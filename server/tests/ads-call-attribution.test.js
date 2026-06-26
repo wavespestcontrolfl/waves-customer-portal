@@ -3,6 +3,7 @@
 
 let firstByTable = {};
 const insertCalls = [];
+const updateCalls = [];
 
 const mockDb = jest.fn((table) => {
   const b = {};
@@ -10,12 +11,15 @@ const mockDb = jest.fn((table) => {
   ['where', 'whereNot', 'select', 'orderBy', 'limit'].forEach((m) => { b[m] = jest.fn(self); });
   b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
   b.insert = jest.fn((row) => { insertCalls.push({ table, row }); return Promise.resolve([1]); });
+  b.update = jest.fn((row) => { updateCalls.push({ table, row }); return Promise.resolve(1); });
   return b;
 });
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
-jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-06-26' }));
+jest.mock('../utils/datetime-et', () => ({
+  etDateString: (d) => (d ? new Date(d).toISOString().slice(0, 10) : '2026-06-26'),
+}));
 
 const CallAttribution = require('../services/ads/call-attribution');
 const { inferServiceLine, resolveCampaignId } = CallAttribution._private;
@@ -24,6 +28,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   firstByTable = {};
   insertCalls.length = 0;
+  updateCalls.length = 0;
 });
 
 describe('inferServiceLine', () => {
@@ -111,6 +116,55 @@ describe('recordCallPpcAttribution', () => {
       lead_source: 'google_ads',
       service_line: null,
       funnel_stage: 'lead',
+    });
+  });
+
+  test('backfills campaign on an existing null-campaign row instead of skipping', async () => {
+    firstByTable.ad_service_attribution = { id: 'row-1', campaign_id: null, lead_source_detail: null, service_line: null };
+    firstByTable.ad_campaigns = { id: 'local-9' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1',
+      leadSource: 'google_ads',
+      leadSourceDetail: 'Search - Bradenton',
+      googleCampaignId: '22594274874',
+    });
+
+    expect(res).toEqual({ recorded: true, updated: true, campaignId: 'local-9' });
+    expect(insertCalls).toHaveLength(0);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].row).toMatchObject({ campaign_id: 'local-9', lead_source_detail: 'Search - Bradenton' });
+  });
+
+  test('does not touch an existing row that already has its campaign', async () => {
+    firstByTable.ad_service_attribution = { id: 'row-2', campaign_id: 'local-existing', lead_source_detail: 'x', service_line: 'pest' };
+    firstByTable.ad_campaigns = { id: 'local-9' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', googleCampaignId: '22594274874', leadSourceDetail: 'y',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'already_recorded' });
+    expect(updateCalls).toHaveLength(0);
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  test('uses the passed serviceInterest (no lead lookup) and dates the row by the call', async () => {
+    firstByTable.ad_service_attribution = undefined;
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C3',
+      leadId: 'L3',
+      leadSourceDetail: 'Google Ads (tracking line)',
+      serviceInterest: 'Lawn Care',
+      leadDate: new Date('2026-03-15T18:00:00Z'),
+    });
+
+    expect(res).toEqual({ recorded: true, campaignId: null });
+    expect(insertCalls[0].row).toMatchObject({
+      service_line: 'lawn',
+      lead_date: '2026-03-15',
+      lead_source: 'google_ads',
     });
   });
 });

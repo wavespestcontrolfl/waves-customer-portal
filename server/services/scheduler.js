@@ -2270,18 +2270,23 @@ function initScheduledJobs() {
     if (process.env.GOOGLE_DATA_MANAGER_CRON_ENABLED !== 'true') return;
     logger.info('Running: Google Ads offline conversion upload (Data Manager)');
     try {
-      const DataManager = require('./ads/data-manager');
-      for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
-        const r = await DataManager.uploadConversions({
-          conversionType, periodDays: 7, limit: 500, validateOnly: false,
-        });
-        logger.info(`[data-manager cron] ${conversionType}: ${JSON.stringify({
-          configured: r.configured, validateOnly: r.validateOnly, candidates: r.candidates,
-          sent: r.sent, accepted: r.accepted, pending: r.pending,
-          skipped: Array.isArray(r.skipped) ? r.skipped.length : r.skipped,
-          requestId: r.requestId || null, error: r.error || null,
-        })}`);
-      }
+      // runExclusive: read-then-POST job — uploadConversions checks the upload log
+      // before the external POST and writes it after, so two pods / a deploy
+      // overlap could both send the same conversions. Serialize across instances.
+      await runExclusive('data-manager-offline-conversions', async () => {
+        const DataManager = require('./ads/data-manager');
+        for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
+          const r = await DataManager.uploadConversions({
+            conversionType, periodDays: 7, limit: 500, validateOnly: false,
+          });
+          logger.info(`[data-manager cron] ${conversionType}: ${JSON.stringify({
+            configured: r.configured, validateOnly: r.validateOnly, candidates: r.candidates,
+            sent: r.sent, accepted: r.accepted, pending: r.pending,
+            skipped: Array.isArray(r.skipped) ? r.skipped.length : r.skipped,
+            requestId: r.requestId || null, error: r.error || null,
+          })}`);
+        }
+      });
     } catch (err) {
       logger.error(`Data Manager offline conversion upload failed: ${err.message}`);
     }

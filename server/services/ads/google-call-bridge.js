@@ -382,7 +382,7 @@ async function findLeadForCall(callLog) {
   const plan = leadMatchPlan(callLog);
   if (!plan) return null;
 
-  let query = db('leads').select('id');
+  let query = db('leads').select('id', 'customer_id');
   if (plan.strategy === 'customer_id') {
     query = query.where({ customer_id: plan.customerId });
   } else {
@@ -398,7 +398,9 @@ async function findLeadForCall(callLog) {
     .orderByRaw('ABS(EXTRACT(EPOCH FROM (first_contact_at - ?::timestamptz))) ASC', [plan.callAt])
     .orderBy('created_at', 'desc')
     .first();
-  return lead?.id ? { ...plan, leadId: lead.id } : null;
+  // A phone-matched plan has no customerId; surface the matched lead's so PPC
+  // attribution can run even when the call_log row isn't customer-linked.
+  return lead?.id ? { ...plan, leadId: lead.id, customerId: plan.customerId || lead.customer_id || null } : null;
 }
 
 async function updateLeadAttribution(leadMatch, bridgeSource, now) {
@@ -535,6 +537,7 @@ async function applyBridge(options = {}) {
           leadSource: 'google_ads',
           leadSourceDetail: match.googleCall.campaignName || GOOGLE_ADS_BRIDGE_SOURCE_NAME,
           googleCampaignId: match.googleCall.campaignId,
+          leadDate: match.callLog?.createdAt || null, // date the row by the actual call, not the bridge run
         }).catch((e) => logger.warn(`[google-call-bridge] PPC attribution failed: ${e.message}`));
       }
 

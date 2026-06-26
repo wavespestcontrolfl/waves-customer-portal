@@ -2061,6 +2061,10 @@ const CallRecordingProcessor = {
               leadId,
               leadSource: 'google_ads',
               leadSourceDetail: leadSourceRow.name || 'inbound call',
+              // service_interest isn't on the lead row yet (enrichment writes it
+              // later) — pass the extracted service so service-line ROI is right.
+              serviceInterest: extracted.matched_service || extracted.requested_service || null,
+              leadDate: call.created_at || null, // date by the actual call
             }).catch(() => {});
           }
 

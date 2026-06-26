@@ -44,7 +44,19 @@ async function resolveCampaignId(googleCampaignId) {
 }
 
 /**
- * @returns {{recorded:boolean, reason?:string, campaignId?:string|null}}
+ * Record an inbound paid call lead in the PPC funnel.
+ *   - leadDate: the ACTUAL call date (Date or string). The bridge can apply
+ *     matches for calls up to 90 days old, so we must date the row by the call,
+ *     not by the day the bridge/cron runs — otherwise /admin/ads period filters
+ *     skew and the idempotency key drifts across replays.
+ *   - serviceInterest: the extracted service, passed directly when the lead row
+ *     doesn't carry service_interest yet (new call leads get it only after a
+ *     later enrichment write).
+ *   - If a row already exists for (customer, source, day) but is missing the
+ *     campaign (e.g. the dedicated-number path recorded it first with a null
+ *     campaign), backfill campaign_id / lead_source_detail / service_line from
+ *     the bridge's richer data instead of skipping.
+ * @returns {{recorded:boolean, reason?:string, updated?:boolean, campaignId?:string|null}}
  */
 async function recordCallPpcAttribution({
   customerId,
@@ -53,24 +65,39 @@ async function recordCallPpcAttribution({
   leadSourceDetail = null,
   googleCampaignId = null,
   leadDate,
+  serviceInterest = null,
 } = {}) {
   if (!customerId) return { recorded: false, reason: 'no_customer' };
-  const day = leadDate || etDateString();
+  const day = leadDate
+    ? etDateString(leadDate instanceof Date ? leadDate : new Date(leadDate))
+    : etDateString();
   try {
-    // Idempotent per (customer, source, day): the bridge can re-run, and the
-    // dedicated-number path may also fire — never double-insert the same call lead.
-    const existing = await db('ad_service_attribution')
-      .where({ customer_id: customerId, lead_source: leadSource, lead_date: day })
-      .first();
-    if (existing) return { recorded: false, reason: 'already_recorded' };
+    const campaignId = await resolveCampaignId(googleCampaignId);
 
-    let serviceLine = null;
-    if (leadId) {
+    // Prefer the explicitly-passed service; fall back to the lead's stored value.
+    let serviceLine = inferServiceLine(serviceInterest);
+    if (!serviceLine && leadId) {
       const lead = await db('leads').where({ id: leadId }).select('service_interest').first().catch(() => null);
       serviceLine = inferServiceLine(lead?.service_interest);
     }
 
-    const campaignId = await resolveCampaignId(googleCampaignId);
+    // Idempotent per (customer, source, day) — but enrich an existing row when a
+    // later path (the bridge) brings the campaign the first path didn't have.
+    const existing = await db('ad_service_attribution')
+      .where({ customer_id: customerId, lead_source: leadSource, lead_date: day })
+      .first();
+    if (existing) {
+      const patch = {};
+      if (campaignId && !existing.campaign_id) patch.campaign_id = campaignId;
+      if (leadSourceDetail && !existing.lead_source_detail) patch.lead_source_detail = leadSourceDetail;
+      if (serviceLine && !existing.service_line) patch.service_line = serviceLine;
+      if (Object.keys(patch).length) {
+        patch.updated_at = new Date();
+        await db('ad_service_attribution').where({ id: existing.id }).update(patch);
+        return { recorded: true, updated: true, campaignId: campaignId || existing.campaign_id || null };
+      }
+      return { recorded: false, reason: 'already_recorded' };
+    }
 
     await db('ad_service_attribution').insert({
       campaign_id: campaignId,
