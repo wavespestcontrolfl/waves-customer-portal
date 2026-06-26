@@ -331,13 +331,21 @@ class SignalDetector {
       logger.debug(`[signal-detector] AI sentiment step failed for ${customerId}: ${err.message}`);
     }
 
-    // Save new signals
+    // Save new signals. Idempotent under concurrency: the partial unique index
+    // customer_signals_unresolved_uniq (customer_id, signal_type) WHERE
+    // resolved = false means two inbound-SMS webhooks racing to detect the same
+    // signal for one customer can't both insert it — the loser hits 23505 and
+    // is ignored, so the duplicate weight is never folded into the score.
     for (const signal of newSignals) {
-      await db('customer_signals').insert({
-        customer_id: customerId,
-        ...signal,
-        detected_at: new Date(),
-      });
+      try {
+        await db('customer_signals').insert({
+          customer_id: customerId,
+          ...signal,
+          detected_at: new Date(),
+        });
+      } catch (err) {
+        if (err.code !== '23505') throw err;
+      }
     }
 
     return newSignals;

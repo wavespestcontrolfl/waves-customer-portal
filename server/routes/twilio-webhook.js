@@ -176,6 +176,18 @@ router.post('/sms', async (req, res) => {
     // while older customer rows may still have local formatting.
     const customer = await findSingleCustomerByPhone(From);
 
+    // Event-driven health rescore on a hot inbound signal (competitor mention,
+    // cancellation, price complaint). Fire-and-forget so it never delays the
+    // webhook ack; gated behind GATE_EVENT_RESCORE (no-op when off). Defined
+    // here so it can fire on BOTH the early-return branches (opt-out/cancel —
+    // the strongest churn signal) and the general inbound path.
+    const fireEventRescore = (src) => {
+      if (!customer?.id) return;
+      void require('../services/customer-intelligence/event-rescore')
+        .rescoreOnInboundMessage(customer.id, { source: src })
+        .catch(err => logger.debug(`[twilio-webhook] event rescore failed: ${err.message}`));
+    };
+
     // Dual-write to unified messages table. Wrapped in fire-and-forget
     // because old sms_log writes still happen below; if this errors the
     // legacy path keeps Virginia's inbox working.
@@ -234,6 +246,11 @@ router.post('/sms', async (req, res) => {
           }),
         }).catch(() => {});
       }
+
+      // An opt-out / "CANCEL" is the strongest churn signal there is — rescore
+      // and alert the owner now rather than waiting for the nightly pipeline.
+      // (The alert is internal to the owner, unaffected by the SMS opt-out.)
+      fireEventRescore('sms_opt_out');
 
       return res.type('text/xml').send(
         `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`
@@ -402,14 +419,9 @@ router.post('/sms', async (req, res) => {
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
 
-    // Event-driven health rescore on hot inbound signals (competitor mention,
-    // cancellation language, price complaint). Fire-and-forget so it never
-    // delays the webhook ack; gated behind GATE_EVENT_RESCORE (no-op when off).
-    if (messageType === 'inbound' && customer?.id) {
-      void require('../services/customer-intelligence/event-rescore')
-        .rescoreOnInboundMessage(customer.id, { source: 'inbound_sms' })
-        .catch(err => logger.debug(`[twilio-webhook] event rescore failed: ${err.message}`));
-    }
+    // Event-driven health rescore on the general inbound path (the opt-out
+    // branch above already fired for cancellations).
+    if (messageType === 'inbound') fireEventRescore('inbound_sms');
 
     await db('activity_log').insert({
       customer_id: customer?.id || null,

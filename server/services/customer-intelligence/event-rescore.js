@@ -28,6 +28,20 @@ async function rescoreOnInboundMessage(customerId, { source = 'inbound' } = {}) 
   if (!gateOn() || !customerId) return null;
 
   try {
+    // Risk BEFORE this event. This distinguishes a real crossing into critical
+    // from a customer who was ALREADY critical — via nightly/Stripe scoring
+    // (which don't run this path) or before this feature was enabled. Without
+    // it, an already-critical customer's next text would falsely alert "just
+    // dropped to CRITICAL".
+    let priorRisk = null;
+    try {
+      const prior = await db('customer_health_scores')
+        .where('customer_id', customerId)
+        .orderByRaw('scored_at DESC NULLS LAST')
+        .first();
+      priorRisk = prior?.churn_risk || null;
+    } catch { /* table may not exist yet */ }
+
     // Detect fresh signals for this customer (keyword + AI sentiment on recent
     // inbound SMS) so the rescore folds in whatever just arrived. Non-fatal.
     try {
@@ -39,14 +53,16 @@ async function rescoreOnInboundMessage(customerId, { source = 'inbound' } = {}) 
     const result = await customerHealth.scoreCustomer(customerId);
     if (!result) return null;
 
-    // Alert the owner once per critical episode. The crossing is claimed
-    // ATOMICALLY via a conditional update on the just-written row, so two
-    // concurrent inbound texts for the same customer can't both alert: exactly
-    // one wins the `critical_alert_sent_at IS NULL` claim. The canonical scorer
-    // clears the column whenever the customer is not critical, so a later
-    // re-entry into critical can claim and alert again. (The nightly pipeline
-    // doesn't run this path, so it never fires the live alert.)
-    if (result.churnRisk === 'critical' && await claimCriticalAlert(customerId)) {
+    // Alert the owner once on a real crossing into critical. Two guards:
+    //  - priorRisk !== 'critical' — it's an actual transition, not an
+    //    already-critical customer (nightly/Stripe/pre-enable);
+    //  - claimCriticalAlert() — ATOMIC, so two concurrent inbound texts that
+    //    both observe a non-critical prior can't both alert: exactly one wins
+    //    the `critical_alert_sent_at IS NULL` claim.
+    // The canonical scorer clears the claim column whenever the customer is not
+    // critical, so a later re-entry can claim and alert again. (The nightly
+    // pipeline doesn't run this path, so it never fires the live alert.)
+    if (result.churnRisk === 'critical' && priorRisk !== 'critical' && await claimCriticalAlert(customerId)) {
       await sendCriticalChurnAlert(customerId, result, source);
     }
 
