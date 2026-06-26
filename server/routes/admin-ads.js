@@ -79,11 +79,17 @@ router.post('/campaigns/:id/mode', async (req, res, next) => {
 router.post('/campaigns/:id/budget', async (req, res, next) => {
   try {
     const { budget, reason } = req.body;
+    // Only Google campaigns have remote control here — refuse Meta (read-only,
+    // managed in Ads Manager) BEFORE mutating local budget, so the local row
+    // can't drift from the real campaign.
+    const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.platform !== 'google_ads') {
+      return res.status(400).json({ error: `Budget control isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
+    }
     const result = await getBudgetManager().setBudget(req.params.id, budget, reason || 'manual');
 
-    // Also update on Google Ads if campaign is linked
-    const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
-    if (campaign && campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+    if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
       const gResult = await getGoogleAds().updateBudget(campaign.platform_campaign_id, budget);
       if (gResult) result.googleAdsUpdated = true;
     }
@@ -97,6 +103,9 @@ router.post('/campaigns/:id/pause', async (req, res, next) => {
   try {
     const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.platform !== 'google_ads') {
+      return res.status(400).json({ error: `Pause isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
+    }
 
     // Pause on Google Ads if linked
     let googleAdsResult = null;
@@ -119,6 +128,9 @@ router.post('/campaigns/:id/enable', async (req, res, next) => {
   try {
     const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.platform !== 'google_ads') {
+      return res.status(400).json({ error: `Enable isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
+    }
 
     // Enable on Google Ads if linked
     let googleAdsResult = null;

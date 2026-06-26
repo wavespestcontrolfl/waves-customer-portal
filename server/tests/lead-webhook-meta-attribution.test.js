@@ -35,6 +35,11 @@ describe('determineLeadSource — fbclid', () => {
     expect(r).toMatchObject({ source: 'facebook', channel: 'paid' });
   });
 
+  test('an _fbc cookie (no top-level fbclid) also attributes to paid facebook', () => {
+    const r = determineLeadSource('', '', '', '', '', '', '', 'fb.1.171.clickid');
+    expect(r).toMatchObject({ source: 'facebook', channel: 'paid', detail: 'Meta click (_fbc)' });
+  });
+
   test('explicit utm_source=facebook still wins (and keeps its detail)', () => {
     const r = determineLeadSource('', '', 'facebook', 'cpc', 'summer', '', 'fb.click.123');
     expect(r.source).toBe('facebook');

@@ -548,6 +548,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
     const wbraid = attr?.wbraid ? String(attr.wbraid).slice(0, 255) : null;
     const gbraid = attr?.gbraid ? String(attr.gbraid).slice(0, 255) : null;
+    const fbclid = attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null;
+    const fbc = attr?.fbc ? String(attr.fbc).slice(0, 255) : null;
+    const fbp = attr?.fbp ? String(attr.fbp).slice(0, 255) : null;
     const sourceMeta = await resolveLeadSource(attr);
 
     const isOneTimeOnly = !monthly && !annual && oneTimeTotal > 0;
@@ -568,7 +571,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       quoteRequiredService: manualQuoteLine?.service || null,
       manualQuoteLines,
       utm: attr?.utm || null,
-      clickIds: { gclid, wbraid, gbraid },
+      clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
       referrer: attr?.referrer || null,
       landing_url: attr?.landing_url || null,
       address: normalizedAddress,
@@ -596,6 +599,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (gclid) updateFields.gclid = gclid;
       if (wbraid) updateFields.wbraid = wbraid;
       if (gbraid) updateFields.gbraid = gbraid;
+      if (fbclid) updateFields.fbclid = fbclid;
+      if (fbc) updateFields.fbc = fbc;
+      if (fbp) updateFields.fbp = fbp;
       const rows = await db('leads')
         .where({ id: leadId })
         .update(updateFields)
@@ -623,6 +629,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         gclid,
         wbraid,
         gbraid,
+        fbclid,
+        fbc,
+        fbp,
         extracted_data: extractedData,
       }).returning(['id']);
       lead = rows[0];

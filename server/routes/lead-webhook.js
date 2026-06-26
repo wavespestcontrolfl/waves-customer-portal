@@ -900,6 +900,7 @@ function buildLeadWebhookIntake(body = {}) {
     attribution.utmCampaign,
     attribution.utmContent,
     attribution.fbclid,
+    attribution.fbc,
   );
 
   return {
@@ -1072,7 +1073,7 @@ function cleanPhone(value) {
   return String(value).replace(/\D/g, '').replace(/^1(\d{10})$/, '$1');
 }
 
-function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid) {
+function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc) {
   const url = landingUrl || pageUrl || '';
   const source = String(utmSource || '').trim().toLowerCase();
   const medium = String(utmMedium || '').trim().toLowerCase();
@@ -1091,9 +1092,11 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
   if (utmSource === 'google' && utmMedium === 'cpc') return { source: 'google_ads', detail: `Campaign: ${utmCampaign}`, channel: 'paid', area: utmContent };
   if (utmSource === 'facebook' || utmSource === 'fb') return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: utmMedium === 'cpc' ? 'paid' : 'organic' };
   if (utmSource === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
-  // Meta auto-appends fbclid to ad-click landing URLs even without explicit UTMs,
-  // so an fbclid with no clearer source above is a paid Meta click.
-  if (fbclid) return { source: 'facebook', detail: 'Meta click (fbclid)', channel: 'paid' };
+  // Meta auto-appends fbclid to ad-click landing URLs even without explicit UTMs;
+  // _fbc is its cookie form (survives navigation when the URL fbclid is lost). A
+  // lead carrying either, with no clearer source above, is a paid Meta click.
+  // (_fbp alone is NOT counted — Meta sets it on every visit, organic included.)
+  if (fbclid || fbc) return { source: 'facebook', detail: fbclid ? 'Meta click (fbclid)' : 'Meta click (_fbc)', channel: 'paid' };
 
   // Domain-based attribution. Must mirror the spoke fleet in
   // wavespestcontrol-astro-/src/data/domains.json — each spoke domain that
