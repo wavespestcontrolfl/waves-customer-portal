@@ -22,6 +22,7 @@ import {
   KpiRing,
   KpiSparklineTile,
   MrrTrendChart,
+  RetentionCohortGrid,
   ReviewTrendChart,
   RevenueByCity,
   RevenueTrendArea,
@@ -107,6 +108,7 @@ export default function DashboardPageV2() {
   const [funnel, setFunnel] = useState(null);
   const [aging, setAging] = useState(null);
   const [mrrTrend, setMrrTrend] = useState(null);
+  const [cohort, setCohort] = useState(null);
   // /lead-source (downstream string aggregation) is intentionally dropped
   // in favor of the upstream attribution endpoints below.
   const [callsBySource, setCallsBySource] = useState(null);
@@ -228,15 +230,17 @@ export default function DashboardPageV2() {
       track("/service-mix", adminFetch("/admin/dashboard/service-mix")),
       track("/revenue-by-city", adminFetch("/admin/dashboard/revenue-by-city")),
       track("/review-trend", adminFetch("/admin/dashboard/review-trend")),
+      track("/retention-cohort", adminFetch("/admin/dashboard/retention-cohort?months=12")),
     ]);
     if (!mountedRef.current) { inFlightRef.current = false; return; }
-    const [fnl, ag, mrr, mx, rbc, rev] = wave2;
+    const [fnl, ag, mrr, mx, rbc, rev, coh] = wave2;
     setFunnel((prev) => fnl ?? prev);
     setAging((prev) => ag ?? prev);
     setMrrTrend((prev) => mrr ?? prev);
     setMix((prev) => mx ?? prev);
     setRevenueByCity((prev) => rbc ?? prev);
     setReviewTrend((prev) => rev ?? prev);
+    setCohort((prev) => coh ?? prev);
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -966,6 +970,40 @@ export default function DashboardPageV2() {
           <ChartCard title="MRR Trend" sub={mrrTrendSub}>
             {" "}
             <MrrTrendChart trend={mrrTrend?.trend || []} />{" "}
+          </ChartCard>{" "}
+        </div>
+      )}
+      {/* Retention by signup cohort — % of each month's new customers still
+          active over the months since they joined. */}
+      {isMobile ? (
+        <MobileFold
+          title="Retention by Cohort"
+          sub="% still active by signup month"
+        >
+          {" "}
+          <ChartCard
+            title="Retention by Cohort"
+            sub="% still active by signup month"
+          >
+            {" "}
+            <RetentionCohortGrid
+              cohorts={cohort?.cohorts || []}
+              maxOffset={cohort?.maxOffset || 0}
+            />{" "}
+          </ChartCard>{" "}
+        </MobileFold>
+      ) : (
+        <div className="mb-5">
+          {" "}
+          <ChartCard
+            title="Retention by Cohort"
+            sub="% of each signup month still active"
+          >
+            {" "}
+            <RetentionCohortGrid
+              cohorts={cohort?.cohorts || []}
+              maxOffset={cohort?.maxOffset || 0}
+            />{" "}
           </ChartCard>{" "}
         </div>
       )}
