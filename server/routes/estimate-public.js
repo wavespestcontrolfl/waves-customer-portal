@@ -9804,8 +9804,15 @@ function foamFrequenciesFromV1Services(services = []) {
     : /monthly/.test(nameLc) ? 'monthly'
     : /quarterly/.test(nameLc) ? 'quarterly'
     : null;
-  const cadenceCandidate = row.cadence
-    || row.frequencyKey
+  // Normalize aliases (bi_monthly → bimonthly) so an explicit row.cadence in the
+  // alias form doesn't short-circuit the chain into the quarterly fallback.
+  const CADENCE_ALIASES = { bi_monthly: 'bimonthly', 'bi-monthly': 'bimonthly', bimonth: 'bimonthly' };
+  const normCadence = (c) => {
+    const key = String(c || '').toLowerCase();
+    return CADENCE_ALIASES[key] || (['quarterly', 'bimonthly', 'monthly'].includes(key) ? key : null);
+  };
+  const cadenceCandidate = normCadence(row.cadence)
+    || normCadence(row.frequencyKey)
     || (rawVisits != null ? VISITS_TO_CADENCE[rawVisits] : null)
     || cadenceFromName;
   const cadence = ['quarterly', 'bimonthly', 'monthly'].includes(cadenceCandidate) ? cadenceCandidate : 'quarterly';
@@ -11112,7 +11119,18 @@ async function buildPricingBundle(estimate) {
       // the v1 result.results.lawn path. Mixed bundles and other single-service
       // estimates keep the existing single-entry view.
       const lawnFreqs = lawnFrequenciesFromEngineResult(engineResult, estData);
-      const foamFreqs = lawnFreqs.length ? [] : foamFrequenciesFromEngineResult(engineResult);
+      // The foam-specific frequency prices ONLY the foam line, so use it just for
+      // a foam-only recurring mix. With another recurring service present (foam +
+      // lawn/tree/mosquito), fall through to the full-summary shapeFrequencyEntry
+      // so the price lock / annual prepay don't drop the other service.
+      const recurringKeys = recurringServicesWithSupplements(engineResult)
+        .map(recurringServiceKey)
+        .filter(Boolean);
+      const foamOnlyRecurring = recurringKeys.length > 0
+        && recurringKeys.every((k) => k === 'foam_recurring');
+      const foamFreqs = (lawnFreqs.length || !foamOnlyRecurring)
+        ? []
+        : foamFrequenciesFromEngineResult(engineResult);
       if (lawnFreqs.length) {
         frequencies.push(...lawnFreqs);
       } else if (foamFreqs.length) {

@@ -2,8 +2,12 @@ const {
   acceptanceServiceLists,
   withSupplementedRecurringServices,
   foamFrequenciesFromEngineResult,
+  buildPricingBundle,
 } = require('../routes/estimate-public.js');
 const { _internals: { durationForService } } = require('../services/estimate-slot-availability.js');
+const { generateEstimate } = require('../services/pricing-engine/estimate-engine.js');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper.js');
+const { priceRecurringFoam } = require('../services/pricing-engine/service-pricing.js');
 
 // The compact line-item shape public-quote.js / lead-estimate-automation.js
 // persist: name + frequency survive, but cadence and estimatedDurationMinutes are
@@ -128,5 +132,74 @@ describe('engine-backed foam frequency recovers cadence / annual / duration from
     expect(durationForService({ service: 'foam_recurring', estimatedDurationMinutes: 120 })).toBe(120);
     // Thin row with no duration still degrades to the foam default (not 45).
     expect(durationForService({ service: 'foam_recurring' })).toBe(90);
+  });
+
+  test('a foam row labeled only by name is still classified as foam for slot sizing', () => {
+    // Engine-backed rows can reach slot sizing with just a display label (no
+    // mapped service key). serviceKeyFor must classify them as foam_recurring so
+    // the carried tier duration is used instead of the generic window.
+    expect(durationForService({ name: 'Recurring Foam Treatment', estimatedDurationMinutes: 180 })).toBe(180);
+    expect(durationForService({ service: 'FoamRecurring', estimatedDurationMinutes: 120 })).toBe(120);
+    // One-time "Drill-and-Foam Termite" still classifies as termite (not foam).
+    expect(durationForService({ name: 'Drill-and-Foam Termite' })).toBe(45);
+  });
+});
+
+describe('recurring foam cadence-key normalization', () => {
+  test('priceRecurringFoam treats bi_monthly as the 6-visit bimonthly plan', () => {
+    const bi = priceRecurringFoam(10, { cadence: 'bi_monthly' });
+    expect(bi.cadence).toBe('bimonthly');
+    expect(bi.visitsPerYear).toBe(6);
+    // not silently downgraded to the 4-visit quarterly multiplier
+    const q = priceRecurringFoam(10, { cadence: 'quarterly' });
+    expect(bi.perVisit).toBeLessThan(q.perVisit);
+  });
+
+  test('foamFrequenciesFromEngineResult normalizes a bi_monthly row cadence', () => {
+    const [f] = foamFrequenciesFromEngineResult({
+      lineItems: [{ service: 'foam_recurring', name: 'Recurring Foam Treatment', cadence: 'bi_monthly', monthly: 131, annual: 1572 }],
+    });
+    expect(f.key).toBe('bimonthly');
+    expect(f.visitsPerYear).toBe(6);
+  });
+});
+
+describe('engine-backed foam pricing-bundle frequency selection', () => {
+  test('foam-only recurring estimate is priced by the foam-specific frequency', async () => {
+    const bundle = await buildPricingBundle({
+      id: 1, status: 'sent', monthly_total: 92.33, annual_total: 1108,
+      estimate_data: JSON.stringify({ engineInputs: { services: { foamRecurring: { cadence: 'bimonthly', points: 10 } } } }),
+    });
+    const f = (bundle.frequencies || [])[0] || {};
+    expect(f.serviceCategory).toBe('foam_recurring');
+    expect(f.billingFrequencyKey).toBe('monthly');
+  });
+
+  test('foam + another recurring service keeps full-summary pricing (does not drop the other service)', async () => {
+    const bundle = await buildPricingBundle({
+      id: 2, status: 'sent', monthly_total: 200, annual_total: 2400,
+      estimate_data: JSON.stringify({
+        engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { foamRecurring: { cadence: 'quarterly', points: 10 }, treeShrub: {} } },
+      }),
+    });
+    const f = (bundle.frequencies || [])[0] || {};
+    // NOT the foam-only frequency — full-summary entry covering both services.
+    expect(f.serviceCategory).not.toBe('foam_recurring');
+    const treatmentServices = (f.perServiceTreatments || []).map((t) => t.service);
+    expect(treatmentServices).toContain('foam_recurring');
+    expect(treatmentServices).toContain('tree_shrub');
+    // annual reflects the mix, not the ~1108 foam-only total.
+    expect(f.annual).toBeGreaterThan(1108);
+  });
+});
+
+describe('mapV1ToLegacyShape carries the foam annual total', () => {
+  test('admin/V2 mapped foam row includes the engine annual (cent-exact lock)', () => {
+    const mapped = mapV1ToLegacyShape(
+      generateEstimate({ services: { foamRecurring: { cadence: 'quarterly', points: 10 } } }),
+    );
+    const foam = (mapped.recurring?.services || []).find((s) => s.service === 'foam_recurring');
+    expect(foam).toBeTruthy();
+    expect(foam.annual).toBe(1108); // not omitted → helper won't fall back to 92.33×12
   });
 });

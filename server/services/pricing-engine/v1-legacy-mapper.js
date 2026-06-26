@@ -612,6 +612,10 @@ function mapV1ToLegacyShape(v1Result) {
     svcAdd(foamRecLI.name || 'Recurring Foam', foamRecLI, {
       service: 'foam_recurring',
       cadence: foamRecLI.cadence || null,
+      // Carry the engine's authoritative annual so the frequency helper locks the
+      // sold total (e.g. 1108) on accept/prepay instead of recomputing the rounded
+      // monthly × 12 (92.33 × 12 = 1107.96, a few cents under the engine price).
+      annual: Number(foamRecLI.annual) || null,
       detail: foamRecLI.detail || null,
       // Carry the tier labor duration so slot-availability sizes the booking
       // window from the foam tier instead of the generic 45-min fallback.

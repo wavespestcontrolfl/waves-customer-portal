@@ -166,6 +166,11 @@ function serviceKeyFor(value = {}) {
   if (/palm/.test(raw)) return 'palm_injection';
   if (/rodent|rat|mouse|mice/.test(raw)) return 'rodent_bait';
   if (/termite/.test(raw)) return 'termite_bait';
+  // Recurring foam can reach slot sizing labeled only "Recurring Foam Treatment"
+  // / "FoamRecurring" (no mapped service key), so classify foam here — after
+  // termite so the one-time "Drill-and-Foam Termite" still maps to termite — or
+  // the booking falls to the generic window instead of the 120/180-min tier.
+  if (/foam/.test(raw)) return 'foam_recurring';
   if (/pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'service';
 }

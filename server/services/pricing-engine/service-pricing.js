@@ -6022,7 +6022,15 @@ function priceRecurringFoam(points = 5, options = {}) {
   const cfg = SPECIALTY.foamDrill;
   const rec = SPECIALTY.foamDrillRecurring;
   const { pointCount, tier } = resolveFoamDrillTier(points, cfg.tiers);
-  const cadence = rec.cadenceMultipliers[options.cadence] ? options.cadence : rec.defaultCadence;
+  // Normalize cadence aliases — the billing/estimate stack also uses the
+  // bi_monthly key for the two-month cadence; without this a {cadence:'bi_monthly'}
+  // caller/replay silently falls back to quarterly (4 visits at the quarterly
+  // multiplier instead of the intended 6-visit bimonthly plan).
+  const CADENCE_ALIASES = { bi_monthly: 'bimonthly', 'bi-monthly': 'bimonthly', bimonth: 'bimonthly' };
+  const requestedCadence = options.cadence
+    ? (CADENCE_ALIASES[String(options.cadence).toLowerCase()] || options.cadence)
+    : options.cadence;
+  const cadence = rec.cadenceMultipliers[requestedCadence] ? requestedCadence : rec.defaultCadence;
   const multiplier = rec.cadenceMultipliers[cadence];
   const visits = rec.frequencies[cadence];
   const cost = tier.cans * cfg.canCost + tier.laborHrs * GLOBAL.LABOR_RATE + cfg.bitsCost;
