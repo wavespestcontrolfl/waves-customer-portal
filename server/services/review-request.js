@@ -1235,17 +1235,16 @@ const ReviewService = {
     const canSms = !!contact.phone && !smsBlocked;
     const canEmail = !!contact.email && !emailBlocked && !prefsLookupFailed;
 
-    // Per-type channel preference. An EXPLICIT single-channel preference
-    // ('sms' | 'email') is treated as the ALLOWED channel set, not a hint — we
-    // never contact a customer on a channel they didn't choose, so if their
-    // chosen channel is unavailable we stop rather than falling back to the
-    // other one. 'both' / unset allows either (with fallback).
+    // Per-type channel preference. Only 'email' is treated as an EXCLUSIVE
+    // choice (it is never the column default, so it's deliberate): an 'email'
+    // preference must not fall back to SMS. 'sms' is the backfill DEFAULT, so it
+    // is NOT a deliberate opt-out — it must keep the email fallback / Day-7 email
+    // step working. 'both' / unset allow either with fallback.
     const prefChannel = prefs && prefs.review_request_channel;
     const allowSms = canSms && prefChannel !== "email";
-    const allowEmail = canEmail && prefChannel !== "sms";
+    const allowEmail = canEmail;
     let intended = channel === "email" ? "email" : "sms";
     if (prefChannel === "email") intended = "email";
-    else if (prefChannel === "sms") intended = "sms";
 
     let actualChannel = intended;
     if (actualChannel === "sms" && !allowSms) actualChannel = allowEmail ? "email" : null;
@@ -1265,6 +1264,13 @@ const ReviewService = {
     const recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
     const persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
 
+    // A no-link template (resolution_check / satisfaction_confirm) is a PRIVATE
+    // check-in, not a review ask — so it must NOT trigger the legacy Day-3
+    // straight-to-Google follow-up (processFollowups), which would turn the
+    // recovery message into a public review request.
+    const smsTpl = actualChannel === "sms" && smsTemplateId ? OUTREACH.getOutreachTemplate(smsTemplateId) : null;
+    const isNoLinkSms = !!smsTpl && !smsTpl.body.includes("{review_url}");
+
     const token = generateToken();
     const [request] = await db("review_requests")
       .insert({
@@ -1282,8 +1288,8 @@ const ReviewService = {
         sequence_id: sequenceId,
         sequence_step: sequenceStep,
         status: "pending",
-        // Sequence touches must NOT also get the legacy Day-3 auto-followup.
-        followup_sent: sequenceId ? true : false,
+        // Sequence touches AND no-link check-ins skip the legacy Day-3 followup.
+        followup_sent: sequenceId || isNoLinkSms ? true : false,
         expires_at: expiresAt || new Date(Date.now() + 14 * 86400000).toISOString(),
       })
       .returning("*");
@@ -1411,7 +1417,14 @@ const ReviewService = {
         },
         recipientType: "customer",
         recipientId: customer.id,
-        idempotencyKey: `review_touch:${request.id}`,
+        // Stable per sequence STEP (not per touch row): a sequence retry inserts
+        // a fresh review_requests row, so a request.id-based key would change
+        // each retry and bypass the email library's dedupe — re-sending the same
+        // Day-7 email if a prior attempt was accepted but then threw.
+        idempotencyKey:
+          request.sequence_id != null && request.sequence_step != null
+            ? `review_seq:${request.sequence_id}:${request.sequence_step}`
+            : `review_touch:${request.id}`,
         suppressionGroupKey: "service_operational",
         categories: ["review_request"],
       });
@@ -1454,14 +1467,25 @@ const ReviewService = {
     // The first touch is an immediate ask, so enforce the same lifetime cap +
     // 30-day cooldown as a one-off send (the candidate list already filters on
     // these, but this endpoint can be hit directly / in bulk / racing a recent
-    // send). Counts asks across BOTH channels (audit: SMS-only sms_log missed
-    // email asks). The cadence's own Day 3/7 touches still bypass the cooldown.
+    // send). Counts asks across BOTH channels. Fail CLOSED — a DB blip must not
+    // let an at-cap / in-cooldown customer through (no .catch → it throws and
+    // the route records the customer as not-started). Day 3/7 still bypass cooldown.
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
-    const stats = await this.getDeliveredAskStats(customerId).catch(() => ({ count: 0, lastAt: null }));
+    const stats = await this.getDeliveredAskStats(customerId);
     if (stats.count >= 3) return { started: false, reason: "at_cap" };
     if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo.getTime()) {
       return { started: false, reason: "cooldown" };
     }
+
+    // Supersede any already-queued ask (post-service auto, or a quiet-hours
+    // deferral): otherwise processScheduled() would fire it AND the cadence's
+    // Day-0 touch → a duplicate review request. The cadence takes over outreach.
+    await db("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotNull("scheduled_for")
+      .update({ status: "suppressed" })
+      .catch(() => {});
 
     const usePlan = Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN;
     let svcType = serviceType;
@@ -1582,8 +1606,13 @@ const ReviewService = {
 
     if (outcome.ok && outcome.sent) {
       const nextStep = seq.current_step + 1;
+      // The post-send advance/complete is conditional on status='active': if an
+      // admin Stop landed WHILE sendOutreachTouch was awaiting Twilio/SendGrid,
+      // status is now 'stopped' and these update 0 rows — so a stop during the
+      // send window is honored (the next touch won't be scheduled) rather than
+      // silently undone by re-activating the row.
       if (nextStep >= plan.length) {
-        await db("review_sequences").where({ id: seq.id }).update({
+        await db("review_sequences").where({ id: seq.id, status: "active" }).update({
           status: "completed",
           stop_reason: "completed",
           current_step: nextStep,
@@ -1597,7 +1626,7 @@ const ReviewService = {
       }
       const plannedAt = new Date(new Date(seq.started_at).getTime() + (Number(plan[nextStep].day) || 0) * 86400000);
       const next_run_at = plannedAt > new Date() ? plannedAt : new Date(Date.now() + 60000);
-      await db("review_sequences").where({ id: seq.id }).update({
+      await db("review_sequences").where({ id: seq.id, status: "active" }).update({
         current_step: nextStep,
         touches_sent: seq.touches_sent + 1,
         last_touch_at: new Date(),

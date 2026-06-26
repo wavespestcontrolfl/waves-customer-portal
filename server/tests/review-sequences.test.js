@@ -201,20 +201,45 @@ describe('review sequences — cadence engine', () => {
     expect(mock.__state.rows.review_sequences).toHaveLength(0);
   });
 
-  test('an explicit "sms" channel preference does NOT fall back to email', async () => {
+  test('an explicit "email" channel preference does NOT fall back to SMS', async () => {
     const mock = makeMock({
-      customers: [{ id: 'p1', first_name: 'Pat', last_name: 'C', phone: null, email: 'pat@x.com', nearest_location_id: 'venice' }],
-      notification_prefs: [{ customer_id: 'p1', review_request: true, review_request_channel: 'sms' }],
+      customers: [{ id: 'p1', first_name: 'Pat', last_name: 'C', phone: '+19410000010', email: null, nearest_location_id: 'venice' }],
+      notification_prefs: [{ customer_id: 'p1', review_request: true, review_request_channel: 'email' }],
     });
     db.mockImplementation(mock);
 
     const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'cron' });
 
-    // Chose SMS, has no phone, prefers SMS only → no contact, NOT an email send.
+    // Deliberately chose email, has no email on file → no contact, NOT an SMS.
     expect(out.ok).toBeFalsy();
     expect(out.reason).toBe('no_contact');
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a default "sms" channel pref still allows the email step (not a deliberate opt-out)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'p2', first_name: 'Deb', last_name: 'D', phone: '+19410000011', email: 'deb@x.com', nearest_location_id: 'sarasota' }],
+      // The prefs backfill sets review_request_channel='sms' by DEFAULT.
+      notification_prefs: [{ customer_id: 'p2', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'sms' }],
+    });
+    db.mockImplementation(mock);
+
+    // An email-channel touch (Day 7) must still send via email.
+    const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'email', templateId: 'final_nudge', manageRetryVia: 'sequence' });
+
+    expect(out.ok).toBe(true);
+    expect(out.channel).toBe('email');
+    expect(mockEmailSendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a no-link template is recorded with followup_sent=true (no legacy Day-3 ask)', async () => {
+    const mock = makeMock({ customers: [{ id: 'nl1', first_name: 'No', last_name: 'L', phone: '+19410000012', nearest_location_id: 'parrish' }] });
+    db.mockImplementation(mock);
+
+    await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'resolution_check', manageRetryVia: 'cron' });
+
+    expect(mock.__state.rows.review_requests[0].followup_sent).toBe(true);
   });
 
   test('a no-link template (resolution_check) sends without a /rate link', async () => {
