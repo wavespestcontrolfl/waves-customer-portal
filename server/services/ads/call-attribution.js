@@ -17,18 +17,8 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
-
-function inferServiceLine(serviceInterest) {
-  const s = String(serviceInterest || '').toLowerCase();
-  if (!s) return null;
-  if (s.includes('lawn')) return 'lawn';
-  if (s.includes('mosquito')) return 'mosquito';
-  if (s.includes('termite') || s.includes('wdo')) return 'termite';
-  if (s.includes('rodent') || s.includes('rat') || s.includes('mice') || s.includes('mouse')) return 'rodent';
-  if (s.includes('tree') || s.includes('shrub') || s.includes('palm')) return 'tree_shrub';
-  if (s.includes('pest') || s.includes('bug') || s.includes('ant') || s.includes('roach')) return 'pest';
-  return null;
-}
+// Shared with the web lead path so call + web leads bucket identically.
+const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../../utils/service-line-infer');
 
 async function resolveCampaignId(googleCampaignId) {
   if (!googleCampaignId) return null;
@@ -44,18 +34,21 @@ async function resolveCampaignId(googleCampaignId) {
 }
 
 /**
- * Record an inbound paid call lead in the PPC funnel.
+ * Record an inbound paid call lead in the PPC funnel (one row per lead).
+ *   - leadId: REQUIRED — a funnel row represents an actual lead, so an
+ *     existing-customer call that matched no lead is never counted. Dedupe is by
+ *     lead_id, so two distinct leads for one customer on the same day (e.g. a web
+ *     form AND a phone call) get distinct rows, while the bridge re-run /
+ *     dedicated-number paths stay idempotent on the same call.
  *   - leadDate: the ACTUAL call date (Date or string). The bridge can apply
- *     matches for calls up to 90 days old, so we must date the row by the call,
- *     not by the day the bridge/cron runs — otherwise /admin/ads period filters
- *     skew and the idempotency key drifts across replays.
+ *     matches for calls up to ~90 days old, so date the row by the call, not by
+ *     the day the bridge/cron runs (keeps /admin/ads period filters correct).
  *   - serviceInterest: the extracted service, passed directly when the lead row
- *     doesn't carry service_interest yet (new call leads get it only after a
- *     later enrichment write).
- *   - If a row already exists for (customer, source, day) but is missing the
- *     campaign (e.g. the dedicated-number path recorded it first with a null
- *     campaign), backfill campaign_id / lead_source_detail / service_line from
- *     the bridge's richer data instead of skipping.
+ *     doesn't carry service_interest yet (new call leads get it after a later
+ *     enrichment write). service_line/specific_service/service_bucket are filled
+ *     via the SHARED inferers so call leads bucket exactly like web leads.
+ *   - An existing row is backfilled (campaign / detail / service fields) when a
+ *     later path brings richer data, instead of being skipped.
  * @returns {{recorded:boolean, reason?:string, updated?:boolean, campaignId?:string|null}}
  */
 async function recordCallPpcAttribution({
@@ -68,29 +61,35 @@ async function recordCallPpcAttribution({
   serviceInterest = null,
 } = {}) {
   if (!customerId) return { recorded: false, reason: 'no_customer' };
+  if (!leadId) return { recorded: false, reason: 'no_lead' };
   const day = leadDate
     ? etDateString(leadDate instanceof Date ? leadDate : new Date(leadDate))
     : etDateString();
   try {
     const campaignId = await resolveCampaignId(googleCampaignId);
 
-    // Prefer the explicitly-passed service; fall back to the lead's stored value.
-    let serviceLine = inferServiceLine(serviceInterest);
-    if (!serviceLine && leadId) {
+    // Resolve the service text (explicit > the lead's stored value), then derive
+    // line/specific/bucket with the shared inferers (always concrete — matches
+    // the web path so service-line ROI groups call leads the same way).
+    let interest = serviceInterest;
+    if (!interest) {
       const lead = await db('leads').where({ id: leadId }).select('service_interest').first().catch(() => null);
-      serviceLine = inferServiceLine(lead?.service_interest);
+      interest = lead?.service_interest || null;
     }
+    const serviceLine = inferServiceLine(interest);
+    const specificService = inferSpecificService(interest);
+    const serviceBucket = inferServiceBucket(interest);
 
-    // Idempotent per (customer, source, day) — but enrich an existing row when a
-    // later path (the bridge) brings the campaign the first path didn't have.
-    const existing = await db('ad_service_attribution')
-      .where({ customer_id: customerId, lead_source: leadSource, lead_date: day })
-      .first();
+    // One funnel row per lead — dedupe by lead_id. Backfill richer data onto an
+    // existing row (e.g. the bridge later supplies the campaign).
+    const existing = await db('ad_service_attribution').where({ lead_id: leadId }).first();
     if (existing) {
       const patch = {};
       if (campaignId && !existing.campaign_id) patch.campaign_id = campaignId;
       if (leadSourceDetail && !existing.lead_source_detail) patch.lead_source_detail = leadSourceDetail;
       if (serviceLine && !existing.service_line) patch.service_line = serviceLine;
+      if (specificService && !existing.specific_service) patch.specific_service = specificService;
+      if (serviceBucket && !existing.service_bucket) patch.service_bucket = serviceBucket;
       if (Object.keys(patch).length) {
         patch.updated_at = new Date();
         await db('ad_service_attribution').where({ id: existing.id }).update(patch);
@@ -102,13 +101,16 @@ async function recordCallPpcAttribution({
     await db('ad_service_attribution').insert({
       campaign_id: campaignId,
       customer_id: customerId,
+      lead_id: leadId,
       service_line: serviceLine,
+      specific_service: specificService,
+      service_bucket: serviceBucket,
       lead_date: day,
       lead_source: leadSource,
       lead_source_detail: leadSourceDetail,
       funnel_stage: 'lead',
     });
-    logger.info(`[call-attribution] recorded ${leadSource} call lead for customer ${customerId}${campaignId ? ` (campaign ${campaignId})` : ''}`);
+    logger.info(`[call-attribution] recorded ${leadSource} call lead ${leadId}${campaignId ? ` (campaign ${campaignId})` : ''}`);
     return { recorded: true, campaignId };
   } catch (err) {
     logger.error(`[call-attribution] record failed: ${err.message}`);
@@ -118,5 +120,5 @@ async function recordCallPpcAttribution({
 
 module.exports = {
   recordCallPpcAttribution,
-  _private: { inferServiceLine, resolveCampaignId },
+  _private: { resolveCampaignId },
 };

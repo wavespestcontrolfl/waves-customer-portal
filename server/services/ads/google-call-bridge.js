@@ -481,7 +481,16 @@ async function applyBridge(options = {}) {
     if (match.status === 'already_bridged') {
       if (!shouldRetryLeadAttribution(match)) {
         // Backfill the funnel row for calls bridged before this shipped (idempotent).
-        await writeCallPpcAttribution(match, match.callLog?.customerId || null, match.callLog?.leadId || null);
+        // call_log.lead_id is only populated by the twilio_call_sid join; a call
+        // lead-matched by phone/customer (recorded in metadata) has it null, so
+        // resolve the lead in that case before attributing.
+        let backfillLeadId = match.callLog?.leadId || null;
+        let backfillCustomerId = match.callLog?.customerId || null;
+        if (!backfillLeadId) {
+          const lm = await findLeadForCall(match.callLog).catch(() => null);
+          if (lm?.leadId) { backfillLeadId = lm.leadId; backfillCustomerId = lm.customerId || backfillCustomerId; }
+        }
+        await writeCallPpcAttribution(match, backfillCustomerId, backfillLeadId);
         skipped.push({ ...match, skipReason: 'already_bridged' });
         continue;
       }

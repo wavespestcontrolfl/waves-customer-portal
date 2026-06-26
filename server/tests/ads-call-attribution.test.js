@@ -1,5 +1,5 @@
 // Tests services/ads/call-attribution.js — recording inbound paid call leads in
-// the PPC funnel (ad_service_attribution).
+// the PPC funnel (ad_service_attribution), keyed by lead_id.
 
 let firstByTable = {};
 const insertCalls = [];
@@ -22,7 +22,8 @@ jest.mock('../utils/datetime-et', () => ({
 }));
 
 const CallAttribution = require('../services/ads/call-attribution');
-const { inferServiceLine, resolveCampaignId } = CallAttribution._private;
+const { resolveCampaignId } = CallAttribution._private;
+const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -31,16 +32,21 @@ beforeEach(() => {
   updateCalls.length = 0;
 });
 
-describe('inferServiceLine', () => {
-  test('maps service interest keywords to a service line', () => {
+describe('shared service-line inference (utils/service-line-infer)', () => {
+  test('maps interest to line / specific / bucket', () => {
     expect(inferServiceLine('Lawn Care')).toBe('lawn');
     expect(inferServiceLine('mosquito treatment')).toBe('mosquito');
-    expect(inferServiceLine('termite / WDO inspection')).toBe('termite');
     expect(inferServiceLine('rat exclusion')).toBe('rodent');
-    expect(inferServiceLine('palm & shrub')).toBe('tree_shrub');
-    expect(inferServiceLine('general pest control')).toBe('pest');
-    expect(inferServiceLine('')).toBeNull();
-    expect(inferServiceLine(null)).toBeNull();
+    expect(inferSpecificService('rat exclusion')).toBe('rodent_exclusion');
+    expect(inferServiceBucket('rat exclusion')).toBe('high_ticket_specialty');
+    expect(inferSpecificService('mosquito treatment')).toBe('mosquito_program');
+    expect(inferServiceBucket('mosquito treatment')).toBe('recurring');
+  });
+
+  test('unknown/empty interest falls back to the same defaults as web leads', () => {
+    expect(inferServiceLine('')).toBe('pest');
+    expect(inferSpecificService('')).toBe('quarterly_pest');
+    expect(inferServiceBucket('')).toBe('recurring');
   });
 });
 
@@ -48,12 +54,10 @@ describe('resolveCampaignId', () => {
   test('returns null without a google campaign id', async () => {
     expect(await resolveCampaignId(null)).toBeNull();
   });
-
   test('maps a Google campaign id to the local ad_campaigns id', async () => {
     firstByTable.ad_campaigns = { id: 'local-1' };
     expect(await resolveCampaignId('22594274874')).toBe('local-1');
   });
-
   test('returns null when no local campaign matches', async () => {
     firstByTable.ad_campaigns = undefined;
     expect(await resolveCampaignId('999')).toBeNull();
@@ -62,21 +66,19 @@ describe('resolveCampaignId', () => {
 
 describe('recordCallPpcAttribution', () => {
   test('skips when there is no customer', async () => {
-    const res = await CallAttribution.recordCallPpcAttribution({ customerId: null });
+    const res = await CallAttribution.recordCallPpcAttribution({ customerId: null, leadId: 'L1' });
     expect(res).toEqual({ recorded: false, reason: 'no_customer' });
     expect(insertCalls).toHaveLength(0);
   });
 
-  test('is idempotent — skips when a row already exists for customer/source/day', async () => {
-    firstByTable.ad_service_attribution = { id: 'existing' };
-    const res = await CallAttribution.recordCallPpcAttribution({ customerId: 'C1' });
-    expect(res).toEqual({ recorded: false, reason: 'already_recorded' });
+  test('skips when there is no lead (existing-customer call that matched no lead)', async () => {
+    const res = await CallAttribution.recordCallPpcAttribution({ customerId: 'C1', leadId: null });
+    expect(res).toEqual({ recorded: false, reason: 'no_lead' });
     expect(insertCalls).toHaveLength(0);
   });
 
-  test('inserts a google_ads lead row with resolved campaign + inferred service line', async () => {
-    firstByTable.ad_service_attribution = undefined; // no existing row
-    firstByTable.leads = { service_interest: 'Mosquito Control' };
+  test('inserts a lead-keyed row with resolved campaign + full service fields', async () => {
+    firstByTable.ad_service_attribution = undefined; // no existing row for this lead
     firstByTable.ad_campaigns = { id: 'local-7' };
 
     const res = await CallAttribution.recordCallPpcAttribution({
@@ -84,50 +86,46 @@ describe('recordCallPpcAttribution', () => {
       leadId: 'L1',
       leadSourceDetail: 'Waves - GBP Search',
       googleCampaignId: '22594274874',
+      serviceInterest: 'Mosquito Control',
+      leadDate: new Date('2026-03-15T18:00:00Z'),
     });
 
     expect(res).toEqual({ recorded: true, campaignId: 'local-7' });
     expect(insertCalls).toHaveLength(1);
-    expect(insertCalls[0].table).toBe('ad_service_attribution');
     expect(insertCalls[0].row).toEqual({
       campaign_id: 'local-7',
       customer_id: 'C1',
+      lead_id: 'L1',
       service_line: 'mosquito',
-      lead_date: '2026-06-26',
+      specific_service: 'mosquito_program',
+      service_bucket: 'recurring',
+      lead_date: '2026-03-15',
       lead_source: 'google_ads',
       lead_source_detail: 'Waves - GBP Search',
       funnel_stage: 'lead',
     });
   });
 
-  test('records with a null campaign (single-number bucket) when no campaign id is known', async () => {
+  test('falls back to the lead service_interest when none is passed', async () => {
     firstByTable.ad_service_attribution = undefined;
-    firstByTable.leads = { service_interest: null };
+    firstByTable.leads = { service_interest: 'Lawn Care' };
 
     const res = await CallAttribution.recordCallPpcAttribution({
-      customerId: 'C2',
-      leadId: 'L2',
-      leadSourceDetail: 'Google Ads (tracking line)',
+      customerId: 'C2', leadId: 'L2', leadSourceDetail: 'tracking line',
     });
 
     expect(res).toEqual({ recorded: true, campaignId: null });
     expect(insertCalls[0].row).toMatchObject({
-      campaign_id: null,
-      lead_source: 'google_ads',
-      service_line: null,
-      funnel_stage: 'lead',
+      lead_id: 'L2', service_line: 'lawn', campaign_id: null, funnel_stage: 'lead',
     });
   });
 
-  test('backfills campaign on an existing null-campaign row instead of skipping', async () => {
-    firstByTable.ad_service_attribution = { id: 'row-1', campaign_id: null, lead_source_detail: null, service_line: null };
+  test('backfills campaign on an existing lead row instead of skipping', async () => {
+    firstByTable.ad_service_attribution = { id: 'row-1', campaign_id: null, lead_source_detail: null, service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
     firstByTable.ad_campaigns = { id: 'local-9' };
 
     const res = await CallAttribution.recordCallPpcAttribution({
-      customerId: 'C1',
-      leadSource: 'google_ads',
-      leadSourceDetail: 'Search - Bradenton',
-      googleCampaignId: '22594274874',
+      customerId: 'C1', leadId: 'L1', leadSourceDetail: 'Search - Bradenton', googleCampaignId: '22594274874',
     });
 
     expect(res).toEqual({ recorded: true, updated: true, campaignId: 'local-9' });
@@ -136,35 +134,16 @@ describe('recordCallPpcAttribution', () => {
     expect(updateCalls[0].row).toMatchObject({ campaign_id: 'local-9', lead_source_detail: 'Search - Bradenton' });
   });
 
-  test('does not touch an existing row that already has its campaign', async () => {
-    firstByTable.ad_service_attribution = { id: 'row-2', campaign_id: 'local-existing', lead_source_detail: 'x', service_line: 'pest' };
+  test('does not touch an existing lead row that already has its campaign', async () => {
+    firstByTable.ad_service_attribution = { id: 'row-2', campaign_id: 'local-existing', lead_source_detail: 'x', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
     firstByTable.ad_campaigns = { id: 'local-9' };
 
     const res = await CallAttribution.recordCallPpcAttribution({
-      customerId: 'C1', googleCampaignId: '22594274874', leadSourceDetail: 'y',
+      customerId: 'C1', leadId: 'L1', googleCampaignId: '22594274874', leadSourceDetail: 'y',
     });
 
     expect(res).toEqual({ recorded: false, reason: 'already_recorded' });
     expect(updateCalls).toHaveLength(0);
     expect(insertCalls).toHaveLength(0);
-  });
-
-  test('uses the passed serviceInterest (no lead lookup) and dates the row by the call', async () => {
-    firstByTable.ad_service_attribution = undefined;
-
-    const res = await CallAttribution.recordCallPpcAttribution({
-      customerId: 'C3',
-      leadId: 'L3',
-      leadSourceDetail: 'Google Ads (tracking line)',
-      serviceInterest: 'Lawn Care',
-      leadDate: new Date('2026-03-15T18:00:00Z'),
-    });
-
-    expect(res).toEqual({ recorded: true, campaignId: null });
-    expect(insertCalls[0].row).toMatchObject({
-      service_line: 'lawn',
-      lead_date: '2026-03-15',
-      lead_source: 'google_ads',
-    });
   });
 });

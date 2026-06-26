@@ -522,6 +522,11 @@ function priorUploadSkipReason(prior) {
   if (!prior) return null;
   if (prior.status === LIVE_UPLOAD_SENT_STATUS) return 'already_sent';
   if (prior.status === LIVE_UPLOAD_PENDING_STATUS) return 'upload_pending';
+  // PARTIAL_SUCCESS returns only aggregate error counts — we can't tell which
+  // transactions in the batch failed, so re-uploading would duplicate the ones
+  // that succeeded. Treat it as terminal (skip) and surface error_message for
+  // manual review rather than blindly retrying the whole batch.
+  if (prior.status === 'partial_success') return 'partial_success';
   return null;
 }
 
