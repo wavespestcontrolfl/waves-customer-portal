@@ -339,29 +339,40 @@ async function markEnRoute(serviceId, opts = {}) {
  * SMS in markEnRoute. Fired from markOnProperty (the one place both Bouncie
  * webhook paths and a manual on-site tap converge) so it stays idempotent.
  *
- * arrival_sms_sent_at is the guard: it can't double-send, and because the
- * send is best-effort and lives OUTSIDE the state-write, a transient failure
- * leaves the column NULL so a later arrival signal retries. Both the
- * fresh-flip and the already-on_property branches call this — without the
- * latter, a first-send failure would be permanently dropped (the job is
- * already on_property, so every retry takes the idempotent branch).
+ * arrival_sms_sent_at is the guard — "arrival handled", NOT "SMS delivered".
+ * It can't double-send, and because the send is best-effort and lives OUTSIDE
+ * the state-write, a transient failure releases the column back to NULL so a
+ * later arrival signal retries. Both the fresh-flip and the already-on_property
+ * branches call this — without the latter, a first-send failure would be
+ * permanently dropped (the job is already on_property, so every retry takes the
+ * idempotent branch).
  *
- * Gated dark behind techArrivedSms; sendTechArrived also self-guards on
- * twilioSms + the per-customer tech_arrived pref.
+ * The guard is claimed even while the techArrivedSms gate is OFF (the documented
+ * post-deploy dark state). Otherwise a job that transitions to on_property
+ * during the deploy→gate-flip window keeps a NULL guard, and the first same-job
+ * geofence repeat or manual retap AFTER the gate is enabled would read it as
+ * never-sent and fire a stale "has arrived" for an arrival that predates the
+ * feature. Claiming under a disabled gate marks those as handled; nothing goes
+ * out. (Migration 20260626000010 does the same for rows already on_property at
+ * deploy.) sendTechArrived also self-guards on twilioSms + per-customer pref.
  */
 async function maybeSendArrivalSms(svc, serviceId) {
-  if (!isEnabled('techArrivedSms') || svc.arrival_sms_sent_at) return;
-  // Atomically CLAIM the send before dispatching. Concurrent arrival signals
-  // (geofence + GPS + manual) can all reach the already-on_property branch
-  // with arrival_sms_sent_at still NULL; stamping only after Twilio returns
-  // would let them all send. The conditional NULL -> now() update is the
-  // serializer: exactly one caller flips it and proceeds, racing callers see
-  // 0 rows and bail.
+  if (svc.arrival_sms_sent_at) return;
+  // Atomically CLAIM the first on-site flip before doing anything else.
+  // Concurrent arrival signals (geofence + GPS + manual) can all reach an
+  // unstamped on_property row; the conditional NULL -> now() update is the
+  // serializer — exactly one caller wins and proceeds, racers see 0 rows and
+  // bail. We claim regardless of the gate (see doc above): the guard means
+  // "handled", so an arrival under a disabled gate is recorded but never sent.
   const claimed = await db('scheduled_services')
     .where({ id: serviceId })
     .whereNull('arrival_sms_sent_at')
     .update({ arrival_sms_sent_at: new Date() });
   if (!claimed) return;
+
+  // Gate off: the claim stands as "handled" so no later signal re-sends. Don't
+  // release it — that's the whole point of stamping under a disabled gate.
+  if (!isEnabled('techArrivedSms')) return;
 
   let sent = false;
   try {

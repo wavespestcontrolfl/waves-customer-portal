@@ -291,7 +291,10 @@ describe('track-transitions lifecycle side effects', () => {
     expect(sendTechArrived).not.toHaveBeenCalled();
   });
 
-  test('markOnProperty does not send the arrival SMS when the gate is off', async () => {
+  test('markOnProperty stamps the guard but sends nothing when the gate is off', async () => {
+    // Post-deploy dark state: the arrival flips the tracker, the gate is off.
+    // Claim the guard anyway (mark handled) so a same-job retap AFTER the gate
+    // is enabled can't fire a stale "has arrived" for this already-past arrival.
     isEnabled.mockReturnValueOnce(false);
     const svc = {
       id: 'job-8',
@@ -302,14 +305,22 @@ describe('track-transitions lifecycle side effects', () => {
       cancelled_at: null,
       arrival_sms_sent_at: null,
     };
+    const claim = query(1);
     db
-      .mockReturnValueOnce(query(svc))
-      .mockReturnValueOnce(query(1));
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // flip
+      .mockReturnValueOnce(claim); // claim — guard stamped, then gate-off returns
 
     const result = await trackTransitions.markOnProperty('job-8');
 
     expect(result.ok).toBe(true);
+    // Guard claimed (NULL -> now) so a later gate-on retap is a no-op...
+    expect(claim.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
+    expect(claim.update).toHaveBeenCalledWith({ arrival_sms_sent_at: expect.any(Date) });
+    // ...but nothing goes out, and the claim is NOT released (no failed send to
+    // retry — the feature is simply off).
     expect(sendTechArrived).not.toHaveBeenCalled();
+    expect(claim.update).toHaveBeenCalledTimes(1);
   });
 
   test('markOnProperty retries the arrival SMS on a later on-site signal when the first send failed', async () => {
