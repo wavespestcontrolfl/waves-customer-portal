@@ -19,7 +19,9 @@ const PAGE_LIMIT = 200;
 const MAX_PAGES = 25; // pagination backstop
 
 function apiVersion() {
-  return process.env.META_ADS_API_VERSION || 'v21.0';
+  // Meta deprecates Marketing API versions roughly yearly — keep META_ADS_API_VERSION
+  // set to a currently-supported version (this default can go stale).
+  return process.env.META_ADS_API_VERSION || 'v23.0';
 }
 
 /** Normalize META_ADS_ACCOUNT_ID to the `act_<digits>` form Graph expects. */

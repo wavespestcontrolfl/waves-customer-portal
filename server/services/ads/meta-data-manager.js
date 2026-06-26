@@ -33,7 +33,9 @@ const VALIDATED = 'validated';
 const EVENT_NAMES = { qualified_lead: 'Lead', completed_job_revenue: 'Purchase' };
 
 function apiVersion() {
-  return process.env.META_CAPI_API_VERSION || process.env.META_ADS_API_VERSION || 'v21.0';
+  // Keep META_CAPI_API_VERSION / META_ADS_API_VERSION on a currently-supported
+  // Graph API version — Meta deprecates versions ~yearly (this default can stale).
+  return process.env.META_CAPI_API_VERSION || process.env.META_ADS_API_VERSION || 'v23.0';
 }
 function pixelId() {
   return String(process.env.META_CAPI_PIXEL_ID || '').trim() || null;
@@ -52,8 +54,16 @@ function toUnixSeconds(value) {
   const d = value instanceof Date ? value : new Date(value);
   return Number.isNaN(d.getTime()) ? null : Math.floor(d.getTime() / 1000);
 }
-function dateRange(periodDays = 90) {
-  const days = Math.min(Math.max(parseInt(periodDays, 10) || 90, 1), 365);
+// Meta CAPI rejects the ENTIRE request if any event_time is older than 7 days,
+// so we never batch an older event. Hard-capped at 7 (Meta's limit).
+function maxEventAgeDays() {
+  const n = parseInt(process.env.META_CAPI_MAX_EVENT_AGE_DAYS, 10);
+  return Number.isFinite(n) && n > 0 && n <= 7 ? n : 7;
+}
+// Default collection window = the 7-day sendable window (no point gathering older
+// events Meta will reject). Aligns with maxEventAgeDays.
+function dateRange(periodDays = 7) {
+  const days = Math.min(Math.max(parseInt(periodDays, 10) || 7, 1), 365);
   return { days, since: etDateString(addETDays(new Date(), -days)), endDate: etDateString(addETDays(new Date(), -1)) };
 }
 
@@ -96,6 +106,9 @@ function buildEvent(candidate) {
 function skipReason(candidate) {
   if (!candidate.eventTimestamp) return 'missing_event_timestamp';
   if (!buildEvent(candidate)) return 'missing_match_keys';
+  // Meta rejects the whole batch on a single >7-day-old event — drop it here.
+  const ts = toUnixSeconds(candidate.eventTimestamp);
+  if (ts && (Date.now() / 1000 - ts) > maxEventAgeDays() * 86400) return 'event_too_old';
   // A Purchase with no value is meaningless to Meta value optimisation.
   if (candidate.conversionType === 'completed_job_revenue' && !(number(candidate.conversionValue) > 0)) {
     return 'missing_conversion_value';
@@ -177,7 +190,7 @@ function resolveMode(validateOnly) {
   return { live, testCode, testMode: wantTest, canSend: wantTest ? !!testCode : true };
 }
 
-async function uploadConversions({ conversionType = 'completed_job_revenue', periodDays = 90, limit = 200, validateOnly = false, force = false, fetchImpl } = {}) {
+async function uploadConversions({ conversionType = 'completed_job_revenue', periodDays = 7, limit = 200, validateOnly = false, force = false, fetchImpl } = {}) {
   if (!EVENT_NAMES[conversionType]) throw new Error(`Unsupported conversion type: ${conversionType}`);
   if (!isConfigured()) return { configured: false, conversionType, error: 'Meta CAPI not configured (META_CAPI_PIXEL_ID + META_CAPI_ACCESS_TOKEN).' };
 
@@ -209,12 +222,20 @@ async function uploadConversions({ conversionType = 'completed_job_revenue', per
     try {
       const resp = await sendEvents(events, { testCode: mode.testMode ? mode.testCode : undefined, fetchImpl });
       const status = mode.testMode ? VALIDATED : SENT;
-      await Promise.all(sendable.map((c) => logUpload(c, { status, testMode: mode.testMode, eventsReceived: resp.events_received })
-        .catch((e) => logger.warn(`[meta-capi] log write failed: ${e.message}`))));
+      // Don't swallow log failures: the events ARE at Meta (events_received), but
+      // if their dedup-log rows didn't persist, a later run will re-send those
+      // event_ids. Meta deduplicates by event_id within 48h, so it's safe
+      // short-term — but surface it as an ERROR so a persistent DB issue is caught.
+      const logResults = await Promise.allSettled(sendable.map((c) => logUpload(c, { status, testMode: mode.testMode, eventsReceived: resp.events_received })));
+      const logFailures = logResults.filter((r) => r.status === 'rejected').length;
+      if (logFailures) {
+        logger.error(`[meta-capi] ${logFailures}/${sendable.length} upload-log writes FAILED after a successful ${conversionType} send — those event_ids may re-send (Meta dedups within 48h); investigate the DB write.`);
+      }
       return {
         configured: true, conversionType, period: range, testMode: mode.testMode,
         sent: mode.testMode ? 0 : sendable.length, validated: mode.testMode ? sendable.length : 0,
         eventsReceived: resp.events_received ?? null, candidates: candidates.length, skipped,
+        logFailures: logFailures || undefined,
       };
     } catch (err) {
       logger.error(`[meta-capi] upload failed (${conversionType}): ${err.message}`);
@@ -225,7 +246,7 @@ async function uploadConversions({ conversionType = 'completed_job_revenue', per
   });
 }
 
-async function buildReadiness({ periodDays = 90, limit = 50 } = {}) {
+async function buildReadiness({ periodDays = 7, limit = 50 } = {}) {
   const range = dateRange(periodDays);
   const mode = resolveMode(false);
   const conversions = {};

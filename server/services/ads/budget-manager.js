@@ -31,7 +31,11 @@ class BudgetManager {
 
     logger.info(`Budget adjust: checking capacity for ${checkDate} (${dayOfWeek === 0 ? 'Sunday→Monday' : hour < 14 ? 'today' : 'tomorrow'})`);
 
-    const campaigns = await db('ad_campaigns').where('status', 'active');
+    // Only campaigns we can control remotely. Meta (platform='facebook') is
+    // ingested read-only (no Marketing API budget control here), so this
+    // capacity-based budget automation must not throttle Meta budgets locally —
+    // that would drift the dashboard from Ads Manager until the next Meta sync.
+    const campaigns = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
     const targets = await db('ad_targets').first();
     const thresholds = {
       green: parseFloat(targets?.capacity_green_max || 70),

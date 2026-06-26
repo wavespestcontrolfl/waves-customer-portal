@@ -2365,7 +2365,7 @@ function initScheduledJobs() {
       const MetaCapi = require('./ads/meta-data-manager');
       for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
         const r = await MetaCapi.uploadConversions({
-          conversionType, periodDays: 90, limit: 500, validateOnly: false,
+          conversionType, periodDays: 7, limit: 500, validateOnly: false,
         });
         logger.info(`[meta-capi cron] ${conversionType}: ${JSON.stringify({
           configured: r.configured, skipped: r.skipped || false, testMode: r.testMode,

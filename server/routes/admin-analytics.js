@@ -83,7 +83,7 @@ router.post('/data-manager/upload', requireAdmin, async (req, res, next) => {
 router.get('/meta-capi/readiness', async (req, res, next) => {
   try {
     const data = await MetaCapi.buildReadiness({
-      periodDays: parseInt(req.query.period || 90),
+      periodDays: parseInt(req.query.period || 7),
       limit: parseInt(req.query.limit || 250),
     });
     res.json(data);
@@ -95,7 +95,7 @@ router.post('/meta-capi/upload', requireAdmin, async (req, res, next) => {
   try {
     const result = await MetaCapi.uploadConversions({
       conversionType: req.body?.conversionType || req.body?.type || 'completed_job_revenue',
-      periodDays: parseInt(req.body?.period || req.body?.days || 90),
+      periodDays: parseInt(req.body?.period || req.body?.days || 7),
       limit: parseInt(req.body?.limit || 100),
       validateOnly: req.body?.validateOnly !== false,
       force: req.body?.force === true,

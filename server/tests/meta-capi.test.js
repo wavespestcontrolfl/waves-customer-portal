@@ -52,10 +52,13 @@ beforeEach(() => {
 });
 afterAll(() => { process.env = env; });
 
+// Default to a recent event so the 7-day Meta window guard treats it as sendable
+// regardless of the wall clock the test runs on.
+const recentTs = () => new Date(Date.now() - 2 * 86400000).toISOString();
 const lead = (over = {}) => ({
   conversionType: 'qualified_lead',
   transactionId: 'waves_qualified_lead:L1',
-  eventTimestamp: '2026-06-20T12:00:00Z',
+  eventTimestamp: recentTs(),
   email: 'a@b.com', phone: '(941) 318-7612', fbc: null, fbp: 'fb.1.1.99', fbclid: null,
   conversionValue: null, currency: 'USD', leadId: 'L1', ...over,
 });
@@ -77,9 +80,12 @@ describe('buildUserData', () => {
 
 describe('buildEvent / skipReason', () => {
   test('builds a Lead event with dedup event_id', () => {
-    const e = buildEvent(lead());
+    // buildEvent itself ignores age (the 7-day guard lives in skipReason), so a
+    // fixed timestamp is fine here.
+    const c = lead({ eventTimestamp: '2026-06-20T12:00:00Z' });
+    const e = buildEvent(c);
     expect(e).toMatchObject({ event_name: 'Lead', event_id: 'waves_qualified_lead:L1', action_source: 'system_generated' });
-    expect(e.event_time).toBe(Math.floor(new Date('2026-06-20T12:00:00Z').getTime() / 1000));
+    expect(e.event_time).toBe(Math.floor(Date.parse('2026-06-20T12:00:00Z') / 1000));
     expect(e.custom_data).toBeUndefined(); // no value on a lead
   });
 
@@ -89,9 +95,11 @@ describe('buildEvent / skipReason', () => {
     expect(e.custom_data).toEqual({ value: 250, currency: 'USD' });
   });
 
-  test('skipReason flags no match keys + missing purchase value', () => {
+  test('skipReason flags no match keys + missing purchase value + too-old events', () => {
     expect(skipReason(lead({ email: null, phone: null, fbp: null, fbc: null, fbclid: null }))).toBe('missing_match_keys');
     expect(skipReason(lead({ conversionType: 'completed_job_revenue', conversionValue: 0 }))).toBe('missing_conversion_value');
+    // Meta rejects the whole batch on a >7-day-old event — guard drops it.
+    expect(skipReason(lead({ eventTimestamp: new Date(Date.now() - 10 * 86400000).toISOString() }))).toBe('event_too_old');
     expect(skipReason(lead())).toBeNull();
   });
 });
