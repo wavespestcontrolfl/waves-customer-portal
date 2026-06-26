@@ -2508,9 +2508,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
 
       if (chargeInPerson) {
         // Defer the term to payment — stash the coverage config on the invoice so
-        // the webhook can reconstruct it. visitCount/cadence/dates mirror what the
-        // term would store; prepay_amount at webhook time uses the tax-inclusive
-        // invoice.total.
+        // the webhook can reconstruct it when the invoice is paid.
         await trx('invoices').where({ id: invoice.id }).update({
           metadata: JSON.stringify({
             annualPrepay: {
@@ -2520,6 +2518,11 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
               termStart,
               termEnd,
               planLabel,
+              // Tax-inclusive SERVICE amount captured at mint time (BEFORE any card
+              // surcharge is added to invoice.total at payment). The webhook splits
+              // this across covered visits — using the paid total would spread the
+              // processing fee into prepaid coverage and break the ledger.
+              prepayAmount: Number(invoice.total),
             },
           }),
         });

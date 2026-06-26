@@ -22,6 +22,7 @@ describe('parseAnnualPrepayMeta (charge-in-person deferred-term gate)', () => {
       termStart: '2026-07-01',
       termEnd: '2027-07-01',
       planLabel: 'WaveGuard',
+      prepayAmount: 480,
     },
   };
 
@@ -33,7 +34,16 @@ describe('parseAnnualPrepayMeta (charge-in-person deferred-term gate)', () => {
       termStart: '2026-07-01',
       termEnd: '2027-07-01',
       planLabel: 'WaveGuard',
+      prepayAmount: 480,
     });
+  });
+
+  test('carries the pre-surcharge prepayAmount (coerces numeric strings; drops non-positive)', () => {
+    expect(parseAnnualPrepayMeta({ annualPrepay: { visitCount: 4, prepayAmount: '600.50' } }).prepayAmount).toBe(600.5);
+    // Non-positive/absent prepayAmount → undefined, so activation falls back to the paid total.
+    expect(parseAnnualPrepayMeta({ annualPrepay: { visitCount: 4, prepayAmount: 0 } }).prepayAmount).toBeUndefined();
+    expect(parseAnnualPrepayMeta({ annualPrepay: { visitCount: 4, prepayAmount: 'abc' } }).prepayAmount).toBeUndefined();
+    expect(parseAnnualPrepayMeta({ annualPrepay: { visitCount: 4 } }).prepayAmount).toBeUndefined();
   });
 
   test('parses a valid JSON string payload (jsonb can arrive stringified)', () => {
@@ -54,6 +64,7 @@ describe('parseAnnualPrepayMeta (charge-in-person deferred-term gate)', () => {
       termStart: undefined,
       termEnd: undefined,
       planLabel: undefined,
+      prepayAmount: undefined,
     });
   });
 

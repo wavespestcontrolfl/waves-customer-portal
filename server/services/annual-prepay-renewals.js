@@ -776,6 +776,7 @@ function parseAnnualPrepayMeta(metadata) {
   try { parsed = typeof metadata === 'string' ? JSON.parse(metadata) : metadata; } catch { return null; }
   const ap = parsed && parsed.annualPrepay;
   if (!ap || !(Number(ap.visitCount) > 0)) return null;
+  const prepayAmount = Number(ap.prepayAmount);
   return {
     serviceType: ap.serviceType || undefined,
     visitCount: Number(ap.visitCount),
@@ -783,6 +784,9 @@ function parseAnnualPrepayMeta(metadata) {
     termStart: ap.termStart || undefined,
     termEnd: ap.termEnd || undefined,
     planLabel: ap.planLabel || undefined,
+    // Pre-surcharge service amount the mint captured; undefined falls back to the
+    // paid invoice total at activation (legacy/missing payloads only).
+    prepayAmount: Number.isFinite(prepayAmount) && prepayAmount > 0 ? prepayAmount : undefined,
   };
 }
 
@@ -848,20 +852,48 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       const full = await conn('invoices').where({ id: invoice.id }).first('id', 'customer_id', 'total');
       const existing = await conn('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id');
       if (full?.customer_id && !existing) {
-        const created = await createTermForAnnualPrepay({
-          customerId: full.customer_id,
-          prepayInvoiceId: invoice.id,
-          prepayAmount: Number(full.total),
-          planLabel: meta.planLabel || undefined,
-          monthlyRate: Math.round((Number(full.total) / 12) * 100) / 100,
-          coverageServiceType: meta.serviceType || undefined,
-          coverageVisitCount: Number(meta.visitCount),
-          coverageCadence: meta.cadence || undefined,
-          termStart: meta.termStart || undefined,
-          termEnd: meta.termEnd || undefined,
-          conn,
-        });
-        if (created) results.push(created);
+        // Re-check coverage overlap at activation time. The deferred flow holds no
+        // payment_pending term to reserve the window, so another annual-prepay term
+        // may have been created between mint and payment. Don't activate duplicate
+        // coverage (it would double-suppress billing) — log for the operator to
+        // reconcile the now-redundant payment. Statuses mirror the create route's
+        // lockAndAssertNoAnnualPrepayOverlap.
+        const overlap = await conn('annual_prepay_terms')
+          .where({ customer_id: full.customer_id })
+          .whereNot({ prepay_invoice_id: invoice.id })
+          .where(function bindingOverlap() {
+            this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+              .orWhere(function lapsedRenewalStillInTerm() {
+                this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+              });
+          })
+          .modify((qb) => {
+            if (meta.termEnd) qb.where('term_start', '<=', meta.termEnd);
+            if (meta.termStart) qb.where('term_end', '>=', meta.termStart);
+          })
+          .first('id');
+        if (overlap) {
+          logger.warn(`[annual-prepay] charge-in-person invoice ${invoice.id} paid but its coverage overlaps existing term ${overlap.id}; skipping duplicate term — reconcile the payment`);
+        } else {
+          // Use the pre-surcharge service amount the mint captured (falls back to
+          // the paid total only for legacy payloads) so the coverage credit excludes
+          // any card processing fee that was added to invoice.total at payment.
+          const coverageAmount = meta.prepayAmount != null ? meta.prepayAmount : Number(full.total);
+          const created = await createTermForAnnualPrepay({
+            customerId: full.customer_id,
+            prepayInvoiceId: invoice.id,
+            prepayAmount: coverageAmount,
+            planLabel: meta.planLabel || undefined,
+            monthlyRate: Math.round((coverageAmount / 12) * 100) / 100,
+            coverageServiceType: meta.serviceType || undefined,
+            coverageVisitCount: Number(meta.visitCount),
+            coverageCadence: meta.cadence || undefined,
+            termStart: meta.termStart || undefined,
+            termEnd: meta.termEnd || undefined,
+            conn,
+          });
+          if (created) results.push(created);
+        }
       }
     }
   }
