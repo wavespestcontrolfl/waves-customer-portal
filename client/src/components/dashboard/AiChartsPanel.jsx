@@ -158,9 +158,13 @@ export default function AiChartsPanel() {
   const fileInputRef = useRef(null);
 
   const addImages = async (fileList) => {
-    const files = Array.from(fileList || []).filter(
-      (f) => ALLOWED_IMAGE_MIME.includes(f.type) && f.size <= MAX_IMAGE_BYTES,
-    );
+    const remaining = MAX_IMAGES - images.length;
+    if (remaining <= 0) return;
+    // Cap to the open slots BEFORE reading, so a big shift-select can't read
+    // many ×5MB files just to drop all but a few.
+    const files = Array.from(fileList || [])
+      .filter((f) => ALLOWED_IMAGE_MIME.includes(f.type) && f.size <= MAX_IMAGE_BYTES)
+      .slice(0, remaining);
     if (!files.length) return;
     const read = await Promise.all(files.map(readImage));
     setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES));
