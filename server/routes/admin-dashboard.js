@@ -885,6 +885,89 @@ router.get('/mrr-trend', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/review-trend — last 12 ET months of Google reviews
+// (monthly count + avg star rating) plus all-time totals. Mirrors the
+// /mrr-trend 12-month window so the dashboard chart aligns month-for-month.
+router.get('/review-trend', dashboardCache, async (req, res, next) => {
+  try {
+    const now = new Date();
+    // Build the 12-month ET window (oldest → newest), each keyed YYYY-MM with a
+    // human label, the same way getMrrTrend walks back ET calendar months.
+    const window = [];
+    for (let i = 11; i >= 0; i--) {
+      const startDay = etMonthStart(now, -i); // 'YYYY-MM-01'
+      const ym = startDay.slice(0, 7); // 'YYYY-MM'
+      const label = parseETDateTime(`${startDay}T00:00`).toLocaleDateString('en-US', {
+        month: 'short',
+        year: 'numeric',
+        timeZone: 'America/New_York',
+      });
+      window.push({ ym, label });
+    }
+
+    const rows = await db('google_reviews')
+      .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
+      .select(db.raw("to_char(review_created_at AT TIME ZONE 'America/New_York','YYYY-MM') as ym"))
+      .count('* as n')
+      .avg('star_rating as avg')
+      .groupByRaw("to_char(review_created_at AT TIME ZONE 'America/New_York','YYYY-MM')");
+
+    const byMonth = {};
+    for (const r of rows) {
+      byMonth[r.ym] = { count: parseInt(r.n, 10) || 0, avg: r.avg != null ? Number(r.avg) : null };
+    }
+
+    const trend = window.map((w) => {
+      const hit = byMonth[w.ym];
+      return {
+        month: w.ym,
+        label: w.label,
+        count: hit ? hit.count : 0,
+        avgRating: hit && hit.avg != null ? Math.round(hit.avg * 10) / 10 : null,
+      };
+    });
+
+    // All-time total + avg rating: prefer the Places API aggregate stored in
+    // the `_stats` rows. The rest of the dashboard (the hero Google Rating tile,
+    // lines ~219-252) reads these first because the synced google_reviews rows
+    // can be an incomplete sample, so deriving the card total from concrete rows
+    // alone would show a lower count than the rest of the dashboard. Fall back to
+    // the dated rows only when no Places stats exist. The monthly `trend` above
+    // intentionally stays on dated rows — those are the only ones we can bucket
+    // by ET month.
+    let total = 0;
+    let avgRating = null;
+    const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
+    let placesTotal = 0, ratingSum = 0, ratingCount = 0;
+    for (const row of statsRows) {
+      try {
+        const parsed = JSON.parse(row.review_text);
+        placesTotal += parsed.totalReviews || 0;
+        if (parsed.rating) { ratingSum += parsed.rating; ratingCount += 1; }
+      } catch (parseErr) {
+        logger.warn(`[admin-dashboard] review-trend _stats parse failed (id=${row.id}): ${parseErr.message}`);
+      }
+    }
+    if (placesTotal > 0) {
+      total = placesTotal;
+      avgRating = ratingCount > 0 ? Math.round((ratingSum / ratingCount) * 10) / 10 : null;
+    } else {
+      const totals = await db('google_reviews')
+        .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
+        .count('* as total')
+        .avg('star_rating as avg')
+        .first();
+      total = parseInt(totals?.total, 10) || 0;
+      avgRating = totals?.avg != null ? Math.round(Number(totals.avg) * 10) / 10 : null;
+    }
+
+    res.json({ trend, total, avgRating, period: { label: 'Last 12 months' } });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /review-trend failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // GET /api/admin/dashboard/lead-source — customer acquisition by source (YTD)
 router.get('/lead-source', dashboardCache, async (req, res, next) => {
   try {

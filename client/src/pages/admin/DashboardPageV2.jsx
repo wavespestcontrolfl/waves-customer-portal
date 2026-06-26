@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Badge,
   Card,
@@ -21,6 +21,7 @@ import {
   KpiRing,
   KpiSparklineTile,
   MrrTrendChart,
+  ReviewTrendChart,
   RevenueByCity,
   RevenueTrendArea,
   ServiceMixDonut,
@@ -44,11 +45,30 @@ const PERIODS = [
 ];
 
 const greeting = () => {
-  const h = new Date().getHours();
+  // Eastern hour so the greeting matches the ET header date/clock regardless of
+  // the viewer's browser timezone.
+  const h =
+    parseInt(
+      new Date().toLocaleString("en-US", {
+        timeZone: "America/New_York",
+        hour: "2-digit",
+        hour12: false,
+      }),
+      10,
+    ) % 24;
   if (h < 12) return "Good morning";
   if (h < 17) return "Good afternoon";
   return "Good evening";
 };
+
+// Human-friendly "time since last refresh" label for the header control.
+function relativeTime(ts) {
+  if (ts == null) return "never";
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 30) return "just now";
+  if (s < 3600) return `${Math.max(1, Math.floor(s / 60))}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
 
 function adminFirstName() {
   try {
@@ -87,12 +107,42 @@ export default function DashboardPageV2() {
   const [channelMix, setChannelMix] = useState(null);
   const [mix, setMix] = useState(null);
   const [revenueByCity, setRevenueByCity] = useState(null);
+  const [reviewTrend, setReviewTrend] = useState(null);
   const [today, setToday] = useState(null);
   const [billing, setBilling] = useState(null);
   const [alerts, setAlerts] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [clockTick, setClockTick] = useState(0);
+  // Bumped on every auto/manual refresh so the period-based effects (Core KPIs +
+  // attribution) re-fetch too — otherwise "Updated Nm ago" would imply a
+  // freshness those panels don't have. The period refs let those effects blank
+  // ONLY on a real period switch, not on a silent refresh.
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const mountedRef = useRef(true);
+  const kpisPeriodRef = useRef(null);
+  const attribPeriodRef = useRef(null);
+  // Serializes refreshes: while a loadAll() is in flight, the 3-min timer and
+  // the manual button skip starting another, so overlapping responses can't
+  // race to write shared state and then stamp a newer "Updated" time.
+  const inFlightRef = useRef(false);
+  const nonceRef = useRef(0);
+  // Freshness gate. A refresh "generation" has up to 3 participants — loadAll
+  // plus the two period effects (Core KPIs + attribution) when they re-run for
+  // a refresh (not a period switch). "Updated just now" advances only once every
+  // participant of the current generation reports success, so a transient
+  // failure in ANY panel (not just the loadAll ones) keeps the stamp honest.
+  const freshGateRef = useRef({ gen: 0, pending: 0, failed: false });
+  const settleGate = useCallback((gen, ok) => {
+    const g = freshGateRef.current;
+    if (g.gen !== gen) return; // superseded by a newer refresh — ignore
+    if (!ok) g.failed = true;
+    g.pending -= 1;
+    if (g.pending <= 0 && !g.failed && mountedRef.current) setLastUpdated(Date.now());
+  }, []);
   const [period, setPeriod] = useState("mtd");
   const [showAllKpis, setShowAllKpis] = useState(false);
   const [kpisLoading, setKpisLoading] = useState(false);
@@ -100,78 +150,137 @@ export default function DashboardPageV2() {
   const [attributionLoading, setAttributionLoading] = useState(false);
   const [attributionError, setAttributionError] = useState(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    // Run the 11 fan-out fetches in two staggered waves so a fresh mount
-    // doesn't burst-trigger the per-user rate limiter (the original code
-    // fired all 11 simultaneously). The hero KPIs land first, then the
-    // attribution panels backfill.
+  // Run the 11 fan-out fetches in two staggered waves so a fresh mount
+  // doesn't burst-trigger the per-user rate limiter (the original code
+  // fired all 11 simultaneously). The hero KPIs land first, then the
+  // attribution panels backfill. Re-callable on an interval / manual refresh:
+  // every setState is guarded by mountedRef and loading is NEVER re-raised, so
+  // an auto/manual refresh swaps data in place without blanking the page.
+  const loadAll = useCallback(async () => {
+    inFlightRef.current = true;
+    // Capture the generation this run belongs to (set up by the caller before
+    // loadAll is invoked) so a late settle can't credit a newer refresh.
+    const gen = freshGateRef.current.gen;
+    let anyFailed = false;
     function track(label, p) {
       return p.catch((e) => {
         console.error(`[dashboard-v2] ${label}`, e);
-        if (!cancelled) setLoadError((prev) => prev || e);
+        anyFailed = true;
+        if (mountedRef.current) setLoadError((prev) => prev || e);
         return null;
       });
     }
-    async function loadAll() {
-      const wave1 = await Promise.all([
-        track("/dashboard", adminFetch("/admin/dashboard")),
-        track(
-          "/compare",
-          adminFetch(
-            "/admin/dashboard/compare?period=this_month&against=last_month",
-          ),
+    const wave1 = await Promise.all([
+      track("/dashboard", adminFetch("/admin/dashboard")),
+      track(
+        "/compare",
+        adminFetch(
+          "/admin/dashboard/compare?period=this_month&against=last_month",
         ),
-        track(
-          "/sales-capture",
-          adminFetch("/admin/dashboard/sales-capture"),
-        ),
-        track(
-          "/today-completion",
-          adminFetch("/admin/dashboard/today-completion"),
-        ),
-        track("/billing-health", adminFetch("/admin/billing-health")),
-        track("/alerts", adminFetch("/admin/dashboard/alerts")),
-      ]);
-      const [d, cmp, sc, td, bh, al] = wave1;
-      if (cancelled) return;
-      setData(d);
-      setCompare(cmp);
-      setSalesCapture(sc);
-      setToday(td);
-      setBilling(bh?.summary || null);
-      setAlerts(Array.isArray(al?.alerts) ? al.alerts : []);
-      setLoading(false);
+      ),
+      track("/sales-capture", adminFetch("/admin/dashboard/sales-capture")),
+      track(
+        "/today-completion",
+        adminFetch("/admin/dashboard/today-completion"),
+      ),
+      track("/billing-health", adminFetch("/admin/billing-health")),
+      track("/alerts", adminFetch("/admin/dashboard/alerts")),
+    ]);
+    const [d, cmp, sc, td, bh, al] = wave1;
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    // Preserve prior values when a refresh fetch transiently fails (track →
+    // null), so an auto/manual refresh never blanks a panel that was populated.
+    // On the first load prev is null, so the loading/error path is unchanged.
+    setData((prev) => d ?? prev);
+    setCompare((prev) => cmp ?? prev);
+    setSalesCapture((prev) => sc ?? prev);
+    setToday((prev) => td ?? prev);
+    setBilling((prev) => bh?.summary ?? prev);
+    setAlerts((prev) => (Array.isArray(al?.alerts) ? al.alerts : prev));
+    setLoading(false);
 
-      const wave2 = await Promise.all([
-        track("/funnel", adminFetch("/admin/dashboard/funnel")),
-        track("/aging", adminFetch("/admin/dashboard/aging")),
-        track("/mrr-trend", adminFetch("/admin/dashboard/mrr-trend?months=12")),
-        track("/service-mix", adminFetch("/admin/dashboard/service-mix")),
-        track(
-          "/revenue-by-city",
-          adminFetch("/admin/dashboard/revenue-by-city"),
-        ),
-      ]);
-      if (cancelled) return;
-      const [fnl, ag, mrr, mx, rbc] = wave2;
-      setFunnel(fnl);
-      setAging(ag);
-      setMrrTrend(mrr);
-      setMix(mx);
-      setRevenueByCity(rbc);
-    }
+    const wave2 = await Promise.all([
+      track("/funnel", adminFetch("/admin/dashboard/funnel")),
+      track("/aging", adminFetch("/admin/dashboard/aging")),
+      track("/mrr-trend", adminFetch("/admin/dashboard/mrr-trend?months=12")),
+      track("/service-mix", adminFetch("/admin/dashboard/service-mix")),
+      track("/revenue-by-city", adminFetch("/admin/dashboard/revenue-by-city")),
+      track("/review-trend", adminFetch("/admin/dashboard/review-trend")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [fnl, ag, mrr, mx, rbc, rev] = wave2;
+    setFunnel((prev) => fnl ?? prev);
+    setAging((prev) => ag ?? prev);
+    setMrrTrend((prev) => mrr ?? prev);
+    setMix((prev) => mx ?? prev);
+    setRevenueByCity((prev) => rbc ?? prev);
+    setReviewTrend((prev) => rev ?? prev);
+    inFlightRef.current = false;
+    // Report this generation's outcome to the freshness gate. "Updated just
+    // now" only advances once loadAll AND the period effects (Core KPIs +
+    // attribution) of the same generation have all reported success — see
+    // settleGate — so a transient failure in any panel never claims freshness.
+    settleGate(gen, !anyFailed);
+  }, [settleGate]);
+
+  // Start a refresh generation: bump the nonce (re-running the period effects),
+  // arm the freshness gate for all 3 participants, then run loadAll. Skipped
+  // while a refresh is already in flight so generations never overlap.
+  const triggerRefresh = useCallback(() => {
+    if (inFlightRef.current) return Promise.resolve();
+    const gen = nonceRef.current + 1;
+    nonceRef.current = gen;
+    freshGateRef.current = { gen, pending: 3, failed: false };
+    setRefreshNonce(gen);
+    return loadAll();
+  }, [loadAll]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    // Initial load: only loadAll participates in the gate (the period effects
+    // run with periodChanged=true and surface their own error state instead).
+    freshGateRef.current = { gen: 0, pending: 1, failed: false };
     loadAll();
+    // Auto-refresh every 3 min in place; a faster clock tick keeps the
+    // "Updated Nm ago" label fresh without re-fetching. Skip the tick if a
+    // refresh is still running so we never stack overlapping loads.
+    const auto = setInterval(() => {
+      if (!inFlightRef.current) triggerRefresh();
+    }, 180000);
+    const tick = setInterval(() => setClockTick((t) => t + 1), 30000);
     return () => {
-      cancelled = true;
+      mountedRef.current = false;
+      clearInterval(auto);
+      clearInterval(tick);
     };
-  }, []);
+  }, [loadAll, triggerRefresh]);
+
+  const refresh = async () => {
+    if (refreshing || inFlightRef.current) return;
+    setRefreshing(true);
+    try {
+      await triggerRefresh();
+    } finally {
+      if (mountedRef.current) setRefreshing(false);
+    }
+  };
 
   useEffect(() => {
     const ctrl = new AbortController();
-    setKpis(null);
-    setKpisError(null);
-    setKpisLoading(true);
+    // Blank + show the loading state only on a real period switch. A silent
+    // auto/manual refresh (refreshNonce bump) keeps the current KPIs on screen,
+    // swaps them in place, and won't surface an error over still-good data.
+    const periodChanged = kpisPeriodRef.current !== period;
+    kpisPeriodRef.current = period;
+    // A refresh-driven run (periodChanged=false) is a participant in the
+    // freshness gate for this generation; a period switch is not.
+    const gateGen = refreshNonce;
+    let ok = true;
+    if (periodChanged) {
+      setKpis(null);
+      setKpisError(null);
+      setKpisLoading(true);
+    }
     adminFetch(`/admin/dashboard/core-kpis?period=${period}`, {
       signal: ctrl.signal,
     })
@@ -181,22 +290,31 @@ export default function DashboardPageV2() {
       })
       .catch((e) => {
         if (e?.name === "AbortError") return;
+        ok = false;
         console.error("[dashboard-v2] /core-kpis", e);
-        setKpisError(e);
+        if (periodChanged) setKpisError(e);
       })
       .finally(() => {
-        if (!ctrl.signal.aborted) setKpisLoading(false);
+        if (ctrl.signal.aborted) return;
+        setKpisLoading(false);
+        if (!periodChanged) settleGate(gateGen, ok);
       });
     return () => ctrl.abort();
-  }, [period]);
+  }, [period, refreshNonce, settleGate]);
 
   useEffect(() => {
     const ctrl = new AbortController();
-    setCallsBySource(null);
-    setLeadsBySource(null);
-    setChannelMix(null);
-    setAttributionError(null);
-    setAttributionLoading(true);
+    const periodChanged = attribPeriodRef.current !== period;
+    attribPeriodRef.current = period;
+    const gateGen = refreshNonce;
+    let ok = true;
+    if (periodChanged) {
+      setCallsBySource(null);
+      setLeadsBySource(null);
+      setChannelMix(null);
+      setAttributionError(null);
+      setAttributionLoading(true);
+    }
 
     Promise.all([
       adminFetch(`/admin/dashboard/calls-by-source?period=${period}`, {
@@ -217,14 +335,17 @@ export default function DashboardPageV2() {
       })
       .catch((e) => {
         if (e?.name === "AbortError") return;
+        ok = false;
         console.error("[dashboard-v2] attribution", e);
-        setAttributionError(e);
+        if (periodChanged) setAttributionError(e);
       })
       .finally(() => {
-        if (!ctrl.signal.aborted) setAttributionLoading(false);
+        if (ctrl.signal.aborted) return;
+        setAttributionLoading(false);
+        if (!periodChanged) settleGate(gateGen, ok);
       });
     return () => ctrl.abort();
-  }, [period]);
+  }, [period, refreshNonce, settleGate]);
 
   if (loading) {
     return (
@@ -270,11 +391,21 @@ export default function DashboardPageV2() {
 
   const k = data.kpis;
   const dailySpark = sparkSeries(data.revenueChart?.daily);
+  // Eastern-time everywhere — the business (and every operator) is in ET, so the
+  // header date/clock must not drift to the viewer's browser timezone.
   const todayLabel = new Date().toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
     day: "numeric",
     year: "numeric",
+    timeZone: "America/New_York",
+  });
+  // Recomputed on each clockTick (30s) re-render so the header clock stays current.
+  void clockTick;
+  const timeLabel = new Date().toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
   });
   const firstName = adminFirstName();
   const mrrTrendSub =
@@ -331,7 +462,7 @@ export default function DashboardPageV2() {
           <div>
             {" "}
             <div className="u-label text-ink-secondary max-md:text-13 max-md:tracking-normal max-md:normal-case max-md:font-medium max-md:text-zinc-500">
-              {todayLabel}
+              {todayLabel} · {timeLabel}
             </div>{" "}
             <h1 className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2">
               {" "}
@@ -346,13 +477,28 @@ export default function DashboardPageV2() {
               </span>{" "}
             </h1>{" "}
           </div>{" "}
+          <div className="text-12 text-ink-tertiary flex items-center gap-1.5">
+            {/* clockTick keeps this label fresh between auto-refreshes */}
+            <span>Updated {relativeTime(lastUpdated, clockTick)}</span>{" "}
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={refreshing}
+              aria-label="Refresh dashboard"
+              className="hover:text-ink-secondary u-focus-ring"
+            >
+              <span className={`inline-block ${refreshing ? "animate-spin" : ""}`}>
+                ↻
+              </span>
+            </button>
+          </div>{" "}
         </div>{" "}
       </header>
       {alerts.length > 0 && <DashboardAlertsBanner alerts={alerts} />}
-      {/* Sales Capture hero — ServiceTitan-style captured-vs-missed gauge,
-          leads the dashboard content above the KPI sparkline row. */}
-      {salesCapture && (
-        <div className="mb-4 md:mb-5">
+      {/* Row 1: Sales Capture gauge + Revenue trend — capture rate next to the
+          revenue it drives. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
+        {salesCapture && (
           <ChartCard
             title="Sales Capture"
             sub={`${fmtMoney(salesCapture.captured)} captured of ${fmtMoney(
@@ -367,42 +513,56 @@ export default function DashboardPageV2() {
               lostCount={salesCapture.lostCount}
             />
           </ChartCard>
-        </div>
-      )}
-      {/* Hero KPI row — sparkline + delta */}
+        )}
+        <ChartCard
+          title={`Revenue — ${new Date().toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "America/New_York" })}`}
+          sub={
+            compare?.deltas?.revenue != null
+              ? `${compare.deltas.revenue >= 0 ? "↑" : "↓"} ${Math.abs(compare.deltas.revenue)}% vs ${compare.against?.label?.toLowerCase() || "prior period"}`
+              : "vs same days last month"
+          }
+          action={
+            <span className="text-12 text-ink-secondary">
+              MRR{" "}
+              <span className="u-nums font-medium text-zinc-900 ml-1">
+                {fmtMoney(data.mrr)}
+              </span>{" "}
+            </span>
+          }
+        >
+          <RevenueTrendArea
+            current={compare?.period?.series || data.revenueChart?.daily || []}
+            prior={compare?.against?.series || []}
+          />
+        </ChartCard>
+      </div>
+      {/* Row 2: Hero KPI row — sparkline + delta */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-4 md:mb-5">
         {HERO.map((h) => (
           <KpiSparklineTile key={h.label} {...h} />
         ))}
       </div>
-      {/* Row: Revenue trend (2/3) + Today completion gauge (1/3) */}
+      {/* Row 3: Reviews trend (2/3) + Today completion gauge (1/3) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
         {" "}
         <div className="md:col-span-2">
           {" "}
           <ChartCard
-            title={`Revenue — ${new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}`}
-            sub={
-              compare?.deltas?.revenue != null
-                ? `${compare.deltas.revenue >= 0 ? "↑" : "↓"} ${Math.abs(compare.deltas.revenue)}% vs ${compare.against?.label?.toLowerCase() || "prior period"}`
-                : "vs same days last month"
-            }
+            title="Reviews"
+            sub={`${reviewTrend?.total ?? 0} reviews · ${reviewTrend?.avgRating ?? "—"}★ avg`}
             action={
-              <span className="text-12 text-ink-secondary">
-                MRR{" "}
-                <span className="u-nums font-medium text-zinc-900 ml-1">
-                  {fmtMoney(data.mrr)}
-                </span>{" "}
-              </span>
+              kpis?.quality?.nps != null ? (
+                <span className="text-12 text-ink-secondary">
+                  Index{" "}
+                  <span className="u-nums font-medium text-zinc-900 ml-1">
+                    {kpis.quality.nps}
+                  </span>
+                </span>
+              ) : null
             }
           >
             {" "}
-            <RevenueTrendArea
-              current={
-                compare?.period?.series || data.revenueChart?.daily || []
-              }
-              prior={compare?.against?.series || []}
-            />{" "}
+            <ReviewTrendChart trend={reviewTrend?.trend || []} />{" "}
           </ChartCard>{" "}
         </div>{" "}
         <ChartCard
