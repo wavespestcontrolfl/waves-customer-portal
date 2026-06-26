@@ -54,3 +54,46 @@ describe('rainWindowEndingOn', () => {
     expect(rainWindowEndingOn(null)).toBeNull();
   });
 });
+
+describe('fetchServiceWeekWeather — dailyRain mirrors rainInches (no partial chart)', () => {
+  const { fetchServiceWeekWeather } = require('../services/service-report/application-conditions');
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+
+  // Mock Open-Meteo to return the exact inclusive window the function expects, with
+  // a caller-supplied precipitation array (one entry per day).
+  function mockOpenMeteo(window, precip) {
+    const days = [];
+    let d = new Date(`${window.start}T00:00:00Z`);
+    const end = new Date(`${window.end}T00:00:00Z`);
+    while (d <= end) { days.push(d.toISOString().slice(0, 10)); d = new Date(d.getTime() + 86400000); }
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        daily: { time: days, precipitation_sum: precip, et0_fao_evapotranspiration: days.map(() => 0.2) },
+        daily_units: { et0_fao_evapotranspiration: 'inch' },
+      }),
+    });
+  }
+
+  test('a clean full window → weekly total AND a complete per-day array', async () => {
+    const serviceDate = '2026-05-10';
+    mockOpenMeteo(rainWindowEndingOn(serviceDate, 7), [0.1, 0, 0.2, 0, 0.3, 0, 0.1]);
+    const res = await fetchServiceWeekWeather({ latitude: 27.1, longitude: -82.4, serviceDate });
+    expect(res.rainInches).toBe(0.7);
+    expect(Array.isArray(res.dailyRain)).toBe(true);
+    expect(res.dailyRain).toHaveLength(7);
+    expect(res.dailyRain.every((p) => typeof p.inches === 'number')).toBe(true);
+  });
+
+  test('full-length window but ONE missing day → rainInches null AND dailyRain null', async () => {
+    // Different end-date + coords so this never hits the prior test's rain cache.
+    const serviceDate = '2026-05-11';
+    mockOpenMeteo(rainWindowEndingOn(serviceDate, 7), [0.1, null, 0.2, 0, 0.3, 0, 0.1]);
+    const res = await fetchServiceWeekWeather({ latitude: 28.2, longitude: -81.9, serviceDate });
+    // sumPrecipInches rejects the partial window → both must be null together, so the
+    // chart can never render a 6-bar partial series while the weekly total is unknown.
+    expect(res.rainInches).toBeNull();
+    expect(res.dailyRain).toBeNull();
+  });
+});

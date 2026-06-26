@@ -221,8 +221,9 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     const sumIfFull = (arr) => (windowOk && Array.isArray(arr) && arr.length === expectedDays)
       ? sumPrecipInches(arr) : null;
     const round2 = (n) => (Number.isFinite(Number(n)) ? Math.round(Number(n) * 100) / 100 : null);
+    const rainInches = sumIfFull(daily.precipitation_sum);
     const value = {
-      rainInches: sumIfFull(daily.precipitation_sum),
+      rainInches,
       et0Inches: et0SumToInches(
         sumIfFull(daily.et0_fao_evapotranspiration),
         payload?.daily_units?.et0_fao_evapotranspiration,
@@ -230,9 +231,12 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
       // Per-day rainfall (inches) over the trusted window, at the SAME client
       // lat/lng as rainInches. Lets the report's 7-day chart be sourced from the
       // customer's actual coordinates (not a regional area centroid) and always
-      // reconcile with the weekly total. Null unless the full window is present.
-      dailyRain: (windowOk && Array.isArray(daily.precipitation_sum)
-        && daily.precipitation_sum.length === expectedDays)
+      // reconcile with the weekly total. Gated on rainInches being non-null — NOT
+      // just window length — because sumIfFull/sumPrecipInches return null when any
+      // single day is missing or non-numeric. Without this, a full-length window
+      // with one null day would null out the weekly total while still emitting a
+      // daily array with a null bar, rendering a misleading partial chart.
+      dailyRain: rainInches != null
         ? times.map((date, i) => ({ date, inches: round2(daily.precipitation_sum[i]) }))
         : null,
     };
