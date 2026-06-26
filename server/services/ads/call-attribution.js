@@ -91,12 +91,30 @@ async function recordCallPpcAttribution({
       if (existing.lead_source && existing.lead_source !== leadSource) {
         return { recorded: false, reason: 'other_source' };
       }
+      // Upgrade placeholders, not just nulls — the first path (dedicated number)
+      // inserts a row with a generic detail ("inbound call") + default service
+      // bucket, and a later bridge run brings the REAL campaign + a now-known
+      // service. Only-fill-null guards would leave those placeholders forever.
+      const hasInterest = !!(interest && String(interest).trim());
       const patch = {};
-      if (campaignId && !existing.campaign_id) patch.campaign_id = campaignId;
-      if (leadSourceDetail && !existing.lead_source_detail) patch.lead_source_detail = leadSourceDetail;
-      if (serviceLine && !existing.service_line) patch.service_line = serviceLine;
-      if (specificService && !existing.specific_service) patch.specific_service = specificService;
-      if (serviceBucket && !existing.service_bucket) patch.service_bucket = serviceBucket;
+      if (campaignId && !existing.campaign_id) {
+        // Bridge brought the real campaign — set it AND replace the generic
+        // placeholder detail with the campaign name. (Don't overwrite an
+        // already-set campaign: first-touch attribution wins.)
+        patch.campaign_id = campaignId;
+        if (leadSourceDetail) patch.lead_source_detail = leadSourceDetail;
+      } else if (leadSourceDetail && !existing.lead_source_detail) {
+        patch.lead_source_detail = leadSourceDetail;
+      }
+      // A service derived from a KNOWN interest replaces a default-placeholder
+      // bucket; an unknown/default inference only fills genuinely-missing fields.
+      const applyService = (col, val) => {
+        if (!val) return;
+        if (hasInterest ? val !== existing[col] : !existing[col]) patch[col] = val;
+      };
+      applyService('service_line', serviceLine);
+      applyService('specific_service', specificService);
+      applyService('service_bucket', serviceBucket);
       if (Object.keys(patch).length) {
         patch.updated_at = new Date();
         await db('ad_service_attribution').where({ id: existing.id }).update(patch);

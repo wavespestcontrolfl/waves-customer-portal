@@ -136,6 +136,41 @@ describe('recordCallPpcAttribution', () => {
     expect(updateCalls[0].row).toMatchObject({ campaign_id: 'local-9', lead_source_detail: 'Search - Bradenton' });
   });
 
+  test('upgrades a placeholder detail + default service when the bridge later brings campaign + a known service', async () => {
+    // dedicated-number path recorded this first: null campaign, generic detail, default service.
+    firstByTable.ad_service_attribution = {
+      id: 'row-x', lead_source: 'google_ads', campaign_id: null,
+      lead_source_detail: 'inbound call', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring',
+    };
+    firstByTable.ad_campaigns = { id: 'local-7' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', leadSource: 'google_ads',
+      leadSourceDetail: 'Search - Mosquito', googleCampaignId: '22594274874',
+      serviceInterest: 'Mosquito Control',
+    });
+
+    expect(res).toEqual({ recorded: true, updated: true, campaignId: 'local-7' });
+    expect(updateCalls[0].row).toMatchObject({
+      campaign_id: 'local-7',
+      lead_source_detail: 'Search - Mosquito', // generic "inbound call" replaced
+      service_line: 'mosquito',                // default "pest" upgraded
+      specific_service: 'mosquito_program',
+    });
+  });
+
+  test('does not overwrite an already-set campaign with a different one (first-touch wins)', async () => {
+    firstByTable.ad_service_attribution = { id: 'row-y', lead_source: 'google_ads', campaign_id: 'local-existing', lead_source_detail: 'Old Campaign', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
+    firstByTable.ad_campaigns = { id: 'local-9' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', googleCampaignId: '22594274874', leadSourceDetail: 'New Campaign',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'already_recorded' });
+    expect(updateCalls).toHaveLength(0);
+  });
+
   test('does not duplicate or override when the lead already has a different-source row (reused web lead)', async () => {
     firstByTable.ad_service_attribution = { id: 'web-row', lead_source: 'domain_website', campaign_id: null, service_line: 'pest' };
     firstByTable.ad_campaigns = { id: 'local-9' };
