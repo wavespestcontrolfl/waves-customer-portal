@@ -180,7 +180,20 @@ describe('recordCallPpcAttribution', () => {
       customerId: 'C1', leadId: 'L1', leadSource: 'google_ads', googleCampaignId: '22594274874', leadSourceDetail: 'Call Campaign',
     });
 
-    expect(res).toEqual({ recorded: false, reason: 'click_attributed' });
+    expect(res).toEqual({ recorded: false, reason: 'web_attributed' });
+    expect(updateCalls).toHaveLength(0);
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  test('leaves a UTM-only web row (no click id) untouched too', async () => {
+    firstByTable.ad_service_attribution = { id: 'web2', lead_source: 'google_ads', gclid: null, utm_campaign: 'spring_lawn', campaign_id: null, lead_source_detail: 'web detail' };
+    firstByTable.ad_campaigns = { id: 'local-9' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', leadSource: 'google_ads', googleCampaignId: '22594274874', leadSourceDetail: 'Call Campaign',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'web_attributed' });
     expect(updateCalls).toHaveLength(0);
     expect(insertCalls).toHaveLength(0);
   });

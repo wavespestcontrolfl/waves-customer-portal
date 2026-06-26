@@ -2281,11 +2281,12 @@ function initScheduledJobs() {
       // per-type advisory lock, so it's safe against overlapping cron ticks AND a
       // concurrent admin-triggered upload (the manual endpoint calls the same fn).
       // Per-type window: a lead can be marked qualified (is_qualified) well after
-      // first contact, and qualified-lead candidates are dated by
-      // COALESCE(converted_at, first_contact_at, created_at) — so scan wide enough
-      // to still catch a late-qualified lead before Google's ~90d import window
-      // closes. Per-transaction dedupe makes the overlap a no-op.
-      const PERIOD_DAYS = { qualified_lead: 60, completed_job_revenue: 30 };
+      // first contact WITHOUT setting converted_at, and qualified-lead candidates
+      // are dated by COALESCE(converted_at, first_contact_at, created_at). Scan the
+      // full ~90-day Google import window so a lead first contacted up to 90 days
+      // ago but qualified only now is still uploaded (anything older is outside
+      // Google's window anyway). Per-transaction dedupe makes the overlap a no-op.
+      const PERIOD_DAYS = { qualified_lead: 90, completed_job_revenue: 30 };
       for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
         const r = await DataManager.uploadConversions({
           conversionType, periodDays: PERIOD_DAYS[conversionType], limit: 500, validateOnly: false,
