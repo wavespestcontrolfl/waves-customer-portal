@@ -1197,24 +1197,39 @@ const ReviewService = {
     const { getServiceContact } = require("./customer-contact");
     const contact = getServiceContact(customer);
 
-    // Resolve the actual channel from intent + available contact info.
-    let actualChannel = channel === "email" ? "email" : "sms";
-    if (actualChannel === "sms" && !contact.phone) actualChannel = contact.email ? "email" : null;
-    if (actualChannel === "email" && !contact.email) actualChannel = contact.phone ? "sms" : null;
-    if (!actualChannel) return { ok: false, reason: "no_contact", terminal: true };
-
-    // Email opt-out parity — the email library suppresses on email_suppressions
-    // but does NOT read notification_prefs, so gate it here.
-    if (actualChannel === "email") {
-      try {
-        const prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
-        if (prefs && (prefs.email_enabled === false || prefs.review_request === false)) {
-          return { ok: false, reason: "email_opted_out", blocked: true, terminal: true };
-        }
-      } catch {
-        /* fail-open to library suppression */
-      }
+    // Load consent prefs once and resolve the channel OPT-OUT-AWARE: a customer
+    // who opted out of SMS but allows email should get the email touch instead
+    // of stalling the cadence as "opted out" (and vice-versa). The email
+    // library doesn't read notification_prefs, so this is also where email
+    // opt-out is enforced.
+    let prefs = null;
+    try {
+      prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
+    } catch {
+      /* fail open to downstream guards */
     }
+    const reviewBlocked = !!prefs && prefs.review_request === false;
+    const smsBlocked = reviewBlocked || (!!prefs && prefs.sms_enabled === false);
+    const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false);
+    const canSms = !!contact.phone && !smsBlocked;
+    const canEmail = !!contact.email && !emailBlocked;
+
+    let actualChannel = channel === "email" ? "email" : "sms";
+    if (actualChannel === "sms" && !canSms) actualChannel = canEmail ? "email" : null;
+    if (actualChannel === "email" && !canEmail) actualChannel = canSms ? "sms" : null;
+    if (!actualChannel) {
+      const optedOut = reviewBlocked || (channel === "email" ? emailBlocked : smsBlocked);
+      return { ok: false, reason: optedOut ? "opted_out" : "no_contact", blocked: optedOut, terminal: true };
+    }
+
+    // Effective template + what we RECORD for analytics. A manual send with no
+    // chosen template defaults to the standard friendly ask (audit P1 — the
+    // table/batch Send buttons pass neither templateId nor body). Email touches
+    // always render the review_request_email DB template, so we record THAT as
+    // the template for honest per-template attribution (audit: email steps were
+    // recorded under their SMS plan key but rendered a different body).
+    const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
+    const recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
 
     const token = generateToken();
     const [request] = await db("review_requests")
@@ -1228,7 +1243,7 @@ const ReviewService = {
         service_date: serviceDate || null,
         triggered_by: triggeredBy,
         channel: actualChannel,
-        template_key: templateId || null,
+        template_key: recordedTemplateKey,
         sequence_id: sequenceId,
         sequence_step: sequenceStep,
         status: "pending",
@@ -1257,7 +1272,7 @@ const ReviewService = {
     if (actualChannel === "email") {
       return this._sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia });
     }
-    return this._sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia });
+    return this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody, manageRetryVia });
   },
 
   async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {
@@ -1383,6 +1398,24 @@ const ReviewService = {
     const active = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
     if (active) return { started: false, reason: "already_active", sequence: active };
 
+    // The first touch is an immediate ask, so enforce the same lifetime cap +
+    // 30-day cooldown as a one-off send (the candidate list already filters on
+    // these, but this endpoint can be hit directly / in bulk / racing a recent
+    // send). The cadence's own Day 3/7 touches still bypass the 30-day cooldown.
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
+    const askCountRow = await db("sms_log")
+      .where({ customer_id: customerId, message_type: "review_request" })
+      .count("* as count")
+      .first()
+      .catch(() => ({ count: 0 }));
+    if (Number(askCountRow?.count) >= 3) return { started: false, reason: "at_cap" };
+    const recentAsk = await db("sms_log")
+      .where({ customer_id: customerId, message_type: "review_request" })
+      .where("created_at", ">=", thirtyDaysAgo)
+      .first()
+      .catch(() => null);
+    if (recentAsk) return { started: false, reason: "cooldown" };
+
     const usePlan = Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN;
     let svcType = serviceType;
     let tName = techName;
@@ -1407,7 +1440,12 @@ const ReviewService = {
           plan: JSON.stringify(usePlan),
           current_step: 0,
           touches_sent: 0,
-          next_run_at: new Date(),
+          // Insert with next_run_at NULL so the cron (which only picks rows with
+          // a non-null next_run_at <= now) can't grab this row and fire step 0
+          // in parallel with the inline _runSequenceStep below — the cron lock
+          // serializes cron workers, not this admin path. _runSequenceStep sets
+          // next_run_at when it advances/retries.
+          next_run_at: null,
           service_record_id: serviceRecordId || null,
           tech_name: tName,
           service_type: svcType,
@@ -1585,46 +1623,43 @@ const ReviewService = {
     const window = Math.max(1, Math.min(365, Number(days) || 90));
     const since = new Date(Date.now() - window * 86400000);
 
+    // The live /rate/<token> flow (review-gate.js) records score / category /
+    // submitted_at — NOT the legacy rating / rated_at / redirected_to_google
+    // (those belong to the older review-public.js submitRating path). Count
+    // BOTH families so the funnel reflects real conversions on either flow.
+    // "Directed to Google" = a promoter (score 8-10 → Google redirect) or the
+    // legacy redirect flag.
+    const SENT_SQL = "(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)";
+    const RATED_SQL = "(submitted_at IS NOT NULL OR rated_at IS NOT NULL)";
+    const OPENED_SQL = "(opened_at IS NOT NULL OR submitted_at IS NOT NULL OR rated_at IS NOT NULL)";
+    const PROMOTER_SQL = "(category = 'promoter' OR rating >= 7)";
+    const REVIEWED_SQL = "(redirected_to_google = true OR category = 'promoter')";
+
     const [funnel] = await db("review_requests")
       .where("created_at", ">=", since)
       .select(
-        db.raw("COUNT(*) FILTER (WHERE sms_sent_at IS NOT NULL OR sent_at IS NOT NULL) AS sent"),
-        db.raw("COUNT(*) FILTER (WHERE opened_at IS NOT NULL) AS opened"),
-        db.raw("COUNT(*) FILTER (WHERE rated_at IS NOT NULL) AS rated"),
-        db.raw("COUNT(*) FILTER (WHERE rating >= 7) AS promoters"),
-        db.raw("COUNT(*) FILTER (WHERE redirected_to_google = true) AS reviewed"),
+        db.raw(`COUNT(*) FILTER (WHERE ${SENT_SQL}) AS sent`),
+        db.raw(`COUNT(*) FILTER (WHERE ${OPENED_SQL}) AS opened`),
+        db.raw(`COUNT(*) FILTER (WHERE ${RATED_SQL}) AS rated`),
+        db.raw(`COUNT(*) FILTER (WHERE ${PROMOTER_SQL}) AS promoters`),
+        db.raw(`COUNT(*) FILTER (WHERE ${REVIEWED_SQL}) AS reviewed`),
         db.raw("COUNT(*) FILTER (WHERE channel = 'email') AS email_touches"),
       );
 
-    const byLocation = await db("review_requests")
-      .where("created_at", ">=", since)
-      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-      .groupBy("location_id")
-      .select(
-        "location_id",
-        db.raw("COUNT(*) AS sent"),
-        db.raw("COUNT(*) FILTER (WHERE redirected_to_google = true) AS reviewed"),
-      );
+    const breakdown = (col) =>
+      db("review_requests")
+        .where("created_at", ">=", since)
+        .whereRaw(SENT_SQL)
+        .groupBy(col)
+        .select(
+          col,
+          db.raw("COUNT(*) AS sent"),
+          db.raw(`COUNT(*) FILTER (WHERE ${REVIEWED_SQL}) AS reviewed`),
+        );
 
-    const byTemplate = await db("review_requests")
-      .where("created_at", ">=", since)
-      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-      .groupBy("template_key")
-      .select(
-        "template_key",
-        db.raw("COUNT(*) AS sent"),
-        db.raw("COUNT(*) FILTER (WHERE redirected_to_google = true) AS reviewed"),
-      );
-
-    const byChannel = await db("review_requests")
-      .where("created_at", ">=", since)
-      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-      .groupBy("channel")
-      .select(
-        "channel",
-        db.raw("COUNT(*) AS sent"),
-        db.raw("COUNT(*) FILTER (WHERE redirected_to_google = true) AS reviewed"),
-      );
+    const byLocation = await breakdown("location_id");
+    const byTemplate = await breakdown("template_key");
+    const byChannel = await breakdown("channel");
 
     // Actual Google reviews landed in window — the real outcome + velocity.
     let googleByLocation = [];
@@ -1678,7 +1713,7 @@ const ReviewService = {
     const lim = Math.max(1, Math.min(200, Number(limit) || 50));
     const rows = await db("review_requests as rr")
       .leftJoin("customers as c", "c.id", "rr.customer_id")
-      .whereRaw("COALESCE(rr.sms_sent_at, rr.sent_at, rr.rated_at, rr.opened_at) IS NOT NULL")
+      .whereRaw("COALESCE(rr.sms_sent_at, rr.sent_at, rr.submitted_at, rr.rated_at, rr.opened_at) IS NOT NULL")
       .select(
         "rr.id",
         "rr.status",
@@ -1688,27 +1723,36 @@ const ReviewService = {
         "rr.sms_sent_at",
         "rr.sent_at",
         "rr.opened_at",
+        "rr.submitted_at",
         "rr.rated_at",
         "rr.rating",
+        "rr.score",
+        "rr.category",
         "rr.redirected_to_google",
         "rr.sequence_id",
         "rr.triggered_by",
         "c.first_name",
         "c.last_name",
       )
-      .orderByRaw("COALESCE(rr.rated_at, rr.opened_at, rr.sms_sent_at, rr.sent_at, rr.created_at) DESC")
+      .orderByRaw("COALESCE(rr.submitted_at, rr.rated_at, rr.opened_at, rr.sms_sent_at, rr.sent_at, rr.created_at) DESC")
       .limit(lim);
 
     return rows.map((r) => {
       const name = `${r.first_name || ""} ${r.last_name || ""}`.trim() || "Customer";
+      // Score (live /rate flow) and rating (legacy) both express NPS; promoters
+      // (score 8-10 / category 'promoter' / rating ≥7) are the ones directed to
+      // Google.
+      const nps = r.score ?? r.rating ?? null;
+      const isPromoter = r.category === "promoter" || r.redirected_to_google === true || (r.rating != null && r.rating >= 7);
+      const isRated = r.submitted_at != null || r.rated_at != null;
       let type = "sent";
       let msg;
-      if (r.redirected_to_google) {
+      if (isPromoter) {
         type = "reviewed";
-        msg = `${name} left a Google review`;
-      } else if (r.rated_at) {
+        msg = `${name} was sent to Google (promoter)`;
+      } else if (isRated) {
         type = "rated";
-        msg = `${name} rated ${r.rating ?? "?"}/10`;
+        msg = `${name} rated ${nps ?? "?"}/10`;
       } else {
         const via = r.sequence_id ? "cadence" : r.triggered_by === "auto" ? "auto" : "manual";
         msg = `Review request sent to ${name} (${r.channel || "sms"}, ${via})`;
@@ -1719,7 +1763,7 @@ const ReviewService = {
         channel: r.channel || "sms",
         locationId: r.location_id,
         message: msg,
-        at: r.rated_at || r.opened_at || r.sms_sent_at || r.sent_at,
+        at: r.submitted_at || r.rated_at || r.opened_at || r.sms_sent_at || r.sent_at,
       };
     });
   },

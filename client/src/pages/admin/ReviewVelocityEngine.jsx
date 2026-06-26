@@ -382,10 +382,10 @@ function apiToCustomer(row) {
     seqTotal: seq ? seq.totalSteps : 3,
     seqId: seq ? seq.id : null,
     sequence: seq,
-    // Real send-eligibility from the server (audit O8): the row is only
-    // sendable when it has a reachable, opted-in, non-suppressed, not-at-cap,
-    // not-in-cooldown, not-already-in-a-cadence contact.
+    // Real send-eligibility from the server (audit O8). `sendable` gates the
+    // SMS-only manual Send; `cadenceable` gates Start-Cadence (can use email).
     sendable: row.sendable !== false,
+    cadenceable: row.cadenceable !== false,
     eligibilityReasons: row.eligibilityReasons || [],
     suppressed: Array.isArray(row.eligibilityReasons)
       ? row.eligibilityReasons.includes("suppressed") || row.eligibilityReasons.includes("opted_out")
@@ -397,11 +397,14 @@ function apiToCustomer(row) {
 // Human-readable label for an eligibility blocker.
 const ELIGIBILITY_LABELS = {
   no_contact: "No phone or email on file",
+  no_phone: "No SMS phone (email only — use a cadence)",
   opted_out: "Opted out of review texts",
   suppressed: "On the do-not-contact list",
   at_cap: "Already asked 3 times",
   cooldown: "Asked within the last 30 days",
   in_sequence: "Already in an active cadence",
+  already_active: "Already in an active cadence",
+  already_reviewed: "Already left a review",
 };
 function eligibilityLabel(reasons = []) {
   if (!reasons.length) return "";
@@ -864,6 +867,7 @@ export default function ReviewVelocityEngine() {
           setPipeSearch={setPipeSearch}
           quickSend={quickSend}
           quickStartSequence={quickStartSequence}
+          sequencesEnabled={analytics?.reviewSequencesEnabled}
           setDrawerCust={setDrawerCust}
           setBatchModal={setBatchModal}
           addLog={addLog}
@@ -886,6 +890,7 @@ export default function ReviewVelocityEngine() {
           showToast={showToast}
           sendReviewRequest={sendReviewRequest}
           startSequence={startSequence}
+          sequencesEnabled={analytics?.reviewSequencesEnabled}
         />
       )}
       {/* Batch Modal */}
@@ -1424,6 +1429,7 @@ function Pipeline({
   setPipeSearch,
   quickSend,
   quickStartSequence,
+  sequencesEnabled,
   setDrawerCust,
   setBatchModal,
 }) {
@@ -1786,7 +1792,7 @@ function Pipeline({
                       >
                         Send
                       </button>
-                      {c.sendable && !c.sequence && (
+                      {sequencesEnabled && c.cadenceable && !c.sequence && (
                         <button
                           type="button"
                           title="Start a Day 0/3/7 review cadence"
@@ -1978,6 +1984,7 @@ function CustomerDrawer({
   showToast,
   sendReviewRequest,
   startSequence: startSequenceFn,
+  sequencesEnabled,
 }) {
   const [msg, setMsg] = useState("");
   const [selectedTpl, setSelectedTpl] = useState("");
@@ -1988,7 +1995,10 @@ function CustomerDrawer({
   const applyTpl = (tplId) => {
     setSelectedTpl(tplId);
     const tpl = TEMPLATES.find((t) => t.id === tplId);
-    if (tpl) setMsg(hydrate(tpl.body, c));
+    // Hydrate name/tech/etc. for preview, but KEEP the {review_url} token so the
+    // server swaps in the tokenized /rate link. Hydrating it client-side to the
+    // raw GBP URL would bypass the NPS gate (sends issues straight to Google).
+    if (tpl) setMsg(hydrate(tpl.body, { ...c, reviewUrl: "{review_url}" }));
   };
 
   // Sends the chosen template / edited body through the server's NPS rate-page
@@ -2401,11 +2411,11 @@ function CustomerDrawer({
               </Btn>{" "}
               {c.sequence ? (
                 <Btn disabled>In cadence ({c.seqStep}/{c.seqTotal})</Btn>
-              ) : (
-                <Btn onClick={startSequence} disabled={seqStarting || !c.sendable}>
+              ) : sequencesEnabled ? (
+                <Btn onClick={startSequence} disabled={seqStarting || !c.cadenceable}>
                   {seqStarting ? "Starting…" : "Start Cadence"}
                 </Btn>
-              )}{" "}
+              ) : null}{" "}
             </div>{" "}
           </div>{" "}
         </DrawerSection>{" "}

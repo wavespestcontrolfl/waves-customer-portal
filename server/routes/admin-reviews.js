@@ -12,6 +12,7 @@ const { etDateString, addETDays, startOfETMonth } = require('../utils/datetime-e
 const { getServiceContact } = require('../services/customer-contact');
 const { runExclusive } = require('../utils/cron-lock');
 const OUTREACH = require('../services/review-outreach-templates');
+const { isEnabled } = require('../config/feature-gates');
 
 const DRAFT_REPLY_PREFIX = '[DRAFT]';
 
@@ -546,11 +547,17 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         const atCap = ask.askCount >= 3;
         const smsable = !!phone && !optedOut && !suppressed;
         const emailable = !!email && !emailOptedOut;
-        const noContact = !smsable && !emailable;
         const sequence = sequenceMap[c.id] || null;
-        const sendable = !noContact && !atCap && !inCooldown && !sequence;
+        // `sendable` gates the manual Send button, which is SMS-only — so it
+        // requires an SMS-reachable contact (audit: email-only customers used to
+        // show an enabled Send that always 400s "No SMS-capable phone").
+        // `cadenceable` gates Start-Cadence, which can fall back to email.
+        const baseBlocked = atCap || inCooldown || !!sequence;
+        const sendable = smsable && !baseBlocked;
+        const cadenceable = (smsable || emailable) && !baseBlocked;
         const eligibilityReasons = [];
-        if (noContact) eligibilityReasons.push('no_contact');
+        if (!phone && !email) eligibilityReasons.push('no_contact');
+        else if (!smsable && !suppressed && !optedOut) eligibilityReasons.push('no_phone');
         if (optedOut) eligibilityReasons.push('opted_out');
         if (suppressed) eligibilityReasons.push('suppressed');
         if (atCap) eligibilityReasons.push('at_cap');
@@ -577,6 +584,7 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
           requestSent: ask.askCount > 0,
           sentiment: sentimentMap[c.id] || 'unknown',
           sendable,
+          cadenceable,
           eligibilityReasons,
           sequence,
         };
@@ -683,7 +691,9 @@ router.get('/outreach-analytics', requireAdmin, async (req, res, next) => {
   try {
     const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 90));
     const analytics = await ReviewService.getOutreachAnalytics({ days });
-    res.json(analytics);
+    // Tell the client whether automated cadences are live so it can hide the
+    // Start-Cadence affordance when the gate is off (one-off sends still work).
+    res.json({ ...analytics, reviewSequencesEnabled: isEnabled('reviewSequences') });
   } catch (err) { next(err); }
 });
 
@@ -709,6 +719,12 @@ router.get('/outreach-templates', requireAdmin, (req, res) => {
 // only advances when GATE_REVIEW_SEQUENCES is on; the first touch fires now.
 router.post('/outreach/start-sequence', requireAdmin, async (req, res, next) => {
   try {
+    // Don't start cadences while the gate is off: the cron won't advance them,
+    // so the row would sit 'active' forever — firing Day 0 then blocking the
+    // customer from one-off sends without ever delivering Day 3/7.
+    if (!isEnabled('reviewSequences')) {
+      return res.status(409).json({ error: 'Review cadences are disabled (GATE_REVIEW_SEQUENCES is off). Use a one-off send instead.' });
+    }
     const ids = Array.isArray(req.body?.customerIds)
       ? req.body.customerIds
       : (req.body?.customerId ? [req.body.customerId] : []);

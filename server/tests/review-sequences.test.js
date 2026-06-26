@@ -146,6 +146,54 @@ describe('review sequences — cadence engine', () => {
     expect(seq.stop_reason).toBe('completed');
   });
 
+  test('manual SMS send with no template defaults to the friendly ask (audit P1)', async () => {
+    const mock = makeMock({ customers: [{ id: 'm1', first_name: 'Stan', last_name: 'S', phone: '+19410000001', nearest_location_id: 'bradenton' }] });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: null, manageRetryVia: 'cron' });
+
+    expect(out.ok).toBe(true);
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    // Body is the friendly-ask copy, not an empty/no_template failure.
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/great customer/i);
+    expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
+  });
+
+  test('an SMS-opted-out customer who allows email gets the email touch instead of stalling', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'm2', first_name: 'Eve', last_name: 'M', phone: '+19410000002', email: 'eve@x.com', nearest_location_id: 'venice' }],
+      notification_prefs: [{ customer_id: 'm2', sms_enabled: false, email_enabled: true, review_request: true }],
+    });
+    db.mockImplementation(mock);
+
+    // Intended channel is SMS (default Day-0 step), but SMS is opted out.
+    const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'sequence' });
+
+    expect(out.ok).toBe(true);
+    expect(out.channel).toBe('email');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockEmailSendTemplate).toHaveBeenCalledTimes(1);
+    // Email touches are recorded under the email template for honest attribution.
+    expect(mock.__state.rows.review_requests[0]).toMatchObject({ channel: 'email', template_key: 'review_request_email' });
+  });
+
+  test('start is blocked when the customer is at the 3-ask cap', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'm3', first_name: 'Cap', last_name: 'T', phone: '+19410000003', nearest_location_id: 'parrish' }],
+      sms_log: [
+        { customer_id: 'm3', message_type: 'review_request', created_at: new Date('2026-01-01') },
+        { customer_id: 'm3', message_type: 'review_request', created_at: new Date('2026-01-02') },
+        { customer_id: 'm3', message_type: 'review_request', created_at: new Date('2026-01-03') },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.startReviewSequence({ customerId: 'm3', serviceType: 'pest control', techName: 'Adam' });
+    expect(out.started).toBe(false);
+    expect(out.reason).toBe('at_cap');
+    expect(mock.__state.rows.review_sequences).toHaveLength(0);
+  });
+
   test('an opted-out customer stops the sequence without sending', async () => {
     const mock = makeMock({
       customers: [{ id: 'cust-4', first_name: 'Ada', last_name: 'B', nearest_location_id: 'parrish' }],
