@@ -5,6 +5,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
+const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
 const {
@@ -3390,73 +3391,38 @@ function shouldAttemptPrepaidReceipt({ gateEnabled, emailReceipt, applyToSeries,
 // invoice: reduce the balance, mark paid when fully covered, and write one
 // idempotent prepaid-credit payment row. Extracted from the Charge-now route so
 // both paths share one implementation (and one dedupe guard).
-async function applyScheduledServicePrepaidCredit(svc, invoice) {
-  const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
-  const centsToDollars = (cents) => (cents / 100).toFixed(2);
-  const prepaidCents = svc.prepaid_amount != null ? toCents(svc.prepaid_amount) : 0;
-  if (!(prepaidCents > 0)) {
-    return { invoice, prepaidCredit: 0 };
+// Stripe PI statuses where money is already moving — we must NOT cancel the PI
+// or mark the invoice paid out from under it (mirrors /admin/invoices apply-credit).
+const PI_MONEY_IN_FLIGHT_STATUSES = ['processing', 'succeeded', 'requires_capture'];
+
+// Neutralize any open PaymentIntent on a reused invoice before marking it paid by
+// cash, so a stale /pay client secret can't still charge the card. Mirrors the
+// /apply-credit triage: refuse if money is in flight or the PI can't be verified;
+// otherwise cancel it. Returns { ok, piId } or { ok:false, reason }.
+async function guardOpenPaymentIntentForPrepaid(invoice) {
+  const piId = invoice.stripe_payment_intent_id || null;
+  if (!piId) return { ok: true, piId: null };
+  const StripeService = require('../services/stripe');
+  let pi;
+  try {
+    pi = await StripeService.retrievePaymentIntent(piId);
+  } catch (e) {
+    logger.warn(`[schedule] prepaid-receipt PI verify failed for ${piId}: ${e.message}`);
+    return { ok: false, reason: 'payment_session_unverifiable' };
   }
-  return db.transaction(async (trx) => {
-    const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
-    if (!lockedInvoice) return { invoice, prepaidCredit: 0 };
-    if (['paid', 'prepaid'].includes(lockedInvoice.status)) return { invoice: lockedInvoice, prepaidCredit: 0 };
-    const invoiceTotalCents = toCents(lockedInvoice.total);
-    if (!(invoiceTotalCents > 0)) {
-      return { invoice: lockedInvoice, prepaidCredit: 0 };
+  // Null = Stripe unconfigured/unreachable — fail closed rather than mark paid
+  // while a live client secret could still settle.
+  if (!pi) return { ok: false, reason: 'payment_session_unverifiable' };
+  if (PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) return { ok: false, reason: 'payment_in_flight' };
+  if (pi.status !== 'canceled') {
+    try {
+      await StripeService.cancelPaymentIntent(piId, { cancellation_reason: 'abandoned' });
+    } catch (e) {
+      logger.warn(`[schedule] prepaid-receipt PI cancel failed for ${piId}: ${e.message}`);
+      return { ok: false, reason: 'payment_session_unverifiable' };
     }
-    const existingCredit = await trx('payments')
-      .where({ customer_id: svc.customer_id, status: 'paid' })
-      .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
-      .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [lockedInvoice.id])
-      .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [svc.id])
-      .first('id');
-    if (existingCredit) {
-      return { invoice: lockedInvoice, prepaidCredit: 0 };
-    }
-    const creditCents = Math.min(prepaidCents, invoiceTotalCents);
-    const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
-    const prepaidCredit = centsToDollars(creditCents);
-    const remainingTotal = centsToDollars(remainingCents);
-    const stamp = etDateString();
-    const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
-    const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
-    const paidByPrepayment = remainingCents <= 0;
-    const [updatedInvoice] = await trx('invoices')
-      .where({ id: lockedInvoice.id })
-      .update({
-        total: remainingTotal,
-        status: paidByPrepayment ? 'paid' : lockedInvoice.status,
-        paid_at: paidByPrepayment ? trx.fn.now() : lockedInvoice.paid_at,
-        notes: nextNotes,
-        payment_method: svc.prepaid_method || lockedInvoice.payment_method || null,
-        payment_reference: svc.prepaid_note || lockedInvoice.payment_reference || null,
-        payment_recorded_at: svc.prepaid_at || trx.fn.now(),
-        updated_at: trx.fn.now(),
-      })
-      .returning('*');
-    const creditedInvoice = updatedInvoice || {
-      ...lockedInvoice,
-      total: remainingTotal,
-      status: paidByPrepayment ? 'paid' : lockedInvoice.status,
-      notes: nextNotes,
-    };
-    await trx('payments').insert({
-      customer_id: svc.customer_id,
-      amount: prepaidCredit,
-      status: 'paid',
-      description: `Prepaid credit applied to invoice ${creditedInvoice.invoice_number}`,
-      payment_date: etDateString(),
-      metadata: JSON.stringify({
-        invoice_id: lockedInvoice.id,
-        scheduled_service_id: svc.id,
-        source: 'scheduled_service_prepaid',
-        method: svc.prepaid_method || null,
-        note: svc.prepaid_note || null,
-      }),
-    });
-    return { invoice: creditedInvoice, prepaidCredit: Number(prepaidCredit) };
-  });
+  }
+  return { ok: true, piId };
 }
 
 // Mint-or-reuse the invoice for a scheduled visit at the visit's standard price
@@ -3508,59 +3474,63 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
   });
 }
 
-// Send the branded paid receipt (email + SMS) for a fully-paid invoice and stamp
-// receipt_sent_at, reusing the pipeline behind /admin/invoices/:id/send-receipt.
-// Dedupe-safe (idempotencyKey on email, receipt_sent_at guard on the un-forced
-// SMS) so a double mark-prepaid never double-receipts the customer.
+// Send the branded paid receipt (email + SMS) for a fully-paid invoice. An atomic
+// claim on receipt_sent_at (UPDATE ... WHERE receipt_sent_at IS NULL) makes the
+// send single-flight: concurrent double-submits and re-requests on an already-
+// paid invoice see claim=0 and report alreadySent without re-texting. The claim
+// is released on a TOTAL send failure so the operator (or a retry) can resend.
 async function sendPrepaidReceiptForInvoice(invoice) {
-  // Already receipted (a prior mark-prepaid, a manual send, or the Stripe
-  // auto-receipt)? Don't contact the customer again — report it as sent.
-  if (invoice.receipt_sent_at) {
+  const claimed = await db('invoices')
+    .where({ id: invoice.id })
+    .whereNull('receipt_sent_at')
+    .update({ receipt_sent_at: db.fn.now() });
+  if (claimed === 0) {
     return {
       sent: true,
-      channels: { email: false, sms: false },
-      reason: null,
       alreadySent: true,
+      channels: { email: false, sms: false },
       invoiceId: invoice.id,
       invoiceNumber: invoice.invoice_number,
     };
   }
   const { sendReceiptEmail } = require('../services/invoice-email');
   const InvoiceService = require('../services/invoice');
-  const emailResult = await sendReceiptEmail(invoice.id, {
-    idempotencyKey: `prepaid_receipt:${invoice.id}`,
-  }).catch((err) => ({ ok: false, error: err.message }));
+  // force:true on both sends — the receipt_sent_at claim above is the dedupe, and
+  // it already stamped receipt_sent_at (which the un-forced SMS path would treat
+  // as already-sent).
+  const emailResult = await sendReceiptEmail(invoice.id).catch((err) => ({ ok: false, error: err.message }));
   let smsResult = { ok: false, skipped: true };
   try {
-    const r = await InvoiceService.sendReceipt(invoice.id, { recordActivity: false });
+    const r = await InvoiceService.sendReceipt(invoice.id, { force: true, recordActivity: false });
     smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
   } catch (err) {
     smsResult = { ok: false, error: err.message };
   }
-  if (emailResult.ok || smsResult.ok) {
-    await db('invoices').where({ id: invoice.id }).update({ receipt_sent_at: db.fn.now() });
-    await db('activity_log').insert({
-      customer_id: invoice.customer_id,
-      action: 'invoice_receipt_sent',
-      description: `Prepaid receipt sent for invoice ${invoice.invoice_number}`
-        + ` (${[emailResult.ok && 'email', smsResult.ok && 'sms'].filter(Boolean).join(' + ') || 'no channel'})`,
-    }).catch((err) => logger.warn(`[schedule] prepaid receipt activity_log insert failed: ${err.message}`));
+  if (!(emailResult.ok || smsResult.ok)) {
+    // Total failure — release the claim so a retry (or the operator) can resend.
+    await db('invoices').where({ id: invoice.id }).update({ receipt_sent_at: null }).catch(() => {});
+    return { sent: false, reason: 'send_failed', invoiceId: invoice.id, invoiceNumber: invoice.invoice_number };
   }
+  await db('activity_log').insert({
+    customer_id: invoice.customer_id,
+    action: 'invoice_receipt_sent',
+    description: `Prepaid receipt sent for invoice ${invoice.invoice_number}`
+      + ` (${[emailResult.ok && 'email', smsResult.ok && 'sms'].filter(Boolean).join(' + ')})`,
+  }).catch((err) => logger.warn(`[schedule] prepaid receipt activity_log insert failed: ${err.message}`));
   return {
-    sent: !!(emailResult.ok || smsResult.ok),
+    sent: true,
     channels: { email: !!emailResult.ok, sms: !!smsResult.ok },
-    reason: (emailResult.ok || smsResult.ok) ? null : 'send_failed',
     invoiceId: invoice.id,
     invoiceNumber: invoice.invoice_number,
   };
 }
 
-// Orchestrator: from a just-stamped single prepaid visit, mint/reuse its
-// invoice, apply the prepayment, and — only if it lands fully paid — send the
-// receipt. Never throws to the route: every non-send path returns a typed
-// reason the modal can explain. A payer-billed visit is owed by the payer's AP
-// inbox, never the homeowner, so it's refused at both the resolver and the
-// minted invoice's payer_id.
+// Orchestrator: from a just-stamped single prepaid visit, mint/reuse its invoice
+// and — only when the cash fully covers it — finalize it the canonical way the
+// /admin/invoices record-payment + apply-credit routes do (NO total reduction;
+// atomic paid transition; open PaymentIntent cancelled/refused first), then send
+// the receipt. Never throws to the route: every non-send path returns a typed
+// reason the modal can explain.
 async function generatePrepaidReceiptForService(serviceId) {
   const svc = await db('scheduled_services')
     .where('scheduled_services.id', serviceId)
@@ -3576,6 +3546,7 @@ async function generatePrepaidReceiptForService(serviceId) {
   if (!(svc.prepaid_amount != null && Number(svc.prepaid_amount) > 0)) {
     return { sent: false, reason: 'no_prepaid_amount' };
   }
+  // Payer-billed visits are owed by the payer's AP inbox, never the homeowner.
   try {
     const PayerService = require('../services/payer');
     const resolved = await PayerService.resolveForInvoice({
@@ -3586,21 +3557,118 @@ async function generatePrepaidReceiptForService(serviceId) {
   } catch (e) {
     logger.warn(`[schedule] prepaid-receipt payer resolve failed for service ${svc.id}: ${e.message}`);
   }
+
   const minted = await mintOrReuseScheduledServiceInvoice(svc);
   if (!minted.invoice) return { sent: false, reason: minted.reason || 'no_invoice' };
-  if (minted.invoice.payer_id) return { sent: false, reason: 'payer_billed' };
-  const applied = await applyScheduledServicePrepaidCredit(svc, minted.invoice);
-  const invoice = applied.invoice;
-  if (invoice.status !== 'paid') {
+  const invoice = minted.invoice;
+  if (invoice.payer_id) return { sent: false, reason: 'payer_billed' };
+
+  // Already settled (a prior mark-prepaid, or a card/ACH payment landed): just
+  // (idempotently) send the receipt for the existing paid invoice.
+  if (['paid', 'prepaid'].includes(invoice.status)) {
+    return sendPrepaidReceiptForInvoice(invoice);
+  }
+
+  // Coverage gate: only finalize when the cash fully covers the amount due. A
+  // partial prepayment stays recorded on scheduled_services (already stamped) and
+  // is collected/closed at completion — we never write a partial payment row here,
+  // so a later top-up to the full amount applies cleanly.
+  const prepaidCents = Math.round((Number(svc.prepaid_amount) || 0) * 100);
+  if (prepaidCents < Math.round(invoiceAmountDue(invoice) * 100)) {
     return {
       sent: false,
       reason: 'not_paid_in_full',
       invoiceId: invoice.id,
       invoiceNumber: invoice.invoice_number,
-      balance: Number(invoice.total),
+      balance: invoiceAmountDue(invoice),
     };
   }
-  return sendPrepaidReceiptForInvoice(invoice);
+
+  // P0: cancel/refuse any open PaymentIntent before marking paid.
+  const piGuard = await guardOpenPaymentIntentForPrepaid(invoice);
+  if (!piGuard.ok) {
+    return { sent: false, reason: piGuard.reason, invoiceId: invoice.id, invoiceNumber: invoice.invoice_number };
+  }
+
+  // Atomic finalize under a row lock (mirrors /apply-credit): re-check the PI
+  // hasn't changed since triage, re-check coverage, flip to paid WITHOUT reducing
+  // total (so receipts/PDF/AR show the real amount), and book the cash payment.
+  let outcome;
+  try {
+    outcome = await db.transaction(async (trx) => {
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      if (!locked) return { reason: 'not_collectible' };
+      if (['paid', 'prepaid'].includes(locked.status)) return { invoice: locked, alreadyPaid: true };
+      if (!isInvoiceCollectibleStatus(locked.status)) return { reason: 'not_collectible' };
+      // A new /pay session could have minted a different PI between triage and this
+      // lock — refuse and let the operator retry (the new PI gets triaged then).
+      if ((locked.stripe_payment_intent_id || null) !== (piGuard.piId || null)) {
+        return { reason: 'payment_session_changed' };
+      }
+      if (prepaidCents < Math.round(invoiceAmountDue(locked) * 100)) {
+        return { reason: 'not_paid_in_full', invoice: locked };
+      }
+      const [updated] = await trx('invoices')
+        .where({ id: locked.id })
+        .update({
+          status: 'paid',
+          paid_at: trx.fn.now(),
+          payment_method: svc.prepaid_method || 'cash',
+          payment_reference: svc.prepaid_note || null,
+          payment_recorded_at: svc.prepaid_at || trx.fn.now(),
+          updated_at: trx.fn.now(),
+        })
+        .returning('*');
+      const paidInvoice = updated || { ...locked, status: 'paid' };
+      // Cash actually received = amount due (not total — they differ when account
+      // credit was applied), mirroring /record-payment's ledger row.
+      await trx('payments').insert({
+        customer_id: paidInvoice.customer_id,
+        amount: invoiceAmountDue(paidInvoice),
+        status: 'paid',
+        description: `Invoice ${paidInvoice.invoice_number} — ${svc.prepaid_method || 'prepaid'} (prepaid at visit)`,
+        payment_date: etDateString(),
+        metadata: JSON.stringify({
+          invoice_id: paidInvoice.id,
+          scheduled_service_id: svc.id,
+          source: 'scheduled_service_prepaid',
+          method: svc.prepaid_method || null,
+          note: svc.prepaid_note || null,
+        }),
+      });
+      return { invoice: paidInvoice, newlyPaid: true };
+    });
+  } catch (e) {
+    logger.error(`[schedule] prepaid-receipt finalize failed for service ${svc.id}: ${e.message}`);
+    return { sent: false, reason: 'error', invoiceId: invoice.id, invoiceNumber: invoice.invoice_number };
+  }
+
+  if (outcome.reason) {
+    return {
+      sent: false,
+      reason: outcome.reason,
+      invoiceId: invoice.id,
+      invoiceNumber: invoice.invoice_number,
+      ...(outcome.reason === 'not_paid_in_full' ? { balance: invoiceAmountDue(outcome.invoice) } : {}),
+    };
+  }
+
+  // Newly paid (race winner): stop dunning + sync any annual-prepay term, like
+  // /record-payment. Best-effort — never block the receipt.
+  if (outcome.newlyPaid) {
+    try {
+      await require('../services/invoice-followups').stopOnPayment(outcome.invoice.id);
+    } catch (e) {
+      logger.warn(`[schedule] prepaid-receipt stopOnPayment failed: ${e.message}`);
+    }
+    try {
+      await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(outcome.invoice);
+    } catch (e) {
+      logger.warn(`[schedule] prepaid-receipt annual-prepay sync failed: ${e.message}`);
+    }
+  }
+
+  return sendPrepaidReceiptForInvoice(outcome.invoice);
 }
 
 // POST /api/admin/schedule/:id/prepaid — record payment taken in advance
@@ -3740,9 +3808,80 @@ router.post('/:id/invoice', async (req, res, next) => {
       logger.warn(`[admin-schedule] payer resolve failed on charge-now for service ${svc.id}: ${e.message}`);
     }
 
-    // Shared with the Mark-prepaid → email-receipt flow; see
-    // applyScheduledServicePrepaidCredit above.
-    const applyPrepaidCredit = (invoice) => applyScheduledServicePrepaidCredit(svc, invoice);
+    const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
+    const centsToDollars = (cents) => (cents / 100).toFixed(2);
+    const applyPrepaidCredit = async (invoice) => {
+      const prepaidCents = svc.prepaid_amount != null ? toCents(svc.prepaid_amount) : 0;
+      if (!(prepaidCents > 0)) {
+        return { invoice, prepaidCredit: 0 };
+      }
+
+      return db.transaction(async (trx) => {
+        const lockedInvoice = await trx('invoices')
+          .where({ id: invoice.id })
+          .forUpdate()
+          .first();
+        if (!lockedInvoice) return { invoice, prepaidCredit: 0 };
+        if (['paid', 'prepaid'].includes(lockedInvoice.status)) return { invoice: lockedInvoice, prepaidCredit: 0 };
+
+        const invoiceTotalCents = toCents(lockedInvoice.total);
+        if (!(invoiceTotalCents > 0)) {
+          return { invoice: lockedInvoice, prepaidCredit: 0 };
+        }
+        const existingCredit = await trx('payments')
+          .where({ customer_id: svc.customer_id, status: 'paid' })
+          .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+          .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [lockedInvoice.id])
+          .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [svc.id])
+          .first('id');
+        if (existingCredit) {
+          return { invoice: lockedInvoice, prepaidCredit: 0 };
+        }
+
+        const creditCents = Math.min(prepaidCents, invoiceTotalCents);
+        const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
+        const prepaidCredit = centsToDollars(creditCents);
+        const remainingTotal = centsToDollars(remainingCents);
+        const stamp = etDateString();
+        const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
+        const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
+        const paidByPrepayment = remainingCents <= 0;
+        const [updatedInvoice] = await trx('invoices')
+          .where({ id: lockedInvoice.id })
+          .update({
+            total: remainingTotal,
+            status: paidByPrepayment ? 'paid' : lockedInvoice.status,
+            paid_at: paidByPrepayment ? trx.fn.now() : lockedInvoice.paid_at,
+            notes: nextNotes,
+            payment_method: svc.prepaid_method || lockedInvoice.payment_method || null,
+            payment_reference: svc.prepaid_note || lockedInvoice.payment_reference || null,
+            payment_recorded_at: svc.prepaid_at || trx.fn.now(),
+            updated_at: trx.fn.now(),
+          })
+          .returning('*');
+        const creditedInvoice = updatedInvoice || {
+          ...lockedInvoice,
+          total: remainingTotal,
+          status: paidByPrepayment ? 'paid' : lockedInvoice.status,
+          notes: nextNotes,
+        };
+        await trx('payments').insert({
+          customer_id: svc.customer_id,
+          amount: prepaidCredit,
+          status: 'paid',
+          description: `Prepaid credit applied to invoice ${creditedInvoice.invoice_number}`,
+          payment_date: etDateString(),
+          metadata: JSON.stringify({
+            invoice_id: lockedInvoice.id,
+            scheduled_service_id: svc.id,
+            source: 'scheduled_service_prepaid',
+            method: svc.prepaid_method || null,
+            note: svc.prepaid_note || null,
+          }),
+        });
+        return { invoice: creditedInvoice, prepaidCredit: Number(prepaidCredit) };
+      });
+    };
 
     // Reuse the existing invoice for this visit if one already exists and isn't
     // void — avoids dupes if the tech taps "Charge now" twice.

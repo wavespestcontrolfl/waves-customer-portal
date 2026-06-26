@@ -33,7 +33,6 @@ const {
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
   invoiceAmountDue,
-  receiptAmountPaid,
 } = require('../services/invoice-helpers');
 const {
   classifyExistingWebhookEvent,
@@ -387,35 +386,6 @@ describe('invoice invoiceAmountDue (charge base = total − credit_applied)', ()
   test('cents math avoids float drift', () => {
     // 0.1 + 0.2 in floats is 0.30000000000000004 — cents math keeps it exact.
     expect(invoiceAmountDue({ total: 0.3, credit_applied: 0.1 })).toBe(0.2);
-  });
-});
-
-describe('invoice receiptAmountPaid (what the customer actually paid)', () => {
-  test('normal paid invoice: amount due, unchanged', () => {
-    // total not reduced, no refund — receipt shows the amount charged.
-    expect(receiptAmountPaid({ total: 120, credit_applied: 0 }, { amount: 120, refund_amount: 0 })).toBe(120);
-    // account-credit applied: still the amount actually charged.
-    expect(receiptAmountPaid({ total: 120, credit_applied: 20 }, { amount: 100, refund_amount: 0 })).toBe(100);
-    // no payment row at all falls back to amount due.
-    expect(receiptAmountPaid({ total: 120, credit_applied: 0 }, null)).toBe(120);
-  });
-
-  test('prepaid-covered invoice: total zeroed, show the recorded payment', () => {
-    // The prepaid path set total=0/status=paid; the receipt must show $120, not $0.
-    expect(receiptAmountPaid({ total: 0, credit_applied: 0 }, { amount: 120, refund_amount: 0 })).toBe(120);
-    expect(receiptAmountPaid({ total: '0.00', credit_applied: 0 }, { amount: 80, refund_amount: 0 })).toBe(80);
-  });
-
-  test('refunded invoice: net cash kept = payment.amount − refund_amount', () => {
-    expect(receiptAmountPaid({ total: 120, credit_applied: 0 }, { amount: 120, refund_amount: 50 })).toBe(70);
-    // full refund → 0, never negative.
-    expect(receiptAmountPaid({ total: 120, credit_applied: 0 }, { amount: 120, refund_amount: 120 })).toBe(0);
-    expect(receiptAmountPaid({ total: 120, credit_applied: 0 }, { amount: 120, refund_amount: 200 })).toBe(0);
-  });
-
-  test('zero balance and no usable payment falls back to amount due (0)', () => {
-    expect(receiptAmountPaid({ total: 0, credit_applied: 0 }, null)).toBe(0);
-    expect(receiptAmountPaid({ total: 0, credit_applied: 0 }, { amount: 0, refund_amount: 0 })).toBe(0);
   });
 });
 

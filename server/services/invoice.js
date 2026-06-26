@@ -555,7 +555,6 @@ const {
   INVOICE_UNCOLLECTIBLE_STATUSES,
   assertInvoiceVoidable,
   invoiceAmountDue,
-  receiptAmountPaid,
 } = require("./invoice-helpers");
 
 function invoiceNotSendableError(invoice) {
@@ -2364,10 +2363,11 @@ const InvoiceService = {
       cardBrand && cardLast4
         ? ` (${cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1)} ending ${cardLast4})`
         : "";
-    // Receipt amount = what the customer actually paid (receiptAmountPaid), to
-    // match the receipt page/PDF: net cash kept on a refund, the recorded payment
-    // when a prepaid credit zeroed invoice.total, else amount due. See
-    // invoice-helpers.receiptAmountPaid.
+    // Receipt amount from the PAYMENT row, not invoiceAmountDue(invoice): a full
+    // refund zeroes credit_applied, after which invoiceAmountDue returns the gross
+    // total. On a recorded refund show net cash kept (amount − refunded) to match
+    // the receipt page/PDF; otherwise amount due (total − applied credit). Falls
+    // back to amount due when no payment row exists.
     const receiptPayment = await db("payments")
       .where({ customer_id: invoice.customer_id })
       .whereIn("status", ["paid", "refunded"])
@@ -2375,7 +2375,10 @@ const InvoiceService = {
       .orderBy("created_at", "desc")
       .first()
       .catch(() => null);
-    const receiptAmount = receiptAmountPaid(invoice, receiptPayment);
+    const receiptRefunded = receiptPayment ? Number(receiptPayment.refund_amount || 0) : 0;
+    const receiptAmount = receiptRefunded > 0
+      ? Math.max(0, Number(receiptPayment.amount || 0) - receiptRefunded)
+      : invoiceAmountDue(invoice);
     const amount = Number.isFinite(receiptAmount)
       ? receiptAmount.toFixed(2)
       : "0.00";

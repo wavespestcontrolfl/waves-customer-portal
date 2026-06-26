@@ -10,7 +10,7 @@
 
 const logger = require('./logger');
 const db = require('../models/db');
-const { invoiceAmountDue, receiptAmountPaid } = require('./invoice-helpers');
+const { invoiceAmountDue } = require('./invoice-helpers');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('./pdf/invoice-pdf');
 const { loadInvoiceAnnualPrepay } = require('./invoice-prepay');
 const { wrapEmail, ctaButton, currency, formatDate, plainText } = require('./email-template');
@@ -373,11 +373,17 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     .first()
     .catch(() => null);
 
-  // Receipt amount = what the customer actually paid (receiptAmountPaid), which
-  // matches the payment-row-built PDF: net cash kept on a refund, the recorded
-  // payment when a prepaid credit zeroed invoice.total, else amount due. See
-  // invoice-helpers.receiptAmountPaid.
-  const amountDue = receiptAmountPaid(invoice, payment);
+  // Receipt amount comes from the PAYMENT row, not invoiceAmountDue(invoice): a
+  // full refund zeroes credit_applied, after which invoiceAmountDue would return
+  // the gross total and contradict the attached PDF (which is built from this
+  // same payment row). When a refund is recorded, show net cash actually kept
+  // (payment.amount − refunded) to match the PDF's "Net paid"; otherwise amount
+  // due (total − applied credit), which matches the PDF's "Amount due". Fall back
+  // to amount due when there is no payment row.
+  const refundedAmount = payment ? Number(payment.refund_amount || 0) : 0;
+  const amountDue = refundedAmount > 0
+    ? Math.max(0, Number(payment.amount || 0) - refundedAmount)
+    : invoiceAmountDue(invoice);
 
   const domain = publicPortalUrl();
   const longReceiptUrl = `${domain}/receipt/${invoice.token}`;
