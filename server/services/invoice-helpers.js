@@ -44,6 +44,32 @@ function invoiceAmountDue(invoice) {
   return Math.max(0, totalCents - creditCents) / 100;
 }
 
+/**
+ * The amount to show on a RECEIPT — what the customer actually PAID, which is not
+ * always invoiceAmountDue (the balance still owed). Two paid-invoice shapes make
+ * them differ, and the receipt must match the payment-row-built PDF in both:
+ *   - Refunded: show net cash kept = payment.amount − refund_amount (a full
+ *     refund zeroes credit_applied, after which invoiceAmountDue returns the
+ *     gross total).
+ *   - Prepaid-credit covered: the scheduled-service prepaid path reduces
+ *     invoice.total to the remaining balance (0 when fully covered), so
+ *     invoiceAmountDue understates the payment — fall back to the recorded
+ *     payment amount.
+ * Normal card/ACH paid invoices (total not reduced, no refund) are unchanged:
+ * invoiceAmountDue already equals the amount charged. Falls back to amount due
+ * when there is no payment row.
+ */
+function receiptAmountPaid(invoice, payment) {
+  const refunded = payment ? Number(payment.refund_amount || 0) : 0;
+  if (refunded > 0) {
+    return Math.max(0, (Number(payment.amount) || 0) - refunded);
+  }
+  const due = invoiceAmountDue(invoice);
+  if (due > 0) return due;
+  const paid = payment ? Math.max(0, Number(payment.amount) || 0) : 0;
+  return paid > 0 ? paid : due;
+}
+
 function isInvoiceCollectibleStatus(status) {
   return !INVOICE_UNCOLLECTIBLE_STATUSES.includes(invoiceStatusKey(status));
 }
@@ -91,4 +117,5 @@ module.exports = {
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
   invoiceAmountDue,
+  receiptAmountPaid,
 };
