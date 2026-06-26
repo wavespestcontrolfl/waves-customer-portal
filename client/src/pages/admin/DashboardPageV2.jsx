@@ -156,11 +156,11 @@ export default function DashboardPageV2() {
     if (g.pending <= 0 && !g.failed && mountedRef.current) setLastUpdated(Date.now());
   }, []);
   const [period, setPeriod] = useState("mtd");
-  // Custom date range (drives both Core KPIs + attribution when period==='custom').
-  const [customRange, setCustomRange] = useState(null); // { from, to } | null
+  // Custom lookback: a START date through today, driving Core KPIs + attribution
+  // when period==='custom'. End is always today, so every metric stays valid.
+  const [customRange, setCustomRange] = useState(null); // { from } | null
   const [showRangePicker, setShowRangePicker] = useState(false);
   const [draftFrom, setDraftFrom] = useState("");
-  const [draftTo, setDraftTo] = useState("");
   // Recomputed as the dashboard's freshness clock ticks, so an overnight session
   // gets the new ET day as the date-input max without a reload.
   const todayISO = useMemo(
@@ -168,9 +168,8 @@ export default function DashboardPageV2() {
     [clockTick],
   );
   const applyCustomRange = () => {
-    if (!draftFrom || !draftTo) return;
-    const [a, b] = draftFrom <= draftTo ? [draftFrom, draftTo] : [draftTo, draftFrom];
-    setCustomRange({ from: a, to: b });
+    if (!draftFrom || draftFrom > todayISO) return;
+    setCustomRange({ from: draftFrom });
     setPeriod("custom");
     setShowRangePicker(false);
   };
@@ -324,11 +323,11 @@ export default function DashboardPageV2() {
     // swaps them in place, and won't surface an error over still-good data.
     const periodKey =
       period === "custom" && customRange
-        ? `custom:${customRange.from}:${customRange.to}`
+        ? `custom:${customRange.from}`
         : period;
     const periodQS =
       period === "custom" && customRange
-        ? `period=custom&from=${customRange.from}&to=${customRange.to}`
+        ? `period=custom&from=${customRange.from}`
         : `period=${period}`;
     const periodChanged = kpisPeriodRef.current !== periodKey;
     kpisPeriodRef.current = periodKey;
@@ -366,11 +365,11 @@ export default function DashboardPageV2() {
     const ctrl = new AbortController();
     const periodKey =
       period === "custom" && customRange
-        ? `custom:${customRange.from}:${customRange.to}`
+        ? `custom:${customRange.from}`
         : period;
     const periodQS =
       period === "custom" && customRange
-        ? `period=custom&from=${customRange.from}&to=${customRange.to}`
+        ? `period=custom&from=${customRange.from}`
         : `period=${period}`;
     const periodChanged = attribPeriodRef.current !== periodKey;
     attribPeriodRef.current = periodKey;
@@ -747,36 +746,31 @@ export default function DashboardPageV2() {
                 <button
                   onClick={() => {
                     setDraftFrom(customRange?.from || "");
-                    setDraftTo(customRange?.to || "");
                     setShowRangePicker((v) => !v);
                   }}
                   className={cn(
-                    "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0 border-l border-hairline border-zinc-200",
+                    "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0 border-l border-hairline border-zinc-200 whitespace-nowrap",
                     period === "custom"
                       ? "bg-zinc-900 text-white"
                       : "bg-white text-ink-secondary hover:bg-zinc-50",
                   )}
-                  title="Custom date range"
+                  title="Custom lookback — pick a start date (through today)"
                 >
-                  {period === "custom" && customRange ? `${customRange.from} – ${customRange.to}` : "Custom"}
+                  {period === "custom" && customRange ? `Since ${customRange.from}` : "Custom"}
                 </button>
               </div>
             </div>
             {showRangePicker && (
               <div className="absolute right-0 top-full mt-1 z-20 bg-white border-hairline border-zinc-200 rounded-sm shadow-lg p-3 flex flex-col gap-2">
                 <label className="text-11 text-ink-tertiary flex items-center justify-between gap-3">
-                  From
+                  Since
                   <input type="date" max={todayISO} value={draftFrom} onChange={(e) => setDraftFrom(e.target.value)}
                     className="text-12 border-hairline border-zinc-300 rounded-sm px-2 py-1 u-focus-ring" />
                 </label>
-                <label className="text-11 text-ink-tertiary flex items-center justify-between gap-3">
-                  To
-                  <input type="date" max={todayISO} value={draftTo} onChange={(e) => setDraftTo(e.target.value)}
-                    className="text-12 border-hairline border-zinc-300 rounded-sm px-2 py-1 u-focus-ring" />
-                </label>
+                <div className="text-11 text-ink-tertiary">through today</div>
                 <div className="flex justify-end gap-2 mt-1">
                   <button onClick={() => setShowRangePicker(false)} className="text-11 text-ink-tertiary hover:text-ink-secondary u-focus-ring">Cancel</button>
-                  <button onClick={applyCustomRange} disabled={!draftFrom || !draftTo}
+                  <button onClick={applyCustomRange} disabled={!draftFrom}
                     className="text-11 font-medium px-3 py-1 rounded-sm bg-zinc-900 text-white disabled:opacity-40 u-focus-ring">Apply</button>
                 </div>
               </div>

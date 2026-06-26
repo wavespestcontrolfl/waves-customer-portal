@@ -389,16 +389,14 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     const todayStr = etDateString(now);
 
     // Shared period resolver (periodStartDate) — same windows the attribution
-    // panels use. A custom range overrides both bounds; otherwise the window ends
-    // today. `end` is the window upper bound for every windowed metric below;
-    // point-in-time snapshots (AR days, autopay, retention "live now") stay as-of-now,
-    // exactly as they do for the named periods.
+    // panels use; every window ends today. A custom range overrides only the
+    // START (a custom lookback through today), so every metric's "as of now"
+    // numerator stays valid — no historical reconstruction needed.
     const start = (range && range.from) || periodStartDate(period);
-    const end = (range && range.to) || todayStr;
 
     // Service completion rate — scheduled_services in window
     const svcAgg = await db('scheduled_services')
-      .where('scheduled_date', '>=', start).where('scheduled_date', '<=', end)
+      .where('scheduled_date', '>=', start).where('scheduled_date', '<=', todayStr)
       .select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
@@ -417,7 +415,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
 
     // Callback rate — service_records.is_callback in window
     const cbAgg = await db('service_records')
-      .where('service_date', '>=', start).where('service_date', '<=', end)
+      .where('service_date', '>=', start).where('service_date', '<=', todayStr)
       .select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE is_callback = true) as callbacks")
@@ -433,7 +431,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     let csatRow = null;
     try {
       csatRow = await db('review_requests')
-        .modify((qb) => applyETTimestampWindow(qb, 'submitted_at', start, end))
+        .where('submitted_at', '>=', start)
         .where({ status: 'submitted' })
         .whereNotNull('score')
         .select(
@@ -455,7 +453,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     // Both per-job average AND revenue-weighted gross margin so a $50 callback
     // at 100% can't visually offset a $5,000 job at 30%.
     const srFin = await db('service_records')
-      .where('service_date', '>=', start).where('service_date', '<=', end)
+      .where('service_date', '>=', start).where('service_date', '<=', todayStr)
       .whereNotNull('revenue')
       .select(
         db.raw("SUM(revenue) as rev_total"),
@@ -484,10 +482,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     } catch (err) {
       logger.error(`[admin-dashboard] active techs count failed: ${err.message}`);
     }
-    // Capacity must span the SAME window the billable hours were filtered to —
-    // start..end (end = today for named periods, the custom end otherwise) — or a
-    // historical custom range divides its labor by start-to-today capacity.
-    const daysInPeriod = Math.max(1, inclusiveDayCount(start, end));
+    const daysInPeriod = Math.max(1, Math.ceil((now - new Date(start)) / 86400000) + 1);
     const availableHours = numTechs ? numTechs * 8 * daysInPeriod : 0;
     const utilization = availableHours > 0 && laborHoursTotal > 0
       ? Math.round((laborHoursTotal / availableHours) * 100) : null;
@@ -513,7 +508,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
           db('leads').whereNotIn('status', NON_ENGAGED_LEAD_STATUSES),
           'first_contact_at',
           start,
-          end,
+          todayStr,
         )
       ).select(
           db.raw("COUNT(*) as total"),
@@ -609,7 +604,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
             )
         )`)
         .whereRaw(`${issueDateET} >= ?`, [start])
-        .whereRaw(`${issueDateET} <= ?`, [end])
+        .whereRaw(`${issueDateET} <= ?`, [todayStr])
         // Collected keys on status='paid' (cash), NOT paid_at IS NOT NULL:
         // prepaid credit closures stamp paid_at but stay status='prepaid'
         // (already excluded above), and a status='paid' invoice with null paid_at
@@ -725,22 +720,12 @@ async function computeCoreKpis(period = 'mtd', range = null) {
       const base = parseInt(baseRow?.c || 0);
       const baseMRR = parseFloat(baseRow?.mrr || 0);
 
-      // Retained = cohort members still live AS OF the window end. For named
-      // periods end = today, so this is exactly "still live now" — unchanged. For
-      // a historical custom range it ALSO retains anyone who only departed AFTER
-      // the window (best-available departure date), so the loss/momentum stays
-      // inside [start, end] instead of subtracting later churn. `departure > end`
-      // can never match for a today-bounded window (departures are <= today), so
-      // named-period behavior is byte-for-byte preserved.
-      const departedDateExpr = "COALESCE(churned_at, "
-        + "(pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date, "
-        + "(deleted_at AT TIME ZONE 'America/New_York')::date)";
+      // Retained = cohort members still live now (active, not deleted, still a
+      // customer stage). Everyone else who was a customer at the start — churned,
+      // gone dormant, or deleted since — is a LOSS for the period (not all
+      // "churn", so the field is reported as `lost`).
       const retainedRow = await cohort()
-        .where(function retainedAsOfEnd() {
-          this.where(function liveNow() {
-            this.where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES);
-          }).orWhereRaw(`${departedDateExpr} > ?`, [end]);
-        })
+        .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES)
         .select(db.raw('COUNT(*) as c'), db.raw('COALESCE(SUM(monthly_rate), 0) as mrr')).first();
       const retained = parseInt(retainedRow?.c || 0);
       lost = Math.max(0, base - retained);
@@ -776,7 +761,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     if (retentionOk) try {
       const newRow = await db('customers')
         .where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
-        .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [start]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [end])
+        .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [start]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [todayStr])
         .select(db.raw('COUNT(*) as c'), db.raw('COALESCE(SUM(monthly_rate), 0) as mrr')).first();
       const newCount = parseInt(newRow?.c || 0);
       const newMRR = parseFloat(newRow?.mrr || 0);
@@ -792,7 +777,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     let leaderboard = [];
     try {
       leaderboard = await db('service_records')
-        .where('service_date', '>=', start).where('service_date', '<=', end)
+        .where('service_date', '>=', start).where('service_date', '<=', todayStr)
         .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
         .groupBy('technicians.id', 'technicians.name')
         .select(
@@ -839,7 +824,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         .whereNotNull('waveguard_tier')
         .whereNotIn('waveguard_tier', ['none', 'None', 'One-Time'])
         .where('member_since', '>=', start)
-        .where('member_since', '<=', end)
+        .where('member_since', '<=', todayStr)
         .count('* as n').first();
       membershipsSold = parseInt(m?.n || 0, 10);
     } catch (err) { logger.error(`[admin-dashboard] memberships query failed: ${err.message}`); }
@@ -850,7 +835,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     let inboundCalls = 0, callToBooking = null;
     try {
       const cc = await db('call_log').where('direction', 'inbound')
-        .modify((qb) => applyETTimestampWindow(qb, 'created_at', start, end))
+        .modify((qb) => applyETTimestampWindow(qb, 'created_at', start, todayStr))
         .count('* as n').first();
       inboundCalls = parseInt(cc?.n || 0, 10);
       // null (not 0%) when the lead-metrics query failed — booked is a stale 0
@@ -863,7 +848,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
 
     return {
       period: range ? 'custom' : period,
-      periodLabel: range ? `${start} – ${end}` : periodLabel(period),
+      periodLabel: range ? `Since ${start}` : periodLabel(period),
       service: {
         completionRate,
         scheduled: svcDenom, // non-cancelled, so the tile's "completed/scheduled" matches the rate
@@ -916,7 +901,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
 // cron calls, so the live tiles and the recorded trend never diverge.
 router.get('/core-kpis', dashboardCache, async (req, res, next) => {
   try {
-    res.json(await computeCoreKpis(String(req.query.period || 'mtd').toLowerCase(), parseCustomRange(req.query)));
+    res.json(await computeCoreKpis(String(req.query.period || "mtd").toLowerCase(), parseCustomRange(req.query)));
   } catch (err) {
     logger.error(`[admin-dashboard] /core-kpis failed: ${err.message}`);
     next(err);
@@ -1451,24 +1436,19 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
 // Periods accepted: today | wtd | mtd | ytd. Defaults to mtd.
 // ─────────────────────────────────────────────────────────────────────
 
-// Optional custom date range (?from=YYYY-MM-DD&to=YYYY-MM-DD) for the dashboard
-// period control. Null unless BOTH are valid ET dates; orders them and clamps to
-// today (no future windows).
+// Custom lookback: an operator-chosen START date through today (?from=YYYY-MM-DD).
+// Window end is always today, so every "as of now" metric stays valid — no
+// historical end. Null unless `from` is a valid ET date not in the future.
 function parseCustomRange(query) {
-  const re = /^\d{4}-\d{2}-\d{2}$/;
-  let from = typeof query.from === 'string' && re.test(query.from) ? query.from : null;
-  let to = typeof query.to === 'string' && re.test(query.to) ? query.to : null;
-  if (!from || !to) return null;
-  if (from > to) { const t = from; from = to; to = t; }
+  const from = typeof query.from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(query.from) ? query.from : null;
+  if (!from) return null;
   const today = etDateString();
-  if (to > today) to = today;
-  if (from > today) from = today;
-  return { from, to };
+  return { from: from > today ? today : from };
 }
 
 function resolveAttributionWindow(period, range) {
-  if (range && range.from && range.to) {
-    return { from: range.from, to: range.to, label: `${range.from} – ${range.to}` };
+  if (range && range.from) {
+    return { from: range.from, to: etDateString(), label: `Since ${range.from}` };
   }
   return { from: periodStartDate(period), to: etDateString(), label: periodLabel(period) };
 }
