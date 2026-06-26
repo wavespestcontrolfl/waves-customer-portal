@@ -15,6 +15,20 @@ const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-s
 const { autopayActivePredicate } = require('../services/autopay-eligibility');
 const { generateChartSpec } = require('../services/ai-chart-builder');
 const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
+const { isUserFeatureEnabled } = require('../services/feature-flags');
+
+// Server-side gate for the AI chart builder. The client hides the panel behind
+// the same flag, but the endpoints must enforce it too — otherwise any admin who
+// knows the route could reach the LLM + SQL sandbox while it's dark-launched.
+const AI_CHARTS_FLAG = 'dashboard-ai-charts';
+async function requireAiChartsEnabled(req, res, next) {
+  try {
+    if (await isUserFeatureEnabled(req.technicianId, AI_CHARTS_FLAG)) return next();
+  } catch (err) {
+    logger.error(`[admin-dashboard] ai-charts flag check failed: ${err.message}`);
+  }
+  return res.status(403).json({ error: 'AI charts are not enabled for your account.' });
+}
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -1645,7 +1659,7 @@ router.get('/alerts', dashboardCache, async (req, res, next) => {
 // Generate + safely run a chart from a natural-language prompt (no persistence).
 // One repair round: if the first SQL fails to validate/run, the error is fed
 // back to the model for a corrected query.
-router.post('/ai-chart/preview', async (req, res) => {
+router.post('/ai-chart/preview', requireAiChartsEnabled, async (req, res) => {
   const prompt = String(req.body?.prompt || '').trim();
   if (!prompt) return res.status(400).json({ error: 'A prompt is required.' });
 
@@ -1674,7 +1688,7 @@ router.post('/ai-chart/preview', async (req, res) => {
 // List the current admin's pinned widgets, each re-validated + re-run read-only.
 // A single broken/blocked widget fails soft (returns its error) rather than
 // breaking the list.
-router.get('/widgets', async (req, res, next) => {
+router.get('/widgets', requireAiChartsEnabled, async (req, res, next) => {
   try {
     const rows = await db('user_dashboard_widgets')
       .where('owner_technician_id', req.technicianId)
@@ -1698,7 +1712,7 @@ router.get('/widgets', async (req, res, next) => {
 
 // Pin a widget. The SQL is re-validated server-side before it's stored (never
 // trust a client-supplied query), so only sandbox-safe SQL is ever persisted.
-router.post('/widgets', async (req, res, next) => {
+router.post('/widgets', requireAiChartsEnabled, async (req, res, next) => {
   try {
     const { title, prompt, sql, chartSpec } = req.body || {};
     if (!title || !sql || !chartSpec) return res.status(400).json({ error: 'title, sql and chartSpec are required.' });
@@ -1726,7 +1740,7 @@ router.post('/widgets', async (req, res, next) => {
 });
 
 // Unpin a widget (scoped to the owner).
-router.delete('/widgets/:id', async (req, res, next) => {
+router.delete('/widgets/:id', requireAiChartsEnabled, async (req, res, next) => {
   try {
     const deleted = await db('user_dashboard_widgets')
       .where({ id: req.params.id, owner_technician_id: req.technicianId })

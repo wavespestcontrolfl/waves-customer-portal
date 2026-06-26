@@ -3,28 +3,29 @@
  *
  * The AI pin-to-dashboard feature lets an admin describe a chart in plain
  * English; an LLM generates a Postgres SELECT that runs against the live
- * database. That power demands defense-in-depth — this module is the single
- * gate every AI-generated query passes through, both at preview time and every
- * time a pinned widget re-runs on dashboard load.
+ * database. That power demands a real security boundary — and a regex over SQL
+ * text is NOT one (comma joins, query_to_xml executing inner SQL, SELECT *,
+ * snake_case secret columns all slip a denylist). So the boundary is the
+ * DATABASE, not this file:
  *
- * Layers (each independent — any one alone blocks the obvious attacks):
- *   1. Structural: must be a single statement starting with SELECT; no
- *      semicolons, comments, or dollar-quoting (blocks chaining / function
- *      bodies / injected DDL).
- *   2. Identifier denylist: catalog access (pg_*, information_schema,
- *      current_setting/set_config), file/large-object/dblink functions, and any
- *      secret/credential column name (password, token, secret, api_key, jwt,
- *      session, webhook, stripe_*, …) — nothing sensitive is even nameable.
- *   3. Table allowlist: only business-analytics tables may appear after
- *      FROM/JOIN. Anything else (users, auth, tokens, unknown tables) → rejected.
- *   4. Execution guard: run inside `SET TRANSACTION READ ONLY` with a
- *      statement_timeout, wrapped in an outer LIMIT, then rolled back. Postgres
- *      itself throws on any write even if a layer above were somehow bypassed —
- *      this is the backstop, not the only line.
+ *   Every query runs under `SET LOCAL ROLE aichart_readonly` inside a
+ *   `SET TRANSACTION READ ONLY` transaction. That role (created by migration
+ *   20260626000011) holds ONLY column-level SELECT on the non-sensitive columns
+ *   of the business-analytics tables — nothing else. Reading any other table,
+ *   any sensitive column, SELECT * over an ungranted column, or executing inner
+ *   SQL via query_to_xml/dblink all fail with "permission denied", enforced by
+ *   Postgres regardless of how the SQL is shaped. The read-only transaction
+ *   blocks writes; statement_timeout + an outer LIMIT bound cost.
+ *
+ * The static checks below are cheap DEFENSE-IN-DEPTH (fast rejects, clearer
+ * errors), not the primary control. The role is the control.
  */
 
 const db = require('../models/db');
-const logger = require('./logger');
+
+// Least-privilege role the migration grants column-level SELECT on safe
+// analytics columns. The query is executed AS this role — the security boundary.
+const ANALYTICS_ROLE = 'aichart_readonly';
 
 class SqlGuardError extends Error {
   constructor(message) {
@@ -34,30 +35,11 @@ class SqlGuardError extends Error {
   }
 }
 
-// Business-analytics tables the AI may read. NOTHING else is queryable — this is
-// the scoping line that keeps auth/credential/PII-token tables out of reach.
-const ALLOWED_TABLES = new Set([
-  'customers',
-  'leads',
-  'lead_sources',
-  'invoices',
-  'invoice_line_items',
-  'payments',
-  'service_records',
-  'scheduled_services',
-  'services',
-  'review_requests',
-  'reviews',
-  'estimates',
-  'mrr_snapshots',
-  'kpi_snapshots',
-]);
-
-// Tokens that must never appear anywhere in the SQL. Catalog/system access,
-// file/network functions, and secret/credential identifiers. Write/DDL keywords
-// are intentionally NOT listed here — the "starts with SELECT", single-statement,
-// and READ ONLY transaction guards make writes impossible without the risk of
-// false-positives on column names. Matched case-insensitively on word bounds.
+// Catalog/system access and query-executing functions. Belt to the role's
+// suspenders — these are denied by the role too, but rejecting them up front
+// gives a clear error and never reaches the DB. (Write/DDL keywords are NOT
+// listed: "starts with SELECT" + single-statement + READ ONLY make writes
+// impossible without risking false-positives on column names.)
 const FORBIDDEN_PATTERNS = [
   /\bpg_[a-z_]+/, // pg_sleep, pg_read_file, pg_ls_dir, pg_catalog, …
   /\binformation_schema\b/,
@@ -67,16 +49,15 @@ const FORBIDDEN_PATTERNS = [
   /\bdblink\w*/,
   /\bcopy\b/,
   /\blo_[a-z]+/, // large-object functions
-  /\bpassword\b/, /\bpasswd\b/, /\bsecret\b/, /\btoken\b/, /\bapi_?key\b/,
-  /\bjwt\b/, /\bsession\b/, /\bwebhook\b/, /\bcredential\b/, /\bprivate_key\b/,
-  /\bstripe_[a-z_]+/,
+  /\w*_to_xml\w*/, // query_to_xml / table_to_xml / query_to_xmlschema / cursor_to_xml — execute inner SQL
 ];
 
 const MAX_SQL_LENGTH = 4000;
 
 /**
- * Validate an AI-generated SQL string. Throws SqlGuardError on any violation;
- * returns the cleaned (trailing-semicolon-stripped) SQL on success. Pure — no DB.
+ * Static pre-validation (defense-in-depth). Throws SqlGuardError on violation;
+ * returns the cleaned (trailing-semicolon-stripped) SQL on success. Pure — no
+ * DB. The DB role is what actually scopes table/column access at run time.
  */
 function validateAnalyticsSql(rawSql) {
   const sql = String(rawSql || '').trim().replace(/;+\s*$/, '');
@@ -91,48 +72,44 @@ function validateAnalyticsSql(rawSql) {
     throw new SqlGuardError('SQL comments are not allowed.');
   }
   if (/\$[a-z0-9_]*\$/i.test(sql)) throw new SqlGuardError('Dollar-quoting is not allowed.');
+  if (!/\bfrom\b/.test(lower)) throw new SqlGuardError('Query must read from a table.');
 
   for (const pat of FORBIDDEN_PATTERNS) {
-    if (pat.test(lower)) throw new SqlGuardError('Query references a disallowed table, column, or function.');
-  }
-
-  // Every table after FROM/JOIN must be allowlisted. Subqueries get their own
-  // FROM matched too; a derived-table "FROM (" never matches the \w+ capture.
-  const refs = [...lower.matchAll(/\b(?:from|join)\s+"?([a-z_][a-z0-9_]*)"?/g)].map((m) => m[1]);
-  if (refs.length === 0) throw new SqlGuardError('Query must read from a known table.');
-  for (const t of refs) {
-    if (!ALLOWED_TABLES.has(t)) throw new SqlGuardError(`Table "${t}" is not available to the chart builder.`);
+    if (pat.test(lower)) throw new SqlGuardError('Query uses a disallowed catalog/system function.');
   }
 
   return sql;
 }
 
 /**
- * Validate + run a read-only analytics query. Caps rows and wall-clock, runs in
- * a READ ONLY transaction, and rolls back. Returns { rows, fields }.
+ * Validate + run a read-only analytics query AS the least-privilege role. Caps
+ * rows and wall-clock; rolls back. The role (not the regex) is what prevents
+ * access to non-analytics tables, sensitive columns, and SQL-executing tricks.
+ * Returns { rows, fields }.
  */
 async function runReadOnlyAnalyticsQuery(rawSql, { rowCap = 1000, timeoutMs = 5000 } = {}) {
   const sql = validateAnalyticsSql(rawSql);
-  const wrapped = `SELECT * FROM (${sql}) AS _aichart LIMIT ${rowCap}`;
+  const wrapped = `SELECT * FROM (${sql}) AS _aichart LIMIT ${Number(rowCap) || 1000}`;
 
   let rows = [];
   let fields = [];
   await db.transaction(async (trx) => {
-    // First statements after BEGIN: lock the transaction read-only and bound the
-    // wall-clock. A write anywhere inside now raises "read-only transaction".
+    // Order matters: lock read-only first, then drop to the least-privilege role
+    // (so the query is privilege-checked by Postgres), then bound the clock.
     await trx.raw('SET TRANSACTION READ ONLY');
     await trx.raw(`SET LOCAL statement_timeout = ${Number(timeoutMs) || 5000}`);
+    await trx.raw(`SET LOCAL ROLE ${ANALYTICS_ROLE}`);
     const res = await trx.raw(wrapped);
     rows = res.rows || [];
     fields = (res.fields || []).map((f) => f.name);
-    // Nothing was written; let the (read-only) transaction commit normally.
+    // Nothing was written; the read-only transaction commits cleanly.
   });
   return { rows, fields };
 }
 
 module.exports = {
   SqlGuardError,
-  ALLOWED_TABLES,
+  ANALYTICS_ROLE,
   validateAnalyticsSql,
   runReadOnlyAnalyticsQuery,
 };
