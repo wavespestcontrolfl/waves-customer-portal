@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Badge,
   Card,
@@ -144,6 +145,21 @@ export default function DashboardPageV2() {
     if (g.pending <= 0 && !g.failed && mountedRef.current) setLastUpdated(Date.now());
   }, []);
   const [period, setPeriod] = useState("mtd");
+  const navigate = useNavigate();
+  // Drill-down: open the Leads list filtered to this attribution source, scoped
+  // to the same period window the panel is showing so the list matches the count.
+  const drillToSource = useCallback(
+    (name) => {
+      if (!name) return;
+      const p = new URLSearchParams({ source_name: name });
+      const w = leadsBySource?.period;
+      if (w?.from) p.set("from", w.from);
+      if (w?.to) p.set("to", w.to);
+      if (w?.label) p.set("period_label", w.label);
+      navigate(`/admin/leads?${p.toString()}`);
+    },
+    [navigate, leadsBySource],
+  );
   const [showAllKpis, setShowAllKpis] = useState(false);
   const [kpisLoading, setKpisLoading] = useState(false);
   const [kpisError, setKpisError] = useState(null);
@@ -967,6 +983,7 @@ export default function DashboardPageV2() {
             channelMix={channelMix}
             loading={attributionLoading}
             error={attributionError}
+            onDrillSource={drillToSource}
           />{" "}
         </MobileFold>
       ) : (
@@ -983,6 +1000,7 @@ export default function DashboardPageV2() {
             channelMix={channelMix}
             loading={attributionLoading}
             error={attributionError}
+            onDrillSource={drillToSource}
           />
         </ChartCard>
       )}
