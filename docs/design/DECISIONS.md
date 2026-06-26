@@ -1015,6 +1015,10 @@ Three more, all in `estimate-public.js`, all on the engine-result ingestion + pe
 
 **Verification:** 325 slot/service-line/converter/public tests green across 12 suites; client `vite build` clean; a temp vitest confirmed the V1 engine prices a foam-only no-sqft quote and the row carries cadence/duration/discountable (bimonthly 20pt → 180min, discountable:false).
 
+### Round 6 (06-26) — merge main + close the deferred foam floor
+
+Merged `origin/main` (sole conflict: this append-only log — kept both the foam entry and main's invoice-AI entries; no code overlap, main touched none of the 17 pricing/estimate files this branch changed). Then **zeroed the residual `$125` floor in `calculateFoamPrice()`** (`service-pricing.js`), the spec-version `services.termiteFoam` pricer that round 3 deliberately SKIPPED. Re-confirmed it's dead in the live flow (nothing assigns `services.termiteFoam`; its only consumer `estimate-engine.js:1213` never fires; `PricingLogicPage` SpecServicesPanel only documents it), but zeroing its floor makes EVERY foam path consistent with the owner's "remove the minimum entirely" directive and closes the last open Codex thread. Kept `Math.max(0, …)` as a non-negative guard. 86 foam pricing tests green; no test asserted the old floor. **Still wants the Railway customer-render preview before merge** (unchanged from earlier rounds).
+
 ## 2026-06-25 — Invoices: one-tap AI invoice summary from the linked visit (feat/invoice-ai-summary)
 
 **Context.** The admin invoice builder already had a "Write with AI" button that drafted the customer-facing invoice note, but it only saw what the operator typed plus the line-item descriptions — it had no idea what actually happened at the visit. Most invoices are created against a completed `service_records` row (the operator picks the service), so the richest context (the tech's job summary, the diagnostic readings captured on the form) was sitting one join away and going unused. This makes the AI note ServiceTitan-style: a one-tap summary assembled from the visit, not just from re-typed line items.
