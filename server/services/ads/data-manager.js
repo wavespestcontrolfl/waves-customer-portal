@@ -881,10 +881,41 @@ async function retrieveRequestStatus(requestId, { fetchImpl = global.fetch, acce
   return { ...data, uploadStatus: uploadStatus.status, uploadsUpdated: uploadStatus.updated };
 }
 
+/**
+ * Resolve still-pending live upload requests by polling Data Manager request
+ * status and updating the upload log. Without this, a request that later fails or
+ * partially succeeds stays 'pending' forever (and future scans skip its
+ * transactions as upload_pending) — so the automated cron would never retry it.
+ * Reconciling flips failed/partial rows out of 'pending', making them retryable
+ * on the next upload run, and confirms successes.
+ */
+async function reconcilePendingRequests({ limit = 100 } = {}) {
+  const rows = await db('google_ads_conversion_uploads')
+    .where({ status: LIVE_UPLOAD_PENDING_STATUS, validate_only: false })
+    .whereNotNull('request_id')
+    .distinct('request_id')
+    .limit(Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500));
+
+  const results = [];
+  for (const row of rows) {
+    const requestId = row.request_id;
+    if (!requestId) continue;
+    try {
+      const r = await retrieveRequestStatus(requestId);
+      results.push({ requestId, status: r.uploadStatus, updated: r.uploadsUpdated });
+    } catch (err) {
+      logger.warn('[data-manager] reconcile failed', { requestId, error: err.message });
+      results.push({ requestId, error: err.message });
+    }
+  }
+  return results;
+}
+
 module.exports = {
   buildReadiness,
   uploadConversions,
   retrieveRequestStatus,
+  reconcilePendingRequests,
   _private: {
     adIdentifiers,
     buildEvent,

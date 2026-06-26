@@ -2275,9 +2275,21 @@ function initScheduledJobs() {
       // overlap could both send the same conversions. Serialize across instances.
       await runExclusive('data-manager-offline-conversions', async () => {
         const DataManager = require('./ads/data-manager');
+        // Reconcile prior runs' still-pending requests first, so failures/partials
+        // get marked (and become retryable) instead of stuck pending forever.
+        const reconciled = await DataManager.reconcilePendingRequests({ limit: 100 });
+        if (reconciled.length) {
+          logger.info(`[data-manager cron] reconciled ${reconciled.length} pending request(s)`);
+        }
+        // Per-type window: a lead can be marked qualified (is_qualified) well after
+        // first contact, and qualified-lead candidates are dated by
+        // COALESCE(converted_at, first_contact_at, created_at) — so scan wide
+        // enough to still catch a late-qualified lead before Google's ~90d import
+        // window closes. Per-transaction dedupe makes the overlap a no-op.
+        const PERIOD_DAYS = { qualified_lead: 60, completed_job_revenue: 30 };
         for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
           const r = await DataManager.uploadConversions({
-            conversionType, periodDays: 7, limit: 500, validateOnly: false,
+            conversionType, periodDays: PERIOD_DAYS[conversionType], limit: 500, validateOnly: false,
           });
           logger.info(`[data-manager cron] ${conversionType}: ${JSON.stringify({
             configured: r.configured, validateOnly: r.validateOnly, candidates: r.candidates,
