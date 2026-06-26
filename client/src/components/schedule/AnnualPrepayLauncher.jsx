@@ -47,6 +47,8 @@ export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [paymentInvoice, setPaymentInvoice] = useState(null);
+  const [voiding, setVoiding] = useState(false);
+  const [voidError, setVoidError] = useState('');
   const paidRef = useRef(false);
 
   useEffect(() => {
@@ -96,17 +98,76 @@ export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
   // the spot — any successful tender flips the term active (webhook / record-payment).
   if (paymentInvoice) {
     const markPaidAndClose = () => { paidRef.current = true; onSaved?.(); onClose?.(); };
+
+    // True when the invoice is anything other than collectible-unpaid — paid, or
+    // prepaid by auto-applied account credit (which can settle it with no tender
+    // callback), or already processing/void. Those are clean closes, NOT aborts.
+    const isSettled = async () => {
+      const inv = await adminFetch(`/admin/invoices/${paymentInvoice.id}`);
+      return !['draft', 'sent', 'overdue'].includes(String(inv?.status || '').toLowerCase());
+    };
+
     // Abort: void the just-minted invoice so its payment_pending term is cancelled
     // and the customer isn't left with billing suppressed by an uncollected charge.
-    // Skip when a tender already succeeded; voidInvoice also cancels the PaymentIntent
-    // first and refuses an already-settled invoice, so a Tap-to-Pay charge that landed
-    // without a client signal stays paid (the webhook activates the term).
     const abortAndClose = async () => {
-      if (!paidRef.current) {
-        try { await adminFetch(`/admin/invoices/${paymentInvoice.id}/void`, { method: 'POST' }); } catch { /* best-effort */ }
+      if (paidRef.current) { onClose?.(); return; }
+      setVoiding(true);
+      setVoidError('');
+      try {
+        // A credit-covered / settled invoice must NOT be voided (that would refund
+        // the credit + cancel a legitimately-paid term) — re-read status first.
+        if (await isSettled()) { onClose?.(); return; }
+        try {
+          await adminFetch(`/admin/invoices/${paymentInvoice.id}/void`, { method: 'POST' });
+          onClose?.();
+        } catch (voidErr) {
+          // Void can fail because a Tap-to-Pay charge settled in the gap (webhook
+          // lag, PaymentIntent already captured). If it's settled now, that's a
+          // successful close; otherwise it's a real cleanup failure.
+          if (await isSettled()) { onClose?.(); return; }
+          throw voidErr;
+        }
+      } catch (e) {
+        // Don't silently close: the pending term would keep suppressing monthly
+        // billing. Surface it so the operator retries (or voids from Invoices).
+        setVoidError(e?.message || 'Could not cancel the uncollected prepay invoice.');
+      } finally {
+        setVoiding(false);
       }
-      onClose?.();
     };
+
+    if (voidError) {
+      return (
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center" style={{ background: 'rgba(15,23,42,0.55)', padding: 16 }}>
+          <div className="bg-white rounded-2xl" style={{ padding: 20, maxWidth: 440 }}>
+            <div className="text-alert-fg" style={{ fontSize: 14, marginBottom: 12 }}>
+              Couldn’t cancel the uncollected prepay invoice — this customer’s monthly billing stays paused until it’s voided. {voidError}
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={voiding}
+                onClick={abortAndClose}
+                className="flex-1 rounded-full bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-60"
+                style={{ padding: '12px 16px', fontSize: 14 }}
+              >
+                {voiding ? 'Retrying…' : 'Retry'}
+              </button>
+              <button
+                type="button"
+                disabled={voiding}
+                onClick={() => onClose?.()}
+                className="flex-1 rounded-full border border-zinc-300 text-zinc-700 font-medium u-focus-ring disabled:opacity-60"
+                style={{ padding: '12px 16px', fontSize: 14 }}
+              >
+                Close (void from Invoices)
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <MobilePaymentSheet
         desktopVisible

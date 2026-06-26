@@ -2477,11 +2477,12 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       note,
     ].filter(Boolean).join('\n');
 
-    // Charge-in-person (Tap to Pay) defers the term to payment: mint the invoice
-    // with its coverage config in metadata and DON'T create the term or send a pay
-    // link. The Stripe webhook (syncTermForInvoicePayment) creates + activates the
-    // term when the invoice is paid, so an aborted in-person charge leaves no
-    // orphan payment_pending term.
+    // Charge-in-person (Tap to Pay) mints the invoice and creates the payment_pending
+    // term up front, exactly like the send path but WITHOUT delivering a pay link —
+    // the operator collects on the spot. The term reserves coverage + suppresses
+    // billing immediately; the webhook flips it active on payment, and an aborted
+    // charge is cleaned up by voiding the invoice (which cancels the term). Rejected
+    // for payer-billed customers below (their invoices can't be tendered in person).
     const chargeInPerson = req.body?.chargeInPerson === true;
     const InvoiceService = require('../services/invoice');
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
@@ -2506,15 +2507,16 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         dueDate,
       });
 
-      // Payer-billed customers can't be charged via the payment sheet (statement
-      // invoices reject card/cash/check tenders), so there's no in-person path to
-      // activate coverage — reject charge-in-person before committing. The operator
-      // sends the invoice instead (allowed: the term below suppresses billing).
-      // Re-read the persisted row because the payer-statement accrual is applied
-      // after the insert, so the create() return may not carry payer_statement_id.
+      // Payer-billed customers can't be charged in person: NET third-party invoices
+      // accrue to a payer statement, and due-on-receipt Bill-To invoices carry a
+      // payer_id (the terminal handoff rejects any payer_id — a tech must not collect
+      // the AP's invoice from the service-recipient flow). Block on EITHER payer field
+      // before committing; the operator sends the invoice instead (the term below
+      // suppresses billing meanwhile). Re-read the persisted row because the payer
+      // accrual/stamp is applied after the insert, so create()'s return may omit them.
       if (chargeInPerson) {
-        const minted = await trx('invoices').where({ id: invoice.id }).first('payer_statement_id');
-        if (minted?.payer_statement_id) {
+        const minted = await trx('invoices').where({ id: invoice.id }).first('payer_statement_id', 'payer_id');
+        if (minted?.payer_statement_id || minted?.payer_id) {
           const err = new Error("Charge in person isn't available for payer-billed customers — send the invoice instead.");
           err.chargeInPersonPayerBlocked = true;
           throw err;
