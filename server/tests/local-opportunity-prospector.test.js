@@ -96,6 +96,44 @@ describe('local-opportunity-prospector', () => {
     expect(types).toEqual(new Set(['sponsorship', 'event', 'chamber', 'community', 'podcast']));
   });
 
+  test('fetches all market×query SERPs through a bounded concurrency pool', async () => {
+    let inFlight = 0, maxInFlight = 0, calls = 0;
+    const dfs = {
+      serpOrganic: async () => {
+        calls++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return { tasks: [{ result: [{ items: [] }] }] };
+      },
+      serpMaps: async () => ({ tasks: [{ result: [{ items: [] }] }] }),
+    };
+    const markets = [{ label: 'A', location: 'a' }, { label: 'B', location: 'b' }];
+    const queries = Array.from({ length: 5 }, (_, i) => ({ type: 'community', tmpl: (c) => `${c} q${i}` }));
+    await discoverLocalOpportunities({ markets, queries, concurrency: 3, dfs });
+    expect(calls).toBe(10);                    // every market×query issued (2×5)
+    expect(maxInFlight).toBeLessThanOrEqual(3); // never exceeds the pool size
+    expect(maxInFlight).toBeGreaterThan(1);     // genuinely ran in parallel (not serial)
+  });
+
+  test('primary opportunity_type + landing page come from the best-ranked appearance (deterministic, not fetch order)', async () => {
+    const markets = [{ label: 'Venice', location: 'v' }];
+    // 'community' is listed first, but the domain ranks far better under 'sponsorship' —
+    // rank must decide the primary, so a concurrent sweep can't flip it between runs.
+    const queries = [
+      { type: 'community', tmpl: (c) => `${c} community calendar` },
+      { type: 'sponsorship', tmpl: (c) => `${c} little league sponsors` },
+    ];
+    const dfs = fakeDfs({
+      'Venice community calendar': [{ type: 'organic', domain: 'civichub.org', url: 'https://civichub.org/events', rank_absolute: 6 }],
+      'Venice little league sponsors': [{ type: 'organic', domain: 'civichub.org', url: 'https://civichub.org/sponsors', rank_absolute: 1 }],
+    });
+    const found = await discoverLocalOpportunities({ markets, queries, dfs });
+    const c = found.find((f) => f.domain === 'civichub.org');
+    expect(c.opportunity_type).toBe('sponsorship');               // best rank wins
+    expect(c.source_url).toBe('https://civichub.org/sponsors');   // landing page follows the same pick
+    expect(c.opportunity_types).toEqual(['community', 'sponsorship']); // sorted by query-order precedence
+  });
+
   test('excludeOwned drops domains we already have an active link from', () => {
     const candidates = [
       { domain: 'veniceyouthbaseball.org' },
