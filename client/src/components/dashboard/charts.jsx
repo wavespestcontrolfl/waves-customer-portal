@@ -344,6 +344,69 @@ export function RevenueTrendArea({ current = [], prior = [], height = 240 }) {
   );
 }
 
+// ─── Review trend area (monthly Google-review count) ──────────────
+
+// `trend` is an array of { month:'YYYY-MM', label:'Jul 2025', count, avgRating }.
+// Reviews are a positive metric, so the area is filled with CHART_SUCCESS like
+// the revenue trend. X-axis = the short month (e.g. 'Jul'), Y = monthly count.
+export function ReviewTrendChart({ trend = [], height = 240 }) {
+  if (!trend.length) return <EmptyState>No reviews yet</EmptyState>;
+  const data = trend.map((t) => ({
+    // Strip 'Jul 2025' → 'Jul'; fall back to the label or month key as-is.
+    month: (t.label || t.month || '').split(' ')[0] || t.month,
+    count: Number(t.count) || 0,
+    avgRating: t.avgRating ?? null,
+  }));
+  return (
+    <div style={{ height }}>
+      <ResponsiveContainer
+        width="100%"
+        height="100%"
+        minWidth={0}
+        initialDimension={RESPONSIVE_INITIAL_DIMENSION}
+      >
+        <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
+          <defs>
+            <linearGradient id="review-count" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={CHART_SUCCESS} stopOpacity={0.28} />
+              <stop offset="100%" stopColor={CHART_SUCCESS} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} vertical={false} />
+          <XAxis
+            dataKey="month"
+            tick={{ fill: CHART_TICK, fontSize: 10 }}
+            tickLine={false}
+            axisLine={{ stroke: CHART_GRID }}
+          />
+          <YAxis
+            tick={{ fill: CHART_TICK, fontSize: 10 }}
+            allowDecimals={false}
+            tickLine={false}
+            axisLine={false}
+            width={32}
+          />
+          <Tooltip
+            contentStyle={TOOLTIP_STYLE}
+            formatter={(v, _name, p) => {
+              const r = p?.payload?.avgRating;
+              return [r != null ? `${v} reviews · ${r}★` : `${v} reviews`, 'Reviews'];
+            }}
+          />
+          <Area
+            type="monotone"
+            dataKey="count"
+            stroke={CHART_SUCCESS}
+            strokeWidth={1.75}
+            fill="url(#review-count)"
+            isAnimationActive={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 // ─── Service mix donut ────────────────────────────────────────────
 
 // `mix` is an array of { category, service_count, pct_of_total, revenue }.

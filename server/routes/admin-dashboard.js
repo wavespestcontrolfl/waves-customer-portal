@@ -885,6 +885,61 @@ router.get('/mrr-trend', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/review-trend — last 12 ET months of Google reviews
+// (monthly count + avg star rating) plus all-time totals. Mirrors the
+// /mrr-trend 12-month window so the dashboard chart aligns month-for-month.
+router.get('/review-trend', dashboardCache, async (req, res, next) => {
+  try {
+    const now = new Date();
+    // Build the 12-month ET window (oldest → newest), each keyed YYYY-MM with a
+    // human label, the same way getMrrTrend walks back ET calendar months.
+    const window = [];
+    for (let i = 11; i >= 0; i--) {
+      const startDay = etMonthStart(now, -i); // 'YYYY-MM-01'
+      const ym = startDay.slice(0, 7); // 'YYYY-MM'
+      const label = parseETDateTime(`${startDay}T00:00`).toLocaleDateString('en-US', {
+        month: 'short',
+        year: 'numeric',
+        timeZone: 'America/New_York',
+      });
+      window.push({ ym, label });
+    }
+
+    const rows = await db('google_reviews')
+      .select(db.raw("to_char(review_created_at AT TIME ZONE 'America/New_York','YYYY-MM') as ym"))
+      .count('* as n')
+      .avg('star_rating as avg')
+      .groupByRaw("to_char(review_created_at AT TIME ZONE 'America/New_York','YYYY-MM')");
+
+    const byMonth = {};
+    for (const r of rows) {
+      byMonth[r.ym] = { count: parseInt(r.n, 10) || 0, avg: r.avg != null ? Number(r.avg) : null };
+    }
+
+    const trend = window.map((w) => {
+      const hit = byMonth[w.ym];
+      return {
+        month: w.ym,
+        label: w.label,
+        count: hit ? hit.count : 0,
+        avgRating: hit && hit.avg != null ? Math.round(hit.avg * 10) / 10 : null,
+      };
+    });
+
+    const totals = await db('google_reviews')
+      .count('* as total')
+      .avg('star_rating as avg')
+      .first();
+    const total = parseInt(totals?.total, 10) || 0;
+    const avgRating = totals?.avg != null ? Math.round(Number(totals.avg) * 10) / 10 : null;
+
+    res.json({ trend, total, avgRating, period: { label: 'Last 12 months' } });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /review-trend failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // GET /api/admin/dashboard/lead-source — customer acquisition by source (YTD)
 router.get('/lead-source', dashboardCache, async (req, res, next) => {
   try {

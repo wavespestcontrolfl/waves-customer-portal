@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Badge,
   Card,
@@ -21,6 +21,7 @@ import {
   KpiRing,
   KpiSparklineTile,
   MrrTrendChart,
+  ReviewTrendChart,
   RevenueByCity,
   RevenueTrendArea,
   ServiceMixDonut,
@@ -49,6 +50,15 @@ const greeting = () => {
   if (h < 17) return "Good afternoon";
   return "Good evening";
 };
+
+// Human-friendly "time since last refresh" label for the header control.
+function relativeTime(ts) {
+  if (ts == null) return "never";
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 30) return "just now";
+  if (s < 3600) return `${Math.max(1, Math.floor(s / 60))}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
 
 function adminFirstName() {
   try {
@@ -87,12 +97,17 @@ export default function DashboardPageV2() {
   const [channelMix, setChannelMix] = useState(null);
   const [mix, setMix] = useState(null);
   const [revenueByCity, setRevenueByCity] = useState(null);
+  const [reviewTrend, setReviewTrend] = useState(null);
   const [today, setToday] = useState(null);
   const [billing, setBilling] = useState(null);
   const [alerts, setAlerts] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [clockTick, setClockTick] = useState(0);
+  const mountedRef = useRef(true);
   const [period, setPeriod] = useState("mtd");
   const [showAllKpis, setShowAllKpis] = useState(false);
   const [kpisLoading, setKpisLoading] = useState(false);
@@ -100,72 +115,88 @@ export default function DashboardPageV2() {
   const [attributionLoading, setAttributionLoading] = useState(false);
   const [attributionError, setAttributionError] = useState(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    // Run the 11 fan-out fetches in two staggered waves so a fresh mount
-    // doesn't burst-trigger the per-user rate limiter (the original code
-    // fired all 11 simultaneously). The hero KPIs land first, then the
-    // attribution panels backfill.
+  // Run the 11 fan-out fetches in two staggered waves so a fresh mount
+  // doesn't burst-trigger the per-user rate limiter (the original code
+  // fired all 11 simultaneously). The hero KPIs land first, then the
+  // attribution panels backfill. Re-callable on an interval / manual refresh:
+  // every setState is guarded by mountedRef and loading is NEVER re-raised, so
+  // an auto/manual refresh swaps data in place without blanking the page.
+  const loadAll = useCallback(async () => {
     function track(label, p) {
       return p.catch((e) => {
         console.error(`[dashboard-v2] ${label}`, e);
-        if (!cancelled) setLoadError((prev) => prev || e);
+        if (mountedRef.current) setLoadError((prev) => prev || e);
         return null;
       });
     }
-    async function loadAll() {
-      const wave1 = await Promise.all([
-        track("/dashboard", adminFetch("/admin/dashboard")),
-        track(
-          "/compare",
-          adminFetch(
-            "/admin/dashboard/compare?period=this_month&against=last_month",
-          ),
+    const wave1 = await Promise.all([
+      track("/dashboard", adminFetch("/admin/dashboard")),
+      track(
+        "/compare",
+        adminFetch(
+          "/admin/dashboard/compare?period=this_month&against=last_month",
         ),
-        track(
-          "/sales-capture",
-          adminFetch("/admin/dashboard/sales-capture"),
-        ),
-        track(
-          "/today-completion",
-          adminFetch("/admin/dashboard/today-completion"),
-        ),
-        track("/billing-health", adminFetch("/admin/billing-health")),
-        track("/alerts", adminFetch("/admin/dashboard/alerts")),
-      ]);
-      const [d, cmp, sc, td, bh, al] = wave1;
-      if (cancelled) return;
-      setData(d);
-      setCompare(cmp);
-      setSalesCapture(sc);
-      setToday(td);
-      setBilling(bh?.summary || null);
-      setAlerts(Array.isArray(al?.alerts) ? al.alerts : []);
-      setLoading(false);
+      ),
+      track("/sales-capture", adminFetch("/admin/dashboard/sales-capture")),
+      track(
+        "/today-completion",
+        adminFetch("/admin/dashboard/today-completion"),
+      ),
+      track("/billing-health", adminFetch("/admin/billing-health")),
+      track("/alerts", adminFetch("/admin/dashboard/alerts")),
+    ]);
+    const [d, cmp, sc, td, bh, al] = wave1;
+    if (!mountedRef.current) return;
+    setData(d);
+    setCompare(cmp);
+    setSalesCapture(sc);
+    setToday(td);
+    setBilling(bh?.summary || null);
+    setAlerts(Array.isArray(al?.alerts) ? al.alerts : []);
+    setLoading(false);
 
-      const wave2 = await Promise.all([
-        track("/funnel", adminFetch("/admin/dashboard/funnel")),
-        track("/aging", adminFetch("/admin/dashboard/aging")),
-        track("/mrr-trend", adminFetch("/admin/dashboard/mrr-trend?months=12")),
-        track("/service-mix", adminFetch("/admin/dashboard/service-mix")),
-        track(
-          "/revenue-by-city",
-          adminFetch("/admin/dashboard/revenue-by-city"),
-        ),
-      ]);
-      if (cancelled) return;
-      const [fnl, ag, mrr, mx, rbc] = wave2;
-      setFunnel(fnl);
-      setAging(ag);
-      setMrrTrend(mrr);
-      setMix(mx);
-      setRevenueByCity(rbc);
-    }
-    loadAll();
-    return () => {
-      cancelled = true;
-    };
+    const wave2 = await Promise.all([
+      track("/funnel", adminFetch("/admin/dashboard/funnel")),
+      track("/aging", adminFetch("/admin/dashboard/aging")),
+      track("/mrr-trend", adminFetch("/admin/dashboard/mrr-trend?months=12")),
+      track("/service-mix", adminFetch("/admin/dashboard/service-mix")),
+      track("/revenue-by-city", adminFetch("/admin/dashboard/revenue-by-city")),
+      track("/review-trend", adminFetch("/admin/dashboard/review-trend")),
+    ]);
+    if (!mountedRef.current) return;
+    const [fnl, ag, mrr, mx, rbc, rev] = wave2;
+    setFunnel(fnl);
+    setAging(ag);
+    setMrrTrend(mrr);
+    setMix(mx);
+    setRevenueByCity(rbc);
+    setReviewTrend(rev);
+    setLastUpdated(Date.now());
   }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    loadAll();
+    // Auto-refresh every 3 min in place; a faster clock tick keeps the
+    // "Updated Nm ago" label fresh without re-fetching.
+    const auto = setInterval(() => loadAll(), 180000);
+    const tick = setInterval(() => setClockTick((t) => t + 1), 30000);
+    return () => {
+      mountedRef.current = false;
+      clearInterval(auto);
+      clearInterval(tick);
+    };
+  }, [loadAll]);
+
+  const refresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await loadAll();
+    } finally {
+      if (mountedRef.current) setRefreshing(false);
+    }
+  };
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -346,13 +377,28 @@ export default function DashboardPageV2() {
               </span>{" "}
             </h1>{" "}
           </div>{" "}
+          <div className="text-12 text-ink-tertiary flex items-center gap-1.5">
+            {/* clockTick keeps this label fresh between auto-refreshes */}
+            <span>Updated {relativeTime(lastUpdated, clockTick)}</span>{" "}
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={refreshing}
+              aria-label="Refresh dashboard"
+              className="hover:text-ink-secondary u-focus-ring"
+            >
+              <span className={`inline-block ${refreshing ? "animate-spin" : ""}`}>
+                ↻
+              </span>
+            </button>
+          </div>{" "}
         </div>{" "}
       </header>
       {alerts.length > 0 && <DashboardAlertsBanner alerts={alerts} />}
-      {/* Sales Capture hero — ServiceTitan-style captured-vs-missed gauge,
-          leads the dashboard content above the KPI sparkline row. */}
-      {salesCapture && (
-        <div className="mb-4 md:mb-5">
+      {/* Row 1: Sales Capture gauge + Revenue trend — capture rate next to the
+          revenue it drives. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
+        {salesCapture && (
           <ChartCard
             title="Sales Capture"
             sub={`${fmtMoney(salesCapture.captured)} captured of ${fmtMoney(
@@ -367,42 +413,56 @@ export default function DashboardPageV2() {
               lostCount={salesCapture.lostCount}
             />
           </ChartCard>
-        </div>
-      )}
-      {/* Hero KPI row — sparkline + delta */}
+        )}
+        <ChartCard
+          title={`Revenue — ${new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}`}
+          sub={
+            compare?.deltas?.revenue != null
+              ? `${compare.deltas.revenue >= 0 ? "↑" : "↓"} ${Math.abs(compare.deltas.revenue)}% vs ${compare.against?.label?.toLowerCase() || "prior period"}`
+              : "vs same days last month"
+          }
+          action={
+            <span className="text-12 text-ink-secondary">
+              MRR{" "}
+              <span className="u-nums font-medium text-zinc-900 ml-1">
+                {fmtMoney(data.mrr)}
+              </span>{" "}
+            </span>
+          }
+        >
+          <RevenueTrendArea
+            current={compare?.period?.series || data.revenueChart?.daily || []}
+            prior={compare?.against?.series || []}
+          />
+        </ChartCard>
+      </div>
+      {/* Row 2: Hero KPI row — sparkline + delta */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-4 md:mb-5">
         {HERO.map((h) => (
           <KpiSparklineTile key={h.label} {...h} />
         ))}
       </div>
-      {/* Row: Revenue trend (2/3) + Today completion gauge (1/3) */}
+      {/* Row 3: Reviews trend (2/3) + Today completion gauge (1/3) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
         {" "}
         <div className="md:col-span-2">
           {" "}
           <ChartCard
-            title={`Revenue — ${new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}`}
-            sub={
-              compare?.deltas?.revenue != null
-                ? `${compare.deltas.revenue >= 0 ? "↑" : "↓"} ${Math.abs(compare.deltas.revenue)}% vs ${compare.against?.label?.toLowerCase() || "prior period"}`
-                : "vs same days last month"
-            }
+            title="Reviews"
+            sub={`${reviewTrend?.total ?? 0} reviews · ${reviewTrend?.avgRating ?? "—"}★ avg`}
             action={
-              <span className="text-12 text-ink-secondary">
-                MRR{" "}
-                <span className="u-nums font-medium text-zinc-900 ml-1">
-                  {fmtMoney(data.mrr)}
-                </span>{" "}
-              </span>
+              kpis?.quality?.nps != null ? (
+                <span className="text-12 text-ink-secondary">
+                  Index{" "}
+                  <span className="u-nums font-medium text-zinc-900 ml-1">
+                    {kpis.quality.nps}
+                  </span>
+                </span>
+              ) : null
             }
           >
             {" "}
-            <RevenueTrendArea
-              current={
-                compare?.period?.series || data.revenueChart?.daily || []
-              }
-              prior={compare?.against?.series || []}
-            />{" "}
+            <ReviewTrendChart trend={reviewTrend?.trend || []} />{" "}
           </ChartCard>{" "}
         </div>{" "}
         <ChartCard
