@@ -208,7 +208,17 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const summaryHtml = summaryNote
     ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${summaryEscaped}</div>`
     : '';
-  const introWithSummary = summaryNote ? `${intro}${summaryHtml}` : intro;
+  // Operator-written personal thank-you note (invoice.email_message), rendered
+  // after the service summary and above the line-item table. Plain paragraph
+  // (no info-card chrome) so it reads as a personal note, distinct from the
+  // boxed service summary above it.
+  const thankYouNote = clean(invoice.email_message).slice(0, 800);
+  const thankYouEscaped = thankYouNote
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const thankYouHtml = thankYouNote
+    ? `<div style="margin-top:16px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${thankYouEscaped}</div>`
+    : '';
+  const introWithSummary = `${intro}${summaryHtml}${thankYouHtml}`;
   const lines = [
     ['Invoice', invoice.invoice_number],
     ['Service', invoice.service_type || '—'],
@@ -232,6 +242,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     '',
     intro,
     summaryNote || null,
+    thankYouNote || null,
     '',
     `Invoice: ${invoice.invoice_number}`,
     invoice.service_type ? `Service: ${invoice.service_type}` : null,
@@ -259,6 +270,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           service_label: invoice.service_type || '',
           service_date: invoice.service_date ? formatDateOnly(invoice.service_date) : '',
           invoice_summary: summaryNote,
+          invoice_message: thankYouNote,
           attachment_note: extraAttachmentCount > 0
             ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
             : 'Your PDF invoice is attached.',
