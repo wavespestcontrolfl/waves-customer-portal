@@ -63,9 +63,19 @@ exports.up = async function up(knex) {
   const at = summaryIdx !== -1 ? summaryIdx + 1 : (blocks.length ? 1 : 0);
   const newBlocks = [...blocks.slice(0, at), NEW_BLOCK, ...blocks.slice(at)];
 
+  // Number from the LATEST version across ALL statuses, not the active one —
+  // an unpublished draft may already hold active.version_number + 1, and
+  // (template_id, version_number) is unique, so deriving from `active` would
+  // collide and abort the deploy. Matches the existing publish path.
+  const latest = await knex('email_template_versions')
+    .where({ template_id: tmpl.id })
+    .orderBy('version_number', 'desc')
+    .first();
+  const nextVersion = (latest?.version_number || 0) + 1;
+
   const [version] = await knex('email_template_versions').insert({
     template_id: tmpl.id,
-    version_number: (active.version_number || 0) + 1,
+    version_number: nextVersion,
     status: 'active',
     subject: active.subject,
     preview_text: active.preview_text || null,
