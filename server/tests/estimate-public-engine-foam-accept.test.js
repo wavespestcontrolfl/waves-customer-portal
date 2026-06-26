@@ -3,7 +3,6 @@ const {
   withSupplementedRecurringServices,
   foamFrequenciesFromEngineResult,
   buildPricingBundle,
-  shapeFromV1,
 } = require('../routes/estimate-public.js');
 const { _internals: { durationForService } } = require('../services/estimate-slot-availability.js');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine.js');
@@ -221,23 +220,6 @@ describe('engineInputs-only foam estimate is schedulable on accept (no stored re
     const supplemented = withSupplementedRecurringServices(inputsOnly());
     const { recurringSvcList } = acceptanceServiceLists(supplemented);
     expect(recurringSvcList.some((s) => (s.service || s.key) === 'foam_recurring')).toBe(true);
-  });
-});
-
-describe('shapeFromV1 keeps foam cent-exact in a mixed (pest + foam) bundle', () => {
-  test('mixed annual uses the foam line’s exact annual, not monthly×12', () => {
-    const v1 = {
-      discount: 0,
-      manualDiscount: null,
-      services: [
-        { name: 'Pest Control', service: 'pest_control', mo: 50, ann: 600, perTreatment: 150, visitsPerYear: 4 },
-        { name: 'Recurring Foam (Quarterly)', service: 'foam_recurring', mo: 92.33, annual: 1108, perTreatment: 277, visitsPerYear: 4 },
-      ],
-    };
-    const pestTier = { mo: 50, ann: 600, apps: 4, pa: 150, label: 'Quarterly' };
-    const f = shapeFromV1(v1, { key: 'quarterly', label: 'Quarterly' }, pestTier, {});
-    expect(f.annual).toBe(1708); // 600 pest + 1108 foam (not 600 + 1107.96)
-    expect(f.monthly).toBe(142.33); // monthly stays mo-based
   });
 });
 

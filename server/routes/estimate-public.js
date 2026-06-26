@@ -10831,20 +10831,7 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const manualDiscount = manualDiscountForRecurringBase(v1.manualDiscount, manualDiscountableAnnual);
   const manualDiscountMonthly = Number(manualDiscount?.monthlyAmount || 0);
   const totalMoAfter = Math.max(0, Math.round((pestMoAfter + nonPestMoAfter - manualDiscountMonthly - monthlyOff) * 100) / 100);
-  // foam_recurring is cadence-priced (perVisit × visits, integer) and non-
-  // discountable, so its exact annual (e.g. 1108) isn't its rounded mo × 12
-  // (1107.96). Correct the bundle annual by that delta so a foam-in-mix plan
-  // locks/invoices the sold total to the cent (monthly stays mo-based).
-  const foamAnnualCorrection = pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
-    if (recurringServiceKey(svc) !== 'foam_recurring') return sum;
-    const exact = Number(svc?.annual ?? svc?.ann);
-    const mo = Number(svc?.mo ?? svc?.monthly);
-    if (Number.isFinite(exact) && exact > 0 && Number.isFinite(mo) && mo > 0) {
-      return sum + (exact - Math.round(mo * 12 * 100) / 100);
-    }
-    return sum;
-  }, 0);
-  const totalAnnAfter = Math.round((totalMoAfter * 12 + foamAnnualCorrection) * 100) / 100;
+  const totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
   const treatmentDisplayPrice = (perTreatment, svc) => {
     const amount = Number(perTreatment);
     if (!Number.isFinite(amount) || amount <= 0) return null;
@@ -11595,7 +11582,6 @@ module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.foamFrequenciesFromEngineResult = foamFrequenciesFromEngineResult;
-module.exports.shapeFromV1 = shapeFromV1;
 module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;
 module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.attachPublicPricingContract = attachPublicPricingContract;
