@@ -3273,7 +3273,11 @@ export default function EstimateToolViewV2({
       // the home/lot footprint, so a Bora-Care-only quote must not be gated on it.
       const boraCareOnly =
         selectedServices.length === 1 && selectedServices[0] === "BORACARE";
-      if (!bedBugOnly && !preSlabOnly && !boraCareOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+      // Recurring foam is priced from drill points + cadence, not home/lot size,
+      // so an operator can quote it before a property lookup (or with no sqft).
+      const foamRecurringOnly =
+        selectedServices.length === 1 && selectedServices[0] === "FOAM_RECURRING";
+      if (!bedBugOnly && !preSlabOnly && !boraCareOnly && !foamRecurringOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert("Enter home sq ft or lot size.");
         return null;
       }

@@ -9806,6 +9806,17 @@ function foamFrequenciesFromV1Services(services = []) {
   }];
 }
 
+// Engine-invocation path: build the foam frequency from the live engine result's
+// foam_recurring line item (carries cadence/visitsPerYear/monthly/perVisit), so
+// an engineInputs/engineResult foam quote isn't exposed as the default quarterly
+// FREQUENCY_LADDER[0] entry.
+function foamFrequenciesFromEngineResult(engineResult = {}) {
+  const lineItems = Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [];
+  const foam = lineItems.find((li) => li && (li.service === 'foam_recurring' || recurringServiceKey(li) === 'foam_recurring'));
+  if (!foam) return [];
+  return foamFrequenciesFromV1Services([foam]);
+}
+
 function quoteRequiredFromFrequency(frequency = {}) {
   return frequency?.quoteRequired === true
     || frequency?.kind === 'quote_required'
@@ -11042,8 +11053,11 @@ async function buildPricingBundle(estimate) {
       // the v1 result.results.lawn path. Mixed bundles and other single-service
       // estimates keep the existing single-entry view.
       const lawnFreqs = lawnFrequenciesFromEngineResult(engineResult, estData);
+      const foamFreqs = lawnFreqs.length ? [] : foamFrequenciesFromEngineResult(engineResult);
       if (lawnFreqs.length) {
         frequencies.push(...lawnFreqs);
+      } else if (foamFreqs.length) {
+        frequencies.push(...foamFreqs);
       } else {
         frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
       }

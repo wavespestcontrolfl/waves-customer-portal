@@ -116,16 +116,18 @@ describe('estimate converter annual prepay amount', () => {
       estimateData: { result: { lineItems: [] } },
     })).toEqual({ amount: 660, discount: 0, rate: 0 });
 
-    // No-fee mix with a non-discountable (non-lawn) line: the margin floor caps the
-    // 5% so the invoiced/displayed total never dips below the protected amount.
+    // No-fee mix with a non-discountable (non-lawn) line: the 5% applies ONLY to
+    // the discountable remainder. The protected line is split out first and added
+    // back at full price, so the prepay % never bleeds onto it (e.g. foam, whose
+    // cadence multiplier is its only discount).
     const floored = resolveAnnualPrepayInvoiceTotal({
       baseAnnual: 660,
       recurringServices: [{ service: 'tree_shrub', name: 'Tree & Shrub' }],
       estimateData: { result: { lineItems: [{ service: 'tree_shrub', annual: 650, discountable: false }] } },
     });
-    expect(floored.amount).toBe(650); // max(627, 650)
-    expect(floored.discount).toBe(10); // 660 - 650, less than a full 5%
-    expect(floored.rate).toBeCloseTo(0.0152, 4);
+    expect(floored.amount).toBe(659.5); // 650 protected + 5% off only the $10 discountable remainder
+    expect(floored.discount).toBe(0.5);
+    expect(floored.rate).toBeCloseTo(0.0008, 4);
   });
 
   test('all recurring pay-per-application accepts create invoices', () => {

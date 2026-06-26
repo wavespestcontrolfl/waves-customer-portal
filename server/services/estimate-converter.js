@@ -628,9 +628,14 @@ function resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices = [], e
   const base = Math.round((Number(baseAnnual) || 0) * 100) / 100;
   if (!(base > 0)) return { amount: 0, discount: 0, rate: 0 };
   const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
-  const discounted = Math.round(base * (1 - discountRate) * 100) / 100;
-  const floor = nonDiscountableRecurringAnnualFloor(estimateData);
-  const amount = Math.max(discounted, floor);
+  // Apply the prepay % ONLY to the discountable portion. Non-discountable
+  // recurring lines (e.g. foam_recurring, whose cadence multiplier is its only
+  // discount) are split out first and added back at full price — otherwise a
+  // mixed plan (foam + lawn) would still bleed part of the 5% onto foam because
+  // a simple max(discounted, floor) clamp only protects foam-heavy mixes.
+  const floor = Math.min(base, nonDiscountableRecurringAnnualFloor(estimateData));
+  const discountableBase = Math.max(0, Math.round((base - floor) * 100) / 100);
+  const amount = Math.round((floor + discountableBase * (1 - discountRate)) * 100) / 100;
   const discount = Math.max(0, Math.round((base - amount) * 100) / 100);
   return { amount, discount, rate: Math.round((discount / base) * 10000) / 10000 };
 }

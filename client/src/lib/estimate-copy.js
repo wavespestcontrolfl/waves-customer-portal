@@ -72,6 +72,21 @@ export const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for this plan.",
     },
   },
+  foam_recurring: {
+    headline: "Hey {first}, choose your recurring foam treatment option.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your foam treatment scope before pricing this plan',
+    aiBody: 'We reviewed the drill points and treatment areas before pricing this recurring foam plan.',
+    askChips: [
+      'What does each visit cover?',
+      'How often do you come out?',
+      'Can I prepay annually?',
+      'What about active termites?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this plan.",
+    },
+  },
   termite_trenching: {
     headline: "Hey {first}, here's your termite trenching quote.",
     aiEyebrow: 'Waves AI',
