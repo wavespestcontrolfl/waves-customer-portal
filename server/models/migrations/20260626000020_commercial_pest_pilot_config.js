@@ -73,16 +73,13 @@ function stableStringify(value) {
 }
 
 exports.down = async function (knex) {
-  // Only remove the row if this migration's up() created it (keyed off the audit
-  // row) AND the current config still matches what we seeded. If an operator
-  // tuned the values in the admin Pricing Logic panel, the row no longer matches
-  // the seed, so rollback leaves the edited production config in place.
-  if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
-  const ownUp = await knex('pricing_config_audit')
-    .where({ config_key: CONFIG_KEY, changed_by: MIGRATION_TAG, reason: UP_REASON })
-    .first('id');
-  if (!ownUp) return;
-
+  // Remove the row only if it still matches what we seeded. The config_key is
+  // unique and introduced by this migration, so a seed-matching row can only be
+  // our untouched insert — safe to drop. If an operator tuned the values in the
+  // admin Pricing Logic panel the row no longer matches the seed, so rollback
+  // leaves the edited production config in place. Keying on the seed (not the
+  // audit row) means rollback also cleans up in environments where
+  // `pricing_config_audit` doesn't exist but up() still inserted the row.
   if (await knex.schema.hasTable('pricing_config')) {
     const row = await knex('pricing_config').where({ config_key: CONFIG_KEY }).first();
     if (row) {
@@ -91,7 +88,9 @@ exports.down = async function (knex) {
       await knex('pricing_config').where({ config_key: CONFIG_KEY }).del();
     }
   }
-  await knex('pricing_config_audit')
-    .where({ config_key: CONFIG_KEY, changed_by: MIGRATION_TAG, reason: UP_REASON })
-    .del();
+  if (await knex.schema.hasTable('pricing_config_audit')) {
+    await knex('pricing_config_audit')
+      .where({ config_key: CONFIG_KEY, changed_by: MIGRATION_TAG, reason: UP_REASON })
+      .del();
+  }
 };

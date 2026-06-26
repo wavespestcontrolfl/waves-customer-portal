@@ -1739,6 +1739,7 @@ function EstimateToolView() {
           onetimeLawnType: form.otLawnType || "FERT",
           commercialPricingMode: form.commercialPricingMode || "manual_quote",
           commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
+          units: formIsCommercial ? parseInt(form.units, 10) || 0 : 0,
         };
         if (form.svcInjection) {
           options.palmInjection = {

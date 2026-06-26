@@ -5,6 +5,7 @@ const {
   normalizeProposal,
   computeProposalTotals,
 } = require('../services/estimate-proposal');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 
 function commercialInput(overrides = {}) {
   return {
@@ -154,6 +155,43 @@ describe('priceCommercialPestPilot through generateEstimate', () => {
     const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
     expect(pest).toMatchObject({ commercialPricingMode: 'manual_quote', quoteRequired: true });
     expect(pest.suggestedAnnual).toBeUndefined();
+  });
+
+  test('prices off gross area supplied only as livingAreaSqFt (no homeSqFt/buildingSqFt)', () => {
+    const estimate = generateEstimate({
+      propertyType: 'commercial', isCommercial: true,
+      livingAreaSqFt: 5000, stories: 1, lotSqFt: 20000, features: {},
+      services: { pest: { frequency: 'quarterly', commercialPricingMode: 'small_commercial_pilot' } },
+    });
+    const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(pest.commercialPricingMode).toBe('small_commercial_pilot');
+    expect(pest.suggestedAnnual).toBe(660);
+  });
+
+  test('the suggested price is surfaced in the line reason (operator-visible)', () => {
+    const estimate = generateEstimate(commercialInput());
+    const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(pest.reason).toMatch(/suggested \$660/);
+  });
+});
+
+describe('proposal synthesizes from the SAVED legacy spec-item shape', () => {
+  test('an admin-saved pilot estimate still shows the suggested price + FL tax', () => {
+    // Admin save persists mapV1ToLegacyShape output under estimate_data.result —
+    // there is no top-level lineItems array.
+    const result = mapV1ToLegacyShape(generateEstimate(commercialInput()));
+    const proposal = normalizeProposal({
+      address: '9 Plaza Dr',
+      estimate_data: JSON.stringify({ result }),
+    });
+
+    expect(proposal.taxRate).toBeCloseTo(0.07, 4);
+    expect(proposal.buildings[0].lineItems).toContainEqual(expect.objectContaining({
+      description: 'Commercial Pest Control',
+      taxable: true,
+    }));
+    const totals = computeProposalTotals(proposal);
+    expect(totals.totalTax).toBeCloseTo(46.2, 2); // 660 × 7%
   });
 });
 

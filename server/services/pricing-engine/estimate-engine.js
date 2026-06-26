@@ -591,6 +591,11 @@ function generateEstimate(input) {
             buildings: pestOpts.buildings || commercialPestOpts.buildings || input.commercialBuildings,
             units: pestOpts.units ?? commercialPestOpts.units ?? input.units,
             stories: pestOpts.stories ?? commercialPestOpts.stories ?? input.stories ?? property.stories,
+            // Pass the gross building area straight from the raw input — the
+            // property profile doesn't preserve every gross-area alias
+            // (e.g. livingAreaSqFt), so don't make the pilot depend on it.
+            fallbackSqFt: input.buildingSqFt ?? input.homeSqFt ?? input.livingAreaSqFt
+              ?? input.footprintSqFt ?? input.footprint,
           })
         : null;
       if (pilotResult) {

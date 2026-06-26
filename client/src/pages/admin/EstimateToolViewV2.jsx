@@ -3133,6 +3133,7 @@ export default function EstimateToolViewV2({
         onetimeLawnType: form.otLawnType || "FERT",
         commercialPricingMode: form.commercialPricingMode || "manual_quote",
         commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
+        units: formIsCommercial ? parseInt(form.units, 10) || 0 : 0,
         fleaOfferKey: form.fleaOfferKey || "flea_elimination_two_visit",
         fleaComplexity: form.fleaComplexity || "light",
         fleaExteriorSourceSuspected: !!form.fleaExteriorSourceSuspected,

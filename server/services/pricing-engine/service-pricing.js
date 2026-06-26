@@ -1608,6 +1608,11 @@ function nonNegativeInt(value) {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
 }
 
+function formatUsd(value) {
+  const n = Number(value) || 0;
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+}
+
 // Normalize the list of buildings the pilot prices. Accepts an explicit
 // `options.buildings` array (mixed complexes — e.g. a 2-story + a 1-story
 // building, each with its own sqft/stories/units), or falls back to a single
@@ -1617,9 +1622,11 @@ function resolveCommercialBuildings(property = {}, options = {}) {
     ? options.buildings
     : [{
         // Gross building area first; derived footprint last (see
-        // resolveCommercialBuildingSqFt).
-        sqft: property.buildingSqFt ?? property.homeSqFt ?? property.livingAreaSqFt
-          ?? property.footprintSqFt ?? property.footprint,
+        // resolveCommercialBuildingSqFt). `options.fallbackSqFt` is the gross
+        // area forwarded from the raw estimate input — preferred over the
+        // property profile, which doesn't preserve every gross-area alias.
+        sqft: options.fallbackSqFt ?? property.buildingSqFt ?? property.homeSqFt
+          ?? property.livingAreaSqFt ?? property.footprintSqFt ?? property.footprint,
         stories: options.stories ?? property.stories,
         units: options.units ?? property.units,
       }];
@@ -1692,7 +1699,8 @@ function priceCommercialPestPilot(property, options = {}) {
 
   const multi = buildingBreakdown.length > 1;
   const reasonParts = [
-    `Small-commercial pilot — suggested quarterly GPC, ${buildingBreakdown.length} building${multi ? 's' : ''}`,
+    `Small-commercial pilot — suggested ${formatUsd(suggestedAnnual)}/yr (${formatUsd(suggestedMonthly)}/mo, ${formatUsd(suggestedPerApp)}/visit ${frequency})`,
+    `${buildingBreakdown.length} building${multi ? 's' : ''}`,
     totalUnits > 0 ? `${totalUnits} unit${totalUnits === 1 ? '' : 's'}` : null,
     'requires admin approval before sending',
   ].filter(Boolean);

@@ -111,10 +111,29 @@ function parseEstimateData(estimateData) {
 function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
   const lineItems = [];
   const engineLines = Array.isArray(estimateData?.sendSnapshot?.pricingBundle?.lineItems)
-    ? estimateData.sendSnapshot.pricingBundle.lineItems
+    ? [...estimateData.sendSnapshot.pricingBundle.lineItems]
     : Array.isArray(estimateData?.lineItems)
-    ? estimateData.lineItems
+    ? [...estimateData.lineItems]
     : [];
+
+  // An admin-saved estimate persists the legacy `mapV1ToLegacyShape` output, not
+  // a top-level `lineItems` array, so the small-commercial pilot line lives in
+  // `result.(oneTime.)specItems`. Pull the commercial pilot line(s) from there
+  // (by service key, deduped) so a saved pilot estimate still synthesizes a
+  // proposal with the suggested price + tax instead of an empty $0 PDF.
+  const specSources = [
+    ...(Array.isArray(estimateData?.result?.oneTime?.specItems) ? estimateData.result.oneTime.specItems : []),
+    ...(Array.isArray(estimateData?.result?.specItems) ? estimateData.result.specItems : []),
+    ...(Array.isArray(estimateData?.engineResult?.oneTime?.specItems) ? estimateData.engineResult.oneTime.specItems : []),
+    ...(Array.isArray(estimateData?.engineResult?.specItems) ? estimateData.engineResult.specItems : []),
+  ];
+  for (const s of specSources) {
+    const svc = String(s?.service || '');
+    const hasSuggested = num(s?.suggestedMonthly) > 0 || num(s?.suggestedAnnual) > 0;
+    if (svc.startsWith('commercial_') && hasSuggested && !engineLines.some((l) => l.service === svc)) {
+      engineLines.push(s);
+    }
+  }
 
   // A taxable commercial line (e.g. the small-commercial pest pilot) pre-fills a
   // default FL commercial tax rate so the synthesized PDF shows tax. Residential
