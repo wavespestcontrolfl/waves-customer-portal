@@ -10,7 +10,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
-const { generateInvoiceSummary } = require('../services/invoice-ai-summary');
+const { generateInvoiceSummary, generateThankYouMessage } = require('../services/invoice-ai-summary');
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
@@ -512,6 +512,27 @@ router.post('/notes/ai', requireAdmin, async (req, res, next) => {
   }
 });
 
+// POST /email-message/ai — draft a short, warm thank-you message for the
+// invoice email body (separate from the service summary; never on the PDF).
+router.post('/email-message/ai', requireAdmin, async (req, res, next) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+
+    const result = await generateThankYouMessage({
+      customerName: req.body.customerName,
+      serviceType: req.body.serviceType,
+      input: req.body.input,
+    });
+    if (result.error) return res.status(400).json({ error: result.error });
+
+    logger.info(`[invoices] ai-thank-you ${result.message.length} chars`);
+    res.json({ message: result.message });
+  } catch (err) {
+    logger.error(`[invoices] ai-thank-you failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // GET /:id/recipients — preview invoice delivery recipients before sending
 router.get('/:id/recipients', requireAdmin, async (req, res, next) => {
   try {
@@ -588,7 +609,7 @@ router.delete('/:id/attachments/:attachmentId', requireAdmin, async (req, res, n
 // POST / — create invoice manually
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const { customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate, discountIds, serviceDate } = req.body;
+    const { customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
     if (serviceDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(serviceDate))) {
@@ -596,7 +617,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
 
     const invoice = await InvoiceService.create({
-      customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate, discountIds, serviceDate,
+      customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
     });
 
     const domain = publicPortalUrl();
