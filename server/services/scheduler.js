@@ -2352,6 +2352,33 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:45AM — Meta Conversions API upload (Lead + Purchase)
+  // Opt-in via META_CAPI_CRON_ENABLED. uploadConversions self-serializes (per
+  // type) and honours META_CAPI_ALLOW_UPLOADS / _TEST_EVENT_CODE, so it sends
+  // real events only when explicitly allowed; otherwise it dry-runs to Test
+  // Events (or no-ops). De-duped per event_id.
+  // =========================================================================
+  cron.schedule('45 6 * * *', async () => {
+    if (process.env.META_CAPI_CRON_ENABLED !== 'true') return;
+    logger.info('Running: Meta Conversions API upload');
+    try {
+      const MetaCapi = require('./ads/meta-data-manager');
+      for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
+        const r = await MetaCapi.uploadConversions({
+          conversionType, periodDays: 90, limit: 500, validateOnly: false,
+        });
+        logger.info(`[meta-capi cron] ${conversionType}: ${JSON.stringify({
+          configured: r.configured, skipped: r.skipped || false, testMode: r.testMode,
+          sent: r.sent, validated: r.validated, eventsReceived: r.eventsReceived,
+          candidates: r.candidates, error: r.error || null,
+        })}`);
+      }
+    } catch (err) {
+      logger.error(`Meta Conversions API upload failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6AM — Sync Google Search Console data (hub + all spoke domains)
   //
   // syncAllDomains walks NETWORK_DOMAINS in order (hub first) and catches
