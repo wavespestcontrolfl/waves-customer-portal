@@ -325,13 +325,19 @@ async function markEnRoute(serviceId, opts = {}) {
 
   // One-time "introducing the app" email for a new recurring customer's first
   // visit — fired here so it lands exactly when "watch your tech arrive live"
-  // is true. Best-effort and fully self-gating (flag + recurring + first-visit
-  // + per-customer idempotency); never affects the transition result.
+  // is true. FIRE-AND-FORGET: the en-route endpoints await markEnRoute(), and
+  // this send includes a SendGrid call with no timeout, so we must NOT await it
+  // — the state change + track-link SMS have already landed and a slow provider
+  // can't be allowed to stall the technician's request. Self-gating (flag +
+  // recurring + first-visit + per-customer idempotency); never affects the
+  // transition result.
   try {
     const RecurringAppIntro = require('./recurring-app-intro-email');
-    await RecurringAppIntro.maybeSendOnEnRoute(svc);
+    RecurringAppIntro.maybeSendOnEnRoute(svc).catch((err) => {
+      logger.error(`[track-transitions] app-intro email hook failed: ${err.message}`);
+    });
   } catch (err) {
-    logger.error(`[track-transitions] app-intro email hook failed: ${err.message}`);
+    logger.error(`[track-transitions] app-intro email hook failed to start: ${err.message}`);
   }
 
   return {

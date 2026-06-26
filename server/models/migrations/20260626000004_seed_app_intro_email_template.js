@@ -82,8 +82,13 @@ function templateRow(t) {
     audience: 'customer',
     message_priority: 'normal',
     content_sensitivity: t.sensitivity || 'account',
-    send_stream: 'transactional_required',
-    suppression_group_key: 'transactional_required',
+    // Onboarding/app-download content — NOT a required security/payment/legal
+    // notice. Use the service_operational stream so customer unsubscribes are
+    // honored (transactional_required would bypass them). The library downgrades
+    // the sender's transactional override to this stream because the template
+    // can't bypass. Group is seeded centrally in 20260518000001.
+    send_stream: 'service_operational',
+    suppression_group_key: 'service_operational',
     layout_wrapper_id: 'service_default_v1',
     from_name: 'Waves Pest Control',
     from_email: SERVICE_FROM,
@@ -96,25 +101,6 @@ function templateRow(t) {
     status: 'active',
     updated_at: new Date(),
   };
-}
-
-async function ensureTransactionalGroup(knex) {
-  if (!(await knex.schema.hasTable('email_preference_groups'))) return;
-  const row = {
-    key: 'transactional_required',
-    name: 'Required account notices',
-    description: 'Security, payment, legal, and account notices that must reach the customer.',
-    send_stream: 'transactional_required',
-    user_can_unsubscribe: false,
-    sort_order: 10,
-    updated_at: new Date(),
-  };
-  const existing = await knex('email_preference_groups').where({ key: row.key }).first();
-  if (existing) {
-    await knex('email_preference_groups').where({ key: row.key }).update(row);
-  } else {
-    await knex('email_preference_groups').insert({ ...row, created_at: new Date() });
-  }
 }
 
 async function upsertTemplate(knex, t) {
@@ -185,7 +171,6 @@ exports.up = async function up(knex) {
   const hasTables = await knex.schema.hasTable('email_templates')
     && await knex.schema.hasTable('email_template_versions');
   if (!hasTables) return;
-  await ensureTransactionalGroup(knex);
   await upsertTemplate(knex, TEMPLATE);
 };
 
