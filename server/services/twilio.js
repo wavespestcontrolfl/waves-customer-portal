@@ -800,7 +800,22 @@ const TwilioService = {
       );
     }
 
-    return { success: results.some((r) => r?.sent), results };
+    if (results.some((r) => r?.sent)) return { success: true, results };
+
+    // Nothing delivered. Distinguish a RETRYABLE miss from deterministic
+    // suppression so the caller knows whether to release its arrival guard:
+    //  - retryable: a quiet-hours hold or a transient provider failure (both
+    //    carry retryable:true from sendCustomerMessage), or the template was
+    //    missing for every contact (results empty → re-seed fixes it).
+    //  - suppressed: every attempt was blocked/terminal for a deterministic
+    //    reason (STOP/wrong-number/manual-DNC suppression, consent, a non-mobile
+    //    or otherwise terminal provider result). Retrying can't change those, so
+    //    the arrival is HANDLED — the caller must keep the guard stamped, else a
+    //    later same-job signal could fire a stale "has arrived" if the
+    //    suppression/number is fixed while the job is still on-property.
+    const anyRetryable = results.length === 0 || results.some((r) => r?.retryable);
+    if (anyRetryable) return { success: false, results };
+    return { success: false, suppressed: true, reason: "blocked", results };
   },
 
   /**

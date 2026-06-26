@@ -207,6 +207,57 @@ describe("TwilioService.sendTechEnRoute", () => {
     expect(result).toMatchObject({ success: false, suppressed: true, reason: "opt_out" });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
+
+  test("sendTechArrived reports suppressed when every send is blocked terminally (DNC/non-mobile)", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: true }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    smsTemplates.getTemplate.mockResolvedValue("Hello Sam! Bryan has arrived.");
+    // Manual-DNC / wrong-number suppression — blocked and NOT retryable.
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      blocked: true,
+      code: "SUPPRESSED_WRONG_NUMBER",
+      retryable: false,
+    });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan");
+
+    // Deterministic terminal block — retrying can't help, so the arrival is
+    // handled and the caller must keep its guard stamped.
+    expect(result).toMatchObject({ success: false, suppressed: true, reason: "blocked" });
+  });
+
+  test("sendTechArrived stays retryable (not suppressed) on a quiet-hours / transient miss", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: true }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    smsTemplates.getTemplate.mockResolvedValue("Hello Sam! Bryan has arrived.");
+    // Quiet-hours hold is explicitly retryable.
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      blocked: true,
+      code: "QUIET_HOURS_HOLD",
+      retryable: true,
+    });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan");
+
+    // A retryable miss must NOT be marked suppressed — the caller releases the
+    // guard so a later signal can try again once the hold clears.
+    expect(result.success).toBe(false);
+    expect(result.suppressed).toBeFalsy();
+  });
 });
 
 describe("TwilioService.sendServiceReminder", () => {
