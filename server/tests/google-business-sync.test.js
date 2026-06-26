@@ -64,6 +64,7 @@ function createDbMock(initialRows = {}) {
         return rows
           .filter(row => matchesWhere(row, this._where))
           .filter(row => this._rawFilters.every(fn => fn(row)))
+          .filter(row => !this._whereNull || row[this._whereNull] == null)
           .find(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value)) || null;
       },
       insert(record) {
@@ -514,5 +515,37 @@ describe('Google Business review sync', () => {
     await service.syncAllReviews();
 
     expect((db.__state.rows.notifications || []).filter(n => n.category === 'review')).toHaveLength(0);
+  });
+
+  test('alerts admin when a review name matches only a soft-deleted customer', async () => {
+    db.__state.rows.customers.push({
+      id: 'cust-deleted',
+      first_name: 'John',
+      last_name: 'Doe',
+      has_left_google_review: false,
+      review_marked_at: null,
+      deleted_at: '2026-05-01T00:00:00Z', // soft-deleted → not a real link
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-1',
+        reviewer: { displayName: 'John Doe' },
+        starRating: 'FIVE',
+        comment: 'Great work',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    // The deleted record is never auto-flagged...
+    expect(db.__state.rows.customers.find(c => c.id === 'cust-deleted').has_left_google_review).toBe(false);
+    // ...and the review still surfaces for manual matching.
+    const alert = (db.__state.rows.notifications || []).find(n => n.category === 'review');
+    expect(alert).toBeTruthy();
+    expect(alert.title).toContain('John Doe');
   });
 });

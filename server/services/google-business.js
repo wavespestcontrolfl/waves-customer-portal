@@ -365,7 +365,13 @@ class GoogleBusinessService {
 
   async _findCustomerIdByReviewerName(reviewerName) {
     if (!reviewerName || reviewerName === 'Anonymous') return null;
+    // Exclude soft-deleted customers: linking a review to a deleted record
+    // would silently suppress both the auto-mark (the flip no-ops on
+    // deleted_at) AND the unlinked-review alert, dropping the review from the
+    // manual-match queue. Treating a deleted-only name match as "no match"
+    // routes it to the admin notification instead.
     const customer = await db('customers')
+      .whereNull('deleted_at')
       .whereRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))) = LOWER(?)", [reviewerName])
       .first();
     return customer?.id || null;
@@ -442,7 +448,9 @@ class GoogleBusinessService {
           },
         },
       );
-      logger.info(`[gbp] Unlinked review from ${reviewer} (${locName}) — admin notified`);
+      // ID-only logging — reviewer display names are PII (AGENTS.md). The
+      // name rides in the admin notification, not the plaintext log.
+      logger.info(`[gbp] Unlinked review (${row.google_review_id || 'unknown id'}) at ${locName} — admin notified`);
     } catch (err) {
       logger.warn(`[gbp] Unlinked-review notify failed: ${err.message}`);
     }
