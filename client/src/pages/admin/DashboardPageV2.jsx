@@ -307,6 +307,12 @@ export default function DashboardPageV2() {
     day: "numeric",
     year: "numeric",
   });
+  // Recomputed on each clockTick (30s) re-render so the header clock stays current.
+  void clockTick;
+  const timeLabel = new Date().toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
   const firstName = adminFirstName();
   const mrrTrendSub =
     mrrTrend?.avg_growth_pct != null
@@ -362,7 +368,7 @@ export default function DashboardPageV2() {
           <div>
             {" "}
             <div className="u-label text-ink-secondary max-md:text-13 max-md:tracking-normal max-md:normal-case max-md:font-medium max-md:text-zinc-500">
-              {todayLabel}
+              {todayLabel} · {timeLabel}
             </div>{" "}
             <h1 className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2">
               {" "}
