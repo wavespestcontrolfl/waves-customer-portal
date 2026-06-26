@@ -688,6 +688,7 @@ const InvoiceService = {
       title,
       lineItems,
       notes,
+      emailMessage,
       dueDate,
       taxRate,
       discountIds,
@@ -1217,6 +1218,7 @@ const InvoiceService = {
           tax_amount: taxAmount,
           total,
           notes: notes || null,
+          email_message: emailMessage || null,
           due_date: dueDate || etDateString(addETDays(new Date(), 30)),
           status: "draft",
           ...(scheduledServiceId

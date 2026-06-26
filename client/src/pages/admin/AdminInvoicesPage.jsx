@@ -3974,6 +3974,9 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   // One-tap AI summary (pulls context from the linked visit + source toggles).
   // Off by default; the base "Write with AI" still works from typed input + lines.
   const aiSummaryEnabled = useFeatureFlag("ff_invoice_ai_summary");
+  // Optional AI-assisted personal thank-you message in the invoice email body
+  // (separate from the service summary). Off by default.
+  const emailMessageEnabled = useFeatureFlag("ff_invoice_email_message");
   function defaultServiceDate() {
     const parts = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
@@ -3998,6 +4001,8 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   const [serviceDate, setServiceDate] = useState(defaultServiceDate);
   const [lineItems, setLineItems] = useState(() => [newLineItem()]);
   const [notes, setNotes] = useState("");
+  const [emailMessage, setEmailMessage] = useState("");
+  const [aiMessageLoading, setAiMessageLoading] = useState(false);
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [sendTiming, setSendTiming] = useState("now");
@@ -4078,6 +4083,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     setLineItems(initialLineItems);
     editLineItemsBaselineRef.current = JSON.stringify(initialLineItems);
     setNotes(editInvoice.notes || "");
+    setEmailMessage(editInvoice.email_message || "");
     setTitle(editInvoice.title || "");
     const due = invoiceDateOnly(editInvoice.due_date);
     if (due) {
@@ -4459,6 +4465,34 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     setAiNotesLoading(false);
   };
 
+  const handleWriteThankYouWithAI = async () => {
+    const customerName = selectedCustomer
+      ? `${selectedCustomer.first_name || ""} ${selectedCustomer.last_name || ""}`.trim()
+      : "";
+    const serviceType =
+      selectedService?.service_type || editInvoice?.service_type || title || "";
+    if (!customerName && !serviceType && !emailMessage.trim()) {
+      showToast("Select a customer first");
+      return;
+    }
+    setAiMessageLoading(true);
+    try {
+      const result = await adminFetch("/admin/invoices/email-message/ai", {
+        method: "POST",
+        body: JSON.stringify({ customerName, serviceType, input: emailMessage }),
+      });
+      if (result.message) {
+        setEmailMessage(result.message);
+        showToast("Thank-you message written with AI");
+      } else {
+        showToast("AI did not return a message");
+      }
+    } catch (e) {
+      showToast(`AI message failed: ${e.message}`);
+    }
+    setAiMessageLoading(false);
+  };
+
   const handleQueuedAttachments = (event) => {
     const files = Array.from(event.target.files || []);
     event.target.value = "";
@@ -4521,6 +4555,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             amount: lineAmount(i),
           })),
         notes: notes || null,
+        emailMessage: emailMessage || null,
         dueDate,
       };
 
@@ -4578,8 +4613,9 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   };
 
   // Edit mode save — persists only the fields the PUT route allows
-  // (title, notes, due_date, line_items). The server recalculates subtotal,
-  // discounts, tax, and total from the line items, so we never send money totals.
+  // (title, notes, email_message, due_date, line_items). The server recalculates
+  // subtotal, discounts, tax, and total from the line items, so we never send
+  // money totals.
   const handleSave = async () => {
     if (
       !lineItems.some(
@@ -4599,6 +4635,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       const body = {
         title: title || null,
         notes: notes || null,
+        email_message: emailMessage || null,
         due_date: dueDate,
       };
       // Only send line_items when they actually changed. An unchanged save
@@ -5474,6 +5511,63 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               style={{ ...sInput(isMobile), resize: "vertical" }}
             />{" "}
           </div>{" "}
+          {emailMessageEnabled && (
+            <div style={{ marginBottom: 14 }}>
+              {" "}
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: 8,
+                  marginBottom: 4,
+                }}
+              >
+                {" "}
+                <label
+                  style={{
+                    fontSize: 11,
+                    color: D.muted,
+                    textTransform: "uppercase",
+                    letterSpacing: 0.8,
+                    display: "block",
+                  }}
+                >
+                  Email thank-you (optional)
+                </label>{" "}
+                <button
+                  type="button"
+                  onClick={handleWriteThankYouWithAI}
+                  disabled={aiMessageLoading}
+                  style={{
+                    ...sBtn("transparent", D.teal, isMobile),
+                    padding: isMobile ? "9px 10px" : "6px 8px",
+                    fontSize: isMobile ? 12 : 11,
+                    minHeight: isMobile ? 38 : 30,
+                    opacity: aiMessageLoading ? 0.55 : 1,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {aiMessageLoading
+                    ? "Writing..."
+                    : emailMessage.trim()
+                      ? "Rewrite with AI"
+                      : "Write with AI"}
+                </button>{" "}
+              </div>{" "}
+              <textarea
+                value={emailMessage}
+                onChange={(e) => setEmailMessage(e.target.value.slice(0, 800))}
+                rows={2}
+                placeholder="A short, warm thank-you note for the invoice email."
+                style={{ ...sInput(isMobile), resize: "vertical" }}
+              />{" "}
+              <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                Appears in the invoice email, below the service summary — not on
+                the PDF.
+              </div>{" "}
+            </div>
+          )}{" "}
           <div style={{ marginBottom: 14 }}>
             {" "}
             <div
