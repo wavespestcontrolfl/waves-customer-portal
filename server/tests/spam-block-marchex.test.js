@@ -48,15 +48,27 @@ beforeEach(() => {
 });
 
 describe('spam-block Marchex Clean Call integration', () => {
-  test('gate off: BLOCK verdict shadow-logs and allows the call', async () => {
+  test('gate off: BLOCK verdict shadow-logs, records a marchex_shadow row, and allows the call', async () => {
     const { inserts } = makeDb();
     isEnabled.mockReturnValue(false);
 
     const result = await checkInboundBlock({ ...CALL, addOns: marchexAddOns('BLOCK') });
 
     expect(result).toEqual({ blocked: false });
-    expect(inserts).toHaveLength(0);
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('would block'));
+    // Shadow verdict is persisted (not blocked) so accuracy can be judged later.
+    expect(inserts).toEqual([
+      {
+        table: 'blocked_call_attempts',
+        row: expect.objectContaining({
+          number: CALL.from,
+          our_endpoint_id: CALL.to,
+          channel: 'voice',
+          block_type: 'marchex_shadow',
+          twilio_sid: 'CA_test',
+        }),
+      },
+    ]);
   });
 
   test('gate on: BLOCK verdict rejects and writes a marchex_auto audit row', async () => {
