@@ -2288,6 +2288,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:15AM — Meta (Facebook/Instagram) Ads sync (campaigns + insights)
+  // Pulls Meta ad spend/performance into the same ad_campaigns /
+  // ad_performance_daily tables (platform='facebook'); the PPC dashboard then
+  // shows Meta alongside Google. No-ops unless META_ADS_* creds are set.
+  // =========================================================================
+  cron.schedule('15 6 * * *', async () => {
+    try {
+      const metaAds = require('./ads/meta-ads');
+      if (!metaAds.isConfigured()) return;
+      logger.info('Running: Meta Ads daily sync');
+      await metaAds.syncCampaigns();
+      await metaAds.syncDailyPerformance(7);
+      logger.info('Meta Ads daily sync complete');
+    } catch (err) {
+      logger.error(`Meta Ads sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:40AM — Google Ads offline conversion upload (Data Manager API)
   // Automates the EXISTING DataManager.uploadConversions (qualified leads +
   // completed-job revenue) — previously admin-trigger only. Opt-in via

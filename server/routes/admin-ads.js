@@ -10,6 +10,8 @@ let _BudgetManager, _CampaignAdvisor, _googleAds;
 function getBudgetManager() { return _BudgetManager || (_BudgetManager = require('../services/ads/budget-manager')); }
 function getCampaignAdvisor() { return _CampaignAdvisor || (_CampaignAdvisor = require('../services/ads/campaign-advisor')); }
 function getGoogleAds() { return _googleAds || (_googleAds = require('../services/ads/google-ads')); }
+let _metaAds;
+function getMetaAds() { return _metaAds || (_metaAds = require('../services/ads/meta-ads')); }
 let _GoogleCallBridge;
 function getGoogleCallBridge() {
   return _GoogleCallBridge || (_GoogleCallBridge = require('../services/ads/google-call-bridge'));
@@ -152,6 +154,22 @@ router.post('/sync', async (req, res, next) => {
         performanceRows: performance.length,
         searchTerms: searchTerms.length,
       },
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/sync/meta — pull Meta (Facebook/Instagram) campaigns +
+// daily insights into ad_campaigns/ad_performance_daily (platform='facebook').
+router.post('/sync/meta', async (req, res, next) => {
+  try {
+    if (!getMetaAds().isConfigured()) {
+      return res.status(400).json({ error: 'Meta Ads API not configured. Set META_ADS_ACCESS_TOKEN + META_ADS_ACCOUNT_ID.' });
+    }
+    const campaigns = await getMetaAds().syncCampaigns();
+    const performance = await getMetaAds().syncDailyPerformance(7);
+    res.json({
+      success: true,
+      synced: { campaigns: campaigns.length, performanceRows: performance.length },
     });
   } catch (err) { next(err); }
 });
