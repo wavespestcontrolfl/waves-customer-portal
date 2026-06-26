@@ -38,7 +38,6 @@ import { addETDays, etDateString } from "../../lib/timezone";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
-import FastCloseoutSummary from "../../components/tech/FastCloseoutSummary";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
 import TreeShrubCloseoutSummary from "../../components/tech/TreeShrubCloseoutSummary";
 
@@ -6803,7 +6802,6 @@ export function CompletionPanel({
   // otherwise a pre-load submit hides the field the server still requires (422).
   const { enabled: turfHeightFlag, ready: turfHeightFlagReady } = useFeatureFlagReady("turf-height-capture");
   // Phase 3 fast closeout — flag-gated (default off). Existing completion flow is unchanged when off.
-  const { enabled: fastCloseoutFlag, ready: fastCloseoutReady } = useFeatureFlagReady("fast-closeout-v2");
   // Tree & Shrub exception-based closeout — flag-gated (default off). When off the
   // completion flow is unchanged and the server's post-commit auto-score still runs.
   const { enabled: treeShrubCloseoutFlag, ready: treeShrubCloseoutReady } = useFeatureFlagReady("tree-shrub-closeout-v2");
@@ -9289,47 +9287,6 @@ export function CompletionPanel({
     const Field = CPField;
     const Chip = CPChip;
 
-    // ── Phase 3 fast closeout (flag-gated, additive) ──────────────────────────
-    // A one-tap summary at the top of the panel for lawn visits: confirms defaults,
-    // surfaces the AI insight, and lets the tech attach an exception via chips that
-    // map to the EXISTING observation-chip handler (so they feed the report exactly
-    // as today). "Complete + Send" calls the real submit; the full form stays below.
-    const fastCloseoutOn = fastCloseoutReady && fastCloseoutFlag && serviceLineForCloseout === "lawn";
-    const EXCEPTION_TO_CHIP = {
-      dry_stress: "Lawn stress/dry patches", coverage: "Irrigation issue", weeds: "Weeds spreading",
-      fungus: "Fungus visible", pest: "Pest activity noted", concern: "Customer concern discussed",
-    };
-    const fastCloseoutExceptions = [
-      { key: "none", label: "No issues found", status: "ready" },
-      { key: "dry_stress", label: "Dry stress", status: "watch" },
-      { key: "coverage", label: "Irrigation coverage", status: "watch" },
-      { key: "weeds", label: "Weed pressure", status: "watch" },
-      { key: "pest", label: "Pest monitoring", status: "watch" },
-      { key: "fungus", label: "Fungus watch", status: "attention" },
-      { key: "concern", label: "Customer concern", status: "attention" },
-    ].map((e) => ({
-      ...e,
-      active: EXCEPTION_TO_CHIP[e.key]
-        ? selectedObservationLabels.includes(EXCEPTION_TO_CHIP[e.key])
-        : (e.key === "none" ? selectedObservationLabels.length === 0 : false),
-    }));
-    const fastCloseoutSummary = {
-      productsReady: selectedProducts.length > 0,
-      protocolReady: true,
-      photosReady: servicePhotos.length > 0 || !!lawnAssessmentId,
-      smsEnabled: true,
-      aiAnalysisStatus: lawnAssessmentId ? "complete" : "pending",
-      aiInsights: [],
-      suggestedCustomerAction: "",
-      exceptions: fastCloseoutExceptions,
-      canComplete: !submitting,
-    };
-    function handleFastException(key) {
-      if (!key) return; // "Advanced" / no-op — the full form is already below
-      const chip = EXCEPTION_TO_CHIP[key];
-      if (chip && typeof handleObservationSelect === "function") handleObservationSelect(chip);
-    }
-
     return createPortal(
       <>
         {" "}
@@ -9358,16 +9315,6 @@ export function CompletionPanel({
             animation: "slideIn 0.25s ease",
           }}
         >
-          {fastCloseoutOn && (
-            <div style={{ padding: "12px 16px 0" }}>
-              <FastCloseoutSummary
-                summary={fastCloseoutSummary}
-                completing={submitting}
-                onAddIssue={handleFastException}
-                onComplete={handleSubmit}
-              />
-            </div>
-          )}
           {treeShrubCloseoutOn && (
             <div style={{ padding: "12px 16px 0" }}>
               <TreeShrubCloseoutSummary
