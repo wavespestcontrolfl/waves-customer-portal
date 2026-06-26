@@ -13,6 +13,7 @@ const { renderSmsTemplate } = require("./sms-template-renderer");
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
+const { toE164 } = require("../utils/phone");
 
 // GBP review links per location
 const REVIEW_LINKS = {
@@ -373,15 +374,18 @@ const ReviewService = {
       // "custom body ⇒ ask" — otherwise an edited no-link check-in (e.g.
       // resolution_check / satisfaction_confirm) would retry as a review ask
       // with a Google link appended. A pure custom body with no known template
-      // is treated as an ask.
-      const customRequiresLink = outreachTpl ? outreachTpl.body.includes("{review_url}") : true;
+      // is treated as an ask. For a no-link template, review_url is forced empty
+      // so any {review_url} the operator left in the edited copy renders to
+      // nothing (the cap was skipped for this template).
+      const customIsNoLink = !!(outreachTpl && !outreachTpl.body.includes("{review_url}"));
+      const customRequiresLink = !customIsNoLink && (outreachTpl ? outreachTpl.body.includes("{review_url}") : true);
       body = OUTREACH.renderOutreachBody(
         request.custom_body,
         {
           first: contact.name || customer.first_name || "",
           tech: techName,
           service_type: request.service_type || "service",
-          review_url: reviewUrl,
+          review_url: customIsNoLink ? "" : reviewUrl,
         },
         { requireLink: customRequiresLink },
       );
@@ -1237,7 +1241,11 @@ const ReviewService = {
     let phoneSuppressed = false;
     if (contact.phone) {
       try {
-        const sup = await db("messaging_suppression").where({ phone: contact.phone, active: true }).first();
+        // messaging_suppression.phone is E.164 (written by the Twilio path), so
+        // normalize before matching or a formatted "(941)…" number misses the
+        // DNC row and the cadence stalls instead of falling back to email.
+        const e164 = toE164(contact.phone) || contact.phone;
+        const sup = await db("messaging_suppression").where({ phone: e164, active: true }).first();
         phoneSuppressed = !!sup;
       } catch {
         /* table may not exist → treat as not suppressed */
@@ -1352,8 +1360,13 @@ const ReviewService = {
     // of an ask template still gets the link appended rather than sending an ask
     // with no way to act on it. A pure custom body with no template is treated
     // as an ask (require the link); the issue/check-in templates carry no link.
-    const requiresLink = tpl ? tpl.body.includes("{review_url}") : true;
-    const body = OUTREACH.renderOutreachBody(rawBody, vars, { requireLink: requiresLink });
+    const isNoLink = !!(tpl && !tpl.body.includes("{review_url}"));
+    const requiresLink = !isNoLink && (tpl ? tpl.body.includes("{review_url}") : true);
+    // For a no-link check-in, force review_url empty so ANY {review_url} the
+    // operator left/added in the edited body renders to nothing — send-request
+    // skipped cap/cooldown for this template, so it must never carry a review link.
+    const renderVars = isNoLink ? { ...vars, review_url: "" } : vars;
+    const body = OUTREACH.renderOutreachBody(rawBody, renderVars, { requireLink: requiresLink });
     try {
       const result = await sendCustomerMessage({
         to: contact.phone,
@@ -1641,12 +1654,19 @@ const ReviewService = {
     // Keep the whole cadence within the lifetime 3-ask cap: a customer who had
     // 1-2 prior asks must not reach 4-5 via the cadence. Delivered ask touches
     // (incl. this cadence's own) are counted, so the sequence stops once 3 is hit.
+    let askStats;
     try {
-      const askStats = await this.getDeliveredAskStats(seq.customer_id);
-      if (askStats.count >= 3) return stop("capped");
+      askStats = await this.getDeliveredAskStats(seq.customer_id);
     } catch {
-      /* on a stats blip, let the per-send guards apply */
+      // Fail CLOSED: sendOutreachTouch does NOT enforce the lifetime cap, so a
+      // stats blip must defer the step (retry next tick), not send a 4th ask.
+      await db("review_sequences")
+        .where({ id: seq.id, status: "active" })
+        .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+        .catch(() => {});
+      return { ran: false, deferred: true, reason: "cap_stats_unavailable" };
     }
+    if (askStats.count >= 3) return stop("capped");
     try {
       const prefs = await db("notification_prefs").where({ customer_id: seq.customer_id }).first();
       if (prefs && prefs.review_request === false) return stop("opted_out");

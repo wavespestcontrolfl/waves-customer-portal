@@ -13,6 +13,7 @@ const { getServiceContact } = require('../services/customer-contact');
 const { runExclusive } = require('../utils/cron-lock');
 const OUTREACH = require('../services/review-outreach-templates');
 const { isEnabled } = require('../config/feature-gates');
+const { toE164 } = require('../utils/phone');
 
 const DRAFT_REPLY_PREFIX = '[DRAFT]';
 
@@ -503,7 +504,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
 
     const phones = customers
       .map(c => getServiceContact(c).phone || c.phone)
-      .filter(Boolean);
+      .filter(Boolean)
+      // messaging_suppression.phone is E.164 — normalize before matching.
+      .map(p => toE164(p) || p);
     const suppressedRows = phones.length
       ? await db('messaging_suppression').whereIn('phone', phones).where('active', true).select('phone').catch(() => [])
       : [];
@@ -540,7 +543,7 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         // explicit 'email' preference disables the SMS-only manual Send; 'sms'
         // (the backfill default) does NOT disable email.
         const emailPreferred = !!prefs && prefs.review_request_channel === 'email';
-        const suppressed = phone ? suppressedSet.has(phone) : false;
+        const suppressed = phone ? suppressedSet.has(toE164(phone) || phone) : false;
         const inCooldown = ask.lastAsked ? (new Date(ask.lastAsked).getTime() >= thirtyDaysAgo) : false;
         const atCap = ask.askCount >= 3;
         const smsable = !!phone && !reviewOptedOut && !smsPrefOff && !suppressed && !emailPreferred;
@@ -625,19 +628,22 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
     // can't slip two messages past the cap + cooldown (audit O7). The lock is
     // non-blocking — a second in-flight send to the same customer is rejected.
     const result = await runExclusive(`review-send:${customerId}`, async () => {
-      // An active cadence already owns this customer's outreach (and its touches
-      // can sit in a 'deferred' state the queued-row check below won't see), so a
-      // one-off send here would double-contact. Manage it from the cadence.
-      const activeSeq = await db('review_sequences')
-        .where({ customer_id: customer.id, status: 'active' }).first().catch(() => null);
-      if (activeSeq) {
-        return { status: 409, payload: { error: 'Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.' } };
-      }
-
       // Private no-link check-ins (resolution_check / satisfaction_confirm) are
-      // NOT review asks, so they bypass the review 3-cap / 30-day cooldown and
-      // the queued-ask reuse (and getDeliveredAskStats doesn't count them).
+      // NOT review asks, so they bypass the review 3-cap / 30-day cooldown, the
+      // queued-ask reuse, AND the active-cadence block below (a recovery message
+      // is intentionally non-ask outreach). getDeliveredAskStats doesn't count them.
       const isAsk = OUTREACH.isAskTemplate(templateId);
+
+      // An active cadence already owns this customer's review ASKS (and its
+      // touches can sit 'deferred' where the queued-row check can't see them), so
+      // a one-off ASK here would double-contact. Check-ins are allowed through.
+      if (isAsk) {
+        const activeSeq = await db('review_sequences')
+          .where({ customer_id: customer.id, status: 'active' }).first().catch(() => null);
+        if (activeSeq) {
+          return { status: 409, payload: { error: 'Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.' } };
+        }
+      }
 
       const thirtyDaysAgo = Date.now() - 30 * 86400000;
       // Channel-complete cap/cooldown across SMS + email (audit). Fail CLOSED:

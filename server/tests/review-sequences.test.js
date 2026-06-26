@@ -339,6 +339,41 @@ describe('review sequences — cadence engine', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a DNC phone (stored E.164) falls back to email even when contact phone is formatted', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'dnc1', first_name: 'Dan', last_name: 'C', phone: '(941) 555-1234', email: 'dan@x.com', nearest_location_id: 'bradenton' }],
+      notification_prefs: [{ customer_id: 'dnc1', review_request: true, sms_enabled: true, email_enabled: true }],
+      messaging_suppression: [{ phone: '+19415551234', active: true, reason: 'dnc' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'sequence' });
+
+    // Phone is on the DNC list (matched after E.164 normalization) → email.
+    expect(out.ok).toBe(true);
+    expect(out.channel).toBe('email');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockEmailSendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('an edited no-link check-in never renders a review link even if {review_url} is left in', async () => {
+    const mock = makeMock({ customers: [{ id: 'edit1', first_name: 'Ed', last_name: 'T', phone: '+19410000040', nearest_location_id: 'venice' }] });
+    db.mockImplementation(mock);
+
+    await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'sms',
+      templateId: 'resolution_check',
+      body: 'Hi {first}, sorry about that — here {review_url} if you want.',
+      manageRetryVia: 'cron',
+    });
+
+    const body = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(body).not.toMatch(/\/rate\//);
+    expect(body).not.toMatch(/portal\.test/);
+    expect(body).not.toContain('{review_url}');
+  });
+
   test('a terminal SMS failure (invalid number) is suppressed, not retried forever', async () => {
     mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, retryable: false, code: 'INVALID_NUMBER' });
     const mock = makeMock({ customers: [{ id: 't1', first_name: 'Bad', last_name: 'N', phone: '+10000000000', nearest_location_id: 'bradenton' }] });
