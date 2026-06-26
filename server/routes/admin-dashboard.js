@@ -484,7 +484,10 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     } catch (err) {
       logger.error(`[admin-dashboard] active techs count failed: ${err.message}`);
     }
-    const daysInPeriod = Math.max(1, Math.ceil((now - new Date(start)) / 86400000) + 1);
+    // Capacity must span the SAME window the billable hours were filtered to —
+    // start..end (end = today for named periods, the custom end otherwise) — or a
+    // historical custom range divides its labor by start-to-today capacity.
+    const daysInPeriod = Math.max(1, inclusiveDayCount(start, end));
     const availableHours = numTechs ? numTechs * 8 * daysInPeriod : 0;
     const utilization = availableHours > 0 && laborHoursTotal > 0
       ? Math.round((laborHoursTotal / availableHours) * 100) : null;
@@ -722,12 +725,22 @@ async function computeCoreKpis(period = 'mtd', range = null) {
       const base = parseInt(baseRow?.c || 0);
       const baseMRR = parseFloat(baseRow?.mrr || 0);
 
-      // Retained = cohort members still live now (active, not deleted, still a
-      // customer stage). Everyone else who was a customer at the start — churned,
-      // gone dormant, or deleted since — is a LOSS for the period (not all
-      // "churn", so the field is reported as `lost`).
+      // Retained = cohort members still live AS OF the window end. For named
+      // periods end = today, so this is exactly "still live now" — unchanged. For
+      // a historical custom range it ALSO retains anyone who only departed AFTER
+      // the window (best-available departure date), so the loss/momentum stays
+      // inside [start, end] instead of subtracting later churn. `departure > end`
+      // can never match for a today-bounded window (departures are <= today), so
+      // named-period behavior is byte-for-byte preserved.
+      const departedDateExpr = "COALESCE(churned_at, "
+        + "(pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date, "
+        + "(deleted_at AT TIME ZONE 'America/New_York')::date)";
       const retainedRow = await cohort()
-        .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES)
+        .where(function retainedAsOfEnd() {
+          this.where(function liveNow() {
+            this.where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES);
+          }).orWhereRaw(`${departedDateExpr} > ?`, [end]);
+        })
         .select(db.raw('COUNT(*) as c'), db.raw('COALESCE(SUM(monthly_rate), 0) as mrr')).first();
       const retained = parseInt(retainedRow?.c || 0);
       lost = Math.max(0, base - retained);

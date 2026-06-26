@@ -161,9 +161,11 @@ export default function DashboardPageV2() {
   const [showRangePicker, setShowRangePicker] = useState(false);
   const [draftFrom, setDraftFrom] = useState("");
   const [draftTo, setDraftTo] = useState("");
+  // Recomputed as the dashboard's freshness clock ticks, so an overnight session
+  // gets the new ET day as the date-input max without a reload.
   const todayISO = useMemo(
     () => new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }),
-    [],
+    [clockTick],
   );
   const applyCustomRange = () => {
     if (!draftFrom || !draftTo) return;
