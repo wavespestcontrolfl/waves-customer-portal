@@ -3441,18 +3441,26 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
   });
 }
 
-// Send the branded paid receipt (email + SMS) for a fully-paid invoice. An atomic
-// claim on receipt_sent_at (UPDATE ... WHERE receipt_sent_at IS NULL) makes the
-// send single-flight: concurrent double-submits and re-requests on an already-
-// paid invoice see claim=0 and report alreadySent without re-texting. The claim
-// is released on a TOTAL send failure so the operator (or a retry) can resend.
+// Send the branded paid receipt (email + SMS) for a fully-paid invoice, exactly
+// once. Both the paid-transition winner AND a concurrent loser (which sees the
+// invoice already paid) reach here, so the atomic CLAIM below — not the paid
+// transition — is what makes the send single-flight.
+//
+// Claim BEFORE the external sends (`UPDATE ... WHERE receipt_sent_at IS NULL`):
+// claim==0 means another caller already owns the send, so report alreadySent
+// without re-contacting the customer (the SMS path has no per-message idempotency
+// key, so post-send stamping would let a double-submit double-text). The claim is
+// RELEASED on any caught failure so a normal send error still retries. The single
+// unrecovered case is an uncaught process death in the sub-second window between
+// claim and delivery — it leaves a paid invoice whose receipt the operator
+// resends from the invoices page (no money impact). We accept that narrow gap
+// over double-texting the customer.
 async function sendPrepaidReceiptForInvoice(invoice) {
-  // Don't re-contact a customer who already got this receipt (a prior send, a
-  // manual resend, or the Stripe auto-receipt). Re-sends go through the invoices
-  // page /send-receipt (force). The newly-paid caller passes a fresh invoice with
-  // receipt_sent_at null, and the atomic paid transition guarantees a single
-  // caller there, so there is no concurrent-send race on the happy path.
-  if (invoice.receipt_sent_at) {
+  const claimed = await db('invoices')
+    .where({ id: invoice.id })
+    .whereNull('receipt_sent_at')
+    .update({ receipt_sent_at: db.fn.now() });
+  if (claimed === 0) {
     return {
       sent: true,
       alreadySent: true,
@@ -3463,25 +3471,24 @@ async function sendPrepaidReceiptForInvoice(invoice) {
   }
   const { sendReceiptEmail } = require('../services/invoice-email');
   const InvoiceService = require('../services/invoice');
-  // Email dedupes durably on the idempotency key; the SMS path checks
-  // receipt_sent_at (still null here — we stamp only AFTER a channel succeeds, so
-  // a crash before delivery leaves it null and a retry still delivers).
+  // force:true — the claim above is the dedupe, and it already stamped
+  // receipt_sent_at (which sendReceipt's own un-forced guard would treat as sent).
+  // Email also carries an idempotency key for durable cross-process dedupe.
   const emailResult = await sendReceiptEmail(invoice.id, {
     idempotencyKey: `prepaid_receipt:${invoice.id}`,
   }).catch((err) => ({ ok: false, error: err.message }));
   let smsResult = { ok: false, skipped: true };
   try {
-    const r = await InvoiceService.sendReceipt(invoice.id, { recordActivity: false });
+    const r = await InvoiceService.sendReceipt(invoice.id, { force: true, recordActivity: false });
     smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
   } catch (err) {
     smsResult = { ok: false, error: err.message };
   }
   if (!(emailResult.ok || smsResult.ok)) {
+    // Total failure — release the claim so a retry (or the operator) can resend.
+    await db('invoices').where({ id: invoice.id }).update({ receipt_sent_at: null }).catch(() => {});
     return { sent: false, reason: 'send_failed', invoiceId: invoice.id, invoiceNumber: invoice.invoice_number };
   }
-  // Stamp the durable "receipt delivered" marker only now that a channel landed.
-  await db('invoices').where({ id: invoice.id }).update({ receipt_sent_at: db.fn.now() })
-    .catch((err) => logger.warn(`[schedule] prepaid receipt receipt_sent_at stamp failed: ${err.message}`));
   await db('activity_log').insert({
     customer_id: invoice.customer_id,
     action: 'invoice_receipt_sent',

@@ -157,6 +157,11 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
 
   const wantsReceipt = receiptFlag && !applyToSeries && emailReceipt;
 
+  // Once the prepayment has saved (even if the optional receipt couldn't send),
+  // ANY dismiss — backdrop, ×, or Done — must refresh the parent, or the schedule
+  // keeps showing the stale pre-save visit. Before a save, dismiss just closes.
+  const dismiss = () => (savedWithNote ? onSaved?.() : onClose?.());
+
   async function handleSave() {
     if (!Number.isFinite(amt) || amt < 0) {
       setError('Enter a valid amount');
@@ -193,7 +198,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
 
   return (
     <div
-      onClick={onClose}
+      onClick={dismiss}
       className="fixed inset-0 z-[1200] flex items-end md:items-center justify-center"
       style={{ background: 'rgba(15,23,42,0.55)', padding: 16 }}
     >
@@ -222,7 +227,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={dismiss}
             aria-label="Close"
             className="flex items-center justify-center rounded-full bg-white border border-hairline border-zinc-200 u-focus-ring"
             style={{ width: 32, height: 32, fontSize: 18, lineHeight: 1 }}
@@ -375,7 +380,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
 
         <button
           type="button"
-          onClick={savedWithNote ? () => onSaved?.() : handleSave}
+          onClick={savedWithNote ? dismiss : handleSave}
           disabled={saving}
           className="w-full rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
           style={{ padding: '14px 20px', fontSize: 15, opacity: saving ? 0.6 : 1 }}

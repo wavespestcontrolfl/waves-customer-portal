@@ -40,7 +40,15 @@ async function guardOpenPaymentIntentForPrepaid(invoice) {
   // Null = Stripe unconfigured/unreachable — fail closed rather than mark paid
   // while a live client secret could still settle.
   if (!pi) return { ok: false, reason: 'payment_session_unverifiable' };
-  if (PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) return { ok: false, reason: 'payment_in_flight' };
+  // An ACH micro-deposit verification sits in requires_action (not one of the
+  // money-in-flight statuses) but is a LIVE payment the customer has started —
+  // cancelling it would kill their bank-verification session. Treat it as in
+  // flight and defer to manual reconciliation, never cancel it.
+  const isMicrodepositVerification = pi.status === 'requires_action'
+    && pi.next_action && pi.next_action.type === 'verify_with_microdeposits';
+  if (PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status) || isMicrodepositVerification) {
+    return { ok: false, reason: 'payment_in_flight' };
+  }
   if (pi.status !== 'canceled') {
     try {
       await StripeService.cancelPaymentIntent(piId, { cancellation_reason: 'abandoned' });
