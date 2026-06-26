@@ -28,16 +28,6 @@ async function rescoreOnInboundMessage(customerId, { source = 'inbound' } = {}) 
   if (!gateOn() || !customerId) return null;
 
   try {
-    // Risk before this event, to detect a crossing into critical.
-    let priorRisk = null;
-    try {
-      const prior = await db('customer_health_scores')
-        .where('customer_id', customerId)
-        .orderByRaw('scored_at DESC NULLS LAST')
-        .first();
-      priorRisk = prior?.churn_risk || null;
-    } catch { /* table may not exist yet */ }
-
     // Detect fresh signals for this customer (keyword + AI sentiment on recent
     // inbound SMS) so the rescore folds in whatever just arrived. Non-fatal.
     try {
@@ -49,11 +39,14 @@ async function rescoreOnInboundMessage(customerId, { source = 'inbound' } = {}) 
     const result = await customerHealth.scoreCustomer(customerId);
     if (!result) return null;
 
-    // Alert the owner ONLY on a transition into critical — fires once when the
-    // customer crosses the line, not on every subsequent message while already
-    // critical (the nightly pipeline does not call this path, so it can't
-    // double-fire the live alert).
-    if (result.churnRisk === 'critical' && priorRisk !== 'critical') {
+    // Alert the owner once per critical episode. The crossing is claimed
+    // ATOMICALLY via a conditional update on the just-written row, so two
+    // concurrent inbound texts for the same customer can't both alert: exactly
+    // one wins the `critical_alert_sent_at IS NULL` claim. The canonical scorer
+    // clears the column whenever the customer is not critical, so a later
+    // re-entry into critical can claim and alert again. (The nightly pipeline
+    // doesn't run this path, so it never fires the live alert.)
+    if (result.churnRisk === 'critical' && await claimCriticalAlert(customerId)) {
       await sendCriticalChurnAlert(customerId, result, source);
     }
 
@@ -61,6 +54,24 @@ async function rescoreOnInboundMessage(customerId, { source = 'inbound' } = {}) 
   } catch (err) {
     logger.error(`[event-rescore] rescore failed for ${customerId}: ${err.message}`);
     return null;
+  }
+}
+
+// Atomically claim the crossing into critical. Returns true iff THIS caller
+// won — the conditional update only matches while `critical_alert_sent_at` is
+// still NULL, and Postgres row-locks the single current row, so among
+// concurrent callers exactly one gets a non-zero rowcount.
+async function claimCriticalAlert(customerId) {
+  try {
+    const claimed = await db('customer_health_scores')
+      .where('customer_id', customerId)
+      .where('churn_risk', 'critical')
+      .whereNull('critical_alert_sent_at')
+      .update({ critical_alert_sent_at: new Date() });
+    return claimed > 0;
+  } catch (err) {
+    logger.debug(`[event-rescore] critical-alert claim failed for ${customerId}: ${err.message}`);
+    return false;
   }
 }
 

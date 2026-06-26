@@ -2,8 +2,9 @@
  * Event-driven health rescore (near-real-time on a hot inbound SMS).
  *  - no-op unless GATE_EVENT_RESCORE === 'true',
  *  - detects fresh signals for the customer, then rescores (canonical engine),
- *  - alerts the owner ONLY on a transition INTO critical (fires once at the
- *    crossing, never on every subsequent message while already critical),
+ *  - alerts the owner on the crossing into critical, claimed ATOMICALLY via a
+ *    conditional update (critical_alert_sent_at IS NULL) so two concurrent
+ *    inbound texts can't both alert — exactly one wins the rowcount,
  *  - never throws (called fire-and-forget); silent when ADAM_PHONE is unset.
  */
 
@@ -22,21 +23,23 @@ const customerHealth = require('../services/customer-health');
 const TwilioService = require('../services/twilio');
 const eventRescore = require('../services/customer-intelligence/event-rescore');
 
-function makeChain(firstResult) {
+function makeChain({ first, update } = {}) {
   const chain = {};
   chain.where = jest.fn(() => chain);
+  chain.whereNull = jest.fn(() => chain);
   chain.orderByRaw = jest.fn(() => chain);
-  chain.first = jest.fn(() => Promise.resolve(firstResult));
+  chain.first = jest.fn(() => Promise.resolve(first));
+  chain.update = jest.fn(() => Promise.resolve(update));
   return chain;
 }
 
-// db queue per table: priorRow lookup (customer_health_scores), then customer
-function wireDb({ priorRow, customer }) {
+// claimResult = rows affected by the atomic claim update (1 = won, 0 = lost)
+function wireDb({ claimResult = 0, customer } = {}) {
   const queues = {
-    customer_health_scores: [makeChain(priorRow)],
-    customers: [makeChain(customer)],
+    customer_health_scores: [makeChain({ update: claimResult })],
+    customers: [makeChain({ first: customer })],
   };
-  db.mockImplementation((table) => (queues[table]?.shift()) || makeChain(undefined));
+  db.mockImplementation((table) => (queues[table]?.shift()) || makeChain());
 }
 
 const CUSTOMER = { id: 'c1', first_name: 'Pat', last_name: 'Lee', waveguard_tier: 'Gold', monthly_rate: '120', phone: '+19415551234' };
@@ -58,20 +61,19 @@ describe('rescoreOnInboundMessage', () => {
   });
 
   test('detects fresh signals, then rescores', async () => {
-    wireDb({ priorRow: { churn_risk: 'moderate' }, customer: CUSTOMER });
+    wireDb({ customer: CUSTOMER });
     customerHealth.scoreCustomer.mockResolvedValue({ overall: 70, churnRisk: 'moderate', churnSignals: [] });
 
     await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
 
     expect(SignalDetector.detectSignals).toHaveBeenCalledWith('c1');
     expect(customerHealth.scoreCustomer).toHaveBeenCalledWith('c1');
-    // detection happens before scoring
     expect(SignalDetector.detectSignals.mock.invocationCallOrder[0])
       .toBeLessThan(customerHealth.scoreCustomer.mock.invocationCallOrder[0]);
   });
 
-  test('alerts the owner on a transition INTO critical', async () => {
-    wireDb({ priorRow: { churn_risk: 'high' }, customer: CUSTOMER });
+  test('alerts the owner when it WINS the atomic critical claim', async () => {
+    wireDb({ claimResult: 1, customer: CUSTOMER });
     customerHealth.scoreCustomer.mockResolvedValue({
       overall: 22, churnRisk: 'critical',
       churnSignals: [{ signal: 'COMPETITOR_MENTIONED', value: 'Competitor mentioned', severity: 'critical' }],
@@ -88,8 +90,8 @@ describe('rescoreOnInboundMessage', () => {
     expect(opts).toEqual({ messageType: 'internal_alert' });
   });
 
-  test('does NOT re-alert when the customer was already critical', async () => {
-    wireDb({ priorRow: { churn_risk: 'critical' }, customer: CUSTOMER });
+  test('does NOT alert when it LOSES the claim (already alerted / concurrent winner)', async () => {
+    wireDb({ claimResult: 0, customer: CUSTOMER });
     customerHealth.scoreCustomer.mockResolvedValue({ overall: 18, churnRisk: 'critical', churnSignals: [] });
 
     await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
@@ -97,18 +99,21 @@ describe('rescoreOnInboundMessage', () => {
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
 
-  test('no alert when the rescore is not critical', async () => {
-    wireDb({ priorRow: { churn_risk: 'moderate' }, customer: CUSTOMER });
+  test('no claim and no alert when the rescore is not critical', async () => {
+    wireDb({ customer: CUSTOMER });
+    const healthScoresChain = makeChain({ update: 1 });
+    db.mockImplementation((table) => (table === 'customer_health_scores' ? healthScoresChain : makeChain({ first: CUSTOMER })));
     customerHealth.scoreCustomer.mockResolvedValue({ overall: 45, churnRisk: 'high', churnSignals: [] });
 
     await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
 
+    expect(healthScoresChain.update).not.toHaveBeenCalled(); // no claim attempted
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
 
-  test('critical transition but no ADAM_PHONE → no alert, no throw', async () => {
+  test('won claim but no ADAM_PHONE → no SMS, no throw', async () => {
     delete process.env.ADAM_PHONE;
-    wireDb({ priorRow: { churn_risk: 'high' }, customer: CUSTOMER });
+    wireDb({ claimResult: 1, customer: CUSTOMER });
     customerHealth.scoreCustomer.mockResolvedValue({ overall: 20, churnRisk: 'critical', churnSignals: [] });
 
     await expect(eventRescore.rescoreOnInboundMessage('c1', {})).resolves.toBeTruthy();
