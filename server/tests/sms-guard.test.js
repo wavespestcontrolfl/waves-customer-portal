@@ -22,68 +22,36 @@ describe('sms-guard outbound validation', () => {
     expect(result).toEqual({ ok: true });
   });
 
-  describe('stale-month exemptions', () => {
-    const NOW = new Date('2026-06-16T12:00:00-04:00'); // June -> allows may/june/july
+  describe('month names no longer block sends', () => {
+    const NOW = new Date('2026-06-16T12:00:00-04:00'); // June
     const APRIL_BODY =
       'Hello Mike, our notes show Adam visited your property back in April while you were building your pool and set up a future date for service.';
 
-    test('blocks a stale month on an automated template send', () => {
+    test('allows a month >1 calendar month from today on an automated template send', () => {
+      // The stale-month guard has been removed; a month name that used to be
+      // rejected as a stale render now passes.
       const result = validateOutbound(APRIL_BODY, {
         messageType: 'service_complete',
         now: NOW,
       });
-      expect(result).toEqual({ ok: false, reason: 'stale-month:april' });
-    });
-
-    test('allows an intentional past month on a human-authored send', () => {
-      const result = validateOutbound(APRIL_BODY, {
-        messageType: 'manual',
-        humanAuthored: true,
-        now: NOW,
-      });
       expect(result).toEqual({ ok: true });
     });
 
-    test("does NOT exempt the legacy 'manual' messageType on its own", () => {
-      // 'manual' is overloaded — automated senders (e.g. reschedule-sms.js)
-      // reuse it for rendered templates, so only the explicit humanAuthored
-      // flag may bypass the month check.
-      const result = validateOutbound(APRIL_BODY, {
-        messageType: 'manual',
-        now: NOW,
-      });
-      expect(result).toEqual({ ok: false, reason: 'stale-month:april' });
-    });
-
-    test('keeps the internal_alert month exemption', () => {
-      const result = validateOutbound(APRIL_BODY, {
-        messageType: 'internal_alert',
-        now: NOW,
-      });
-      expect(result).toEqual({ ok: true });
-    });
-
-    test('does NOT exempt AI-drafted sends from the month check', () => {
+    test('allows a month name on an AI-drafted send', () => {
       const result = validateOutbound(APRIL_BODY, {
         messageType: 'ai_assistant',
         now: NOW,
       });
-      expect(result).toEqual({ ok: false, reason: 'stale-month:april' });
+      expect(result).toEqual({ ok: true });
     });
 
-    test('human-authored sends are still caught by broken-render and unsubbed-variable checks', () => {
+    test('still catches broken-render and unsubbed-variable even with a month name present', () => {
       expect(
-        validateOutbound('Hi {first_name}, see you in April.', {
-          humanAuthored: true,
-          now: NOW,
-        }),
+        validateOutbound('Hi {first_name}, see you in April.', { now: NOW }),
       ).toEqual({ ok: false, reason: 'unsubstituted-variable:{first_name}' });
 
       expect(
-        validateOutbound('Hi undefined, see you in April.', {
-          humanAuthored: true,
-          now: NOW,
-        }),
+        validateOutbound('Hi undefined, see you in April.', { now: NOW }),
       ).toEqual({ ok: false, reason: 'broken-render:undefined' });
     });
   });

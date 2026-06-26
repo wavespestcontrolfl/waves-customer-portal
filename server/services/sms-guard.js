@@ -3,10 +3,8 @@
  *
  * Runs on every outbound SMS body in TwilioService.sendSMS. Rejects messages
  * that look like a template-rendering bug instead of quietly delivering them
- * to customers. Real-world failures motivating each rule are in the
- * referenced issue — examples: a template with a stale {month} sent to
- * Heidi saying "January" in April; "undefined" / "null" bodies from null
- * customer fields.
+ * to customers — e.g. "undefined" / "null" bodies from null customer fields,
+ * unsubstituted Mustache variables, or a known blocked phrase.
  *
  *   validateOutbound(body, options?)  -> { ok: true } | { ok: false, reason }
  *
@@ -15,30 +13,13 @@
  * customer when they ship. When a message is rejected, the caller logs +
  * alerts Virginia instead of silently dropping the SMS.
  *
- * The stale-month check is bypassed when the body is human-authored or
- * admin-facing, where a month name is intentional rather than a stale
- * template render:
- *   - `options.messageType === 'internal_alert'` — admin-facing alerts often
- *     reference past months.
- *   - `options.humanAuthored === true` — an operator typed the body by hand
- *     in the Communications composer, e.g. "Adam visited back in April."
- *     This is an explicit caller flag, NOT the legacy `manual` messageType:
- *     `manual` is overloaded (automated senders such as reschedule-sms.js
- *     reuse it for rendered templates), so it can't distinguish hand-written
- *     text from a template render. Human-authored sends are still covered by
- *     the unsubstituted-variable and broken-render checks; AI-drafted sends
- *     are intentionally NOT exempt — an LLM is the likely source of a
- *     hallucinated stale month.
+ * Note: a stale-month check (rejecting a month name >1 calendar month from
+ * today) used to live here, motivated by a template that shipped "January"
+ * in April. It produced too many false positives on legitimate forward- and
+ * backward-looking copy, so it has been removed. The `options.messageType`
+ * and `options.humanAuthored` flags are still accepted (callers continue to
+ * pass them) but no longer gate any check.
  */
-
-const MONTHS = [
-  'january', 'february', 'march', 'april', 'may', 'june',
-  'july', 'august', 'september', 'october', 'november', 'december',
-];
-
-// Message types that are admin-facing rather than customer template renders,
-// where a past month name is intentional.
-const STALE_MONTH_EXEMPT_TYPES = new Set(['internal_alert']);
 
 // Unsubstituted Mustache-style variables like `{first_name}`, `{date}`.
 // Narrow pattern — only flag short lowercase-snake tokens so we don't false-
@@ -79,27 +60,6 @@ function findBlockedOutboundPattern(body) {
   return null;
 }
 
-// Return any month-name mentioned in the body that's obviously stale —
-// i.e. more than 1 calendar month off from today. Allows current month,
-// the month before, and the month after (handles "we'll see you in May"
-// late-April / early-May cases).
-function findStaleMonth(body, now = new Date()) {
-  const idx = now.getMonth(); // 0..11
-  const allowed = new Set([
-    MONTHS[(idx + 11) % 12],
-    MONTHS[idx],
-    MONTHS[(idx + 1) % 12],
-  ]);
-  const lower = body.toLowerCase();
-  for (const m of MONTHS) {
-    if (allowed.has(m)) continue;
-    // Word-boundary match so "March" doesn't trigger on "marching orders".
-    const re = new RegExp(`\\b${m}\\b`, 'i');
-    if (re.test(lower)) return m;
-  }
-  return null;
-}
-
 function validateOutbound(body, options = {}) {
   if (typeof body !== 'string' || body.trim().length === 0) {
     return { ok: false, reason: 'empty-body' };
@@ -123,17 +83,7 @@ function validateOutbound(body, options = {}) {
     return { ok: false, reason: blockedPattern };
   }
 
-  const monthCheckExempt =
-    options.humanAuthored === true ||
-    STALE_MONTH_EXEMPT_TYPES.has(options.messageType);
-  if (!monthCheckExempt) {
-    const stale = findStaleMonth(body, options.now);
-    if (stale) {
-      return { ok: false, reason: `stale-month:${stale}` };
-    }
-  }
-
   return { ok: true };
 }
 
-module.exports = { validateOutbound, findStaleMonth, hasBrokenRender, findBlockedOutboundPattern };
+module.exports = { validateOutbound, hasBrokenRender, findBlockedOutboundPattern };
