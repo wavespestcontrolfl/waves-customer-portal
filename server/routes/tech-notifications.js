@@ -91,7 +91,10 @@ router.post('/:id/confirm-start', async (req, res, next) => {
       // markOnProperty (via markOnPropertyFromGeofence → track-transitions) is
       // the sole owner of the customer arrival SMS now — it fires once,
       // idempotently when the tracker flips to on-site. Don't double-send here.
-      await geofenceHandler.markOnPropertyFromGeofence(jobId, new Date());
+      // startJob above already fired it as the acting tech; pass req.technicianId
+      // again so that if that first send was released for retry, this no-op-or-
+      // retry call still names the tech who confirmed the start, not a stale one.
+      await geofenceHandler.markOnPropertyFromGeofence(jobId, new Date(), { actingTechId: req.technicianId });
     }
 
     await db('tech_notifications')

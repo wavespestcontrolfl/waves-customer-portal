@@ -135,7 +135,10 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
   if (jobId) {
     try {
       const trackTransitions = require('./track-transitions');
-      await trackTransitions.markOnProperty(jobId);
+      // technicianId is the tech who actually started the job (the logged-in
+      // tech, or the IMEI tech in the geofence-auto path) — pass it so the
+      // arrival SMS names the acting tech, not the job's stale assignment.
+      await trackTransitions.markOnProperty(jobId, { actingTechId: technicianId });
     } catch (err) {
       logger.error(`[time-tracking] markOnProperty failed for job ${jobId}: ${err.message}`);
     }

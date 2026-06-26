@@ -202,7 +202,9 @@ describe("TwilioService.sendTechEnRoute", () => {
 
     const result = await TwilioService.sendTechArrived("cust-1", "Bryan");
 
-    expect(result).toBeUndefined();
+    // Opt-out is deterministic local suppression, not a retryable miss: the
+    // caller keeps its arrival guard stamped so a later signal can't re-fire.
+    expect(result).toMatchObject({ success: false, suppressed: true, reason: "opt_out" });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });

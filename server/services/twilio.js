@@ -748,11 +748,17 @@ const TwilioService = {
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
       .first();
-    if (!customer || !prefs?.tech_arrived || !prefs?.sms_enabled) return;
+    // Deterministic local suppression (opt-out / SMS disabled / missing customer):
+    // the arrival is "handled", not a retryable failure. The caller (markOnProperty)
+    // keeps its idempotency guard stamped on this signal so no later same-job
+    // signal re-fires a stale arrival text if the pref flips while on-site.
+    if (!customer) return { success: false, suppressed: true, reason: "no_customer" };
+    if (!prefs?.sms_enabled) return { success: false, suppressed: true, reason: "sms_disabled" };
+    if (!prefs?.tech_arrived) return { success: false, suppressed: true, reason: "opt_out" };
 
     const { getAppointmentContacts, isServiceContactRole } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);
-    if (!contacts.length) return;
+    if (!contacts.length) return { success: false, suppressed: true, reason: "no_contacts" };
 
     const results = [];
     const {

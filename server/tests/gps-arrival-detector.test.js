@@ -152,7 +152,8 @@ describe('gps-arrival-detector', () => {
     });
 
     expect(query.where).toHaveBeenCalledWith('s.id', 'svc-1');
-    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1');
+    // Pass the reporting tech so the arrival SMS names who actually arrived.
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1', { actingTechId: 'tech-1' });
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       actor_type: 'system:gps-arrival',
       action: 'gps_arrival.mark_on_property',
@@ -210,7 +211,7 @@ describe('gps-arrival-detector', () => {
     });
 
     expect(ensureCustomerGeocoded).toHaveBeenCalledWith('cust-1');
-    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1');
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1', { actingTechId: 'tech-1' });
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       metadata: expect.objectContaining({
         destination_source: 'customer_geocode',

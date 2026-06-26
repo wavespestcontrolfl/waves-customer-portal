@@ -170,7 +170,10 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       // after a manual start whose first arrival send failed and released the
       // guard), let the SMS fire/retry — the tech really is on this property.
       const differentJob = String(existingTimer.job_id) !== String(job.id);
-      await markOnPropertyFromGeofence(job.id, eventTime, { suppressArrivalSms: differentJob });
+      await markOnPropertyFromGeofence(job.id, eventTime, {
+        suppressArrivalSms: differentJob,
+        actingTechId: tech.id,
+      });
       // A suppressed drive-past leaves the arrival SMS pending (guard NULL),
       // relying on a later real arrival to send it. Don't let it consume the
       // duplicate-ENTER cooldown: isDuplicateEnter() counts timer_already_running
@@ -231,7 +234,9 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       // markOnProperty (track-transitions) is the sole owner of the customer
       // arrival SMS now — it fires once when the tracker flips to on-site,
       // idempotent across both Bouncie webhook paths. Don't double-send here.
-      await markOnPropertyFromGeofence(job.id, eventTime);
+      // tech.id is the IMEI device's tech — the one actually arriving — which
+      // beats the job's stale assignment for the "{tech} has arrived" copy.
+      await markOnPropertyFromGeofence(job.id, eventTime, { actingTechId: tech.id });
     }
 
     await sendTechNotification(tech.id, {

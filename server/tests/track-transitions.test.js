@@ -192,6 +192,62 @@ describe('track-transitions lifecycle side effects', () => {
     expect(release.update).toHaveBeenCalledWith({ arrival_sms_sent_at: null });
   });
 
+  test('markOnProperty keeps the arrival guard stamped when the customer opted out (no release)', async () => {
+    const svc = {
+      id: 'job-o',
+      customer_id: 'cust-o',
+      technician_id: 'tech-o',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    // Deterministic local suppression — handled, not retryable. The guard must
+    // stay stamped so a later same-job signal can't fire a stale "has arrived"
+    // if the pref flips while still on-site.
+    sendTechArrived.mockResolvedValue({ success: false, suppressed: true, reason: 'opt_out' });
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // flip
+      .mockReturnValueOnce(query(1)) // claim
+      .mockReturnValueOnce(query({ name: 'Omar' })); // tech lookup — NO release after
+
+    const result = await trackTransitions.markOnProperty('job-o');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).toHaveBeenCalled();
+    // A release would be a 5th db() call (UPDATE ... arrival_sms_sent_at = null).
+    // Suppression is handled, so the guard stays stamped — exactly 4 db calls:
+    // loadService, flip, claim, tech lookup.
+    expect(db).toHaveBeenCalledTimes(4);
+  });
+
+  test('markOnProperty names the acting tech, not the stale assignment, in the arrival SMS', async () => {
+    const svc = {
+      id: 'job-a',
+      customer_id: 'cust-a',
+      technician_id: 'tech-assigned', // stale assignment after a crew swap
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    sendTechArrived.mockResolvedValue({ success: true });
+    const techLookup = query({ name: 'Acting Andy' });
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // flip
+      .mockReturnValueOnce(query(1)) // claim
+      .mockReturnValueOnce(techLookup); // tech name lookup
+
+    const result = await trackTransitions.markOnProperty('job-a', { actingTechId: 'tech-acting' });
+
+    expect(result.ok).toBe(true);
+    // Name resolves from the acting tech the caller passed, not technician_id.
+    expect(techLookup.where).toHaveBeenCalledWith({ id: 'tech-acting' });
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-a', 'Acting Andy');
+  });
+
   test('markOnProperty suppresses the arrival SMS on the timer-already-running path', async () => {
     const svc = {
       id: 'job-s',
