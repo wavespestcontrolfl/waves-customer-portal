@@ -562,6 +562,13 @@ export default function DashboardPageV2() {
         </div>{" "}
       </header>
       {alerts.length > 0 && <DashboardAlertsBanner alerts={alerts} />}
+      {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
+          by default; the model only proposes SQL, the server sandboxes it. */}
+      {aiChartsEnabled && (
+        <div className="mb-5">
+          <AiChartsPanel />
+        </div>
+      )}
       {/* Row 1: Sales Capture gauge + Revenue trend — capture rate next to the
           revenue it drives. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
@@ -1078,13 +1085,6 @@ export default function DashboardPageV2() {
               maxOffset={cohort?.maxOffset || 0}
             />{" "}
           </ChartCard>{" "}
-        </div>
-      )}
-      {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
-          by default; the model only proposes SQL, the server sandboxes it. */}
-      {aiChartsEnabled && (
-        <div className="mb-5">
-          <AiChartsPanel />
         </div>
       )}
       {/* Upstream lead-attribution row.

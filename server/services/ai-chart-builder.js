@@ -7,11 +7,12 @@
  * (services/llm/call.js → callAnthropic), with jsonMode for a structured reply.
  */
 
-const { callAnthropic } = require('./llm/call');
-const { FLAGSHIP } = require('../config/models');
+const { callAnthropic, callGemini } = require('./llm/call');
+const { FLAGSHIP, GEMINI_VISION_BEST } = require('../config/models');
 const logger = require('./logger');
 
 const CHART_TYPES = ['line', 'bar', 'donut', 'kpi', 'table'];
+const Y_FORMATS = ['currency', 'percent', 'count', 'hours', 'rating', 'number'];
 
 // Curated schema handed to the model. These are the ONLY readable objects —
 // filtered analytics VIEWS (test accounts already excluded; sensitive columns
@@ -33,47 +34,87 @@ ai_mrr_snapshots(period_month date, total_mrr numeric$, committed_mrr, at_risk_m
 ai_kpi_snapshots(snapshot_date date, metric text, value numeric, captured_at)`;
 
 function buildSystemPrompt() {
-  return `You are a careful analytics engineer for Waves, a pest-control & lawn-care business (SW Florida). Turn the user's question into ONE read-only PostgreSQL query and a chart spec.
+  return `You are a careful analytics engineer for Waves, a pest-control & lawn-care business (SW Florida). Turn the user's question (and any attached reference image) into ONE read-only PostgreSQL query and a chart spec.
 
 Return JSON only, no prose:
-{ "sql": "<single SELECT>", "chartType": "line|bar|donut|kpi|table", "title": "<short>", "x": "<column alias or null>", "y": ["<column alias>", ...], "explanation": "<one sentence>" }
+{ "sql": "<single SELECT, may begin with a read-only WITH>", "chartType": "line|bar|donut|kpi|table", "title": "<short>", "x": "<column alias or null>", "y": ["<column alias>", ...], "yFormat": "currency|percent|count|hours|rating|number", "explanation": "<one sentence — STATE the exact time window you used>" }
 If the question cannot be answered from the schema below, return { "error": "<short reason>" } instead.
 
 Hard rules for "sql" (queries that break these are rejected):
-- A SINGLE SELECT statement. No semicolons, no comments, no CTEs/WITH, no DDL/DML, no catalog/system functions (pg_*, information_schema, current_setting).
+- A SINGLE statement: a SELECT, optionally led by a read-only WITH/CTE. No semicolons, no comments, no DDL/DML, no catalog/system functions (pg_*, information_schema, current_setting).
 - Only these tables and columns exist:${SCHEMA_DOC}
-- Alias output columns clearly (these alias names are what "x" and "y" must reference).
-- Aggregate sensibly; ORDER BY for time series; end with LIMIT 100 or less.
+- Every name in "x" and "y" MUST be an output alias in your SELECT. Never reference a column you didn't select.
+- Wrap EVERY denominator in NULLIF(x, 0) and COALESCE counts/sums to 0 — a divide-by-zero nulls the whole row.
+- Categorical results: ORDER BY the value DESC, LIMIT 100. Time series: ORDER BY the time bucket ASC (so the line reads left-to-right) and aggregate to a grain that fits ≤366 buckets (daily for ≤1 year, else weekly/monthly) — never truncate a trend with LIMIT.
 - Dates/timestamps are US Eastern (the query already runs in America/New_York); money columns are already in dollars.
 
+Canonical sources — pick the RIGHT one so the same question always returns the same number (the wrong source silently returns a different total):
+- Revenue: "collected/paid" → ai_payments.amount (status='paid'); "billed" → ai_invoices.total WHERE status='paid' (exclude void/unpaid unless asked); "service/delivered" revenue & margin → ai_service_records.revenue.
+- Current/point-in-time MRR and customer_count → the latest ai_mrr_snapshots row. MRR/customer-count OVER TIME → the ai_mrr_snapshots series. Only compute from ai_customers when snapshots can't answer it.
+
 Domain rules (using the wrong one silently returns wrong/zero rows):
-- A real/active customer = "is_live_customer = true" (do NOT use "active" alone — it's true for CRM leads). Use is_live_customer for CURRENT-book metrics: "active customers", "customer count", current MRR.
-- For CHURN / RETENTION, do NOT filter to is_live_customer — that hides the departures you're measuring. Use the whole population with member_since as the join date and pipeline_stage IN ('churned','dormant') / churned_at / deleted_at as the departure signal.
-- ai_scheduled_services has NO 'scheduled' status. Upcoming work = status IN ('pending','confirmed'); completed visits = 'completed'; for delivered-work metrics prefer ai_service_records.
-- Estimate value lives in monthly_total / annual_total / onetime_total (there is no "total"); accepted deals = status='accepted'.
-- ai_reviews are public Google reviews: rating is "star_rating" (1-5), date is "review_created_at". ai_review_requests is the internal CSAT survey ("score" 1-10).
-- For chartType "kpi", select a single row with one numeric column. For "line"/"bar", "x" is the category/time column and "y" the numeric series. For "donut", "x" is the label and y[0] the value. For "table", list "y" columns in order.`;
+- A real/active customer = is_live_customer = true (do NOT use "active" alone — it's true for CRM leads). Use it for current-book metrics ("active customers", "customer count").
+- CHURN / RETENTION: do NOT filter to is_live_customer — that hides the departures you're measuring. Use the whole population with member_since as the join date and pipeline_stage IN ('churned','dormant') / churned_at / deleted_at as the departure signal.
+- ai_scheduled_services has NO 'scheduled' status. Upcoming = status IN ('pending','confirmed'); completed visits = 'completed'; prefer ai_service_records for delivered work.
+- Estimate value = monthly_total / annual_total / onetime_total (there is no "total"); accepted deals = status='accepted'.
+- ai_reviews = public Google reviews (rating = star_rating 1-5, date = review_created_at). ai_review_requests = internal CSAT survey (score 1-10).
+
+Relative dates (compute with CURRENT_DATE; STATE the window in "explanation"):
+- "this month" = date_trunc('month', CURRENT_DATE); "this quarter" = date_trunc('quarter', CURRENT_DATE); "this year" = date_trunc('year', CURRENT_DATE).
+- "last N days" = CURRENT_DATE - INTERVAL 'N days". "YoY" = same window CURRENT_DATE - INTERVAL '1 year'.
+- Default when no window given: last 12 months for trends, last 30 days for point metrics.
+
+Chart type & format:
+- time series → "line"; category comparison → "bar"; part-to-whole with ≤6 slices → "donut", else "bar"; single scalar → "kpi"; many columns → "table".
+- "yFormat": currency for $, percent for RATES, count for whole numbers, hours for labor_hours, rating for star_rating, else number. For percent, output the FRACTION (won/total = 0.18) — the chart multiplies by 100 and adds %.
+- kpi: ONE row, one numeric column. line/bar: "x" = category/time, "y" = numeric series. donut: "x" = label, y[0] = value. table: list "y" columns in order.
+
+Examples (input → exact JSON output):
+"how many active customers" → {"sql":"SELECT COUNT(*) AS active_customers FROM ai_customers WHERE is_live_customer = true","chartType":"kpi","title":"Active Customers","x":null,"y":["active_customers"],"yFormat":"count","explanation":"Current live customers."}
+"monthly churn count, last 12 months" → {"sql":"SELECT date_trunc('month', churned_at) AS month, COUNT(*) AS churned FROM ai_customers WHERE pipeline_stage IN ('churned','dormant') AND churned_at >= CURRENT_DATE - INTERVAL '12 months' GROUP BY 1 ORDER BY 1 ASC","chartType":"line","title":"Churned Customers by Month","x":"month","y":["churned"],"yFormat":"count","explanation":"Customers in churned/dormant by churned_at month, last 12 months."}
+"lead-to-won conversion rate, last 90 days" → {"sql":"SELECT COALESCE(COUNT(*) FILTER (WHERE status='won'),0)::numeric / NULLIF(COUNT(*),0) AS conversion FROM ai_leads WHERE first_contact_at >= CURRENT_DATE - INTERVAL '90 days'","chartType":"kpi","title":"Lead Conversion (90d)","x":null,"y":["conversion"],"yFormat":"percent","explanation":"Won leads / all leads first contacted in the last 90 days."}
+"collected revenue by month this year" → {"sql":"SELECT date_trunc('month', payment_date) AS month, COALESCE(SUM(amount),0) AS collected FROM ai_payments WHERE status='paid' AND payment_date >= date_trunc('year', CURRENT_DATE) GROUP BY 1 ORDER BY 1 ASC","chartType":"line","title":"Collected Revenue by Month","x":"month","y":["collected"],"yFormat":"currency","explanation":"Sum of paid payments per month, Jan 1 this year to date."}`;
 }
 
 /**
- * Generate a chart spec for a natural-language prompt. Single-shot; the caller
- * validates/executes the SQL and may request a repair on failure.
+ * Generate a chart spec for a natural-language prompt (+ optional reference
+ * images). Single-shot; the caller validates/executes the SQL and may request a
+ * repair on failure.
+ *
+ * When images are attached the request is a VISION call routed to Gemini 3.5
+ * Flash (GEMINI_VISION_BEST) — the app's live vision model — with an automatic
+ * fallback to Claude (also multimodal) so a provider issue never blocks the
+ * chart. Text-only requests stay on the FLAGSHIP reasoning tier.
  * @param {string} prompt
- * @param {{ errorContext?: string }} [opts] - prior SQL + DB error, for a repair round
+ * @param {{ errorContext?: string, images?: Array<{data:string, mimeType:string}> }} [opts]
  * @returns {Promise<{ok:true, spec:object} | {ok:false, reason:string, message?:string}>}
  */
 async function generateChartSpec(prompt, opts = {}) {
   const cleanPrompt = String(prompt || '').trim().slice(0, 500);
-  if (!cleanPrompt) return { ok: false, reason: 'empty_prompt' };
+  const images = Array.isArray(opts.images) ? opts.images.filter((im) => im && im.data && im.mimeType) : [];
+  if (!cleanPrompt && !images.length) return { ok: false, reason: 'empty_prompt' };
 
-  let text = cleanPrompt;
+  let text = cleanPrompt || 'Build the most useful chart this image implies, from the schema below.';
+  if (images.length) {
+    text = `${text}\n\nA reference image is attached — use it to infer the metric, breakdown, and chart type the user wants, then map it to the schema.`;
+  }
   if (opts.errorContext) {
-    text = `${cleanPrompt}\n\nYour previous attempt failed with: ${String(opts.errorContext).slice(0, 300)}\nReturn a corrected query that obeys all the rules.`;
+    text = `${text}\n\nYour previous attempt failed with: ${String(opts.errorContext).slice(0, 300)}\nReturn a corrected query that obeys all the rules.`;
   }
 
+  const system = buildSystemPrompt();
   let res;
   try {
-    res = await callAnthropic({ model: FLAGSHIP, system: buildSystemPrompt(), text, jsonMode: true, maxTokens: 1200 });
+    if (images.length) {
+      // Vision → Gemini 3.5 Flash, Claude fallback (CLAUDE.md cross-provider rule).
+      res = await callGemini({ model: GEMINI_VISION_BEST, system, text, images, jsonMode: true, maxTokens: 1200 });
+      if (!res || !res.ok) {
+        logger.warn(`[ai-chart-builder] Gemini vision miss (${res?.reason}); falling back to Claude`);
+        res = await callAnthropic({ model: FLAGSHIP, system, text, images, jsonMode: true, maxTokens: 1200 });
+      }
+    } else {
+      res = await callAnthropic({ model: FLAGSHIP, system, text, jsonMode: true, maxTokens: 1200 });
+    }
   } catch (err) {
     logger.error(`[ai-chart-builder] LLM call threw: ${err.message}`);
     return { ok: false, reason: 'llm_error' };
@@ -86,6 +127,7 @@ async function generateChartSpec(prompt, opts = {}) {
   if (!CHART_TYPES.includes(j.chartType)) return { ok: false, reason: 'bad_chart_type' };
 
   const y = Array.isArray(j.y) ? j.y.filter((v) => typeof v === 'string') : (typeof j.y === 'string' ? [j.y] : []);
+  const yFormat = Y_FORMATS.includes(j.yFormat) ? j.yFormat : 'number';
   return {
     ok: true,
     spec: {
@@ -94,9 +136,10 @@ async function generateChartSpec(prompt, opts = {}) {
       title: (typeof j.title === 'string' && j.title.trim()) ? j.title.trim().slice(0, 120) : cleanPrompt.slice(0, 120),
       x: typeof j.x === 'string' ? j.x : null,
       y,
+      yFormat,
       explanation: typeof j.explanation === 'string' ? j.explanation.slice(0, 240) : '',
     },
   };
 }
 
-module.exports = { generateChartSpec, CHART_TYPES, SCHEMA_DOC };
+module.exports = { generateChartSpec, CHART_TYPES, Y_FORMATS, SCHEMA_DOC };
