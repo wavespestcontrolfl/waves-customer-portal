@@ -4196,6 +4196,30 @@ export default function Customer360ProfileV2({
                   </a>
                 );
               })()}
+            {/* Contact — listed on mobile (desktop shows these in its header) */}
+            {(c.phone || c.email) && (
+              <div className="flex flex-col gap-1 mb-3 text-13">
+                {c.phone && (
+                  <CallBridgeLink
+                    phone={c.phone}
+                    customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
+                    className="u-nums text-ink-secondary hover:text-zinc-900 no-underline self-start"
+                  >
+                    {c.phone}
+                  </CallBridgeLink>
+                )}
+                {c.email && (
+                  <a
+                    href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-ink-secondary hover:text-zinc-900 no-underline truncate"
+                  >
+                    {c.email}
+                  </a>
+                )}
+              </div>
+            )}
             <div className="flex items-center gap-2 flex-wrap mb-3">
               {" "}
               <TierBadgeV2 tier={c.tier} />{" "}
