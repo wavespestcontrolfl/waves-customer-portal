@@ -7,8 +7,8 @@
  * (services/llm/call.js → callAnthropic), with jsonMode for a structured reply.
  */
 
-const { callAnthropic } = require('./llm/call');
-const { FLAGSHIP } = require('../config/models');
+const { callAnthropic, callGemini } = require('./llm/call');
+const { FLAGSHIP, GEMINI_VISION_BEST } = require('../config/models');
 const logger = require('./logger');
 
 const CHART_TYPES = ['line', 'bar', 'donut', 'kpi', 'table'];
@@ -56,24 +56,44 @@ Domain rules (using the wrong one silently returns wrong/zero rows):
 }
 
 /**
- * Generate a chart spec for a natural-language prompt. Single-shot; the caller
- * validates/executes the SQL and may request a repair on failure.
+ * Generate a chart spec for a natural-language prompt (+ optional reference
+ * images). Single-shot; the caller validates/executes the SQL and may request a
+ * repair on failure.
+ *
+ * When images are attached the request is a VISION call routed to Gemini 3.5
+ * Flash (GEMINI_VISION_BEST) — the app's live vision model — with an automatic
+ * fallback to Claude (also multimodal) so a provider issue never blocks the
+ * chart. Text-only requests stay on the FLAGSHIP reasoning tier.
  * @param {string} prompt
- * @param {{ errorContext?: string }} [opts] - prior SQL + DB error, for a repair round
+ * @param {{ errorContext?: string, images?: Array<{data:string, mimeType:string}> }} [opts]
  * @returns {Promise<{ok:true, spec:object} | {ok:false, reason:string, message?:string}>}
  */
 async function generateChartSpec(prompt, opts = {}) {
   const cleanPrompt = String(prompt || '').trim().slice(0, 500);
-  if (!cleanPrompt) return { ok: false, reason: 'empty_prompt' };
+  const images = Array.isArray(opts.images) ? opts.images.filter((im) => im && im.data && im.mimeType) : [];
+  if (!cleanPrompt && !images.length) return { ok: false, reason: 'empty_prompt' };
 
-  let text = cleanPrompt;
+  let text = cleanPrompt || 'Build the most useful chart this image implies, from the schema below.';
+  if (images.length) {
+    text = `${text}\n\nA reference image is attached — use it to infer the metric, breakdown, and chart type the user wants, then map it to the schema.`;
+  }
   if (opts.errorContext) {
-    text = `${cleanPrompt}\n\nYour previous attempt failed with: ${String(opts.errorContext).slice(0, 300)}\nReturn a corrected query that obeys all the rules.`;
+    text = `${text}\n\nYour previous attempt failed with: ${String(opts.errorContext).slice(0, 300)}\nReturn a corrected query that obeys all the rules.`;
   }
 
+  const system = buildSystemPrompt();
   let res;
   try {
-    res = await callAnthropic({ model: FLAGSHIP, system: buildSystemPrompt(), text, jsonMode: true, maxTokens: 1200 });
+    if (images.length) {
+      // Vision → Gemini 3.5 Flash, Claude fallback (CLAUDE.md cross-provider rule).
+      res = await callGemini({ model: GEMINI_VISION_BEST, system, text, images, jsonMode: true, maxTokens: 1200 });
+      if (!res || !res.ok) {
+        logger.warn(`[ai-chart-builder] Gemini vision miss (${res?.reason}); falling back to Claude`);
+        res = await callAnthropic({ model: FLAGSHIP, system, text, images, jsonMode: true, maxTokens: 1200 });
+      }
+    } else {
+      res = await callAnthropic({ model: FLAGSHIP, system, text, jsonMode: true, maxTokens: 1200 });
+    }
   } catch (err) {
     logger.error(`[ai-chart-builder] LLM call threw: ${err.message}`);
     return { ok: false, reason: 'llm_error' };

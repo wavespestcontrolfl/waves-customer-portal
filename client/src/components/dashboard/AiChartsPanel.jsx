@@ -1,5 +1,21 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChartCard, EmptyState, CHART_PRIMARY } from "./charts";
+import DictationButton from "../tech/DictationButton";
+
+const MAX_IMAGES = 3;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const ALLOWED_IMAGE_MIME = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+// FileReader → { data: base64 (no data: prefix), mimeType, name, preview: dataURL }
+const readImage = (file) =>
+  new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const url = String(r.result || "");
+      resolve({ data: url.split(",")[1] || "", mimeType: file.type, name: file.name, preview: url });
+    };
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
 
 // Self-contained AI chart builder + pinned widgets. Gated behind the
 // `dashboard-ai-charts` feature flag by the caller. The model only proposes SQL;
@@ -116,6 +132,18 @@ export default function AiChartsPanel() {
   const [error, setError] = useState(null);
   const [widgets, setWidgets] = useState([]);
   const [pinning, setPinning] = useState(false);
+  const [images, setImages] = useState([]); // [{ data, mimeType, name, preview }]
+  const fileInputRef = useRef(null);
+
+  const addImages = async (fileList) => {
+    const files = Array.from(fileList || []).filter(
+      (f) => ALLOWED_IMAGE_MIME.includes(f.type) && f.size <= MAX_IMAGE_BYTES,
+    );
+    if (!files.length) return;
+    const read = await Promise.all(files.map(readImage));
+    setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES));
+  };
+  const removeImage = (i) => setImages((prev) => prev.filter((_, idx) => idx !== i));
 
   const loadWidgets = useCallback(async () => {
     try {
@@ -131,10 +159,13 @@ export default function AiChartsPanel() {
 
   const onGenerate = async () => {
     const p = prompt.trim();
-    if (!p || busy) return;
+    if ((!p && !images.length) || busy) return;
     setBusy(true); setError(null); setPreview(null);
     try {
-      const data = await aiFetch("/admin/dashboard/ai-chart/preview", { method: "POST", body: JSON.stringify({ prompt: p }) });
+      const data = await aiFetch("/admin/dashboard/ai-chart/preview", {
+        method: "POST",
+        body: JSON.stringify({ prompt: p, images: images.map((im) => ({ data: im.data, mimeType: im.mimeType })) }),
+      });
       setPreview(data);
     } catch (e) {
       setError(e.message);
@@ -151,7 +182,7 @@ export default function AiChartsPanel() {
         method: "POST",
         body: JSON.stringify({ title: preview.spec.title, prompt: prompt.trim(), sql: preview.spec.sql, chartSpec: preview.spec }),
       });
-      setPreview(null); setPrompt("");
+      setPreview(null); setPrompt(""); setImages([]);
       await loadWidgets();
     } catch (e) {
       setError(e.message);
@@ -171,23 +202,66 @@ export default function AiChartsPanel() {
 
   return (
     <ChartCard title="Ask for a chart" sub="Describe a metric — the AI builds it from your data">
-      <div className="flex gap-2 mb-3">
+      <div className="flex items-center gap-2 mb-2">
         <input
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") onGenerate(); }}
-          placeholder="e.g. new customers per month by city, last 6 months"
+          placeholder="e.g. new customers per month by city, last 6 months — or attach an image"
           className="flex-1 h-9 px-3 text-13 border-hairline border-zinc-300 rounded-sm u-focus-ring"
+        />
+        <DictationButton
+          onAppend={(t) => setPrompt((p) => (p ? `${p} ${t}` : t))}
+          palette={{ accent: "#18181B", muted: "#A1A1AA", red: "#C8312F", card: "#FFFFFF" }}
+          title="Dictate"
+          size={36}
+        />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={ALLOWED_IMAGE_MIME.join(",")}
+          multiple
+          className="hidden"
+          onChange={(e) => { addImages(e.target.files); e.target.value = ""; }}
         />
         <button
           type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={images.length >= MAX_IMAGES}
+          title="Attach a reference image"
+          aria-label="Attach a reference image"
+          className="h-9 w-9 inline-flex items-center justify-center border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:bg-zinc-50 disabled:opacity-40 u-focus-ring shrink-0"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+          </svg>
+        </button>
+        <button
+          type="button"
           onClick={onGenerate}
-          disabled={busy || !prompt.trim()}
-          className="h-9 px-4 text-12 font-medium rounded-sm bg-zinc-900 text-white disabled:opacity-40 u-focus-ring"
+          disabled={busy || (!prompt.trim() && !images.length)}
+          className="h-9 px-4 text-12 font-medium rounded-sm bg-zinc-900 text-white disabled:opacity-40 u-focus-ring shrink-0"
         >
           {busy ? "Building…" : "Generate"}
         </button>
       </div>
+      {images.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-3">
+          {images.map((im, i) => (
+            <div key={i} className="relative">
+              <img src={im.preview} alt={im.name} className="h-14 w-14 object-cover rounded-sm border-hairline border-zinc-200" />
+              <button
+                type="button"
+                onClick={() => removeImage(i)}
+                aria-label={`Remove ${im.name}`}
+                className="absolute -top-1.5 -right-1.5 h-4 w-4 inline-flex items-center justify-center rounded-full bg-zinc-900 text-white text-[10px] u-focus-ring"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {error && <div className="text-12 text-alert-fg mb-3">{error}</div>}
 

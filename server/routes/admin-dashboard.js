@@ -1692,11 +1692,26 @@ router.get('/alerts', dashboardCache, async (req, res, next) => {
 // Generate + safely run a chart from a natural-language prompt (no persistence).
 // One repair round: if the first SQL fails to validate/run, the error is fed
 // back to the model for a corrected query.
+// Bounded image acceptance for the vision path: a few small reference images,
+// validated to known raster types and a sane size, passed to the model (Gemini
+// 3.5 Flash) — never persisted.
+const ALLOWED_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const MAX_IMAGES = 3;
+const MAX_IMAGE_B64 = 7 * 1024 * 1024; // ~5 MB decoded
+function sanitizeChartImages(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((im) => im && typeof im.data === 'string' && ALLOWED_IMAGE_MIME.has(im.mimeType) && im.data.length <= MAX_IMAGE_B64)
+    .slice(0, MAX_IMAGES)
+    .map((im) => ({ data: im.data, mimeType: im.mimeType }));
+}
+
 router.post('/ai-chart/preview', requireAiChartsEnabled, aiChartLimiter, async (req, res) => {
   const prompt = String(req.body?.prompt || '').trim();
-  if (!prompt) return res.status(400).json({ error: 'A prompt is required.' });
+  const images = sanitizeChartImages(req.body?.images);
+  if (!prompt && !images.length) return res.status(400).json({ error: 'A prompt or an image is required.' });
 
-  let gen = await generateChartSpec(prompt);
+  let gen = await generateChartSpec(prompt, { images });
   if (!gen.ok) {
     return res.status(422).json({ error: gen.message || `Could not build a chart (${gen.reason}).` });
   }
@@ -1709,7 +1724,7 @@ router.post('/ai-chart/preview', requireAiChartsEnabled, aiChartLimiter, async (
       const guard = err instanceof SqlGuardError;
       logger.warn(`[admin-dashboard] ai-chart preview attempt ${attempt + 1} failed (${guard ? 'guard' : 'exec'}): ${err.message}`);
       if (attempt === 0) {
-        const repaired = await generateChartSpec(prompt, { errorContext: err.message });
+        const repaired = await generateChartSpec(prompt, { images, errorContext: err.message });
         if (repaired.ok) { gen = repaired; continue; }
       }
       return res.status(422).json({ error: 'The generated query was rejected or failed to run. Try rephrasing.' });
