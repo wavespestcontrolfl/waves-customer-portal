@@ -586,7 +586,14 @@ function recurringLineAnnualAmount(item = {}) {
 function isNonDiscountableRecurringLine(item = {}) {
   if (recurringServiceKey(item) === 'lawn_care') return false;
   const annual = recurringLineAnnualAmount(item);
-  return annual > 0 && (
+  if (!(annual > 0)) return false;
+  // foam_recurring is non-discountable by owner directive — the cadence
+  // multiplier is its only discount. Engine-backed / quote-wizard save paths
+  // persist the foam line without the discountable:false flag (e.g.
+  // public-quote.js maps a lineItems subset), so key off the service itself so
+  // annual prepay never stacks the generic 5% on foam regardless of row flags.
+  if (recurringServiceKey(item) === 'foam_recurring') return true;
+  return (
     item.discountable === false ||
     item.discount?.discountable === false ||
     item.discount?.policy === 'LAWN_V2_NET_55_FLOOR_PRICE'
