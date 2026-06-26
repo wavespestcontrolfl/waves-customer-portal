@@ -2773,9 +2773,19 @@ function EstimateToolView() {
                 </Field>
               </div>
               {(commercialDetected || form.commercialSubtype) && (
-                <Field label="Commercial Subtype">
-                  <Input k="commercialSubtype" placeholder="Optional" />
-                </Field>
+                <div style={sRow}>
+                  <Field label="Commercial Subtype">
+                    <Input k="commercialSubtype" placeholder="Optional" />
+                  </Field>
+                  <Field label="Number of Units">
+                    <Input
+                      k="units"
+                      type="number"
+                      min="0"
+                      placeholder="Apartments / multi-family"
+                    />
+                  </Field>
+                </div>
               )}
               {commercialDetected && (
                 <div

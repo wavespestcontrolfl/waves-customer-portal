@@ -24,65 +24,114 @@ function commercialInput(overrides = {}) {
 }
 
 describe('priceCommercialPestPilot (unit)', () => {
-  test('prices the floor at/below the first bracket', () => {
-    const result = priceCommercialPestPilot({ buildingSqFt: 1200 }, { frequency: 'quarterly' });
+  test('is a manual-review line carrying a SUGGESTED price (never a committed plan)', () => {
+    const result = priceCommercialPestPilot({ buildingSqFt: 5000 }, { frequency: 'quarterly' });
     expect(result).toMatchObject({
       service: 'commercial_pest',
       isCommercial: true,
       commercialPricingMode: 'small_commercial_pilot',
-      quoteRequired: false,
+      // Blocking flags set so the existing commercial plumbing refuses self-serve
+      // accept and skips the residential membership fee.
+      quoteRequired: true,
+      requiresManualReview: true,
       autoQuoteRequiresAdminApproval: true,
       taxable: true,
       taxCategory: 'nonresidential_pest_control',
       visitsPerYear: 4,
     });
-    // 1,200 sqft is below the first bracket (2,000 → $95), so the floor applies.
-    expect(result.quarterlyPerVisit).toBe(95);
-    expect(result.perApp).toBe(95);
-    expect(result.annual).toBe(380); // 95 × 4
+    // Committed money fields stay null (kept out of engine recurring/one-time totals).
+    expect(result.price).toBeNull();
+    expect(result.annual).toBeNull();
+    expect(result.monthly).toBeNull();
+    // Suggested price rides along for the operator + proposal.
+    expect(result.suggestedQuarterlyPerVisit).toBe(165);
+    expect(result.suggestedPerApp).toBe(165);
+    expect(result.suggestedAnnual).toBe(660); // 165 × 4
+    expect(result.manualReviewReasons).toContain('commercial_pilot_pricing_requires_admin_approval');
   });
 
-  test('interpolates between brackets at quarterly cadence', () => {
-    // Midpoint between 5,000 ($165) and 10,000 ($245) → 7,500 → $205.
+  test('floors below the first bracket', () => {
+    const result = priceCommercialPestPilot({ buildingSqFt: 1200 }, { frequency: 'quarterly' });
+    expect(result.suggestedQuarterlyPerVisit).toBe(95);
+    expect(result.suggestedAnnual).toBe(380);
+  });
+
+  test('interpolates between brackets', () => {
+    // 7,500 sqft midway between 5,000 ($165) and 10,000 ($245) → $205.
     const result = priceCommercialPestPilot({ buildingSqFt: 7500 }, { frequency: 'quarterly' });
-    expect(result.quarterlyPerVisit).toBe(205);
-    expect(result.perApp).toBe(205);
-    expect(result.visitsPerYear).toBe(4);
-    expect(result.annual).toBe(820);
+    expect(result.suggestedQuarterlyPerVisit).toBe(205);
+    expect(result.suggestedAnnual).toBe(820);
   });
 
-  test('applies the bi-monthly and monthly frequency multipliers', () => {
+  test('applies bi-monthly and monthly multipliers to the suggested per-visit', () => {
     const bimonthly = priceCommercialPestPilot({ buildingSqFt: 5000 }, { frequency: 'bimonthly' });
-    // 165 × 0.92 = 151.80 per visit, 6 visits/yr.
-    expect(bimonthly.perApp).toBeCloseTo(151.8, 2);
+    expect(bimonthly.suggestedPerApp).toBeCloseTo(151.8, 2); // 165 × 0.92
     expect(bimonthly.visitsPerYear).toBe(6);
 
     const monthly = priceCommercialPestPilot({ buildingSqFt: 5000 }, { frequency: 'monthly' });
-    // 165 × 0.85 = 140.25 per visit, 12 visits/yr.
-    expect(monthly.perApp).toBeCloseTo(140.25, 2);
+    expect(monthly.suggestedPerApp).toBeCloseTo(140.25, 2); // 165 × 0.85
     expect(monthly.visitsPerYear).toBe(12);
   });
 
-  test('declines (returns null) above the pilot ceiling', () => {
-    expect(priceCommercialPestPilot({ buildingSqFt: COMMERCIAL_PEST_PILOT.ceilingSqFt + 1 }, {})).toBeNull();
+  test('stories multiply the base for resident callbacks/access', () => {
+    const result = priceCommercialPestPilot({ buildingSqFt: 5000, stories: 2 }, {});
+    // 165 × (1 + 0.12 × 1) = 184.8
+    expect(result.suggestedQuarterlyPerVisit).toBeCloseTo(184.8, 2);
+    expect(result.buildings[0].storiesMultiplier).toBeCloseTo(1.12, 3);
   });
 
-  test('declines (returns null) when no usable building sqft', () => {
+  test('units add a per-unit callback reserve', () => {
+    const result = priceCommercialPestPilot({ buildingSqFt: 5000, units: 10 }, {});
+    // 165 + 5 × 10 = 215
+    expect(result.suggestedQuarterlyPerVisit).toBe(215);
+    expect(result.totalUnits).toBe(10);
+  });
+
+  test('sums per-building prices for a mixed complex (2-story + 1-story)', () => {
+    const result = priceCommercialPestPilot({}, {
+      buildings: [
+        { sqft: 12000, stories: 2, units: 16 },
+        { sqft: 6000, stories: 1, units: 8 },
+      ],
+    });
+    // B1: interp(12000)=277 ×1.12 + 16×5 = 390.24 ; B2: interp(6000)=181 ×1.0 + 8×5 = 221
+    expect(result.buildingCount).toBe(2);
+    expect(result.totalUnits).toBe(24);
+    expect(result.buildings[0].quarterlyPerVisit).toBeCloseTo(390.24, 2);
+    expect(result.buildings[1].quarterlyPerVisit).toBeCloseTo(221, 2);
+    expect(result.suggestedQuarterlyPerVisit).toBeCloseTo(611.24, 2);
+    expect(result.suggestedAnnual).toBeCloseTo(2444.96, 2);
+  });
+
+  test('declines (null) when any building exceeds the pilot ceiling', () => {
+    expect(priceCommercialPestPilot({ buildingSqFt: COMMERCIAL_PEST_PILOT.ceilingSqFt + 1 }, {})).toBeNull();
+    expect(priceCommercialPestPilot({}, {
+      buildings: [{ sqft: 5000 }, { sqft: 99999 }],
+    })).toBeNull();
+  });
+
+  test('prices off GROSS area, not derived per-floor footprint (Codex P2)', () => {
+    // A 20,000-sf two-story building: gross 20,000 is over the 15,000 ceiling, so
+    // the pilot must decline even though homeSqFt/stories = 10,000 footprint.
+    expect(priceCommercialPestPilot({ homeSqFt: 20000, footprint: 10000, stories: 2 }, {})).toBeNull();
+  });
+
+  test('declines (null) when no usable building sqft', () => {
     expect(priceCommercialPestPilot({}, {})).toBeNull();
     expect(priceCommercialPestPilot({ buildingSqFt: 0 }, {})).toBeNull();
   });
 });
 
 describe('priceCommercialPestPilot through generateEstimate', () => {
-  test('a flagged commercial pest estimate produces a priced recurring line', () => {
+  test('a flagged commercial pest estimate is a manual-review line, not a recurring plan', () => {
     const estimate = generateEstimate(commercialInput());
     const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
     expect(pest).toBeTruthy();
-    expect(pest.quoteRequired).toBe(false);
-    expect(pest.annual).toBe(660); // 165 × 4
-    // The priced commercial line flows into the recurring summary totals.
-    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(660);
-    // No WaveGuard tier credit for the commercial pilot line.
+    expect(pest.quoteRequired).toBe(true);
+    expect(pest.requiresManualReview).toBe(true);
+    expect(pest.suggestedAnnual).toBe(660);
+    // Kept out of the recurring totals (no auto self-serve plan / membership fee).
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(0);
     expect(estimate.waveGuard.activeServices).not.toContain('commercial_pest');
   });
 
@@ -95,6 +144,7 @@ describe('priceCommercialPestPilot through generateEstimate', () => {
       requiresManualReview: true,
     });
     expect(pest.price).toBeNull();
+    expect(pest.suggestedAnnual).toBeUndefined();
   });
 
   test('without the pilot flag a commercial pest estimate stays a manual quote', () => {
@@ -103,26 +153,26 @@ describe('priceCommercialPestPilot through generateEstimate', () => {
     }));
     const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
     expect(pest).toMatchObject({ commercialPricingMode: 'manual_quote', quoteRequired: true });
+    expect(pest.suggestedAnnual).toBeUndefined();
   });
 });
 
-describe('customer-facing proposal applies FL commercial tax to the priced pilot line', () => {
-  test('synthesized proposal marks the commercial line taxable and defaults the FL rate', () => {
+describe('customer-facing proposal applies FL commercial tax to the suggested pilot price', () => {
+  test('synthesized proposal renders the readable label, marks it taxable, defaults the FL rate', () => {
     const estimate = generateEstimate(commercialInput());
     const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
 
-    // Persisted estimate_data carries the engine line items; the proposal layer
-    // synthesizes a fallback proposal from them when none is hand-authored.
     const proposal = normalizeProposal({
       address: '123 Commerce Way',
       estimate_data: JSON.stringify({ lineItems: [pest] }),
     });
     expect(proposal.taxRate).toBeCloseTo(0.07, 4);
+    // Readable label, not the raw service key (Codex P3).
+    expect(proposal.buildings[0].lineItems[0].description).toBe('Commercial Pest Control');
 
     const totals = computeProposalTotals(proposal);
     expect(totals.hasTax).toBe(true);
-    // Annual recurring 660 × 7% = 46.20 tax.
-    expect(totals.taxableAnnualRecurring).toBe(660);
+    expect(totals.taxableAnnualRecurring).toBe(660); // 55/mo × 12
     expect(totals.totalTax).toBeCloseTo(46.2, 2);
     expect(totals.firstYearTotal).toBeCloseTo(706.2, 2);
   });

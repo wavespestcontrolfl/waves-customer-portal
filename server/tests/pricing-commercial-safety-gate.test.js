@@ -523,7 +523,7 @@ describe('commercial safety gate in generateEstimate', () => {
     expect(estimate.lineItems.every((line) => line.quoteRequired)).toBe(true);
   });
 
-  test('small-commercial pilot flag auto-prices pest but never falls through to residential pricing', () => {
+  test('small-commercial pilot flag suggests a pest price but never falls through to residential pricing', () => {
     const estimate = generateEstimate(baseInput({
       propertyType: 'commercial',
       services: {
@@ -536,19 +536,23 @@ describe('commercial safety gate in generateEstimate', () => {
       'commercial_pest',
       'commercial_lawn',
     ]);
-    // The pilot prices pest with the commercial service key — never the
+    // The pilot suggests a pest price with the commercial service key — never the
     // residential pricer — and lawn has no pilot, so it stays a manual quote.
     expect(estimate.lineItems).not.toContainEqual(expect.objectContaining({ service: 'pest_control' }));
     expect(estimate.lineItems).not.toContainEqual(expect.objectContaining({ service: 'lawn_care' }));
     const pest = estimate.lineItems.find((line) => line.service === 'commercial_pest');
     expect(pest).toMatchObject({
       commercialPricingMode: 'small_commercial_pilot',
-      quoteRequired: false,
+      // Manual-review line: blocks self-serve accept / membership fee until an
+      // operator approves and sends a formal quote.
+      quoteRequired: true,
+      requiresManualReview: true,
       autoQuoteRequiresAdminApproval: true,
       taxable: true,
       taxCategory: 'nonresidential_pest_control',
     });
-    expect(pest.monthly).toBeGreaterThan(0);
+    expect(pest.annual).toBeNull();
+    expect(pest.suggestedAnnual).toBeGreaterThan(0);
     expect(estimate.lineItems.find((line) => line.service === 'commercial_lawn')).toMatchObject({
       quoteRequired: true,
       commercialPricingMode: 'manual_quote',
@@ -706,7 +710,7 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
     }));
   });
 
-  test('commercial v2 payload WITH the pilot flag auto-prices pest (recurring) and leaves lawn a manual quote', () => {
+  test('commercial v2 payload WITH the pilot flag suggests a pest price as a manual-review spec item', () => {
     const input = translateV2CallToV1Input(
       {
         propertyType: 'Commercial',
@@ -728,25 +732,24 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
 
     const mapped = mapV1ToLegacyShape(generateEstimate(input));
 
-    // Pest is now a PRICED recurring service (5,000 sqft → $165/visit quarterly).
-    expect(mapped.recurring.services).toContainEqual(expect.objectContaining({
+    // Pilot pest is a manual-review line, NOT a recurring self-serve plan — so it
+    // never lands in recurring.services (no membership fee / auto-accept).
+    expect(mapped.recurring.services).toEqual([]);
+    // It surfaces as a quote-required spec item carrying the SUGGESTED price for
+    // the operator + proposal (5,000 sqft → $165/visit quarterly → $660/yr).
+    expect(mapped.oneTime.specItems).toContainEqual(expect.objectContaining({
       service: 'commercial_pest',
-      name: 'Commercial Pest Control',
+      quoteRequired: true,
+      requiresManualReview: true,
       isCommercial: true,
       commercialPricingMode: 'small_commercial_pilot',
       taxable: true,
       taxCategory: 'nonresidential_pest_control',
       autoQuoteRequiresAdminApproval: true,
-      countsTowardWaveGuardTier: false,
-      mo: 55,
-      perTreatment: 165,
-      visitsPerYear: 4,
+      suggestedAnnual: 660,
+      suggestedQuarterlyPerVisit: 165,
     }));
-    // ...and not duplicated as a manual-quote spec item.
-    expect(mapped.specItems).not.toContainEqual(expect.objectContaining({
-      service: 'commercial_pest',
-    }));
-    // Lawn has no pilot pricer — it stays a manual quote.
+    // Lawn has no pilot pricer — it stays a plain manual quote.
     expect(mapped.specItems).toContainEqual(expect.objectContaining({
       service: 'commercial_lawn',
       quoteRequired: true,

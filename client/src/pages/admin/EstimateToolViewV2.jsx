@@ -4328,9 +4328,19 @@ export default function EstimateToolViewV2({
                 </FieldV2>
               </div>
               {(commercialDetected || form.commercialSubtype) && (
-                <FieldV2 label="Commercial Subtype">
-                  <InputV2 k="commercialSubtype" placeholder="Optional" />
-                </FieldV2>
+                <div className="grid grid-cols-2 gap-3">
+                  <FieldV2 label="Commercial Subtype">
+                    <InputV2 k="commercialSubtype" placeholder="Optional" />
+                  </FieldV2>
+                  <FieldV2 label="Number of Units">
+                    <InputV2
+                      k="units"
+                      type="number"
+                      min="0"
+                      placeholder="Apartments / multi-family"
+                    />
+                  </FieldV2>
+                </div>
               )}
               {commercialDetected && (
                 <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">

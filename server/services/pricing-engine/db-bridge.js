@@ -517,6 +517,18 @@ function validatePestPricingConfig(snapshot = constants) {
       errors.push(`COMMERCIAL_PEST_PILOT.frequencies.${freq} must be positive`);
     }
   }
+  if (!isNonNegativeNumber(commercialPilot.stories?.perStoryUplift)) {
+    errors.push('COMMERCIAL_PEST_PILOT.stories.perStoryUplift must be non-negative');
+  }
+  if (!isPositiveNumber(commercialPilot.stories?.maxStories)) {
+    errors.push('COMMERCIAL_PEST_PILOT.stories.maxStories must be positive');
+  }
+  if (!isNonNegativeNumber(commercialPilot.perUnitQuarterly)) {
+    errors.push('COMMERCIAL_PEST_PILOT.perUnitQuarterly must be non-negative');
+  }
+  if (!isPositiveNumber(commercialPilot.unitManualReviewThreshold)) {
+    errors.push('COMMERCIAL_PEST_PILOT.unitManualReviewThreshold must be positive');
+  }
 
   return { valid: errors.length === 0, errors };
 }
@@ -1556,6 +1568,13 @@ async function syncConstantsFromDB(dbInstance) {
           setNumber(target.frequencies, freq, c.frequencies[freq], Number);
         }
       }
+      if (c.stories && typeof c.stories === 'object') {
+        if (!target.stories || typeof target.stories !== 'object') target.stories = {};
+        setNumber(target.stories, 'perStoryUplift', c.stories.perStoryUplift);
+        setNumber(target.stories, 'maxStories', c.stories.maxStories, Number);
+      }
+      setNumber(target, 'perUnitQuarterly', c.perUnitQuarterly, money);
+      setNumber(target, 'unitManualReviewThreshold', c.unitManualReviewThreshold, Number);
     }
 
     assertValidPestPricingConfig(constants);

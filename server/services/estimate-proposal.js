@@ -122,23 +122,31 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
   let hasTaxableCommercialLine = false;
 
   for (const line of engineLines) {
-    // Engine recurring lines carry `.monthly`/`.annual`; persisted bundles may
-    // use `monthlyPrice`/`monthly_price`. Accept all so a priced commercial line
-    // is not silently dropped.
-    const monthly = num(line.monthlyPrice ?? line.monthly_price ?? line.monthly ?? (num(line.annual) > 0 ? num(line.annual) / 12 : 0));
+    // Engine recurring lines carry `.monthly`/`.annual`; the small-commercial
+    // pilot carries an advisory `suggestedMonthly`/`suggestedAnnual` (it is a
+    // manual-review line, so its committed `monthly`/`annual` are null);
+    // persisted bundles may use `monthlyPrice`/`monthly_price`. Accept all so a
+    // priced/suggested commercial line is not silently dropped.
+    const monthly = num(
+      line.monthlyPrice ?? line.monthly_price ?? line.monthly
+      ?? line.suggestedMonthly
+      ?? (num(line.annual) > 0 ? num(line.annual) / 12 : 0)
+      ?? (num(line.suggestedAnnual) > 0 ? num(line.suggestedAnnual) / 12 : 0),
+    );
     const oneTime = num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime);
     const taxable = line.taxable === true;
-    if (taxable) hasTaxableCommercialLine = true;
+    const description = line.displayName || line.name || line.label || line.service;
+    if (taxable && (monthly > 0 || oneTime > 0)) hasTaxableCommercialLine = true;
     if (monthly > 0) {
       lineItems.push(normalizeLineItem({
-        description: line.displayName || line.name || line.service || 'Recurring service',
+        description: description || 'Recurring service',
         unitPrice: monthly,
         frequency: 'monthly',
         taxable,
       }));
     } else if (oneTime > 0) {
       lineItems.push(normalizeLineItem({
-        description: line.displayName || line.name || line.service || 'One-time service',
+        description: description || 'One-time service',
         unitPrice: oneTime,
         frequency: 'one_time',
         taxable,

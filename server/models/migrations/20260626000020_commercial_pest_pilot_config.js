@@ -29,8 +29,11 @@ const PILOT_DATA = {
   ],
   frequencyMultipliers: { quarterly: 1.0, bimonthly: 0.92, monthly: 0.85 },
   frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },
+  stories: { perStoryUplift: 0.12, maxStories: 6 },
+  perUnitQuarterly: 5,
+  unitManualReviewThreshold: 60,
   taxCategory: 'nonresidential_pest_control',
-  description: 'Small-commercial pest pilot — quarterly per-visit price interpolated by building sqft. Above ceilingSqFt falls back to manual quote.',
+  description: 'Small-commercial pest pilot — quarterly per-visit price interpolated by building sqft, × stories uplift + per-unit callback reserve, summed across buildings. Above ceilingSqFt falls back to manual quote.',
 };
 
 exports.up = async function (knex) {
@@ -59,9 +62,21 @@ exports.up = async function (knex) {
   }
 };
 
+// Stable stringify so a key-order difference between the seeded JSON and the
+// round-tripped DB JSON doesn't read as an admin edit.
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 exports.down = async function (knex) {
-  // Only remove the row if this migration's up() created it — keyed off the
-  // audit row — so an admin-edited pilot config survives rollback.
+  // Only remove the row if this migration's up() created it (keyed off the audit
+  // row) AND the current config still matches what we seeded. If an operator
+  // tuned the values in the admin Pricing Logic panel, the row no longer matches
+  // the seed, so rollback leaves the edited production config in place.
   if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
   const ownUp = await knex('pricing_config_audit')
     .where({ config_key: CONFIG_KEY, changed_by: MIGRATION_TAG, reason: UP_REASON })
@@ -69,7 +84,12 @@ exports.down = async function (knex) {
   if (!ownUp) return;
 
   if (await knex.schema.hasTable('pricing_config')) {
-    await knex('pricing_config').where({ config_key: CONFIG_KEY }).del();
+    const row = await knex('pricing_config').where({ config_key: CONFIG_KEY }).first();
+    if (row) {
+      const current = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+      if (stableStringify(current) !== stableStringify(PILOT_DATA)) return; // admin-edited — keep it
+      await knex('pricing_config').where({ config_key: CONFIG_KEY }).del();
+    }
   }
   await knex('pricing_config_audit')
     .where({ config_key: CONFIG_KEY, changed_by: MIGRATION_TAG, reason: UP_REASON })

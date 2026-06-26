@@ -223,6 +223,20 @@ const PEST = {
 // and the line falls back to manual quote (a true large site needs a walk).
 // Bi-monthly / monthly per-visit rates derive from quarterly via
 // `frequencyMultipliers`. Commercial nonresidential pest is taxable in FL.
+//
+// Per-building model (multi-family / mixed complexes). A property is one or more
+// BUILDINGS, each with its own { sqft, stories, units }; per-building prices are
+// summed. Two callback drivers ride on top of the sqft-driven scheduled-visit
+// base, because resident callbacks (re-services between scheduled treatments)
+// scale with how many residents live there and how vertical the building is:
+//   • `stories.perStoryUplift` — each story above the first multiplies the base
+//     (units stacked vertically = more access + more callbacks). storiesMult =
+//     1 + perStoryUplift × (clamp(stories, 1, maxStories) − 1).
+//   • `perUnitQuarterly` — a flat per-unit/quarter callback reserve added per
+//     occupied unit (apartments/multi-family). Zero units (a plain commercial
+//     building) adds nothing, so single-building commercial pricing is unchanged.
+// buildingQuarterly = max(floor, interpolate(sqft)) × storiesMult
+//                     + perUnitQuarterly × units; property = Σ buildings.
 const COMMERCIAL_PEST_PILOT = {
   enabled: true,
   floor: r(95),
@@ -239,6 +253,12 @@ const COMMERCIAL_PEST_PILOT = {
   // residential curve. Must stay in (0, 1].
   frequencyMultipliers: { quarterly: 1.00, bimonthly: 0.92, monthly: 0.85 },
   frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },
+  // Stories callback/access uplift (PILOT DEFAULT — owner to confirm).
+  stories: { perStoryUplift: 0.12, maxStories: 6 },
+  // Per-unit quarterly callback reserve for multi-family (PILOT DEFAULT).
+  perUnitQuarterly: r(5),
+  // Total units above this still price, but flag the line for manual review.
+  unitManualReviewThreshold: 60,
   taxCategory: 'nonresidential_pest_control',
 };
 

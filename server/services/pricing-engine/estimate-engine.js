@@ -585,6 +585,12 @@ function generateEstimate(input) {
         ? priceCommercialPestPilot(property, {
             frequency: pestOpts.frequency || commercialPestOpts.frequency || 'quarterly',
             commercialSubtype,
+            // Multi-family / mixed-complex inputs: an explicit per-building list
+            // (each { sqft, stories, units }) wins; otherwise the single-building
+            // fallback derives from the property profile + these top-level values.
+            buildings: pestOpts.buildings || commercialPestOpts.buildings || input.commercialBuildings,
+            units: pestOpts.units ?? commercialPestOpts.units ?? input.units,
+            stories: pestOpts.stories ?? commercialPestOpts.stories ?? input.stories ?? property.stories,
           })
         : null;
       if (pilotResult) {

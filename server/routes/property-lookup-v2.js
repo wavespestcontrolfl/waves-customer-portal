@@ -2393,6 +2393,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         ? { commercialPricingMode: o.commercialPricingMode }
         : {}),
       ...(commercialProfile && commercialSubtype ? { commercialSubtype } : {}),
+      // Multi-family / mixed-complex pilot inputs: a per-building list wins;
+      // otherwise the single-building fallback uses top-level units + stories.
+      ...(commercialProfile && Array.isArray(o.commercialBuildings) && o.commercialBuildings.length
+        ? { buildings: o.commercialBuildings }
+        : {}),
+      ...(commercialProfile && o.units != null && o.units !== '' ? { units: Number(o.units) } : {}),
     };
   }
   if (sel.has('LAWN')) {
