@@ -8904,7 +8904,10 @@ export function CompletionPanel({
       // Keep the panel open when a pest recap is pending — it renders async and the
       // tech approves/sends it from the success overlay (the approve UI is otherwise
       // unreachable once the panel auto-closes).
-      if (!result?.followupSuggestion?.required && !recapEligible) {
+      // Keep the success overlay open when the annual-prepay CTA is available so
+      // the operator can act on it — otherwise the ~1.2s auto-close unmounts the
+      // button (and the prepay modal) mid-flow on the common no-recap path.
+      if (!result?.followupSuggestion?.required && !recapEligible && !prepayAtCompletionFlag) {
         setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
       }
     } catch (e) {
