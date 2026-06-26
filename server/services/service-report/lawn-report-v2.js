@@ -168,11 +168,14 @@ const SNAP_STATUS = { low: 'low', high: 'high', balanced: 'balanced', unknown: '
 // reading; otherwise fall back to the live irrigation-advice water context.
 function mapWater(waterContext, waterSnapshot = null) {
   const grassLabel = 'lawn';
-  // Only prefer the area snapshot when its inputs are actually known. status can read
-  // low/high from irrigation-only totals while rain is unsynced (interpretation =
-  // 'rain_unknown'); in that case fall back to the live irrigation-advice context
-  // rather than show misleading water totals.
-  if (waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
+  // Property-level rainfall (Open-Meteo at the client's exact lat/lng, behind
+  // waterContext.rainfallInches7d) is authoritative — it's more precise than the
+  // regional area centroid and is the same source the 7-day chart now uses, so the
+  // summary and chart always agree. Only fall back to the area snapshot when we have
+  // no property rainfall but the area does (and its inputs are actually known —
+  // status can read low/high from irrigation-only totals while rain is unsynced).
+  const clientRainKnown = waterContext && num(waterContext.rainfallInches7d) != null;
+  if (!clientRainKnown && waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown') {
     const rain = waterSnapshot.adjusted_rain_7day_inches != null ? waterSnapshot.adjusted_rain_7day_inches : waterSnapshot.rain_7day_inches;
     return {

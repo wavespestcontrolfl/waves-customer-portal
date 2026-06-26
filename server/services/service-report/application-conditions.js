@@ -185,7 +185,7 @@ function rainCacheKey(lat, lon, end) {
 // (inches here). Eyeball a real report once — a ~25× value would mean it came
 // back in mm.
 async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}) {
-  const empty = { rainInches: null, et0Inches: null };
+  const empty = { rainInches: null, et0Inches: null, dailyRain: null };
   const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : null;
   const lon = Number.isFinite(Number(longitude)) ? Number(longitude) : null;
   const range = rainWindowEndingOn(serviceDate, 7);
@@ -220,12 +220,21 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
       && times[0] === range.start && times[times.length - 1] === range.end;
     const sumIfFull = (arr) => (windowOk && Array.isArray(arr) && arr.length === expectedDays)
       ? sumPrecipInches(arr) : null;
+    const round2 = (n) => (Number.isFinite(Number(n)) ? Math.round(Number(n) * 100) / 100 : null);
     const value = {
       rainInches: sumIfFull(daily.precipitation_sum),
       et0Inches: et0SumToInches(
         sumIfFull(daily.et0_fao_evapotranspiration),
         payload?.daily_units?.et0_fao_evapotranspiration,
       ),
+      // Per-day rainfall (inches) over the trusted window, at the SAME client
+      // lat/lng as rainInches. Lets the report's 7-day chart be sourced from the
+      // customer's actual coordinates (not a regional area centroid) and always
+      // reconcile with the weekly total. Null unless the full window is present.
+      dailyRain: (windowOk && Array.isArray(daily.precipitation_sum)
+        && daily.precipitation_sum.length === expectedDays)
+        ? times.map((date, i) => ({ date, inches: round2(daily.precipitation_sum[i]) }))
+        : null,
     };
     _rainCache.set(key, { at: Date.now(), value });
     return value;
