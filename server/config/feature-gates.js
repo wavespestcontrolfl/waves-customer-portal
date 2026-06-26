@@ -46,10 +46,13 @@ const gates = {
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
 
   // Tech Arrived SMS — customer-facing "your tech has arrived" text fired
-  // from track-transitions markOnProperty when the live tracker flips to
-  // on-site. Dark in prod until Adam enables it; the en-route SMS is
-  // unaffected. Still subject to twilioSms + per-customer tech_arrived pref.
-  techArrivedSms: isProd ? process.env.GATE_TECH_ARRIVED_SMS === 'true' : true,
+  // automatically from track-transitions markOnProperty when the live tracker
+  // flips to on-site. Customer-facing auto-send, so it is explicit opt-in in
+  // EVERY environment (off in dev/preview too, unlike twilioSms) — otherwise a
+  // preview/dev env with real Twilio creds would text real customers the moment
+  // markOnProperty runs. Dark until Adam sets GATE_TECH_ARRIVED_SMS=true; the
+  // en-route SMS is unaffected. Still subject to twilioSms + per-customer pref.
+  techArrivedSms: process.env.GATE_TECH_ARRIVED_SMS === 'true',
 
   // Twilio — handles real inbound voice calls
   twilioVoice: isProd ? process.env.GATE_TWILIO_VOICE === 'true' : true,

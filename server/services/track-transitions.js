@@ -460,6 +460,16 @@ async function markOnProperty(serviceId, opts = {}) {
         logger.error(`[track-transitions] tech_status on_site race sync failed: ${err.message}`);
       }
     }
+    // We lost the on_property flip to a concurrent signal. We can't assume that
+    // winner owned the send: a geofence drive-past wins with suppressArrivalSms,
+    // leaving the guard NULL with no guaranteed later trigger (the manual
+    // start-job path that lost here won't re-fire). So a non-suppressed loser
+    // for an already-on_property job must still attempt the arrival SMS. The
+    // atomic claim in maybeSendArrivalSms prevents a double-send if the winner
+    // did already send.
+    if (!opts.suppressArrivalSms && fresh?.track_state === 'on_property') {
+      await maybeSendArrivalSms(fresh, serviceId);
+    }
     return { ok: true, state: fresh?.track_state || 'on_property', arrivedAt: fresh?.arrived_at || null };
   }
   try {
@@ -479,11 +489,12 @@ async function markOnProperty(serviceId, opts = {}) {
     }
   }
   emitCustomerTrackRefresh(svc, 'on_property', now);
-  // Fire the arrival SMS on the first on-site flip. The race-loser branch
-  // above returns before here, so the concurrent winner owns the send.
-  // suppressArrivalSms skips it for the geofence "timer already running"
-  // path, which flips the tracker for a job the tech hasn't actually
-  // started (e.g. driving past the next customer mid-job).
+  // Fire the arrival SMS on the first on-site flip. maybeSendArrivalSms claims
+  // the guard atomically, so this and the race-loser branch above can both
+  // safely attempt it without double-sending. suppressArrivalSms skips it for
+  // the geofence "timer already running for another job" path, which flips the
+  // tracker for a job the tech hasn't actually started (driving past the next
+  // customer mid-job); a later real arrival for that job still sends.
   if (!opts.suppressArrivalSms) await maybeSendArrivalSms(svc, serviceId);
 
   return { ok: true, state: 'on_property', arrivedAt: now };

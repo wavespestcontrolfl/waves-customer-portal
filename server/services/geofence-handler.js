@@ -162,11 +162,14 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   const existingTimer = await matcher.getActiveJobTimer(tech.id);
   if (existingTimer) {
     if (job) {
-      // A timer is already running for another job — the tech hasn't started
-      // this one (e.g. driving past the next customer mid-job). Flip the
-      // tracker for accuracy but suppress the arrival SMS so the customer
-      // isn't told "your tech has arrived" prematurely.
-      await markOnPropertyFromGeofence(job.id, eventTime, { suppressArrivalSms: true });
+      // Suppress the arrival SMS only when the running timer belongs to a
+      // DIFFERENT job — i.e. the tech is driving past this customer mid-job and
+      // hasn't actually started here, so "your tech has arrived" would be
+      // premature. When the timer is already for THIS job (e.g. a repeat ENTER
+      // after a manual start whose first arrival send failed and released the
+      // guard), let the SMS fire/retry — the tech really is on this property.
+      const differentJob = String(existingTimer.job_id) !== String(job.id);
+      await markOnPropertyFromGeofence(job.id, eventTime, { suppressArrivalSms: differentJob });
     }
     await matcher.logEvent({
       bouncie_imei: imei,
@@ -756,6 +759,7 @@ function customerName(c) {
 
 module.exports = {
   handleGeozoneEvent,
+  handleArrival,
   sendTechNotification,
   markOnPropertyFromGeofence,
   markCompleteFromGeofence,

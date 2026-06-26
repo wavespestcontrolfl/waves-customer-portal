@@ -213,6 +213,64 @@ describe('track-transitions lifecycle side effects', () => {
     expect(sendTechArrived).not.toHaveBeenCalled();
   });
 
+  test('markOnProperty race-loser still sends the arrival SMS when the flip-winner suppressed it', async () => {
+    // A geofence drive-past wins the scheduled->on_property flip with
+    // suppressArrivalSms, leaving the guard NULL. A real (non-suppressed)
+    // arrival for the same job loses the conditional flip (0 rows) — it must
+    // still claim and send rather than returning on the stale "winner owns it"
+    // assumption.
+    const svc = {
+      id: 'job-l',
+      customer_id: 'cust-l',
+      technician_id: 'tech-l',
+      status: 'confirmed',
+      track_state: 'scheduled', // loaded before the winner flipped it
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    const fresh = {
+      ...svc,
+      track_state: 'on_property', // winner already flipped it
+      arrival_sms_sent_at: null, // winner suppressed, so guard is still open
+    };
+    sendTechArrived.mockResolvedValue({ success: true });
+    const claim = query(1);
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(0)) // conditional flip loses the race
+      .mockReturnValueOnce(query(fresh)) // fresh reload in the race-loser branch
+      .mockReturnValueOnce(claim) // atomic claim succeeds (winner left it NULL)
+      .mockReturnValueOnce(query({ name: 'Lee' })); // technician name lookup
+
+    const result = await trackTransitions.markOnProperty('job-l');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-l', 'Lee');
+    expect(claim.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
+  });
+
+  test('markOnProperty race-loser does NOT send when it is itself the suppressed signal', async () => {
+    const svc = {
+      id: 'job-ls',
+      customer_id: 'cust-ls',
+      technician_id: 'tech-ls',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    const fresh = { ...svc, track_state: 'on_property', arrival_sms_sent_at: null };
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(0)) // conditional flip loses the race
+      .mockReturnValueOnce(query(fresh)); // fresh reload — no claim/send follows
+
+    const result = await trackTransitions.markOnProperty('job-ls', { suppressArrivalSms: true });
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).not.toHaveBeenCalled();
+  });
+
   test('markOnProperty does not re-send the arrival SMS when already stamped', async () => {
     const svc = {
       id: 'job-7',
