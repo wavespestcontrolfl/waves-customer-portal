@@ -9,9 +9,9 @@
  * commercial pest when a service opts in via
  * `commercialPricingMode: 'small_commercial_pilot'`.
  *
- * PILOT DEFAULTS — owner to confirm/tune via the admin Pricing Logic panel.
- * Every pilot price is returned with autoQuoteRequiresAdminApproval, so no quote
- * reaches a customer without operator review.
+ * Values owner-confirmed 2026-06-26 (Waves); tunable via the admin Pricing Logic
+ * panel. Every pilot price is returned with autoQuoteRequiresAdminApproval, so no
+ * quote reaches a customer without operator review.
  */
 const CONFIG_KEY = 'commercial_pest_pilot';
 const MIGRATION_TAG = 'migration:20260626000020';

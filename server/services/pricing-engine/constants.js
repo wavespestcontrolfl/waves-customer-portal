@@ -212,8 +212,8 @@ const PEST = {
 // 'small_commercial_pilot'` AND `enabled` is true here. Otherwise commercial
 // pest falls back to the manual-quote safety gate (commercial-helpers.js).
 //
-// PILOT DEFAULTS — owner to confirm/tune. Every pilot price is returned with
-// `autoQuoteRequiresAdminApproval: true`, so no quote reaches a customer
+// Values owner-confirmed 2026-06-26 (Waves). Every pilot price is still returned
+// with `autoQuoteRequiresAdminApproval: true`, so no quote reaches a customer
 // without operator review. All values below are admin-editable via the
 // `commercial_pest_pilot` pricing_config row (db-bridge.js).
 //
@@ -253,9 +253,9 @@ const COMMERCIAL_PEST_PILOT = {
   // residential curve. Must stay in (0, 1].
   frequencyMultipliers: { quarterly: 1.00, bimonthly: 0.92, monthly: 0.85 },
   frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },
-  // Stories callback/access uplift (PILOT DEFAULT — owner to confirm).
+  // Stories callback/access uplift (owner-confirmed 2026-06-26).
   stories: { perStoryUplift: 0.12, maxStories: 6 },
-  // Per-unit quarterly callback reserve for multi-family (PILOT DEFAULT).
+  // Per-unit quarterly callback reserve for multi-family (owner-confirmed 2026-06-26).
   perUnitQuarterly: r(5),
   // Total units above this still price, but flag the line for manual review.
   unitManualReviewThreshold: 60,
