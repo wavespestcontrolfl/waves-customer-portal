@@ -4054,13 +4054,17 @@ export default function Customer360ProfileV2({
               aria-hidden="true"
               style={{ height: "calc(52px + env(safe-area-inset-top, 0px))" }}
             />
-            {/* Top action bar — fixed to the viewport top, mirroring the fixed
-                bottom CustomerActionBar (z-[1001], md:hidden). Replaces the old
+            {/* Top action bar — fixed to the viewport top (z-[1001]), mirroring
+                the fixed bottom CustomerActionBar. Replaces the old
                 position:sticky header row, which on iOS standalone PWAs let
                 Back / Text / Call / ⋯ scroll out of reach (only revealed by
-                rubber-band overscroll, never tappable). */}
+                rubber-band overscroll, never tappable). No Tailwind md:hidden
+                here on purpose: this bar lives inside .c360-header-mobile, whose
+                @media (max-width:768px) rule already shows/hides it on the exact
+                same boundary — md:hidden (min-width:768px) would blank the
+                controls at exactly 768px (iPad portrait). */}
             <div
-              className="c360-mobile-actionbar md:hidden fixed top-0 left-0 right-0 z-[1001] flex items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
+              className="c360-mobile-actionbar fixed top-0 left-0 right-0 z-[1001] flex items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
               style={{
                 paddingTop: "calc(0.5rem + env(safe-area-inset-top, 0px))",
               }}
