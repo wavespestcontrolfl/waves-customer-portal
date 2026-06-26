@@ -111,6 +111,16 @@ function isAskTemplate(id) {
   return t ? t.body.includes("{review_url}") : true;
 }
 
+// SQL predicate (on review_requests.template_key): a touch is an "ask" — counts
+// toward the cap/cooldown AND the outreach funnel — unless it used a no-link
+// check-in template. null template_key = canonical ask. The keys are internal
+// constants ([a-z_]), so the interpolation is injection-safe. Shared by the
+// cap stats, the funnel, and the queued-ask reuse guard so they stay in lockstep.
+const ASK_TOUCH_SQL =
+  NO_LINK_TEMPLATE_KEYS.length > 0
+    ? `(template_key IS NULL OR template_key NOT IN (${NO_LINK_TEMPLATE_KEYS.map((k) => `'${k}'`).join(",")}))`
+    : "(1=1)";
+
 /**
  * Default multi-touch cadence: Day 0 SMS → Day 3 SMS → Day 7 email.
  * Mirrors ReviewRover's "a couple of SMS then an email" pattern. The day
@@ -169,6 +179,7 @@ module.exports = {
   TEMPLATES_BY_ID,
   DEFAULT_SEQUENCE_PLAN,
   NO_LINK_TEMPLATE_KEYS,
+  ASK_TOUCH_SQL,
   isAskTemplate,
   getOutreachTemplate,
   renderOutreachBody,

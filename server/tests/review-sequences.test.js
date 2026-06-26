@@ -277,6 +277,22 @@ describe('review sequences — cadence engine', () => {
     expect(body).not.toMatch(/portal\.test/);
   });
 
+  test('a no-link check-in never falls back to email (would add a /rate link)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'c5', first_name: 'Cara', last_name: 'R', phone: null, email: 'cara@x.com', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'resolution_check', manageRetryVia: 'cron' });
+
+    // No phone + a private check-in must NOT be emailed (the only email template
+    // carries a review link) → no contact, no email send.
+    expect(out.ok).toBeFalsy();
+    expect(out.reason).toBe('no_contact');
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('a terminal SMS failure (invalid number) is suppressed, not retried forever', async () => {
     mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, retryable: false, code: 'INVALID_NUMBER' });
     const mock = makeMock({ customers: [{ id: 't1', first_name: 'Bad', last_name: 'N', phone: '+10000000000', nearest_location_id: 'bradenton' }] });

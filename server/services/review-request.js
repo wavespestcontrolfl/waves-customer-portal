@@ -12,14 +12,7 @@ const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
-
-// SQL predicate: a touch is an "ask" (counts toward the review cap/cooldown)
-// unless it used a no-link check-in template. null template_key = canonical ask.
-// The keys are internal constants ([a-z_]) so interpolation is injection-safe.
-const ASK_TOUCH_SQL =
-  OUTREACH.NO_LINK_TEMPLATE_KEYS.length > 0
-    ? `(template_key IS NULL OR template_key NOT IN (${OUTREACH.NO_LINK_TEMPLATE_KEYS.map((k) => `'${k}'`).join(",")}))`
-    : "(1=1)";
+const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 
 // GBP review links per location
 const REVIEW_LINKS = {
@@ -1243,16 +1236,23 @@ const ReviewService = {
     const canSms = !!contact.phone && !smsBlocked;
     const canEmail = !!contact.email && !emailBlocked && !prefsLookupFailed;
 
+    // A no-link private check-in (resolution_check / satisfaction_confirm) must
+    // NEVER route to email — the only email template is review_request_email,
+    // which carries a /rate link, so an email fallback would turn a recovery
+    // message into a review ask (and bypass the cap, since send-request didn't
+    // count it). Keep these SMS-only, ignoring the email channel preference.
+    const noLinkSend = !!(templateId && OUTREACH.NO_LINK_TEMPLATE_KEYS.includes(templateId));
+
     // Per-type channel preference. Only 'email' is treated as an EXCLUSIVE
     // choice (it is never the column default, so it's deliberate): an 'email'
     // preference must not fall back to SMS. 'sms' is the backfill DEFAULT, so it
     // is NOT a deliberate opt-out — it must keep the email fallback / Day-7 email
     // step working. 'both' / unset allow either with fallback.
     const prefChannel = prefs && prefs.review_request_channel;
-    const allowSms = canSms && prefChannel !== "email";
-    const allowEmail = canEmail;
-    let intended = channel === "email" ? "email" : "sms";
-    if (prefChannel === "email") intended = "email";
+    const allowSms = canSms && (noLinkSend || prefChannel !== "email");
+    const allowEmail = canEmail && !noLinkSend;
+    let intended = noLinkSend ? "sms" : channel === "email" ? "email" : "sms";
+    if (!noLinkSend && prefChannel === "email") intended = "email";
 
     let actualChannel = intended;
     if (actualChannel === "sms" && !allowSms) actualChannel = allowEmail ? "email" : null;
@@ -1816,8 +1816,13 @@ const ReviewService = {
     const PROMOTER_SQL = "((category = 'promoter' AND submitted_at IS NOT NULL) OR rating >= 7)";
     const REVIEWED_SQL = "(redirected_to_google = true OR (category = 'promoter' AND submitted_at IS NOT NULL))";
 
+    // The funnel measures review ASKS, so exclude no-link private check-ins
+    // (same predicate as the cap stats) — otherwise recovery/check-in sends
+    // inflate the "sent" denominator and skew the conversion rate + template
+    // breakdown with messages that had no review CTA.
     const [funnel] = await db("review_requests")
       .where("created_at", ">=", since)
+      .whereRaw(ASK_TOUCH_SQL)
       .select(
         db.raw(`COUNT(*) FILTER (WHERE ${SENT_SQL}) AS sent`),
         db.raw(`COUNT(*) FILTER (WHERE ${OPENED_SQL}) AS opened`),
@@ -1831,6 +1836,7 @@ const ReviewService = {
       db("review_requests")
         .where("created_at", ">=", since)
         .whereRaw(SENT_SQL)
+        .whereRaw(ASK_TOUCH_SQL)
         .groupBy(col)
         .select(
           col,

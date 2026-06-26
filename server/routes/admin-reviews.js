@@ -495,7 +495,7 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
     // sentiment signal from the customer's last NPS rating (audit O4).
     const prefsRows = customerIds.length
       ? await db('notification_prefs').whereIn('customer_id', customerIds)
-          .select('customer_id', 'sms_enabled', 'email_enabled', 'review_request')
+          .select('customer_id', 'sms_enabled', 'email_enabled', 'review_request', 'review_request_channel')
           .catch(() => [])
       : [];
     const prefsMap = {};
@@ -536,10 +536,14 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         const reviewOptedOut = !!prefs && prefs.review_request === false; // review-wide opt-out
         const smsPrefOff = !!prefs && prefs.sms_enabled === false;
         const emailPrefOff = !!prefs && prefs.email_enabled === false;
+        // Mirror the sender's channel-preference exclusivity (round-4/6): an
+        // explicit 'email' preference disables the SMS-only manual Send; 'sms'
+        // (the backfill default) does NOT disable email.
+        const emailPreferred = !!prefs && prefs.review_request_channel === 'email';
         const suppressed = phone ? suppressedSet.has(phone) : false;
         const inCooldown = ask.lastAsked ? (new Date(ask.lastAsked).getTime() >= thirtyDaysAgo) : false;
         const atCap = ask.askCount >= 3;
-        const smsable = !!phone && !reviewOptedOut && !smsPrefOff && !suppressed;
+        const smsable = !!phone && !reviewOptedOut && !smsPrefOff && !suppressed && !emailPreferred;
         const emailable = !!email && !reviewOptedOut && !emailPrefOff;
         const sequence = sequenceMap[c.id] || null;
         // `sendable` gates the SMS-only manual Send; `cadenceable` gates
@@ -556,7 +560,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
           else if (suppressed) eligibilityReasons.push('suppressed');
           else eligibilityReasons.push('no_contact');
         } else if (!smsable && emailable) {
-          eligibilityReasons.push(suppressed ? 'sms_suppressed' : smsPrefOff ? 'sms_opted_out' : 'no_phone');
+          eligibilityReasons.push(
+            emailPreferred ? 'email_preferred' : suppressed ? 'sms_suppressed' : smsPrefOff ? 'sms_opted_out' : 'no_phone',
+          );
         }
         if (atCap) eligibilityReasons.push('at_cap');
         if (inCooldown) eligibilityReasons.push('cooldown');
@@ -650,6 +656,9 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
           .where({ customer_id: customer.id, status: 'pending' })
           .whereNull('sms_sent_at')
           .whereNotNull('scheduled_for')
+          // Only a queued ASK should block another ask — a deferred no-link
+          // check-in must not make a real review request return alreadyQueued.
+          .whereRaw(OUTREACH.ASK_TOUCH_SQL)
           .orderBy('scheduled_for', 'asc')
           .first();
         if (queued) {

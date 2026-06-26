@@ -393,6 +393,7 @@ const ELIGIBILITY_LABELS = {
   no_phone: "No SMS phone (email only — use a cadence)",
   sms_opted_out: "Opted out of review texts (email cadence still OK)",
   sms_suppressed: "Phone on do-not-contact (email cadence still OK)",
+  email_preferred: "Customer prefers email — use a cadence",
   opted_out: "Opted out of review texts",
   suppressed: "On the do-not-contact list",
   at_cap: "Already asked 3 times",
@@ -612,14 +613,20 @@ export default function ReviewVelocityEngine() {
             ...(opts.body ? { body: opts.body } : {}),
           }),
         });
-        const newAsk = (customer.askCount || 0) + 1;
-        const newStage = newAsk >= 2 ? "reminded" : "sms_sent";
-        updateCustomer(customer.id, {
-          askCount: newAsk,
-          lastAsked: fmtDate(new Date()),
-          stage: newStage,
-          seqStep: Math.min((customer.seqStep || 0) + 1, 3),
-        });
+        // Only mark the customer asked on an ACTUAL delivery. Deferred (quiet
+        // hours), queued (transient retry), and alreadyQueued responses did NOT
+        // deliver a new ask, so don't optimistically inflate askCount/stage —
+        // the row reflects reality on the next candidate reload.
+        if (res?.success) {
+          const newAsk = (customer.askCount || 0) + 1;
+          const newStage = newAsk >= 2 ? "reminded" : "sms_sent";
+          updateCustomer(customer.id, {
+            askCount: newAsk,
+            lastAsked: fmtDate(new Date()),
+            stage: newStage,
+            seqStep: Math.min((customer.seqStep || 0) + 1, 3),
+          });
+        }
         // Re-pull the authoritative funnel + feed.
         loadAnalytics();
         loadActivity();
