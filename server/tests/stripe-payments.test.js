@@ -225,10 +225,10 @@ describe('invoice INVOICE_UPDATE_ALLOWED_FIELDS', () => {
   });
 
   test('the editable shape is exactly what the admin UI exposes', () => {
-    // Admin invoice detail UI exposes title / notes / due date /
-    // line items / tax rate. Anything else is a regression.
+    // Admin invoice detail UI exposes title / notes / email thank-you message /
+    // due date / line items / tax rate. Anything else is a regression.
     expect([...INVOICE_UPDATE_ALLOWED_FIELDS].sort()).toEqual(
-      ['due_date', 'line_items', 'notes', 'tax_rate', 'title'],
+      ['due_date', 'email_message', 'line_items', 'notes', 'tax_rate', 'title'],
     );
   });
 

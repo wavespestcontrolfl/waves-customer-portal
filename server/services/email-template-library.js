@@ -132,6 +132,7 @@ function requiredPayloadMissing(template, payload) {
 // placeholder guard so a real note can't make a customer email send fail.
 const FREE_FORM_PAYLOAD_KEYS = new Set([
   'invoice_summary',
+  'invoice_message',
 ]);
 
 function productionPlaceholderPayloadValues(payload = {}) {

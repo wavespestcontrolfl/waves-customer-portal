@@ -23,6 +23,7 @@ const logger = require('./logger');
 const MAX_INPUT = 2000;
 const MAX_SERVICE_LINES = 12;
 const MAX_NOTES_OUT = 1000;
+const MAX_MESSAGE_OUT = 800;
 
 function clean(value, max) {
   if (value == null) return '';
@@ -210,6 +211,52 @@ async function generateInvoiceSummary({ input, customerName, customerId, service
   return { notes, sourcesUsed };
 }
 
+// ── Thank-you email message ──────────────────────────────────────────────
+// A short, warm relationship note for the invoice EMAIL body (invoice.email_
+// message), separate from the service summary. Same VOICE tier + the same
+// "no products / prices / overpromising" guardrails, but focused on
+// appreciation rather than recapping the work — and with NO greeting, since the
+// email already opens with "Hi {first}".
+
+function buildThankYouPrompt({ customerName, serviceType, input } = {}) {
+  const name = clean(customerName, 160);
+  const svc = clean(serviceType, 100);
+  const hint = clean(input, MAX_INPUT);
+  const ctx = [];
+  if (name) ctx.push(`Customer: ${name}`);
+  if (svc) ctx.push(`Service: ${svc}`);
+  if (hint) ctx.push(`What to emphasize: ${hint}`);
+
+  return `Write a short, warm thank-you message from Waves Pest Control & Lawn Care to include in a customer's invoice email.
+
+Requirements:
+- Plain text only.
+- 1 to 2 sentences.
+- Warm, genuine, and personal — thank the customer for their business and trust.
+- You may reference the service in general terms, but keep the focus on appreciation, not a recap of the work.
+- Do NOT include a greeting (no "Hi", "Dear", or the customer's name) — the email already greets them — and no subject line, sign-off, markdown, or bullets.
+- Do not mention prices, amounts, products, chemical names, guarantees, or follow-up dates.
+- Do not say eliminated, guaranteed, pest-free, eradicated, or solved forever.
+
+${ctx.join('\n') || '[no extra context]'}
+
+Return only the message text.`;
+}
+
+/**
+ * Generate a warm thank-you message for the invoice email.
+ * @returns {Promise<{ message: string } | { error: string }>}
+ */
+async function generateThankYouMessage({ customerName, serviceType, input } = {}) {
+  if (!clean(customerName) && !clean(serviceType) && !clean(input)) {
+    return { error: 'Select a customer or add a note first' };
+  }
+  const prompt = buildThankYouPrompt({ customerName, serviceType, input });
+  const message = await aiSummary(prompt);
+  if (!message) return { error: 'AI did not return a message' };
+  return { message: clean(message, MAX_MESSAGE_OUT) };
+}
+
 module.exports = {
   generateInvoiceSummary,
   buildSummaryPrompt,
@@ -218,4 +265,6 @@ module.exports = {
   formatObservations,
   normalizeSources,
   hasUsableContext,
+  generateThankYouMessage,
+  buildThankYouPrompt,
 };
