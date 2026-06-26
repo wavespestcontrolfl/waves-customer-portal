@@ -5,6 +5,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const leadAttribution = require('../services/lead-attribution');
 const logger = require('../services/logger');
 const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
 // A date-only end_date (e.g. "2026-06-30") parses as midnight UTC, so an
 // inclusive `created_at <= end` bound drops that day's later rows. Treat a
@@ -18,6 +19,16 @@ function parseInclusiveEnd(endDate) {
     return new Date(parseETDateTime(`${endDate}T23:59:59`).getTime() + 999);
   }
   return new Date(endDate);
+}
+
+// Lower-bound mirror of parseInclusiveEnd: a date-only start_date is the START of
+// that ET day. A bare `new Date("YYYY-MM-DD")` parses as midnight UTC, which on
+// our UTC Railway box shifts the cutoff by the ET offset — so a dashboard drill
+// passing ET date bounds would mis-window vs the panel. Full timestamps pass through.
+function parseInclusiveStart(startDate) {
+  if (!startDate) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return parseETDateTime(`${startDate}T00:00:00`);
+  return new Date(startDate);
 }
 const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -576,8 +587,10 @@ router.get('/', async (req, res, next) => {
     // list are then consistent: both group/filter on name).
     if (source_name) query = query.where('lead_sources.name', source_name);
     if (channel) query = query.where('lead_sources.channel', channel);
-    const startDt = start_date ? new Date(start_date) : null;
-    const endDt = end_date ? new Date(end_date) : null;
+    // ET-inclusive bounds for date-only params, so a dashboard drill window
+    // (which includes the whole ET `to` day) matches the panel's count.
+    const startDt = parseInclusiveStart(start_date);
+    const endDt = parseInclusiveEnd(end_date);
     if (startDt && !isNaN(startDt)) query = query.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) query = query.where('leads.first_contact_at', '<=', endDt);
     if (search) {
@@ -612,6 +625,18 @@ router.get('/', async (req, res, next) => {
     if (channel) countQuery.where('lead_sources.channel', channel);
     if (startDt && !isNaN(startDt)) countQuery.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) countQuery.where('leads.first_contact_at', '<=', endDt);
+    // Dashboard source drill: mirror /admin/dashboard/leads-by-source's
+    // excludeInternalLeads so the drilled rows match the count the owner clicked.
+    // Scoped to the drill path so the day-to-day Leads list is unchanged.
+    if (source_name && INTERNAL_TEST_CUSTOMERS.length) {
+      const excludeInternal = (qb) =>
+        qb.whereNotIn(
+          db.raw("LOWER(COALESCE(leads.first_name, '') || ' ' || COALESCE(leads.last_name, ''))"),
+          INTERNAL_TEST_CUSTOMERS,
+        );
+      excludeInternal(query);
+      excludeInternal(countQuery);
+    }
     if (search) {
       const s = `%${search}%`;
       countQuery.where(function () {
