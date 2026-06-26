@@ -462,7 +462,11 @@ async function applyBridge(options = {}) {
   // calls bridged BEFORE this shipped (and lead-retry calls) also land in the
   // funnel. customerId may come from a freshly-matched lead or the call_log.
   const writeCallPpcAttribution = async (match, customerId, leadId) => {
-    if (!customerId) return;
+    // Require an actual lead — a confirmed Google Ads call from an EXISTING
+    // customer that matched no lead (e.g. a service/support call) must not be
+    // counted as a new PPC lead. Mirrors the lead-creation gate in
+    // call-recording-processor (LEAD_PIPELINE_STAGES).
+    if (!customerId || !leadId) return;
     await require('./call-attribution').recordCallPpcAttribution({
       customerId,
       leadId: leadId || null,
