@@ -2477,10 +2477,16 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       note,
     ].filter(Boolean).join('\n');
 
+    // Charge-in-person (Tap to Pay) defers the term to payment: mint the invoice
+    // with its coverage config in metadata and DON'T create the term or send a pay
+    // link. The Stripe webhook (syncTermForInvoicePayment) creates + activates the
+    // term when the invoice is paid, so an aborted in-person charge leaves no
+    // orphan payment_pending term.
+    const chargeInPerson = req.body?.chargeInPerson === true;
     const InvoiceService = require('../services/invoice');
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
     let invoice;
-    let term;
+    let term = null;
     await db.transaction(async (trx) => {
       await lockAndAssertNoAnnualPrepayOverlap(
         trx, customer.id, termStart, req.body?.allowOverlap === true,
@@ -2500,34 +2506,55 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         dueDate,
       });
 
-      term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
-        customerId: customer.id,
-        prepayInvoiceId: invoice.id,
-        planLabel,
-        monthlyRate: Math.round((amount / 12) * 100) / 100,
-        // Store what the customer is actually billed (commercial invoices add
-        // county tax via InvoiceService.create), not the pretax request amount —
-        // applyPrepaidCoverageForTerm splits prepay_amount across the covered
-        // visits, so a pretax value would leave the tax portion uncredited and
-        // make the coverage ledger disagree with the invoice/payment total.
-        prepayAmount: Number(invoice.total),
-        termStart,
-        termEnd,
-        coverageServiceType,
-        coverageVisitCount: visitCount,
-        coverageCadence,
-        conn: trx,
-      });
-      if (!term) throw new Error('Annual prepay term could not be created');
+      if (chargeInPerson) {
+        // Defer the term to payment — stash the coverage config on the invoice so
+        // the webhook can reconstruct it. visitCount/cadence/dates mirror what the
+        // term would store; prepay_amount at webhook time uses the tax-inclusive
+        // invoice.total.
+        await trx('invoices').where({ id: invoice.id }).update({
+          metadata: JSON.stringify({
+            annualPrepay: {
+              serviceType: coverageServiceType,
+              visitCount,
+              cadence: coverageCadence,
+              termStart,
+              termEnd,
+              planLabel,
+            },
+          }),
+        });
+      } else {
+        term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+          customerId: customer.id,
+          prepayInvoiceId: invoice.id,
+          planLabel,
+          monthlyRate: Math.round((amount / 12) * 100) / 100,
+          // Store what the customer is actually billed (commercial invoices add
+          // county tax via InvoiceService.create), not the pretax request amount —
+          // applyPrepaidCoverageForTerm splits prepay_amount across the covered
+          // visits, so a pretax value would leave the tax portion uncredited and
+          // make the coverage ledger disagree with the invoice/payment total.
+          prepayAmount: Number(invoice.total),
+          termStart,
+          termEnd,
+          coverageServiceType,
+          coverageVisitCount: visitCount,
+          coverageCadence,
+          conn: trx,
+        });
+        if (!term) throw new Error('Annual prepay term could not be created');
+      }
 
       await trx('activity_log').insert({
         customer_id: customer.id,
         action: 'annual_prepay_invoice_created',
-        description: `Annual prepay invoice ${invoice.invoice_number} created for ${coverageServiceType}: $${amount.toFixed(2)} covering ${visitCount} visit(s)`,
+        description: `Annual prepay invoice ${invoice.invoice_number} created for ${coverageServiceType}: $${amount.toFixed(2)} covering ${visitCount} visit(s)`
+          + (chargeInPerson ? ' (charge in person — term activates on payment)' : ''),
         metadata: JSON.stringify({
           invoice_id: invoice.id,
           invoice_number: invoice.invoice_number,
-          annual_prepay_term_id: term.id,
+          annual_prepay_term_id: term?.id || null,
+          charge_in_person: chargeInPerson,
           coverage_service_type: coverageServiceType,
           coverage_visit_count: visitCount,
           coverage_cadence: coverageCadence,
@@ -2539,11 +2566,13 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     });
 
     let delivery = null;
-    try {
-      delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id);
-    } catch (err) {
-      delivery = { ok: false, error: err.message };
-      logger.warn(`[customers:annual-prepay-invoice] send failed for ${invoice.id}: ${err.message}`);
+    if (!chargeInPerson) {
+      try {
+        delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id);
+      } catch (err) {
+        delivery = { ok: false, error: err.message };
+        logger.warn(`[customers:annual-prepay-invoice] send failed for ${invoice.id}: ${err.message}`);
+      }
     }
 
     const payUrl = delivery?.payUrl || await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
@@ -2557,7 +2586,8 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     await auditCustomerMutation(req, 'customer.annual_prepay.invoice_send', customer.id, {
       invoiceId: invoice.id,
       invoiceNumber: invoice.invoice_number,
-      annualPrepayTermId: term.id,
+      annualPrepayTermId: term?.id || null,
+      chargeInPerson,
       amount,
       serviceType: coverageServiceType,
       visitCount,
@@ -2573,7 +2603,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         ...invoice,
         payUrl,
       },
-      annualPrepayTerm: mapAnnualPrepayTerm(term),
+      annualPrepayTerm: term ? mapAnnualPrepayTerm(term) : null,
       delivery,
     });
   } catch (err) {

@@ -3017,7 +3017,7 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
 // invoice flow (correct commercial-tax preview, full cadence set, term dates,
 // amount inference) instead of maintaining a parallel modal. See
 // schedule/AnnualPrepayLauncher.
-export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved }) {
+export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved, allowChargeInPerson = false, onChargeInPerson }) {
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
   const defaultServiceBase = serviceOptions[0]?.value || inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
@@ -3149,6 +3149,36 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
       await onSaved?.(result);
     } catch (err) {
       setError(err.message || "Annual prepay invoice failed");
+      setSaving(false);
+    }
+  };
+
+  // Charge in person (Tap to Pay): mint the prepay invoice WITHOUT sending or
+  // creating the term (chargeInPerson), then hand it to the caller's payment sheet.
+  // The term is created + activated by the payment webhook, so an aborted charge
+  // leaves no orphan term. Only offered when the caller opts in (completion screen).
+  const handleChargeInPerson = async () => {
+    if (submitDisabled) return;
+    setSaving(true);
+    setError("");
+    try {
+      const result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
+        method: "POST",
+        body: JSON.stringify({
+          amount: Number(amount),
+          serviceType: serviceType.trim(),
+          visitCount: Number.parseInt(visitCount, 10),
+          coverageCadence,
+          termStart,
+          termEnd,
+          dueDate,
+          note: note.trim() || undefined,
+          chargeInPerson: true,
+        }),
+      });
+      onChargeInPerson?.(result.invoice);
+    } catch (err) {
+      setError(err.message || "Couldn't start the charge");
       setSaving(false);
     }
   };
@@ -3301,6 +3331,11 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           <Button variant="secondary" onClick={onClose} disabled={saving}>
             Cancel
           </Button>
+          {allowChargeInPerson && (
+            <Button variant="secondary" onClick={handleChargeInPerson} disabled={submitDisabled}>
+              {saving ? "Working…" : "Charge in person"}
+            </Button>
+          )}
           <Button onClick={handleSubmit} disabled={submitDisabled}>
             {saving ? "Sending..." : "Create & send invoice"}
           </Button>

@@ -765,6 +765,27 @@ async function statusForPrepayInvoice(invoiceId, conn = db) {
   }
 }
 
+// Parse an invoice's metadata jsonb (string OR object) for a deferred annual-prepay
+// coverage config (written by the charge-in-person mint). Returns the normalized
+// config or null when malformed / missing / no positive visit count — this is the
+// gate for webhook-time term creation, so a bad/absent payload must never create a
+// term. Pure; exported for tests.
+function parseAnnualPrepayMeta(metadata) {
+  if (metadata == null) return null;
+  let parsed;
+  try { parsed = typeof metadata === 'string' ? JSON.parse(metadata) : metadata; } catch { return null; }
+  const ap = parsed && parsed.annualPrepay;
+  if (!ap || !(Number(ap.visitCount) > 0)) return null;
+  return {
+    serviceType: ap.serviceType || undefined,
+    visitCount: Number(ap.visitCount),
+    cadence: ap.cadence || undefined,
+    termStart: ap.termStart || undefined,
+    termEnd: ap.termEnd || undefined,
+    planLabel: ap.planLabel || undefined,
+  };
+}
+
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return [];
   const invoice = typeof invoiceOrId === 'object'
@@ -809,6 +830,39 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       results.push(refreshed || current);
     } else {
       results.push(current);
+    }
+  }
+
+  // Deferred term creation (charge-in-person flow): a now-PAID annual-prepay
+  // invoice that carries its coverage config in metadata.annualPrepay but has NO
+  // term yet — create + activate it now (createTermForAnnualPrepay reads the paid
+  // invoice and creates it `active` + stamps the covered visits). Deferring the
+  // term to payment is what keeps an aborted in-person charge from leaving an
+  // orphan payment_pending term (which would suppress the customer's billing).
+  if (nextStatus === 'active' && terms.length === 0) {
+    const rawMeta = invoice.metadata !== undefined
+      ? invoice.metadata
+      : (await conn('invoices').where({ id: invoice.id }).first('metadata'))?.metadata;
+    const meta = parseAnnualPrepayMeta(rawMeta);
+    if (meta) {
+      const full = await conn('invoices').where({ id: invoice.id }).first('id', 'customer_id', 'total');
+      const existing = await conn('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id');
+      if (full?.customer_id && !existing) {
+        const created = await createTermForAnnualPrepay({
+          customerId: full.customer_id,
+          prepayInvoiceId: invoice.id,
+          prepayAmount: Number(full.total),
+          planLabel: meta.planLabel || undefined,
+          monthlyRate: Math.round((Number(full.total) / 12) * 100) / 100,
+          coverageServiceType: meta.serviceType || undefined,
+          coverageVisitCount: Number(meta.visitCount),
+          coverageCadence: meta.cadence || undefined,
+          termStart: meta.termStart || undefined,
+          termEnd: meta.termEnd || undefined,
+          conn,
+        });
+        if (created) results.push(created);
+      }
     }
   }
 
@@ -1503,6 +1557,7 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
 
 module.exports = {
   createTermForAnnualPrepay,
+  parseAnnualPrepayMeta,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
   syncTermForInvoicePayment,

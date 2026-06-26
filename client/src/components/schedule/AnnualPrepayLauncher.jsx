@@ -6,6 +6,7 @@
 
 import { useState, useEffect } from 'react';
 import { AnnualPrepayInvoiceModal } from '../admin/Customer360ProfileV2';
+import MobilePaymentSheet from './MobilePaymentSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -44,6 +45,7 @@ function pickActiveTerm(terms = []) {
 export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [paymentInvoice, setPaymentInvoice] = useState(null);
 
   useEffect(() => {
     if (!customerId) { setError('No customer for this visit'); return undefined; }
@@ -84,12 +86,37 @@ export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
     );
   }
 
+  const customerName = [data.customer?.firstName, data.customer?.lastName]
+    .filter(Boolean).join(' ').trim() || 'Customer';
+
+  // Tap-to-Pay handoff: once the operator chose "Charge in person", the prepay
+  // invoice is minted (no term yet) — charge it on the spot. Any successful tender
+  // marks it paid and the webhook creates + activates the term; an abort just
+  // leaves a benign unpaid draft (no orphan term).
+  if (paymentInvoice) {
+    return (
+      <MobilePaymentSheet
+        desktopVisible
+        service={{ customerId: data.customer?.id || customerId, customerName }}
+        invoiceId={paymentInvoice.id}
+        invoiceToken={paymentInvoice.token}
+        amount={Number(paymentInvoice.total) || 0}
+        onClose={onClose}
+        onChargeSuccess={() => { onSaved?.(); onClose?.(); }}
+        onPrepaidRecorded={() => { onSaved?.(); onClose?.(); }}
+        onInvoiceSent={() => { onSaved?.(); onClose?.(); }}
+      />
+    );
+  }
+
   return (
     <AnnualPrepayInvoiceModal
       customer={data.customer}
       activeTerm={pickActiveTerm(data.annualPrepayTerms)}
       prepaidPlans={data.prepaidPlans || []}
       annualPrepayTerms={data.annualPrepayTerms || []}
+      allowChargeInPerson
+      onChargeInPerson={(invoice) => setPaymentInvoice(invoice)}
       onClose={onClose}
       onSaved={() => { onSaved?.(); onClose?.(); }}
     />
