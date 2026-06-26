@@ -35,6 +35,26 @@ export default function TechLayout() {
     setTechName(getAdminDisplayName('Tech'));
   }, [navigate]);
 
+  // While in the tech portal, point the PWA manifest + home-screen title at
+  // the field app. The default manifest pins start_url to "/" (the customer
+  // portal), so an "Add to Home Screen" install that honors the manifest start
+  // URL would otherwise launch the tech into the customer app. manifest.tech
+  // uses start_url "/tech" with scope "/" (kept broad so the /admin/login auth
+  // hop stays in the standalone window instead of popping out to Safari).
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const link = document.querySelector('link[rel="manifest"]');
+    const title = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+    const prevManifest = link?.getAttribute('href');
+    const prevTitle = title?.getAttribute('content');
+    link?.setAttribute('href', '/manifest.tech.json');
+    title?.setAttribute('content', 'Field Tools');
+    return () => {
+      if (link && prevManifest) link.setAttribute('href', prevManifest);
+      if (title && prevTitle) title.setAttribute('content', prevTitle);
+    };
+  }, []);
+
   const isActive = (item) => {
     if (item.exact) return location.pathname === item.path;
     return location.pathname.startsWith(item.path);
