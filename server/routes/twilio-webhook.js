@@ -419,9 +419,12 @@ router.post('/sms', async (req, res) => {
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
 
-    // Event-driven health rescore on the general inbound path (the opt-out
-    // branch above already fired for cancellations).
-    if (messageType === 'inbound') fireEventRescore('inbound_sms');
+    // Event-driven health rescore for any matched customer (the opt-out branch
+    // above already fired for cancellations). Not gated on messageType: an
+    // existing customer texting a churn message to a domain/van tracking number
+    // is logged as a *_lead but is still a real customer — fireEventRescore
+    // no-ops when there's no matched customer.
+    fireEventRescore('inbound_sms');
 
     await db('activity_log').insert({
       customer_id: customer?.id || null,
