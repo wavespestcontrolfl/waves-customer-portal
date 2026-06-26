@@ -125,6 +125,24 @@ export default function DashboardPageV2() {
   const mountedRef = useRef(true);
   const kpisPeriodRef = useRef(null);
   const attribPeriodRef = useRef(null);
+  // Serializes refreshes: while a loadAll() is in flight, the 3-min timer and
+  // the manual button skip starting another, so overlapping responses can't
+  // race to write shared state and then stamp a newer "Updated" time.
+  const inFlightRef = useRef(false);
+  const nonceRef = useRef(0);
+  // Freshness gate. A refresh "generation" has up to 3 participants — loadAll
+  // plus the two period effects (Core KPIs + attribution) when they re-run for
+  // a refresh (not a period switch). "Updated just now" advances only once every
+  // participant of the current generation reports success, so a transient
+  // failure in ANY panel (not just the loadAll ones) keeps the stamp honest.
+  const freshGateRef = useRef({ gen: 0, pending: 0, failed: false });
+  const settleGate = useCallback((gen, ok) => {
+    const g = freshGateRef.current;
+    if (g.gen !== gen) return; // superseded by a newer refresh — ignore
+    if (!ok) g.failed = true;
+    g.pending -= 1;
+    if (g.pending <= 0 && !g.failed && mountedRef.current) setLastUpdated(Date.now());
+  }, []);
   const [period, setPeriod] = useState("mtd");
   const [showAllKpis, setShowAllKpis] = useState(false);
   const [kpisLoading, setKpisLoading] = useState(false);
@@ -139,6 +157,10 @@ export default function DashboardPageV2() {
   // every setState is guarded by mountedRef and loading is NEVER re-raised, so
   // an auto/manual refresh swaps data in place without blanking the page.
   const loadAll = useCallback(async () => {
+    inFlightRef.current = true;
+    // Capture the generation this run belongs to (set up by the caller before
+    // loadAll is invoked) so a late settle can't credit a newer refresh.
+    const gen = freshGateRef.current.gen;
     let anyFailed = false;
     function track(label, p) {
       return p.catch((e) => {
@@ -165,7 +187,7 @@ export default function DashboardPageV2() {
       track("/alerts", adminFetch("/admin/dashboard/alerts")),
     ]);
     const [d, cmp, sc, td, bh, al] = wave1;
-    if (!mountedRef.current) return;
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
     // Preserve prior values when a refresh fetch transiently fails (track →
     // null), so an auto/manual refresh never blanks a panel that was populated.
     // On the first load prev is null, so the loading/error path is unchanged.
@@ -185,7 +207,7 @@ export default function DashboardPageV2() {
       track("/revenue-by-city", adminFetch("/admin/dashboard/revenue-by-city")),
       track("/review-trend", adminFetch("/admin/dashboard/review-trend")),
     ]);
-    if (!mountedRef.current) return;
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
     const [fnl, ag, mrr, mx, rbc, rev] = wave2;
     setFunnel((prev) => fnl ?? prev);
     setAging((prev) => ag ?? prev);
@@ -193,19 +215,37 @@ export default function DashboardPageV2() {
     setMix((prev) => mx ?? prev);
     setRevenueByCity((prev) => rbc ?? prev);
     setReviewTrend((prev) => rev ?? prev);
-    // Only stamp "Updated just now" when every panel actually refreshed — a
-    // transient failure leaves stale data, so the timestamp must not advance.
-    if (!anyFailed) setLastUpdated(Date.now());
-  }, []);
+    inFlightRef.current = false;
+    // Report this generation's outcome to the freshness gate. "Updated just
+    // now" only advances once loadAll AND the period effects (Core KPIs +
+    // attribution) of the same generation have all reported success — see
+    // settleGate — so a transient failure in any panel never claims freshness.
+    settleGate(gen, !anyFailed);
+  }, [settleGate]);
+
+  // Start a refresh generation: bump the nonce (re-running the period effects),
+  // arm the freshness gate for all 3 participants, then run loadAll. Skipped
+  // while a refresh is already in flight so generations never overlap.
+  const triggerRefresh = useCallback(() => {
+    if (inFlightRef.current) return Promise.resolve();
+    const gen = nonceRef.current + 1;
+    nonceRef.current = gen;
+    freshGateRef.current = { gen, pending: 3, failed: false };
+    setRefreshNonce(gen);
+    return loadAll();
+  }, [loadAll]);
 
   useEffect(() => {
     mountedRef.current = true;
+    // Initial load: only loadAll participates in the gate (the period effects
+    // run with periodChanged=true and surface their own error state instead).
+    freshGateRef.current = { gen: 0, pending: 1, failed: false };
     loadAll();
     // Auto-refresh every 3 min in place; a faster clock tick keeps the
-    // "Updated Nm ago" label fresh without re-fetching.
+    // "Updated Nm ago" label fresh without re-fetching. Skip the tick if a
+    // refresh is still running so we never stack overlapping loads.
     const auto = setInterval(() => {
-      loadAll();
-      setRefreshNonce((n) => n + 1);
+      if (!inFlightRef.current) triggerRefresh();
     }, 180000);
     const tick = setInterval(() => setClockTick((t) => t + 1), 30000);
     return () => {
@@ -213,14 +253,13 @@ export default function DashboardPageV2() {
       clearInterval(auto);
       clearInterval(tick);
     };
-  }, [loadAll]);
+  }, [loadAll, triggerRefresh]);
 
   const refresh = async () => {
-    if (refreshing) return;
+    if (refreshing || inFlightRef.current) return;
     setRefreshing(true);
-    setRefreshNonce((n) => n + 1);
     try {
-      await loadAll();
+      await triggerRefresh();
     } finally {
       if (mountedRef.current) setRefreshing(false);
     }
@@ -233,6 +272,10 @@ export default function DashboardPageV2() {
     // swaps them in place, and won't surface an error over still-good data.
     const periodChanged = kpisPeriodRef.current !== period;
     kpisPeriodRef.current = period;
+    // A refresh-driven run (periodChanged=false) is a participant in the
+    // freshness gate for this generation; a period switch is not.
+    const gateGen = refreshNonce;
+    let ok = true;
     if (periodChanged) {
       setKpis(null);
       setKpisError(null);
@@ -247,19 +290,24 @@ export default function DashboardPageV2() {
       })
       .catch((e) => {
         if (e?.name === "AbortError") return;
+        ok = false;
         console.error("[dashboard-v2] /core-kpis", e);
         if (periodChanged) setKpisError(e);
       })
       .finally(() => {
-        if (!ctrl.signal.aborted) setKpisLoading(false);
+        if (ctrl.signal.aborted) return;
+        setKpisLoading(false);
+        if (!periodChanged) settleGate(gateGen, ok);
       });
     return () => ctrl.abort();
-  }, [period, refreshNonce]);
+  }, [period, refreshNonce, settleGate]);
 
   useEffect(() => {
     const ctrl = new AbortController();
     const periodChanged = attribPeriodRef.current !== period;
     attribPeriodRef.current = period;
+    const gateGen = refreshNonce;
+    let ok = true;
     if (periodChanged) {
       setCallsBySource(null);
       setLeadsBySource(null);
@@ -287,14 +335,17 @@ export default function DashboardPageV2() {
       })
       .catch((e) => {
         if (e?.name === "AbortError") return;
+        ok = false;
         console.error("[dashboard-v2] attribution", e);
         if (periodChanged) setAttributionError(e);
       })
       .finally(() => {
-        if (!ctrl.signal.aborted) setAttributionLoading(false);
+        if (ctrl.signal.aborted) return;
+        setAttributionLoading(false);
+        if (!periodChanged) settleGate(gateGen, ok);
       });
     return () => ctrl.abort();
-  }, [period, refreshNonce]);
+  }, [period, refreshNonce, settleGate]);
 
   if (loading) {
     return (

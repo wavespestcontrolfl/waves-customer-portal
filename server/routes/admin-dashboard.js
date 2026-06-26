@@ -927,13 +927,39 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
       };
     });
 
-    const totals = await db('google_reviews')
-      .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
-      .count('* as total')
-      .avg('star_rating as avg')
-      .first();
-    const total = parseInt(totals?.total, 10) || 0;
-    const avgRating = totals?.avg != null ? Math.round(Number(totals.avg) * 10) / 10 : null;
+    // All-time total + avg rating: prefer the Places API aggregate stored in
+    // the `_stats` rows. The rest of the dashboard (the hero Google Rating tile,
+    // lines ~219-252) reads these first because the synced google_reviews rows
+    // can be an incomplete sample, so deriving the card total from concrete rows
+    // alone would show a lower count than the rest of the dashboard. Fall back to
+    // the dated rows only when no Places stats exist. The monthly `trend` above
+    // intentionally stays on dated rows — those are the only ones we can bucket
+    // by ET month.
+    let total = 0;
+    let avgRating = null;
+    const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
+    let placesTotal = 0, ratingSum = 0, ratingCount = 0;
+    for (const row of statsRows) {
+      try {
+        const parsed = JSON.parse(row.review_text);
+        placesTotal += parsed.totalReviews || 0;
+        if (parsed.rating) { ratingSum += parsed.rating; ratingCount += 1; }
+      } catch (parseErr) {
+        logger.warn(`[admin-dashboard] review-trend _stats parse failed (id=${row.id}): ${parseErr.message}`);
+      }
+    }
+    if (placesTotal > 0) {
+      total = placesTotal;
+      avgRating = ratingCount > 0 ? Math.round((ratingSum / ratingCount) * 10) / 10 : null;
+    } else {
+      const totals = await db('google_reviews')
+        .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
+        .count('* as total')
+        .avg('star_rating as avg')
+        .first();
+      total = parseInt(totals?.total, 10) || 0;
+      avgRating = totals?.avg != null ? Math.round(Number(totals.avg) * 10) / 10 : null;
+    }
 
     res.json({ trend, total, avgRating, period: { label: 'Last 12 months' } });
   } catch (err) {
