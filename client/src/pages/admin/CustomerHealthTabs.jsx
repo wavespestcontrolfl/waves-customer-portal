@@ -1201,18 +1201,18 @@ function ScoresTab() {
                 {[
                   { key: "first_name", label: "Customer" },
                   { key: null, label: "Tier" },
-                  { key: "overall_score", label: "Score" },
+                  { key: "overall_score", label: "Score", align: "right" },
                   { key: "score_grade", label: "Grade" },
                   { key: null, label: "Sub-Scores" },
                   { key: "churn_risk", label: "Risk" },
-                  { key: null, label: "Trend" },
+                  { key: null, label: "Trend", align: "right" },
                 ].map((h) => (
                   <th
                     key={h.label}
                     onClick={h.key ? () => handleSort(h.key) : undefined}
                     style={{
                       padding: "10px 12px",
-                      textAlign: "left",
+                      textAlign: h.align || "left",
                       color: COLORS.textMuted,
                       fontWeight: 500,
                       fontSize: 11,
@@ -1300,11 +1300,12 @@ function ScoresTab() {
                           <span style={{ color: COLORS.textMuted }}>--</span>
                         )}
                       </td>{" "}
-                      <td style={{ padding: "10px 12px" }}>
+                      <td style={{ padding: "10px 12px", textAlign: "right" }}>
                         {" "}
                         <span
                           style={{
                             ...mono,
+                            fontVariantNumeric: "tabular-nums",
                             color: COLORS.text,
                             marginRight: 8,
                           }}
@@ -1339,7 +1340,9 @@ function ScoresTab() {
                         style={{
                           padding: "10px 12px",
                           ...mono,
+                          fontVariantNumeric: "tabular-nums",
                           fontSize: 16,
+                          textAlign: "right",
                           color: TREND_COLORS[c.score_trend],
                         }}
                       >
