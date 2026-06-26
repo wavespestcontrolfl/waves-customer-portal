@@ -15,7 +15,7 @@ const { priceTopDressing, priceTreeShrub } = require('./service-pricing');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
-  'mosquito', 'termite_bait', 'rodent_bait',
+  'mosquito', 'termite_bait', 'rodent_bait', 'foam_recurring',
 ]);
 
 const ONE_TIME_SERVICES = new Set([
@@ -377,6 +377,7 @@ function mapV1ToLegacyShape(v1Result) {
   const mqLI = lineItems.find(l => l.service === 'mosquito');
   const tbLI = lineItems.find(l => l.service === 'termite_bait');
   const rbLI = lineItems.find(l => l.service === 'rodent_bait');
+  const foamRecLI = lineItems.find(l => l.service === 'foam_recurring');
 
   // Pest → R.pest, R.pestTiers
   if (pestLI) {
@@ -603,6 +604,27 @@ function mapV1ToLegacyShape(v1Result) {
   }
   if (tbLI && !tbLI.quoteRequired && !tbLI.requiresMeasurement) {
     svcAdd('Termite Bait', tbLI, { service: 'termite_bait' });
+  }
+  // Recurring Foam — standalone recurring line (cadence-discounted). Stays in
+  // summary.recurringAnnual* (so it's part of monthlyTotal/year totals) but does
+  // NOT count toward the WaveGuard tier and is not bundle-discountable.
+  if (foamRecLI) {
+    svcAdd(foamRecLI.name || 'Recurring Foam', foamRecLI, {
+      service: 'foam_recurring',
+      cadence: foamRecLI.cadence || null,
+      // Carry the engine's authoritative annual so the frequency helper locks the
+      // sold total (e.g. 1108) on accept/prepay instead of recomputing the rounded
+      // monthly × 12 (92.33 × 12 = 1107.96, a few cents under the engine price).
+      annual: Number(foamRecLI.annual) || null,
+      detail: foamRecLI.detail || null,
+      // Carry the tier labor duration so slot-availability sizes the booking
+      // window from the foam tier instead of the generic 45-min fallback.
+      estimatedDurationMinutes: foamRecLI.estimatedDurationMinutes || null,
+      discountable: false,
+      discountEligible: false,
+      waveGuardDiscountEligible: false,
+      countsTowardWaveGuardTier: false,
+    });
   }
 
   // One-time + specialty split

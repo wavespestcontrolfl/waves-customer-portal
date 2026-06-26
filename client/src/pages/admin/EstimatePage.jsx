@@ -877,6 +877,8 @@ function EstimateToolView() {
     preslabJobContext: "standalone",
     _preslabJobContextEdited: false,
     foamPoints: "5",
+    foamRecurringPoints: "5",
+    foamRecurringFreq: "quarterly",
     roachType: "REGULAR",
     // services
     svcLawn: true,
@@ -897,6 +899,7 @@ function EstimateToolView() {
     svcBoracare: false,
     svcPreslab: false,
     svcFoam: false,
+    svcFoamRecurring: false,
     svcRodentTrap: false,
     svcFlea: false,
     svcWasp: false,
@@ -916,7 +919,7 @@ function EstimateToolView() {
       "svcMosquito",
       "svcTermiteBait",
     ];
-    const separateRecurringKeys = ["svcInjection", "svcRodentBait"];
+    const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
     const commercialManualQuoteCount =
       commercialDetected ? ["svcLawn", "svcPest"].filter((k) => form[k]).length : 0;
     const recurringCount = qualifyingRecurringKeys
@@ -964,10 +967,20 @@ function EstimateToolView() {
       approx.mosquito = Math.max(40, Math.round(lotSqft * 0.005 + 15));
     if (form.svcTermiteBait) approx.termiteBait = 50;
     if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 69 : 49;
+    if (form.svcFoamRecurring) {
+      // Rough preview; engine is authoritative. One-time per-visit by tier
+      // (no floor) × cadence multiplier × visits/yr ÷ 12.
+      const oneTimeByPoints = { 5: 182, 10: 308, 15: 434, 20: 598 };
+      const cadMult = { quarterly: 0.9, bimonthly: 0.85, monthly: 0.8 };
+      const cadVisits = { quarterly: 4, bimonthly: 6, monthly: 12 };
+      const cad = cadMult[form.foamRecurringFreq] ? form.foamRecurringFreq : "quarterly";
+      const base = oneTimeByPoints[form.foamRecurringPoints] || oneTimeByPoints[5];
+      approx.foamRecurring = Math.round((base * cadMult[cad] * cadVisits[cad]) / 12);
+    }
 
-    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0);
+    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0) + (approx.foamRecurring || 0);
     const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
-      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" ? 0 : value),
+      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" || key === "foamRecurring" ? 0 : value),
       0,
     );
     const recurringMonthly = Math.round(
@@ -1525,6 +1538,7 @@ function EstimateToolView() {
       form.svcBoracare,
       form.svcPreslab,
       form.svcFoam,
+      form.svcFoamRecurring,
       form.svcRodentTrap,
       form.svcFlea,
       form.svcWasp,
@@ -1588,6 +1602,7 @@ function EstimateToolView() {
         if (form.svcBoracare) selectedServices.push("BORACARE");
         if (form.svcPreslab) selectedServices.push("PRESLAB");
         if (form.svcFoam) selectedServices.push("FOAM");
+        if (form.svcFoamRecurring) selectedServices.push("FOAM_RECURRING");
         if (form.svcRodentTrap) selectedServices.push("RODENT_TRAP");
         if (form.svcFlea) selectedServices.push("FLEA");
         if (form.svcWasp) selectedServices.push("STING");
@@ -1703,6 +1718,8 @@ function EstimateToolView() {
           preslabJobContext: resolvePreSlabJobContextForForm(form),
           includePreSlabWarrantyExtended: form.preslabWarranty === "EXTENDED",
           foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
+          foamRecurringPoints: form.foamRecurringPoints === undefined ? undefined : form.foamRecurringPoints,
+          foamRecurringFreq: form.foamRecurringFreq || "quarterly",
           bedbugRooms: parseInt(form.bedbugRooms) || 1,
           bedbugMethod: form.bedbugMethod || "CHEMICAL",
           bedbugSeverity: form.bedbugSeverity || "light",
@@ -3476,6 +3493,35 @@ function EstimateToolView() {
                     {" "}
                     <Select
                       k="foamPoints"
+                      options={[
+                        { value: "5", label: "1-5 Spot" },
+                        { value: "10", label: "6-10 Moderate" },
+                        { value: "15", label: "11-15 Extensive" },
+                        { value: "20", label: "15+ Full Perimeter" },
+                      ]}
+                    />{" "}
+                  </Field>{" "}
+                </div>
+              )}
+              <Checkbox k="svcFoamRecurring" label="Recurring Foam Treatment" />
+              {form.svcFoamRecurring && (
+                <div style={sSubOpts}>
+                  {" "}
+                  <Field label="Cadence" style={{ marginBottom: 8 }}>
+                    {" "}
+                    <Select
+                      k="foamRecurringFreq"
+                      options={[
+                        { value: "quarterly", label: "Quarterly (every 3 mo) — 10% off" },
+                        { value: "bimonthly", label: "Bimonthly (every 2 mo) — 15% off" },
+                        { value: "monthly", label: "Monthly — 20% off" },
+                      ]}
+                    />{" "}
+                  </Field>{" "}
+                  <Field label="Drill Points" style={{ marginBottom: 0 }}>
+                    {" "}
+                    <Select
+                      k="foamRecurringPoints"
                       options={[
                         { value: "5", label: "1-5 Spot" },
                         { value: "10", label: "6-10 Moderate" },

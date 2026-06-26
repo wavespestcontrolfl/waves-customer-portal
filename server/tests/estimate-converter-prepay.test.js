@@ -116,16 +116,53 @@ describe('estimate converter annual prepay amount', () => {
       estimateData: { result: { lineItems: [] } },
     })).toEqual({ amount: 660, discount: 0, rate: 0 });
 
-    // No-fee mix with a non-discountable (non-lawn) line: the margin floor caps the
-    // 5% so the invoiced/displayed total never dips below the protected amount.
+    // No-fee mix with a non-discountable (non-lawn) line: the 5% applies ONLY to
+    // the discountable remainder. The protected line is split out first and added
+    // back at full price, so the prepay % never bleeds onto it (e.g. foam, whose
+    // cadence multiplier is its only discount).
     const floored = resolveAnnualPrepayInvoiceTotal({
       baseAnnual: 660,
       recurringServices: [{ service: 'tree_shrub', name: 'Tree & Shrub' }],
       estimateData: { result: { lineItems: [{ service: 'tree_shrub', annual: 650, discountable: false }] } },
     });
-    expect(floored.amount).toBe(650); // max(627, 650)
-    expect(floored.discount).toBe(10); // 660 - 650, less than a full 5%
-    expect(floored.rate).toBeCloseTo(0.0152, 4);
+    expect(floored.amount).toBe(659.5); // 650 protected + 5% off only the $10 discountable remainder
+    expect(floored.discount).toBe(0.5);
+    expect(floored.rate).toBeCloseTo(0.0008, 4);
+  });
+
+  test('engine-backed foam (no discountable flag) is still protected from the prepay discount', () => {
+    // public-quote.js / lead-estimate-automation.js persist the foam line under
+    // engineResult.lineItems as a subset WITHOUT discountable:false. The floor must
+    // protect it by service key so annual prepay never bleeds the 5% onto foam.
+    const estimateData = {
+      engineResult: {
+        lineItems: [
+          { service: 'foam_recurring', name: 'Recurring Foam Treatment (Quarterly)', annual: 1108, monthly: 92.33 },
+        ],
+      },
+    };
+    expect(nonDiscountableRecurringAnnualFloor(estimateData)).toBe(1108);
+
+    // foam-only annual prepay: 0% off (cadence multiplier is its only discount).
+    const foamOnly = resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 1108,
+      recurringServices: [{ service: 'foam_recurring', name: 'Recurring Foam Treatment (Quarterly)' }],
+      estimateData,
+    });
+    expect(foamOnly.amount).toBe(1108);
+    expect(foamOnly.discount).toBe(0);
+
+    // foam + a discountable lawn line: only the lawn $600 takes the 5%.
+    const mixed = resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 1708,
+      recurringServices: [
+        { service: 'foam_recurring', name: 'Recurring Foam Treatment (Quarterly)' },
+        { service: 'lawn_care', name: 'Lawn Care' },
+      ],
+      estimateData,
+    });
+    expect(mixed.amount).toBe(1678); // 1108 foam protected + 95% of $600 lawn
+    expect(mixed.discount).toBe(30);
   });
 
   test('all recurring pay-per-application accepts create invoices', () => {
