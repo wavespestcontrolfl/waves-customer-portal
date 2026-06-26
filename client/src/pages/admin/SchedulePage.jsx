@@ -6778,10 +6778,6 @@ export function CompletionPanel({
   });
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState("");
-  const [soilTemp, setSoilTemp] = useState("");
-  const [thatchMeasurement, setThatchMeasurement] = useState("");
-  const [soilPh, setSoilPh] = useState("");
-  const [soilMoisture, setSoilMoisture] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
@@ -7689,10 +7685,6 @@ export function CompletionPanel({
         savedAt: new Date().toISOString(),
         notes,
         selectedProducts,
-        soilTemp,
-        thatchMeasurement,
-        soilPh,
-        soilMoisture,
         sendSms,
         includePayLink,
         requestReview,
@@ -7753,10 +7745,6 @@ export function CompletionPanel({
     success,
     notes,
     selectedProducts,
-    soilTemp,
-    thatchMeasurement,
-    soilPh,
-    soilMoisture,
     sendSms,
     includePayLink,
     requestReview,
@@ -7811,10 +7799,6 @@ export function CompletionPanel({
           )
         : [],
     );
-    setSoilTemp(savedDraft.soilTemp || "");
-    setThatchMeasurement(savedDraft.thatchMeasurement || "");
-    setSoilPh(savedDraft.soilPh || "");
-    setSoilMoisture(savedDraft.soilMoisture || "");
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
@@ -8894,13 +8878,6 @@ export function CompletionPanel({
       }
       if (nextVisitNote) {
         body.nextVisitAdjustmentNote = nextVisitNote;
-      }
-      if (isLawn) {
-        if (soilTemp) body.soilTemp = parseFloat(soilTemp);
-        if (thatchMeasurement)
-          body.thatchMeasurement = parseFloat(thatchMeasurement);
-        if (soilPh) body.soilPh = parseFloat(soilPh);
-        if (soilMoisture) body.soilMoisture = parseFloat(soilMoisture);
       }
       if (service?.completionInvoiceAlreadySent) {
         body.invoiceAlreadySent = true;
@@ -11248,75 +11225,6 @@ export function CompletionPanel({
                 </div>
               </Field>
             )}
-            {/* Lawn measurements */}
-            {isLawn && !quickComplete && (
-              <Field label="Lawn measurements">
-                {" "}
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "1fr 1fr",
-                    gap: 12,
-                  }}
-                >
-                  {" "}
-                  <div>
-                    {" "}
-                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>
-                      Soil temp (°F)
-                    </label>{" "}
-                    <input
-                      type="number"
-                      value={soilTemp}
-                      onChange={(e) => setSoilTemp(e.target.value)}
-                      placeholder="—"
-                      style={mInput}
-                    />{" "}
-                  </div>{" "}
-                  <div>
-                    {" "}
-                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>
-                      Thatch (in)
-                    </label>{" "}
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={thatchMeasurement}
-                      onChange={(e) => setThatchMeasurement(e.target.value)}
-                      placeholder="—"
-                      style={mInput}
-                    />{" "}
-                  </div>{" "}
-                  <div>
-                    {" "}
-                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>
-                      Soil pH
-                    </label>{" "}
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={soilPh}
-                      onChange={(e) => setSoilPh(e.target.value)}
-                      placeholder="—"
-                      style={mInput}
-                    />{" "}
-                  </div>{" "}
-                  <div>
-                    {" "}
-                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>
-                      Moisture (%)
-                    </label>{" "}
-                    <input
-                      type="number"
-                      value={soilMoisture}
-                      onChange={(e) => setSoilMoisture(e.target.value)}
-                      placeholder="—"
-                      style={mInput}
-                    />{" "}
-                  </div>{" "}
-                </div>{" "}
-              </Field>
-            )}
             {/* Options */}
             <Field label="Options">
               {" "}
@@ -13380,69 +13288,6 @@ export function CompletionPanel({
                 0 = none, 5 = severe. Tap a number again to clear.
               </div>
             </div>
-          )}
-          {/* Lawn Measurements — hidden in quick complete */}
-          {isLawn && !quickComplete && (
-            <>
-              {" "}
-              <label style={labelStyle}>Lawn Measurements</label>{" "}
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
-                  gap: 10,
-                  marginBottom: 20,
-                }}
-              >
-                {" "}
-                <div>
-                  {" "}
-                  <div style={subLabelStyle}>Soil Temp (F)</div>{" "}
-                  <input
-                    type="number"
-                    value={soilTemp}
-                    onChange={(e) => setSoilTemp(e.target.value)}
-                    placeholder="--"
-                    style={inputStyle}
-                  />{" "}
-                </div>{" "}
-                <div>
-                  {" "}
-                  <div style={subLabelStyle}>Thatch (in)</div>{" "}
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={thatchMeasurement}
-                    onChange={(e) => setThatchMeasurement(e.target.value)}
-                    placeholder="--"
-                    style={inputStyle}
-                  />{" "}
-                </div>{" "}
-                <div>
-                  {" "}
-                  <div style={subLabelStyle}>Soil pH</div>{" "}
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={soilPh}
-                    onChange={(e) => setSoilPh(e.target.value)}
-                    placeholder="--"
-                    style={inputStyle}
-                  />{" "}
-                </div>{" "}
-                <div>
-                  {" "}
-                  <div style={subLabelStyle}>Moisture (%)</div>{" "}
-                  <input
-                    type="number"
-                    value={soilMoisture}
-                    onChange={(e) => setSoilMoisture(e.target.value)}
-                    placeholder="--"
-                    style={inputStyle}
-                  />{" "}
-                </div>{" "}
-              </div>{" "}
-            </>
           )}
           {/* Options */}
           <label style={labelStyle}>Options</label>{" "}
