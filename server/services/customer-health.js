@@ -669,6 +669,13 @@ async function scoreCustomer(customerId) {
     // any 'critical'-severity signal as critical).
     const churnSignals = await detectChurnSignals(customerId, scoreData);
     for (const bs of behavioral.churnSignals) churnSignals.push(bs);
+    // Consumers read different fields off each driver: the /admin/health UI
+    // reads `message`, the retention engine + Adam churn-alert read `value`.
+    // Keep both populated so neither surfaces `undefined`.
+    for (const s of churnSignals) {
+      if (s.value === undefined) s.value = s.message;
+      if (s.message === undefined) s.message = s.value;
+    }
     const churnRisk = determineChurnRisk(churnSignals, overall);
     const churnProbability = estimateChurnProbability(churnRisk, overall);
     const daysUntilChurn = estimateDaysUntilChurn(churnRisk);
@@ -758,25 +765,40 @@ async function scoreCustomer(customerId) {
       else await db('customer_health_scores').insert({ ...minimal, created_at: now }).catch(err => logger.error(`[health] Minimal score insert failed: ${err.message}`));
     }
 
-    // Insert history snapshot
+    // Insert/refresh today's history snapshot. Idempotent per (customer, day)
+    // so a manual re-scan on the same day refreshes the point instead of
+    // appending a duplicate (which would skew the trend chart).
+    const snapshot = {
+      customer_id: customerId,
+      overall_score: overall,
+      payment_score: payment.score,
+      service_score: service.score,
+      engagement_score: engagement.score,
+      satisfaction_score: satisfaction.score,
+      loyalty_score: loyalty.score,
+      growth_score: growth.score,
+      churn_risk: churnRisk,
+      scored_at: today,
+    };
     try {
-      await db('customer_health_history').insert({
-        customer_id: customerId,
-        overall_score: overall,
-        payment_score: payment.score,
-        service_score: service.score,
-        engagement_score: engagement.score,
-        satisfaction_score: satisfaction.score,
-        loyalty_score: loyalty.score,
-        growth_score: growth.score,
-        churn_risk: churnRisk,
-        scored_at: today,
-      });
+      const existingSnapshot = await db('customer_health_history')
+        .where('customer_id', customerId)
+        .where('scored_at', today)
+        .first();
+      if (existingSnapshot) {
+        await db('customer_health_history').where('id', existingSnapshot.id).update(snapshot);
+      } else {
+        await db('customer_health_history').insert(snapshot);
+      }
     } catch (e) {
-      // Fallback: minimal history
-      await db('customer_health_history').insert({
-        customer_id: customerId, overall_score: overall, scored_at: today,
-      }).catch(() => {});
+      // Fallback: minimal, still idempotent per (customer, day)
+      try {
+        const existingSnapshot = await db('customer_health_history')
+          .where('customer_id', customerId).where('scored_at', today).first();
+        if (!existingSnapshot) {
+          await db('customer_health_history').insert({ customer_id: customerId, overall_score: overall, scored_at: today });
+        }
+      } catch { /* ignore */ }
     }
 
     // Generate alerts

@@ -2115,9 +2115,15 @@ function initScheduledJobs() {
       const HealthScorer = require('./customer-intelligence/health-scorer');
       const RetentionEngine = require('./customer-intelligence/retention-engine');
 
-      // Step 1: Detect signals
-      const signalResult = await SignalDetector.detectAllSignals();
-      logger.info(`Signals: ${signalResult.newSignals} new from ${signalResult.customersScanned} customers`);
+      // Step 1: Detect signals. Isolated so a detection failure doesn't skip
+      // tonight's scoring — this is now the only nightly health-score refresh,
+      // and scoring folds whatever signals already exist.
+      try {
+        const signalResult = await SignalDetector.detectAllSignals();
+        logger.info(`Signals: ${signalResult.newSignals} new from ${signalResult.customersScanned} customers`);
+      } catch (err) {
+        logger.error(`Signal detection failed (continuing to scoring): ${err.message}`);
+      }
 
       // Step 2: Score health — single canonical engine (customer-health.js).
       // Runs after signal detection so tonight's fresh signals fold into the

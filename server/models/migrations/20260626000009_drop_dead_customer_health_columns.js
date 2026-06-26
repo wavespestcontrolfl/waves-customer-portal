@@ -18,6 +18,21 @@ exports.up = async function (knex) {
     if (existing.includes('health_score')) t.dropColumn('health_score');
     if (existing.includes('health_risk')) t.dropColumn('health_risk');
   });
+
+  // Normalize any existing customer_health_scores rows still carrying the
+  // retired customer-intelligence vocabulary (healthy/watch/at_risk) to the
+  // canonical engine's vocabulary (low/moderate/high/critical), so the
+  // /admin/health at-risk KPI and risk filters are correct immediately on
+  // deploy — before the first nightly canonical re-score runs. 'critical' is
+  // shared by both vocabularies and needs no change.
+  if (await knex.schema.hasTable('customer_health_scores')) {
+    const hasChurnRisk = await knex.schema.hasColumn('customer_health_scores', 'churn_risk');
+    if (hasChurnRisk) {
+      await knex('customer_health_scores').where('churn_risk', 'at_risk').update({ churn_risk: 'high' });
+      await knex('customer_health_scores').where('churn_risk', 'watch').update({ churn_risk: 'moderate' });
+      await knex('customer_health_scores').where('churn_risk', 'healthy').update({ churn_risk: 'low' });
+    }
+  }
 };
 
 exports.down = async function (knex) {
