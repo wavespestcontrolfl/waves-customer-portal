@@ -76,45 +76,75 @@ Examples (input → exact JSON output):
 "collected revenue by month this year" → {"sql":"SELECT date_trunc('month', payment_date) AS month, COALESCE(SUM(amount),0) AS collected FROM ai_payments WHERE status='paid' AND payment_date >= date_trunc('year', CURRENT_DATE) GROUP BY 1 ORDER BY 1 ASC","chartType":"line","title":"Collected Revenue by Month","x":"month","y":["collected"],"yFormat":"currency","explanation":"Sum of paid payments per month, Jan 1 this year to date."}`;
 }
 
+// ── Two-step image path ───────────────────────────────────────────────────
+// A reference image is read by the VISION model (Gemini 3.5 Flash, Claude
+// fallback) to extract INTENT ONLY — it never sees the schema and never writes
+// SQL, so it can't hallucinate a column or lock in a wrong predicate. The SQL is
+// then always written by FLAGSHIP (the strongest SQL model) from that intent,
+// exactly like the text path. This keeps SQL rigor regardless of input modality.
+const CONFIDENCE = ['high', 'medium', 'low'];
+function buildIntentSystemPrompt() {
+  return `You are reading reference chart image(s) for a pest-control / lawn-care analytics tool. Extract ONLY the user's analytical INTENT. Do NOT write SQL. Do NOT reference any database, schema, table, or column names. Return JSON only:
+{ "metric": "<plain-language what to measure>", "breakdown": "<dimension to group by, or null>", "timeWindow": "<relative phrase e.g. 'last 12 months', or null>", "chartType": "line|bar|donut|kpi|table", "confidence": "high|medium|low" }
+Set confidence "low" if the image is ambiguous or isn't a chart.`;
+}
+
 /**
- * Generate a chart spec for a natural-language prompt (+ optional reference
- * images). Single-shot; the caller validates/executes the SQL and may request a
- * repair on failure.
- *
- * When images are attached the request is a VISION call routed to Gemini 3.5
- * Flash (GEMINI_VISION_BEST) — the app's live vision model — with an automatic
- * fallback to Claude (also multimodal) so a provider issue never blocks the
- * chart. Text-only requests stay on the FLAGSHIP reasoning tier.
+ * Extract chart intent from reference image(s) via the vision model (Gemini 3.5
+ * Flash → Claude fallback). Returns a normalized intent object or null.
+ */
+async function extractImageIntent(images) {
+  const imgs = Array.isArray(images) ? images.filter((im) => im && im.data && im.mimeType) : [];
+  if (!imgs.length) return null;
+  const system = buildIntentSystemPrompt();
+  const text = 'Extract the analytical intent the user wants, from the attached image(s).';
+  let res;
+  try {
+    res = await callGemini({ model: GEMINI_VISION_BEST, system, text, images: imgs, jsonMode: true, maxTokens: 400 });
+    if (!res || !res.ok || !res.json) {
+      logger.warn(`[ai-chart-builder] Gemini intent miss (${res?.reason}); falling back to Claude`);
+      res = await callAnthropic({ model: FLAGSHIP, system, text, images: imgs, jsonMode: true, maxTokens: 400 });
+    }
+  } catch (err) {
+    logger.error(`[ai-chart-builder] intent extraction threw: ${err.message}`);
+    return null;
+  }
+  if (!res || !res.ok || !res.json) return null;
+  const j = res.json;
+  return {
+    metric: typeof j.metric === 'string' ? j.metric.slice(0, 300) : '',
+    breakdown: typeof j.breakdown === 'string' ? j.breakdown.slice(0, 120) : null,
+    timeWindow: typeof j.timeWindow === 'string' ? j.timeWindow.slice(0, 80) : null,
+    chartType: CHART_TYPES.includes(j.chartType) ? j.chartType : null,
+    confidence: CONFIDENCE.includes(j.confidence) ? j.confidence : 'low',
+  };
+}
+
+/**
+ * Generate a chart spec from a natural-language prompt and/or pre-extracted image
+ * intent. The SQL is ALWAYS written by FLAGSHIP. Single-shot; the caller
+ * validates/executes the SQL and may request a repair on failure.
  * @param {string} prompt
- * @param {{ errorContext?: string, images?: Array<{data:string, mimeType:string}> }} [opts]
+ * @param {{ errorContext?: string, intent?: object }} [opts]
  * @returns {Promise<{ok:true, spec:object} | {ok:false, reason:string, message?:string}>}
  */
 async function generateChartSpec(prompt, opts = {}) {
   const cleanPrompt = String(prompt || '').trim().slice(0, 500);
-  const images = Array.isArray(opts.images) ? opts.images.filter((im) => im && im.data && im.mimeType) : [];
-  if (!cleanPrompt && !images.length) return { ok: false, reason: 'empty_prompt' };
+  const intent = opts.intent && typeof opts.intent === 'object' ? opts.intent : null;
+  if (!cleanPrompt && !intent) return { ok: false, reason: 'empty_prompt' };
 
-  let text = cleanPrompt || 'Build the most useful chart this image implies, from the schema below.';
-  if (images.length) {
-    text = `${text}\n\nA reference image is attached — use it to infer the metric, breakdown, and chart type the user wants, then map it to the schema.`;
+  let text = cleanPrompt || 'Build the most useful chart for the intent below, from the schema.';
+  if (intent) {
+    text = `${text}\n\nThe user's analytical intent (extracted from a reference image — map it to the schema):\n${JSON.stringify({ metric: intent.metric, breakdown: intent.breakdown, timeWindow: intent.timeWindow, chartType: intent.chartType })}`;
   }
   if (opts.errorContext) {
     text = `${text}\n\nYour previous attempt failed with: ${String(opts.errorContext).slice(0, 300)}\nReturn a corrected query that obeys all the rules.`;
   }
 
-  const system = buildSystemPrompt();
   let res;
   try {
-    if (images.length) {
-      // Vision → Gemini 3.5 Flash, Claude fallback (CLAUDE.md cross-provider rule).
-      res = await callGemini({ model: GEMINI_VISION_BEST, system, text, images, jsonMode: true, maxTokens: 1200 });
-      if (!res || !res.ok) {
-        logger.warn(`[ai-chart-builder] Gemini vision miss (${res?.reason}); falling back to Claude`);
-        res = await callAnthropic({ model: FLAGSHIP, system, text, images, jsonMode: true, maxTokens: 1200 });
-      }
-    } else {
-      res = await callAnthropic({ model: FLAGSHIP, system, text, jsonMode: true, maxTokens: 1200 });
-    }
+    // SQL is always written by FLAGSHIP — text or image, the strongest SQL model.
+    res = await callAnthropic({ model: FLAGSHIP, system: buildSystemPrompt(), text, jsonMode: true, maxTokens: 1200 });
   } catch (err) {
     logger.error(`[ai-chart-builder] LLM call threw: ${err.message}`);
     return { ok: false, reason: 'llm_error' };
@@ -142,4 +172,4 @@ async function generateChartSpec(prompt, opts = {}) {
   };
 }
 
-module.exports = { generateChartSpec, CHART_TYPES, Y_FORMATS, SCHEMA_DOC };
+module.exports = { generateChartSpec, extractImageIntent, CHART_TYPES, Y_FORMATS, SCHEMA_DOC };

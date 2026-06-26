@@ -13,7 +13,7 @@ const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
 const { autopayActivePredicate } = require('../services/autopay-eligibility');
-const { generateChartSpec } = require('../services/ai-chart-builder');
+const { generateChartSpec, extractImageIntent } = require('../services/ai-chart-builder');
 const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const rateLimit = require('express-rate-limit');
@@ -1713,12 +1713,44 @@ function sanitizeChartImages(raw) {
     .map((im) => ({ data: im.data, mimeType: im.mimeType }));
 }
 
+// Validate the chart spec against the ACTUAL returned column names (not by
+// parsing the SQL — fragile and CTEs break it). Every x/y must be a real output
+// column or the chart renders empty/wrong. Returns the missing refs.
+function chartSpecFieldErrors(spec, fields) {
+  const set = new Set(fields || []);
+  return [spec.x, ...(spec.y || [])].filter((r) => r && !set.has(r));
+}
+// Last-resort: snap x/y to real columns so a rendered chart always matches the
+// data even if the model's last attempt still mislabels them.
+function coerceChartSpecToFields(spec, fields) {
+  if (!Array.isArray(fields) || !fields.length) return spec;
+  const set = new Set(fields);
+  const x = spec.x && set.has(spec.x) ? spec.x : fields[0];
+  let y = (spec.y || []).filter((c) => set.has(c));
+  if (!y.length) { const alt = fields.find((c) => c !== x); y = [alt || fields[0]]; }
+  return { ...spec, x, y };
+}
+
 router.post('/ai-chart/preview', requireAiChartsEnabled, aiChartLimiter, async (req, res) => {
   const prompt = String(req.body?.prompt || '').trim();
   const images = sanitizeChartImages(req.body?.images);
   if (!prompt && !images.length) return res.status(400).json({ error: 'A prompt or an image is required.' });
 
-  let gen = await generateChartSpec(prompt, { images });
+  // Two-step image path: the vision model extracts INTENT only (no schema, no
+  // SQL); FLAGSHIP then writes the SQL from that intent + the schema, exactly like
+  // the text path — so the SQL is always written by the strongest SQL model.
+  let intent = null;
+  if (images.length) {
+    intent = await extractImageIntent(images);
+    if (!intent && !prompt) {
+      return res.status(422).json({ error: "Couldn't read a chart from that image — describe the metric you want instead." });
+    }
+    if (intent && intent.confidence === 'low' && !prompt) {
+      return res.status(422).json({ error: `The image was ambiguous (read it as "${intent.metric || 'unclear'}"). Add a short description of the metric you want.` });
+    }
+  }
+
+  let gen = await generateChartSpec(prompt, { intent });
   if (!gen.ok) {
     return res.status(422).json({ error: gen.message || `Could not build a chart (${gen.reason}).` });
   }
@@ -1726,12 +1758,24 @@ router.post('/ai-chart/preview', requireAiChartsEnabled, aiChartLimiter, async (
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const { rows, fields } = await runReadOnlyAnalyticsQuery(gen.spec.sql);
-      return res.json({ spec: gen.spec, rows, fields });
+      // Spec↔result validation: if the chart references a column the query didn't
+      // output, repair once (feeding the mismatch back like a DB error).
+      const missing = chartSpecFieldErrors(gen.spec, fields);
+      if (missing.length && attempt === 0) {
+        logger.warn(`[admin-dashboard] ai-chart spec references non-output column(s): ${missing.join(', ')}`);
+        const repaired = await generateChartSpec(prompt, {
+          intent,
+          errorContext: `The chart references column(s) [${missing.join(', ')}] that your SELECT did not output (it returned: ${fields.join(', ')}). Alias the SELECT columns so x/y match, or fix x/y.`,
+        });
+        if (repaired.ok) { gen = repaired; continue; }
+      }
+      // Snap any residual mismatch to real columns so the chart always matches.
+      return res.json({ spec: coerceChartSpecToFields(gen.spec, fields), rows, fields });
     } catch (err) {
       const guard = err instanceof SqlGuardError;
       logger.warn(`[admin-dashboard] ai-chart preview attempt ${attempt + 1} failed (${guard ? 'guard' : 'exec'}): ${err.message}`);
       if (attempt === 0) {
-        const repaired = await generateChartSpec(prompt, { images, errorContext: err.message });
+        const repaired = await generateChartSpec(prompt, { intent, errorContext: err.message });
         if (repaired.ok) { gen = repaired; continue; }
       }
       return res.status(422).json({ error: 'The generated query was rejected or failed to run. Try rephrasing.' });
