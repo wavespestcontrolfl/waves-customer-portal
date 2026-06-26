@@ -45,7 +45,17 @@ const PERIODS = [
 ];
 
 const greeting = () => {
-  const h = new Date().getHours();
+  // Eastern hour so the greeting matches the ET header date/clock regardless of
+  // the viewer's browser timezone.
+  const h =
+    parseInt(
+      new Date().toLocaleString("en-US", {
+        timeZone: "America/New_York",
+        hour: "2-digit",
+        hour12: false,
+      }),
+      10,
+    ) % 24;
   if (h < 12) return "Good morning";
   if (h < 17) return "Good afternoon";
   return "Good evening";
@@ -129,9 +139,11 @@ export default function DashboardPageV2() {
   // every setState is guarded by mountedRef and loading is NEVER re-raised, so
   // an auto/manual refresh swaps data in place without blanking the page.
   const loadAll = useCallback(async () => {
+    let anyFailed = false;
     function track(label, p) {
       return p.catch((e) => {
         console.error(`[dashboard-v2] ${label}`, e);
+        anyFailed = true;
         if (mountedRef.current) setLoadError((prev) => prev || e);
         return null;
       });
@@ -181,7 +193,9 @@ export default function DashboardPageV2() {
     setMix((prev) => mx ?? prev);
     setRevenueByCity((prev) => rbc ?? prev);
     setReviewTrend((prev) => rev ?? prev);
-    setLastUpdated(Date.now());
+    // Only stamp "Updated just now" when every panel actually refreshed — a
+    // transient failure leaves stale data, so the timestamp must not advance.
+    if (!anyFailed) setLastUpdated(Date.now());
   }, []);
 
   useEffect(() => {
@@ -450,7 +464,7 @@ export default function DashboardPageV2() {
           </ChartCard>
         )}
         <ChartCard
-          title={`Revenue — ${new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}`}
+          title={`Revenue — ${new Date().toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "America/New_York" })}`}
           sub={
             compare?.deltas?.revenue != null
               ? `${compare.deltas.revenue >= 0 ? "↑" : "↓"} ${Math.abs(compare.deltas.revenue)}% vs ${compare.against?.label?.toLowerCase() || "prior period"}`
