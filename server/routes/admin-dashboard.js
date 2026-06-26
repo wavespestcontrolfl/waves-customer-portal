@@ -906,6 +906,7 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
     }
 
     const rows = await db('google_reviews')
+      .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
       .select(db.raw("to_char(review_created_at AT TIME ZONE 'America/New_York','YYYY-MM') as ym"))
       .count('* as n')
       .avg('star_rating as avg')
@@ -927,6 +928,7 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
     });
 
     const totals = await db('google_reviews')
+      .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
       .count('* as total')
       .avg('star_rating as avg')
       .first();

@@ -107,7 +107,14 @@ export default function DashboardPageV2() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [clockTick, setClockTick] = useState(0);
+  // Bumped on every auto/manual refresh so the period-based effects (Core KPIs +
+  // attribution) re-fetch too — otherwise "Updated Nm ago" would imply a
+  // freshness those panels don't have. The period refs let those effects blank
+  // ONLY on a real period switch, not on a silent refresh.
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const mountedRef = useRef(true);
+  const kpisPeriodRef = useRef(null);
+  const attribPeriodRef = useRef(null);
   const [period, setPeriod] = useState("mtd");
   const [showAllKpis, setShowAllKpis] = useState(false);
   const [kpisLoading, setKpisLoading] = useState(false);
@@ -147,12 +154,15 @@ export default function DashboardPageV2() {
     ]);
     const [d, cmp, sc, td, bh, al] = wave1;
     if (!mountedRef.current) return;
-    setData(d);
-    setCompare(cmp);
-    setSalesCapture(sc);
-    setToday(td);
-    setBilling(bh?.summary || null);
-    setAlerts(Array.isArray(al?.alerts) ? al.alerts : []);
+    // Preserve prior values when a refresh fetch transiently fails (track →
+    // null), so an auto/manual refresh never blanks a panel that was populated.
+    // On the first load prev is null, so the loading/error path is unchanged.
+    setData((prev) => d ?? prev);
+    setCompare((prev) => cmp ?? prev);
+    setSalesCapture((prev) => sc ?? prev);
+    setToday((prev) => td ?? prev);
+    setBilling((prev) => bh?.summary ?? prev);
+    setAlerts((prev) => (Array.isArray(al?.alerts) ? al.alerts : prev));
     setLoading(false);
 
     const wave2 = await Promise.all([
@@ -165,12 +175,12 @@ export default function DashboardPageV2() {
     ]);
     if (!mountedRef.current) return;
     const [fnl, ag, mrr, mx, rbc, rev] = wave2;
-    setFunnel(fnl);
-    setAging(ag);
-    setMrrTrend(mrr);
-    setMix(mx);
-    setRevenueByCity(rbc);
-    setReviewTrend(rev);
+    setFunnel((prev) => fnl ?? prev);
+    setAging((prev) => ag ?? prev);
+    setMrrTrend((prev) => mrr ?? prev);
+    setMix((prev) => mx ?? prev);
+    setRevenueByCity((prev) => rbc ?? prev);
+    setReviewTrend((prev) => rev ?? prev);
     setLastUpdated(Date.now());
   }, []);
 
@@ -179,7 +189,10 @@ export default function DashboardPageV2() {
     loadAll();
     // Auto-refresh every 3 min in place; a faster clock tick keeps the
     // "Updated Nm ago" label fresh without re-fetching.
-    const auto = setInterval(() => loadAll(), 180000);
+    const auto = setInterval(() => {
+      loadAll();
+      setRefreshNonce((n) => n + 1);
+    }, 180000);
     const tick = setInterval(() => setClockTick((t) => t + 1), 30000);
     return () => {
       mountedRef.current = false;
@@ -191,6 +204,7 @@ export default function DashboardPageV2() {
   const refresh = async () => {
     if (refreshing) return;
     setRefreshing(true);
+    setRefreshNonce((n) => n + 1);
     try {
       await loadAll();
     } finally {
@@ -200,9 +214,16 @@ export default function DashboardPageV2() {
 
   useEffect(() => {
     const ctrl = new AbortController();
-    setKpis(null);
-    setKpisError(null);
-    setKpisLoading(true);
+    // Blank + show the loading state only on a real period switch. A silent
+    // auto/manual refresh (refreshNonce bump) keeps the current KPIs on screen,
+    // swaps them in place, and won't surface an error over still-good data.
+    const periodChanged = kpisPeriodRef.current !== period;
+    kpisPeriodRef.current = period;
+    if (periodChanged) {
+      setKpis(null);
+      setKpisError(null);
+      setKpisLoading(true);
+    }
     adminFetch(`/admin/dashboard/core-kpis?period=${period}`, {
       signal: ctrl.signal,
     })
@@ -213,21 +234,25 @@ export default function DashboardPageV2() {
       .catch((e) => {
         if (e?.name === "AbortError") return;
         console.error("[dashboard-v2] /core-kpis", e);
-        setKpisError(e);
+        if (periodChanged) setKpisError(e);
       })
       .finally(() => {
         if (!ctrl.signal.aborted) setKpisLoading(false);
       });
     return () => ctrl.abort();
-  }, [period]);
+  }, [period, refreshNonce]);
 
   useEffect(() => {
     const ctrl = new AbortController();
-    setCallsBySource(null);
-    setLeadsBySource(null);
-    setChannelMix(null);
-    setAttributionError(null);
-    setAttributionLoading(true);
+    const periodChanged = attribPeriodRef.current !== period;
+    attribPeriodRef.current = period;
+    if (periodChanged) {
+      setCallsBySource(null);
+      setLeadsBySource(null);
+      setChannelMix(null);
+      setAttributionError(null);
+      setAttributionLoading(true);
+    }
 
     Promise.all([
       adminFetch(`/admin/dashboard/calls-by-source?period=${period}`, {
@@ -249,13 +274,13 @@ export default function DashboardPageV2() {
       .catch((e) => {
         if (e?.name === "AbortError") return;
         console.error("[dashboard-v2] attribution", e);
-        setAttributionError(e);
+        if (periodChanged) setAttributionError(e);
       })
       .finally(() => {
         if (!ctrl.signal.aborted) setAttributionLoading(false);
       });
     return () => ctrl.abort();
-  }, [period]);
+  }, [period, refreshNonce]);
 
   if (loading) {
     return (
@@ -301,17 +326,21 @@ export default function DashboardPageV2() {
 
   const k = data.kpis;
   const dailySpark = sparkSeries(data.revenueChart?.daily);
+  // Eastern-time everywhere — the business (and every operator) is in ET, so the
+  // header date/clock must not drift to the viewer's browser timezone.
   const todayLabel = new Date().toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
     day: "numeric",
     year: "numeric",
+    timeZone: "America/New_York",
   });
   // Recomputed on each clockTick (30s) re-render so the header clock stays current.
   void clockTick;
   const timeLabel = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",
     minute: "2-digit",
+    timeZone: "America/New_York",
   });
   const firstName = adminFirstName();
   const mrrTrendSub =
