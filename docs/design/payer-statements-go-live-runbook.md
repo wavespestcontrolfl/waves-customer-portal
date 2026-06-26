@@ -84,7 +84,11 @@ does not surface the link either. So fetch the statement's token directly and
 build the URL yourself:
 
 ```
-select id, statement_number, status, token from payer_statements where status = 'sent' order by id desc limit 5;
+-- there is no statement_number column; the display number is S-<id>.
+-- opening the pay page stamps sent→viewed, and close-only/retry rows stay
+-- finalized, so match all payable statuses, not just 'sent'.
+select id, status, token from payer_statements
+  where status in ('finalized','sent','viewed') order by id desc limit 5;
 -- pay URL = https://<portal>/pay/statement/<token>
 ```
 
@@ -92,12 +96,15 @@ select id, statement_number, status, token from payer_statements where status = 
 receive the reminder email that contains the CTA link.)
 
 **One settling payment per statement.** A statement is only payable while
-`finalized`/`sent`/`viewed`; the moment it settles it becomes `paid` and the pay
-page returns `409 "already paid"`. So **each test that actually settles money
-needs its own fresh Sent statement** — accrue → close → send a new one for the
-credit-card, ACH, and offline-reconcile cases. The non-settling checks (debit
-surcharge display, failed-card→ACH switch, redirect return) can share one Sent
-statement *until* one of them settles it.
+`finalized`/`sent`/`viewed`; once a PaymentIntent confirms it goes
+`processing`→`paid`, and the pay page then returns `409 "already paid"` (or
+"already in progress"). So **every flow that submits a PaymentIntent needs its
+own fresh Sent statement** — accrue → close → send a new one for the credit-card,
+ACH, **failed-card→ACH switch**, **redirect-return**, and offline-reconcile
+cases (the failed-card and redirect flows confirm/queue a PI too, so they consume
+their statement). Only the **display-only** debit-surcharge readout — where you
+enter a debit card and just observe the $0 surcharge line *without submitting* —
+can reuse a statement.
 
 From a **Sent** test statement, open its pay link:
 
@@ -121,8 +128,12 @@ From a **Sent** test statement, open its pay link:
       payment** (check/ACH/wire) in the admin sheet → confirm it settles + the
       amount validates against the statement total.
 
-If any of these misbehave, **set `GATE_PAYER_STATEMENTS=false`** and report —
-nothing real is billed yet.
+If any of these misbehave, stop and report. Don't just flip
+`GATE_PAYER_STATEMENTS=false` — a dry-run leaves test statements `sent`/`viewed`
+(and maybe a `processing` ACH), and flipping off strands them (see **Rollback**).
+First drain or detach the test statements per the Rollback steps, *then* disable
+the gate. Nothing real is billed to a customer yet, but a half-paid test
+statement still needs to be settled or unwound cleanly.
 
 ---
 
@@ -179,15 +190,28 @@ So those balances sit uncollectable until you act. To roll back cleanly when any
 statement still owes, do one of:
 
 1. **Drain first (preferred).** Leave the gate **on**, finish every unpaid
-   statement: **Close & send** anything still `open`, then let each `sent`/
-   `viewed` statement settle online or **Record offline payment**, and let any
-   `processing` ACH clear — until nothing remains that isn't `paid`/`void`. Then
-   flip the gate off. During the §2/§3 dry-run this just means finishing (not
-   abandoning) the test statements you created.
+   statement: **Close & send** anything still `open`; **deliver/settle the
+   `finalized` rows too** — a close-only statement or one whose AP delivery 422'd
+   sits in `finalized` and is just as stranded (use the forced **Send to AP**
+   retry, then collect); let each `sent`/`viewed` statement settle online or
+   **Record offline payment**; and let any `processing` ACH clear — until nothing
+   remains that isn't `paid`/`void`. Then flip the gate off. During the §2/§3
+   dry-run this just means finishing (not abandoning) the test statements you
+   created.
 2. **Detach.** If you must flip off immediately, clear `payer_statement_id` on
    the affected child invoices (and void the now-empty statement) so they become
    individually billable again under per-visit billing. Treat this as a
    deliberate, audited DB step — there is no UI for it.
+   **⚠️ Never detach/void a statement with a payment in flight** — i.e. `status =
+   'processing'`, or a non-null `stripe_payment_intent_id` whose PI isn't
+   canceled. The statement PaymentIntent webhook is **not** feature-gated
+   (`server/routes/stripe-webhook.js`) and settles only when the statement's
+   stored PI still matches, so a late ACH/card success that lands *after* you've
+   detached + voided won't cascade — it's recorded as an orphaned payment for
+   **manual refund/review**, with the funds collected but the children already
+   billed separately. First wait for `processing` to clear (then it's `paid` —
+   nothing to detach), or cancel the active PI in Stripe and refund anything
+   captured and confirm no funds are in flight, **then** detach.
 
 Sanity check before flipping off — any row here must be drained or detached:
 `select id, payer_id, status from payer_statements where status not in ('paid','void');`
