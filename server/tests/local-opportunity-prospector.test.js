@@ -1,4 +1,4 @@
-const { discoverLocalOpportunities, OPPORTUNITY_QUERIES, _internals } = require('../services/seo/local-opportunity-prospector');
+const { discoverLocalOpportunities, excludeOwned, isReliablyClassified, OPPORTUNITY_QUERIES, _internals } = require('../services/seo/local-opportunity-prospector');
 
 // Inject a dfs whose serpOrganic returns canned items keyed by the keyword, so we
 // can assert per-query routing + exclusion without any network.
@@ -94,5 +94,30 @@ describe('local-opportunity-prospector', () => {
   test('query catalog covers every requested opportunity category', () => {
     const types = new Set(OPPORTUNITY_QUERIES.map((q) => q.type));
     expect(types).toEqual(new Set(['sponsorship', 'event', 'chamber', 'community', 'podcast']));
+  });
+
+  test('excludeOwned drops domains we already have an active link from', () => {
+    const candidates = [
+      { domain: 'veniceyouthbaseball.org' },
+      { domain: 'mysuncoast.com' },   // already an active backlink
+      { domain: 'wavespestcontrol.com' }, // ourselves
+    ];
+    const owned = new Set(['mysuncoast.com', 'wavespestcontrol.com']);
+    expect(excludeOwned(candidates, owned).map((c) => c.domain)).toEqual(['veniceyouthbaseball.org']);
+    // empty/absent owned set is a no-op
+    expect(excludeOwned(candidates, new Set())).toBe(candidates);
+    expect(excludeOwned(candidates, null)).toBe(candidates);
+  });
+
+  test('isReliablyClassified holds back heuristic-fallback rows (would mis-route to outreach)', () => {
+    // A chamber under heuristic fallback classifies as intent 'unknown' → 'resource'
+    // → outreach lane; we must NOT auto-promote that (the drafter would cold-email it).
+    expect(isReliablyClassified({ classification: { reason: 'heuristic' } })).toBe(false);
+    // An LLM-classified row (reason carries the model's text) is trustworthy.
+    expect(isReliablyClassified({ classification: { reason: 'local chamber member directory' } })).toBe(true);
+    expect(isReliablyClassified({ classification: { reason: 'llm' } })).toBe(true);
+    // Only an explicit 'heuristic' reason holds a row back; a real scoreCandidates
+    // result always carries a classification, so absence is theoretical → not held.
+    expect(isReliablyClassified({})).toBe(true);
   });
 });

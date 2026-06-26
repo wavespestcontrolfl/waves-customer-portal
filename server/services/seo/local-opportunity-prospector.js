@@ -168,5 +168,32 @@ async function discoverLocalOpportunities({
     .sort((a, b) => (b.appearances - a.appearances) || (a.bestPosition - b.bestPosition));
 }
 
-module.exports = { discoverLocalOpportunities, OPPORTUNITY_QUERIES, MARKETS };
+/**
+ * excludeOwned — drop candidates we already have a LIVE link from (or that are us).
+ * The deep harvest filters active seo_backlinks before promotion so an already-won
+ * partner isn't re-pitched; this proactive path must do the same, since a domain we
+ * already link-partner with may have no row on the prospect board yet.
+ * `ownedDomains` is a Set of already-normalized host strings (active source_domains
+ * + our own apex).
+ */
+function excludeOwned(candidates, ownedDomains) {
+  if (!ownedDomains || !ownedDomains.size) return candidates;
+  return candidates.filter((c) => !ownedDomains.has(c.domain));
+}
+
+/**
+ * isReliablyClassified — true only when the scorer used the LLM for this prospect.
+ * The heuristic fallback (no ANTHROPIC_API_KEY or a transient classifier error)
+ * can't reliably tell an outreach target from a signup/citation one — e.g. a chamber
+ * member directory falls through to intent 'unknown' → coerced to 'resource' →
+ * OUTREACH lane, so the drafter would cold-email a membership directory. A
+ * heuristic-classified row is therefore held back from promotion (re-run once the
+ * classifier is healthy), never silently routed into an auto-acting lane.
+ * `scored` is a prospect-scorer.scoreCandidates result ({ classification, ... }).
+ */
+function isReliablyClassified(scored) {
+  return scored?.classification?.reason !== 'heuristic';
+}
+
+module.exports = { discoverLocalOpportunities, excludeOwned, isReliablyClassified, OPPORTUNITY_QUERIES, MARKETS };
 module.exports._internals = { isExcludedHost, PLATFORM_HOSTS, OWN_HOSTS };

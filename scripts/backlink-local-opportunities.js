@@ -36,6 +36,14 @@ const scorer = require('../server/services/seo/prospect-scorer');
 const prospector = require('../server/services/seo/local-opportunity-prospector');
 
 const HOME = 'https://wavespestcontrol.com/';
+const OWN_DOMAIN = 'wavespestcontrol.com';
+
+function normDomain(v) {
+  const raw = String(v || '').trim().toLowerCase();
+  if (!raw) return null;
+  try { return new URL(raw.includes('://') ? raw : `https://${raw}`).hostname.replace(/^www\./, ''); }
+  catch { return raw.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '') || null; }
+}
 
 function parseArgs(argv) {
   const a = { dryRun: false, limit: null, perQuery: 10, promoteMin: 35 };
@@ -62,6 +70,14 @@ const todayTag = () => etDateString().replace(/-/g, ''); // America/New_York, no
 
 async function run(db, args) {
   if (!dataforseo.configured) throw new Error('DATAFORSEO_LOGIN/PASSWORD not set');
+  // Lane routing (outreach vs signup/citation) depends entirely on a reliable LLM
+  // classification; without ANTHROPIC_API_KEY the scorer silently falls back to the
+  // heuristic, which mis-routes a chamber member directory into the outreach lane
+  // (the drafter would cold-email it). Fail a LIVE run closed; --dry-run may still
+  // preview heuristically since it writes nothing.
+  if (!args.dryRun && !process.env.ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY required for a live run (lane routing needs reliable LLM classification); re-run with --dry-run to preview without writing');
+  }
 
   // 1. discover (read-only SERP)
   console.log(`\n[local-opp] querying ${prospector.MARKETS.map((m) => m.label).join(', ')} × ${prospector.OPPORTUNITY_QUERIES.length} opportunity queries (perQuery=${args.perQuery})…`);
@@ -69,8 +85,20 @@ async function run(db, args) {
   const byType = {};
   candidates.forEach((c) => { byType[c.opportunity_type] = (byType[c.opportunity_type] || 0) + 1; });
   console.log(`[local-opp] ${candidates.length} unique candidate domains (by primary type: ${JSON.stringify(byType)})`);
+
+  // Exclude domains we ALREADY have a live link from (mirrors backlink-deep-harvest):
+  // an already-won partner may have no board row yet, and without this it'd be
+  // inserted as a fresh prospect and re-pitched by the worker. Active-only matches
+  // BacklinkMonitor scope (a lost/disavowed link stays eligible to re-prospect).
+  const ours = new Set((await db('seo_backlinks').where({ status: 'active' }).select('source_domain'))
+    .map((r) => normDomain(r.source_domain)).filter(Boolean));
+  ours.add(OWN_DOMAIN);
+  const preOwned = candidates.length;
+  candidates = prospector.excludeOwned(candidates, ours);
+  if (preOwned !== candidates.length) console.log(`[local-opp] excluded ${preOwned - candidates.length} domain(s) we already have an active backlink from`);
+
   if (args.limit) { candidates = candidates.slice(0, args.limit); console.log(`[local-opp] limited to ${candidates.length} (most cross-market first)`); }
-  if (!candidates.length) { console.log('[local-opp] nothing discovered — done.'); return; }
+  if (!candidates.length) { console.log('[local-opp] nothing to score — done.'); return; }
 
   // 2. score (LLM classify + contact-find + composite + lane gate). domain_rating is
   // left null (we don't spend a DR lookup here — it's only a 10% tiebreaker and these
@@ -98,14 +126,22 @@ async function run(db, args) {
   console.log(`\n[local-opp] scored ${scored.length}; ${promotable.length} promotable (score >= ${args.promoteMin}) by lane: ${JSON.stringify(laneCounts)}`);
   console.log('[local-opp] top promotable sample:');
   promotable.slice(0, 15).forEach(({ s, cand }) => console.log(
-    `   ${String(s.score).padStart(5)}  T${s.tier}  ${s.gate.lane.padEnd(8)} ${s.intent_class.padEnd(10)} ${cand.domain.padEnd(34)} [${cand.opportunity_type}]  contact=${s.contact?.contact_email ? 'email' : s.contact?.contact_url ? 'form/url' : 'none'}`));
+    `   ${String(s.score).padStart(5)}  T${s.tier}  ${s.gate.lane.padEnd(8)} ${s.intent_class.padEnd(10)} ${cand.domain.padEnd(34)} [${cand.opportunity_type}]  contact=${s.contact?.contact_email ? 'email' : s.contact?.contact_url ? 'form/url' : 'none'}${prospector.isReliablyClassified(s) ? '' : '  ⚠ heuristic (held)'}`));
 
   if (args.dryRun) { console.log('\n[local-opp] DRY-RUN — no writes.'); return; }
+
+  // Only persist LLM-classified rows. A heuristic-classified row (transient classifier
+  // failure on a live run — the no-key case already aborted above) can't be trusted to
+  // route outreach vs signup, so hold it back rather than risk cold-emailing a
+  // directory; it can be re-run once the classifier is healthy.
+  const writable = promotable.filter(({ s }) => prospector.isReliablyClassified(s));
+  const heldBack = promotable.length - writable.length;
+  if (heldBack) console.log(`[local-opp] holding back ${heldBack} promotable row(s) scored by heuristic fallback (unreliable lane routing — re-run with a healthy classifier)`);
 
   // 3. promote survivors onto the board (dedupe on target_domain+target_page; a domain
   // already on the board from the harvest is skipped, no duplicate).
   let promoted = 0, dupes = 0;
-  for (const { s, cand } of promotable) {
+  for (const { s, cand } of writable) {
     const dup = await db('seo_link_prospects').where({ target_domain: cand.domain, target_page: HOME }).first();
     if (dup) { dupes++; continue; }
     await db('seo_link_prospects').insert({
