@@ -384,17 +384,21 @@ router.get('/', dashboardCache, async (req, res, next) => {
 
 // GET /api/admin/dashboard/core-kpis?period=today|wtd|mtd|ytd
 // ServiceTitan-style operational KPIs: completion, CSAT, callback, RPJ, efficiency, retention, AR days, lead conv
-async function computeCoreKpis(period = 'mtd') {
+async function computeCoreKpis(period = 'mtd', range = null) {
     const now = new Date();
     const todayStr = etDateString(now);
 
     // Shared period resolver (periodStartDate) — same windows the attribution
-    // panels use; every window ends today.
-    const start = periodStartDate(period);
+    // panels use. A custom range overrides both bounds; otherwise the window ends
+    // today. `end` is the window upper bound for every windowed metric below;
+    // point-in-time snapshots (AR days, autopay, retention "live now") stay as-of-now,
+    // exactly as they do for the named periods.
+    const start = (range && range.from) || periodStartDate(period);
+    const end = (range && range.to) || todayStr;
 
     // Service completion rate — scheduled_services in window
     const svcAgg = await db('scheduled_services')
-      .where('scheduled_date', '>=', start).where('scheduled_date', '<=', todayStr)
+      .where('scheduled_date', '>=', start).where('scheduled_date', '<=', end)
       .select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
@@ -413,7 +417,7 @@ async function computeCoreKpis(period = 'mtd') {
 
     // Callback rate — service_records.is_callback in window
     const cbAgg = await db('service_records')
-      .where('service_date', '>=', start).where('service_date', '<=', todayStr)
+      .where('service_date', '>=', start).where('service_date', '<=', end)
       .select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE is_callback = true) as callbacks")
@@ -429,7 +433,7 @@ async function computeCoreKpis(period = 'mtd') {
     let csatRow = null;
     try {
       csatRow = await db('review_requests')
-        .where('submitted_at', '>=', start)
+        .modify((qb) => applyETTimestampWindow(qb, 'submitted_at', start, end))
         .where({ status: 'submitted' })
         .whereNotNull('score')
         .select(
@@ -451,7 +455,7 @@ async function computeCoreKpis(period = 'mtd') {
     // Both per-job average AND revenue-weighted gross margin so a $50 callback
     // at 100% can't visually offset a $5,000 job at 30%.
     const srFin = await db('service_records')
-      .where('service_date', '>=', start).where('service_date', '<=', todayStr)
+      .where('service_date', '>=', start).where('service_date', '<=', end)
       .whereNotNull('revenue')
       .select(
         db.raw("SUM(revenue) as rev_total"),
@@ -506,7 +510,7 @@ async function computeCoreKpis(period = 'mtd') {
           db('leads').whereNotIn('status', NON_ENGAGED_LEAD_STATUSES),
           'first_contact_at',
           start,
-          todayStr,
+          end,
         )
       ).select(
           db.raw("COUNT(*) as total"),
@@ -602,7 +606,7 @@ async function computeCoreKpis(period = 'mtd') {
             )
         )`)
         .whereRaw(`${issueDateET} >= ?`, [start])
-        .whereRaw(`${issueDateET} <= ?`, [todayStr])
+        .whereRaw(`${issueDateET} <= ?`, [end])
         // Collected keys on status='paid' (cash), NOT paid_at IS NOT NULL:
         // prepaid credit closures stamp paid_at but stay status='prepaid'
         // (already excluded above), and a status='paid' invoice with null paid_at
@@ -759,7 +763,7 @@ async function computeCoreKpis(period = 'mtd') {
     if (retentionOk) try {
       const newRow = await db('customers')
         .where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
-        .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [start]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [todayStr])
+        .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [start]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [end])
         .select(db.raw('COUNT(*) as c'), db.raw('COALESCE(SUM(monthly_rate), 0) as mrr')).first();
       const newCount = parseInt(newRow?.c || 0);
       const newMRR = parseFloat(newRow?.mrr || 0);
@@ -775,7 +779,7 @@ async function computeCoreKpis(period = 'mtd') {
     let leaderboard = [];
     try {
       leaderboard = await db('service_records')
-        .where('service_date', '>=', start).where('service_date', '<=', todayStr)
+        .where('service_date', '>=', start).where('service_date', '<=', end)
         .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
         .groupBy('technicians.id', 'technicians.name')
         .select(
@@ -822,7 +826,7 @@ async function computeCoreKpis(period = 'mtd') {
         .whereNotNull('waveguard_tier')
         .whereNotIn('waveguard_tier', ['none', 'None', 'One-Time'])
         .where('member_since', '>=', start)
-        .where('member_since', '<=', todayStr)
+        .where('member_since', '<=', end)
         .count('* as n').first();
       membershipsSold = parseInt(m?.n || 0, 10);
     } catch (err) { logger.error(`[admin-dashboard] memberships query failed: ${err.message}`); }
@@ -833,7 +837,7 @@ async function computeCoreKpis(period = 'mtd') {
     let inboundCalls = 0, callToBooking = null;
     try {
       const cc = await db('call_log').where('direction', 'inbound')
-        .modify((qb) => applyETTimestampWindow(qb, 'created_at', start, todayStr))
+        .modify((qb) => applyETTimestampWindow(qb, 'created_at', start, end))
         .count('* as n').first();
       inboundCalls = parseInt(cc?.n || 0, 10);
       // null (not 0%) when the lead-metrics query failed — booked is a stale 0
@@ -845,8 +849,8 @@ async function computeCoreKpis(period = 'mtd') {
     } catch (err) { logger.error(`[admin-dashboard] call-to-booking query failed: ${err.message}`); }
 
     return {
-      period,
-      periodLabel: periodLabel(period),
+      period: range ? 'custom' : period,
+      periodLabel: range ? `${start} – ${end}` : periodLabel(period),
       service: {
         completionRate,
         scheduled: svcDenom, // non-cancelled, so the tile's "completed/scheduled" matches the rate
@@ -899,7 +903,7 @@ async function computeCoreKpis(period = 'mtd') {
 // cron calls, so the live tiles and the recorded trend never diverge.
 router.get('/core-kpis', dashboardCache, async (req, res, next) => {
   try {
-    res.json(await computeCoreKpis(String(req.query.period || 'mtd').toLowerCase()));
+    res.json(await computeCoreKpis(String(req.query.period || 'mtd').toLowerCase(), parseCustomRange(req.query)));
   } catch (err) {
     logger.error(`[admin-dashboard] /core-kpis failed: ${err.message}`);
     next(err);
@@ -1434,7 +1438,25 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
 // Periods accepted: today | wtd | mtd | ytd. Defaults to mtd.
 // ─────────────────────────────────────────────────────────────────────
 
-function resolveAttributionWindow(period) {
+// Optional custom date range (?from=YYYY-MM-DD&to=YYYY-MM-DD) for the dashboard
+// period control. Null unless BOTH are valid ET dates; orders them and clamps to
+// today (no future windows).
+function parseCustomRange(query) {
+  const re = /^\d{4}-\d{2}-\d{2}$/;
+  let from = typeof query.from === 'string' && re.test(query.from) ? query.from : null;
+  let to = typeof query.to === 'string' && re.test(query.to) ? query.to : null;
+  if (!from || !to) return null;
+  if (from > to) { const t = from; from = to; to = t; }
+  const today = etDateString();
+  if (to > today) to = today;
+  if (from > today) from = today;
+  return { from, to };
+}
+
+function resolveAttributionWindow(period, range) {
+  if (range && range.from && range.to) {
+    return { from: range.from, to: range.to, label: `${range.from} – ${range.to}` };
+  }
   return { from: periodStartDate(period), to: etDateString(), label: periodLabel(period) };
 }
 
@@ -1445,7 +1467,7 @@ function resolveAttributionWindow(period) {
 // under "Unmapped" so a missing seed row is visible, not invisible.
 router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
   try {
-    const win = resolveAttributionWindow(req.query.period);
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     // Direct equality match — the 20260428000003 backfill normalized
     // every call_log.to_phone to E.164, and admin-import-sheets.js +
     // the Twilio webhooks both write E.164 going forward, so the
@@ -1501,7 +1523,7 @@ router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
 // before customer conversion). Joined to lead_sources for the human label.
 router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
   try {
-    const win = resolveAttributionWindow(req.query.period);
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     const rows = await excludeInternalLeads(
       applyETTimestampWindow(
         db('leads as l')
@@ -1618,7 +1640,7 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
 // shop or has the web caught up?". Reads leads.first_contact_channel.
 router.get('/channel-mix', dashboardCache, async (req, res, next) => {
   try {
-    const win = resolveAttributionWindow(req.query.period);
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     const rows = await excludeInternalLeads(
       applyETTimestampWindow(db('leads'), 'first_contact_at', win.from, win.to)
     ).select(

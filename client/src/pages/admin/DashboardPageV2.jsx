@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Badge,
@@ -156,6 +156,27 @@ export default function DashboardPageV2() {
     if (g.pending <= 0 && !g.failed && mountedRef.current) setLastUpdated(Date.now());
   }, []);
   const [period, setPeriod] = useState("mtd");
+  // Custom date range (drives both Core KPIs + attribution when period==='custom').
+  const [customRange, setCustomRange] = useState(null); // { from, to } | null
+  const [showRangePicker, setShowRangePicker] = useState(false);
+  const [draftFrom, setDraftFrom] = useState("");
+  const [draftTo, setDraftTo] = useState("");
+  const todayISO = useMemo(
+    () => new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }),
+    [],
+  );
+  const applyCustomRange = () => {
+    if (!draftFrom || !draftTo) return;
+    const [a, b] = draftFrom <= draftTo ? [draftFrom, draftTo] : [draftTo, draftFrom];
+    setCustomRange({ from: a, to: b });
+    setPeriod("custom");
+    setShowRangePicker(false);
+  };
+  const selectNamedPeriod = (id) => {
+    setPeriod(id);
+    setCustomRange(null);
+    setShowRangePicker(false);
+  };
   const navigate = useNavigate();
   // Drill-down: open the Leads list filtered to this attribution source, scoped
   // to the same period window the panel is showing so the list matches the count.
@@ -299,8 +320,16 @@ export default function DashboardPageV2() {
     // Blank + show the loading state only on a real period switch. A silent
     // auto/manual refresh (refreshNonce bump) keeps the current KPIs on screen,
     // swaps them in place, and won't surface an error over still-good data.
-    const periodChanged = kpisPeriodRef.current !== period;
-    kpisPeriodRef.current = period;
+    const periodKey =
+      period === "custom" && customRange
+        ? `custom:${customRange.from}:${customRange.to}`
+        : period;
+    const periodQS =
+      period === "custom" && customRange
+        ? `period=custom&from=${customRange.from}&to=${customRange.to}`
+        : `period=${period}`;
+    const periodChanged = kpisPeriodRef.current !== periodKey;
+    kpisPeriodRef.current = periodKey;
     // A refresh-driven run (periodChanged=false) is a participant in the
     // freshness gate for this generation; a period switch is not.
     const gateGen = refreshNonce;
@@ -310,7 +339,7 @@ export default function DashboardPageV2() {
       setKpisError(null);
       setKpisLoading(true);
     }
-    adminFetch(`/admin/dashboard/core-kpis?period=${period}`, {
+    adminFetch(`/admin/dashboard/core-kpis?${periodQS}`, {
       signal: ctrl.signal,
     })
       .then((d) => {
@@ -329,12 +358,20 @@ export default function DashboardPageV2() {
         if (!periodChanged) settleGate(gateGen, ok);
       });
     return () => ctrl.abort();
-  }, [period, refreshNonce, settleGate]);
+  }, [period, customRange, refreshNonce, settleGate]);
 
   useEffect(() => {
     const ctrl = new AbortController();
-    const periodChanged = attribPeriodRef.current !== period;
-    attribPeriodRef.current = period;
+    const periodKey =
+      period === "custom" && customRange
+        ? `custom:${customRange.from}:${customRange.to}`
+        : period;
+    const periodQS =
+      period === "custom" && customRange
+        ? `period=custom&from=${customRange.from}&to=${customRange.to}`
+        : `period=${period}`;
+    const periodChanged = attribPeriodRef.current !== periodKey;
+    attribPeriodRef.current = periodKey;
     const gateGen = refreshNonce;
     let ok = true;
     if (periodChanged) {
@@ -346,13 +383,13 @@ export default function DashboardPageV2() {
     }
 
     Promise.all([
-      adminFetch(`/admin/dashboard/calls-by-source?period=${period}`, {
+      adminFetch(`/admin/dashboard/calls-by-source?${periodQS}`, {
         signal: ctrl.signal,
       }),
-      adminFetch(`/admin/dashboard/leads-by-source?period=${period}`, {
+      adminFetch(`/admin/dashboard/leads-by-source?${periodQS}`, {
         signal: ctrl.signal,
       }),
-      adminFetch(`/admin/dashboard/channel-mix?period=${period}`, {
+      adminFetch(`/admin/dashboard/channel-mix?${periodQS}`, {
         signal: ctrl.signal,
       }),
     ])
@@ -374,7 +411,7 @@ export default function DashboardPageV2() {
         if (!periodChanged) settleGate(gateGen, ok);
       });
     return () => ctrl.abort();
-  }, [period, refreshNonce, settleGate]);
+  }, [period, customRange, refreshNonce, settleGate]);
 
   if (loading) {
     return (
@@ -688,23 +725,60 @@ export default function DashboardPageV2() {
               {kpis?.periodLabel || "Month to Date"}
             </div>{" "}
           </div>{" "}
-          <div className="max-w-full overflow-x-auto">
-            <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
-              {PERIODS.map((p) => (
+          <div className="relative flex items-center gap-2">
+            <div className="max-w-full overflow-x-auto">
+              <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
+                {PERIODS.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => selectNamedPeriod(p.id)}
+                    className={cn(
+                      "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0",
+                      period === p.id
+                        ? "bg-zinc-900 text-white"
+                        : "bg-white text-ink-secondary hover:bg-zinc-50",
+                    )}
+                  >
+                    {p.label}
+                  </button>
+                ))}
                 <button
-                  key={p.id}
-                  onClick={() => setPeriod(p.id)}
+                  onClick={() => {
+                    setDraftFrom(customRange?.from || "");
+                    setDraftTo(customRange?.to || "");
+                    setShowRangePicker((v) => !v);
+                  }}
                   className={cn(
-                    "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0",
-                    period === p.id
+                    "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0 border-l border-hairline border-zinc-200",
+                    period === "custom"
                       ? "bg-zinc-900 text-white"
                       : "bg-white text-ink-secondary hover:bg-zinc-50",
                   )}
+                  title="Custom date range"
                 >
-                  {p.label}
+                  {period === "custom" && customRange ? `${customRange.from} – ${customRange.to}` : "Custom"}
                 </button>
-              ))}
+              </div>
             </div>
+            {showRangePicker && (
+              <div className="absolute right-0 top-full mt-1 z-20 bg-white border-hairline border-zinc-200 rounded-sm shadow-lg p-3 flex flex-col gap-2">
+                <label className="text-11 text-ink-tertiary flex items-center justify-between gap-3">
+                  From
+                  <input type="date" max={todayISO} value={draftFrom} onChange={(e) => setDraftFrom(e.target.value)}
+                    className="text-12 border-hairline border-zinc-300 rounded-sm px-2 py-1 u-focus-ring" />
+                </label>
+                <label className="text-11 text-ink-tertiary flex items-center justify-between gap-3">
+                  To
+                  <input type="date" max={todayISO} value={draftTo} onChange={(e) => setDraftTo(e.target.value)}
+                    className="text-12 border-hairline border-zinc-300 rounded-sm px-2 py-1 u-focus-ring" />
+                </label>
+                <div className="flex justify-end gap-2 mt-1">
+                  <button onClick={() => setShowRangePicker(false)} className="text-11 text-ink-tertiary hover:text-ink-secondary u-focus-ring">Cancel</button>
+                  <button onClick={applyCustomRange} disabled={!draftFrom || !draftTo}
+                    className="text-11 font-medium px-3 py-1 rounded-sm bg-zinc-900 text-white disabled:opacity-40 u-focus-ring">Apply</button>
+                </div>
+              </div>
+            )}
           </div>{" "}
         </CardHeader>{" "}
         <CardBody>
