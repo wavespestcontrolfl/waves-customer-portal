@@ -168,11 +168,14 @@ const SNAP_STATUS = { low: 'low', high: 'high', balanced: 'balanced', unknown: '
 // reading; otherwise fall back to the live irrigation-advice water context.
 function mapWater(waterContext, waterSnapshot = null) {
   const grassLabel = 'lawn';
-  // Only prefer the area snapshot when its inputs are actually known. status can read
-  // low/high from irrigation-only totals while rain is unsynced (interpretation =
-  // 'rain_unknown'); in that case fall back to the live irrigation-advice context
-  // rather than show misleading water totals.
-  if (waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
+  // Property-level rainfall (Open-Meteo at the client's exact lat/lng, behind
+  // waterContext.rainfallInches7d) is authoritative — it's more precise than the
+  // regional area centroid and is the same source the 7-day chart now uses, so the
+  // summary and chart always agree. Only fall back to the area snapshot when we have
+  // no property rainfall but the area does (and its inputs are actually known —
+  // status can read low/high from irrigation-only totals while rain is unsynced).
+  const clientRainKnown = waterContext && num(waterContext.rainfallInches7d) != null;
+  if (!clientRainKnown && waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown') {
     const rain = waterSnapshot.adjusted_rain_7day_inches != null ? waterSnapshot.adjusted_rain_7day_inches : waterSnapshot.rain_7day_inches;
     return {
@@ -378,12 +381,18 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const advice = lawnAssessment.waterContext?.irrigationAdvice || {};
 
   const water = mapWater(lawnAssessment.waterContext, waterSnapshot);
-  // Unify the water status the diagnosis + insights reason about: prefer the
-  // area snapshot (high/low/balanced) mapped to the advice vocabulary, else the
-  // live irrigation-advice status.
-  // Same guard as mapWater: a rain-unknown snapshot (irrigation-only) must not drive the
-  // water diagnosis/overwatering signal either — fall back to the live irrigation advice.
-  const usingSnapshot = !!(waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
+  // Unify the water status the diagnosis + insights reason about with the water
+  // card mapWater just produced. Priority must match mapWater EXACTLY or the card
+  // and the Water/Coverage diagnosis can contradict each other:
+  //   1. property rainfall known → live irrigation-advice status (property source);
+  //   2. else a usable area snapshot → its high/low/balanced mapped to advice vocab;
+  //   3. else the live irrigation-advice status.
+  // clientRainKnown mirrors mapWater's own gate: when the property's Open-Meteo
+  // rainfall is known mapWater ignores the area snapshot, so the diagnosis/insights/
+  // overwatering signal must ignore it too. (A rain-unknown snapshot — irrigation-only
+  // — is also excluded, same as mapWater.)
+  const clientRainKnown = num(lawnAssessment.waterContext?.rainfallInches7d) != null;
+  const usingSnapshot = !clientRainKnown && !!(waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown');
   const SNAP_TO_ADVICE = { high: 'surplus', low: 'deficit', balanced: 'balanced' };
   const effectiveWaterStatus = usingSnapshot ? SNAP_TO_ADVICE[waterSnapshot.status] : (advice.status || null);

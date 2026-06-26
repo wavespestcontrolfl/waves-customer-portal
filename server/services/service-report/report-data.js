@@ -256,7 +256,7 @@ function monthFromServiceDate(serviceDate) {
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null } = {}) {
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null } = {}) {
   const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
   const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
   const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
@@ -334,6 +334,11 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     rainfallSource: rainfallInches7d == null && rainfallInchesToday != null
       ? 'fawn_daily_observation'
       : (rainfallInches7d != null ? 'fawn_7_day_observation' : null),
+    // Per-day rainfall over the trailing 7 days at the client's lat/lng (same
+    // Open-Meteo source as rainfallInches7d), raw as [{ date, inches }]. The
+    // report's 7-day chart renders from this so it matches the weekly total and
+    // is property-specific. Null when no complete window is available.
+    dailyRain7d: Array.isArray(completionDailyRain) ? completionDailyRain : null,
     irrigationAdvice,
   };
 }
@@ -1799,6 +1804,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
   // 'rain_unknown'; ET₀ null → grass×season fallback target.
   let completionRainfall7dInches = null;
   let completionEt0Inches = null;
+  let completionDailyRain = null;
   try {
     const weekWeather = await fetchServiceWeekWeather({
       latitude: service.customer_latitude ?? service.latitude ?? service.lat,
@@ -1807,6 +1813,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     });
     completionRainfall7dInches = weekWeather.rainInches;
     completionEt0Inches = weekWeather.et0Inches;
+    completionDailyRain = weekWeather.dailyRain;
   } catch (e) { /* non-blocking */ }
   const waterContext = buildLawnWaterContext({
     assessment,
@@ -1820,6 +1827,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     ),
     completionRainfall7dInches,
     completionEt0Inches,
+    completionDailyRain,
   });
 
   return {
@@ -2343,9 +2351,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       // completion); compute + persist on the fly if absent so a permanent report
       // token self-heals. Also pull the area's 7-day rainfall for the rain chart.
       let waterSnapshot = null;
-      let areaRain7d = null;
       try {
-        const { computeLawnWaterIntakeSnapshot, getAreaDailyRainfall } = require('../lawn-water-area');
+        const { computeLawnWaterIntakeSnapshot } = require('../lawn-water-area');
         const snapDate = lawnAssessment.assessmentDate || service.service_date || null;
         waterSnapshot = await knex('lawn_water_intake_snapshots').where({ service_record_id: service.id }).first().catch(() => null);
         if (!waterSnapshot) {
@@ -2359,27 +2366,6 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             signals: { overwatering: !!lawnAssessment.overwateringSignal },
           }, knex).catch(() => null);
         }
-        if (waterSnapshot && waterSnapshot.area_id && snapDate) {
-          const d = new Date(snapDate);
-          const s = new Date(d); s.setDate(s.getDate() - 6);
-          const fmt = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
-          const daily = await getAreaDailyRainfall(waterSnapshot.area_id, fmt(s), fmt(d), knex).catch(() => []);
-          // Only render the 7-day chart with a COMPLETE window — a partial sync would
-          // show a misleading chart with missing/zero days (mirrors getAreaRainfall,
-          // which now returns unknown for an incomplete window).
-          const rainDays = new Set((daily || []).map((r) => (r.date instanceof Date ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10)))).size;
-          if (Array.isArray(daily) && rainDays >= 7) {
-            areaRain7d = daily.map((r) => {
-              // r.date is a DATE — anchor at noon so the ET weekday label doesn't
-              // shift a day back from a UTC-midnight instant.
-              const ymd = r.date instanceof Date ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10);
-              return {
-                d: new Date(`${ymd}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
-                in: r.rain,
-              };
-            });
-          }
-        }
       } catch { /* area calibration optional (tables may be unmigrated/unseeded) */ }
 
       reportV2 = buildLawnReportV2({
@@ -2390,7 +2376,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         customerConcern: structured.customerConcern || structured.customer_concern || '',
         waterSnapshot,
       });
-      if (reportV2 && areaRain7d && areaRain7d.length) reportV2.rain7d = areaRain7d;
+      // 7-day rainfall chart — sourced from the client's exact lat/lng (the same
+      // Open-Meteo trailing-7-day series behind waterContext.rainfallInches7d), so
+      // the chart is property-specific and always reconciles with the "rain this
+      // week" total. (Previously read from a regional area centroid, which could
+      // disagree with the property-level weekly total.)
+      const clientDailyRain = lawnAssessment.waterContext?.dailyRain7d;
+      if (reportV2 && Array.isArray(clientDailyRain) && clientDailyRain.length) {
+        reportV2.rain7d = clientDailyRain.map((r) => ({
+          // r.date is a YYYY-MM-DD string — anchor at noon ET so the weekday label
+          // doesn't shift a day from a UTC-midnight parse.
+          d: new Date(`${r.date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
+          in: r.inches,
+        }));
+      }
 
       // Next scheduled lawn visit. Honest-precision rule: a CONFIDENT date only from
       // a real upcoming scheduled_services row (same allow-list as context-aggregator);

@@ -144,3 +144,60 @@ describe('Lawn Report V2 — consistency golden fixtures', () => {
     expect(v2.beforeAfter).toBeNull();
   });
 });
+
+describe('Lawn Report V2 — property rainfall is authoritative over the area snapshot', () => {
+  // When the property's own Open-Meteo rainfall is known, mapWater returns
+  // property-level water totals and ignores the regional area snapshot. The
+  // diagnosis / insights / overwatering signal must ignore it too — otherwise the
+  // water CARD (property source) shows one thing while the Water/Coverage diagnosis
+  // (area source) says another. Regression for the usingSnapshot gate.
+  const deficitAssessment = () => baseAssessment({
+    observations: 'Turf looks dry and is showing drought stress across the lawn.',
+    aiSummary: 'Dry, under-watered turf with tan patches.',
+    overwateringSignal: false,
+    waterContext: {
+      rainfallInches7d: 0.1, irrigationInchesPerWeek: 0.3, effectiveInches7d: 0.4, targetInchesPerWeek: 1.25,
+      irrigationAdvice: { status: 'deficit', rainKnown: true, profileMissing: false, recommendedInchesPerWeek: 1.25 },
+    },
+  });
+  // Area snapshot says the OPPOSITE — wet / overwatered.
+  const WET_SNAPSHOT = {
+    status: 'high', interpretation: 'wet_condition_watch',
+    adjusted_rain_7day_inches: 3.4, rain_7day_inches: 3.4, irrigation_inches_per_week: 1.5,
+    total_water_7day_inches: 4.9, target_water_inches_per_week: 1.25, confidence: 'high',
+  };
+
+  test('a conflicting area snapshot is ignored end-to-end when property rainfall is known', () => {
+    const assessment = deficitAssessment();
+    const baseline = buildLawnReportV2({ lawnAssessment: assessment, applications: APPLICATIONS });
+    const withConflict = buildLawnReportV2({ lawnAssessment: assessment, applications: APPLICATIONS, waterSnapshot: WET_SNAPSHOT });
+
+    // Water card uses the property irrigation-advice path, not the snapshot.
+    expect(withConflict.water.source).toBe('irrigation_advice');
+    // The snapshot must not change the diagnosis-layer outputs at all — same root
+    // cause and same Water/Coverage category as with no snapshot.
+    expect(withConflict.snapshot.rootCause).toEqual(baseline.snapshot.rootCause);
+    const waterCat = (r) => r.diagnosis.find((c) => c.key === 'water_moisture_stress');
+    expect(waterCat(withConflict)).toEqual(waterCat(baseline));
+    // And nothing in the report claims a water surplus / overwatering.
+    const txt = collectStrings(withConflict).join(' ').toLowerCase();
+    expect(txt).not.toMatch(/too much water|overwater/);
+  });
+
+  test('with NO property rainfall, a usable area snapshot still drives the diagnosis', () => {
+    // Strip property rainfall so clientRainKnown is false → snapshot is authoritative.
+    const assessment = baseAssessment({
+      overwateringSignal: false,
+      observations: 'Damp, spongy turf with a few mushrooms.',
+      aiSummary: 'Soil reads wet; some fungal pressure.',
+      waterContext: {
+        rainfallInches7d: null, irrigationInchesPerWeek: 1.4, effectiveInches7d: null, targetInchesPerWeek: 1.25,
+        irrigationAdvice: { status: null, rainKnown: false, profileMissing: false, recommendedInchesPerWeek: 1.25 },
+      },
+    });
+    const withSnap = buildLawnReportV2({ lawnAssessment: assessment, applications: APPLICATIONS, waterSnapshot: WET_SNAPSHOT });
+    const noSnap = buildLawnReportV2({ lawnAssessment: assessment, applications: APPLICATIONS });
+    // The snapshot is the only water signal here, so it must change the report.
+    expect(withSnap.snapshot.rootCause).not.toEqual(noSnap.snapshot.rootCause);
+  });
+});
