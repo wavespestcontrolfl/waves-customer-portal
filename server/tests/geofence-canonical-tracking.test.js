@@ -65,6 +65,11 @@ describe('geofence canonical tracking transitions', () => {
     // Tech is driving past this customer mid-job — flip the tracker but
     // suppress the premature "has arrived" text.
     expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('job-1', { suppressArrivalSms: true });
+    // ...and log it under an action isDuplicateEnter() ignores, so a real
+    // arrival within the cooldown isn't dropped as ignored_duplicate.
+    expect(matcher.logEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ action_taken: 'arrival_suppressed_other_job' }),
+    );
   });
 
   test('arrival does NOT suppress the SMS when the active timer is for THIS job', async () => {
@@ -83,6 +88,10 @@ describe('geofence canonical tracking transitions', () => {
     // Same-job repeat ENTER (e.g. after a manual start whose first send
     // failed) — the tech really is here, so let the arrival SMS fire/retry.
     expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('job-1', { suppressArrivalSms: false });
+    // Same-job keeps the standard dedup action (no pending suppressed send).
+    expect(matcher.logEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ action_taken: 'timer_already_running' }),
+    );
   });
 
   test('departure auto-complete routes through track_state without legacy service_tracking sync', async () => {

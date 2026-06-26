@@ -161,6 +161,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   // If tech already has a running job timer, don't start a second one.
   const existingTimer = await matcher.getActiveJobTimer(tech.id);
   if (existingTimer) {
+    let actionTaken = 'timer_already_running';
     if (job) {
       // Suppress the arrival SMS only when the running timer belongs to a
       // DIFFERENT job — i.e. the tech is driving past this customer mid-job and
@@ -170,6 +171,14 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       // guard), let the SMS fire/retry — the tech really is on this property.
       const differentJob = String(existingTimer.job_id) !== String(job.id);
       await markOnPropertyFromGeofence(job.id, eventTime, { suppressArrivalSms: differentJob });
+      // A suppressed drive-past leaves the arrival SMS pending (guard NULL),
+      // relying on a later real arrival to send it. Don't let it consume the
+      // duplicate-ENTER cooldown: isDuplicateEnter() counts timer_already_running
+      // as a duplicate for ~15 min, so if the tech actually reaches this
+      // customer within that window the real arrival would be dropped as
+      // ignored_duplicate and the text would never fire. Log it under an action
+      // isDuplicateEnter() ignores so the real arrival is still processed.
+      if (differentJob) actionTaken = 'arrival_suppressed_other_job';
     }
     await matcher.logEvent({
       bouncie_imei: imei,
@@ -179,7 +188,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       longitude: lng,
       matched_customer_id: customer.id,
       matched_job_id: job ? job.id : null,
-      action_taken: 'timer_already_running',
+      action_taken: actionTaken,
       time_entry_id: existingTimer.id,
       raw_payload: payload,
       event_timestamp: eventTime,
