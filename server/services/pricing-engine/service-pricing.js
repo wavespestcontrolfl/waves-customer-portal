@@ -6576,7 +6576,9 @@ function calculateFoamPrice(config = {}) {
   const totalCost = materialCost + laborCost + setupLabor;
   const preDiscountPrice = _applyMargin(totalCost, 0.62);
   const price = preDiscountPrice * (1 - BUNDLE_DISCOUNT);
-  const MINIMUM_PRICE = 125;
+  // Owner directive 2026-06-25: foam minimum removed for all foam (mirrors foamDrill.floor 0);
+  // true tiered cost/margin flows through. Clamp kept only to prevent a negative price.
+  const MINIMUM_PRICE = 0;
   return {
     service: 'termite_foam',
     name: 'Termidor Foam Spot Treatment',
