@@ -121,6 +121,12 @@ describe('priceCommercialPestPilot (unit)', () => {
     expect(priceCommercialPestPilot({}, {})).toBeNull();
     expect(priceCommercialPestPilot({ buildingSqFt: 0 }, {})).toBeNull();
   });
+
+  test('falls back to the profile unitCount when no explicit units given', () => {
+    const result = priceCommercialPestPilot({ buildingSqFt: 5000, unitCount: 10 }, {});
+    expect(result.totalUnits).toBe(10);
+    expect(result.suggestedQuarterlyPerVisit).toBe(215); // 165 + 5×10
+  });
 });
 
 describe('priceCommercialPestPilot through generateEstimate', () => {
@@ -168,6 +174,19 @@ describe('priceCommercialPestPilot through generateEstimate', () => {
     expect(pest.suggestedAnnual).toBe(660);
   });
 
+  test('a zero earlier sqft alias does not mask a positive later one', () => {
+    // The admin adapter returns homeSqFt: 0 when the form lacks it; the gross-area
+    // pick must skip it and use the positive livingAreaSqFt.
+    const estimate = generateEstimate({
+      propertyType: 'commercial', isCommercial: true,
+      homeSqFt: 0, livingAreaSqFt: 5000, stories: 1, lotSqFt: 20000, features: {},
+      services: { pest: { frequency: 'quarterly', commercialPricingMode: 'small_commercial_pilot' } },
+    });
+    const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(pest.commercialPricingMode).toBe('small_commercial_pilot');
+    expect(pest.suggestedAnnual).toBe(660);
+  });
+
   test('the suggested price is surfaced in the line reason (operator-visible)', () => {
     const estimate = generateEstimate(commercialInput());
     const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
@@ -186,12 +205,16 @@ describe('proposal synthesizes from the SAVED legacy spec-item shape', () => {
     });
 
     expect(proposal.taxRate).toBeCloseTo(0.07, 4);
+    // Emitted at the pilot's real cadence (quarterly $165/visit), not flattened
+    // to monthly — so proposal-win invoices the correct first service period.
     expect(proposal.buildings[0].lineItems).toContainEqual(expect.objectContaining({
       description: 'Commercial Pest Control',
       taxable: true,
+      frequency: 'quarterly',
+      unitPrice: 165,
     }));
     const totals = computeProposalTotals(proposal);
-    expect(totals.totalTax).toBeCloseTo(46.2, 2); // 660 × 7%
+    expect(totals.totalTax).toBeCloseTo(46.2, 2); // 660 annual × 7%
   });
 });
 

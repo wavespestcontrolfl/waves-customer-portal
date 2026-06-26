@@ -3133,7 +3133,9 @@ export default function EstimateToolViewV2({
         onetimeLawnType: form.otLawnType || "FERT",
         commercialPricingMode: form.commercialPricingMode || "manual_quote",
         commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
-        units: formIsCommercial ? parseInt(form.units, 10) || 0 : 0,
+        // Omit when blank so the server can fall back to the lookup unit count;
+        // sending 0 would override that with "no units".
+        units: formIsCommercial && parseInt(form.units, 10) > 0 ? parseInt(form.units, 10) : undefined,
         fleaOfferKey: form.fleaOfferKey || "flea_elimination_two_visit",
         fleaComplexity: form.fleaComplexity || "light",
         fleaExteriorSourceSuspected: !!form.fleaExteriorSourceSuspected,

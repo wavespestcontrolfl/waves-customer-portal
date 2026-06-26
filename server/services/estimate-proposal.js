@@ -141,11 +141,29 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
   let hasTaxableCommercialLine = false;
 
   for (const line of engineLines) {
-    // Engine recurring lines carry `.monthly`/`.annual`; the small-commercial
-    // pilot carries an advisory `suggestedMonthly`/`suggestedAnnual` (it is a
-    // manual-review line, so its committed `monthly`/`annual` are null);
-    // persisted bundles may use `monthlyPrice`/`monthly_price`. Accept all so a
-    // priced/suggested commercial line is not silently dropped.
+    const taxable = line.taxable === true;
+    const description = line.displayName || line.name || line.label || line.service;
+
+    // Small-commercial pilot rows carry a per-visit suggestion at a real cadence
+    // (`suggestedPerApp` at `frequency`). Emit the row AT THAT CADENCE — not
+    // flattened to monthly — so the annualized total is unchanged but
+    // proposal-win invoices the correct first service period (a quarterly
+    // pilot's first invoice is one quarterly visit, not one month).
+    const pilotPerVisit = num(line.suggestedPerApp);
+    if (pilotPerVisit > 0) {
+      if (taxable) hasTaxableCommercialLine = true;
+      lineItems.push(normalizeLineItem({
+        description: description || 'Recurring service',
+        unitPrice: pilotPerVisit,
+        frequency: line.frequency || 'quarterly',
+        taxable,
+      }));
+      continue;
+    }
+
+    // Engine recurring lines carry `.monthly`/`.annual`; persisted bundles may
+    // use `monthlyPrice`/`monthly_price`. Accept all so a priced/suggested
+    // commercial line is not silently dropped.
     const monthly = num(
       line.monthlyPrice ?? line.monthly_price ?? line.monthly
       ?? line.suggestedMonthly
@@ -153,8 +171,6 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
       ?? (num(line.suggestedAnnual) > 0 ? num(line.suggestedAnnual) / 12 : 0),
     );
     const oneTime = num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime);
-    const taxable = line.taxable === true;
-    const description = line.displayName || line.name || line.label || line.service;
     if (taxable && (monthly > 0 || oneTime > 0)) hasTaxableCommercialLine = true;
     if (monthly > 0) {
       lineItems.push(normalizeLineItem({

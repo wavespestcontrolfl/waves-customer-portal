@@ -1628,7 +1628,7 @@ function resolveCommercialBuildings(property = {}, options = {}) {
         sqft: options.fallbackSqFt ?? property.buildingSqFt ?? property.homeSqFt
           ?? property.livingAreaSqFt ?? property.footprintSqFt ?? property.footprint,
         stories: options.stories ?? property.stories,
-        units: options.units ?? property.units,
+        units: options.units ?? property.units ?? property.unitCount,
       }];
   return list.map((b) => {
     const { sqft, source } = resolveCommercialBuildingSqFt(b);

@@ -589,13 +589,17 @@ function generateEstimate(input) {
             // (each { sqft, stories, units }) wins; otherwise the single-building
             // fallback derives from the property profile + these top-level values.
             buildings: pestOpts.buildings || commercialPestOpts.buildings || input.commercialBuildings,
-            units: pestOpts.units ?? commercialPestOpts.units ?? input.units,
+            units: pestOpts.units ?? commercialPestOpts.units ?? input.units ?? input.unitCount,
             stories: pestOpts.stories ?? commercialPestOpts.stories ?? input.stories ?? property.stories,
             // Pass the gross building area straight from the raw input — the
             // property profile doesn't preserve every gross-area alias
-            // (e.g. livingAreaSqFt), so don't make the pilot depend on it.
-            fallbackSqFt: input.buildingSqFt ?? input.homeSqFt ?? input.livingAreaSqFt
-              ?? input.footprintSqFt ?? input.footprint,
+            // (e.g. livingAreaSqFt). Pick the first POSITIVE value, not the first
+            // non-nullish one: the admin adapter returns homeSqFt as 0 when the
+            // form lacks it, which would otherwise mask a positive livingAreaSqFt.
+            fallbackSqFt: [
+              input.buildingSqFt, input.homeSqFt, input.livingAreaSqFt,
+              input.footprintSqFt, input.footprint,
+            ].find(v => Number(v) > 0),
           })
         : null;
       if (pilotResult) {
