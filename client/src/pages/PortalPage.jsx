@@ -11152,6 +11152,8 @@ export default function PortalPage() {
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: 'none',
         padding: '12px max(16px, calc((100vw - 1440px) / 2 + 16px))',
+        // Clear the iPhone notch/status bar in standalone PWA mode (viewport-fit=cover).
+        paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         gap: 12,
         position: 'sticky', top: 0, zIndex: 100,
