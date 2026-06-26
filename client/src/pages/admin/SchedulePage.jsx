@@ -36,6 +36,7 @@ import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import PrepaymentModal from "../../components/schedule/PrepaymentModal";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
@@ -6794,6 +6795,11 @@ export function CompletionPanel({
   const [generating, setGenerating] = useState(false);
   const [success, setSuccess] = useState(false);
   const [completionResult, setCompletionResult] = useState(null);
+  // Completion-screen annual-prepay offer (flag-gated, default off): a post-
+  // completion CTA that mints the prepay invoice and either sends it alongside
+  // the report or charges the year via Tap to Pay. Off = no change to completion.
+  const [showPrepay, setShowPrepay] = useState(false);
+  const { enabled: prepayAtCompletionFlag } = useFeatureFlagReady("prepay-at-completion");
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   const [servicePhotos, setServicePhotos] = useState([]);
@@ -9428,6 +9434,15 @@ export function CompletionPanel({
                   <PestRecapCard serviceId={service.id} />
                 </div>
               )}
+              {prepayAtCompletionFlag && (
+                <button
+                  type="button"
+                  onClick={() => setShowPrepay(true)}
+                  style={{ ...secondaryPill, marginTop: 16 }}
+                >
+                  Offer annual prepay
+                </button>
+              )}
               {recapEligible && !completionResult?.followupSuggestion?.required && (
                 <button
                   type="button"
@@ -9472,6 +9487,15 @@ export function CompletionPanel({
                 </div>
               )}
             </div>
+          )}
+          {showPrepay && (
+            <PrepaymentModal
+              service={service}
+              customerId={service.customerId || service.customer_id}
+              customerName={service.customerName}
+              onClose={() => setShowPrepay(false)}
+              onSent={() => setShowPrepay(false)}
+            />
           )}
           {/* Sticky top bar — Square pattern: ← · centered title · ⋯ */}
           <div

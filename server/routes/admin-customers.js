@@ -2538,12 +2538,22 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       }).catch((err) => logger.warn(`[customers:annual-prepay-invoice] activity_log insert failed: ${err.message}`));
     });
 
+    // deliver=false mints the unpaid prepay invoice + term WITHOUT emailing/texting
+    // a pay link — the completion-screen "Tap to Pay" path charges the year in
+    // person instead. Default true (the Customer 360 "Send invoice" caller is
+    // unchanged). On a Tap-to-Pay charge the Stripe webhook still activates the
+    // term and stamps the covered visits, same as a paid link.
+    const deliver = req.body?.deliver !== false;
     let delivery = null;
-    try {
-      delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id);
-    } catch (err) {
-      delivery = { ok: false, error: err.message };
-      logger.warn(`[customers:annual-prepay-invoice] send failed for ${invoice.id}: ${err.message}`);
+    if (deliver) {
+      try {
+        delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id);
+      } catch (err) {
+        delivery = { ok: false, error: err.message };
+        logger.warn(`[customers:annual-prepay-invoice] send failed for ${invoice.id}: ${err.message}`);
+      }
+    } else {
+      delivery = { ok: true, skipped: true, reason: 'tap_to_pay' };
     }
 
     const payUrl = delivery?.payUrl || await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
