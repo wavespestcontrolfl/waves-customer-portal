@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { formatAddress } = require('../utils/address-normalizer');
 const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { buildReportV1Data } = require('../services/service-report/report-data');
@@ -1091,7 +1092,7 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   // Customer info
   doc.fontSize(10).font('Helvetica-Bold').fillColor(PDF_BODY).text('Customer:');
   doc.font('Helvetica').text(`${service.first_name} ${service.last_name}`);
-  doc.text(`${service.address_line1}, ${service.city}, ${service.state} ${service.zip}`);
+  doc.text(formatAddress({ line1: service.address_line1, city: service.city, state: service.state, zip: service.zip }));
   doc.moveDown(0.5);
 
   doc.font('Helvetica-Bold').text('Service Details:');

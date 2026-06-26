@@ -66,6 +66,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { CustomerActionBar } from "./StickyActionBar";
+import { formatAddress } from "../../utils/format-address";
 import {
   Card,
   CardBody,
@@ -3938,11 +3939,7 @@ export default function Customer360ProfileV2({
                   c.address?.zip,
                 ].filter(Boolean);
                 if (!parts.length) return null;
-                const full =
-                  `${c.address?.line1 || ""}, ${c.address?.city || ""}, ${c.address?.state || ""} ${c.address?.zip || ""}`.replace(
-                    /^,\s*|\s*,\s*$/g,
-                    "",
-                  );
+                const full = formatAddress(c.address);
                 return (
                   <a
                     href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(full)}`}
@@ -5405,7 +5402,7 @@ export default function Customer360ProfileV2({
                     />
                   ) : (
                     <a
-                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${c.address.line1}, ${c.address.city}, ${c.address.state} ${c.address.zip}`)}`}
+                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(formatAddress(c.address))}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="block p-5 bg-zinc-50 text-center text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
