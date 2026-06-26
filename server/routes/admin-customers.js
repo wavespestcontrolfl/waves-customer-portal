@@ -6,6 +6,7 @@ const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
+const { formatAddress } = require('../utils/address-normalizer');
 const { recordAuditEvent } = require('../services/audit-log');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const PhotoService = require('../services/photos');
@@ -501,7 +502,7 @@ function mapCustomerListRow(c) {
     serviceContact3Name: c.service_contact3_name,
     serviceContact3Phone: c.service_contact3_phone,
     serviceContact3Email: c.service_contact3_email,
-    address: `${c.address_line1 || ''}, ${c.city || ''}, ${c.state || ''} ${c.zip || ''}`.trim(),
+    address: formatAddress({ line1: c.address_line1, city: c.city, state: c.state, zip: c.zip }),
     tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
     memberSince: c.member_since, active: c.active,
     pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
@@ -1175,7 +1176,7 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
         profileLabel: customer.profile_label,
         attachedToExistingAccount: customer._attachedToExistingAccount,
         propertyCount: customer._propertyCount,
-        address: `${customer.address_line1 || ''}, ${customer.city || ''}, ${customer.state || ''} ${customer.zip || ''}`.trim(),
+        address: formatAddress({ line1: customer.address_line1, city: customer.city, state: customer.state, zip: customer.zip }),
         city: customer.city,
         state: customer.state,
         zip: customer.zip,

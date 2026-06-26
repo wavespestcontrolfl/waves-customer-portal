@@ -94,11 +94,35 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns, recordA
     // Marketplace add-on attaches to inbound voice webhooks.
     if (channel === 'voice') {
       const marchex = parseMarchexVerdict(addOns);
+      // Confirm the Marchex Clean Call add-on is attached + producing verdicts:
+      // if these lines never appear in the logs, the Marketplace add-on isn't
+      // installed/enabled on the voice number (or isn't returning a result), so
+      // the shadow-block above can never fire. Low volume (voice only).
+      if (marchex) {
+        logger.info(`[spam-block] Marchex verdict for voice from ${maskPhone(from)}: ${marchex.recommendation || 'n/a'} (sid=${twilioSid || 'n/a'})`);
+      }
       if (marchex && marchex.recommendation === 'BLOCK') {
         if (!isEnabled('marchexAutoBlock')) {
-          // Shadow mode — surface the verdict so accuracy can be judged from
-          // logs before the gate lets it reject real callers.
+          // Shadow mode — surface the verdict AND persist it as a
+          // 'marchex_shadow' row so accuracy can be judged from the DB (not just
+          // ephemeral logs) before the gate ever rejects a real caller. A later
+          // report cross-references these would-block numbers against
+          // leads/customers for a true false-positive rate. The call itself is
+          // still allowed through. Best-effort; a write failure never blocks.
           logger.info(`[spam-block] Marchex would block voice from ${maskPhone(from)} → ${maskPhone(to)} (shadow; sid=${twilioSid || 'n/a'}; reason=${marchex.reason || 'n/a'})`);
+          if (recordAttempt) {
+            try {
+              await db('blocked_call_attempts').insert({
+                number: from,
+                our_endpoint_id: to || null,
+                channel,
+                block_type: 'marchex_shadow',
+                twilio_sid: twilioSid || null,
+              });
+            } catch (err) {
+              logger.error(`[spam-block] Shadow audit insert failed: ${err.message}`);
+            }
+          }
           return { blocked: false };
         }
         if (recordAttempt) {

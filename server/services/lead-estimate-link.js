@@ -353,6 +353,7 @@ async function convertLeadFromEvent({
   phone = null,
   email = null,
   requireAcceptedEstimate = false,
+  enforceOriginating = false,
   database = db,
   leadAttributionService = leadAttribution,
 }) {
@@ -438,6 +439,20 @@ async function convertLeadFromEvent({
       // Tier 3 — contact fallback (never-linked, customer_id IS NULL).
       if (!candidates.length && (resolvedPhone || resolvedEmail)) {
         candidates = await findUnconvertedLeadsByContact(database, resolvedPhone, resolvedEmail);
+        // enforceOriginating (backfill safety): the live triggers fire the moment
+        // the deal closes, so a contact-matched open lead is the originating deal.
+        // A backfill runs LATER, by which point the customer may have a newer,
+        // unrelated add-on inquiry sharing their phone/email — converting that
+        // would misattribute a closed deal to the wrong lead. Gate the fuzzy match
+        // to leads first contacted on/before the customer became a customer (the
+        // same originating-timing test Tier 2 already applies).
+        if (enforceOriginating && candidates.length && resolvedCustomerId) {
+          const originating = [];
+          for (const lead of candidates) {
+            if (await isOriginatingLead(database, resolvedCustomerId, lead)) originating.push(lead);
+          }
+          candidates = originating;
+        }
         if (candidates.length) resolution = 'contact';
       }
     }

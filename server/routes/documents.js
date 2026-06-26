@@ -7,6 +7,7 @@ const { projectReportPathForProject } = require('../services/project-report-link
 const { getProjectType } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const { formatAddress } = require('../utils/address-normalizer');
 const {
   WAVES_ADDRESS_LINE,
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -198,7 +199,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   y = sectionHeader(doc, 'Customer Information', L, y);
   y = infoRow(doc, 'Name:', customerName, L + 8, y, 70, 180);
   y = infoRow(doc, 'Address:', customer.address_line1 || '', L + 8, y, 70, 180);
-  y = infoRow(doc, 'City:', `${customer.city || ''}, ${customer.state || 'FL'} ${customer.zip || ''}`, L + 8, y, 70, 180);
+  y = infoRow(doc, 'City:', formatAddress({ city: customer.city, state: customer.state || 'FL', zip: customer.zip }), L + 8, y, 70, 180);
   y = infoRow(doc, 'Phone:', customer.phone || '', L + 8, y, 70, 180);
   if (customer.email) y = infoRow(doc, 'Email:', customer.email, L + 8, y, 70, 180);
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import api from '../utils/api';
+import { formatAddress } from '../utils/format-address';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
@@ -4653,7 +4654,7 @@ function PropertyTab({ customer }) {
   const hoaSummary = prefs.hoaName || prefs.hoaCompany || 'No HOA details listed';
   const mapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
   const staticMapUrl = mapsKey && customer.address?.line1
-    ? `https://maps.googleapis.com/maps/api/staticmap?center=${encodeURIComponent(`${customer.address.line1}, ${customer.address.city}, ${customer.address.state} ${customer.address.zip}`)}&zoom=19&size=640x280&scale=2&maptype=satellite&key=${mapsKey}`
+    ? `https://maps.googleapis.com/maps/api/staticmap?center=${encodeURIComponent(formatAddress(customer.address))}&zoom=19&size=640x280&scale=2&maptype=satellite&key=${mapsKey}`
     : '';
   const saveText = saveStatus === 'saving'
     ? 'Saving changes'
@@ -11152,6 +11153,8 @@ export default function PortalPage() {
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: 'none',
         padding: '12px max(16px, calc((100vw - 1440px) / 2 + 16px))',
+        // Clear the iPhone notch/status bar in standalone PWA mode (viewport-fit=cover).
+        paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         gap: 12,
         position: 'sticky', top: 0, zIndex: 100,

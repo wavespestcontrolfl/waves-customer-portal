@@ -222,7 +222,14 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     }
 
     const [named] = await namedQuery.orderBy('updated_at', 'desc').limit(1);
-    return named && extractedNameMatchesCustomer(extracted, named) ? named : null;
+    if (named && extractedNameMatchesCustomer(extracted, named)) return named;
+    // No name match — but the AI-extracted name is frequently wrong (it can pick
+    // up the technician's name from the call audio, e.g. "Adam"). Returning null
+    // here makes the caller spawn a NEW customer even when the phone already maps
+    // to one, creating a duplicate. Fall through to the phone-only single-match
+    // below instead — this is the behavior the caller already documents
+    // ("phone-only matching is allowed only when the number maps to a single
+    // active customer") and keeps the genuine shared-phone case (2+ matches) safe.
   }
 
   const matches = await base().orderBy('updated_at', 'desc').limit(2);
@@ -2041,6 +2048,30 @@ const CallRecordingProcessor = {
           }).returning('*');
           leadId = newLead.id;
           logger.info(`[call-proc] Created new lead ${leadId} for ${extracted.first_name} ${extracted.last_name}`);
+
+          // Untracked inbound call → no lead_source matched (caller reached the
+          // main line / caller-ID didn't match a tracking number). These are the
+          // "Unattributed" call leads the dashboard surfaces — notify an admin so
+          // it can be source-tagged or followed up. Best-effort; a notify failure
+          // must never break call processing.
+          if (!leadSourceId) {
+            try {
+              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+                .filter(Boolean)
+                .join(' ');
+              await require('./notification-service').notifyAdmin(
+                'lead',
+                'Untracked call lead',
+                `New lead from a call we couldn't attribute: ${callerName || 'Unknown caller'} (${phone || 'unknown number'}). No marketing source matched — tag the source or follow up.`,
+                {
+                  link: `/admin/leads?lead=${leadId}`,
+                  metadata: { leadId, phone, callSid: call.twilio_call_sid },
+                },
+              );
+            } catch (notifyErr) {
+              logger.warn(`[call-proc] untracked-call admin notify failed: ${notifyErr.message}`);
+            }
+          }
         }
 
         // Enrich lead with AI-extracted data. For an existing lead, only fill
@@ -2901,6 +2932,7 @@ CallRecordingProcessor._test = {
   maskPhone,
   validatePhoneCallAppointmentCustomer,
   extractedNameMatchesCustomer,
+  findCustomerForCallContact,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   transcribeRecording,

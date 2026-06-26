@@ -54,6 +54,8 @@ export default function TechLayout() {
         alignItems: 'center',
         justifyContent: 'space-between',
         padding: '12px 16px',
+        // Clear the iPhone notch/status bar in standalone PWA mode (viewport-fit=cover).
+        paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
         background: DARK.card,
         borderBottom: `1px solid ${DARK.border}`,
         position: 'sticky',

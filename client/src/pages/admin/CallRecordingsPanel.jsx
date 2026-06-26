@@ -40,6 +40,7 @@
 //   classification or write recordings to disk are an attack
 //   surface — flag any path missing the signature check.
 import { useState, useEffect, useCallback } from "react";
+import { formatAddress } from "../../utils/format-address";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple/gray fold to zinc tokens. Semantic green/amber/red preserved.
@@ -972,7 +973,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
                 ["Address", extraction.address_line1],
                 [
                   "City",
-                  `${extraction.city || ""}, ${extraction.state || "FL"} ${extraction.zip || ""}`,
+                  formatAddress({ city: extraction.city, state: extraction.state || "FL", zip: extraction.zip }),
                 ],
                 [
                   "Service",

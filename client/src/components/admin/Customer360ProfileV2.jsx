@@ -66,6 +66,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { CustomerActionBar } from "./StickyActionBar";
+import { formatAddress } from "../../utils/format-address";
 import {
   Card,
   CardBody,
@@ -524,6 +525,9 @@ function RadarChart({ data }) {
       height={size}
       viewBox={`0 0 ${size} ${size}`}
       className="block mx-auto"
+      // Let axis labels (e.g. "Engagement") paint into the centered side
+      // margin instead of being clipped by the 160px SVG box.
+      style={{ overflow: "visible" }}
     >
       {gridLevels.map((lv) => (
         <polygon
@@ -3470,7 +3474,7 @@ export default function Customer360ProfileV2({
       >
         {" "}
         <div
-          className="c360-panel bg-white w-full max-w-[900px] h-screen flex flex-col"
+          className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col"
           onClick={(e) => e.stopPropagation()}
         >
           {" "}
@@ -3489,7 +3493,7 @@ export default function Customer360ProfileV2({
       >
         {" "}
         <div
-          className="c360-panel bg-white w-full max-w-[900px] h-screen flex flex-col"
+          className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col"
           onClick={(e) => e.stopPropagation()}
         >
           {" "}
@@ -3623,7 +3627,6 @@ export default function Customer360ProfileV2({
         s + parseFloat(i.amount_due || 0) - parseFloat(i.amount_paid || 0),
       0,
     );
-  const lastPayment = payments[0];
   const today = todayDateInput();
   const inactiveNextServiceStatuses = new Set([
     "cancelled",
@@ -3633,13 +3636,20 @@ export default function Customer360ProfileV2({
     "skipped",
     "no_show",
   ]);
-  const nextService = upcomingScheduled.find((s) => {
+  const isUpcomingAppt = (s) => {
     const status = String(s.status || "").toLowerCase();
     return (
       !inactiveNextServiceStatuses.has(status) &&
       dateInputValue(s.scheduled_date) >= today
     );
-  });
+  };
+  const upcomingFuture = upcomingScheduled
+    .filter(isUpcomingAppt)
+    .sort((a, b) =>
+      dateInputValue(a.scheduled_date) < dateInputValue(b.scheduled_date)
+        ? -1
+        : 1,
+    );
 
   const expiringCard = cards.find((cd) => {
     if (!cd.exp_month || !cd.exp_year) return false;
@@ -3798,7 +3808,7 @@ export default function Customer360ProfileV2({
       <div
         ref={panelRef}
         onClick={(e) => e.stopPropagation()}
-        className="c360-panel bg-white w-full max-w-[900px] h-screen flex flex-col overflow-y-auto text-zinc-900"
+        className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900"
       >
         {" "}
         <style>{`
@@ -3929,11 +3939,7 @@ export default function Customer360ProfileV2({
                   c.address?.zip,
                 ].filter(Boolean);
                 if (!parts.length) return null;
-                const full =
-                  `${c.address?.line1 || ""}, ${c.address?.city || ""}, ${c.address?.state || ""} ${c.address?.zip || ""}`.replace(
-                    /^,\s*|\s*,\s*$/g,
-                    "",
-                  );
+                const full = formatAddress(c.address);
                 return (
                   <a
                     href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(full)}`}
@@ -4040,7 +4046,14 @@ export default function Customer360ProfileV2({
           </div>
           {/* Mobile header (< 768px) — per mobile-admin-audit PR #3 item 2:
               back / menu / Text pills on top, large name, three-stat row */}
-          <div className="c360-header-mobile px-4 pt-3 pb-3">
+          <div
+            className="c360-header-mobile px-4 pt-3 pb-3"
+            // Clear the iPhone notch/translucent status bar in standalone PWA
+            // mode so the back / Text / Call pills aren't hidden under it.
+            style={{
+              paddingTop: "calc(0.75rem + env(safe-area-inset-top, 0px))",
+            }}
+          >
             {" "}
             <div className="flex items-center justify-between mb-3">
               {" "}
@@ -4065,6 +4078,7 @@ export default function Customer360ProfileV2({
                   <CallBridgeLink
                     phone={c.phone}
                     customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
+                    styledButton
                     className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
                   >
                     Call
@@ -4185,6 +4199,30 @@ export default function Customer360ProfileV2({
                   </a>
                 );
               })()}
+            {/* Contact — listed on mobile (desktop shows these in its header) */}
+            {(c.phone || c.email) && (
+              <div className="flex flex-col gap-1 mb-3 text-13">
+                {c.phone && (
+                  <CallBridgeLink
+                    phone={c.phone}
+                    customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
+                    className="u-nums text-ink-secondary hover:text-zinc-900 no-underline self-start"
+                  >
+                    {c.phone}
+                  </CallBridgeLink>
+                )}
+                {c.email && (
+                  <a
+                    href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-ink-secondary hover:text-zinc-900 no-underline truncate"
+                  >
+                    {c.email}
+                  </a>
+                )}
+              </div>
+            )}
             <div className="flex items-center gap-2 flex-wrap mb-3">
               {" "}
               <TierBadgeV2 tier={c.tier} />{" "}
@@ -4246,7 +4284,10 @@ export default function Customer360ProfileV2({
           </div>
         )}
         {/* ZONE 3 — TAB BAR */}
-        <div className="flex bg-white border-b border-hairline border-zinc-200 px-6 overflow-x-auto">
+        {/* shrink-0: this is an overflow-x scroll container, so its flex
+            auto-minimum-size is 0 — without it the column flex collapses the
+            bar to ~0px on mobile (tall content), hiding every section tab. */}
+        <div className="flex shrink-0 bg-white border-b border-hairline border-zinc-200 px-6 overflow-x-auto">
           {TABS.map((t) => (
             <button
               key={t.key}
@@ -4388,21 +4429,27 @@ export default function Customer360ProfileV2({
                 {/* Col 1: Services */}
                 <div>
                   {" "}
-                  <SectionTitle>Upcoming Service</SectionTitle>
-                  {nextService ? (
-                    <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
-                      {" "}
-                      <div className="text-13 font-medium text-zinc-900">
-                        {nextService.service_type}
-                      </div>{" "}
-                      <div className="text-12 text-ink-secondary">
-                        {fmtDate(nextService.scheduled_date)} ·{" "}
-                        {nextService.status}
-                      </div>{" "}
-                    </div>
+                  <SectionTitle>
+                    Upcoming Appointments ({upcomingFuture.length})
+                  </SectionTitle>
+                  {upcomingFuture.length > 0 ? (
+                    upcomingFuture.slice(0, 3).map((s, i) => (
+                      <div
+                        key={i}
+                        className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
+                      >
+                        {" "}
+                        <div className="text-13 font-medium text-zinc-900">
+                          {s.service_type}
+                        </div>{" "}
+                        <div className="text-12 text-ink-secondary">
+                          {fmtDate(s.scheduled_date)} · {s.status}
+                        </div>{" "}
+                      </div>
+                    ))
                   ) : (
                     <div className="text-12 text-ink-secondary mb-3">
-                      No upcoming services
+                      No upcoming appointments
                     </div>
                   )}
                   <SectionTitle>
@@ -4450,17 +4497,51 @@ export default function Customer360ProfileV2({
                       value={fmtCurrency(c.lifetimeRevenue)}
                     />{" "}
                   </div>
-                  {cards.length > 0 && (
-                    <div className="text-12 text-ink-secondary mb-1.5">
-                      Card: {cards[0].card_brand} ending {cards[0].last_four}
-                    </div>
-                  )}
-                  {lastPayment && (
-                    <div className="text-12 text-ink-secondary mb-3">
-                      Last payment: {fmtCurrency(lastPayment.amount)} on{" "}
-                      {fmtDate(lastPayment.payment_date)}
-                    </div>
-                  )}
+                  <div className="text-12 text-ink-secondary mb-1.5">
+                    {cards.length > 0
+                      ? `Card on file: ${cards[0].card_brand} ending ${cards[0].last_four}${cards.length > 1 ? ` · +${cards.length - 1} more` : ""}`
+                      : "No card on file"}
+                  </div>
+                  <div className="mb-3">
+                    <SectionTitle>
+                      Recent Transactions ({payments.length})
+                    </SectionTitle>
+                    {payments.length > 0 ? (
+                      payments.slice(0, 3).map((p, i) => {
+                        const isRefund = !!p.refund_status;
+                        return (
+                          <div
+                            key={i}
+                            className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
+                          >
+                            {" "}
+                            <span
+                              className={cn(
+                                "u-nums flex-shrink-0",
+                                isRefund
+                                  ? "text-ink-secondary"
+                                  : "text-zinc-900",
+                              )}
+                            >
+                              {fmtCurrency(p.amount)}
+                            </span>{" "}
+                            <span className="text-ink-secondary truncate">
+                              {p.card_brand
+                                ? `${p.card_brand} …${p.last_four}`
+                                : p.method || p.processor || ""}
+                            </span>{" "}
+                            <span className="text-ink-secondary flex-shrink-0">
+                              {fmtDate(p.payment_date)}
+                            </span>{" "}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="text-12 text-ink-secondary">
+                        No transactions yet
+                      </div>
+                    )}
+                  </div>
                   {displayedAnnualPrepayTerm && (
                     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
                       <div className="text-12 font-medium text-zinc-900">
@@ -4583,7 +4664,13 @@ export default function Customer360ProfileV2({
                         {score}/100
                       </span>
                       {(hs.churn_risk_level || hs.churn_risk) && (
-                        <span>· {hs.churn_risk_level || hs.churn_risk}</span>
+                        <span>
+                          {" "}
+                          ·{" "}
+                          {String(hs.churn_risk_level || hs.churn_risk)
+                            .replace(/_/g, " ")
+                            .replace(/\b\w/g, (ch) => ch.toUpperCase())}
+                        </span>
                       )}
                     </div>
                   )}
@@ -5315,7 +5402,7 @@ export default function Customer360ProfileV2({
                     />
                   ) : (
                     <a
-                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${c.address.line1}, ${c.address.city}, ${c.address.state} ${c.address.zip}`)}`}
+                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(formatAddress(c.address))}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="block p-5 bg-zinc-50 text-center text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
@@ -5606,7 +5693,9 @@ export default function Customer360ProfileV2({
               ))}
             </div>{" "}
           </div>{" "}
-          <div className="max-h-[250px] overflow-y-auto flex flex-col">
+          {/* On mobile the timeline grows inline (panel handles the scroll) so
+              a nested 250px scroll region doesn't trap touch; capped on desktop. */}
+          <div className="md:max-h-[250px] md:overflow-y-auto flex flex-col">
             {filteredTimeline.slice(0, 30).map((item, i) => {
               const TYPE_LABEL = {
                 sms: "SMS",

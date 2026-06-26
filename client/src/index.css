@@ -1,5 +1,10 @@
 @import "@fontsource/inter/400.css";
 @import "@fontsource/inter/500.css";
+/* Self-host Roboto (the admin's forced font) so it loads reliably on iPhone
+   instead of falling back to the system font when Google Fonts is slow/blocked. */
+@import "@fontsource/roboto/400.css";
+@import "@fontsource/roboto/500.css";
+@import "@fontsource/roboto/700.css";
 @import "./styles/design-tokens.css";
 @import "./styles/buttons.css";
 @import "./styles/tokens.css";
@@ -8,6 +13,14 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Stop iOS Safari from auto-inflating text on rotate / standalone, so the
+   admin font renders at its intended size on iPhone instead of looking
+   oversized and inconsistent across tabs. */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
 
 /* preflight is disabled, so border-width utilities have no effect without
    an explicit border-style. Force solid on hairline so it actually renders. */

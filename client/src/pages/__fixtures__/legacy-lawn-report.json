@@ -1,0 +1,1129 @@
+{
+  "reportVersion": "service_report_v1",
+  "serviceLine": "lawn",
+  "serviceDisplayName": "Lawn Care Visit",
+  "serviceLineDisplay": "WaveGuard lawn care",
+  "customerName": "Test Customer",
+  "serviceDate": "2026-06-25T00:00:00.000Z",
+  "technicianName": "Alex",
+  "technician": {
+    "name": "Alex",
+    "photoUrl": "https://example.test/photo.png",
+    "initials": "A"
+  },
+  "evidenceLevel": "technician_confirmed",
+  "waveGuardTier": "Gold",
+  "lawnAssessment": {
+    "scores": {
+      "assessmentId": "bfba11a9-44b7-46d3-92f6-7fae99907ed7",
+      "assessmentDate": "2026-06-25T00:00:00.000Z",
+      "overallScore": 80,
+      "turfDensity": 75,
+      "weedSuppression": 93,
+      "colorHealth": 88,
+      "stressDamage": 60,
+      "fungusControl": 80,
+      "thatchScore": 85,
+      "season": "peak",
+      "observations": "The St. Augustine lawn shows moderate density with generally acceptable color, though there are scattered thin and slightly off-color areas — particularly around the utility pad and along the right side near the sidewalk — suggesting mild drought stress or uneven irrigation coverage. A few broadleaf weeds are visible throughout, and the turf near the hardscape edges appears slightly sparse, which is common where root competition and heat reflection reduce vigor. A check of the irrigation zones serving the front lawn is recommended to ensure uniform coverage, and spot-treating visible weeds will help improve overall turf density.",
+      "aiSummary": "The St. Augustine lawn is in generally good condition for peak June heat, with strong weed suppression and color, but moderate thinning near the utility pad, sidewalk edge, and hardscape areas suggests uneven irrigation coverage and mild heat/drought stress.",
+      "recommendations": {
+        "summary": "The St. Augustine lawn is in generally good condition for peak June heat, with strong weed suppression and color, but moderate thinning near the utility pad, sidewalk edge, and hardscape areas suggests uneven irrigation coverage and mild heat/drought stress.",
+        "recommendations": [
+          {
+            "priority": 1,
+            "action": "Audit the irrigation zones covering the front lawn, especially around the utility pad, right-side sidewalk edge, and other hardscape borders; adjust heads for overlap and check for clogged nozzles or low-pressure areas.",
+            "reason": "Turf density is moderate at 75%, and the observed thin, slightly off-color areas are consistent with drought stress or uneven coverage, which is common in Southwest Florida during June peak heat.",
+            "timeframe": "Within the next 7 days, ideally before the next scheduled treatment"
+          },
+          {
+            "priority": 2,
+            "action": "Spot-treat visible broadleaf weeds rather than applying a broad blanket herbicide.",
+            "reason": "Weed suppression is strong at 93%, so targeted control is the best approach to clean up scattered weeds while minimizing stress on St. Augustine during hot, humid June conditions.",
+            "timeframe": "At the next service visit or as soon as weather conditions are favorable"
+          },
+          {
+            "priority": 3,
+            "action": "Monitor the sparse turf near sidewalks, driveway edges, and the utility pad for continued thinning, and support recovery with proper mowing height and irrigation consistency.",
+            "reason": "Hardscape areas reflect heat and dry out faster, reducing root vigor and turf density; maintaining St. Augustine at a higher cut helps shade the crown and conserve soil moisture.",
+            "timeframe": "Ongoing through June and July"
+          },
+          {
+            "priority": 4,
+            "action": "Continue fungus monitoring, especially after heavy rains or extended humidity, and avoid unnecessary evening watering.",
+            "reason": "Fungus control is acceptable at 80%, but June humidity in Southwest Florida can quickly increase disease pressure in St. Augustine, particularly in areas already stressed by moisture imbalance.",
+            "timeframe": "Recheck at the next visit and after major rain events"
+          },
+          {
+            "priority": 5,
+            "action": "Maintain the current agronomic program with careful nutrient and stress-management inputs appropriate for St. Augustine in peak season.",
+            "reason": "Color health is good at 88% and thatch level is manageable at 85%, indicating the lawn is responding well overall; real outcome data for June St. Augustine is still limited, so adjustments should be made based on observed response rather than aggressive changes.",
+            "timeframe": "Continue through the next treatment cycle"
+          }
+        ],
+        "nextVisitFocus": "Prioritize irrigation verification in the front lawn zones, inspect the thin areas near the utility pad and right-side sidewalk for improvement, spot-treat remaining broadleaf weeds, and recheck for early signs of fungus in any stressed or moisture-retentive areas.",
+        "customerTip": "Run each irrigation zone briefly and watch for dry spots, blocked heads, or overspray onto pavement; St. Augustine should be watered deeply in the early morning, not lightly or late in the evening."
+      },
+      "stressFlags": {
+        "new_sod": false,
+        "recent_scalp": false,
+        "shade_stress": false,
+        "drought_stress": false,
+        "disease_suspicion": false
+      }
+    },
+    "trend": [
+      {
+        "date": "2026-06-25T00:00:00.000Z",
+        "overallScore": 80,
+        "turfDensity": 75,
+        "weedSuppression": 93,
+        "colorHealth": 88,
+        "stressDamage": 60,
+        "fungusControl": 80,
+        "thatchScore": 85,
+        "season": "peak"
+      }
+    ],
+    "customerSummary": "This is your first lawn health assessment. Future reports will show the trend.",
+    "aiSummary": "The St. Augustine lawn is in generally good condition for peak June heat, with strong weed suppression and color, but moderate thinning near the utility pad, sidewalk edge, and hardscape areas suggests uneven irrigation coverage and mild heat/drought stress.",
+    "turfProfile": {
+      "grassType": "st_augustine",
+      "cultivar": null,
+      "sunExposure": null,
+      "lawnSqft": null,
+      "irrigationType": null,
+      "irrigationInchesPerWeek": null,
+      "soilPh": null,
+      "knownChinchHistory": false,
+      "knownDiseaseHistory": false,
+      "knownDroughtStress": false
+    },
+    "waterContext": {
+      "irrigationInchesPerWeek": null,
+      "irrigationInchesPerDay": null,
+      "rainfallInchesToday": 0.05,
+      "rainfallInches7d": 3.27,
+      "effectiveInchesToday": 0.05,
+      "effectiveInches7d": 3.27,
+      "targetInchesPerWeek": 1.25,
+      "targetInchesPerDay": 0.18,
+      "rainfallSource": "fawn_7_day_observation",
+      "irrigationAdvice": {
+        "recommendedInchesPerWeek": 1.25,
+        "appliedInchesPerWeek": null,
+        "differentialInchesPerWeek": null,
+        "status": "unknown",
+        "profileMissing": true,
+        "rainKnown": true,
+        "targetBasis": "evapotranspiration"
+      }
+    },
+    "overwateringSignal": false,
+    "photos": []
+  },
+  "reportV2": null,
+  "applications": [
+    {
+      "id": "7e3b960b-f701-4a61-82ee-670ca331aedf",
+      "product": {
+        "catalogId": "20ed4820-22ce-4aa0-a18b-c8f81744dc38",
+        "name": "LESCO K-Flow 0-0-25",
+        "epa_reg": "N/A",
+        "active_ingredient": "Potassium chelate",
+        "category": "fertilizer",
+        "product_type": null,
+        "manufacturer": null,
+        "public_summary": null,
+        "service_report_summary": null,
+        "precaution_summary": null,
+        "reentry_summary": null,
+        "irrigation_notes": null,
+        "label_verified_at": null,
+        "label_version": null,
+        "facts_approved": false
+      },
+      "method": "broadcast_spray",
+      "methodLabel": "Broadcast spray",
+      "zone_ids": [
+        "default-zone-1",
+        "default-zone-2",
+        "default-zone-3"
+      ],
+      "rate": "3.000",
+      "rateUnit": "fl_oz",
+      "totalAmount": "45.000",
+      "amountUnit": "fl_oz",
+      "applicationArea": null,
+      "areaValue": "4500.00",
+      "areaUnit": "sqft",
+      "targets": [],
+      "appliedAt": "2026-06-25T14:56:39.599Z"
+    },
+    {
+      "id": "9b879f03-e1ff-4ef0-b5f2-9831e065fb58",
+      "product": {
+        "catalogId": "75149627-cf31-4020-a552-971f073196cb",
+        "name": "LESCO Chelated Iron Plus",
+        "epa_reg": "N/A",
+        "active_ingredient": "Iron + N (foliar)",
+        "category": "Uncategorized",
+        "product_type": null,
+        "manufacturer": null,
+        "public_summary": null,
+        "service_report_summary": null,
+        "precaution_summary": null,
+        "reentry_summary": null,
+        "irrigation_notes": null,
+        "label_verified_at": null,
+        "label_version": null,
+        "facts_approved": false
+      },
+      "method": "broadcast_spray",
+      "methodLabel": "Broadcast spray",
+      "zone_ids": [
+        "default-zone-1",
+        "default-zone-2",
+        "default-zone-3"
+      ],
+      "rate": "3.000",
+      "rateUnit": "oz",
+      "totalAmount": "30.000",
+      "amountUnit": "oz",
+      "applicationArea": null,
+      "areaValue": "4500.00",
+      "areaUnit": "sqft",
+      "targets": [],
+      "appliedAt": "2026-06-25T14:56:39.599Z"
+    },
+    {
+      "id": "78b3f939-c187-4eec-8ae5-b5192d691aaa",
+      "product": {
+        "catalogId": "2cd6b953-55fc-418c-b240-7a9f2f31963f",
+        "name": "Talstar P",
+        "epa_reg": "279-3206",
+        "active_ingredient": "Bifenthrin",
+        "category": "insecticide",
+        "product_type": null,
+        "manufacturer": null,
+        "public_summary": null,
+        "service_report_summary": null,
+        "precaution_summary": null,
+        "reentry_summary": null,
+        "irrigation_notes": null,
+        "label_verified_at": null,
+        "label_version": null,
+        "facts_approved": false
+      },
+      "method": "broadcast_spray",
+      "methodLabel": "Broadcast spray",
+      "zone_ids": [
+        "default-zone-1",
+        "default-zone-2",
+        "default-zone-3"
+      ],
+      "rate": "0.500",
+      "rateUnit": "fl_oz",
+      "totalAmount": "2.000",
+      "amountUnit": "fl_oz",
+      "applicationArea": null,
+      "areaValue": "4500.00",
+      "areaUnit": "sqft",
+      "targets": [],
+      "appliedAt": "2026-06-25T14:56:39.599Z"
+    }
+  ],
+  "visitTimeline": {
+    "enabled": true,
+    "title": "Visit Timeline",
+    "intro": "Here's a simple summary of today's service visit.",
+    "serviceLine": "lawn",
+    "status": "completed",
+    "events": [
+      {
+        "id": "technician_en_route",
+        "type": "technician_en_route",
+        "label": "Technician en route",
+        "customerDescription": "Your technician was on the way to the property.",
+        "customerVisibleDescription": "Your technician was on the way to the property.",
+        "occurredAt": "2026-06-25T13:57:21.820Z",
+        "timestamp": "2026-06-25T13:57:21.820Z",
+        "displayTime": "9:57 AM",
+        "source": "bouncie",
+        "confidence": "high",
+        "status": "completed",
+        "sortOrder": 1
+      },
+      {
+        "id": "technician_on_site",
+        "type": "technician_on_site",
+        "label": "Technician on site",
+        "customerDescription": "Your technician was recorded at the property.",
+        "customerVisibleDescription": "Your technician was recorded at the property.",
+        "occurredAt": "2026-06-25T14:08:12.087Z",
+        "timestamp": "2026-06-25T14:08:12.087Z",
+        "displayTime": "10:08 AM",
+        "source": "bouncie",
+        "confidence": "high",
+        "status": "completed",
+        "sortOrder": 2
+      },
+      {
+        "id": "service_completed",
+        "type": "service_completed",
+        "label": "Service completed",
+        "customerDescription": "Your technician completed the lawn service and finalized the report.",
+        "customerVisibleDescription": "Your technician completed the lawn service and finalized the report.",
+        "occurredAt": "2026-06-25T14:56:39.602Z",
+        "timestamp": "2026-06-25T14:56:39.602Z",
+        "displayTime": "10:56 AM",
+        "source": "service_report",
+        "confidence": "high",
+        "status": "completed",
+        "sortOrder": 3
+      }
+    ],
+    "details": [
+      {
+        "id": "customer_contact",
+        "type": "customer_contact",
+        "label": "Customer contact",
+        "text": "No one was home, and the technician had full access to complete service.",
+        "occurredAt": null,
+        "displayTime": null,
+        "showAsTimelineEvent": false
+      }
+    ],
+    "timingNote": null,
+    "dataSourceNote": "Times are based on available technician status updates, vehicle data, and report completion records.",
+    "durationMinutes": null,
+    "reportGeneratedAt": "2026-06-25T14:56:40.039Z",
+    "config": {
+      "enabled": true,
+      "showOnCustomerReports": true,
+      "title": "Visit Timeline",
+      "showTechnicianEnRoute": true,
+      "showTechnicianOnSite": true,
+      "showServiceCompleted": true,
+      "serviceCompletedRequiredWhenReportCompleted": true,
+      "showCustomerContact": true,
+      "showCustomerContactAsTimelineEvent": false,
+      "showReportGenerated": false,
+      "showExactTimes": true,
+      "showDuration": false,
+      "minimumDurationMinutes": 5,
+      "showTimingNoteWhenDurationUnavailable": true,
+      "showDataSourceNote": true
+    }
+  },
+  "workflowEvents": [
+    {
+      "id": "technician_en_route",
+      "type": "technician_en_route",
+      "label": "Technician en route",
+      "timestamp": "2026-06-25T13:57:21.820Z",
+      "status": "completed",
+      "customerVisibleDescription": "Your technician was on the way to the property."
+    },
+    {
+      "id": "arrived_on_site",
+      "type": "arrived_on_site",
+      "label": "Technician on site",
+      "timestamp": "2026-06-25T14:08:12.087Z",
+      "status": "completed",
+      "customerVisibleDescription": "Your technician was recorded at the property."
+    },
+    {
+      "id": "service_completed",
+      "type": "service_completed",
+      "label": "Service completed",
+      "timestamp": "2026-06-25T14:56:39.983Z",
+      "status": "completed",
+      "customerVisibleDescription": "Your technician completed the lawn service and finalized the report."
+    },
+    {
+      "id": "report_published",
+      "type": "report_published",
+      "label": "Report published",
+      "timestamp": "2026-06-25T14:56:40.039Z",
+      "status": "completed",
+      "customerVisibleDescription": "Your service report was generated."
+    }
+  ],
+  "serviceCoverage": {
+    "enabled": true,
+    "serviceReportId": "470d4681-282a-4058-94f4-029529bf0115",
+    "serviceLine": "lawn",
+    "title": "Lawn Coverage",
+    "intro": "Here's where your technician completed lawn service, inspected, or marked an area as inaccessible during today's visit.",
+    "introText": "Here's where your technician completed lawn service, inspected, or marked an area as inaccessible during today's visit.",
+    "address": "123 Test St, Testville, FL 34000",
+    "serviceDate": "2026-06-25T00:00:00.000Z",
+    "disclaimer": "Service coverage is based on technician-marked locations and available visit data. It is not a property survey.",
+    "summary": {
+      "completedCount": 3,
+      "inspectedCount": 0,
+      "inaccessibleCount": 0,
+      "needsAttentionCount": 0
+    },
+    "legend": [
+      {
+        "key": "treated",
+        "label": "Treated"
+      }
+    ],
+    "map": {
+      "available": true,
+      "center": {
+        "lat": null,
+        "lng": null
+      },
+      "zoom": 18,
+      "markers": [
+        {
+          "id": "marker_zone-default-zone-1",
+          "coverageItemId": "zone-default-zone-1",
+          "label": "A",
+          "status": "treated",
+          "statusLabel": "Treated",
+          "lat": null,
+          "lng": null,
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+              [
+                [
+                  64,
+                  42
+                ],
+                [
+                  576,
+                  42
+                ],
+                [
+                  576,
+                  88
+                ],
+                [
+                  64,
+                  88
+                ],
+                [
+                  64,
+                  42
+                ]
+              ]
+            ]
+          }
+        },
+        {
+          "id": "marker_zone-default-zone-2",
+          "coverageItemId": "zone-default-zone-2",
+          "label": "B",
+          "status": "treated",
+          "statusLabel": "Treated",
+          "lat": null,
+          "lng": null,
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+              [
+                [
+                  64,
+                  250
+                ],
+                [
+                  576,
+                  250
+                ],
+                [
+                  576,
+                  296
+                ],
+                [
+                  64,
+                  296
+                ],
+                [
+                  64,
+                  250
+                ]
+              ]
+            ]
+          }
+        },
+        {
+          "id": "marker_zone-default-zone-3",
+          "coverageItemId": "zone-default-zone-3",
+          "label": "C",
+          "status": "treated",
+          "statusLabel": "Treated",
+          "lat": null,
+          "lng": null,
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+              [
+                [
+                  64,
+                  88
+                ],
+                [
+                  112,
+                  88
+                ],
+                [
+                  112,
+                  250
+                ],
+                [
+                  64,
+                  250
+                ],
+                [
+                  64,
+                  88
+                ]
+              ]
+            ]
+          }
+        }
+      ],
+      "polygons": [
+        {
+          "id": "polygon_zone-default-zone-1",
+          "coverageItemId": "zone-default-zone-1",
+          "label": "A",
+          "status": "treated",
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+              [
+                [
+                  64,
+                  42
+                ],
+                [
+                  576,
+                  42
+                ],
+                [
+                  576,
+                  88
+                ],
+                [
+                  64,
+                  88
+                ],
+                [
+                  64,
+                  42
+                ]
+              ]
+            ]
+          }
+        },
+        {
+          "id": "polygon_zone-default-zone-2",
+          "coverageItemId": "zone-default-zone-2",
+          "label": "B",
+          "status": "treated",
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+              [
+                [
+                  64,
+                  250
+                ],
+                [
+                  576,
+                  250
+                ],
+                [
+                  576,
+                  296
+                ],
+                [
+                  64,
+                  296
+                ],
+                [
+                  64,
+                  250
+                ]
+              ]
+            ]
+          }
+        },
+        {
+          "id": "polygon_zone-default-zone-3",
+          "coverageItemId": "zone-default-zone-3",
+          "label": "C",
+          "status": "treated",
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+              [
+                [
+                  64,
+                  88
+                ],
+                [
+                  112,
+                  88
+                ],
+                [
+                  112,
+                  250
+                ],
+                [
+                  64,
+                  250
+                ],
+                [
+                  64,
+                  88
+                ]
+              ]
+            ]
+          }
+        }
+      ],
+      "lines": []
+    },
+    "groups": [
+      {
+        "serviceLine": "lawn",
+        "title": "Lawn Coverage",
+        "items": [
+          {
+            "id": "zone-default-zone-1",
+            "serviceReportId": "470d4681-282a-4058-94f4-029529bf0115",
+            "serviceLine": "lawn",
+            "markerLabel": "A",
+            "areaName": "Front yard",
+            "customerDescription": "Lawn treatment completed.",
+            "internalDescription": "perimeter",
+            "status": "treated",
+            "customerStatusLabel": "Treated",
+            "statusLabel": "Treated",
+            "actionTypes": [],
+            "inaccessibleReason": null,
+            "needsFollowUp": false,
+            "followUpReason": null,
+            "technicianNote": null,
+            "showTechnicianNoteToCustomer": false,
+            "geometryId": "default-zone-1",
+            "zoneId": "default-zone-1",
+            "marker": null,
+            "geometry": {
+              "type": "Polygon",
+              "coordinates": [
+                [
+                  [
+                    64,
+                    42
+                  ],
+                  [
+                    576,
+                    42
+                  ],
+                  [
+                    576,
+                    88
+                  ],
+                  [
+                    64,
+                    88
+                  ],
+                  [
+                    64,
+                    42
+                  ]
+                ]
+              ]
+            },
+            "imageGeometry": {},
+            "polygon": {
+              "type": "Polygon",
+              "coordinates": [
+                [
+                  [
+                    64,
+                    42
+                  ],
+                  [
+                    576,
+                    42
+                  ],
+                  [
+                    576,
+                    88
+                  ],
+                  [
+                    64,
+                    88
+                  ],
+                  [
+                    64,
+                    42
+                  ]
+                ]
+              ]
+            },
+            "line": null,
+            "sortOrder": 0,
+            "isVisibleToCustomer": true
+          },
+          {
+            "id": "zone-default-zone-2",
+            "serviceReportId": "470d4681-282a-4058-94f4-029529bf0115",
+            "serviceLine": "lawn",
+            "markerLabel": "B",
+            "areaName": "Back yard",
+            "customerDescription": "Lawn treatment completed.",
+            "internalDescription": "perimeter",
+            "status": "treated",
+            "customerStatusLabel": "Treated",
+            "statusLabel": "Treated",
+            "actionTypes": [],
+            "inaccessibleReason": null,
+            "needsFollowUp": false,
+            "followUpReason": null,
+            "technicianNote": null,
+            "showTechnicianNoteToCustomer": false,
+            "geometryId": "default-zone-2",
+            "zoneId": "default-zone-2",
+            "marker": null,
+            "geometry": {
+              "type": "Polygon",
+              "coordinates": [
+                [
+                  [
+                    64,
+                    250
+                  ],
+                  [
+                    576,
+                    250
+                  ],
+                  [
+                    576,
+                    296
+                  ],
+                  [
+                    64,
+                    296
+                  ],
+                  [
+                    64,
+                    250
+                  ]
+                ]
+              ]
+            },
+            "imageGeometry": {},
+            "polygon": {
+              "type": "Polygon",
+              "coordinates": [
+                [
+                  [
+                    64,
+                    250
+                  ],
+                  [
+                    576,
+                    250
+                  ],
+                  [
+                    576,
+                    296
+                  ],
+                  [
+                    64,
+                    296
+                  ],
+                  [
+                    64,
+                    250
+                  ]
+                ]
+              ]
+            },
+            "line": null,
+            "sortOrder": 1,
+            "isVisibleToCustomer": true
+          },
+          {
+            "id": "zone-default-zone-3",
+            "serviceReportId": "470d4681-282a-4058-94f4-029529bf0115",
+            "serviceLine": "lawn",
+            "markerLabel": "C",
+            "areaName": "Side yard",
+            "customerDescription": "Lawn treatment completed.",
+            "internalDescription": "perimeter",
+            "status": "treated",
+            "customerStatusLabel": "Treated",
+            "statusLabel": "Treated",
+            "actionTypes": [],
+            "inaccessibleReason": null,
+            "needsFollowUp": false,
+            "followUpReason": null,
+            "technicianNote": null,
+            "showTechnicianNoteToCustomer": false,
+            "geometryId": "default-zone-3",
+            "zoneId": "default-zone-3",
+            "marker": null,
+            "geometry": {
+              "type": "Polygon",
+              "coordinates": [
+                [
+                  [
+                    64,
+                    88
+                  ],
+                  [
+                    112,
+                    88
+                  ],
+                  [
+                    112,
+                    250
+                  ],
+                  [
+                    64,
+                    250
+                  ],
+                  [
+                    64,
+                    88
+                  ]
+                ]
+              ]
+            },
+            "imageGeometry": {},
+            "polygon": {
+              "type": "Polygon",
+              "coordinates": [
+                [
+                  [
+                    64,
+                    88
+                  ],
+                  [
+                    112,
+                    88
+                  ],
+                  [
+                    112,
+                    250
+                  ],
+                  [
+                    64,
+                    250
+                  ],
+                  [
+                    64,
+                    88
+                  ]
+                ]
+              ]
+            },
+            "line": null,
+            "sortOrder": 2,
+            "isVisibleToCustomer": true
+          }
+        ]
+      }
+    ],
+    "items": [
+      {
+        "id": "zone-default-zone-1",
+        "serviceReportId": "470d4681-282a-4058-94f4-029529bf0115",
+        "serviceLine": "lawn",
+        "markerLabel": "A",
+        "areaName": "Front yard",
+        "customerDescription": "Lawn treatment completed.",
+        "internalDescription": "perimeter",
+        "status": "treated",
+        "customerStatusLabel": "Treated",
+        "statusLabel": "Treated",
+        "actionTypes": [],
+        "inaccessibleReason": null,
+        "needsFollowUp": false,
+        "followUpReason": null,
+        "technicianNote": null,
+        "showTechnicianNoteToCustomer": false,
+        "geometryId": "default-zone-1",
+        "zoneId": "default-zone-1",
+        "marker": null,
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                64,
+                42
+              ],
+              [
+                576,
+                42
+              ],
+              [
+                576,
+                88
+              ],
+              [
+                64,
+                88
+              ],
+              [
+                64,
+                42
+              ]
+            ]
+          ]
+        },
+        "imageGeometry": {},
+        "polygon": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                64,
+                42
+              ],
+              [
+                576,
+                42
+              ],
+              [
+                576,
+                88
+              ],
+              [
+                64,
+                88
+              ],
+              [
+                64,
+                42
+              ]
+            ]
+          ]
+        },
+        "line": null,
+        "sortOrder": 0,
+        "isVisibleToCustomer": true
+      },
+      {
+        "id": "zone-default-zone-2",
+        "serviceReportId": "470d4681-282a-4058-94f4-029529bf0115",
+        "serviceLine": "lawn",
+        "markerLabel": "B",
+        "areaName": "Back yard",
+        "customerDescription": "Lawn treatment completed.",
+        "internalDescription": "perimeter",
+        "status": "treated",
+        "customerStatusLabel": "Treated",
+        "statusLabel": "Treated",
+        "actionTypes": [],
+        "inaccessibleReason": null,
+        "needsFollowUp": false,
+        "followUpReason": null,
+        "technicianNote": null,
+        "showTechnicianNoteToCustomer": false,
+        "geometryId": "default-zone-2",
+        "zoneId": "default-zone-2",
+        "marker": null,
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                64,
+                250
+              ],
+              [
+                576,
+                250
+              ],
+              [
+                576,
+                296
+              ],
+              [
+                64,
+                296
+              ],
+              [
+                64,
+                250
+              ]
+            ]
+          ]
+        },
+        "imageGeometry": {},
+        "polygon": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                64,
+                250
+              ],
+              [
+                576,
+                250
+              ],
+              [
+                576,
+                296
+              ],
+              [
+                64,
+                296
+              ],
+              [
+                64,
+                250
+              ]
+            ]
+          ]
+        },
+        "line": null,
+        "sortOrder": 1,
+        "isVisibleToCustomer": true
+      },
+      {
+        "id": "zone-default-zone-3",
+        "serviceReportId": "470d4681-282a-4058-94f4-029529bf0115",
+        "serviceLine": "lawn",
+        "markerLabel": "C",
+        "areaName": "Side yard",
+        "customerDescription": "Lawn treatment completed.",
+        "internalDescription": "perimeter",
+        "status": "treated",
+        "customerStatusLabel": "Treated",
+        "statusLabel": "Treated",
+        "actionTypes": [],
+        "inaccessibleReason": null,
+        "needsFollowUp": false,
+        "followUpReason": null,
+        "technicianNote": null,
+        "showTechnicianNoteToCustomer": false,
+        "geometryId": "default-zone-3",
+        "zoneId": "default-zone-3",
+        "marker": null,
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                64,
+                88
+              ],
+              [
+                112,
+                88
+              ],
+              [
+                112,
+                250
+              ],
+              [
+                64,
+                250
+              ],
+              [
+                64,
+                88
+              ]
+            ]
+          ]
+        },
+        "imageGeometry": {},
+        "polygon": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                64,
+                88
+              ],
+              [
+                112,
+                88
+              ],
+              [
+                112,
+                250
+              ],
+              [
+                64,
+                250
+              ],
+              [
+                64,
+                88
+              ]
+            ]
+          ]
+        },
+        "line": null,
+        "sortOrder": 2,
+        "isVisibleToCustomer": true
+      }
+    ],
+    "settings": {
+      "showMap": true,
+      "showList": true,
+      "showSummaryCounts": true,
+      "defaultLayout": "split",
+      "mobileLayout": "summary_map_list",
+      "mapPrecisionMode": "exact"
+    }
+  },
+  "customerInteraction": "not_home_full_access",
+  "visitTiming": {
+    "arrivedAt": "2026-06-25T14:08:12.087Z",
+    "exitedAt": "2026-06-25T14:56:39.602Z",
+    "onSiteMinutes": 48
+  },
+  "summary": "We visited today and treated your front, back, and side yards to support your lawn heading into the wetter months ahead. We applied nutrients to strengthen the root system and help your turf handle the heavy rainfall, along with a treatment to address insect activity across the grass. You can expect your lawn's color and density to gradually improve over the coming weeks as everything works in. Thanks for trusting us with your lawn care - Waves",
+  "lawnProgramOverview": {
+    "linked": false,
+    "title": "Your Waves Lawn Care Program Overview",
+    "contextCopy": "This lawn service report documents what was actually inspected and completed during today's visit.",
+    "distinctionCopy": "The program overview explains what may be used through the season. This service report documents what was actually done today."
+  },
+  "scheduledService": {
+    "arrived_at": "2026-06-25T14:08:12.087Z",
+    "actual_start_time": "2026-06-25T14:08:12.087Z",
+    "check_in_time": "2026-06-25T14:08:12.087Z",
+    "completed_at": "2026-06-25T14:56:39.983Z",
+    "actual_end_time": "2026-06-25T14:56:39.602Z",
+    "check_out_time": "2026-06-25T14:56:39.602Z",
+    "started_at": null,
+    "ended_at": null
+  },
+  "serviceRecord": {
+    "arrived_at": null,
+    "actual_start_time": null,
+    "check_in_time": null,
+    "completed_at": null,
+    "actual_end_time": null,
+    "check_out_time": null,
+    "started_at": "2026-06-25T14:08:12.087Z",
+    "ended_at": "2026-06-25T14:56:39.602Z"
+  },
+  "actual_start_time": "2026-06-25T14:08:12.087Z",
+  "actual_end_time": "2026-06-25T14:56:39.602Z",
+  "arrived_at": "2026-06-25T14:08:12.087Z",
+  "completed_at": "2026-06-25T14:56:39.602Z",
+  "check_in_time": "2026-06-25T14:08:12.087Z",
+  "check_out_time": "2026-06-25T14:56:39.602Z",
+  "token": "test-legacy-lawn",
+  "serviceRecordId": "test-record"
+}

@@ -352,7 +352,9 @@ function DashboardTab({ data }) {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+          // 150px min → two cards fit side-by-side at 390px (a 180px min
+          // forced a single tall column); still auto-fits more on wider screens.
+          gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
           gap: 16,
           marginBottom: 24,
         }}
@@ -472,7 +474,20 @@ function DashboardTab({ data }) {
         >
           Top At-Risk Customers
         </div>{" "}
-        <div style={{ overflowX: "auto" }}>
+        <div
+          style={{
+            overflowX: "auto",
+            // Horizontal scroll-shadow: soft edge shadows hint at off-screen
+            // columns (Risk / Trend) and fade out at each end. Pure CSS — the
+            // white masks scroll with content (local) and uncover the fixed
+            // shadows (scroll); self-hides when the table doesn't overflow.
+            background:
+              "linear-gradient(to right,#fff 30%,rgba(255,255,255,0)) left center/36px 100% no-repeat local," +
+              "linear-gradient(to left,#fff 30%,rgba(255,255,255,0)) right center/36px 100% no-repeat local," +
+              "radial-gradient(farthest-side at 0 50%,rgba(0,0,0,0.14),rgba(0,0,0,0)) left center/14px 100% no-repeat scroll," +
+              "radial-gradient(farthest-side at 100% 50%,rgba(0,0,0,0.14),rgba(0,0,0,0)) right center/14px 100% no-repeat scroll",
+          }}
+        >
           {" "}
           <table
             style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
@@ -1161,7 +1176,20 @@ function ScoresTab() {
       {/* Table */}
       <Card style={{ padding: 0, overflow: "hidden" }}>
         {" "}
-        <div style={{ overflowX: "auto" }}>
+        <div
+          style={{
+            overflowX: "auto",
+            // Horizontal scroll-shadow: soft edge shadows hint at off-screen
+            // columns (Risk / Trend) and fade out at each end. Pure CSS — the
+            // white masks scroll with content (local) and uncover the fixed
+            // shadows (scroll); self-hides when the table doesn't overflow.
+            background:
+              "linear-gradient(to right,#fff 30%,rgba(255,255,255,0)) left center/36px 100% no-repeat local," +
+              "linear-gradient(to left,#fff 30%,rgba(255,255,255,0)) right center/36px 100% no-repeat local," +
+              "radial-gradient(farthest-side at 0 50%,rgba(0,0,0,0.14),rgba(0,0,0,0)) left center/14px 100% no-repeat scroll," +
+              "radial-gradient(farthest-side at 100% 50%,rgba(0,0,0,0.14),rgba(0,0,0,0)) right center/14px 100% no-repeat scroll",
+          }}
+        >
           {" "}
           <table
             style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
@@ -1173,18 +1201,18 @@ function ScoresTab() {
                 {[
                   { key: "first_name", label: "Customer" },
                   { key: null, label: "Tier" },
-                  { key: "overall_score", label: "Score" },
+                  { key: "overall_score", label: "Score", align: "right" },
                   { key: "score_grade", label: "Grade" },
                   { key: null, label: "Sub-Scores" },
                   { key: "churn_risk", label: "Risk" },
-                  { key: null, label: "Trend" },
+                  { key: null, label: "Trend", align: "right" },
                 ].map((h) => (
                   <th
                     key={h.label}
                     onClick={h.key ? () => handleSort(h.key) : undefined}
                     style={{
                       padding: "10px 12px",
-                      textAlign: "left",
+                      textAlign: h.align || "left",
                       color: COLORS.textMuted,
                       fontWeight: 500,
                       fontSize: 11,
@@ -1272,11 +1300,12 @@ function ScoresTab() {
                           <span style={{ color: COLORS.textMuted }}>--</span>
                         )}
                       </td>{" "}
-                      <td style={{ padding: "10px 12px" }}>
+                      <td style={{ padding: "10px 12px", textAlign: "right" }}>
                         {" "}
                         <span
                           style={{
                             ...mono,
+                            fontVariantNumeric: "tabular-nums",
                             color: COLORS.text,
                             marginRight: 8,
                           }}
@@ -1311,7 +1340,9 @@ function ScoresTab() {
                         style={{
                           padding: "10px 12px",
                           ...mono,
+                          fontVariantNumeric: "tabular-nums",
                           fontSize: 16,
+                          textAlign: "right",
                           color: TREND_COLORS[c.score_trend],
                         }}
                       >

@@ -199,6 +199,26 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     ? ` ${extraAttachmentCount} additional attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the online invoice.`
     : '';
   const intro = `Hi ${first}, thank you for letting us take care of ${svcType}. Your invoice for ${currency(amountDue)} is ready — the full breakdown is attached as a PDF, and you can pay online in a few taps.${attachmentNote}`;
+  // Customer-facing service summary (the AI-written / operator-edited note that
+  // already shows on the invoice PDF). Render it as its own paragraph so the
+  // summary reaches the customer in the email body, not just the attachment.
+  const summaryNote = clean(invoice.notes).slice(0, 1200);
+  const summaryEscaped = summaryNote
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const summaryHtml = summaryNote
+    ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${summaryEscaped}</div>`
+    : '';
+  // Operator-written personal thank-you note (invoice.email_message), rendered
+  // after the service summary and above the line-item table. Plain paragraph
+  // (no info-card chrome) so it reads as a personal note, distinct from the
+  // boxed service summary above it.
+  const thankYouNote = clean(invoice.email_message).slice(0, 800);
+  const thankYouEscaped = thankYouNote
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const thankYouHtml = thankYouNote
+    ? `<div style="margin-top:16px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${thankYouEscaped}</div>`
+    : '';
+  const introWithSummary = `${intro}${summaryHtml}${thankYouHtml}`;
   const lines = [
     ['Invoice', invoice.invoice_number],
     ['Service', invoice.service_type || '—'],
@@ -209,7 +229,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const html = wrapEmail({
     preheader: `Invoice ${invoice.invoice_number} — ${currency(amountDue)} due.`,
     heading,
-    intro,
+    intro: introWithSummary,
     lines,
     ctaHref: payUrl,
     ctaLabel: `Pay ${currency(amountDue)}`,
@@ -221,6 +241,8 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     `Hi ${first},`,
     '',
     intro,
+    summaryNote || null,
+    thankYouNote || null,
     '',
     `Invoice: ${invoice.invoice_number}`,
     invoice.service_type ? `Service: ${invoice.service_type}` : null,
@@ -247,6 +269,8 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           due_date: invoice.due_date ? formatDateOnly(invoice.due_date) : '',
           service_label: invoice.service_type || '',
           service_date: invoice.service_date ? formatDateOnly(invoice.service_date) : '',
+          invoice_summary: summaryNote,
+          invoice_message: thankYouNote,
           attachment_note: extraAttachmentCount > 0
             ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
             : 'Your PDF invoice is attached.',

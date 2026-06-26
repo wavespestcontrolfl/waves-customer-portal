@@ -371,6 +371,60 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     expect(database._calls.whereNull).toContain('customer_id');
   });
 
+  test('enforceOriginating converts a contact lead first contacted before the customer signed up', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-01-01' },
+      contactLeads: [{ id: 'Lold', status: 'new', customer_id: null, first_contact_at: '2025-12-15T10:00:00Z' }],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'recurring_service_booked',
+      customerId: 'c1',
+      enforceOriginating: true,
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toMatchObject({ converted: true, leadIds: ['Lold'] });
+  });
+
+  test('enforceOriginating does NOT convert a contact lead created AFTER the customer signed up (later add-on)', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-01-01' },
+      contactLeads: [{ id: 'Lnew', status: 'new', customer_id: null, first_contact_at: '2026-05-01T10:00:00Z' }],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'recurring_service_booked',
+      customerId: 'c1',
+      enforceOriginating: true,
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toEqual({ converted: false, reason: 'no_open_lead' });
+    expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('without enforceOriginating, the live-trigger path still converts that same later contact lead', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-01-01' },
+      contactLeads: [{ id: 'Lnew', status: 'new', customer_id: null, first_contact_at: '2026-05-01T10:00:00Z' }],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'recurring_service_booked',
+      customerId: 'c1',
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toMatchObject({ converted: true, leadIds: ['Lnew'] });
+  });
+
   test('skips already-closed leads and reports no_open_lead', async () => {
     const markConverted = jest.fn().mockResolvedValue();
     const database = makeConvertDb({

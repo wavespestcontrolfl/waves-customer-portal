@@ -9,6 +9,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
+const { formatAddress } = require('../../utils/address-normalizer');
 
 const TECH_TOOLS = [
   {
@@ -171,7 +172,7 @@ async function getMyRoute(techId, techName, date) {
     next_stop: nextStop ? {
       id: nextStop.id,
       customer: `${nextStop.first_name} ${nextStop.last_name}`,
-      address: `${nextStop.address_line1}, ${nextStop.city}, ${nextStop.state} ${nextStop.zip}`,
+      address: formatAddress({ line1: nextStop.address_line1, city: nextStop.city, state: nextStop.state, zip: nextStop.zip }),
       service_type: nextStop.service_type,
       time_window: nextStop.window_start || null,
       notes: nextStop.notes,
@@ -230,7 +231,7 @@ async function getStopDetails(input) {
     customer: {
       name: `${customer.first_name} ${customer.last_name}`,
       phone: customer.phone,
-      address: `${customer.address_line1}, ${customer.city}, ${customer.state} ${customer.zip}`,
+      address: formatAddress({ line1: customer.address_line1, city: customer.city, state: customer.state, zip: customer.zip }),
       tier: customer.waveguard_tier,
       lawn_type: customer.lawn_type,
       property_sqft: customer.property_sqft,

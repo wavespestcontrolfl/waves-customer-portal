@@ -10,6 +10,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { formatAddress } = require('../../utils/address-normalizer');
 const {
   normalizeContactName,
   normalizeContactPhone,
@@ -554,7 +555,7 @@ async function getCustomerDetail(customerId) {
       last_name: customer.last_name,
       email: customer.email,
       phone: customer.phone,
-      address: `${customer.address_line1 || ''}, ${customer.city || ''}, ${customer.state || ''} ${customer.zip || ''}`.trim(),
+      address: formatAddress({ line1: customer.address_line1, city: customer.city, state: customer.state, zip: customer.zip }),
       city: customer.city,
       state: customer.state,
       zip: customer.zip,

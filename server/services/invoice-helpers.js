@@ -13,7 +13,7 @@
  */
 
 const INVOICE_UPDATE_ALLOWED_FIELDS = Object.freeze([
-  'title', 'notes', 'due_date', 'line_items', 'tax_rate',
+  'title', 'notes', 'email_message', 'due_date', 'line_items', 'tax_rate',
 ]);
 
 const INVOICE_UNCOLLECTIBLE_STATUSES = Object.freeze([

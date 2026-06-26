@@ -1221,7 +1221,7 @@ function CustomerIntelligenceTab() {
                         fontWeight: 700,
                       }}
                     >
-                      {c.health_score}/100
+                      {c.health_score ?? 0}/100
                     </span>{" "}
                     <span>{riskEmoji[c.churn_risk_level]}</span>{" "}
                   </div>{" "}
@@ -1414,7 +1414,18 @@ function CustomerIntelligenceTab() {
               </span>
             </div>{" "}
           </div>{" "}
-          <div style={{ overflowX: "auto" }}>
+          <div
+            style={{
+              overflowX: "auto",
+              // Horizontal scroll-shadow affordance (see CustomerHealthTabs):
+              // soft edge shadows reveal off-screen columns, fade at each end.
+              background:
+                "linear-gradient(to right,#fff 30%,rgba(255,255,255,0)) left center/36px 100% no-repeat local," +
+                "linear-gradient(to left,#fff 30%,rgba(255,255,255,0)) right center/36px 100% no-repeat local," +
+                "radial-gradient(farthest-side at 0 50%,rgba(0,0,0,0.14),rgba(0,0,0,0)) left center/14px 100% no-repeat scroll," +
+                "radial-gradient(farthest-side at 100% 50%,rgba(0,0,0,0.14),rgba(0,0,0,0)) right center/14px 100% no-repeat scroll",
+            }}
+          >
             {" "}
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               {" "}
@@ -2179,7 +2190,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
           value={filterTier}
           onChange={(e) => setFilterTier(e.target.value)}
           style={{
-            padding: "6px 10px",
+            padding: "10px 12px",
             background: D.bg,
             border: `1px solid ${D.border}`,
             borderRadius: 8,
@@ -2200,7 +2211,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
           value={filterStage}
           onChange={(e) => setFilterStage(e.target.value)}
           style={{
-            padding: "6px 10px",
+            padding: "10px 12px",
             background: D.bg,
             border: `1px solid ${D.border}`,
             borderRadius: 8,
