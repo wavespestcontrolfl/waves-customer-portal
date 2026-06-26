@@ -77,8 +77,29 @@ go-live (no local client build exists; it was verified only by static analysis +
 the Codex review). It MUST be exercised end-to-end before any real payer pays
 online.
 
-From the **Sent** test statement, open its pay link (the `token` →
-`https://<portal>/pay/statement/<token>`):
+**Getting the pay URL.** The close/send (`payer.statement.sent`) email has **no
+online-pay CTA** — by design, only the dunning/followup reminder carries one
+(migration `20260622000003_payer_statement_followup_cta`), and the admin sheet
+does not surface the link either. So fetch the statement's token directly and
+build the URL yourself:
+
+```
+select id, statement_number, status, token from payer_statements where status = 'sent' order by id desc limit 5;
+-- pay URL = https://<portal>/pay/statement/<token>
+```
+
+(Or back-date a statement's `due_date` and run the dunning cron once — §4 — to
+receive the reminder email that contains the CTA link.)
+
+**One settling payment per statement.** A statement is only payable while
+`finalized`/`sent`/`viewed`; the moment it settles it becomes `paid` and the pay
+page returns `409 "already paid"`. So **each test that actually settles money
+needs its own fresh Sent statement** — accrue → close → send a new one for the
+credit-card, ACH, and offline-reconcile cases. The non-settling checks (debit
+surcharge display, failed-card→ACH switch, redirect return) can share one Sent
+statement *until* one of them settles it.
+
+From a **Sent** test statement, open its pay link:
 
 - [ ] **Card (credit) → settles.** Pay with a real credit card (small amount).
       Verify: the surcharge line shows, the charge lands on the **payer's**
@@ -134,35 +155,42 @@ Once §2–§4 pass:
 ## Rollback
 
 `GATE_PAYER_STATEMENTS=false` instantly reverts to per-visit billing for **new**
-visits, and a `Sent`/`Paid` statement is a historical document that is
-unaffected. No data is destroyed by toggling the gate.
+visits, and a fully **`paid`** (or `void`) statement is a historical document
+that is unaffected. No data is destroyed by toggling the gate.
 
-**But a clean rollback is only clean if no invoice has accrued to an OPEN
-statement yet.** Once invoices are attached to an OPEN statement, flipping the
-gate off **strands** them rather than freeing them:
+**But a clean rollback is only clean if no statement is still carrying an unpaid
+balance.** This is *not* just OPEN statements — any statement that has not
+reached `paid`/`void` (i.e. `open`, `finalized`, `sent`, `viewed`, or a
+`processing` payment in flight) is **stranded**, not freed, when the gate flips
+off:
 
-- the admin close/send/reconcile paths are gated and return `403`
-  (`server/routes/admin-payers.js`), so you can't deliver the statement; and
+- the public statement pay page 404s (`server/routes/pay-statement.js`), so the
+  AP can no longer pay a `sent`/`viewed` statement online;
+- the admin close/send/reconcile paths return `403`
+  (`server/routes/admin-payers.js`), so you can't deliver or settle it; and
+  statement-level dunning becomes a no-op (`server/services/payer-statement-followups.js`),
+  so it won't even be chased;
 - the individual invoice email and pay surfaces refuse any invoice carrying a
   `payer_statement_id` — and those guards are **gate-independent, fail-closed**
   (`server/services/invoice-email.js`, `server/routes/pay-v2.js`), so the child
   invoices can't be billed one-by-one either.
 
-So those balances sit uncollectable until you act. To roll back cleanly when an
-OPEN statement has already accrued lines, do one of:
+So those balances sit uncollectable until you act. To roll back cleanly when any
+statement still owes, do one of:
 
-1. **Drain first (preferred).** Leave the gate **on**, **Close & send** the OPEN
-   statement(s), let them settle (or **Record offline payment**), then flip the
-   gate off once nothing is `Open (accruing)`. During the §2/§3 dry-run this just
-   means finishing the test statement you created instead of abandoning it.
+1. **Drain first (preferred).** Leave the gate **on**, finish every unpaid
+   statement: **Close & send** anything still `open`, then let each `sent`/
+   `viewed` statement settle online or **Record offline payment**, and let any
+   `processing` ACH clear — until nothing remains that isn't `paid`/`void`. Then
+   flip the gate off. During the §2/§3 dry-run this just means finishing (not
+   abandoning) the test statements you created.
 2. **Detach.** If you must flip off immediately, clear `payer_statement_id` on
-   the affected child invoices (and reopen/void the empty statement) so they
-   become individually billable again under per-visit billing. Treat this as a
+   the affected child invoices (and void the now-empty statement) so they become
+   individually billable again under per-visit billing. Treat this as a
    deliberate, audited DB step — there is no UI for it.
 
-Sanity check before flipping off:
-`select id, payer_id, status from payer_statements where status = 'open';` — if
-that returns rows with lines, drain or detach before rollback.
+Sanity check before flipping off — any row here must be drained or detached:
+`select id, payer_id, status from payer_statements where status not in ('paid','void');`
 
 ## Still deferred (not blockers for go-live)
 
