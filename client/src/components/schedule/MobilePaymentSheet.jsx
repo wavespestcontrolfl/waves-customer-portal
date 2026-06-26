@@ -44,6 +44,7 @@ export default function MobilePaymentSheet({
   onChargeSuccess,
   onPrepaidRecorded,
   desktopVisible = false,
+  hideInvoiceTender = false,
 }) {
   const [charging, setCharging] = useState(false);
   const [sendingInvoice, setSendingInvoice] = useState(false);
@@ -100,13 +101,18 @@ export default function MobilePaymentSheet({
     { key: 'check', label: 'Check', onClick: () => setShowCheck(true) },
     { key: 'manual_cc', label: 'Manual Credit Card Entry', onClick: () => setShowManualCard(true) },
     { key: 'card_on_file', label: 'Card on File', onClick: () => setShowCardOnFile(true) },
-    {
+    // The Invoice (send pay-link) tender is suppressed for the deferred annual-prepay
+    // charge flow: that invoice carries no annual_prepay_terms row (the term is
+    // created on payment), so sending it would leave a pending invoice with no
+    // payment_pending term to suppress monthly billing. Sending-with-term is the
+    // modal's separate "Create & send invoice" action.
+    ...(hideInvoiceTender ? [] : [{
       key: 'invoice',
       label: 'Invoice',
       subtitle: sendingInvoice ? 'Sending…' : 'Send SMS + email',
       onClick: handleSendInvoice,
       disabled: sendingInvoice,
-    },
+    }]),
   ];
 
   return (

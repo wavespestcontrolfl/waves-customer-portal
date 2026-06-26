@@ -97,6 +97,7 @@ export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
     return (
       <MobilePaymentSheet
         desktopVisible
+        hideInvoiceTender
         service={{ customerId: data.customer?.id || customerId, customerName }}
         invoiceId={paymentInvoice.id}
         invoiceToken={paymentInvoice.token}
@@ -104,7 +105,6 @@ export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
         onClose={onClose}
         onChargeSuccess={() => { onSaved?.(); onClose?.(); }}
         onPrepaidRecorded={() => { onSaved?.(); onClose?.(); }}
-        onInvoiceSent={() => { onSaved?.(); onClose?.(); }}
       />
     );
   }
