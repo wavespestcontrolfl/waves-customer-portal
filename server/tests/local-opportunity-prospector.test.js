@@ -96,6 +96,25 @@ describe('local-opportunity-prospector', () => {
     expect(types).toEqual(new Set(['sponsorship', 'event', 'chamber', 'community', 'podcast']));
   });
 
+  test('fetches all market×query SERPs through a bounded concurrency pool', async () => {
+    let inFlight = 0, maxInFlight = 0, calls = 0;
+    const dfs = {
+      serpOrganic: async () => {
+        calls++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return { tasks: [{ result: [{ items: [] }] }] };
+      },
+      serpMaps: async () => ({ tasks: [{ result: [{ items: [] }] }] }),
+    };
+    const markets = [{ label: 'A', location: 'a' }, { label: 'B', location: 'b' }];
+    const queries = Array.from({ length: 5 }, (_, i) => ({ type: 'community', tmpl: (c) => `${c} q${i}` }));
+    await discoverLocalOpportunities({ markets, queries, concurrency: 3, dfs });
+    expect(calls).toBe(10);                    // every market×query issued (2×5)
+    expect(maxInFlight).toBeLessThanOrEqual(3); // never exceeds the pool size
+    expect(maxInFlight).toBeGreaterThan(1);     // genuinely ran in parallel (not serial)
+  });
+
   test('excludeOwned drops domains we already have an active link from', () => {
     const candidates = [
       { domain: 'veniceyouthbaseball.org' },

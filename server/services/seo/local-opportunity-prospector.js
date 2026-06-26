@@ -94,6 +94,19 @@ function isExcludedHost(host, ownHosts = OWN_HOSTS) {
   return false;
 }
 
+// Bounded-concurrency async map — runs at most `limit` of `fn` at once over `items`.
+async function mapPool(items, limit, fn) {
+  const n = Math.max(1, Math.min(limit || 1, items.length));
+  let idx = 0;
+  const worker = async () => {
+    while (idx < items.length) {
+      const cur = idx++;
+      await fn(items[cur], cur);
+    }
+  };
+  await Promise.all(Array.from({ length: n }, worker));
+}
+
 /**
  * discoverLocalOpportunities → ranked candidate list. Each entry:
  *   { domain, opportunity_type, opportunity_types[], source_url, title,
@@ -109,6 +122,7 @@ async function discoverLocalOpportunities({
   queries = OPPORTUNITY_QUERIES,
   perQuery = 10,
   ownHosts = OWN_HOSTS,
+  concurrency = 6,
   dfs = dataforseo,
 } = {}) {
   const tally = new Map();
@@ -134,22 +148,29 @@ async function discoverLocalOpportunities({
     tally.set(host, cur);
   };
 
+  // Each market×query SERP lookup is independent, and a DataForSEO live call is
+  // ~10s — so a fully serial sweep (markets × queries) runs ~10 min, long enough to
+  // outlast a remote shell session (the only place this runs in prod). Fetch through
+  // a bounded concurrency pool instead. `tally` is mutated only at await boundaries
+  // (Node is single-threaded), so concurrent bumps are safe and the aggregate is
+  // order-independent. dataforseo.request already backs off on 429.
+  const tasks = [];
   for (const m of markets) {
-    for (const q of queries) {
-      const keyword = q.tmpl(m.label);
-      try {
-        const org = itemsOf(await dfs.serpOrganic(keyword, m.location))
-          .filter((i) => i.type === 'organic')
-          .slice(0, perQuery);
-        org.forEach((i, idx) => bump(normHost(i.domain || i.url), {
-          market: m.label, query: keyword, type: q.type,
-          position: i.rank_absolute || idx + 1, url: i.url, title: i.title,
-        }));
-      } catch (err) {
-        logger.warn(`[local-opportunity] ${m.label} / "${keyword}" failed: ${err.message}`);
-      }
-    }
+    for (const q of queries) tasks.push({ m, q, keyword: q.tmpl(m.label) });
   }
+  await mapPool(tasks, concurrency, async ({ m, q, keyword }) => {
+    try {
+      const org = itemsOf(await dfs.serpOrganic(keyword, m.location))
+        .filter((i) => i.type === 'organic')
+        .slice(0, perQuery);
+      org.forEach((i, idx) => bump(normHost(i.domain || i.url), {
+        market: m.label, query: keyword, type: q.type,
+        position: i.rank_absolute || idx + 1, url: i.url, title: i.title,
+      }));
+    } catch (err) {
+      logger.warn(`[local-opportunity] ${m.label} / "${keyword}" failed: ${err.message}`);
+    }
+  });
 
   return [...tally.values()]
     .map((c) => ({
