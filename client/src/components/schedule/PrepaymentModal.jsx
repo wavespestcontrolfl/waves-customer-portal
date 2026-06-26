@@ -60,6 +60,21 @@ const CADENCES = [
   { value: 'monthly', label: 'Monthly', visits: 12 },
 ];
 
+// Default the coverage cadence/visit count to the customer's ACTUAL plan (the
+// service being completed). The annual-prepay engine honors an explicit
+// coverage_cadence + visit count, so defaulting a monthly/bi-monthly customer to
+// quarterly/4 would sell a full year that only stamps 4 visits — the rest would
+// re-bill. The operator can still override via the pills.
+function cadenceFromService(service) {
+  const p = String(
+    service?.recurringPattern || service?.recurring_pattern
+    || service?.serviceTypeDisplay || service?.serviceType || service?.service_type || '',
+  ).toLowerCase();
+  if (/bi-?monthly|every other month/.test(p)) return CADENCES.find((c) => c.value === 'bimonthly');
+  if (/month/.test(p)) return CADENCES.find((c) => c.value === 'monthly');
+  return CADENCES.find((c) => c.value === 'quarterly');
+}
+
 export default function PrepaymentModal({ service, customerId, customerName, monthlyRate, onClose, onSent }) {
   const cid = customerId || service?.customerId || service?.customer_id;
   const cname = customerName || service?.customerName || service?.customer_name || 'Customer';
@@ -69,11 +84,17 @@ export default function PrepaymentModal({ service, customerId, customerName, mon
     return Number.isFinite(r) && r > 0 ? String(Math.round(r * 12 * 100) / 100) : '';
   });
   const [serviceType, setServiceType] = useState(() => serviceDisplayName(service));
-  const [cadence, setCadence] = useState('quarterly');
-  const [visitCount, setVisitCount] = useState(4);
+  const initialCadence = cadenceFromService(service);
+  const [cadence, setCadence] = useState(initialCadence.value);
+  const [visitCount, setVisitCount] = useState(initialCadence.visits);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [note, setNote] = useState(null);
+
+  // Don't let a backdrop/× tap unmount the modal while the send is in flight —
+  // that hides the result (incl. the "created but not delivered" path) and can
+  // leave the operator unsure whether the invoice/term were created.
+  const requestClose = () => { if (!saving) onClose?.(); };
 
   // When the caller didn't pass a monthly rate (the completion screen has no
   // customer record loaded), fetch it so we can pre-fill the year's amount. The
@@ -140,7 +161,7 @@ export default function PrepaymentModal({ service, customerId, customerName, mon
 
   return (
     <div
-      onClick={onClose}
+      onClick={requestClose}
       className="fixed inset-0 z-[1200] flex items-end md:items-center justify-center"
       style={{ background: 'rgba(15,23,42,0.55)', padding: 16 }}
     >
@@ -158,7 +179,7 @@ export default function PrepaymentModal({ service, customerId, customerName, mon
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={requestClose}
             aria-label="Close"
             className="flex items-center justify-center rounded-full bg-white border border-hairline border-zinc-200 u-focus-ring"
             style={{ width: 32, height: 32, fontSize: 18, lineHeight: 1 }}

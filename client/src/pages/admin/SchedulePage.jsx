@@ -6800,6 +6800,15 @@ export function CompletionPanel({
   // the report or charges the year via Tap to Pay. Off = no change to completion.
   const [showPrepay, setShowPrepay] = useState(false);
   const { enabled: prepayAtCompletionFlag } = useFeatureFlagReady("prepay-at-completion");
+  // Minting an annual-prepay invoice is admin-only (requireAdmin). The admin app +
+  // flags endpoint also serve technician users, so gate the CTA on the admin role
+  // exactly like the Customer 360 prepay buttons — otherwise a tech hits a 403
+  // after filling the modal.
+  const prepayIsAdmin = (() => {
+    try { return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin"; }
+    catch { return false; }
+  })();
+  const showPrepayCta = prepayAtCompletionFlag && prepayIsAdmin;
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   const [servicePhotos, setServicePhotos] = useState([]);
@@ -8907,7 +8916,7 @@ export function CompletionPanel({
       // Keep the success overlay open when the annual-prepay CTA is available so
       // the operator can act on it — otherwise the ~1.2s auto-close unmounts the
       // button (and the prepay modal) mid-flow on the common no-recap path.
-      if (!result?.followupSuggestion?.required && !recapEligible && !prepayAtCompletionFlag) {
+      if (!result?.followupSuggestion?.required && !recapEligible && !showPrepayCta) {
         setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
       }
     } catch (e) {
@@ -9437,7 +9446,7 @@ export function CompletionPanel({
                   <PestRecapCard serviceId={service.id} />
                 </div>
               )}
-              {prepayAtCompletionFlag && (
+              {showPrepayCta && (
                 <button
                   type="button"
                   onClick={() => setShowPrepay(true)}
@@ -9446,7 +9455,7 @@ export function CompletionPanel({
                   Offer annual prepay
                 </button>
               )}
-              {recapEligible && !completionResult?.followupSuggestion?.required && (
+              {(recapEligible || showPrepayCta) && !completionResult?.followupSuggestion?.required && (
                 <button
                   type="button"
                   onClick={() => onClose(true)}
