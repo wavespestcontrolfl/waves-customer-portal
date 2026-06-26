@@ -9,6 +9,14 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Stop iOS Safari from auto-inflating text on rotate / standalone, so the
+   admin font renders at its intended size on iPhone instead of looking
+   oversized and inconsistent across tabs. */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 /* preflight is disabled, so border-width utilities have no effect without
    an explicit border-style. Force solid on hairline so it actually renders. */
 .border-hairline {

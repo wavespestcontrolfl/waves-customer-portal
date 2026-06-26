@@ -3473,7 +3473,7 @@ export default function Customer360ProfileV2({
       >
         {" "}
         <div
-          className="c360-panel bg-white w-full max-w-[900px] h-screen flex flex-col"
+          className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col"
           onClick={(e) => e.stopPropagation()}
         >
           {" "}
@@ -3492,7 +3492,7 @@ export default function Customer360ProfileV2({
       >
         {" "}
         <div
-          className="c360-panel bg-white w-full max-w-[900px] h-screen flex flex-col"
+          className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col"
           onClick={(e) => e.stopPropagation()}
         >
           {" "}
@@ -3801,7 +3801,7 @@ export default function Customer360ProfileV2({
       <div
         ref={panelRef}
         onClick={(e) => e.stopPropagation()}
-        className="c360-panel bg-white w-full max-w-[900px] h-screen flex flex-col overflow-y-auto text-zinc-900"
+        className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900"
       >
         {" "}
         <style>{`
@@ -4043,7 +4043,14 @@ export default function Customer360ProfileV2({
           </div>
           {/* Mobile header (< 768px) — per mobile-admin-audit PR #3 item 2:
               back / menu / Text pills on top, large name, three-stat row */}
-          <div className="c360-header-mobile px-4 pt-3 pb-3">
+          <div
+            className="c360-header-mobile px-4 pt-3 pb-3"
+            // Clear the iPhone notch/translucent status bar in standalone PWA
+            // mode so the back / Text / Call pills aren't hidden under it.
+            style={{
+              paddingTop: "calc(0.75rem + env(safe-area-inset-top, 0px))",
+            }}
+          >
             {" "}
             <div className="flex items-center justify-between mb-3">
               {" "}
