@@ -141,8 +141,19 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   const mode = await matcher.getMode();
   const cooldown = await matcher.getCooldownMinutes();
 
-  // Duplicate guard
+  // Duplicate guard — GPS jitter / repeat ENTERs for the same tech+customer
+  // within the cooldown must not start a second timer or re-process arrival.
   if (await matcher.isDuplicateEnter(tech.id, customer.id, cooldown)) {
+    // One exception: if a prior arrival already flipped THIS job on_property but
+    // its arrival SMS is still pending (guard NULL — a retryable first-send miss
+    // released it), let the idempotent retry run. Otherwise a transient
+    // provider/quiet-hours miss is stranded until a manual retap or an event
+    // after the cooldown clears. markOnProperty's CAS makes this a no-op once
+    // the guard is stamped, and gating on track_state === 'on_property' avoids
+    // flipping a still-scheduled (e.g. reminder-mode) job from a duplicate ENTER.
+    if (job && job.track_state === 'on_property' && !job.arrival_sms_sent_at) {
+      await markOnPropertyFromGeofence(job.id, eventTime, { actingTechId: tech.id });
+    }
     await matcher.logEvent({
       bouncie_imei: imei,
       technician_id: tech.id,

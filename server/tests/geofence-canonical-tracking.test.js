@@ -100,6 +100,65 @@ describe('geofence canonical tracking transitions', () => {
     );
   });
 
+  test('duplicate ENTER still retries the arrival SMS when this job is on_property with a NULL guard', async () => {
+    // A prior arrival flipped the job on_property but the first send was a
+    // retryable miss (guard released to NULL). A same-job ENTER inside the
+    // cooldown is a duplicate, but must still run the idempotent retry instead
+    // of being dropped until the cooldown clears.
+    matcher.isDuplicateEnter.mockResolvedValueOnce(true);
+
+    await geofenceHandler.handleArrival({
+      tech: { id: 'tech-1' },
+      customer: { id: 'cust-1' },
+      job: { id: 'job-1', track_state: 'on_property', arrival_sms_sent_at: null },
+      lat: 1, lng: 2,
+      eventTime: new Date('2026-05-05T12:00:00.000Z'),
+      imei: 'imei-1',
+      payload: {},
+    });
+
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('job-1', { actingTechId: 'tech-1' });
+    // Still logged as a duplicate (which isDuplicateEnter ignores), so it
+    // doesn't extend the dedup window or start a timer.
+    expect(matcher.logEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ action_taken: 'ignored_duplicate' }),
+    );
+  });
+
+  test('duplicate ENTER does NOT retry when the arrival guard is already stamped', async () => {
+    matcher.isDuplicateEnter.mockResolvedValueOnce(true);
+
+    await geofenceHandler.handleArrival({
+      tech: { id: 'tech-1' },
+      customer: { id: 'cust-1' },
+      job: { id: 'job-1', track_state: 'on_property', arrival_sms_sent_at: new Date() },
+      lat: 1, lng: 2,
+      eventTime: new Date('2026-05-05T12:00:00.000Z'),
+      imei: 'imei-1',
+      payload: {},
+    });
+
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+  });
+
+  test('duplicate ENTER does NOT flip a still-scheduled (reminder-mode) job', async () => {
+    matcher.isDuplicateEnter.mockResolvedValueOnce(true);
+
+    await geofenceHandler.handleArrival({
+      tech: { id: 'tech-1' },
+      customer: { id: 'cust-1' },
+      job: { id: 'job-1', track_state: 'scheduled', arrival_sms_sent_at: null },
+      lat: 1, lng: 2,
+      eventTime: new Date('2026-05-05T12:00:00.000Z'),
+      imei: 'imei-1',
+      payload: {},
+    });
+
+    // Gating on track_state === 'on_property' prevents a duplicate ENTER from
+    // prematurely flipping/arriving a job the tech hasn't started.
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+  });
+
   test('departure auto-complete routes through track_state without legacy service_tracking sync', async () => {
     const eventTime = new Date('2026-05-05T12:30:00.000Z');
 
