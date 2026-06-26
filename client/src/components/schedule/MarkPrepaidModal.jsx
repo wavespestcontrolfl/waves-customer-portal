@@ -6,6 +6,7 @@
 // Mobile-first layout — stays inside the admin V2 system (Tailwind zinc ramp).
 
 import { useState } from 'react';
+import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -54,6 +55,31 @@ function patternLabel(pattern) {
   return `${p} plan`;
 }
 
+// Friendly copy for when a prepayment was recorded but no receipt was sent. The
+// prepayment always saves; this only explains why the optional receipt didn't go.
+const RECEIPT_REASON_TEXT = {
+  disabled: 'Receipt sending isn’t enabled yet — the prepayment was still recorded.',
+  series_unsupported:
+    'For a whole plan, receipts go out with each visit rather than as one — the prepayment was recorded.',
+  no_chargeable_amount:
+    'This visit has no price set, so there was nothing to receipt — the prepayment was recorded.',
+  not_paid_in_full:
+    'The amount received doesn’t cover this visit in full, so no receipt was sent — the prepayment was recorded.',
+  payer_billed:
+    'This visit is billed to a third-party payer, so no homeowner receipt was sent — the prepayment was recorded.',
+  send_failed:
+    'The prepayment was recorded, but the receipt couldn’t be sent just now. You can resend it from the invoice.',
+  error: 'The prepayment was recorded, but the receipt couldn’t be sent just now.',
+};
+function receiptReasonText(receipt) {
+  const base = RECEIPT_REASON_TEXT[receipt?.reason]
+    || 'The prepayment was recorded, but no receipt was sent.';
+  if (receipt?.reason === 'not_paid_in_full' && receipt?.balance != null) {
+    return `${base} Balance remaining: $${Number(receipt.balance).toFixed(2)}.`;
+  }
+  return base;
+}
+
 // Default visit count used to seed the plan-total field when the operator
 // opens the modal on a recurring child. The server fans the input across the
 // ACTUAL sibling count when it saves — this is just a best-guess pre-fill.
@@ -97,6 +123,13 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
+  // Optional "email a paid receipt" — single visit only, gated behind the
+  // prepaid-receipt flag (fails closed). Default on; hidden in series mode.
+  const receiptFlag = useFeatureFlag('prepaid-receipt');
+  const [emailReceipt, setEmailReceipt] = useState(true);
+  const [receiptNote, setReceiptNote] = useState(null);
+  const [savedWithNote, setSavedWithNote] = useState(false);
+
   // When the operator flips between "this visit" and "the whole plan" we
   // re-seed the amount field so they don't have to clear it manually — single
   // visit pre-fills the per-visit price, series pre-fills the same default
@@ -114,6 +147,8 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
     ? Math.round((amt / previewVisits) * 100) / 100
     : 0;
 
+  const wantsReceipt = receiptFlag && !applyToSeries && emailReceipt;
+
   async function handleSave() {
     if (!Number.isFinite(amt) || amt < 0) {
       setError('Enter a valid amount');
@@ -121,16 +156,26 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
     }
     setSaving(true);
     setError(null);
+    setReceiptNote(null);
     try {
-      await adminFetch(`/admin/schedule/${service.id}/prepaid`, {
+      const result = await adminFetch(`/admin/schedule/${service.id}/prepaid`, {
         method: 'POST',
         body: JSON.stringify({
           amount: amt,
           method,
           note: note.trim() || null,
           applyToSeries: applyToSeries || undefined,
+          emailReceipt: wantsReceipt || undefined,
         }),
       });
+      // The prepayment saved. If a receipt was requested but didn't go out,
+      // keep the modal open to explain why; dismissing still refreshes the list.
+      if (wantsReceipt && result?.receipt && !result.receipt.sent) {
+        setReceiptNote(receiptReasonText(result.receipt));
+        setSavedWithNote(true);
+        setSaving(false);
+        return;
+      }
       onSaved?.();
     } catch (e) {
       setError(e.message || 'Failed to save');
@@ -279,6 +324,38 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
           placeholder="Check #, who took it, etc."
         />
 
+        {receiptFlag && !applyToSeries && (
+          <label
+            className="flex items-start gap-3 border border-hairline border-zinc-200 rounded-lg bg-zinc-50 cursor-pointer"
+            style={{ padding: 12, marginBottom: 14 }}
+          >
+            <input
+              type="checkbox"
+              checked={emailReceipt}
+              onChange={(e) => setEmailReceipt(e.target.checked)}
+              className="mt-1"
+              style={{ width: 16, height: 16, accentColor: '#18181B' }}
+            />
+            <div className="flex-1 min-w-0">
+              <div className="text-zinc-900 font-medium" style={{ fontSize: 14 }}>
+                Email a paid receipt to the customer
+              </div>
+              <div className="text-ink-secondary" style={{ fontSize: 12, marginTop: 2 }}>
+                Emails and texts a receipt once the prepayment covers this visit in full.
+              </div>
+            </div>
+          </label>
+        )}
+
+        {receiptNote && (
+          <div
+            className="border border-hairline border-zinc-200 rounded-lg bg-zinc-50 text-ink-secondary"
+            style={{ fontSize: 13, padding: 12, marginBottom: 12 }}
+          >
+            {receiptNote}
+          </div>
+        )}
+
         {error && (
           <div
             className="text-alert-fg"
@@ -290,12 +367,12 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
 
         <button
           type="button"
-          onClick={handleSave}
+          onClick={savedWithNote ? () => onSaved?.() : handleSave}
           disabled={saving}
           className="w-full rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
           style={{ padding: '14px 20px', fontSize: 15, opacity: saving ? 0.6 : 1 }}
         >
-          {saving ? 'Saving…' : isExistingPrepayment ? 'Save changes' : 'Save prepayment'}
+          {saving ? 'Saving…' : savedWithNote ? 'Done' : isExistingPrepayment ? 'Save changes' : 'Save prepayment'}
         </button>
       </div>
     </div>
