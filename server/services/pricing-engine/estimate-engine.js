@@ -25,7 +25,7 @@ function guardedLineCost(item) {
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
-  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
+  pricePestControl, priceCommercialPestPilot, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
@@ -570,9 +570,28 @@ function generateEstimate(input) {
   // Pest Control
   if (services.pest || serviceSelected(services.commercialPest)) {
     if (propertyIsCommercial) {
-      // PR 1 safety gate: commercial pest has no residential fallback. Even
-      // an explicit pilot flag stays manual until the pilot pricer is built.
-      addCommercialManualQuote('pest_control');
+      // Commercial pest has no residential fallback. The small-commercial pilot
+      // pricer auto-prices quarterly GPC off building sqft when the service opts
+      // in via `commercialPricingMode: 'small_commercial_pilot'`; otherwise (or
+      // when the pilot declines — disabled, no sqft, or above its ceiling) the
+      // line falls back to the manual-quote safety gate. The pilot never reaches
+      // a customer unreviewed: every pilot line is autoQuoteRequiresAdminApproval.
+      const pestOpts = serviceOptions(services.pest);
+      const commercialPestOpts = serviceOptions(services.commercialPest);
+      const pilotRequested =
+        pestOpts.commercialPricingMode === 'small_commercial_pilot' ||
+        commercialPestOpts.commercialPricingMode === 'small_commercial_pilot';
+      const pilotResult = pilotRequested
+        ? priceCommercialPestPilot(property, {
+            frequency: pestOpts.frequency || commercialPestOpts.frequency || 'quarterly',
+            commercialSubtype,
+          })
+        : null;
+      if (pilotResult) {
+        lineItems.push(pilotResult);
+      } else {
+        addCommercialManualQuote('pest_control');
+      }
     } else {
       const result = pricePestControl(property, {
         frequency: services.pest.frequency || 'quarterly',

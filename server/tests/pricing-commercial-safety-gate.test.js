@@ -523,7 +523,7 @@ describe('commercial safety gate in generateEstimate', () => {
     expect(estimate.lineItems.every((line) => line.quoteRequired)).toBe(true);
   });
 
-  test('small-commercial pilot flag still does not fall through to residential pricing in PR1', () => {
+  test('small-commercial pilot flag auto-prices pest but never falls through to residential pricing', () => {
     const estimate = generateEstimate(baseInput({
       propertyType: 'commercial',
       services: {
@@ -536,8 +536,23 @@ describe('commercial safety gate in generateEstimate', () => {
       'commercial_pest',
       'commercial_lawn',
     ]);
+    // The pilot prices pest with the commercial service key — never the
+    // residential pricer — and lawn has no pilot, so it stays a manual quote.
     expect(estimate.lineItems).not.toContainEqual(expect.objectContaining({ service: 'pest_control' }));
     expect(estimate.lineItems).not.toContainEqual(expect.objectContaining({ service: 'lawn_care' }));
+    const pest = estimate.lineItems.find((line) => line.service === 'commercial_pest');
+    expect(pest).toMatchObject({
+      commercialPricingMode: 'small_commercial_pilot',
+      quoteRequired: false,
+      autoQuoteRequiresAdminApproval: true,
+      taxable: true,
+      taxCategory: 'nonresidential_pest_control',
+    });
+    expect(pest.monthly).toBeGreaterThan(0);
+    expect(estimate.lineItems.find((line) => line.service === 'commercial_lawn')).toMatchObject({
+      quoteRequired: true,
+      commercialPricingMode: 'manual_quote',
+    });
   });
 
   test('commercial property type casing keeps commercial property profile for manual-quoted services', () => {
@@ -635,7 +650,7 @@ describe('commercial safety gate in generateEstimate', () => {
 });
 
 describe('commercial safety metadata survives the admin v2 adapter', () => {
-  test('commercial v2 payload maps to legacy manual quote spec items', () => {
+  test('commercial v2 payload WITHOUT the pilot flag maps to manual quote spec items', () => {
     const input = translateV2CallToV1Input(
       {
         propertyType: 'Commercial',
@@ -652,7 +667,6 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
         nearWater: 'NO',
       },
       ['PEST', 'LAWN'],
-      { commercialPricingMode: 'small_commercial_pilot' }
     );
 
     expect(input).toMatchObject({
@@ -689,6 +703,55 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
       quoteRequired: true,
       autoQuoteRequiresAdminApproval: true,
       pricingConfidence: 'LOW',
+    }));
+  });
+
+  test('commercial v2 payload WITH the pilot flag auto-prices pest (recurring) and leaves lawn a manual quote', () => {
+    const input = translateV2CallToV1Input(
+      {
+        propertyType: 'Commercial',
+        isCommercial: true,
+        commercialSubtype: 'office_retail',
+        homeSqFt: 5000,
+        lotSqFt: 12000,
+        stories: 1,
+        pool: 'NO',
+        poolCage: 'NO',
+        shrubDensity: 'MODERATE',
+        treeDensity: 'MODERATE',
+        landscapeComplexity: 'MODERATE',
+        nearWater: 'NO',
+      },
+      ['PEST', 'LAWN'],
+      { commercialPricingMode: 'small_commercial_pilot' }
+    );
+
+    const mapped = mapV1ToLegacyShape(generateEstimate(input));
+
+    // Pest is now a PRICED recurring service (5,000 sqft → $165/visit quarterly).
+    expect(mapped.recurring.services).toContainEqual(expect.objectContaining({
+      service: 'commercial_pest',
+      name: 'Commercial Pest Control',
+      isCommercial: true,
+      commercialPricingMode: 'small_commercial_pilot',
+      taxable: true,
+      taxCategory: 'nonresidential_pest_control',
+      autoQuoteRequiresAdminApproval: true,
+      countsTowardWaveGuardTier: false,
+      mo: 55,
+      perTreatment: 165,
+      visitsPerYear: 4,
+    }));
+    // ...and not duplicated as a manual-quote spec item.
+    expect(mapped.specItems).not.toContainEqual(expect.objectContaining({
+      service: 'commercial_pest',
+    }));
+    // Lawn has no pilot pricer — it stays a manual quote.
+    expect(mapped.specItems).toContainEqual(expect.objectContaining({
+      service: 'commercial_lawn',
+      quoteRequired: true,
+      requiresManualReview: true,
+      isCommercial: true,
     }));
   });
 

@@ -21,6 +21,13 @@
 
 const FREQUENCIES = ['monthly', 'quarterly', 'bimonthly', 'annual', 'one_time'];
 
+// FL nonresidential pest control is taxable (6% state + ~1% county surtax).
+// Mirrors the tax-calculator default for commercial when a county can't be
+// inferred. Used only to pre-fill the synthesized fallback proposal so a priced
+// commercial line shows tax without the operator hand-typing a rate; the
+// operator can still override the rate when authoring the proposal.
+const DEFAULT_COMMERCIAL_TAX_RATE = 0.07;
+
 // Occurrences per year for each recurring cadence. one_time is handled
 // separately (it never contributes to the recurring/annualized totals).
 const OCCURRENCES_PER_YEAR = {
@@ -109,22 +116,32 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
     ? estimateData.lineItems
     : [];
 
+  // A taxable commercial line (e.g. the small-commercial pest pilot) pre-fills a
+  // default FL commercial tax rate so the synthesized PDF shows tax. Residential
+  // lines stay non-taxable and the rate stays 0.
+  let hasTaxableCommercialLine = false;
+
   for (const line of engineLines) {
-    const monthly = num(line.monthlyPrice ?? line.monthly_price);
+    // Engine recurring lines carry `.monthly`/`.annual`; persisted bundles may
+    // use `monthlyPrice`/`monthly_price`. Accept all so a priced commercial line
+    // is not silently dropped.
+    const monthly = num(line.monthlyPrice ?? line.monthly_price ?? line.monthly ?? (num(line.annual) > 0 ? num(line.annual) / 12 : 0));
     const oneTime = num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime);
+    const taxable = line.taxable === true;
+    if (taxable) hasTaxableCommercialLine = true;
     if (monthly > 0) {
       lineItems.push(normalizeLineItem({
         description: line.displayName || line.name || line.service || 'Recurring service',
         unitPrice: monthly,
         frequency: 'monthly',
-        taxable: false,
+        taxable,
       }));
     } else if (oneTime > 0) {
       lineItems.push(normalizeLineItem({
         description: line.displayName || line.name || line.service || 'One-time service',
         unitPrice: oneTime,
         frequency: 'one_time',
-        taxable: false,
+        taxable,
       }));
     }
   }
@@ -145,6 +162,9 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
   return {
     enabled: false,
     synthesized: true,
+    ...(hasTaxableCommercialLine
+      ? { taxRate: DEFAULT_COMMERCIAL_TAX_RATE, taxLabel: 'FL sales tax (commercial)' }
+      : {}),
     buildings: [{ name: estimate.address || 'Service location', note: null, lineItems }],
   };
 }

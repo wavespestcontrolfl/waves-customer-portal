@@ -2,7 +2,7 @@
 // service-pricing.js — All service line pricing calculations
 // ============================================================
 const {
-  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
+  GLOBAL, PROPERTY_TYPE_ADJ, PEST, COMMERCIAL_PEST_PILOT, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
   TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
@@ -1560,6 +1560,96 @@ function pricePestControl(property, options = {}) {
     diagnosticMargin,
     diagnosticMarginFloorOk: diagnosticMargin === null ? null : diagnosticMargin >= GLOBAL.MARGIN_FLOOR,
     diagnosticPricingMode: 'shadow_only',
+  };
+}
+
+// ============================================================
+// SMALL-COMMERCIAL PEST PILOT (recurring, sqft-bracket)
+// ============================================================
+// Quarterly general-pest-control pricing for small commercial properties,
+// interpolated off building square footage. Invoked by estimate-engine ONLY
+// when the requested pest service carries `commercialPricingMode:
+// 'small_commercial_pilot'` and the pilot is enabled in constants
+// (COMMERCIAL_PEST_PILOT.enabled). Returns null when the pilot cannot price
+// (disabled, no usable building sqft, or above the pilot ceiling) so the caller
+// falls back to the manual-quote safety gate.
+//
+// The result mirrors the residential pest line shape enough for the engine's
+// total/recurring machinery to consume it (`annual`/`monthly`/`perApp`/
+// `visitsPerYear`), carries the commercial tax fields, and is flagged
+// `autoQuoteRequiresAdminApproval` — the operator must approve the pilot price
+// before it reaches a customer.
+
+// Resolve the building square footage the commercial pilot prices off. Commercial
+// "building sqft" is the gross structure area, so explicit building/footprint
+// fields win and living-area aliases are used as-is (no stories conversion).
+function resolveCommercialBuildingSqFt(property = {}) {
+  const aliases = [
+    ['buildingSqFt', property.buildingSqFt],
+    ['footprintSqFt', property.footprintSqFt],
+    ['footprint', property.footprint],
+    ['homeSqFt', property.homeSqFt],
+    ['livingAreaSqFt', property.livingAreaSqFt],
+  ];
+  for (const [source, value] of aliases) {
+    const parsed = positiveFiniteNumber(value);
+    if (parsed !== null) return { sqft: parsed, source };
+  }
+  return { sqft: null, source: null };
+}
+
+function priceCommercialPestPilot(property, options = {}) {
+  const cfg = COMMERCIAL_PEST_PILOT || {};
+  if (cfg.enabled !== true) return null;
+
+  const brackets = Array.isArray(cfg.quarterlyBrackets) ? cfg.quarterlyBrackets : [];
+  if (!brackets.length) return null;
+
+  const { sqft, source } = resolveCommercialBuildingSqFt(property);
+  // No usable building area, or larger than the pilot band → decline to price.
+  // A true large-commercial site needs a manual walk; let the caller fall back
+  // to the manual-quote safety gate.
+  if (sqft === null) return null;
+  if (positiveFiniteNumber(cfg.ceilingSqFt) && sqft > cfg.ceilingSqFt) return null;
+
+  const frequencyMeta = normalizePestFrequency(options.frequency || 'quarterly');
+  const frequency = frequencyMeta.frequency;
+  const freqMult = cfg.frequencyMultipliers?.[frequency] || 1.0;
+  const visitsPerYear = cfg.frequencies?.[frequency] || PEST.frequencies[frequency] || 4;
+
+  const quarterlyPerVisit = Math.max(
+    Number(cfg.floor) || 0,
+    interpolate(sqft, brackets.map(b => [b.sqft, b.price])),
+  );
+  const perApp = Math.round(quarterlyPerVisit * freqMult * 100) / 100;
+  const annual = Math.round(perApp * visitsPerYear * 100) / 100;
+  const monthly = Math.round(annual / 12 * 100) / 100;
+
+  return {
+    service: 'commercial_pest',
+    originalRequestedService: 'pest_control',
+    propertyType: 'commercial',
+    isCommercial: true,
+    commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+    commercialPricingMode: 'small_commercial_pilot',
+    label: 'Commercial Pest Control',
+    frequency,
+    visitsPerYear,
+    perApp,
+    annual,
+    monthly,
+    // Priced, but a pilot price is never sent without operator review.
+    quoteRequired: false,
+    requiresManualReview: false,
+    autoQuoteRequiresAdminApproval: true,
+    manualReviewReasons: [],
+    reason: `Small-commercial pilot — quarterly GPC priced off ${Math.round(sqft).toLocaleString()} sq ft building area.`,
+    taxable: true,
+    taxCategory: cfg.taxCategory || 'nonresidential_pest_control',
+    pricingConfidence: 'MEDIUM',
+    buildingSqFt: Math.round(sqft),
+    buildingSqFtSource: source,
+    quarterlyPerVisit: Math.round(quarterlyPerVisit * 100) / 100,
   };
 }
 
@@ -6772,7 +6862,7 @@ function applyRodentBundle(componentTotal, bundle) {
 }
 
 module.exports = {
-  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
+  pricePestControl, priceCommercialPestPilot, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,

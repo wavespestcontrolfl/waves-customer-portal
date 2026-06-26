@@ -579,6 +579,30 @@ function mapV1ToLegacyShape(v1Result) {
     pricingSource: lawnLI?.pricingSource,
   });
   svcAdd('Pest Control', pestLI, { service: 'pest_control' });
+  // Small-commercial pilot: a PRICED commercial pest line is a recurring service
+  // (not a manual-quote spec item). It does not count toward the WaveGuard tier
+  // and is not bundle-discountable; it carries the commercial tax fields so the
+  // customer-facing estimate/proposal can apply nonresidential sales tax.
+  const commPestLI = lineItems.find(
+    l => l.service === 'commercial_pest' && !l.quoteRequired && Number(l.annual) > 0,
+  );
+  if (commPestLI) {
+    svcAdd('Commercial Pest Control', commPestLI, {
+      service: 'commercial_pest',
+      isCommercial: true,
+      commercialPricingMode: commPestLI.commercialPricingMode || null,
+      commercialSubtype: commPestLI.commercialSubtype || null,
+      autoQuoteRequiresAdminApproval: !!commPestLI.autoQuoteRequiresAdminApproval,
+      taxable: commPestLI.taxable,
+      taxCategory: commPestLI.taxCategory || null,
+      pricingConfidence: commPestLI.pricingConfidence || null,
+      discountable: false,
+      discountEligible: false,
+      waveGuardDiscountEligible: false,
+      countsTowardWaveGuardTier: false,
+      detail: commPestLI.reason || null,
+    });
+  }
   svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)
@@ -632,6 +656,10 @@ function mapV1ToLegacyShape(v1Result) {
   const v1SpecItems = [];
   lineItems.forEach(li => {
     if (RECURRING_SERVICES.has(li.service)) return;
+    // Priced small-commercial pilot pest is mapped above as a recurring service;
+    // skip it here so it isn't also emitted as a one-time/specialty spec item.
+    // Manual-quote commercial pest (quoteRequired) still flows to spec items.
+    if (li.service === 'commercial_pest' && !li.quoteRequired && Number(li.annual) > 0) return;
     // Prefer the engine's own label when present (e.g. pest_initial_roach
     // emits 'Initial Native Roach Knockdown' vs 'Initial German Roach
     // Knockdown' — SERVICE_LABEL flattens both to a generic name and would

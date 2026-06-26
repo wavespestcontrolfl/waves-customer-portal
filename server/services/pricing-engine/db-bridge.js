@@ -494,6 +494,30 @@ function validatePestPricingConfig(snapshot = constants) {
     errors.push('PALM.internalCostBasis is required');
   }
 
+  // ── Small-commercial pest pilot ──
+  const commercialPilot = snapshot.COMMERCIAL_PEST_PILOT || {};
+  if (typeof commercialPilot.enabled !== 'boolean') {
+    errors.push('COMMERCIAL_PEST_PILOT.enabled must be boolean');
+  }
+  if (!isPositiveNumber(commercialPilot.floor)) {
+    errors.push('COMMERCIAL_PEST_PILOT.floor must be positive');
+  }
+  if (!isPositiveNumber(commercialPilot.ceilingSqFt)) {
+    errors.push('COMMERCIAL_PEST_PILOT.ceilingSqFt must be positive');
+  }
+  validateSortedBrackets(errors, 'COMMERCIAL_PEST_PILOT.quarterlyBrackets', commercialPilot.quarterlyBrackets, 'sqft', 'price');
+  for (const freq of ['quarterly', 'bimonthly', 'monthly']) {
+    const mult = commercialPilot.frequencyMultipliers?.[freq];
+    if (!isFiniteNumber(mult)) {
+      errors.push(`COMMERCIAL_PEST_PILOT.frequencyMultipliers.${freq} is required`);
+    } else if (!(Number(mult) > 0 && Number(mult) <= 1)) {
+      errors.push(`COMMERCIAL_PEST_PILOT.frequencyMultipliers.${freq} must be in (0, 1]`);
+    }
+    if (!isPositiveNumber(commercialPilot.frequencies?.[freq])) {
+      errors.push(`COMMERCIAL_PEST_PILOT.frequencies.${freq} must be positive`);
+    }
+  }
+
   return { valid: errors.length === 0, errors };
 }
 
@@ -1501,6 +1525,35 @@ async function syncConstantsFromDB(dbInstance) {
           // Drop the sqft=0 seed row (lookup uses first bracket ≥ target)
           const filtered = sorted[0]?.[0] === 0 ? sorted.slice(1) : sorted;
           if (filtered.length) constants.LAWN_BRACKETS[track] = filtered;
+        }
+      }
+    }
+
+    // ── Small-commercial pest pilot ──────────────────────────
+    // Admin-editable quarterly GPC brackets by building sqft. Replace the
+    // brackets whole-cloth (admin edits are authoritative); merge scalars.
+    if (config.commercial_pest_pilot && typeof config.commercial_pest_pilot === 'object') {
+      const c = config.commercial_pest_pilot;
+      const target = constants.COMMERCIAL_PEST_PILOT;
+      setBoolean(target, 'enabled', c.enabled);
+      setNumber(target, 'floor', c.floor, money);
+      setNumber(target, 'ceilingSqFt', c.ceilingSqFt, Number);
+      setString(target, 'taxCategory', c.taxCategory);
+      if (Array.isArray(c.quarterlyBrackets) && c.quarterlyBrackets.length) {
+        const brackets = c.quarterlyBrackets
+          .filter(b => isFiniteNumber(b?.sqft) && isFiniteNumber(b?.price))
+          .map(b => ({ sqft: Number(b.sqft), price: money(b.price) }))
+          .sort((a, b2) => a.sqft - b2.sqft);
+        if (brackets.length) target.quarterlyBrackets = brackets;
+      }
+      if (c.frequencyMultipliers && typeof c.frequencyMultipliers === 'object') {
+        for (const freq of ['quarterly', 'bimonthly', 'monthly']) {
+          setNumber(target.frequencyMultipliers, freq, c.frequencyMultipliers[freq]);
+        }
+      }
+      if (c.frequencies && typeof c.frequencies === 'object') {
+        for (const freq of ['quarterly', 'bimonthly', 'monthly']) {
+          setNumber(target.frequencies, freq, c.frequencies[freq], Number);
         }
       }
     }
