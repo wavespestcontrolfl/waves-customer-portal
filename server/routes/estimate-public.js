@@ -9395,6 +9395,10 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     services.boraCare || services.bora_care || inputs.svcBoracare ? 'bora_care' : null,
     services.trenching || inputs.svcTrenching ? 'termite_trenching' : null,
     services.rodent || inputs.svcRodent ? 'rodent' : null,
+    // Recurring foam can be the whole estimate; an engineInputs-only foam quote
+    // has no saved recurring.services row, so without this it falls through to
+    // the 'pest_control' default and the public page mislabels it as Pest Control.
+    services.foamRecurring || inputs.svcFoamRecurring ? 'foam_recurring' : null,
   ].filter(Boolean);
   return inferred.length > 1 ? 'bundle' : (inferred[0] || 'pest_control');
 }

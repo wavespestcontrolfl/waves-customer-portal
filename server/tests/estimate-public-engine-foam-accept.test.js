@@ -3,6 +3,7 @@ const {
   withSupplementedRecurringServices,
   foamFrequenciesFromEngineResult,
   buildPricingBundle,
+  deriveServiceCategory,
 } = require('../routes/estimate-public.js');
 const { _internals: { durationForService } } = require('../services/estimate-slot-availability.js');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine.js');
@@ -220,6 +221,21 @@ describe('engineInputs-only foam estimate is schedulable on accept (no stored re
     const supplemented = withSupplementedRecurringServices(inputsOnly());
     const { recurringSvcList } = acceptanceServiceLists(supplemented);
     expect(recurringSvcList.some((s) => (s.service || s.key) === 'foam_recurring')).toBe(true);
+  });
+
+  test('deriveServiceCategory infers foam_recurring from engineInputs (not Pest Control)', () => {
+    // No saved recurring.services rows — must infer from engineInputs.services.
+    expect(deriveServiceCategory(inputsOnly(), [], [])).toBe('foam_recurring');
+  });
+
+  test('the /data pricing section labels the quote as foam, not Pest Control', async () => {
+    const bundle = await buildPricingBundle({
+      id: 9, status: 'sent', monthly_total: 92.33, annual_total: 1108,
+      estimate_data: JSON.stringify(inputsOnly()),
+    });
+    const section = (bundle.services || [])[0] || {};
+    expect(section.key).toBe('foam_recurring');
+    expect(section.label).toBe('Recurring Foam Treatment');
   });
 });
 
