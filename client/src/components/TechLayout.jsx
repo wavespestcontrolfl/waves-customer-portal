@@ -93,7 +93,12 @@ export default function TechLayout() {
           <AddToHomeScreenHint />
           <button
             type="button"
-            onClick={() => navigate('/admin/login')}
+            onClick={() => {
+              const next = location.pathname.startsWith('/tech')
+                ? location.pathname
+                : '/tech';
+              navigate(`/admin/login?next=${encodeURIComponent(next)}`);
+            }}
             style={{
               width: '100%',
               padding: '14px 16px',
