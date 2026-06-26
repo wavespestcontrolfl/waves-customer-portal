@@ -177,13 +177,15 @@ describe('review sequences — cadence engine', () => {
     expect(mock.__state.rows.review_requests[0]).toMatchObject({ channel: 'email', template_key: 'review_request_email' });
   });
 
-  test('start is blocked when the customer is at the 3-ask cap', async () => {
+  test('start is blocked when the customer is at the 3-ask cap (counts both channels)', async () => {
     const mock = makeMock({
       customers: [{ id: 'm3', first_name: 'Cap', last_name: 'T', phone: '+19410000003', nearest_location_id: 'parrish' }],
-      sms_log: [
-        { customer_id: 'm3', message_type: 'review_request', created_at: new Date('2026-01-01') },
-        { customer_id: 'm3', message_type: 'review_request', created_at: new Date('2026-01-02') },
-        { customer_id: 'm3', message_type: 'review_request', created_at: new Date('2026-01-03') },
+      // 2 SMS asks + 1 email ask, all delivered — the cap counts review_requests
+      // across channels, not just sms_log.
+      review_requests: [
+        { customer_id: 'm3', channel: 'sms', sms_sent_at: new Date('2026-01-01') },
+        { customer_id: 'm3', channel: 'sms', sms_sent_at: new Date('2026-01-02') },
+        { customer_id: 'm3', channel: 'email', sent_at: new Date('2026-01-03') },
       ],
     });
     db.mockImplementation(mock);
@@ -192,6 +194,34 @@ describe('review sequences — cadence engine', () => {
     expect(out.started).toBe(false);
     expect(out.reason).toBe('at_cap');
     expect(mock.__state.rows.review_sequences).toHaveLength(0);
+  });
+
+  test('a terminal SMS failure (invalid number) is suppressed, not retried forever', async () => {
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, retryable: false, code: 'INVALID_NUMBER' });
+    const mock = makeMock({ customers: [{ id: 't1', first_name: 'Bad', last_name: 'N', phone: '+10000000000', nearest_location_id: 'bradenton' }] });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'cron' });
+
+    expect(out.terminal).toBe(true);
+    const row = mock.__state.rows.review_requests[0];
+    expect(row.status).toBe('suppressed');
+    expect(row.scheduled_for).toBeUndefined(); // not requeued
+  });
+
+  test('startReviewSequence reports started:false when the first touch immediately stops', async () => {
+    const mock = makeMock({
+      customers: [{ id: 's5', first_name: 'Opt', last_name: 'O', phone: '+19410000005', nearest_location_id: 'sarasota' }],
+      notification_prefs: [{ customer_id: 's5', review_request: false }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.startReviewSequence({ customerId: 's5', serviceType: 'pest control', techName: 'Adam' });
+
+    expect(out.started).toBe(false);
+    expect(out.reason).toBe('opted_out');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0].status).toBe('stopped');
   });
 
   test('an opted-out customer stops the sequence without sending', async () => {

@@ -405,6 +405,9 @@ const ELIGIBILITY_LABELS = {
   in_sequence: "Already in an active cadence",
   already_active: "Already in an active cadence",
   already_reviewed: "Already left a review",
+  reviewed: "Already left a review",
+  stopped: "Cadence stopped immediately (no reachable contact)",
+  send_in_progress: "Another send to this customer is in progress",
 };
 function eligibilityLabel(reasons = []) {
   if (!reasons.length) return "";

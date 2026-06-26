@@ -685,6 +685,23 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   const technician = await conn('technicians').where({ id: technicianId }).first();
   if (!technician) throw operationalError('Technician not found', 404, 'technician_not_found');
 
+  // If a PAID payout already binds this review, payroll is closed and the
+  // payout can't move — so DON'T relink google_reviews.customer_id either, or
+  // the review would point at a new customer while the bonus stays on the old
+  // one. Reject the correction up front, before any mutation.
+  const priorPayout = await conn('review_incentive_payouts').where({ google_review_id: review.id }).first();
+  if (priorPayout && priorPayout.status === 'paid') {
+    return {
+      payout: priorPayout,
+      created: false,
+      reattributed: false,
+      alreadyPaid: true,
+      reviewId: review.id,
+      customer: serializeCustomer(customer),
+      technician: { id: technician.id, name: technician.name || 'Technician' },
+    };
+  }
+
   await conn('google_reviews')
     .where({ id: review.id })
     .update({

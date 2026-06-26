@@ -480,20 +480,13 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
       if (!lastSvcMap[s.customer_id]) lastSvcMap[s.customer_id] = s;
     });
 
-    // Aggregate review_request SMS history (count + most recent) per customer
-    const askStats = customerIds.length > 0
-      ? await db('sms_log')
-          .whereIn('customer_id', customerIds)
-          .where('message_type', 'review_request')
-          .groupBy('customer_id')
-          .select('customer_id')
-          .count({ askCount: '*' })
-          .max({ lastAsked: 'created_at' })
-      : [];
-    const askMap = {};
-    askStats.forEach(a => {
-      askMap[a.customer_id] = { askCount: Number(a.askCount) || 0, lastAsked: a.lastAsked };
-    });
+    // Channel-complete review-ask history (count + most recent) per customer —
+    // counts delivered review_requests on BOTH SMS and email so the cooldown /
+    // 3-cap eligibility matches the send-time guards (audit: an sms_log-only
+    // count missed email asks).
+    const askMap = customerIds.length > 0
+      ? await ReviewService.getDeliveredAskStatsBatch(customerIds).catch(() => ({}))
+      : {};
 
     // ── Eligibility inputs (batched) ──────────────────────────────
     // Annotate each candidate with WHY it may not be sendable instead of
@@ -619,19 +612,15 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
     // can't slip two messages past the cap + cooldown (audit O7). The lock is
     // non-blocking — a second in-flight send to the same customer is rejected.
     const result = await runExclusive(`review-send:${customerId}`, async () => {
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
-      // Fail CLOSED: a DB error on the cap/cooldown read must NOT let an
-      // at-cap / in-cooldown customer through (audit B6) — let it throw to
-      // next(err) instead of the old silent catch→0.
-      const askCountRow = await db('sms_log')
-        .where({ customer_id: customer.id, message_type: 'review_request' })
-        .count('* as count').first();
-      const recentAsk = await db('sms_log')
-        .where({ customer_id: customer.id, message_type: 'review_request' })
-        .where('created_at', '>=', thirtyDaysAgo).first();
-      const askCount = Number(askCountRow?.count) || 0;
-      if (askCount >= 3) return { status: 409, payload: { error: 'Customer has already received 3 review requests' } };
-      if (recentAsk) return { status: 409, payload: { error: 'Customer received a review request in the last 30 days' } };
+      const thirtyDaysAgo = Date.now() - 30 * 86400000;
+      // Channel-complete cap/cooldown across SMS + email (audit). Fail CLOSED:
+      // a DB error here must NOT let an at-cap / in-cooldown customer through —
+      // it throws to next(err) rather than the old silent catch→0.
+      const stats = await ReviewService.getDeliveredAskStats(customer.id);
+      if (stats.count >= 3) return { status: 409, payload: { error: 'Customer has already received 3 review requests' } };
+      if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
+        return { status: 409, payload: { error: 'Customer received a review request in the last 30 days' } };
+      }
 
       const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
       const lastSvc = await db('scheduled_services')
@@ -734,12 +723,17 @@ router.post('/outreach/start-sequence', requireAdmin, async (req, res, next) => 
     const results = [];
     for (const customerId of ids) {
       try {
-        const r = await ReviewService.startReviewSequence({
-          customerId,
-          plan,
-          startedBy: req.technicianId,
-        });
-        results.push({ customerId, ...r });
+        // Take the SAME per-customer lock as /send-request so a Send + Cadence
+        // double-click (or a batch overlapping a manual send) can't both read
+        // the cap/cooldown before either Twilio log lands and double-ask.
+        const r = await runExclusive(`review-send:${customerId}`, () =>
+          ReviewService.startReviewSequence({ customerId, plan, startedBy: req.technicianId }),
+        );
+        if (r && r.skipped) {
+          results.push({ customerId, started: false, reason: 'send_in_progress' });
+        } else {
+          results.push({ customerId, ...r });
+        }
       } catch (err) {
         results.push({ customerId, started: false, reason: err.message });
       }

@@ -9,6 +9,8 @@
  *   - sequence_id    the review_sequences row this touch belongs to (null for
  *                    a one-off manual / automated post-service ask)
  *   - sequence_step  0-based index of the touch within its sequence plan
+ *   - custom_body    the operator's edited SMS copy (so a deferred/retried send
+ *                    re-renders THAT, not the template)
  *
  * All nullable / defaulted so existing rows and the unchanged post-service
  * auto-send path keep working with no backfill.
@@ -20,12 +22,14 @@ exports.up = async function up(knex) {
   const hasTemplateKey = await knex.schema.hasColumn('review_requests', 'template_key');
   const hasSequenceId = await knex.schema.hasColumn('review_requests', 'sequence_id');
   const hasSequenceStep = await knex.schema.hasColumn('review_requests', 'sequence_step');
+  const hasCustomBody = await knex.schema.hasColumn('review_requests', 'custom_body');
 
   await knex.schema.alterTable('review_requests', (t) => {
     if (!hasChannel) t.string('channel', 16).defaultTo('sms');
     if (!hasTemplateKey) t.string('template_key', 64);
     if (!hasSequenceId) t.uuid('sequence_id');
     if (!hasSequenceStep) t.integer('sequence_step');
+    if (!hasCustomBody) t.text('custom_body');
   });
 
   // Index sequence_id for the "touches in this sequence" lookups.
@@ -43,7 +47,7 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('review_requests'))) return;
-  const cols = ['sequence_step', 'sequence_id', 'template_key', 'channel'];
+  const cols = ['custom_body', 'sequence_step', 'sequence_id', 'template_key', 'channel'];
   for (const col of cols) {
     if (await knex.schema.hasColumn('review_requests', col)) {
       await knex.schema.alterTable('review_requests', (t) => t.dropColumn(col));

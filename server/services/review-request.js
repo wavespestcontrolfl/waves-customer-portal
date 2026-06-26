@@ -357,16 +357,29 @@ const ReviewService = {
     });
     const techName = request.tech_name || "Our team";
 
-    // Body source: when the row carries a chosen outreach template_key (manual
-    // Review Outreach send, or a cadence touch), render that template so a
-    // deferred/retried send keeps the operator's chosen copy instead of
-    // silently reverting to the canonical message. Otherwise fall back to the
-    // canonical sms_templates.review_request. If neither resolves, requeue.
+    // Body source priority so a deferred/retried send keeps the operator's
+    // approved copy instead of reverting:
+    //   1. custom_body — the operator's edited message (persisted on the row).
+    //   2. template_key — the chosen outreach template (manual or cadence touch).
+    //   3. canonical sms_templates.review_request.
+    // If none resolves, requeue.
     let body = null;
     const outreachTpl = request.template_key
       ? OUTREACH.getOutreachTemplate(request.template_key)
       : null;
-    if (outreachTpl) {
+    if (request.custom_body) {
+      // Edited copy always belongs to an ask, so guarantee the /rate link.
+      body = OUTREACH.renderOutreachBody(
+        request.custom_body,
+        {
+          first: contact.name || customer.first_name || "",
+          tech: techName,
+          service_type: request.service_type || "service",
+          review_url: reviewUrl,
+        },
+        { requireLink: true },
+      );
+    } else if (outreachTpl) {
       body = OUTREACH.renderOutreachBody(
         outreachTpl.body,
         {
@@ -1197,39 +1210,49 @@ const ReviewService = {
     const { getServiceContact } = require("./customer-contact");
     const contact = getServiceContact(customer);
 
-    // Load consent prefs once and resolve the channel OPT-OUT-AWARE: a customer
-    // who opted out of SMS but allows email should get the email touch instead
-    // of stalling the cadence as "opted out" (and vice-versa). The email
-    // library doesn't read notification_prefs, so this is also where email
-    // opt-out is enforced.
+    // Load consent prefs once. Channel resolution is OPT-OUT-AWARE and honors
+    // the per-type review_request_channel preference ('sms' | 'email' | 'both'):
+    // a customer who opted out of SMS (or set review requests to email) but
+    // allows email gets the email touch instead of stalling as "opted out".
     let prefs = null;
+    let prefsLookupFailed = false;
     try {
       prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
     } catch {
-      /* fail open to downstream guards */
+      prefsLookupFailed = true;
     }
     const reviewBlocked = !!prefs && prefs.review_request === false;
     const smsBlocked = reviewBlocked || (!!prefs && prefs.sms_enabled === false);
     const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false);
+    // SMS consent is re-checked downstream in sendCustomerMessage (fails closed
+    // there), so a prefs-read blip can still attempt SMS. Email has NO
+    // downstream consent gate, so fail CLOSED on a prefs-lookup failure.
     const canSms = !!contact.phone && !smsBlocked;
-    const canEmail = !!contact.email && !emailBlocked;
+    const canEmail = !!contact.email && !emailBlocked && !prefsLookupFailed;
 
-    let actualChannel = channel === "email" ? "email" : "sms";
+    // Per-type channel preference overrides the step's default channel intent.
+    const prefChannel = prefs && prefs.review_request_channel;
+    let intended = channel === "email" ? "email" : "sms";
+    if (prefChannel === "email") intended = "email";
+    else if (prefChannel === "sms") intended = "sms";
+
+    let actualChannel = intended;
     if (actualChannel === "sms" && !canSms) actualChannel = canEmail ? "email" : null;
     if (actualChannel === "email" && !canEmail) actualChannel = canSms ? "sms" : null;
     if (!actualChannel) {
-      const optedOut = reviewBlocked || (channel === "email" ? emailBlocked : smsBlocked);
+      const optedOut = reviewBlocked || (intended === "email" ? emailBlocked : smsBlocked);
       return { ok: false, reason: optedOut ? "opted_out" : "no_contact", blocked: optedOut, terminal: true };
     }
 
     // Effective template + what we RECORD for analytics. A manual send with no
-    // chosen template defaults to the standard friendly ask (audit P1 — the
-    // table/batch Send buttons pass neither templateId nor body). Email touches
-    // always render the review_request_email DB template, so we record THAT as
-    // the template for honest per-template attribution (audit: email steps were
-    // recorded under their SMS plan key but rendered a different body).
+    // chosen template defaults to the standard friendly ask (audit P1). Email
+    // touches always render the review_request_email DB template, so we record
+    // THAT for honest per-template attribution. An edited SMS body is persisted
+    // (custom_body) so a quiet-hours/provider retry re-sends the operator's copy
+    // rather than reverting to the template.
     const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
     const recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
+    const persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
 
     const token = generateToken();
     const [request] = await db("review_requests")
@@ -1244,6 +1267,7 @@ const ReviewService = {
         triggered_by: triggeredBy,
         channel: actualChannel,
         template_key: recordedTemplateKey,
+        custom_body: persistedBody,
         sequence_id: sequenceId,
         sequence_step: sequenceStep,
         status: "pending",
@@ -1283,9 +1307,13 @@ const ReviewService = {
       await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
       return { ok: false, reason: "no_template", terminal: true, requestId: request.id };
     }
-    const body = OUTREACH.renderOutreachBody(rawBody, vars, {
-      requireLink: rawBody.includes("{review_url}"),
-    });
+    // Whether a /rate link is required is determined by the SELECTED TEMPLATE,
+    // not the (possibly edited) body — so an operator who edits {review_url} out
+    // of an ask template still gets the link appended rather than sending an ask
+    // with no way to act on it. A pure custom body with no template is treated
+    // as an ask (require the link); the issue/check-in templates carry no link.
+    const requiresLink = tpl ? tpl.body.includes("{review_url}") : true;
+    const body = OUTREACH.renderOutreachBody(rawBody, vars, { requireLink: requiresLink });
     try {
       const result = await sendCustomerMessage({
         to: contact.phone,
@@ -1334,7 +1362,16 @@ const ReviewService = {
       }
       return { ok: false, deferred: true, nextAllowedAt: deferredRetryAt, channel, requestId: request.id, code: result?.code };
     }
-    if (result && result.blocked && result.code !== "CONSENT_LOOKUP_FAILED") {
+    // Terminal: a policy block (opt-out/suppression) OR a non-retryable provider
+    // failure (invalid / non-SMS-capable number). Suppress so a manual send
+    // isn't rescheduled every 5 min and a cadence stops on an unfixable contact,
+    // rather than retrying forever. CONSENT_LOOKUP_FAILED is a transient DB blip,
+    // not terminal.
+    const terminalBlock =
+      result &&
+      result.code !== "CONSENT_LOOKUP_FAILED" &&
+      (result.terminal === true || (result.blocked && result.retryable !== true && !result.deferred));
+    if (terminalBlock) {
       await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
       return { ok: false, blocked: true, terminal: true, channel, requestId: request.id, code: result?.code };
     }
@@ -1374,13 +1411,18 @@ const ReviewService = {
       await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
       return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: result?.reason || "email_blocked" };
     } catch (err) {
-      if (manageRetryVia === "cron") {
-        await db("review_requests").where({ id: request.id }).update({ status: "pending" }).catch(() => {});
-      } else {
-        await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
-      }
       logger.error(`[review] outreach email failed (requestId=${request.id} errType=${err?.name || "Error"})`);
-      return { ok: false, retryable: true, channel: "email", requestId: request.id };
+      // There is NO standalone email retry driver — processScheduled only
+      // re-sends SMS (it excludes channel='email'). So:
+      //  • sequence touch → the sequence cron re-runs this step; mark 'failed'
+      //    and report retryable so _runSequenceStep reschedules next_run_at.
+      //  • one-off (cron) → nothing would ever retry it; mark 'failed' and report
+      //    a hard failure so the caller doesn't tell the operator it's "queued".
+      await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+      if (manageRetryVia === "sequence") {
+        return { ok: false, retryable: true, channel: "email", requestId: request.id };
+      }
+      return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_send_failed" };
     }
   },
 
@@ -1401,20 +1443,14 @@ const ReviewService = {
     // The first touch is an immediate ask, so enforce the same lifetime cap +
     // 30-day cooldown as a one-off send (the candidate list already filters on
     // these, but this endpoint can be hit directly / in bulk / racing a recent
-    // send). The cadence's own Day 3/7 touches still bypass the 30-day cooldown.
+    // send). Counts asks across BOTH channels (audit: SMS-only sms_log missed
+    // email asks). The cadence's own Day 3/7 touches still bypass the cooldown.
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
-    const askCountRow = await db("sms_log")
-      .where({ customer_id: customerId, message_type: "review_request" })
-      .count("* as count")
-      .first()
-      .catch(() => ({ count: 0 }));
-    if (Number(askCountRow?.count) >= 3) return { started: false, reason: "at_cap" };
-    const recentAsk = await db("sms_log")
-      .where({ customer_id: customerId, message_type: "review_request" })
-      .where("created_at", ">=", thirtyDaysAgo)
-      .first()
-      .catch(() => null);
-    if (recentAsk) return { started: false, reason: "cooldown" };
+    const stats = await this.getDeliveredAskStats(customerId).catch(() => ({ count: 0, lastAt: null }));
+    if (stats.count >= 3) return { started: false, reason: "at_cap" };
+    if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo.getTime()) {
+      return { started: false, reason: "cooldown" };
+    }
 
     const usePlan = Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN;
     let svcType = serviceType;
@@ -1463,6 +1499,12 @@ const ReviewService = {
 
     const firstTouch = await this._runSequenceStep(sequence.id);
     const refreshed = await db("review_sequences").where({ id: sequence.id }).first();
+    // If the immediate first touch stopped the cadence (no contact, just opted
+    // out, already reviewed), report it as NOT started so the route doesn't
+    // count a phantom "started" — the row is already stopped and nothing runs.
+    if (refreshed && refreshed.status === "stopped") {
+      return { started: false, reason: refreshed.stop_reason || "stopped", sequence: refreshed, firstTouch };
+    }
     return { started: true, sequence: refreshed, firstTouch };
   },
 
@@ -1597,6 +1639,48 @@ const ReviewService = {
     return { stopped: updated > 0 };
   },
 
+  /**
+   * Channel-complete "review asks delivered" stats for one customer — counts
+   * every review_requests row actually sent on SMS OR email (audit: the old
+   * sms_log-only count missed email asks, so a customer could exceed the cap /
+   * dodge the cooldown via email). Used by the cap + 30-day cooldown guards.
+   */
+  async getDeliveredAskStats(customerId) {
+    const countRow = await db("review_requests")
+      .where({ customer_id: customerId })
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .count("* as count")
+      .first();
+    const recent = await db("review_requests")
+      .where({ customer_id: customerId })
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .orderByRaw("COALESCE(sms_sent_at, sent_at) DESC")
+      .first();
+    return {
+      count: Number(countRow?.count) || 0,
+      lastAt: recent ? recent.sms_sent_at || recent.sent_at : null,
+    };
+  },
+
+  /** Batched getDeliveredAskStats for the candidate list. */
+  async getDeliveredAskStatsBatch(ids = []) {
+    if (!ids.length) return {};
+    const rows = await db("review_requests")
+      .whereIn("customer_id", ids)
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .groupBy("customer_id")
+      .select(
+        "customer_id",
+        db.raw("COUNT(*) AS count"),
+        db.raw("MAX(COALESCE(sms_sent_at, sent_at)) AS last_at"),
+      );
+    const map = {};
+    rows.forEach((r) => {
+      map[r.customer_id] = { askCount: Number(r.count) || 0, lastAsked: r.last_at };
+    });
+    return map;
+  },
+
   /** Map of customerId → active sequence summary (for candidate annotation). */
   async getActiveSequencesForCustomers(ids = []) {
     if (!ids.length) return {};
@@ -1629,11 +1713,15 @@ const ReviewService = {
     // BOTH families so the funnel reflects real conversions on either flow.
     // "Directed to Google" = a promoter (score 8-10 → Google redirect) or the
     // legacy redirect flag.
+    // A bare 8-10 score TAP stores category='promoter' with no submitted_at and
+    // no Google redirect (review-gate.js /score). Those drafts must NOT count as
+    // rated/promoter/Google-directed, or the dashboard overstates conversions —
+    // so the live-flow promoter is gated on submitted_at.
     const SENT_SQL = "(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)";
     const RATED_SQL = "(submitted_at IS NOT NULL OR rated_at IS NOT NULL)";
     const OPENED_SQL = "(opened_at IS NOT NULL OR submitted_at IS NOT NULL OR rated_at IS NOT NULL)";
-    const PROMOTER_SQL = "(category = 'promoter' OR rating >= 7)";
-    const REVIEWED_SQL = "(redirected_to_google = true OR category = 'promoter')";
+    const PROMOTER_SQL = "((category = 'promoter' AND submitted_at IS NOT NULL) OR rating >= 7)";
+    const REVIEWED_SQL = "(redirected_to_google = true OR (category = 'promoter' AND submitted_at IS NOT NULL))";
 
     const [funnel] = await db("review_requests")
       .where("created_at", ">=", since)
@@ -1743,8 +1831,12 @@ const ReviewService = {
       // (score 8-10 / category 'promoter' / rating ≥7) are the ones directed to
       // Google.
       const nps = r.score ?? r.rating ?? null;
-      const isPromoter = r.category === "promoter" || r.redirected_to_google === true || (r.rating != null && r.rating >= 7);
       const isRated = r.submitted_at != null || r.rated_at != null;
+      // Same submitted-gate as the funnel: a score-tap draft isn't a promoter.
+      const isPromoter =
+        r.redirected_to_google === true ||
+        (r.category === "promoter" && r.submitted_at != null) ||
+        (r.rating != null && r.rating >= 7);
       let type = "sent";
       let msg;
       if (isPromoter) {

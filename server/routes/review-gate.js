@@ -47,6 +47,19 @@ router.get('/:token', async (req, res, next) => {
       return res.status(410).json({ error: 'This review link has expired' });
     }
 
+    // Stamp the first open so the Review Outreach funnel's open-rate reflects
+    // real link engagement, not just final submissions. Non-blocking.
+    try {
+      const updates = { open_count: (request.open_count || 0) + 1 };
+      if (!request.opened_at) {
+        updates.opened_at = new Date();
+        if (request.status === 'sent') updates.status = 'opened';
+      }
+      await db('review_requests').where({ id: request.id }).update(updates);
+    } catch (err) {
+      logger.warn(`[review-gate] open stamp failed: ${err.message}`);
+    }
+
     // Already submitted
     if (request.status === 'submitted') {
       return res.status(200).json({ alreadySubmitted: true, message: 'You already submitted feedback — thank you!' });
