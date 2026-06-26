@@ -175,9 +175,10 @@ async function generateAlerts(customerId, scoreData) {
       // The SELECT above is the fast path; the insert is also made atomically
       // idempotent so two concurrent rescores for the same customer (e.g. two
       // inbound SMS webhooks) can't both create an active alert of this type.
-      // Partial unique index customer_health_alerts_active_uniq enforces one
-      // active (new/acknowledged) row per (customer_id, alert_type); the loser
-      // hits 23505 and is skipped.
+      // Partial unique index customer_health_alerts_active_rule_uniq enforces
+      // one active (new/acknowledged) row per (customer_id, alert_type) for the
+      // RULE types this function emits; the loser hits 23505 and is skipped.
+      // (Operational alerts from other paths are out of that index's scope.)
       let inserted;
       try {
         [inserted] = await db('customer_health_alerts').insert(alert).returning('*');

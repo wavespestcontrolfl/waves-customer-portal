@@ -53,17 +53,23 @@ async function rescoreOnInboundMessage(customerId, { source = 'inbound' } = {}) 
     const result = await customerHealth.scoreCustomer(customerId);
     if (!result) return null;
 
-    // Alert the owner once on a real crossing into critical. Two guards:
+    // Alert the owner once on a real crossing into critical. Guards:
     //  - priorRisk !== 'critical' — it's an actual transition, not an
     //    already-critical customer (nightly/Stripe/pre-enable);
+    //  - ADAM_PHONE present — checked BEFORE claiming so a missing recipient
+    //    (alerts disabled) doesn't permanently burn the claim;
     //  - claimCriticalAlert() — ATOMIC, so two concurrent inbound texts that
     //    both observe a non-critical prior can't both alert: exactly one wins
     //    the `critical_alert_sent_at IS NULL` claim.
-    // The canonical scorer clears the claim column whenever the customer is not
+    // On a send failure the claim is released so a later text retries. The
+    // canonical scorer clears the claim column whenever the customer is not
     // critical, so a later re-entry can claim and alert again. (The nightly
     // pipeline doesn't run this path, so it never fires the live alert.)
-    if (result.churnRisk === 'critical' && priorRisk !== 'critical' && await claimCriticalAlert(customerId)) {
-      await sendCriticalChurnAlert(customerId, result, source);
+    if (result.churnRisk === 'critical' && priorRisk !== 'critical' && process.env.ADAM_PHONE) {
+      if (await claimCriticalAlert(customerId)) {
+        const delivered = await sendCriticalChurnAlert(customerId, result, source);
+        if (!delivered) await releaseCriticalAlert(customerId);
+      }
     }
 
     return result;
@@ -94,13 +100,15 @@ async function claimCriticalAlert(customerId) {
 // Owner SMS the instant a customer drops to critical. Mirrors the nightly
 // churn-alert format (retention-engine) but marked "(live)" and carrying no
 // outreach draft — it is an immediate heads-up, not the morning action plan.
+// Returns true iff the alert was delivered (so the caller can release the
+// claim and retry on failure).
 async function sendCriticalChurnAlert(customerId, result, source = 'inbound') {
   const adamPhone = process.env.ADAM_PHONE;
-  if (!adamPhone) return;
+  if (!adamPhone) return false;
 
   try {
     const customer = await db('customers').where('id', customerId).first();
-    if (!customer) return;
+    if (!customer) return false;
 
     const TwilioService = require('../twilio');
     const top = (result.churnSignals || [])[0];
@@ -113,10 +121,26 @@ async function sendCriticalChurnAlert(customerId, result, source = 'inbound') {
       + `Trigger: ${trigger}\n`
       + `📞 ${customer.phone || 'no phone on file'}`;
 
-    await TwilioService.sendSMS(adamPhone, body, { messageType: 'internal_alert' });
+    const sendResult = await TwilioService.sendSMS(adamPhone, body, { messageType: 'internal_alert' });
+    if (sendResult && sendResult.sent === false) return false; // soft failure (blocked/undelivered)
     logger.info(`[event-rescore] live churn alert sent for ${customerId} (source: ${source})`);
+    return true;
   } catch (err) {
     logger.error(`[event-rescore] critical alert failed for ${customerId}: ${err.message}`);
+    return false;
+  }
+}
+
+// Release the live-alert claim so a later inbound text retries — used when the
+// send failed after the claim was won (no recipient / Twilio error).
+async function releaseCriticalAlert(customerId) {
+  try {
+    await db('customer_health_scores')
+      .where('customer_id', customerId)
+      .where('churn_risk', 'critical')
+      .update({ critical_alert_sent_at: null });
+  } catch (err) {
+    logger.debug(`[event-rescore] release alert claim failed for ${customerId}: ${err.message}`);
   }
 }
 

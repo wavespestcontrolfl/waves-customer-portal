@@ -34,17 +34,19 @@ function makeChain({ first, update } = {}) {
   return chain;
 }
 
-// customer_health_scores is hit twice: prior-risk read (first), then the
-// atomic claim (update → rows affected: 1 = won, 0 = lost). `claimChain` is
-// returned so tests can assert whether the claim was even attempted.
+// customer_health_scores is hit up to 3×: prior-risk read (first), the atomic
+// claim (update → rows affected: 1 = won, 0 = lost), and — only on a send
+// failure — the claim release (update). `claimChain`/`releaseChain` are
+// returned so tests can assert which fired.
 function wireDb({ priorRisk = null, claimResult = 0, customer } = {}) {
   const claimChain = makeChain({ update: claimResult });
+  const releaseChain = makeChain({ update: 1 });
   const queues = {
-    customer_health_scores: [makeChain({ first: priorRisk == null ? undefined : { churn_risk: priorRisk } }), claimChain],
-    customers: [makeChain({ first: customer })],
+    customer_health_scores: [makeChain({ first: priorRisk == null ? undefined : { churn_risk: priorRisk } }), claimChain, releaseChain],
+    customers: [makeChain({ first: customer }), makeChain({ first: customer })],
   };
   db.mockImplementation((table) => (queues[table]?.shift()) || makeChain());
-  return { claimChain };
+  return { claimChain, releaseChain };
 }
 
 const CUSTOMER = { id: 'c1', first_name: 'Pat', last_name: 'Lee', waveguard_tier: 'Gold', monthly_rate: '120', phone: '+19415551234' };
@@ -124,12 +126,23 @@ describe('rescoreOnInboundMessage', () => {
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
 
-  test('won claim but no ADAM_PHONE → no SMS, no throw', async () => {
+  test('no ADAM_PHONE → does NOT claim (claim not burned), no SMS, no throw', async () => {
     delete process.env.ADAM_PHONE;
-    wireDb({ priorRisk: 'high', claimResult: 1, customer: CUSTOMER });
+    const { claimChain } = wireDb({ priorRisk: 'high', claimResult: 1, customer: CUSTOMER });
     customerHealth.scoreCustomer.mockResolvedValue({ overall: 20, churnRisk: 'critical', churnSignals: [] });
 
     await expect(eventRescore.rescoreOnInboundMessage('c1', {})).resolves.toBeTruthy();
+    expect(claimChain.update).not.toHaveBeenCalled(); // deliverability checked before claiming
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('releases the claim when the alert send fails (so a later text retries)', async () => {
+    const { releaseChain } = wireDb({ priorRisk: 'high', claimResult: 1, customer: CUSTOMER });
+    customerHealth.scoreCustomer.mockResolvedValue({ overall: 20, churnRisk: 'critical', churnSignals: [] });
+    TwilioService.sendSMS.mockRejectedValueOnce(new Error('twilio down'));
+
+    await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
+
+    expect(releaseChain.update).toHaveBeenCalledWith({ critical_alert_sent_at: null });
   });
 });
