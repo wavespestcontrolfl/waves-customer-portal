@@ -643,6 +643,25 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Backlink outreach drafter failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // WEEKLY MONDAY 4:00AM — Proactive local-opportunity prospector: discover local
+  // sponsorship / charity-run / chamber / community-calendar / podcast link targets via
+  // SERP and promote the scored, lane-routed rows onto the prospect board (outreach +
+  // signup lanes). Gated localOpportunityProspector (default OFF in prod). Read-only
+  // discovery + dedupe-guarded inserts; NEVER sends — the outreach drafter / citation
+  // lanes act on the rows, still behind their own gates. runExclusive guards a deploy
+  // overlap from double-spending the SERP/contact API budget (inserts dedupe anyway).
+  cron.schedule('0 4 * * 1', async () => {
+    if (!isEnabled('localOpportunityProspector')) return;
+    logger.info('Running: local-opportunity prospector');
+    try {
+      await runExclusive('local-opportunity-prospector', async () => {
+        const promoter = require('./seo/local-opportunity-promoter');
+        const r = await promoter.run({});
+        logger.info(`[local-opportunity] cron: discovered=${r.discovered} promoted=${r.promoted} dupes=${r.dupes} held=${r.heldBack} byLane=${JSON.stringify(r.byLane)}`);
+      });
+    } catch (err) { logger.error(`Local-opportunity prospector failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY MONDAY 1:30AM — Full site technical audit
   cron.schedule('30 1 * * 1', async () => {
     if (!isEnabled('seoIntelligence')) return;
