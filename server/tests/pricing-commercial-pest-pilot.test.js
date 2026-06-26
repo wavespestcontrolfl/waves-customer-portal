@@ -151,6 +151,22 @@ describe('priceCommercialPestPilot through generateEstimate', () => {
     expect(pest.suggestedAnnual).toBeUndefined();
   });
 
+  test('a pilot GPC estimate bundled with another pest-family service downgrades to a manual quote', () => {
+    const estimate = generateEstimate(commercialInput({
+      services: {
+        pest: { frequency: 'quarterly', commercialPricingMode: 'small_commercial_pilot' },
+        mosquito: { tier: 'monthly12' },
+      },
+    }));
+    const pestLines = estimate.lineItems.filter((l) => l.service === 'commercial_pest');
+    // The pilot only knows GPC; with an extra pest-family service the whole
+    // commercial pest bundle becomes one manual quote (nothing suppressed).
+    expect(pestLines).toHaveLength(1);
+    expect(pestLines[0].commercialPricingMode).toBe('manual_quote');
+    expect(pestLines[0].quoteRequired).toBe(true);
+    expect(pestLines[0].suggestedAnnual).toBeUndefined();
+  });
+
   test('without the pilot flag a commercial pest estimate stays a manual quote', () => {
     const estimate = generateEstimate(commercialInput({
       services: { pest: { frequency: 'quarterly' } },

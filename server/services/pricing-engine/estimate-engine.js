@@ -556,8 +556,19 @@ function generateEstimate(input) {
   const propertyIsCommercial = profileIsCommercial || isCommercialProperty(propertyForCommercialDetection, commercialContext);
   const addCommercialManualQuote = (service) => {
     const result = buildCommercialManualQuoteResult(service, property, { commercialSubtype });
-    if (!lineItems.some((line) => line.service === result.service)) {
+    const existingIdx = lineItems.findIndex((line) => line.service === result.service);
+    if (existingIdx === -1) {
       lineItems.push(result);
+      return;
+    }
+    // A small-commercial pilot GPC line already occupies the commercial_pest
+    // slot, but additional pest-family commercial work (mosquito, termite,
+    // one-time pest, …) was also requested. The pilot only knows GPC, so
+    // downgrade the whole commercial pest bundle to a single manual quote (the
+    // pre-pilot safe behavior) rather than letting the extra work be silently
+    // suppressed behind the GPC suggestion.
+    if (lineItems[existingIdx].commercialPricingMode === 'small_commercial_pilot') {
+      lineItems[existingIdx] = result;
     }
   };
   const useCommercialManualQuote = (selected, service = 'pest_control') => {

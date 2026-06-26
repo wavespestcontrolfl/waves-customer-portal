@@ -1740,9 +1740,12 @@ function EstimateToolView() {
           onetimeLawnType: form.otLawnType || "FERT",
           commercialPricingMode: form.commercialPricingMode || "manual_quote",
           commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
-          // Omit when blank so the server can fall back to the lookup unit count;
-          // sending 0 would override that with "no units".
-          units: formIsCommercial && parseInt(form.units, 10) > 0 ? parseInt(form.units, 10) : undefined,
+          // Omit only when truly blank so the server can fall back to the lookup
+          // unit count. An explicit 0 IS sent, so an operator can clear an
+          // incorrect multi-family count and price with no per-unit reserve.
+          units: formIsCommercial && String(form.units ?? "").trim() !== "" && Number.isFinite(parseInt(form.units, 10))
+            ? Math.max(0, parseInt(form.units, 10))
+            : undefined,
         };
         if (form.svcInjection) {
           options.palmInjection = {
