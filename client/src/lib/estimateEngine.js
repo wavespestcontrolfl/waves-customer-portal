@@ -1274,7 +1274,10 @@ export function calculateEstimate(inputs) {
     svcExclusion,
   ];
   const preSlabOnly = !!svcPreslab && selectedServiceFlags.filter(Boolean).length === 1;
-  if (!preSlabOnly && homeSqFt <= 0 && lotSqFt <= 0) {
+  // Recurring foam is priced from drill points + cadence, not footprint, so a
+  // foam-only quote must not be gated on sqft (mirrors the V2 estimator).
+  const foamRecurringOnly = !!svcFoamRecurring && selectedServiceFlags.filter(Boolean).length === 1;
+  if (!preSlabOnly && !foamRecurringOnly && homeSqFt <= 0 && lotSqFt <= 0) {
     return { error: 'Enter home sq ft or lot size.' };
   }
 
@@ -2309,13 +2312,23 @@ export function calculateEstimate(inputs) {
     const ann = perVisit * visits;
     const mo = Math.round(ann / 12 * 100) / 100;
     const off = Math.round((1 - FOAM_REC_MULT[cad]) * 100);
-    R.foamRec = { perVisit, ann, mo, visits, cadence: cad, points: frPts, tierName: t.n, oneTimePerVisit, off };
+    const foamDurationMin = Math.round(t.l * 60);
+    R.foamRec = { perVisit, ann, mo, visits, cadence: cad, points: frPts, tierName: t.n, oneTimePerVisit, off, estimatedDurationMinutes: foamDurationMin };
     wgServices.push({
       name: 'Recurring Foam (' + FOAM_REC_LABEL[cad] + ')',
       service: 'foam_recurring',
       mo,
       perTreatment: perVisit,
       visitsPerYear: visits,
+      // Mirror the server mapper's recurring.services foam row so downstream
+      // (foamFrequenciesFromV1Services cadence/duration, prepay non-discountable
+      // floor) works off a client-saved legacy estimate too.
+      cadence: cad,
+      frequencyKey: cad,
+      estimatedDurationMinutes: foamDurationMin,
+      discountable: false,
+      discountEligible: false,
+      countsTowardWaveGuardTier: false,
       detail: t.c + ' cans | ' + visits + ' visits/yr | ' + off + '% off one-time',
     });
   }

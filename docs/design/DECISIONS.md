@@ -1004,3 +1004,13 @@ Three more, all in `estimate-public.js`, all on the engine-result ingestion + pe
 - **Foam label on per-treatment rows (P3)** (`shapeFrequencyEntry.labelForRecurring`): added a `foam_recurring → 'Recurring Foam Treatment'` case (+ `li.name` fallback) so an engine-backed mixed estimate doesn't render a raw `foam_recurring` row. The client `PriceCard` renders `perServiceTreatments[].label` directly (no category-keyed benefit map needed).
 
 **Verification:** 735 tests green across 29 suites; pipeline confirms the foam recurring row survives the supplement merge with cadence/visits/duration/name intact (bimonthly 20pt → 180min). Only `estimate-public.js` changed; no client rebuild. Public self-serve flow still wants a Railway preview.
+
+### Round 5b (Codex re-review on 7b5f10d) — booking label + legacy V1 engine parity
+
+(7b5f10d added the client foam benefit bullets in PriceCard via a parallel session; this branch was fast-forwarded onto it.) Three more:
+
+- **Foam booking label (P2)** (`slot-reservation.js` `canonicalServiceTypeForProfile`): a foam_recurring profile had no case, so a booked recurring-foam accept took the coarse `service_interest` ("Termite") as `scheduled_services.service_type`, and the seeder copied that to follow-ups → Termite-labeled foam appointments. Added `foam_recurring → 'Recurring Foam Treatment'`. (Kept `service_interest='Termite'` as the high-level family — foam IS termite work — now that the booking label no longer derives from it.)
+- **Foam-only legacy quote without sqft (P3)** (`estimateEngine.js`): the retained V1 client engine's size guard only bypassed `preSlabOnly`, so a foam-only quote returned "Enter home sq ft or lot size" before pricing. Added a `foamRecurringOnly` bypass mirroring the V2 estimator.
+- **Foam row metadata in legacy engine (P2)** (`estimateEngine.js`): the client-engine `recurring.services` foam row omitted `cadence`/`estimatedDurationMinutes`/`discountable:false`, so a legacy-saved foam quote would lose cadence/duration and could stack the prepay discount. Now mirrors the server mapper's row (cadence, frequencyKey, estimatedDurationMinutes, discountable:false, countsTowardWaveGuardTier:false).
+
+**Verification:** 325 slot/service-line/converter/public tests green across 12 suites; client `vite build` clean; a temp vitest confirmed the V1 engine prices a foam-only no-sqft quote and the row carries cadence/duration/discountable (bimonthly 20pt → 180min, discountable:false).

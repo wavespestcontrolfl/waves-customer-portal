@@ -125,6 +125,7 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
   if (key === 'mosquito') return 'Mosquito Treatment';
   if (key === 'tree_shrub') return 'Tree & Shrub';
   if (key === 'termite_bait') return 'Termite Bait';
+  if (key === 'foam_recurring') return 'Recurring Foam Treatment';
   if (key === 'palm_injection') return 'Palm Injection';
   if (key === 'rodent_trapping') return 'Rodent Trapping Service';
   if (key === 'rodent_exclusion') return 'Rodent Exclusion Service';
