@@ -3480,11 +3480,12 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
 // paid invoice see claim=0 and report alreadySent without re-texting. The claim
 // is released on a TOTAL send failure so the operator (or a retry) can resend.
 async function sendPrepaidReceiptForInvoice(invoice) {
-  const claimed = await db('invoices')
-    .where({ id: invoice.id })
-    .whereNull('receipt_sent_at')
-    .update({ receipt_sent_at: db.fn.now() });
-  if (claimed === 0) {
+  // Don't re-contact a customer who already got this receipt (a prior send, a
+  // manual resend, or the Stripe auto-receipt). Re-sends go through the invoices
+  // page /send-receipt (force). The newly-paid caller passes a fresh invoice with
+  // receipt_sent_at null, and the atomic paid transition guarantees a single
+  // caller there, so there is no concurrent-send race on the happy path.
+  if (invoice.receipt_sent_at) {
     return {
       sent: true,
       alreadySent: true,
@@ -3495,22 +3496,25 @@ async function sendPrepaidReceiptForInvoice(invoice) {
   }
   const { sendReceiptEmail } = require('../services/invoice-email');
   const InvoiceService = require('../services/invoice');
-  // force:true on both sends — the receipt_sent_at claim above is the dedupe, and
-  // it already stamped receipt_sent_at (which the un-forced SMS path would treat
-  // as already-sent).
-  const emailResult = await sendReceiptEmail(invoice.id).catch((err) => ({ ok: false, error: err.message }));
+  // Email dedupes durably on the idempotency key; the SMS path checks
+  // receipt_sent_at (still null here — we stamp only AFTER a channel succeeds, so
+  // a crash before delivery leaves it null and a retry still delivers).
+  const emailResult = await sendReceiptEmail(invoice.id, {
+    idempotencyKey: `prepaid_receipt:${invoice.id}`,
+  }).catch((err) => ({ ok: false, error: err.message }));
   let smsResult = { ok: false, skipped: true };
   try {
-    const r = await InvoiceService.sendReceipt(invoice.id, { force: true, recordActivity: false });
+    const r = await InvoiceService.sendReceipt(invoice.id, { recordActivity: false });
     smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
   } catch (err) {
     smsResult = { ok: false, error: err.message };
   }
   if (!(emailResult.ok || smsResult.ok)) {
-    // Total failure — release the claim so a retry (or the operator) can resend.
-    await db('invoices').where({ id: invoice.id }).update({ receipt_sent_at: null }).catch(() => {});
     return { sent: false, reason: 'send_failed', invoiceId: invoice.id, invoiceNumber: invoice.invoice_number };
   }
+  // Stamp the durable "receipt delivered" marker only now that a channel landed.
+  await db('invoices').where({ id: invoice.id }).update({ receipt_sent_at: db.fn.now() })
+    .catch((err) => logger.warn(`[schedule] prepaid receipt receipt_sent_at stamp failed: ${err.message}`));
   await db('activity_log').insert({
     customer_id: invoice.customer_id,
     action: 'invoice_receipt_sent',
@@ -3523,6 +3527,20 @@ async function sendPrepaidReceiptForInvoice(invoice) {
     invoiceId: invoice.id,
     invoiceNumber: invoice.invoice_number,
   };
+}
+
+// Roll back the prepayment stamped on a scheduled_service. Used when we refuse to
+// finalize because a live PaymentIntent can't be safely neutralized: the
+// completion-side prepaid application (admin-dispatch) has no PI guard, so leaving
+// the coverage would let it settle the invoice while the card/ACH session can
+// still charge. Best-effort; never blocks the response.
+async function clearStampedPrepaidCoverage(serviceId) {
+  await db('scheduled_services').where({ id: serviceId }).update({
+    prepaid_amount: null,
+    prepaid_method: null,
+    prepaid_note: null,
+    prepaid_at: null,
+  }).catch((e) => logger.warn(`[schedule] failed to clear prepaid coverage for ${serviceId}: ${e.message}`));
 }
 
 // Orchestrator: from a just-stamped single prepaid visit, mint/reuse its invoice
@@ -3580,13 +3598,20 @@ async function generatePrepaidReceiptForService(serviceId) {
       reason: 'not_paid_in_full',
       invoiceId: invoice.id,
       invoiceNumber: invoice.invoice_number,
-      balance: invoiceAmountDue(invoice),
+      // What's still owed AFTER the cash already recorded on the visit — not the
+      // full amount due — so the modal doesn't over-state the top-up needed.
+      balance: Math.max(0, Math.round(invoiceAmountDue(invoice) * 100) - prepaidCents) / 100,
     };
   }
 
   // P0: cancel/refuse any open PaymentIntent before marking paid.
   const piGuard = await guardOpenPaymentIntentForPrepaid(invoice);
   if (!piGuard.ok) {
+    // A live card/ACH session blocks safely marking this invoice paid, and the
+    // completion-side prepaid application has no PI guard — so leaving the stamped
+    // coverage would let it settle the invoice while the session can still charge.
+    // Clear it; the operator resolves the open payment, then re-records.
+    await clearStampedPrepaidCoverage(svc.id);
     return { sent: false, reason: piGuard.reason, invoiceId: invoice.id, invoiceNumber: invoice.invoice_number };
   }
 
@@ -3644,12 +3669,20 @@ async function generatePrepaidReceiptForService(serviceId) {
   }
 
   if (outcome.reason) {
+    // Same PI safety as the pre-lock guard: a refusal here (a new /pay session
+    // appeared mid-finalize) must not leave stamped coverage for the unguarded
+    // completion path to apply against this PI-bearing invoice.
+    if (['payment_in_flight', 'payment_session_unverifiable', 'payment_session_changed'].includes(outcome.reason)) {
+      await clearStampedPrepaidCoverage(svc.id);
+    }
     return {
       sent: false,
       reason: outcome.reason,
       invoiceId: invoice.id,
       invoiceNumber: invoice.invoice_number,
-      ...(outcome.reason === 'not_paid_in_full' ? { balance: invoiceAmountDue(outcome.invoice) } : {}),
+      ...(outcome.reason === 'not_paid_in_full'
+        ? { balance: Math.max(0, Math.round(invoiceAmountDue(outcome.invoice) * 100) - prepaidCents) / 100 }
+        : {}),
     };
   }
 
