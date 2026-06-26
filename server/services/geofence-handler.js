@@ -15,30 +15,6 @@ const trackTransitions = require('./track-transitions');
 const auditLog = require('./audit-log');
 const { parseETDateTime } = require('../utils/datetime-et');
 
-let twilioService = null;
-function getTwilio() {
-  if (twilioService === null) {
-    try { twilioService = require('./twilio'); } catch { twilioService = false; }
-  }
-  return twilioService || null;
-}
-
-/**
- * Best-effort arrival SMS to the customer ("Tech is on-site now").
- * Reuses the same appointment-progress preference gate as en-route SMS,
- * but sends arrival-specific copy.
- */
-async function sendArrivalSms(customerId, techName) {
-  try {
-    const tw = getTwilio();
-    if (!tw || !tw.sendTechArrived) return;
-    // Skip if customer has no prefs row or opt-out — sendTechArrived guards internally.
-    await tw.sendTechArrived(customerId, techName || 'Your tech');
-  } catch (err) {
-    logger.warn(`[geofence-handler] arrival SMS failed: ${err.message}`);
-  }
-}
-
 /**
  * Insert a notification for the tech PWA to poll.
  */
@@ -236,9 +212,10 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
     }
 
     if (job) {
+      // markOnProperty (track-transitions) is the sole owner of the customer
+      // arrival SMS now — it fires once when the tracker flips to on-site,
+      // idempotent across both Bouncie webhook paths. Don't double-send here.
       await markOnPropertyFromGeofence(job.id, eventTime);
-      // Fire-and-forget customer arrival SMS when tied to a real job
-      sendArrivalSms(customer.id, tech.name).catch(() => {});
     }
 
     await sendTechNotification(tech.id, {

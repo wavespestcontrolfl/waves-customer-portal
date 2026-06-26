@@ -151,18 +151,18 @@ describe("TwilioService.sendTechEnRoute", () => {
     expect(result.success).toBe(false);
   });
 
-  test("sendTechArrived uses arrival copy instead of en-route copy", async () => {
+  test("sendTechArrived gates on the tech_arrived pref and uses arrival copy", async () => {
     db.mockReturnValueOnce(
       firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
     ).mockReturnValueOnce(
-      firstQuery({ tech_en_route: true, sms_enabled: true }),
+      firstQuery({ tech_arrived: true, sms_enabled: true }),
     );
 
     getAppointmentContacts.mockReturnValue([
       { phone: "+15551112222", name: "Sam", role: "primary" },
     ]);
     smsTemplates.getTemplate.mockResolvedValue(
-      "Hello Sam! Bryan has arrived and is servicing your property.\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.",
+      "Hello Sam! Bryan has arrived at your property for your scheduled service.\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.",
     );
     sendCustomerMessage.mockResolvedValue({ sent: true });
 
@@ -179,9 +179,7 @@ describe("TwilioService.sendTechEnRoute", () => {
     expect(sendCustomerMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         to: "+15551112222",
-        body: expect.stringContaining(
-          "has arrived and is servicing your property",
-        ),
+        body: expect.stringContaining("has arrived at your property"),
         purpose: "tech_en_route",
         metadata: {
           original_message_type: "tech_en_route",
@@ -193,6 +191,19 @@ describe("TwilioService.sendTechEnRoute", () => {
       "on the way",
     );
     expect(result.success).toBe(true);
+  });
+
+  test("sendTechArrived skips when the tech_arrived pref is off", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: false, sms_enabled: true }),
+    );
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan");
+
+    expect(result).toBeUndefined();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });
 

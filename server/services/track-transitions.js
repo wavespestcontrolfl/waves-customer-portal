@@ -29,6 +29,7 @@ const {
 } = require('../utils/service-duration-capture');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
+const { isEnabled } = require('../config/feature-gates');
 
 const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 const CUSTOMER_EVENT = 'customer:job_update';
@@ -419,6 +420,37 @@ async function markOnProperty(serviceId, opts = {}) {
     }
   }
   emitCustomerTrackRefresh(svc, 'on_property', now);
+
+  // Arrival SMS — fires once when the tracker first flips to on-site, the
+  // arrival analogue of the en-route SMS in markEnRoute. Both webhook paths
+  // (geofence userGeozone + gps-arrival detector) and a manual on-site tap
+  // converge here, so this is the one place it can stay idempotent:
+  // arrival_sms_sent_at is the guard, and the race-loser / already-on_property
+  // branches above return before reaching this. Gated dark behind
+  // techArrivedSms; sendTechArrived also self-guards on twilioSms + the
+  // per-customer tech_arrived pref. Send lives outside the state-write so a
+  // Twilio failure can't roll back a legitimate arrival.
+  if (isEnabled('techArrivedSms') && !svc.arrival_sms_sent_at) {
+    try {
+      const tech = svc.technician_id
+        ? await db('technicians').where({ id: svc.technician_id }).first('name')
+        : null;
+      const techName = tech?.name || 'Your Waves technician';
+      const result = await TwilioService.sendTechArrived(svc.customer_id, techName);
+      // sendTechArrived returns undefined (opt-out/landline path), falsy, or
+      // { success }. Only stamp on a positive signal so a missed send can
+      // retry on a later arrival signal.
+      if (result && result.success) {
+        await db('scheduled_services')
+          .where({ id: serviceId })
+          .update({ arrival_sms_sent_at: new Date() });
+      }
+    } catch (err) {
+      logger.error(`[track-transitions] arrival SMS failed: ${err.message}`);
+      // Leave arrival_sms_sent_at NULL so a later arrival signal can retry.
+    }
+  }
+
   return { ok: true, state: 'on_property', arrivedAt: now };
 }
 

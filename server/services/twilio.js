@@ -738,16 +738,17 @@ const TwilioService = {
   /**
    * Send "tech arrived/on property" notification.
    *
-   * Uses the same customer preference gate as en-route notifications
-   * (`notification_prefs.tech_en_route`) because this is the same
-   * appointment-progress class, but the copy must not say "on the way".
+   * Gated on its own per-customer opt-in (`notification_prefs.tech_arrived`)
+   * so a customer can mute the arrival text independently of the en-route
+   * text. Copy must not say "on the way" (that's en-route). Fired from
+   * track-transitions markOnProperty when the live tracker flips to on-site.
    */
   async sendTechArrived(customerId, techName) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
       .first();
-    if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
+    if (!customer || !prefs?.tech_arrived || !prefs?.sms_enabled) return;
 
     const { getAppointmentContacts, isServiceContactRole } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);

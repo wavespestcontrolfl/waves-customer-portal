@@ -5,7 +5,6 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const matcher = require('../services/geofence-matcher');
 const geofenceHandler = require('../services/geofence-handler');
@@ -89,19 +88,10 @@ router.post('/:id/confirm-start', async (req, res, next) => {
     }
 
     if (jobId) {
+      // markOnProperty (via markOnPropertyFromGeofence → track-transitions) is
+      // the sole owner of the customer arrival SMS now — it fires once,
+      // idempotently when the tracker flips to on-site. Don't double-send here.
       await geofenceHandler.markOnPropertyFromGeofence(jobId, new Date());
-      // Fire-and-forget arrival SMS to customer
-      (async () => {
-        try {
-          const tech = await db('technicians').where({ id: req.technicianId }).first();
-          const twilio = require('../services/twilio');
-          if (twilio && twilio.sendTechArrived && customerId) {
-            await twilio.sendTechArrived(customerId, tech ? tech.name : 'Your tech');
-          }
-        } catch (err) {
-          logger.warn(`[tech-notifications] arrival SMS failed: ${err.message}`);
-        }
-      })();
     }
 
     await db('tech_notifications')

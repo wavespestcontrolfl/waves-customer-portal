@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
+ *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
@@ -43,6 +44,12 @@ const gates = {
 
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
+
+  // Tech Arrived SMS — customer-facing "your tech has arrived" text fired
+  // from track-transitions markOnProperty when the live tracker flips to
+  // on-site. Dark in prod until Adam enables it; the en-route SMS is
+  // unaffected. Still subject to twilioSms + per-customer tech_arrived pref.
+  techArrivedSms: isProd ? process.env.GATE_TECH_ARRIVED_SMS === 'true' : true,
 
   // Twilio — handles real inbound voice calls
   twilioVoice: isProd ? process.env.GATE_TWILIO_VOICE === 'true' : true,

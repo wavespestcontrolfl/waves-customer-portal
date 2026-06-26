@@ -1,6 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/twilio', () => ({
   sendTechEnRoute: jest.fn(),
+  sendTechArrived: jest.fn(),
 }));
 jest.mock('../services/tech-status', () => ({
   setTechJobStatus: jest.fn().mockResolvedValue({}),
@@ -12,11 +13,16 @@ jest.mock('../services/job-status', () => ({
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => null),
 }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => true),
+}));
 
 const db = require('../models/db');
+const { sendTechArrived } = require('../services/twilio');
 const { setTechJobStatus, clearTechCurrentJob } = require('../services/tech-status');
 const { transitionJobStatus } = require('../services/job-status');
 const { getIo } = require('../sockets');
+const { isEnabled } = require('../config/feature-gates');
 const trackTransitions = require('../services/track-transitions');
 
 function query(result) {
@@ -71,6 +77,9 @@ describe('track-transitions lifecycle side effects', () => {
       status: 'pending',
       track_state: 'scheduled',
       cancelled_at: null,
+      // Pre-stamped so the arrival-SMS block is skipped — keeps this test
+      // focused on the state/operational-status side effects.
+      arrival_sms_sent_at: new Date(),
     };
     const load = query(svc);
     const update = query(1);
@@ -101,6 +110,75 @@ describe('track-transitions lifecycle side effects', () => {
       status: 'on_site',
       current_job_id: 'job-2',
     });
+  });
+
+  test('markOnProperty fires the arrival SMS once and stamps arrival_sms_sent_at', async () => {
+    const svc = {
+      id: 'job-6',
+      customer_id: 'cust-6',
+      technician_id: 'tech-6',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    sendTechArrived.mockResolvedValue({ success: true });
+    const stamp = query(1);
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // on_property flip update
+      .mockReturnValueOnce(query({ name: 'Bryan' })) // technician name lookup
+      .mockReturnValueOnce(stamp); // arrival_sms_sent_at stamp
+
+    const result = await trackTransitions.markOnProperty('job-6');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('on_property');
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-6', 'Bryan');
+    expect(stamp.update).toHaveBeenCalledWith({
+      arrival_sms_sent_at: expect.any(Date),
+    });
+  });
+
+  test('markOnProperty does not re-send the arrival SMS when already stamped', async () => {
+    const svc = {
+      id: 'job-7',
+      customer_id: 'cust-7',
+      technician_id: 'tech-7',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: new Date(),
+    };
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(query(1));
+
+    const result = await trackTransitions.markOnProperty('job-7');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).not.toHaveBeenCalled();
+  });
+
+  test('markOnProperty does not send the arrival SMS when the gate is off', async () => {
+    isEnabled.mockReturnValueOnce(false);
+    const svc = {
+      id: 'job-8',
+      customer_id: 'cust-8',
+      technician_id: 'tech-8',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(query(1));
+
+    const result = await trackTransitions.markOnProperty('job-8');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).not.toHaveBeenCalled();
   });
 
   test('markComplete writes end aliases and duration from the captured start time', async () => {
