@@ -70,6 +70,13 @@ router.put('/campaigns/:id', async (req, res, next) => {
 router.post('/campaigns/:id/mode', async (req, res, next) => {
   try {
     const { mode, reason } = req.body;
+    // Mode rewrites budget_mode + daily_budget_current locally; refuse Meta
+    // (read-only) so the dashboard can't drift from Ads Manager.
+    const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.platform !== 'google_ads') {
+      return res.status(400).json({ error: `Budget mode isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
+    }
     const result = await getBudgetManager().setMode(req.params.id, mode, reason || 'manual');
     res.json(result);
   } catch (err) { next(err); }

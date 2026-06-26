@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../../models/db');
 const logger = require('../../services/logger');
+const { runExclusive } = require('../../utils/cron-lock');
 
 // ---------------------------------------------------------------------------
 // Meta (Facebook/Instagram) Ads — Marketing API ingestion. Mirrors
@@ -146,6 +147,14 @@ function dateStr(d) {
 // ---------------------------------------------------------------------------
 async function syncCampaigns() {
   if (!isConfigured()) return [];
+  // Serialize across overlapping Railway instances / the admin /sync/meta
+  // endpoint: ad_campaigns has no unique (platform, platform_campaign_id), so two
+  // concurrent first-time syncs could both insert and duplicate a campaign.
+  const out = await runExclusive('meta-ads-campaigns', () => syncCampaignsLocked());
+  return Array.isArray(out) ? out : [];
+}
+
+async function syncCampaignsLocked() {
   try {
     logger.info('[meta-ads] Syncing campaigns');
     const rows = await graphGet('campaigns', {
@@ -181,6 +190,11 @@ async function syncCampaigns() {
 // ---------------------------------------------------------------------------
 async function syncDailyPerformance(days = 7) {
   if (!isConfigured()) return [];
+  const out = await runExclusive('meta-ads-performance', () => syncDailyPerformanceLocked(days));
+  return Array.isArray(out) ? out : [];
+}
+
+async function syncDailyPerformanceLocked(days = 7) {
   try {
     logger.info(`[meta-ads] Syncing daily performance (last ${days} days)`);
     const since = dateStr(Date.now() - days * 86400000);

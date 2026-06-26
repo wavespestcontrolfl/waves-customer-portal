@@ -53,6 +53,11 @@ async function resolveLeadSource(attribution) {
 
   let targetName = MAIN_SITE_NAME;
   let detail = null;
+  let metaPaid = false;
+
+  const utmSrc = String(utm.source || '').toLowerCase();
+  const isMetaClick = utmSrc === 'facebook' || utmSrc === 'fb'
+    || !!attribution?.fbclid || !!attribution?.fbc;
 
   if (isGbpUtmCampaign({ source: utm.source, medium: utm.medium, campaign: utm.campaign })) {
     const loc = findGbpLocationByUtmContent(utm.content);
@@ -62,6 +67,17 @@ async function resolveLeadSource(attribution) {
     } else {
       detail = `GBP website link: ${utm.content || 'unknown profile'}`;
     }
+  } else if (isMetaClick) {
+    // Meta paid click (fbclid/_fbc, or utm_source=facebook) — attribute to
+    // Facebook, NOT the Main Site / spoke landing it happened to land on. Mirrors
+    // the webhook's determineLeadSource. Resolves the FK by a LIKE lookup so it
+    // finds whatever Facebook lead_sources row exists (or leaves it null — never
+    // Main Site).
+    metaPaid = true;
+    targetName = 'Facebook';
+    detail = attribution?.fbclid ? 'Meta click (fbclid)'
+      : attribution?.fbc ? 'Meta click (_fbc)'
+        : `facebook ${utm.medium || ''} ${utm.campaign || ''}`.trim();
   } else if (referrerHost && SPOKE_DOMAIN_TO_SOURCE_NAME[referrerHost]) {
     targetName = SPOKE_DOMAIN_TO_SOURCE_NAME[referrerHost];
     detail = `Spoke referrer: ${referrer}`;
@@ -76,12 +92,14 @@ async function resolveLeadSource(attribution) {
 
   let row = null;
   try {
-    row = await db('lead_sources').where({ name: targetName }).first();
+    row = metaPaid
+      ? await db('lead_sources').whereRaw("LOWER(name) LIKE '%facebook%'").first()
+      : await db('lead_sources').where({ name: targetName }).first();
   } catch { /* swallow — caller still gets meta strings even if FK lookup fails */ }
 
   return {
     leadSourceId: row?.id || null,
-    leadSourceName: targetName,
+    leadSourceName: row?.name || targetName,
     leadSourceDetail: clampDetail(detail),
   };
 }

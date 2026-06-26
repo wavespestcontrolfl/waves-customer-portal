@@ -22,6 +22,7 @@ const mockDb = jest.fn((table) => {
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: (_n, fn) => fn() }));
 jest.mock('uuid', () => ({ v4: jest.fn(() => 'uuid-1') }), { virtual: true });
 
 const MetaAds = require('../services/ads/meta-ads');
