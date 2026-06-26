@@ -3626,7 +3626,6 @@ export default function Customer360ProfileV2({
         s + parseFloat(i.amount_due || 0) - parseFloat(i.amount_paid || 0),
       0,
     );
-  const lastPayment = payments[0];
   const today = todayDateInput();
   const inactiveNextServiceStatuses = new Set([
     "cancelled",
@@ -3636,13 +3635,20 @@ export default function Customer360ProfileV2({
     "skipped",
     "no_show",
   ]);
-  const nextService = upcomingScheduled.find((s) => {
+  const isUpcomingAppt = (s) => {
     const status = String(s.status || "").toLowerCase();
     return (
       !inactiveNextServiceStatuses.has(status) &&
       dateInputValue(s.scheduled_date) >= today
     );
-  });
+  };
+  const upcomingFuture = upcomingScheduled
+    .filter(isUpcomingAppt)
+    .sort((a, b) =>
+      dateInputValue(a.scheduled_date) < dateInputValue(b.scheduled_date)
+        ? -1
+        : 1,
+    );
 
   const expiringCard = cards.find((cd) => {
     if (!cd.exp_month || !cd.exp_year) return false;
@@ -4426,21 +4432,27 @@ export default function Customer360ProfileV2({
                 {/* Col 1: Services */}
                 <div>
                   {" "}
-                  <SectionTitle>Upcoming Service</SectionTitle>
-                  {nextService ? (
-                    <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
-                      {" "}
-                      <div className="text-13 font-medium text-zinc-900">
-                        {nextService.service_type}
-                      </div>{" "}
-                      <div className="text-12 text-ink-secondary">
-                        {fmtDate(nextService.scheduled_date)} ·{" "}
-                        {nextService.status}
-                      </div>{" "}
-                    </div>
+                  <SectionTitle>
+                    Upcoming Appointments ({upcomingFuture.length})
+                  </SectionTitle>
+                  {upcomingFuture.length > 0 ? (
+                    upcomingFuture.slice(0, 3).map((s, i) => (
+                      <div
+                        key={i}
+                        className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
+                      >
+                        {" "}
+                        <div className="text-13 font-medium text-zinc-900">
+                          {s.service_type}
+                        </div>{" "}
+                        <div className="text-12 text-ink-secondary">
+                          {fmtDate(s.scheduled_date)} · {s.status}
+                        </div>{" "}
+                      </div>
+                    ))
                   ) : (
                     <div className="text-12 text-ink-secondary mb-3">
-                      No upcoming services
+                      No upcoming appointments
                     </div>
                   )}
                   <SectionTitle>
@@ -4488,17 +4500,51 @@ export default function Customer360ProfileV2({
                       value={fmtCurrency(c.lifetimeRevenue)}
                     />{" "}
                   </div>
-                  {cards.length > 0 && (
-                    <div className="text-12 text-ink-secondary mb-1.5">
-                      Card: {cards[0].card_brand} ending {cards[0].last_four}
-                    </div>
-                  )}
-                  {lastPayment && (
-                    <div className="text-12 text-ink-secondary mb-3">
-                      Last payment: {fmtCurrency(lastPayment.amount)} on{" "}
-                      {fmtDate(lastPayment.payment_date)}
-                    </div>
-                  )}
+                  <div className="text-12 text-ink-secondary mb-1.5">
+                    {cards.length > 0
+                      ? `Card on file: ${cards[0].card_brand} ending ${cards[0].last_four}${cards.length > 1 ? ` · +${cards.length - 1} more` : ""}`
+                      : "No card on file"}
+                  </div>
+                  <div className="mb-3">
+                    <SectionTitle>
+                      Recent Transactions ({payments.length})
+                    </SectionTitle>
+                    {payments.length > 0 ? (
+                      payments.slice(0, 3).map((p, i) => {
+                        const isRefund = !!p.refund_status;
+                        return (
+                          <div
+                            key={i}
+                            className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
+                          >
+                            {" "}
+                            <span
+                              className={cn(
+                                "u-nums flex-shrink-0",
+                                isRefund
+                                  ? "text-ink-secondary"
+                                  : "text-zinc-900",
+                              )}
+                            >
+                              {fmtCurrency(p.amount)}
+                            </span>{" "}
+                            <span className="text-ink-secondary truncate">
+                              {p.card_brand
+                                ? `${p.card_brand} …${p.last_four}`
+                                : p.method || p.processor || ""}
+                            </span>{" "}
+                            <span className="text-ink-secondary flex-shrink-0">
+                              {fmtDate(p.payment_date)}
+                            </span>{" "}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="text-12 text-ink-secondary">
+                        No transactions yet
+                      </div>
+                    )}
+                  </div>
                   {displayedAnnualPrepayTerm && (
                     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
                       <div className="text-12 font-medium text-zinc-900">
