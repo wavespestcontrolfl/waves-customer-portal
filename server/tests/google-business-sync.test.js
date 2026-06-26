@@ -429,4 +429,90 @@ describe('Google Business review sync', () => {
       review_text: 'A different John Smith',
     });
   });
+
+  test('auto-flips has_left_google_review when a synced review matches a customer', async () => {
+    db.__state.rows.customers.push({
+      id: 'cust-1',
+      first_name: 'John',
+      last_name: 'Doe',
+      has_left_google_review: false,
+      review_marked_at: null,
+      deleted_at: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-1',
+        reviewer: { displayName: 'John Doe' },
+        starRating: 'FIVE',
+        comment: 'Great work',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const customer = db.__state.rows.customers.find(c => c.id === 'cust-1');
+    expect(customer.has_left_google_review).toBe(true);
+    expect(customer.review_marked_at).toBeTruthy();
+    // No admin "unlinked" notification when the review matched a customer.
+    expect((db.__state.rows.notifications || []).some(n => n.category === 'review')).toBe(false);
+  });
+
+  test('notifies admin when a newly synced review cannot be matched to a customer', async () => {
+    // No customers seeded → the reviewer name resolves to no customer.
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-9',
+        reviewer: { displayName: 'Stranger Smith' },
+        starRating: 'FIVE',
+        comment: 'Loved it',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const notifs = db.__state.rows.notifications || [];
+    const alert = notifs.find(n => n.recipient_type === 'admin' && n.category === 'review');
+    expect(alert).toBeTruthy();
+    expect(alert.title).toContain('Stranger Smith');
+    expect(alert.link).toBe('/admin/reviews');
+  });
+
+  test('does not re-notify for an already-synced unmatched review', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'review-existing',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-9',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-9',
+      location_id: 'bradenton',
+      reviewer_name: 'Stranger Smith',
+      star_rating: 5,
+      review_text: 'Loved it',
+      review_created_at: '2026-05-25T12:00:00Z',
+      customer_id: null,
+      review_reply: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-9',
+        reviewer: { displayName: 'Stranger Smith' },
+        starRating: 'FIVE',
+        comment: 'Loved it',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    expect((db.__state.rows.notifications || []).filter(n => n.category === 'review')).toHaveLength(0);
+  });
 });

@@ -8,6 +8,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
+const NotificationService = require('./notification-service');
 const DRAFT_REPLY_PREFIX = '[DRAFT]';
 
 function isDraftReply(reply) {
@@ -370,6 +371,83 @@ class GoogleBusinessService {
     return customer?.id || null;
   }
 
+  /**
+   * Auto-flip a matched customer's "already left a Google review" flag when a
+   * review of theirs syncs in. Same effect as the Customer 360 toggle / the
+   * one-shot backfill endpoint: the customer is then skipped by the
+   * review-request cron — no initial request, no inline suffix, no 48h
+   * followup (review-request.js gates on has_left_google_review).
+   *
+   * Idempotent: only writes when the flag is currently false/null, so the
+   * original review_marked_at is preserved and repeat hourly syncs are no-ops.
+   * Best-effort — never throws into the sync loop (CLAUDE.md Rule 6).
+   *
+   * @param {number} customerId  matched customer id (falsy = skip)
+   * @returns {Promise<boolean>} true when this call flipped the flag
+   */
+  async _markCustomerLeftReview(customerId) {
+    if (!customerId) return false;
+    try {
+      const flipped = await db('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .where(function () {
+          this.where('has_left_google_review', false).orWhereNull('has_left_google_review');
+        })
+        .update({ has_left_google_review: true, review_marked_at: new Date() });
+      if (flipped > 0) {
+        logger.info(`[gbp] Auto-marked customer ${customerId} as already-left-review — excluded from review-request + 48h followup`);
+        try {
+          await db('activity_log').insert({
+            customer_id: customerId,
+            action: 'review_auto_marked',
+            description: 'Auto-marked "already left a Google review" — a matched Google review synced in. Now excluded from review-request and 48h follow-up SMS.',
+          });
+        } catch { /* best-effort audit trail */ }
+      }
+      return flipped > 0;
+    } catch (err) {
+      logger.warn(`[gbp] Auto-mark left-review failed for customer ${customerId}: ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Surface a freshly-synced Google review we couldn't tie to a customer so the
+   * office can match it (or manually mark the customer as already-reviewed).
+   * Fires once, on first insert only — callers gate on the new-review branch so
+   * repeat hourly syncs don't re-notify. Best-effort (notifyAdmin self-catches).
+   *
+   * @param {{reviewer_name?:string, star_rating?:number, review_text?:string, location_id?:string, google_review_id?:string}} row
+   */
+  async _notifyUnlinkedReview(row) {
+    try {
+      const loc = WAVES_LOCATIONS.find(l => l.id === row.location_id);
+      const locName = loc?.name || row.location_id || 'Unknown location';
+      const stars = Number(row.star_rating) || 0;
+      const reviewer = row.reviewer_name || 'Anonymous';
+      const snippet = row.review_text ? ` — "${String(row.review_text).slice(0, 120)}"` : '';
+      await NotificationService.notifyAdmin(
+        'review',
+        `Unlinked Google review from ${reviewer}`,
+        `${stars}★ review at ${locName} couldn't be matched to a customer${snippet}. Open Reviews to match it, or mark the customer as already-reviewed.`,
+        {
+          link: '/admin/reviews',
+          metadata: {
+            googleReviewId: row.google_review_id || null,
+            locationId: row.location_id || null,
+            reviewerName: reviewer,
+            starRating: stars,
+            reason: 'no_customer_match',
+          },
+        },
+      );
+      logger.info(`[gbp] Unlinked review from ${reviewer} (${locName}) — admin notified`);
+    } catch (err) {
+      logger.warn(`[gbp] Unlinked-review notify failed: ${err.message}`);
+    }
+  }
+
   async _findExistingReview(normalized) {
     let existing = await db('google_reviews').where({ gbp_review_name: normalized.gbp_review_name }).first();
     if (existing) return existing;
@@ -404,12 +482,22 @@ class GoogleBusinessService {
       synced_at: db.fn.now(),
       ...replyFields,
     };
+    let result;
     if (existing) {
       await db('google_reviews').where({ id: existing.id }).update(row);
-      return { id: existing.id, inserted: false };
+      result = { id: existing.id, inserted: false };
+    } else {
+      const [insertedReview] = await db('google_reviews').insert(row).returning('id');
+      result = { id: insertedReview?.id || insertedReview, inserted: true };
     }
-    const [insertedReview] = await db('google_reviews').insert(row).returning('id');
-    return { id: insertedReview?.id || insertedReview, inserted: true };
+    if (row.customer_id) {
+      // A matched review means the customer left one — stop asking them.
+      await this._markCustomerLeftReview(row.customer_id);
+    } else if (result.inserted) {
+      // New review we couldn't tie to a customer — alert the office to match it.
+      await this._notifyUnlinkedReview(row);
+    }
+    return result;
   }
 
   async _syncPlacesStatsForLocation(loc, googleKey) {
@@ -515,6 +603,20 @@ class GoogleBusinessService {
           synced_at: db.fn.now(),
         }).returning('id');
         newCount++;
+      }
+      const effectiveCustomerId = customerId || existing?.customer_id || null;
+      if (effectiveCustomerId) {
+        // Matched to a customer → they left a review; auto-exclude from outreach.
+        await this._markCustomerLeftReview(effectiveCustomerId);
+      } else if (!existing) {
+        // Newly inserted, unmatched → alert the office to match it.
+        await this._notifyUnlinkedReview({
+          reviewer_name: reviewerName,
+          star_rating: review.rating || 0,
+          review_text: review.text || null,
+          location_id: loc.id,
+          google_review_id: googleId,
+        });
       }
       synced++;
     }
