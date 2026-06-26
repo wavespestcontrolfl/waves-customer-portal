@@ -103,6 +103,28 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
   });
 
   logger.info(`[LeadAttribution] New lead created: ${newLead.id} from ${leadSource?.name || 'unknown source'}`);
+
+  // Untracked inbound call → no marketing source matched (the caller reached the
+  // main line / caller-ID didn't match a tracking number). These are the
+  // "Unattributed" call leads the dashboard surfaces — notify an admin so it can
+  // be source-tagged or followed up. Best-effort; a notify failure must never
+  // break lead creation.
+  if (type === 'call' && !leadSource) {
+    try {
+      await require('./notification-service').notifyAdmin(
+        'lead',
+        'Untracked call lead',
+        `New lead from a call we couldn't attribute (${normalizedFrom || 'unknown number'}). No marketing source matched — tag the source or follow up.`,
+        {
+          link: `/admin/leads?lead=${newLead.id}`,
+          metadata: { leadId: newLead.id, phone: normalizedFrom, callSid: callSid || null },
+        },
+      );
+    } catch (err) {
+      logger.warn(`[LeadAttribution] untracked-call admin notify failed: ${err.message}`);
+    }
+  }
+
   return { type: 'new_lead', leadId: newLead.id, leadSourceId: leadSource?.id };
 }
 

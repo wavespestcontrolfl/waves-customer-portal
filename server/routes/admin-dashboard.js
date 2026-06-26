@@ -1258,7 +1258,14 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
       ),
       'l',
     ).select(
-        db.raw("COALESCE(s.name, 'Unattributed') as name"),
+        // Null-source leads fall back to their first-contact channel, so direct
+        // emails and referrals get their own attribution rows instead of all
+        // landing in "Unattributed" (which then reads as just untracked calls).
+        db.raw(
+          "COALESCE(s.name, CASE WHEN l.first_contact_channel = 'email' THEN 'Email (direct)' " +
+            "WHEN l.first_contact_channel = 'referral' THEN 'Referral (direct)' " +
+            "ELSE 'Unattributed' END) as name",
+        ),
         db.raw("s.source_type as source_type"),
         db.raw("s.channel as channel"),
         db.raw('COUNT(*) as leads'),
@@ -1266,7 +1273,11 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
         db.raw('COUNT(l.customer_id) as converted_to_customer'),
         db.raw('SUM(COALESCE(l.monthly_value, 0)) as monthly_value'),
       )
-      .groupBy('s.name', 's.source_type', 's.channel')
+      .groupByRaw(
+        "COALESCE(s.name, CASE WHEN l.first_contact_channel = 'email' THEN 'Email (direct)' " +
+          "WHEN l.first_contact_channel = 'referral' THEN 'Referral (direct)' " +
+          "ELSE 'Unattributed' END), s.source_type, s.channel",
+      )
       .orderByRaw('COUNT(*) DESC');
 
     const totalLeads = rows.reduce((acc, r) => acc + parseInt(r.leads), 0);
