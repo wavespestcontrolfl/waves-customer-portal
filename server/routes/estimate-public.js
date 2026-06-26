@@ -7926,6 +7926,11 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
         displayPrice,
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
         estimatedDurationMinutes: firstPositiveNumber(li.estimatedDurationMinutes, li.estimated_duration_minutes) || null,
+        // Carry the per-service cadence (foam has its own, e.g. bimonthly) so a
+        // mixed plan whose top-level frequency is the generic quarterly ladder
+        // row still surfaces/seeds each service at its sold cadence.
+        cadence: li.cadence || null,
+        frequencyKey: li.cadence || li.frequencyKey || null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(li),
       };
     });
@@ -8738,11 +8743,28 @@ function withSupplementedRecurringServices(estData) {
         results: estData.results || result.results,
       }
     : null;
-  const services = uniqueRecurringServiceRows([
+  let services = uniqueRecurringServiceRows([
     ...recurringServicesWithSupplements(result),
     ...(engineResult ? recurringServicesWithSupplements(engineResult) : []),
     ...(rootResult ? recurringServicesWithSupplements(rootResult) : []),
   ]);
+  // engineInputs-only estimates (no stored result/engineResult) are a supported
+  // path — buildPricingBundle replays the engine to show a sellable frequency.
+  // Replay here too so the accept path / EstimateConverter see the same recurring
+  // rows; otherwise such a foam quote accepts with a locked total but an empty
+  // recurring list (no schedule, follow-ups, or invoice).
+  if (!services.length && !hasResult && !engineResult) {
+    const engineInputs = extractEngineInputs(estData);
+    if (engineInputs) {
+      try {
+        services = uniqueRecurringServiceRows(
+          recurringServicesWithSupplements(generateEstimate(engineInputs)),
+        );
+      } catch (err) {
+        logger.error(`[estimate-data] recurring supplement engine replay failed: ${err.message}`);
+      }
+    }
+  }
   if (!services.length) return estData;
   const nextResult = {
     ...result,
@@ -10809,7 +10831,20 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const manualDiscount = manualDiscountForRecurringBase(v1.manualDiscount, manualDiscountableAnnual);
   const manualDiscountMonthly = Number(manualDiscount?.monthlyAmount || 0);
   const totalMoAfter = Math.max(0, Math.round((pestMoAfter + nonPestMoAfter - manualDiscountMonthly - monthlyOff) * 100) / 100);
-  const totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
+  // foam_recurring is cadence-priced (perVisit × visits, integer) and non-
+  // discountable, so its exact annual (e.g. 1108) isn't its rounded mo × 12
+  // (1107.96). Correct the bundle annual by that delta so a foam-in-mix plan
+  // locks/invoices the sold total to the cent (monthly stays mo-based).
+  const foamAnnualCorrection = pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
+    if (recurringServiceKey(svc) !== 'foam_recurring') return sum;
+    const exact = Number(svc?.annual ?? svc?.ann);
+    const mo = Number(svc?.mo ?? svc?.monthly);
+    if (Number.isFinite(exact) && exact > 0 && Number.isFinite(mo) && mo > 0) {
+      return sum + (exact - Math.round(mo * 12 * 100) / 100);
+    }
+    return sum;
+  }, 0);
+  const totalAnnAfter = Math.round((totalMoAfter * 12 + foamAnnualCorrection) * 100) / 100;
   const treatmentDisplayPrice = (perTreatment, svc) => {
     const amount = Number(perTreatment);
     if (!Number.isFinite(amount) || amount <= 0) return null;
@@ -11560,6 +11595,7 @@ module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.foamFrequenciesFromEngineResult = foamFrequenciesFromEngineResult;
+module.exports.shapeFromV1 = shapeFromV1;
 module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;
 module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.attachPublicPricingContract = attachPublicPricingContract;

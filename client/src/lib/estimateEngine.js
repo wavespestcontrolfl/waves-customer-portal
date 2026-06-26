@@ -2318,6 +2318,11 @@ export function calculateEstimate(inputs) {
       name: 'Recurring Foam (' + FOAM_REC_LABEL[cad] + ')',
       service: 'foam_recurring',
       mo,
+      // Exact engine annual (perVisit × visits, integer) so the server frequency/
+      // prepay helpers lock the sold total (e.g. 1108) instead of recomputing the
+      // rounded mo × 12 (92.33 × 12 = 1107.96).
+      annual: ann,
+      ann,
       perTreatment: perVisit,
       visitsPerYear: visits,
       // Mirror the server mapper's recurring.services foam row so downstream

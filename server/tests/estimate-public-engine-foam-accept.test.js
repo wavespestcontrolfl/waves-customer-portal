@@ -3,6 +3,7 @@ const {
   withSupplementedRecurringServices,
   foamFrequenciesFromEngineResult,
   buildPricingBundle,
+  shapeFromV1,
 } = require('../routes/estimate-public.js');
 const { _internals: { durationForService } } = require('../services/estimate-slot-availability.js');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine.js');
@@ -190,6 +191,53 @@ describe('engine-backed foam pricing-bundle frequency selection', () => {
     expect(treatmentServices).toContain('tree_shrub');
     // annual reflects the mix, not the ~1108 foam-only total.
     expect(f.annual).toBeGreaterThan(1108);
+  });
+
+  test('foam keeps its own cadence in a mixed plan whose top-level frequency is the generic ladder row', async () => {
+    const bundle = await buildPricingBundle({
+      id: 4, status: 'sent', monthly_total: 200, annual_total: 2400,
+      estimate_data: JSON.stringify({
+        engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { foamRecurring: { cadence: 'bimonthly', points: 10 }, treeShrub: {} } },
+      }),
+    });
+    const f = (bundle.frequencies || [])[0] || {};
+    const foamRow = (f.perServiceTreatments || []).find((t) => t.service === 'foam_recurring');
+    expect(foamRow).toBeTruthy();
+    expect(foamRow.cadence).toBe('bimonthly');
+    expect(foamRow.visitsPerYear).toBe(6);
+  });
+});
+
+describe('engineInputs-only foam estimate is schedulable on accept (no stored result/engineResult)', () => {
+  const inputsOnly = () => ({ engineInputs: { services: { foamRecurring: { cadence: 'quarterly', points: 10 } } } });
+
+  test('withSupplementedRecurringServices replays the engine and supplements the foam row (wrapper kept)', () => {
+    const out = withSupplementedRecurringServices(inputsOnly());
+    expect((out.recurring?.services || []).some((s) => s.service === 'foam_recurring')).toBe(true);
+    expect(out.engineInputs).toBeTruthy(); // engine wrapper preserved for downstream pricing
+  });
+
+  test('acceptanceServiceLists (on the supplemented data) yields the foam recurring row', () => {
+    const supplemented = withSupplementedRecurringServices(inputsOnly());
+    const { recurringSvcList } = acceptanceServiceLists(supplemented);
+    expect(recurringSvcList.some((s) => (s.service || s.key) === 'foam_recurring')).toBe(true);
+  });
+});
+
+describe('shapeFromV1 keeps foam cent-exact in a mixed (pest + foam) bundle', () => {
+  test('mixed annual uses the foam line’s exact annual, not monthly×12', () => {
+    const v1 = {
+      discount: 0,
+      manualDiscount: null,
+      services: [
+        { name: 'Pest Control', service: 'pest_control', mo: 50, ann: 600, perTreatment: 150, visitsPerYear: 4 },
+        { name: 'Recurring Foam (Quarterly)', service: 'foam_recurring', mo: 92.33, annual: 1108, perTreatment: 277, visitsPerYear: 4 },
+      ],
+    };
+    const pestTier = { mo: 50, ann: 600, apps: 4, pa: 150, label: 'Quarterly' };
+    const f = shapeFromV1(v1, { key: 'quarterly', label: 'Quarterly' }, pestTier, {});
+    expect(f.annual).toBe(1708); // 600 pest + 1108 foam (not 600 + 1107.96)
+    expect(f.monthly).toBe(142.33); // monthly stays mo-based
   });
 });
 
