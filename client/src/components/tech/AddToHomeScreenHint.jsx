@@ -8,7 +8,8 @@ import { isNativeApp } from '../../native/platform';
  * Chrome/Android only), so the only way to get techs onto the home-screen PWA
  * is to tell them to tap Share → Add to Home Screen. This banner does exactly
  * that — shown once, only where it's actionable:
- *   - iOS Safari (other iOS browsers can't add to the home screen)
+ *   - an iOS/iPadOS WebKit browser (Safari, or Chrome/Edge/Firefox on 16.4+,
+ *     which can add to the Home Screen via the share sheet)
  *   - not already running standalone (already installed)
  *   - not inside the native Capacitor shell
  * Dismissed state is remembered so it never nags.
@@ -24,17 +25,18 @@ const DARK = {
 
 const DISMISS_KEY = 'tech_a2hs_dismissed';
 
-function isIosSafari() {
+// Any iOS/iPadOS WebKit browser can add to the Home Screen via the share sheet
+// (Safari always; Chrome/Edge/Firefox since iOS 16.4). Excludes desktop macOS
+// Safari — which has "Add to Dock", not "Add to Home Screen" — by requiring
+// touch support on the desktop-mode Mac UA.
+function isIosWebKit() {
   if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent || '';
-  const isIosDevice =
+  return (
     /iPhone|iPod|iPad/.test(ua) ||
     // iPadOS 13+ reports a desktop Safari UA; detect it via touch support.
-    (/Macintosh/.test(ua) && typeof document !== 'undefined' && 'ontouchend' in document);
-  if (!isIosDevice) return false;
-  // Chrome/Firefox/Edge/Opera on iOS can't "Add to Home Screen" — only Safari.
-  const isOtherBrowser = /CriOS|FxiOS|EdgiOS|OPiOS|mercury/i.test(ua);
-  return !isOtherBrowser;
+    (/Macintosh/.test(ua) && typeof document !== 'undefined' && 'ontouchend' in document)
+  );
 }
 
 function isStandalone() {
@@ -52,7 +54,7 @@ export default function AddToHomeScreenHint() {
   useEffect(() => {
     if (isNativeApp()) return;
     if (isStandalone()) return;
-    if (!isIosSafari()) return;
+    if (!isIosWebKit()) return;
     try {
       if (localStorage.getItem(DISMISS_KEY) === '1') return;
     } catch {
@@ -115,10 +117,10 @@ export default function AddToHomeScreenHint() {
         >
           Install Field Tools on your phone
         </div>
-        <div style={{ fontSize: 13, color: DARK.muted, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: DARK.muted, lineHeight: 1.5 }}>
           Tap the Share button{' '}
           <ShareGlyph />
-          {' '}in Safari, then choose{' '}
+          {' '}then choose{' '}
           <span style={{ color: DARK.text, fontWeight: 600 }}>
             “Add to Home Screen.”
           </span>{' '}
