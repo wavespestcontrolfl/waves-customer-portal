@@ -1963,18 +1963,11 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // =========================================================================
-  // NIGHTLY 2AM — Recalculate customer health scores
-  // =========================================================================
-  cron.schedule('0 2 * * *', async () => {
-    try {
-      const { calculateAllHealthScores } = require('./customer-health-v2');
-      const result = await calculateAllHealthScores();
-      logger.info(`Health scores updated: ${result.updated} customers`);
-    } catch (err) {
-      logger.error(`Health score update failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
+  // Customer health scoring is consolidated into the single nightly Customer
+  // Intelligence Pipeline (3AM ET): detect signals → score (customer-health.js,
+  // the sole canonical engine) → enrich (upsell/next-action/LTV) → outreach.
+  // The former 2AM (customer-health-v2 → unread customers.health_score) and
+  // 2:15AM (standalone v3) jobs were removed to end the three-writer collision.
 
   // =========================================================================
   // 28TH OF MONTH 10AM — Send billing reminders (for customers who opted in)
@@ -2126,17 +2119,29 @@ function initScheduledJobs() {
       const signalResult = await SignalDetector.detectAllSignals();
       logger.info(`Signals: ${signalResult.newSignals} new from ${signalResult.customersScanned} customers`);
 
-      // Step 2: Score health
+      // Step 2: Score health — single canonical engine (customer-health.js).
+      // Runs after signal detection so tonight's fresh signals fold into the
+      // score. Sole writer of overall_score / churn_risk / sub-scores.
       step = 'step 2 (health scoring)';
-      const healthResult = await HealthScorer.calculateAllHealthScores();
-      logger.info(`Health: ${healthResult.atRisk} at-risk, ${healthResult.critical} critical`);
+      const { scoreAllCustomers } = require('./customer-health');
+      const healthResult = await scoreAllCustomers();
+      logger.info(`Health: ${healthResult.scored} scored, ${healthResult.failed} failed`);
 
-      // Step 3: Generate retention outreach for at-risk customers
+      // Step 2b: Enrich scored rows with upsell / next-action / LTV (no score
+      // recompute — adds intelligence columns only).
+      step = 'step 2b (intelligence enrichment)';
+      const enrichResult = await HealthScorer.enrichAllCustomers();
+      logger.info(`Enrichment: ${enrichResult.enriched} enriched, ${enrichResult.upsells} upsells`);
+
+      // Step 3: Generate retention outreach for at-risk customers. high +
+      // critical = the canonical engine's at-risk band (vocab:
+      // low/moderate/high/critical). scored_at is a timestamp under the
+      // canonical engine, so match on its date.
       step = 'step 3 (retention outreach)';
       const today = etDateString();
       const atRisk = await db('customer_health_scores')
-        .where('scored_at', today)
-        .whereIn('churn_risk', ['at_risk', 'critical'])
+        .whereRaw('scored_at::date = ?', [today])
+        .whereIn('churn_risk', ['high', 'critical'])
         .select('customer_id');
 
       let outreachGenerated = 0;
@@ -2525,19 +2530,9 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // =========================================================================
-  // NIGHTLY 2:15AM — Customer Health Scoring v3 (churn prediction engine)
-  // =========================================================================
-  cron.schedule('15 2 * * *', async () => {
-    logger.info('Running: customer health scoring v3');
-    try {
-      const { scoreAllCustomers } = require('./customer-health');
-      const result = await scoreAllCustomers();
-      logger.info(`Health scoring v3 complete: ${result.scored} scored, ${result.failed} failed`);
-    } catch (err) {
-      logger.error(`Health scoring v3 failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
+  // Health scoring runs inside the 3AM Customer Intelligence Pipeline (above)
+  // as its sole nightly invocation — the former standalone 2:15AM job was
+  // removed so signals are detected before the score is computed.
 
   // =========================================================================
   // WEEKLY SUNDAY 4AM — Cleanup health history older than 365 days

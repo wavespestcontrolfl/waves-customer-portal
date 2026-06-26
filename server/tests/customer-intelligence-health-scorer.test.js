@@ -1,14 +1,10 @@
 /**
- * Focused tests for the health-scorer upsert (customer_health_scores).
- *
- * The write must be idempotent per (customer, day) WITHOUT relying on a
- * unique constraint that may not exist:
- *  - lookup is keyed on customer_id only (no scored_at filter — that column
- *    equality lookup is what caused the day-2 23505 on the 093 shape and the
- *    undefined-column crash on the 037 shape),
- *  - if a row exists for the customer, update it in place (re-stamping
- *    scored_at), never insert a second row,
- *  - if no row exists, insert one with scored_at set.
+ * health-scorer is now an ENRICHMENT-only layer. It must:
+ *  - read the canonical customer_health_scores row (written by customer-health.js),
+ *  - update ONLY the intelligence columns (upsell_opportunities, next_best_action,
+ *    lifetime_value_estimate) — never overall_score / churn_risk / sub-scores,
+ *  - skip the write entirely when no canonical row exists yet,
+ *  - map next-best-action against the canonical vocab (low/moderate/high/critical).
  */
 
 jest.mock('../models/db', () => {
@@ -21,10 +17,10 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
 }));
 jest.mock('../services/customer-intelligence/signal-detector', () => ({
-  SIGNAL_TYPES: {},
-}));
-jest.mock('../utils/datetime-et', () => ({
-  etDateString: jest.fn(() => '2026-06-10'),
+  SIGNAL_TYPES: {
+    COMPETITOR_MENTIONED: { weight: -25, severity: 'critical' },
+    SERVICE_GAP_60_DAYS: { weight: -20, severity: 'warning' },
+  },
 }));
 
 const db = require('../models/db');
@@ -57,173 +53,82 @@ function wireDb(queues) {
 const customer = {
   id: 'c1',
   first_name: 'Pat',
-  created_at: new Date('2020-01-01'),
-  member_since: '2020-01-01',
   waveguard_tier: null,
   monthly_rate: '100',
 };
 
-describe('health-scorer customer_health_scores upsert', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
+describe('health-scorer enrichment (customer_health_scores)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
 
-  test('day 2: existing customer row is updated in place — no second insert, no 23505 path', async () => {
-    const lookupChain = makeChain({ id: 'row-1', customer_id: 'c1', scored_at: '2026-06-09T00:00:00.000Z' });
-    const writeChain = makeChain(undefined);
-
-    wireDb({
-      customers: [makeChain(customer)],
-      customer_signals: [makeChain(undefined, [])],
-      service_records: [makeChain(undefined, [])],
-      customer_health_scores: [lookupChain, writeChain],
-    });
-
-    await healthScorer.calculateHealth('c1');
-
-    // Lookup keyed on customer_id only — no scored_at/day filter.
-    expect(lookupChain.whereCalls).toEqual([['customer_id', 'c1']]);
-    expect(lookupChain.orderByRaw).toHaveBeenCalledWith('scored_at DESC NULLS LAST');
-
-    // Update targets the existing row by id; insert never fires.
-    expect(writeChain.whereCalls).toEqual([['id', 'row-1']]);
-    expect(writeChain.update).toHaveBeenCalledTimes(1);
-    expect(writeChain.insert).not.toHaveBeenCalled();
-
-    const updated = writeChain.update.mock.calls[0][0];
-    expect(updated.scored_at).toBe('2026-06-10'); // re-stamped to today
-    expect(updated).toHaveProperty('overall_score');
-    expect(updated).toHaveProperty('churn_risk');
-    expect(updated).toHaveProperty('churn_signals');
-    expect(updated).toHaveProperty('updated_at');
-
-    // score_grade must stay consistent with the overall_score on the row
-    // (same A-F thresholds as customer-health.js getGrade()).
-    const s = updated.overall_score;
-    const expectedGrade = s >= 80 ? 'A' : s >= 65 ? 'B' : s >= 50 ? 'C' : s >= 35 ? 'D' : 'F';
-    expect(updated.score_grade).toBe(expectedGrade);
-  });
-
-  test('first score: no existing row inserts one row with scored_at set', async () => {
-    const lookupChain = makeChain(undefined);
-    const writeChain = makeChain(undefined);
-
-    wireDb({
-      customers: [makeChain(customer)],
-      customer_signals: [makeChain(undefined, [])],
-      service_records: [makeChain(undefined, [])],
-      customer_health_scores: [lookupChain, writeChain],
-    });
-
-    await healthScorer.calculateHealth('c1');
-
-    expect(writeChain.insert).toHaveBeenCalledTimes(1);
-    expect(writeChain.update).not.toHaveBeenCalled();
-
-    const inserted = writeChain.insert.mock.calls[0][0];
-    expect(inserted.customer_id).toBe('c1');
-    expect(inserted.scored_at).toBe('2026-06-10');
-    expect(inserted).toHaveProperty('overall_score');
-    expect(inserted).toHaveProperty('churn_risk');
-  });
-
-  test('first-insert race: 23505 unique violation falls back to updating the winner row', async () => {
-    const lookupChain = makeChain(undefined);
-    const insertChain = makeChain(undefined);
-    const uniqueErr = Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
-    insertChain.insert = jest.fn(() => Promise.reject(uniqueErr));
-    const refetchChain = makeChain({ id: 'row-9', customer_id: 'c1' });
+  test('updates ONLY enrichment columns on the canonical row — never the score/risk', async () => {
+    const row = { id: 'row-1', customer_id: 'c1', churn_risk: 'high', churn_probability: '0.55' };
     const updateChain = makeChain(undefined);
 
     wireDb({
       customers: [makeChain(customer)],
+      customer_health_scores: [makeChain(row), updateChain],
       customer_signals: [makeChain(undefined, [])],
-      service_records: [makeChain(undefined, [])],
-      customer_health_scores: [lookupChain, insertChain, refetchChain, updateChain],
+      service_records: [makeChain(undefined, [])], // no upsell triggers
     });
 
-    await expect(healthScorer.calculateHealth('c1')).resolves.toMatchObject({ riskLevel: expect.any(String) });
+    const result = await healthScorer.enrichCustomer('c1');
 
-    expect(insertChain.insert).toHaveBeenCalledTimes(1);
-    expect(updateChain.whereCalls).toEqual([['id', 'row-9']]);
+    expect(updateChain.whereCalls).toEqual([['id', 'row-1']]);
     expect(updateChain.update).toHaveBeenCalledTimes(1);
-    expect(updateChain.update.mock.calls[0][0].scored_at).toBe('2026-06-10');
+
+    const written = updateChain.update.mock.calls[0][0];
+    // Exactly the enrichment columns — nothing that belongs to the scorer.
+    expect(Object.keys(written).sort()).toEqual(
+      ['lifetime_value_estimate', 'next_best_action', 'updated_at', 'upsell_opportunities'].sort()
+    );
+    expect(written).not.toHaveProperty('overall_score');
+    expect(written).not.toHaveProperty('churn_risk');
+    expect(written).not.toHaveProperty('score_grade');
+    expect(written).not.toHaveProperty('payment_score');
+
+    // LTV uses the canonical row's churn_probability: 100*12*(1-0.55) = 540.
+    expect(written.lifetime_value_estimate).toBeCloseTo(540);
+    expect(result).toMatchObject({ hadRow: true });
   });
 
-  test('non-unique insert errors are rethrown, not swallowed', async () => {
-    const lookupChain = makeChain(undefined);
-    const insertChain = makeChain(undefined);
-    const otherErr = Object.assign(new Error('column "nope" does not exist'), { code: '42703' });
-    insertChain.insert = jest.fn(() => Promise.reject(otherErr));
-
+  test('skips the write when no canonical row exists yet', async () => {
+    const maybeUpdate = makeChain(undefined);
     wireDb({
       customers: [makeChain(customer)],
+      customer_health_scores: [makeChain(undefined), maybeUpdate], // lookup returns nothing
       customer_signals: [makeChain(undefined, [])],
       service_records: [makeChain(undefined, [])],
-      customer_health_scores: [lookupChain, insertChain],
     });
 
-    await expect(healthScorer.calculateHealth('c1')).rejects.toThrow('column "nope" does not exist');
+    const result = await healthScorer.enrichCustomer('c1');
+
+    expect(maybeUpdate.update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ hadRow: false });
   });
 
-  test('per-day history is retained: inserts a daily snapshot into customer_health_history', async () => {
-    const historyLookup = makeChain(undefined);
-    const historyWrite = makeChain(undefined);
-
-    wireDb({
-      customers: [makeChain(customer)],
-      customer_signals: [makeChain(undefined, [])],
-      service_records: [makeChain(undefined, [])],
-      customer_health_scores: [makeChain(undefined), makeChain(undefined)],
-      customer_health_history: [historyLookup, historyWrite],
+  describe('determineNextAction uses the canonical low/moderate/high/critical vocab', () => {
+    test('critical + competitor → CALL', () => {
+      const out = healthScorer.determineNextAction(customer, 'critical',
+        [{ signal: 'COMPETITOR_MENTIONED' }], []);
+      expect(out).toMatch(/^CALL:.*competitor/);
     });
-
-    await healthScorer.calculateHealth('c1');
-
-    expect(historyLookup.whereCalls).toEqual([['customer_id', 'c1'], ['scored_at', '2026-06-10']]);
-    expect(historyWrite.insert).toHaveBeenCalledTimes(1);
-    const snapshot = historyWrite.insert.mock.calls[0][0];
-    expect(snapshot).toMatchObject({
-      customer_id: 'c1',
-      scored_at: '2026-06-10',
+    test('high + service gap → SMS re-engage', () => {
+      const out = healthScorer.determineNextAction(customer, 'high',
+        [{ signal: 'SERVICE_GAP_60_DAYS' }], []);
+      expect(out).toMatch(/^SMS: Re-engage/);
     });
-    expect(snapshot).toHaveProperty('overall_score');
-    expect(snapshot).toHaveProperty('churn_risk');
-  });
-
-  test('history snapshot is idempotent per day: refreshes an existing today-row instead of inserting', async () => {
-    const historyLookup = makeChain({ id: 'h-1', customer_id: 'c1', scored_at: '2026-06-10' });
-    const historyWrite = makeChain(undefined);
-
-    wireDb({
-      customers: [makeChain(customer)],
-      customer_signals: [makeChain(undefined, [])],
-      service_records: [makeChain(undefined, [])],
-      customer_health_scores: [makeChain({ id: 'row-1', customer_id: 'c1' }), makeChain(undefined)],
-      customer_health_history: [historyLookup, historyWrite],
+    test('moderate → MONITOR', () => {
+      const out = healthScorer.determineNextAction(customer, 'moderate', [], []);
+      expect(out).toMatch(/^MONITOR:/);
     });
-
-    await healthScorer.calculateHealth('c1');
-
-    expect(historyWrite.whereCalls).toEqual([['id', 'h-1']]);
-    expect(historyWrite.update).toHaveBeenCalledTimes(1);
-    expect(historyWrite.insert).not.toHaveBeenCalled();
-  });
-
-  test('repeat run on the same day stays idempotent — still a single-row update', async () => {
-    const lookupChain = makeChain({ id: 'row-1', customer_id: 'c1', scored_at: '2026-06-10T00:00:00.000Z' });
-    const writeChain = makeChain(undefined);
-
-    wireDb({
-      customers: [makeChain(customer)],
-      customer_signals: [makeChain(undefined, [])],
-      service_records: [makeChain(undefined, [])],
-      customer_health_scores: [lookupChain, writeChain],
+    test('low + upsell → UPSELL', () => {
+      const out = healthScorer.determineNextAction(customer, 'low', [],
+        [{ service: 'lawn_care', monthly_value: 72.5, confidence: 0.7 }]);
+      expect(out).toMatch(/^UPSELL:/);
     });
-
-    await healthScorer.calculateHealth('c1');
-
-    expect(writeChain.update).toHaveBeenCalledTimes(1);
-    expect(writeChain.insert).not.toHaveBeenCalled();
+    test('low + no upsell → MAINTAIN', () => {
+      const out = healthScorer.determineNextAction(customer, 'low', [], []);
+      expect(out).toMatch(/^MAINTAIN:/);
+    });
   });
 });

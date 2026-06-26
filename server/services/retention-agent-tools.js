@@ -12,8 +12,14 @@ async function executeRetentionTool(toolName, input) {
     // ── Health & Signals ────────────────────────────────────────
 
     case 'run_overall_scores': {
-      const HealthScorer = require('./health-scorer');
-      return HealthScorer.calculateAllHealthScores();
+      // Canonical scoring + intelligence enrichment, mirroring the nightly
+      // pipeline. Scoring lives in customer-health.js (sole engine); the
+      // customer-intelligence layer only enriches (upsell/next-action/LTV).
+      const { scoreAllCustomers } = require('./customer-health');
+      const HealthScorer = require('./customer-intelligence/health-scorer');
+      const health = await scoreAllCustomers();
+      const enrichment = await HealthScorer.enrichAllCustomers();
+      return { ...health, ...enrichment };
     }
 
     case 'detect_signals': {
