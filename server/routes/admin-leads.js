@@ -553,7 +553,7 @@ router.put('/campaigns/:id', async (req, res, next) => {
 router.get('/', async (req, res, next) => {
   try {
     const {
-      status, source, channel, search, sort = 'first_contact_at',
+      status, source, source_name, channel, search, sort = 'first_contact_at',
       order = 'desc', page = 1, limit = 50, start_date, end_date,
     } = req.query;
 
@@ -570,6 +570,11 @@ router.get('/', async (req, res, next) => {
 
     if (status) query = query.where('leads.status', status);
     if (source) query = query.where('leads.lead_source_id', source);
+    // Drill-down from the dashboard's Marketing Attribution panel, which groups by
+    // lead_sources.name — so we filter by the exact display name to match that
+    // bucket's population (names aren't unique across rows, but the panel and this
+    // list are then consistent: both group/filter on name).
+    if (source_name) query = query.where('lead_sources.name', source_name);
     if (channel) query = query.where('lead_sources.channel', channel);
     const startDt = start_date ? new Date(start_date) : null;
     const endDt = end_date ? new Date(end_date) : null;
@@ -603,6 +608,7 @@ router.get('/', async (req, res, next) => {
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id');
     if (status) countQuery.where('leads.status', status);
     if (source) countQuery.where('leads.lead_source_id', source);
+    if (source_name) countQuery.where('lead_sources.name', source_name);
     if (channel) countQuery.where('lead_sources.channel', channel);
     if (startDt && !isNaN(startDt)) countQuery.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) countQuery.where('leads.first_contact_at', '<=', endDt);
