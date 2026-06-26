@@ -24,10 +24,22 @@ describe('geofence canonical tracking transitions', () => {
 
     const result = await geofenceHandler.markOnPropertyFromGeofence('svc-1', eventTime);
 
-    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1');
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1', {});
     expect(db).not.toHaveBeenCalledWith('service_tracking');
     expect(result.canonical).toEqual({ ok: true, state: 'on_property' });
     expect(result).not.toHaveProperty('legacy');
+  });
+
+  test('arrival forwards the suppressArrivalSms option to markOnProperty', async () => {
+    const eventTime = new Date('2026-05-05T12:00:00.000Z');
+
+    await geofenceHandler.markOnPropertyFromGeofence('svc-1', eventTime, {
+      suppressArrivalSms: true,
+    });
+
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1', {
+      suppressArrivalSms: true,
+    });
   });
 
   test('departure auto-complete routes through track_state without legacy service_tracking sync', async () => {

@@ -31,10 +31,10 @@ async function sendTechNotification(technicianId, { type, message, payload }) {
   }
 }
 
-async function markOnPropertyFromGeofence(scheduledServiceId, eventTime = new Date()) {
+async function markOnPropertyFromGeofence(scheduledServiceId, eventTime = new Date(), opts = {}) {
   let canonical = null;
   try {
-    canonical = await trackTransitions.markOnProperty(scheduledServiceId);
+    canonical = await trackTransitions.markOnProperty(scheduledServiceId, opts);
   } catch (err) {
     logger.error(`[geofence-handler] markOnProperty failed for job ${scheduledServiceId}: ${err.message}`);
   }
@@ -162,7 +162,11 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   const existingTimer = await matcher.getActiveJobTimer(tech.id);
   if (existingTimer) {
     if (job) {
-      await markOnPropertyFromGeofence(job.id, eventTime);
+      // A timer is already running for another job — the tech hasn't started
+      // this one (e.g. driving past the next customer mid-job). Flip the
+      // tracker for accuracy but suppress the arrival SMS so the customer
+      // isn't told "your tech has arrived" prematurely.
+      await markOnPropertyFromGeofence(job.id, eventTime, { suppressArrivalSms: true });
     }
     await matcher.logEvent({
       bouncie_imei: imei,

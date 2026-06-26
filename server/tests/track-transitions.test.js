@@ -29,6 +29,7 @@ function query(result) {
   return {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
     update: jest.fn().mockResolvedValue(result),
     first: jest.fn().mockResolvedValue(result),
   };
@@ -112,7 +113,7 @@ describe('track-transitions lifecycle side effects', () => {
     });
   });
 
-  test('markOnProperty fires the arrival SMS once and stamps arrival_sms_sent_at', async () => {
+  test('markOnProperty fires the arrival SMS once and claims arrival_sms_sent_at before sending', async () => {
     const svc = {
       id: 'job-6',
       customer_id: 'cust-6',
@@ -123,21 +124,93 @@ describe('track-transitions lifecycle side effects', () => {
       arrival_sms_sent_at: null,
     };
     sendTechArrived.mockResolvedValue({ success: true });
-    const stamp = query(1);
+    const claim = query(1);
     db
       .mockReturnValueOnce(query(svc)) // loadService
       .mockReturnValueOnce(query(1)) // on_property flip update
-      .mockReturnValueOnce(query({ name: 'Bryan' })) // technician name lookup
-      .mockReturnValueOnce(stamp); // arrival_sms_sent_at stamp
+      .mockReturnValueOnce(claim) // atomic claim of arrival_sms_sent_at
+      .mockReturnValueOnce(query({ name: 'Bryan' })); // technician name lookup
 
     const result = await trackTransitions.markOnProperty('job-6');
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('on_property');
     expect(sendTechArrived).toHaveBeenCalledWith('cust-6', 'Bryan');
-    expect(stamp.update).toHaveBeenCalledWith({
+    // Guard is claimed (NULL -> now()) before the send, not stamped after.
+    expect(claim.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
+    expect(claim.update).toHaveBeenCalledWith({
       arrival_sms_sent_at: expect.any(Date),
     });
+  });
+
+  test('markOnProperty does not double-send when another arrival signal already claimed the guard', async () => {
+    const svc = {
+      id: 'job-c',
+      customer_id: 'cust-c',
+      technician_id: 'tech-c',
+      status: 'on_site', // syncOperationalStatus no-op
+      track_state: 'on_property', // idempotent branch
+      cancelled_at: null,
+      actual_start_time: new Date(),
+      check_in_time: new Date(),
+      arrived_at: new Date(),
+      arrival_sms_sent_at: null,
+    };
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(0)); // claim loses the race (0 rows updated)
+
+    const result = await trackTransitions.markOnProperty('job-c');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).not.toHaveBeenCalled();
+  });
+
+  test('markOnProperty releases the arrival guard when the send fails so a later signal retries', async () => {
+    const svc = {
+      id: 'job-f',
+      customer_id: 'cust-f',
+      technician_id: 'tech-f',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    sendTechArrived.mockResolvedValue({ success: false });
+    const release = query(1);
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // flip
+      .mockReturnValueOnce(query(1)) // claim
+      .mockReturnValueOnce(query({ name: 'Dana' })) // tech lookup
+      .mockReturnValueOnce(release); // release back to NULL
+
+    const result = await trackTransitions.markOnProperty('job-f');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).toHaveBeenCalled();
+    expect(release.update).toHaveBeenCalledWith({ arrival_sms_sent_at: null });
+  });
+
+  test('markOnProperty suppresses the arrival SMS on the timer-already-running path', async () => {
+    const svc = {
+      id: 'job-s',
+      customer_id: 'cust-s',
+      technician_id: 'tech-s',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)); // flip
+
+    const result = await trackTransitions.markOnProperty('job-s', { suppressArrivalSms: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('on_property');
+    expect(sendTechArrived).not.toHaveBeenCalled();
   });
 
   test('markOnProperty does not re-send the arrival SMS when already stamped', async () => {
@@ -196,18 +269,18 @@ describe('track-transitions lifecycle side effects', () => {
       arrival_sms_sent_at: null, // prior send failed — should retry, not be dropped
     };
     sendTechArrived.mockResolvedValue({ success: true });
-    const stamp = query(1);
+    const claim = query(1);
     db
       .mockReturnValueOnce(query(svc)) // loadService
-      .mockReturnValueOnce(query({ name: 'Casey' })) // technician name lookup
-      .mockReturnValueOnce(stamp); // arrival_sms_sent_at stamp
+      .mockReturnValueOnce(claim) // atomic claim of arrival_sms_sent_at
+      .mockReturnValueOnce(query({ name: 'Casey' })); // technician name lookup
 
     const result = await trackTransitions.markOnProperty('job-r');
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('on_property');
     expect(sendTechArrived).toHaveBeenCalledWith('cust-r', 'Casey');
-    expect(stamp.update).toHaveBeenCalledWith({
+    expect(claim.update).toHaveBeenCalledWith({
       arrival_sms_sent_at: expect.any(Date),
     });
   });

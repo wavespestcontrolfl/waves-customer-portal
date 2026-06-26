@@ -351,6 +351,19 @@ async function markEnRoute(serviceId, opts = {}) {
  */
 async function maybeSendArrivalSms(svc, serviceId) {
   if (!isEnabled('techArrivedSms') || svc.arrival_sms_sent_at) return;
+  // Atomically CLAIM the send before dispatching. Concurrent arrival signals
+  // (geofence + GPS + manual) can all reach the already-on_property branch
+  // with arrival_sms_sent_at still NULL; stamping only after Twilio returns
+  // would let them all send. The conditional NULL -> now() update is the
+  // serializer: exactly one caller flips it and proceeds, racing callers see
+  // 0 rows and bail.
+  const claimed = await db('scheduled_services')
+    .where({ id: serviceId })
+    .whereNull('arrival_sms_sent_at')
+    .update({ arrival_sms_sent_at: new Date() });
+  if (!claimed) return;
+
+  let sent = false;
   try {
     const tech = svc.technician_id
       ? await db('technicians').where({ id: svc.technician_id }).first('name')
@@ -358,15 +371,22 @@ async function maybeSendArrivalSms(svc, serviceId) {
     const techName = tech?.name || 'Your Waves technician';
     const result = await TwilioService.sendTechArrived(svc.customer_id, techName);
     // sendTechArrived returns undefined (opt-out/landline path), falsy, or
-    // { success }. Only stamp on a positive signal so a missed send retries.
-    if (result && result.success) {
-      await db('scheduled_services')
-        .where({ id: serviceId })
-        .update({ arrival_sms_sent_at: new Date() });
-    }
+    // { success }. Only a positive signal counts as actually sent.
+    sent = !!(result && result.success);
   } catch (err) {
     logger.error(`[track-transitions] arrival SMS failed: ${err.message}`);
-    // Leave arrival_sms_sent_at NULL so a later arrival signal retries.
+  }
+  if (!sent) {
+    // Nothing went out (opt-out/landline) or the provider failed — release the
+    // claim so a later arrival signal can retry. On success the claim
+    // timestamp stays put as the permanent idempotency guard.
+    try {
+      await db('scheduled_services')
+        .where({ id: serviceId })
+        .update({ arrival_sms_sent_at: null });
+    } catch (err) {
+      logger.error(`[track-transitions] arrival SMS guard release failed: ${err.message}`);
+    }
   }
 }
 
@@ -407,7 +427,7 @@ async function markOnProperty(serviceId, opts = {}) {
     emitCustomerTrackRefresh(svc, 'on_property', svc.arrived_at || lifecycleUpdates.arrived_at || new Date());
     // Retry the arrival SMS if a prior on-site signal flipped the state but
     // its send failed (arrival_sms_sent_at still NULL). No-op once stamped.
-    await maybeSendArrivalSms(svc, serviceId);
+    if (!opts.suppressArrivalSms) await maybeSendArrivalSms(svc, serviceId);
     return { ok: true, state: 'on_property', arrivedAt: svc.arrived_at || lifecycleUpdates.arrived_at || null };
   }
   // Geofence arrival can be the first signal we get when a tech forgot
@@ -461,7 +481,10 @@ async function markOnProperty(serviceId, opts = {}) {
   emitCustomerTrackRefresh(svc, 'on_property', now);
   // Fire the arrival SMS on the first on-site flip. The race-loser branch
   // above returns before here, so the concurrent winner owns the send.
-  await maybeSendArrivalSms(svc, serviceId);
+  // suppressArrivalSms skips it for the geofence "timer already running"
+  // path, which flips the tracker for a job the tech hasn't actually
+  // started (e.g. driving past the next customer mid-job).
+  if (!opts.suppressArrivalSms) await maybeSendArrivalSms(svc, serviceId);
 
   return { ok: true, state: 'on_property', arrivedAt: now };
 }
