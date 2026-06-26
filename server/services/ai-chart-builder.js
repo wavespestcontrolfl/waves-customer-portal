@@ -47,7 +47,8 @@ Hard rules for "sql" (queries that break these are rejected):
 - Dates/timestamps are US Eastern (the query already runs in America/New_York); money columns are already in dollars.
 
 Domain rules (using the wrong one silently returns wrong/zero rows):
-- A real/active customer = "is_live_customer = true". Do NOT use "active" alone — active defaults true for CRM leads. For "active customers", "customer count", retention, churn, filter WHERE is_live_customer.
+- A real/active customer = "is_live_customer = true" (do NOT use "active" alone — it's true for CRM leads). Use is_live_customer for CURRENT-book metrics: "active customers", "customer count", current MRR.
+- For CHURN / RETENTION, do NOT filter to is_live_customer — that hides the departures you're measuring. Use the whole population with member_since as the join date and pipeline_stage IN ('churned','dormant') / churned_at / deleted_at as the departure signal.
 - ai_scheduled_services has NO 'scheduled' status. Upcoming work = status IN ('pending','confirmed'); completed visits = 'completed'; for delivered-work metrics prefer ai_service_records.
 - Estimate value lives in monthly_total / annual_total / onetime_total (there is no "total"); accepted deals = status='accepted'.
 - ai_reviews are public Google reviews: rating is "star_rating" (1-5), date is "review_created_at". ai_review_requests is the internal CSAT survey ("score" 1-10).

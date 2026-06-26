@@ -48,6 +48,9 @@ const VIEWS = [
   { name: 'ai_review_requests', table: 'review_requests', customerCol: 'customer_id', nameExpr: null,
     cols: ['id', 'customer_id', 'submitted_at', 'status', 'score', 'rating', 'created_at'] },
   { name: 'ai_reviews', table: 'google_reviews', customerCol: 'customer_id', nameExpr: null,
+    // Exclude the Places aggregate pseudo-rows (reviewer_name='_stats') the way
+    // the review-trend endpoint does, so AI review counts/averages aren't skewed.
+    viewWhere: "coalesce(t.reviewer_name,'') <> '_stats'",
     cols: ['id', 'star_rating', 'review_created_at', 'location_id', 'customer_id', 'dismissed', 'created_at'] },
   { name: 'ai_estimates', table: 'estimates', customerCol: 'customer_id', nameExpr: NAME_CUSTOMER,
     cols: ['id', 'customer_id', 'status', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest', 'category', 'source', 'sent_at', 'accepted_at', 'declined_at', 'created_at'] },
@@ -89,6 +92,7 @@ exports.up = async function up(knex) {
     // Test-account exclusion: by denormalized name (catches unlinked rows) AND by
     // linked customer_id — whichever the table supports.
     const preds = [];
+    if (v.viewWhere) preds.push(v.viewWhere);
     if (testArr && v.nameExpr) preds.push(`${v.nameExpr} <> ALL(${testArr})`);
     if (testArr && v.customerCol && actual.has(v.customerCol)) {
       preds.push(`(t.${qIdent(v.customerCol)} IS NULL OR t.${qIdent(v.customerCol)} NOT IN `
