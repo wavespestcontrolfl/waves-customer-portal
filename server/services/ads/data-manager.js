@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { runExclusive } = require('../../utils/cron-lock');
 
 let _googleapis;
 function getGoogle() {
@@ -522,6 +523,11 @@ function priorUploadSkipReason(prior) {
   if (!prior) return null;
   if (prior.status === LIVE_UPLOAD_SENT_STATUS) return 'already_sent';
   if (prior.status === LIVE_UPLOAD_PENDING_STATUS) return 'upload_pending';
+  // PARTIAL_SUCCESS returns only aggregate error counts — we can't tell which
+  // transactions in the batch failed, so re-uploading would duplicate the ones
+  // that succeeded. Treat it as terminal (skip) and surface error_message for
+  // manual review rather than blindly retrying the whole batch.
+  if (prior.status === 'partial_success') return 'partial_success';
   return null;
 }
 
@@ -694,7 +700,18 @@ function uploadValidateOnly(requestedValidateOnly) {
   return requestedValidateOnly !== false;
 }
 
-async function uploadConversions({
+// Public entry point. Wraps the upload in a Postgres advisory lock keyed by
+// conversion type so the daily cron AND the admin /data-manager/upload endpoint
+// (and overlapping instances) can't both read the upload log before either
+// writes it and send the same transaction IDs twice. Non-blocking: a concurrent
+// caller is skipped (the holder's sweep covers the same candidates).
+async function uploadConversions(opts = {}) {
+  const conversionType = opts.conversionType || 'completed_job_revenue';
+  if (!CONVERSIONS[conversionType]) throw new Error(`Unsupported conversion type: ${conversionType}`);
+  return runExclusive(`data-manager-upload:${conversionType}`, () => uploadConversionsLocked({ ...opts, conversionType }));
+}
+
+async function uploadConversionsLocked({
   conversionType = 'completed_job_revenue',
   periodDays = 30,
   limit = 100,
@@ -881,10 +898,41 @@ async function retrieveRequestStatus(requestId, { fetchImpl = global.fetch, acce
   return { ...data, uploadStatus: uploadStatus.status, uploadsUpdated: uploadStatus.updated };
 }
 
+/**
+ * Resolve still-pending live upload requests by polling Data Manager request
+ * status and updating the upload log. Without this, a request that later fails or
+ * partially succeeds stays 'pending' forever (and future scans skip its
+ * transactions as upload_pending) — so the automated cron would never retry it.
+ * Reconciling flips failed/partial rows out of 'pending', making them retryable
+ * on the next upload run, and confirms successes.
+ */
+async function reconcilePendingRequests({ limit = 100 } = {}) {
+  const rows = await db('google_ads_conversion_uploads')
+    .where({ status: LIVE_UPLOAD_PENDING_STATUS, validate_only: false })
+    .whereNotNull('request_id')
+    .distinct('request_id')
+    .limit(Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500));
+
+  const results = [];
+  for (const row of rows) {
+    const requestId = row.request_id;
+    if (!requestId) continue;
+    try {
+      const r = await retrieveRequestStatus(requestId);
+      results.push({ requestId, status: r.uploadStatus, updated: r.uploadsUpdated });
+    } catch (err) {
+      logger.warn('[data-manager] reconcile failed', { requestId, error: err.message });
+      results.push({ requestId, error: err.message });
+    }
+  }
+  return results;
+}
+
 module.exports = {
   buildReadiness,
   uploadConversions,
   retrieveRequestStatus,
+  reconcilePendingRequests,
   _private: {
     adIdentifiers,
     buildEvent,

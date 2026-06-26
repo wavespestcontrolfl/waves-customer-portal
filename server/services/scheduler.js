@@ -2288,6 +2288,51 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:40AM — Google Ads offline conversion upload (Data Manager API)
+  // Automates the EXISTING DataManager.uploadConversions (qualified leads +
+  // completed-job revenue) — previously admin-trigger only. Opt-in via
+  // GOOGLE_DATA_MANAGER_CRON_ENABLED so it never auto-fires on deploy; even
+  // when on, the module still honours GOOGLE_DATA_MANAGER_ALLOW_UPLOADS /
+  // _VALIDATE_ONLY (validate-only unless the account is explicitly live) and
+  // de-dupes per transaction id, so a 7-day re-scan never double-reports.
+  // =========================================================================
+  cron.schedule('40 6 * * *', async () => {
+    if (process.env.GOOGLE_DATA_MANAGER_CRON_ENABLED !== 'true') return;
+    logger.info('Running: Google Ads offline conversion upload (Data Manager)');
+    try {
+      const DataManager = require('./ads/data-manager');
+      // Reconcile prior runs' still-pending requests first, so failures/partials
+      // get marked (and become retryable) instead of stuck pending forever.
+      const reconciled = await DataManager.reconcilePendingRequests({ limit: 100 });
+      if (reconciled.length) {
+        logger.info(`[data-manager cron] reconciled ${reconciled.length} pending request(s)`);
+      }
+      // No cron-lock wrapper here — uploadConversions self-serializes with a
+      // per-type advisory lock, so it's safe against overlapping cron ticks AND a
+      // concurrent admin-triggered upload (the manual endpoint calls the same fn).
+      // Per-type window: a lead can be marked qualified (is_qualified) well after
+      // first contact WITHOUT setting converted_at, and qualified-lead candidates
+      // are dated by COALESCE(converted_at, first_contact_at, created_at). Scan the
+      // full ~90-day Google import window so a lead first contacted up to 90 days
+      // ago but qualified only now is still uploaded (anything older is outside
+      // Google's window anyway). Per-transaction dedupe makes the overlap a no-op.
+      const PERIOD_DAYS = { qualified_lead: 90, completed_job_revenue: 30 };
+      for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
+        const r = await DataManager.uploadConversions({
+          conversionType, periodDays: PERIOD_DAYS[conversionType], limit: 500, validateOnly: false,
+        });
+        logger.info(`[data-manager cron] ${conversionType}: ${JSON.stringify({
+          skipped: r.skipped || false, configured: r.configured, validateOnly: r.validateOnly,
+          candidates: r.candidates, sent: r.sent, accepted: r.accepted, pending: r.pending,
+          requestId: r.requestId || null, error: r.error || null,
+        })}`);
+      }
+    } catch (err) {
+      logger.error(`Data Manager offline conversion upload failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6AM — Sync Google Search Console data (hub + all spoke domains)
   //
   // syncAllDomains walks NETWORK_DOMAINS in order (hub first) and catches

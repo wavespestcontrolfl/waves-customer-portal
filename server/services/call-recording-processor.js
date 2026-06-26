@@ -1998,39 +1998,37 @@ const CallRecordingProcessor = {
         // Check if lead already exists for this phone
         const existingLead = phone ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first() : null;
 
+        // Resolve the dialed number's marketing source ONCE — used by both the
+        // existing-lead and new-lead paths, and for PPC attribution of paid calls.
+        // Match every plausible shape of `lead_sources.twilio_phone_number` (it has
+        // historically been hand-entered: E.164 `+19413187612`, 11-digit
+        // `19413187612`, 10-digit `9413187612`, formatted `(941) 318-7612`).
+        let leadSourceId = null;
+        let leadSourceRow = null;
+        try {
+          const digits = (call.to_phone || '').replace(/\D/g, '');
+          const ten = digits.length >= 10 ? digits.slice(-10) : null;
+          const variants = new Set([call.to_phone].filter(Boolean));
+          if (ten) {
+            variants.add(ten);
+            variants.add(`1${ten}`);
+            variants.add(`+1${ten}`);
+            variants.add(`(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6)}`);
+          }
+          const ls = await db('lead_sources')
+            .where('is_active', true)
+            .whereIn('twilio_phone_number', [...variants])
+            .first();
+          if (ls) { leadSourceId = ls.id; leadSourceRow = ls; }
+          else logger.warn(`[call-proc] No lead_source matched ${maskPhone(call.to_phone)} (variants tried: ${[...variants].map(maskPhone).join(', ')})`);
+        } catch (e) {
+          logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
+        }
+
         if (existingLead) {
           leadId = existingLead.id;
           logger.info(`[call-proc] Found existing lead ${leadId} for ${maskPhone(phone)}`);
         } else {
-          // Resolve lead source from the Twilio number. Match every plausible
-          // shape of `lead_sources.twilio_phone_number` because that column has
-          // historically been hand-entered (E.164 `+19413187612`, 11-digit
-          // `19413187612`, 10-digit `9413187612`, formatted `(941) 318-7612`).
-          // The previous implementation produced `+1${digits}` from an already-
-          // E.164 input (`+119413187612`) — always invalid — so on E.164-stored
-          // rows only the exact match worked, and on non-E.164-stored rows
-          // nothing matched and lead_source_id silently went null.
-          let leadSourceId = null;
-          try {
-            const digits = (call.to_phone || '').replace(/\D/g, '');
-            const ten = digits.length >= 10 ? digits.slice(-10) : null;
-            const variants = new Set([call.to_phone].filter(Boolean));
-            if (ten) {
-              variants.add(ten);
-              variants.add(`1${ten}`);
-              variants.add(`+1${ten}`);
-              variants.add(`(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6)}`);
-            }
-            const ls = await db('lead_sources')
-              .where('is_active', true)
-              .whereIn('twilio_phone_number', [...variants])
-              .first();
-            if (ls) leadSourceId = ls.id;
-            else logger.warn(`[call-proc] No lead_source matched ${maskPhone(call.to_phone)} (variants tried: ${[...variants].map(maskPhone).join(', ')})`);
-          } catch (e) {
-            logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
-          }
-
           const [newLead] = await db('leads').insert({
             lead_source_id: leadSourceId,
             customer_id: customerId,
@@ -2072,6 +2070,27 @@ const CallRecordingProcessor = {
               logger.warn(`[call-proc] untracked-call admin notify failed: ${notifyErr.message}`);
             }
           }
+        }
+
+        // Paid call lead (dedicated Google Ads tracking number), NEW or reused ->
+        // surface it in the PPC funnel (ad_service_attribution). Gated on leadId so
+        // it only counts actual leads (shouldCreateLead already excluded established
+        // customers). campaign_id is null here (single-number bucket; the
+        // call-reporting bridge fills the campaign when it matches). Best-effort.
+        // Scope to ACTUAL Google Ads sources — a `channel='paid'` row with a
+        // non-Google source_type (Facebook/LSA/other paid number) must not be
+        // labelled google_ads and pollute the Google Ads PPC funnel.
+        if (leadId && customerId && leadSourceRow && leadSourceRow.source_type === 'google_ads') {
+          require('./ads/call-attribution').recordCallPpcAttribution({
+            customerId,
+            leadId,
+            leadSource: 'google_ads',
+            leadSourceDetail: leadSourceRow.name || 'inbound call',
+            // service_interest isn't on the lead row yet (enrichment writes it
+            // later) — pass the extracted service so service-line ROI is right.
+            serviceInterest: extracted.matched_service || extracted.requested_service || null,
+            leadDate: call.created_at || null, // date by the actual call
+          }).catch(() => {});
         }
 
         // Enrich lead with AI-extracted data. For an existing lead, only fill

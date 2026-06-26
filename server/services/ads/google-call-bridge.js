@@ -382,7 +382,7 @@ async function findLeadForCall(callLog) {
   const plan = leadMatchPlan(callLog);
   if (!plan) return null;
 
-  let query = db('leads').select('id');
+  let query = db('leads').select('id', 'customer_id');
   if (plan.strategy === 'customer_id') {
     query = query.where({ customer_id: plan.customerId });
   } else {
@@ -398,7 +398,9 @@ async function findLeadForCall(callLog) {
     .orderByRaw('ABS(EXTRACT(EPOCH FROM (first_contact_at - ?::timestamptz))) ASC', [plan.callAt])
     .orderBy('created_at', 'desc')
     .first();
-  return lead?.id ? { ...plan, leadId: lead.id } : null;
+  // A phone-matched plan has no customerId; surface the matched lead's so PPC
+  // attribution can run even when the call_log row isn't customer-linked.
+  return lead?.id ? { ...plan, leadId: lead.id, customerId: plan.customerId || lead.customer_id || null } : null;
 }
 
 async function updateLeadAttribution(leadMatch, bridgeSource, now) {
@@ -455,9 +457,50 @@ async function applyBridge(options = {}) {
   const applied = [];
   const skipped = [];
 
+  // Idempotent PPC-funnel write (ad_service_attribution) for a confirmed Google
+  // Ads call. Used by both the fresh-bridge path and the already-bridged path so
+  // calls bridged BEFORE this shipped (and lead-retry calls) also land in the
+  // funnel. customerId may come from a freshly-matched lead or the call_log.
+  const writeCallPpcAttribution = async (match, customerId, leadId) => {
+    // Require an actual lead — a confirmed Google Ads call from an EXISTING
+    // customer that matched no lead (e.g. a service/support call) must not be
+    // counted as a new PPC lead. Mirrors the lead-creation gate in
+    // call-recording-processor (LEAD_PIPELINE_STAGES).
+    if (!customerId || !leadId) return;
+    await require('./call-attribution').recordCallPpcAttribution({
+      customerId,
+      leadId: leadId || null,
+      leadSource: 'google_ads',
+      leadSourceDetail: match.googleCall.campaignName || GOOGLE_ADS_BRIDGE_SOURCE_NAME,
+      googleCampaignId: match.googleCall.campaignId,
+      leadDate: match.callLog?.createdAt || null, // date by the actual call, not this run
+    }).catch((e) => logger.warn(`[google-call-bridge] PPC attribution failed: ${e.message}`));
+  };
+
   for (const match of preview.matches) {
     if (match.status === 'already_bridged') {
+      // Only attribute when the CRM call is bridged to THIS Google call. A call
+      // can score 'already_bridged' off a resource_name linked to a DIFFERENT
+      // nearby Google call, and using this match.googleCall's campaign then would
+      // mis-attribute. (PPC write only — lead-attribution retry is campaign-
+      // agnostic and still runs.)
+      const bridgedToThisCall = !!match.callLog?.googleAdsCallResourceName
+        && match.callLog.googleAdsCallResourceName === match.googleCall.resourceName;
+
       if (!shouldRetryLeadAttribution(match)) {
+        if (bridgedToThisCall) {
+          // Backfill the funnel row for calls bridged before this shipped (idempotent).
+          // call_log.lead_id is only populated by the twilio_call_sid join; a call
+          // lead-matched by phone/customer (recorded in metadata) has it null, so
+          // resolve the lead in that case before attributing.
+          let backfillLeadId = match.callLog?.leadId || null;
+          let backfillCustomerId = match.callLog?.customerId || null;
+          if (!backfillLeadId) {
+            const lm = await findLeadForCall(match.callLog).catch(() => null);
+            if (lm?.leadId) { backfillLeadId = lm.leadId; backfillCustomerId = lm.customerId || backfillCustomerId; }
+          }
+          await writeCallPpcAttribution(match, backfillCustomerId, backfillLeadId);
+        }
         skipped.push({ ...match, skipReason: 'already_bridged' });
         continue;
       }
@@ -479,6 +522,10 @@ async function applyBridge(options = {}) {
             }),
             updated_at: now,
           });
+
+        if (bridgedToThisCall) {
+          await writeCallPpcAttribution(match, leadMatch.customerId || match.callLog?.customerId || null, leadMatch.leadId);
+        }
 
         applied.push({ ...match, status: 'lead_attribution_retried' });
       } catch (err) {
@@ -523,6 +570,15 @@ async function applyBridge(options = {}) {
           metadata: bridgeMetadataPatch(bridgePayload),
           updated_at: now,
         });
+
+      // Surface this confirmed Google Ads call in the PPC funnel
+      // (ad_service_attribution), tagged with the campaign Google reported, so
+      // phone leads stop being invisible to PPC ROI. Idempotent; best-effort.
+      await writeCallPpcAttribution(
+        match,
+        leadMatch?.customerId || match.callLog?.customerId || null,
+        leadMatch?.leadId || match.callLog?.leadId || null,
+      );
 
       applied.push(match);
     } catch (err) {
