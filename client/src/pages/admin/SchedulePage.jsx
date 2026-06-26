@@ -11563,6 +11563,35 @@ export function CompletionPanel({
                 Report stored — customer delivery is off for this service type.
               </div>
             )}
+            {showPrepayCta && !completionResult?.followupSuggestion?.required && (
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                  marginTop: 20,
+                  width: "100%",
+                  maxWidth: 360,
+                  padding: "0 24px",
+                  boxSizing: "border-box",
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setShowPrepay(true)}
+                  style={{ ...btnBase, width: "100%", background: D.teal, color: "#fff", fontSize: 14 }}
+                >
+                  Offer annual prepay
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onClose(true)}
+                  style={{ ...btnBase, width: "100%", background: "transparent", color: D.text, border: `1px solid ${D.border}`, fontSize: 14 }}
+                >
+                  Done
+                </button>
+              </div>
+            )}
             {completionResult?.followupSuggestion?.required && (
               <div
                 style={{
@@ -11613,6 +11642,13 @@ export function CompletionPanel({
               </div>
             )}
           </div>
+        )}
+        {showPrepay && (
+          <AnnualPrepayLauncher
+            customerId={service.customerId || service.customer_id}
+            onClose={() => setShowPrepay(false)}
+            onSaved={() => setShowPrepay(false)}
+          />
         )}
         {/* Header */}
         <div

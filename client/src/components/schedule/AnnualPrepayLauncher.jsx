@@ -22,12 +22,22 @@ function adminFetch(path) {
   });
 }
 
-// Mirror of Customer 360's displayedAnnualPrepayTerm intent: surface the customer's
-// current binding term (active, then payment_pending) so the modal's defaults +
-// the server overlap guard line up. Null when there's no open term.
+// Mirror of Customer 360's displayedAnnualPrepayTerm so the reused modal's
+// defaults + the server overlap guard line up: a truly active/renewal-pending
+// term, else a sent-but-unpaid (payment_pending) one, else a renewal-decided /
+// renewal-lapsed term whose paid window still covers today (the overlap guard
+// 409s all of these). Without this the modal would default termStart to today and
+// the operator would hit a 409. Null when there's no binding term.
 function pickActiveTerm(terms = []) {
-  return terms.find((t) => t.status === 'active')
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const endStr = (t) => String(t?.termEnd || '').slice(0, 10);
+  return terms.find((t) => ['active', 'renewal_pending'].includes(t.status))
     || terms.find((t) => t.status === 'payment_pending')
+    || terms.find((t) =>
+      (['renewed', 'switch_plan'].includes(t.status)
+        || (t.status === 'cancelled' && t.renewalDecision === 'cancel'))
+      && endStr(t) >= todayStr)
     || null;
 }
 
