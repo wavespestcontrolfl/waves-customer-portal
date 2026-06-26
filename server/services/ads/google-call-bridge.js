@@ -524,6 +524,20 @@ async function applyBridge(options = {}) {
           updated_at: now,
         });
 
+      // Surface this confirmed Google Ads call in the PPC funnel
+      // (ad_service_attribution), tagged with the campaign Google reported, so
+      // phone leads stop being invisible to PPC ROI. Idempotent; best-effort.
+      const attribCustomerId = leadMatch?.customerId || match.callLog?.customerId || null;
+      if (attribCustomerId) {
+        await require('./call-attribution').recordCallPpcAttribution({
+          customerId: attribCustomerId,
+          leadId: leadMatch?.leadId || match.callLog?.leadId || null,
+          leadSource: 'google_ads',
+          leadSourceDetail: match.googleCall.campaignName || GOOGLE_ADS_BRIDGE_SOURCE_NAME,
+          googleCampaignId: match.googleCall.campaignId,
+        }).catch((e) => logger.warn(`[google-call-bridge] PPC attribution failed: ${e.message}`));
+      }
+
       applied.push(match);
     } catch (err) {
       logger.error(`[google-call-bridge] Failed to bridge ${match.googleCall.resourceName}: ${err.message}`);

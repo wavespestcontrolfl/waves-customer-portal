@@ -2258,6 +2258,36 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:40AM — Google Ads offline conversion upload (Data Manager API)
+  // Automates the EXISTING DataManager.uploadConversions (qualified leads +
+  // completed-job revenue) — previously admin-trigger only. Opt-in via
+  // GOOGLE_DATA_MANAGER_CRON_ENABLED so it never auto-fires on deploy; even
+  // when on, the module still honours GOOGLE_DATA_MANAGER_ALLOW_UPLOADS /
+  // _VALIDATE_ONLY (validate-only unless the account is explicitly live) and
+  // de-dupes per transaction id, so a 7-day re-scan never double-reports.
+  // =========================================================================
+  cron.schedule('40 6 * * *', async () => {
+    if (process.env.GOOGLE_DATA_MANAGER_CRON_ENABLED !== 'true') return;
+    logger.info('Running: Google Ads offline conversion upload (Data Manager)');
+    try {
+      const DataManager = require('./ads/data-manager');
+      for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
+        const r = await DataManager.uploadConversions({
+          conversionType, periodDays: 7, limit: 500, validateOnly: false,
+        });
+        logger.info(`[data-manager cron] ${conversionType}: ${JSON.stringify({
+          configured: r.configured, validateOnly: r.validateOnly, candidates: r.candidates,
+          sent: r.sent, accepted: r.accepted, pending: r.pending,
+          skipped: Array.isArray(r.skipped) ? r.skipped.length : r.skipped,
+          requestId: r.requestId || null, error: r.error || null,
+        })}`);
+      }
+    } catch (err) {
+      logger.error(`Data Manager offline conversion upload failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6AM — Sync Google Search Console data (hub + all spoke domains)
   //
   // syncAllDomains walks NETWORK_DOMAINS in order (hub first) and catches

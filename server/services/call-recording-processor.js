@@ -2011,6 +2011,7 @@ const CallRecordingProcessor = {
           // rows only the exact match worked, and on non-E.164-stored rows
           // nothing matched and lead_source_id silently went null.
           let leadSourceId = null;
+          let leadSourceRow = null;
           try {
             const digits = (call.to_phone || '').replace(/\D/g, '');
             const ten = digits.length >= 10 ? digits.slice(-10) : null;
@@ -2025,7 +2026,7 @@ const CallRecordingProcessor = {
               .where('is_active', true)
               .whereIn('twilio_phone_number', [...variants])
               .first();
-            if (ls) leadSourceId = ls.id;
+            if (ls) { leadSourceId = ls.id; leadSourceRow = ls; }
             else logger.warn(`[call-proc] No lead_source matched ${maskPhone(call.to_phone)} (variants tried: ${[...variants].map(maskPhone).join(', ')})`);
           } catch (e) {
             logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
@@ -2048,6 +2049,20 @@ const CallRecordingProcessor = {
           }).returning('*');
           leadId = newLead.id;
           logger.info(`[call-proc] Created new lead ${leadId} for ${extracted.first_name} ${extracted.last_name}`);
+
+          // Paid call lead (dedicated Google Ads tracking number) -> surface it in
+          // the PPC funnel (ad_service_attribution). campaign_id is null here
+          // (single-number bucket; the call-reporting bridge fills the campaign
+          // when it matches). Best-effort; never blocks call processing.
+          if (customerId && leadSourceRow
+              && (leadSourceRow.source_type === 'google_ads' || leadSourceRow.channel === 'paid')) {
+            require('./ads/call-attribution').recordCallPpcAttribution({
+              customerId,
+              leadId,
+              leadSource: 'google_ads',
+              leadSourceDetail: leadSourceRow.name || 'inbound call',
+            }).catch(() => {});
+          }
 
           // Untracked inbound call → no lead_source matched (caller reached the
           // main line / caller-ID didn't match a tracking number). These are the
