@@ -1701,6 +1701,12 @@ const InvoiceService = {
     // sent/viewed/overdue or a delayed/scheduled send can run on a day other
     // than service_date, where a same-day claim would be false.
     let serviceDateIsTodayET = false;
+    // Whether the service date is still in the future (ET). An invoice billed
+    // before its service has happened — the setup + first-application invoice
+    // auto-sent at estimate acceptance is the common case — must not use the
+    // generic "...completed on {service_date}" copy. Selects the pre-service
+    // variant below.
+    let serviceDateIsFutureET = false;
     if (invoice.service_date) {
       try {
         // Knex returns DATE as a Date object (UTC midnight). Avoid the broken
@@ -1726,7 +1732,10 @@ const InvoiceService = {
             invoice.service_date instanceof Date
               ? invoice.service_date.toISOString().slice(0, 10)
               : String(invoice.service_date).slice(0, 10);
-          serviceDateIsTodayET = serviceYmd === etDateString(new Date());
+          const todayYmd = etDateString(new Date());
+          serviceDateIsTodayET = serviceYmd === todayYmd;
+          // ISO YYYY-MM-DD compares lexicographically === chronologically.
+          serviceDateIsFutureET = serviceYmd > todayYmd;
         }
       } catch {
         formattedDate = "";
@@ -1779,6 +1788,22 @@ const InvoiceService = {
           first_name: customer.first_name || "",
           coverage_summary: coverageSummary,
           first_visit_clause: firstVisitClause,
+          pay_url: payUrl,
+        }, tplOpts);
+      }
+      // Upfront invoices — the setup + first-application invoice auto-sent at
+      // estimate acceptance, or any invoice billed before its service date —
+      // must not use the generic "...completed on {service_date}" copy, which
+      // asserts a not-yet-performed service AND prints a future date. A service
+      // date still in the future selects a pre-service variant with no completion
+      // claim and no date placeholder. Gated on the same base `invoice` kill
+      // switch as the prepay variant (a disabled invoice_sent skips this too,
+      // keeping the invoice retryable); a missing/disabled variant row falls
+      // through to the standard copy below so the send is never blocked.
+      if (!body && serviceDateIsFutureET && invoiceSmsActive) {
+        body = await templates.getTemplate("invoice_sent_upfront", {
+          first_name: customer.first_name || "",
+          service_type: serviceType,
           pay_url: payUrl,
         }, tplOpts);
       }
