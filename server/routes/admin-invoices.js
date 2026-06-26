@@ -497,6 +497,7 @@ router.post('/notes/ai', requireAdmin, async (req, res, next) => {
     const result = await generateInvoiceSummary({
       input: req.body.input,
       customerName: req.body.customerName,
+      customerId: req.body.customerId,
       services: req.body.services,
       serviceRecordId: req.body.serviceRecordId,
       sources: req.body.sources,

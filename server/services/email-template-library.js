@@ -126,6 +126,14 @@ function requiredPayloadMissing(template, payload) {
   });
 }
 
+// Operator-/AI-authored free-form customer copy where wording that resembles a
+// fixture placeholder ("Sample collected from the lawn…") is legitimate prose,
+// not an unfilled template value. These keys are exempt from the production
+// placeholder guard so a real note can't make a customer email send fail.
+const FREE_FORM_PAYLOAD_KEYS = new Set([
+  'invoice_summary',
+]);
+
 function productionPlaceholderPayloadValues(payload = {}) {
   const reviewFixtureValues = new Set([
     'review request type',
@@ -139,6 +147,7 @@ function productionPlaceholderPayloadValues(payload = {}) {
   ]);
   const findings = [];
   for (const [key, rawValue] of Object.entries(payload || {})) {
+    if (FREE_FORM_PAYLOAD_KEYS.has(key)) continue;
     if (rawValue == null) continue;
     if (typeof rawValue === 'object') continue;
     const value = String(rawValue).trim();

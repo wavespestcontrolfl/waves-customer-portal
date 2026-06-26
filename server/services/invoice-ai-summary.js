@@ -73,20 +73,35 @@ function formatObservations(record = {}) {
   return obs;
 }
 
-// Pull customer-relevant context from a completed service record. Degrades
-// gracefully — a missing record / bad query returns an empty context so the
-// operator's typed input + line items still drive generation.
-async function loadServiceContext(serviceRecordId) {
+// Service-record statuses that mean the visit actually happened — only these
+// have a real "what we did" to recap. A scheduled/pending/void record must not
+// be summarized as though work was performed.
+const PERFORMED_STATUSES = new Set(['completed', 'paid']);
+
+// Pull customer-relevant context from a COMPLETED service record that belongs
+// to the selected customer. Degrades gracefully — a missing/mismatched/non-
+// completed record (or a bad query) returns an empty context so the operator's
+// typed input + line items still drive generation.
+//
+// `customerId` is REQUIRED to use a service record: the invoice builder fetches
+// the visit picker by id only and does not clear `selectedService` when the
+// operator switches customers, so a stale `serviceRecordId` could otherwise
+// pull a DIFFERENT customer's technician notes into this customer's invoice.
+// We fail closed — no `customerId` ⇒ no visit context.
+async function loadServiceContext(serviceRecordId, customerId) {
   const empty = { found: false, serviceType: '', serviceDate: '', jobSummary: '', observations: [] };
-  if (!serviceRecordId) return empty;
+  if (!serviceRecordId || !customerId) return empty;
   let record;
   try {
-    record = await db('service_records').where({ id: serviceRecordId }).first();
+    record = await db('service_records')
+      .where({ id: serviceRecordId, customer_id: customerId })
+      .first();
   } catch (err) {
     logger.warn(`[invoice-ai-summary] service record lookup failed: ${err.message}`);
     return empty;
   }
   if (!record) return empty;
+  if (!PERFORMED_STATUSES.has(String(record.status || '').toLowerCase())) return empty;
   return {
     found: true,
     serviceType: clean(record.service_type, 100),
@@ -145,7 +160,9 @@ function hasUsableContext({ input, serviceLines, context, sources }) {
   if (context && context.found) {
     if (src.jobSummary && context.jobSummary) return true;
     if (src.forms && context.observations && context.observations.length) return true;
-    if (context.serviceType) return true;
+    // The visit's service label/date is supplementary context, not a basis on
+    // its own — if every source toggle is off (and there's no typed input or
+    // enabled line item), don't generate a summary from just a label.
   }
   return false;
 }
@@ -171,10 +188,10 @@ async function aiSummary(prompt) {
  * Generate a customer-facing invoice summary.
  * @returns {Promise<{ notes: string, sourcesUsed: string[] } | { error: string }>}
  */
-async function generateInvoiceSummary({ input, customerName, services, serviceRecordId, sources } = {}) {
+async function generateInvoiceSummary({ input, customerName, customerId, services, serviceRecordId, sources } = {}) {
   const src = normalizeSources(sources);
   const serviceLines = formatServiceLines(services);
-  const context = await loadServiceContext(serviceRecordId);
+  const context = await loadServiceContext(serviceRecordId, customerId);
 
   if (!hasUsableContext({ input, serviceLines, context, sources })) {
     return { error: 'Add notes, service lines, or link a completed visit first' };

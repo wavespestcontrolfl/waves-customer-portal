@@ -4436,6 +4436,8 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
           customerName: selectedCustomer
             ? `${selectedCustomer.first_name || ""} ${selectedCustomer.last_name || ""}`.trim()
             : "",
+          // Required server-side to scope the visit lookup to THIS customer.
+          customerId: selectedCustomer?.id || editInvoice?.customer_id || null,
           services: usableLines.map((item) => ({
             description: item.description,
             quantity: Number(item.quantity) || 1,
@@ -4847,6 +4849,10 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                       key={c.id}
                       onClick={() => {
                         setSelectedCustomer(c);
+                        // Drop any visit picked for the previous customer so a
+                        // stale service record can't be linked across customers.
+                        setSelectedService(null);
+                        setServiceRecords([]);
                         setCustomers([]);
                         setCustomerQuery("");
                       }}
