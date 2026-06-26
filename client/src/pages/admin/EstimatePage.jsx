@@ -798,7 +798,6 @@ function EstimateToolView() {
     isCommercial: "NO",
     commercialSubtype: "",
     commercialPricingMode: "manual_quote",
-    units: "",
     hasPool: "NO",
     hasPoolCage: "NO",
     poolCageSize: "MEDIUM",
@@ -1740,12 +1739,6 @@ function EstimateToolView() {
           onetimeLawnType: form.otLawnType || "FERT",
           commercialPricingMode: form.commercialPricingMode || "manual_quote",
           commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
-          // Omit only when truly blank so the server can fall back to the lookup
-          // unit count. An explicit 0 IS sent, so an operator can clear an
-          // incorrect multi-family count and price with no per-unit reserve.
-          units: formIsCommercial && String(form.units ?? "").trim() !== "" && Number.isFinite(parseInt(form.units, 10))
-            ? Math.max(0, parseInt(form.units, 10))
-            : undefined,
         };
         if (form.svcInjection) {
           options.palmInjection = {
@@ -2140,7 +2133,6 @@ function EstimateToolView() {
       isCommercial: "NO",
       commercialSubtype: "",
       commercialPricingMode: "manual_quote",
-      units: "",
       hasPool: "NO",
       hasPoolCage: "NO",
       poolCageSize: "MEDIUM",
@@ -2781,19 +2773,9 @@ function EstimateToolView() {
                 </Field>
               </div>
               {(commercialDetected || form.commercialSubtype) && (
-                <div style={sRow}>
-                  <Field label="Commercial Subtype">
-                    <Input k="commercialSubtype" placeholder="Optional" />
-                  </Field>
-                  <Field label="Number of Units">
-                    <Input
-                      k="units"
-                      type="number"
-                      min="0"
-                      placeholder="Apartments / multi-family"
-                    />
-                  </Field>
-                </div>
+                <Field label="Commercial Subtype">
+                  <Input k="commercialSubtype" placeholder="Optional" />
+                </Field>
               )}
               {commercialDetected && (
                 <div

@@ -594,7 +594,12 @@ function generateEstimate(input) {
         commercialPestOpts.commercialPricingMode === 'small_commercial_pilot';
       const pilotResult = pilotRequested
         ? priceCommercialPestPilot(property, {
-            frequency: pestOpts.frequency || commercialPestOpts.frequency || 'quarterly',
+            // Default to quarterly. The admin commercial UI hides the pest
+            // frequency selector, so do NOT inherit the residential `pest.frequency`
+            // (a stale monthly/bimonthly choice from a prior residential estimate
+            // would otherwise leak in). Only an explicit commercial cadence
+            // (services.commercialPest.frequency) overrides the quarterly default.
+            frequency: commercialPestOpts.frequency || 'quarterly',
             commercialSubtype,
             // Multi-family / mixed-complex inputs: an explicit per-building list
             // (each { sqft, stories, units }) wins; otherwise the single-building

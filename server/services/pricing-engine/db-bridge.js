@@ -506,6 +506,15 @@ function validatePestPricingConfig(snapshot = constants) {
     errors.push('COMMERCIAL_PEST_PILOT.ceilingSqFt must be positive');
   }
   validateSortedBrackets(errors, 'COMMERCIAL_PEST_PILOT.quarterlyBrackets', commercialPilot.quarterlyBrackets, 'sqft', 'price');
+  // The top bracket must reach the ceiling, otherwise interpolate() clamps the
+  // gap between the last point and the ceiling to the last price (underquote).
+  if (Array.isArray(commercialPilot.quarterlyBrackets) && commercialPilot.quarterlyBrackets.length
+    && isPositiveNumber(commercialPilot.ceilingSqFt)) {
+    const lastSqFt = Number(commercialPilot.quarterlyBrackets[commercialPilot.quarterlyBrackets.length - 1]?.sqft);
+    if (!(lastSqFt >= Number(commercialPilot.ceilingSqFt))) {
+      errors.push('COMMERCIAL_PEST_PILOT.quarterlyBrackets must extend to ceilingSqFt');
+    }
+  }
   for (const freq of ['quarterly', 'bimonthly', 'monthly']) {
     const mult = commercialPilot.frequencyMultipliers?.[freq];
     if (!isFiniteNumber(mult)) {
@@ -1552,18 +1561,22 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(target, 'ceilingSqFt', c.ceilingSqFt, Number);
       setString(target, 'taxCategory', c.taxCategory);
       if (Array.isArray(c.quarterlyBrackets) && c.quarterlyBrackets.length) {
-        // Fail closed: apply the admin brackets ONLY if every entry is numeric.
-        // Silently filtering out a malformed bracket would change the
-        // interpolation curve (e.g. dropping the 15k point makes 10k pricing
-        // extend to the ceiling and underquote), so a bad edit keeps the safe
-        // in-code default curve instead.
-        const allValid = c.quarterlyBrackets.every(
-          b => isFiniteNumber(b?.sqft) && isFiniteNumber(b?.price),
-        );
-        if (allValid) {
-          target.quarterlyBrackets = c.quarterlyBrackets
-            .map(b => ({ sqft: Number(b.sqft), price: money(b.price) }))
-            .sort((a, b2) => a.sqft - b2.sqft);
+        // Fail closed: apply the admin brackets ONLY if every entry is numeric
+        // AND the curve's top point reaches the ceiling. Silently filtering out a
+        // malformed bracket — or accepting a curve whose last point sits below
+        // the ceiling — would change the interpolation curve: interpolate()
+        // clamps any building between the last point and the ceiling to that last
+        // price, underquoting (e.g. dropping the 15k point extends 10k pricing to
+        // the ceiling). A bad edit keeps the safe in-code default curve instead.
+        const sorted = c.quarterlyBrackets
+          .filter(b => isFiniteNumber(b?.sqft) && isFiniteNumber(b?.price))
+          .map(b => ({ sqft: Number(b.sqft), price: money(b.price) }))
+          .sort((a, b2) => a.sqft - b2.sqft);
+        const allNumeric = sorted.length === c.quarterlyBrackets.length;
+        const coversCeiling = sorted.length > 0
+          && sorted[sorted.length - 1].sqft >= Number(target.ceilingSqFt);
+        if (allNumeric && coversCeiling) {
+          target.quarterlyBrackets = sorted;
         }
       }
       if (c.frequencyMultipliers && typeof c.frequencyMultipliers === 'object') {

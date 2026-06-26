@@ -139,6 +139,18 @@ describe('priceCommercialPestPilot through generateEstimate', () => {
     expect(estimate.waveGuard.activeServices).not.toContain('commercial_pest');
   });
 
+  test('ignores a stale residential pest cadence — the commercial pilot defaults to quarterly', () => {
+    // The admin commercial UI hides the pest-frequency selector; a leftover
+    // residential `pest.frequency` must not drive the commercial pilot cadence.
+    const estimate = generateEstimate(commercialInput({
+      services: { pest: { frequency: 'monthly', commercialPricingMode: 'small_commercial_pilot' } },
+    }));
+    const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(pest.frequency).toBe('quarterly');
+    expect(pest.visitsPerYear).toBe(4);
+    expect(pest.suggestedAnnual).toBe(660);
+  });
+
   test('an estimate above the ceiling falls back to a manual quote', () => {
     const estimate = generateEstimate(commercialInput({ buildingSqFt: 50000, homeSqFt: 50000 }));
     const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
