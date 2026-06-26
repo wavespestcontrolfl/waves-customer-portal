@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
+import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
 
 const DARK = {
   bg: '#0f1923',
@@ -81,6 +82,7 @@ export default function TechLayout() {
 
       {/* Main content area */}
       <main style={{ flex: 1, padding: '16px', paddingBottom: 80, overflowY: 'auto' }}>
+        <AddToHomeScreenHint />
         <Outlet />
       </main>
 
