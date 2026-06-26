@@ -13,6 +13,14 @@ const { renderSmsTemplate } = require("./sms-template-renderer");
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 
+// SQL predicate: a touch is an "ask" (counts toward the review cap/cooldown)
+// unless it used a no-link check-in template. null template_key = canonical ask.
+// The keys are internal constants ([a-z_]) so interpolation is injection-safe.
+const ASK_TOUCH_SQL =
+  OUTREACH.NO_LINK_TEMPLATE_KEYS.length > 0
+    ? `(template_key IS NULL OR template_key NOT IN (${OUTREACH.NO_LINK_TEMPLATE_KEYS.map((k) => `'${k}'`).join(",")}))`
+    : "(1=1)";
+
 // GBP review links per location
 const REVIEW_LINKS = {
   "bradenton": "https://g.page/r/CVRc_P5butTMEBM/review",
@@ -1480,12 +1488,13 @@ const ReviewService = {
     // Supersede any already-queued ask (post-service auto, or a quiet-hours
     // deferral): otherwise processScheduled() would fire it AND the cadence's
     // Day-0 touch → a duplicate review request. The cadence takes over outreach.
+    // Fail CLOSED — if this can't run, abort the start (no .catch → it throws and
+    // the route records not-started) rather than risk a stranded duplicate ask.
     await db("review_requests")
       .where({ customer_id: customerId, status: "pending" })
       .whereNull("sms_sent_at")
       .whereNotNull("scheduled_for")
-      .update({ status: "suppressed" })
-      .catch(() => {});
+      .update({ status: "suppressed" });
 
     const usePlan = Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN;
     let svcType = serviceType;
@@ -1569,6 +1578,23 @@ const ReviewService = {
     } catch {
       /* google_reviews may not exist */
     }
+    // Stop once the customer has ENGAGED with any touch in this cadence — the
+    // /rate flow marks the row submitted/rated (score/category) WITHOUT setting
+    // has_left_google_review or a google_reviews row, so a passive/detractor who
+    // gave private feedback must not keep getting Day-3/7 review asks.
+    const submitted = await db("review_requests")
+      .where({ sequence_id: seq.id })
+      .whereNotNull("submitted_at")
+      .first()
+      .catch(() => null);
+    const rated = submitted
+      ? null
+      : await db("review_requests")
+          .where({ sequence_id: seq.id })
+          .whereNotNull("rated_at")
+          .first()
+          .catch(() => null);
+    if (submitted || rated) return stop("responded");
     if (seq.current_step >= plan.length) return stop("completed");
     try {
       const prefs = await db("notification_prefs").where({ customer_id: seq.customer_id }).first();
@@ -1590,19 +1616,32 @@ const ReviewService = {
       .update({ next_run_at: null, updated_at: new Date() });
     if (!claimed) return { ran: false, reason: "not_active" };
 
-    const outcome = await this.sendOutreachTouch({
-      customer,
-      channel: step.channel || "sms",
-      templateId: step.templateKey || null,
-      locationId: seq.location_id,
-      techName: seq.tech_name,
-      serviceType: seq.service_type,
-      serviceRecordId: seq.service_record_id,
-      sequenceId: seq.id,
-      sequenceStep: seq.current_step,
-      triggeredBy: "sequence",
-      manageRetryVia: "sequence",
-    });
+    let outcome;
+    try {
+      outcome = await this.sendOutreachTouch({
+        customer,
+        channel: step.channel || "sms",
+        templateId: step.templateKey || null,
+        locationId: seq.location_id,
+        techName: seq.tech_name,
+        serviceType: seq.service_type,
+        serviceRecordId: seq.service_record_id,
+        sequenceId: seq.id,
+        sequenceStep: seq.current_step,
+        triggeredBy: "sequence",
+        manageRetryVia: "sequence",
+      });
+    } catch (err) {
+      // The claim above cleared next_run_at; if the touch throws BEFORE handling
+      // its own outcome (e.g. the review_requests insert or short-link fails),
+      // restore a retry time so the cron picks the sequence up again instead of
+      // stranding it with next_run_at = null.
+      await db("review_sequences")
+        .where({ id: seq.id, status: "active" })
+        .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+        .catch(() => {});
+      throw err;
+    }
 
     if (outcome.ok && outcome.sent) {
       const nextStep = seq.current_step + 1;
@@ -1700,11 +1739,13 @@ const ReviewService = {
     const countRow = await db("review_requests")
       .where({ customer_id: customerId })
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .whereRaw(ASK_TOUCH_SQL)
       .count("* as count")
       .first();
     const recent = await db("review_requests")
       .where({ customer_id: customerId })
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .whereRaw(ASK_TOUCH_SQL)
       .orderByRaw("COALESCE(sms_sent_at, sent_at) DESC")
       .first();
     return {
@@ -1719,6 +1760,7 @@ const ReviewService = {
     const rows = await db("review_requests")
       .whereIn("customer_id", ids)
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .whereRaw(ASK_TOUCH_SQL)
       .groupBy("customer_id")
       .select(
         "customer_id",

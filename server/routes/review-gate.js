@@ -188,6 +188,17 @@ router.post('/:token/submit', async (req, res, next) => {
       submitted_at: db.fn.now(),
     });
 
+    // If this came from a multi-touch cadence, stop it now — the customer has
+    // engaged, so no further Day-3/7 review asks should go out. (The cadence
+    // runner also re-checks this before each send; this just stops it sooner.)
+    if (request.sequence_id) {
+      try {
+        await require('../services/review-request').stopReviewSequence(request.sequence_id, 'responded');
+      } catch (err) {
+        logger.warn(`[review-gate] cadence stop-on-submit failed: ${err.message}`);
+      }
+    }
+
     // Create activity log entry
     await db('activity_log').insert({
       customer_id: request.customer_id,

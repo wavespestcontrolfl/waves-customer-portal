@@ -617,32 +617,48 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
     // can't slip two messages past the cap + cooldown (audit O7). The lock is
     // non-blocking — a second in-flight send to the same customer is rejected.
     const result = await runExclusive(`review-send:${customerId}`, async () => {
+      // An active cadence already owns this customer's outreach (and its touches
+      // can sit in a 'deferred' state the queued-row check below won't see), so a
+      // one-off send here would double-contact. Manage it from the cadence.
+      const activeSeq = await db('review_sequences')
+        .where({ customer_id: customer.id, status: 'active' }).first().catch(() => null);
+      if (activeSeq) {
+        return { status: 409, payload: { error: 'Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.' } };
+      }
+
+      // Private no-link check-ins (resolution_check / satisfaction_confirm) are
+      // NOT review asks, so they bypass the review 3-cap / 30-day cooldown and
+      // the queued-ask reuse (and getDeliveredAskStats doesn't count them).
+      const isAsk = OUTREACH.isAskTemplate(templateId);
+
       const thirtyDaysAgo = Date.now() - 30 * 86400000;
       // Channel-complete cap/cooldown across SMS + email (audit). Fail CLOSED:
       // a DB error here must NOT let an at-cap / in-cooldown customer through —
       // it throws to next(err) rather than the old silent catch→0.
-      const stats = await ReviewService.getDeliveredAskStats(customer.id);
-      if (stats.count >= 3) return { status: 409, payload: { error: 'Customer has already received 3 review requests' } };
-      if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
-        return { status: 409, payload: { error: 'Customer received a review request in the last 30 days' } };
-      }
-      // A previous send may have DEFERRED (quiet hours) or hit a transient
-      // failure, leaving a pending row scheduled for processScheduled() with no
-      // sent timestamp. The cap counts only delivered asks, so a second click on
-      // the 202 response would queue ANOTHER pending row and processScheduled
-      // would send both → duplicate texts. Reuse the existing queued row instead.
-      const queued = await db('review_requests')
-        .where({ customer_id: customer.id, status: 'pending' })
-        .whereNull('sms_sent_at')
-        .whereNotNull('scheduled_for')
-        .orderBy('scheduled_for', 'asc')
-        .first();
-      if (queued) {
-        return { status: 202, payload: {
-          success: false, deferred: true, alreadyQueued: true,
-          nextAllowedAt: queued.scheduled_for,
-          message: 'A review request to this customer is already queued and will send automatically.',
-        } };
+      if (isAsk) {
+        const stats = await ReviewService.getDeliveredAskStats(customer.id);
+        if (stats.count >= 3) return { status: 409, payload: { error: 'Customer has already received 3 review requests' } };
+        if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
+          return { status: 409, payload: { error: 'Customer received a review request in the last 30 days' } };
+        }
+        // A previous send may have DEFERRED (quiet hours) or hit a transient
+        // failure, leaving a pending row scheduled for processScheduled() with no
+        // sent timestamp. The cap counts only delivered asks, so a second click on
+        // the 202 response would queue ANOTHER pending row and processScheduled
+        // would send both → duplicate texts. Reuse the existing queued row instead.
+        const queued = await db('review_requests')
+          .where({ customer_id: customer.id, status: 'pending' })
+          .whereNull('sms_sent_at')
+          .whereNotNull('scheduled_for')
+          .orderBy('scheduled_for', 'asc')
+          .first();
+        if (queued) {
+          return { status: 202, payload: {
+            success: false, deferred: true, alreadyQueued: true,
+            nextAllowedAt: queued.scheduled_for,
+            message: 'A review request to this customer is already queued and will send automatically.',
+          } };
+        }
       }
 
       const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
@@ -844,11 +860,16 @@ router.patch('/incentives/policy', requireAdmin, async (req, res, next) => {
 router.post('/incentives/mark-paid', requireAdmin, async (req, res, next) => {
   try {
     const raw = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    if (!raw.length) return res.status(400).json({ error: 'ids required (valid payout UUIDs)' });
     // Validate UUID shape before the query. A non-UUID string reaches a uuid
-    // column and throws Postgres 22P02 → an unhandled 500; reject cleanly.
+    // column and throws Postgres 22P02 → an unhandled 500. Reject the WHOLE
+    // request if any id is malformed rather than silently dropping it and
+    // reporting success on a partial set.
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const ids = raw.filter((id) => typeof id === 'string' && UUID_RE.test(id));
-    if (!ids.length) return res.status(400).json({ error: 'ids required (valid payout UUIDs)' });
+    const ids = raw;
+    if (!ids.every((id) => typeof id === 'string' && UUID_RE.test(id))) {
+      return res.status(400).json({ error: 'All ids must be valid payout UUIDs' });
+    }
     const result = await ReviewIncentives.markPaid(ids, { paidBy: req.technicianId });
     res.json({ success: true, ...result });
   } catch (err) { next(err); }

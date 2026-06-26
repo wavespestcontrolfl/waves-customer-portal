@@ -168,13 +168,6 @@ const GBP_LOCATIONS = [
   },
 ];
 
-// Mirrors the source-of-truth in server/config/twilio-numbers.js. Server
-// defaults to Lakewood Ranch when fromNumber is omitted, so an unknown
-// gbpId safely falls through to that default rather than to a hardcoded
-// tracking line.
-function getOutboundNumberForGbp(gbpId) {
-  return GBP_LOCATIONS.find((l) => l.id === gbpId)?.outboundNumber;
-}
 
 const STAGES = {
   not_contacted: { label: "Not Contacted", color: C.t3, tag: "acc" },
@@ -1699,17 +1692,14 @@ function Pipeline({
                             )
                               return;
                             try {
-                              const fromNumber = getOutboundNumberForGbp(
-                                c.gbpId,
-                              );
+                              // Let the server resolve the From line from its
+                              // own TWILIO_NUMBERS source of truth — a stale
+                              // client-side GBP number would 400.
                               const r = await adminFetch(
                                 "/admin/communications/call",
                                 {
                                   method: "POST",
-                                  body: JSON.stringify({
-                                    to: c.phone,
-                                    ...(fromNumber ? { fromNumber } : {}),
-                                  }),
+                                  body: JSON.stringify({ to: c.phone }),
                                 },
                               );
                               if (!r?.success)
@@ -2393,13 +2383,11 @@ function CustomerDrawer({
                   )
                     return;
                   try {
-                    const fromNumber = getOutboundNumberForGbp(c.gbpId);
+                    // Server resolves the From line (TWILIO_NUMBERS) — a stale
+                    // client-side GBP number would 400.
                     const r = await adminFetch("/admin/communications/call", {
                       method: "POST",
-                      body: JSON.stringify({
-                        to: c.phone,
-                        ...(fromNumber ? { fromNumber } : {}),
-                      }),
+                      body: JSON.stringify({ to: c.phone }),
                     });
                     if (!r?.success) {
                       showToast("Call failed: " + (r?.error || "unknown error"));

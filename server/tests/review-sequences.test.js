@@ -126,6 +126,29 @@ describe('review sequences — cadence engine', () => {
     expect(seq.stop_reason).toBe('reviewed');
   });
 
+  test('a cadence stops after the customer submits private feedback (no further asks)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'f1', first_name: 'Fee', last_name: 'D', phone: '+19410000020', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seqF', customer_id: 'f1', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 4 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      // The Day-0 touch was submitted as a detractor (score, no Google redirect,
+      // no has_left_google_review / google_reviews row).
+      review_requests: [{ id: 'rrF', sequence_id: 'seqF', customer_id: 'f1', channel: 'sms', sms_sent_at: new Date(Date.now() - 3 * 86400000), submitted_at: new Date(Date.now() - 2 * 86400000), score: 4, category: 'detractor' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(seq.status).toBe('stopped');
+    expect(seq.stop_reason).toBe('responded');
+  });
+
   test('the final email step completes the sequence', async () => {
     const mock = makeMock({
       customers: [{ id: 'cust-3', first_name: 'Lee', last_name: 'P', email: 'lee@x.com', nearest_location_id: 'sarasota' }],

@@ -96,6 +96,21 @@ const OUTREACH_TEMPLATES = [
 
 const TEMPLATES_BY_ID = Object.fromEntries(OUTREACH_TEMPLATES.map((t) => [t.id, t]));
 
+// Templates that carry NO review link — private check-ins (issue resolution /
+// satisfaction confirm), not review asks. They must not count toward the review
+// 3-cap / 30-day cooldown, and they must not trigger the legacy Day-3 follow-up.
+const NO_LINK_TEMPLATE_KEYS = OUTREACH_TEMPLATES
+  .filter((t) => !t.body.includes("{review_url}"))
+  .map((t) => t.id);
+
+// True when a template (by id) is an actual review ask (contains a link). An
+// unknown / null id is treated as an ask (the canonical post-service template).
+function isAskTemplate(id) {
+  if (!id) return true;
+  const t = TEMPLATES_BY_ID[id];
+  return t ? t.body.includes("{review_url}") : true;
+}
+
 /**
  * Default multi-touch cadence: Day 0 SMS → Day 3 SMS → Day 7 email.
  * Mirrors ReviewRover's "a couple of SMS then an email" pattern. The day
@@ -153,6 +168,8 @@ module.exports = {
   OUTREACH_TEMPLATES,
   TEMPLATES_BY_ID,
   DEFAULT_SEQUENCE_PLAN,
+  NO_LINK_TEMPLATE_KEYS,
+  isAskTemplate,
   getOutreachTemplate,
   renderOutreachBody,
 };
