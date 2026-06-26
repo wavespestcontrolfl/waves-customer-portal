@@ -16,6 +16,7 @@ const { autopayActivePredicate } = require('../services/autopay-eligibility');
 const { generateChartSpec } = require('../services/ai-chart-builder');
 const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
+const rateLimit = require('express-rate-limit');
 
 // Server-side gate for the AI chart builder. The client hides the panel behind
 // the same flag, but the endpoints must enforce it too — otherwise any admin who
@@ -29,6 +30,23 @@ async function requireAiChartsEnabled(req, res, next) {
   }
   return res.status(403).json({ error: 'AI charts are not enabled for your account.' });
 }
+
+// Per-admin limiter on the LLM-backed preview (each call can fire up to two
+// FLAGSHIP requests) — the app-wide limiter is too coarse to stop a runaway tab
+// or compromised token from burning model spend. Mirrors the newsletter/
+// automation AI-draft limiters.
+const aiChartLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `aichart_${req.technicianId || req.ip}`,
+  message: { error: 'Too many AI chart requests in the last hour. Try again later.' },
+});
+
+// Cap on pinned widgets per admin — bounds GET /widgets fan-out (one sandbox
+// query per widget) and prevents unbounded persistence.
+const MAX_WIDGETS_PER_USER = 24;
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -1659,7 +1677,7 @@ router.get('/alerts', dashboardCache, async (req, res, next) => {
 // Generate + safely run a chart from a natural-language prompt (no persistence).
 // One repair round: if the first SQL fails to validate/run, the error is fed
 // back to the model for a corrected query.
-router.post('/ai-chart/preview', requireAiChartsEnabled, async (req, res) => {
+router.post('/ai-chart/preview', requireAiChartsEnabled, aiChartLimiter, async (req, res) => {
   const prompt = String(req.body?.prompt || '').trim();
   if (!prompt) return res.status(400).json({ error: 'A prompt is required.' });
 
@@ -1716,6 +1734,11 @@ router.post('/widgets', requireAiChartsEnabled, async (req, res, next) => {
   try {
     const { title, prompt, sql, chartSpec } = req.body || {};
     if (!title || !sql || !chartSpec) return res.status(400).json({ error: 'title, sql and chartSpec are required.' });
+    const countRow = await db('user_dashboard_widgets')
+      .where('owner_technician_id', req.technicianId).count({ c: '*' }).first();
+    if (parseInt(countRow?.c || 0, 10) >= MAX_WIDGETS_PER_USER) {
+      return res.status(409).json({ error: `You can pin up to ${MAX_WIDGETS_PER_USER} charts. Remove one first.` });
+    }
     let cleanSql;
     try {
       cleanSql = validateAnalyticsSql(sql);

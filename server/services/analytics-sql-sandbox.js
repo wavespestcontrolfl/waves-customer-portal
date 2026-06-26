@@ -10,12 +10,13 @@
  *
  *   Every query runs under `SET LOCAL ROLE aichart_readonly` inside a
  *   `SET TRANSACTION READ ONLY` transaction. That role (created by migration
- *   20260626000011) holds ONLY column-level SELECT on the non-sensitive columns
- *   of the business-analytics tables — nothing else. Reading any other table,
- *   any sensitive column, SELECT * over an ungranted column, or executing inner
- *   SQL via query_to_xml/dblink all fail with "permission denied", enforced by
- *   Postgres regardless of how the SQL is shaped. The read-only transaction
- *   blocks writes; statement_timeout + an outer LIMIT bound cost.
+ *   20260626000011) can read ONLY the curated `ai_*` analytics VIEWS — which
+ *   expose an explicit safe-column allowlist and already exclude test accounts —
+ *   and has NO access to base tables. Reading any base table, sensitive column,
+ *   or executing inner SQL via query_to_xml/dblink to reach them all fail with
+ *   "permission denied", enforced by Postgres regardless of how the SQL is
+ *   shaped. The read-only transaction blocks writes; statement_timeout + an
+ *   outer LIMIT bound cost.
  *
  * The static checks below are cheap DEFENSE-IN-DEPTH (fast rejects, clearer
  * errors), not the primary control. The role is the control.

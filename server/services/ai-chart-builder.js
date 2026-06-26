@@ -13,23 +13,24 @@ const logger = require('./logger');
 
 const CHART_TYPES = ['line', 'bar', 'donut', 'kpi', 'table'];
 
-// Curated schema handed to the model. Mirrors analytics-sql-sandbox's allowlist —
-// only these tables/columns are readable. Correctness is still enforced at run
-// time (the sandbox validates + executes read-only), so a hallucinated column
-// simply errors and is surfaced; this doc just steers the model.
+// Curated schema handed to the model. These are the ONLY readable objects —
+// filtered analytics VIEWS (test accounts already excluded; sensitive columns
+// already removed). Querying anything else fails at run time (the sandbox role
+// has no other privileges), so a hallucinated name simply errors and is surfaced.
 const SCHEMA_DOC = `
-customers(id uuid, first_name, last_name, city, state, member_since date, created_at, active bool, deleted_at, pipeline_stage [active_customer|won|at_risk|churned|dormant|lost|new_lead|...], monthly_rate numeric$/mo, waveguard_tier [Bronze|Silver|Gold|Platinum], lead_source, churned_at date, lifetime_revenue numeric)
-leads(id, first_contact_at timestamptz, status [new|contacted|estimate_sent|won|lost|...], lead_source_id->lead_sources.id, monthly_value numeric, service_interest, city, first_contact_channel [form|phone|email|referral])
-lead_sources(id, name, source_type, channel)
-invoices(id, customer_id->customers.id, status [paid|unpaid|overdue|void|...], total numeric$, paid_at timestamptz, created_at, due_date date)
-payments(id, customer_id, amount numeric$, status [paid|...], payment_date timestamptz)
-service_records(id, customer_id, service_date date, service_type, revenue numeric$, labor_hours numeric, gross_margin_pct numeric, revenue_per_man_hour numeric, is_callback bool)
-scheduled_services(id, customer_id, scheduled_date date, status [scheduled|completed|cancelled|...], service_type)
-services(id, name, is_active)
-review_requests(id, submitted_at timestamptz, status [submitted|...], score int 1-10)
-estimates(id, customer_id, status, total numeric$, created_at, service_interest)
-mrr_snapshots(period_month date, total_mrr numeric$, committed_mrr, at_risk_mrr, customer_count int)
-kpi_snapshots(snapshot_date date, metric text, value numeric)`;
+ai_customers(id uuid, city, state, zip, member_since date, created_at, active bool, deleted_at, pipeline_stage [active_customer|won|at_risk|churned|dormant|lost|new_lead|...], pipeline_stage_changed_at, monthly_rate numeric$/mo, waveguard_tier [Bronze|Silver|Gold|Platinum], lead_source, lead_source_area, lead_source_channel, churned_at date, churn_reason, lifetime_revenue numeric, total_services int, nearest_location_id)
+ai_leads(id, customer_id, first_contact_at timestamptz, first_contact_channel [form|phone|email|referral], status [new|contacted|estimate_sent|won|lost|...], lead_source_id->ai_lead_sources.id, monthly_value numeric, service_interest, city, is_residential bool, lead_type, response_time_minutes, created_at)
+ai_lead_sources(id, name, source_type, channel, is_active, gbp_location_id)
+ai_invoices(id, customer_id->ai_customers.id, status [paid|unpaid|overdue|void|...], total numeric$, paid_at timestamptz, sent_at, due_date date, created_at)
+ai_payments(id, customer_id, amount numeric$, status [paid|...], payment_date timestamptz, created_at)
+ai_service_records(id, customer_id, service_date date, service_type, revenue numeric$, labor_hours numeric, gross_margin_pct numeric, revenue_per_man_hour numeric, is_callback bool, created_at)
+ai_scheduled_services(id, customer_id, scheduled_date date, status [scheduled|completed|cancelled|...], service_type, created_at)
+ai_services(id, name, is_active)
+ai_review_requests(id, customer_id, submitted_at timestamptz, status [submitted|...], score int 1-10, created_at)
+ai_reviews(id, rating int 1-5, created_at)
+ai_estimates(id, customer_id, status, total numeric$, service_interest, created_at)
+ai_mrr_snapshots(period_month date, total_mrr numeric$, committed_mrr, at_risk_mrr, customer_count int, captured_at)
+ai_kpi_snapshots(snapshot_date date, metric text, value numeric, captured_at)`;
 
 function buildSystemPrompt() {
   return `You are a careful analytics engineer for Waves, a pest-control & lawn-care business (SW Florida). Turn the user's question into ONE read-only PostgreSQL query and a chart spec.

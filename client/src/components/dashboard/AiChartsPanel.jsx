@@ -84,9 +84,11 @@ function AiChart({ chartType, spec, rows, fields }) {
     );
   }
 
-  // bar (and donut → rendered as a share/bar breakdown — same single-series story)
+  // bar (and donut → rendered as a share/bar breakdown — same single-series story).
+  // Scale by absolute magnitude so negative metrics (net change, churn deltas)
+  // get a valid, proportional width; the signed value stays in the label.
   const bars = rows.slice(0, 12).map((r) => ({ label: String(r[xKey] ?? "—"), value: Number(r[yKey]) || 0 }));
-  const max = Math.max(...bars.map((b) => b.value), 1);
+  const absMax = Math.max(...bars.map((b) => Math.abs(b.value)), 1);
   return (
     <ul className="space-y-2">
       {bars.map((b, i) => (
@@ -96,7 +98,10 @@ function AiChart({ chartType, spec, rows, fields }) {
             <span className="u-nums text-ink-primary">{fmtNum(b.value)}</span>
           </div>
           <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
-            <div className="h-full" style={{ width: `${(b.value / max) * 100}%`, background: CHART_PRIMARY }} />
+            <div
+              className="h-full"
+              style={{ width: `${Math.min(100, (Math.abs(b.value) / absMax) * 100)}%`, background: CHART_PRIMARY, opacity: b.value < 0 ? 0.5 : 1 }}
+            />
           </div>
         </li>
       ))}
@@ -209,7 +214,7 @@ export default function AiChartsPanel() {
             <div key={w.id} className="border-hairline border-zinc-200 rounded-sm p-3">
               <div className="flex items-baseline justify-between mb-2">
                 <div className="text-13 font-medium text-ink-primary truncate pr-2">{w.title}</div>
-                <button type="button" onClick={() => onUnpin(w.id)} title="Unpin" aria-label="Unpin" className="text-12 text-ink-tertiary hover:text-alert-fg u-focus-ring">×</button>
+                <button type="button" onClick={() => onUnpin(w.id)} title="Unpin" aria-label="Unpin" className="text-12 text-ink-tertiary hover:text-ink-primary u-focus-ring">×</button>
               </div>
               {w.error
                 ? <EmptyState>{w.error}</EmptyState>
