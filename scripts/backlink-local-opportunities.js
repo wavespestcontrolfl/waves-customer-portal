@@ -58,13 +58,8 @@ function makeDb() {
   const args = parseArgs(process.argv);
   console.log(`backlink-local-opportunities dryRun=${args.dryRun} limit=${args.limit ?? '∞'} promoteMin=${args.promoteMin}`);
   if (!dataforseo.configured) { console.error('DATAFORSEO_LOGIN/PASSWORD not set'); process.exitCode = 1; return; }
-  // Lane routing depends on a reliable LLM classification; without ANTHROPIC_API_KEY the
-  // scorer falls back to the heuristic and the promoter holds those rows back, so a live
-  // run would write nothing useful. Fail fast (the dry-run still previews heuristically).
-  if (!args.dryRun && !process.env.ANTHROPIC_API_KEY) {
-    console.error('ANTHROPIC_API_KEY required for a live run (lane routing needs reliable LLM classification); re-run with --dry-run to preview');
-    process.exitCode = 1; return;
-  }
+  // The ANTHROPIC_API_KEY live-run prerequisite is enforced centrally in promoter.run
+  // (so the cron path is covered too); a missing key surfaces via the catch below.
 
   const db = makeDb();
   try {
@@ -72,7 +67,7 @@ function makeDb() {
     console.log(`\n[local-opp] discovered=${r.discovered} excludedOwned=${r.excludedOwned} scored=${r.scored}; promotable=${r.promotable}${r.heldBack ? ` (held heuristic=${r.heldBack})` : ''} by lane ${JSON.stringify(r.byLane)}`);
     console.log('[local-opp] top promotable:');
     r.items.slice().sort((a, b) => b.score - a.score).slice(0, 25).forEach((it) => console.log(
-      `   ${String(it.score).padStart(5)}  T${it.tier}  ${String(it.lane).padEnd(8)} ${String(it.intent).padEnd(10)} ${it.domain.padEnd(34)} [${it.opportunity_type}] x${it.appearances}/${it.markets}mkt  contact=${it.contact}`));
+      `   ${String(it.score).padStart(5)}  T${it.tier}  ${String(it.lane).padEnd(8)} ${String(it.intent).padEnd(10)} ${it.domain.padEnd(34)} [${it.opportunity_type}] x${it.appearances}/${it.markets}mkt  contact=${it.contact}${it.held ? '  ⚠ heuristic (held)' : ''}`));
     if (args.dryRun) console.log('\n[local-opp] DRY-RUN — no writes.');
     else console.log(`\n[local-opp] promoted ${r.promoted} new prospects to the board (${r.dupes} already present, skipped).`);
   } catch (err) {

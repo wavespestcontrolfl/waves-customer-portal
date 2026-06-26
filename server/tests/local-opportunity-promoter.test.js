@@ -12,13 +12,24 @@ function fakeDb({ ownActive = [], existing = [] } = {}) {
       return { where: () => ({ select: async () => ownActive.map((d) => ({ source_domain: d })) }) };
     }
     if (table === 'seo_link_prospects') {
-      let w = null;
-      const chain = {
-        where: (args) => { w = args; return chain; },
-        first: async () => existing.find((p) => p.target_domain === w.target_domain && p.target_page === w.target_page) || undefined,
-        insert: async (row) => { inserts.push(row); },
+      // Atomic insert chain: .insert(row).onConflict([...]).ignore().returning('id').
+      // Emulates ON CONFLICT DO NOTHING — empty result when (target_domain,target_page)
+      // already exists, else the inserted id.
+      return {
+        insert: (row) => {
+          const b = {
+            onConflict: () => b,
+            ignore: () => b,
+            returning: async () => {
+              const dup = existing.find((p) => p.target_domain === row.target_domain && p.target_page === row.target_page);
+              if (dup) return [];
+              inserts.push(row);
+              return [{ id: inserts.length }];
+            },
+          };
+          return b;
+        },
       };
-      return chain;
     }
     throw new Error(`unexpected table ${table}`);
   };
@@ -98,8 +109,25 @@ describe('local-opportunity-promoter.run', () => {
     expect(r.promoted).toBe(0);
     // promotable = gate-passing + score>=35 (incl. heuristic): sponsora, chamber, heuristic, dup.
     expect(r.promotable).toBe(4);
-    expect(r.heldBack).toBe(1);       // heuristic held out of the writable/items set
-    // items = writable (LLM-classified); dedupe runs only on a live write, so dup is still listed.
-    expect(r.items.map((i) => i.domain).sort()).toEqual(['chamber.com', 'dup.com', 'sponsora.org']);
+    expect(r.heldBack).toBe(1);
+    // items = full promotable set so a no-key preview still lists rows; heuristic flagged held.
+    expect(r.items.map((i) => i.domain).sort()).toEqual(['chamber.com', 'dup.com', 'heuristic.com', 'sponsora.org']);
+    expect(r.items.find((i) => i.domain === 'heuristic.com').held).toBe(true);
+    expect(r.items.find((i) => i.domain === 'sponsora.org').held).toBe(false);
+  });
+
+  test('live run without ANTHROPIC_API_KEY (real scorer) fails fast before any work', async () => {
+    const saved = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    let discovered = false;
+    try {
+      // no scoreFn injected → the real classifier path → guard must fire. discoverFn would
+      // flip the flag if reached; the guard runs first, so it never does.
+      await expect(promoter.run({ db: fakeDb(), discoverFn: async () => { discovered = true; return []; } }))
+        .rejects.toThrow(/ANTHROPIC_API_KEY required/);
+      expect(discovered).toBe(false);
+    } finally {
+      if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved;
+    }
   });
 });

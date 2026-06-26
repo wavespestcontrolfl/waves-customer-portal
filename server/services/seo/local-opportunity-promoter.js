@@ -49,6 +49,15 @@ async function run({
   const discover = discoverFn || prospector.discoverLocalOpportunities;
   const score = scoreFn || scorer.scoreCandidates;
 
+  // A live run needs the real LLM classifier for lane routing — without ANTHROPIC_API_KEY
+  // the scorer silently falls back to the heuristic and every row is held back, so the
+  // job would spend the SERP/contact work and promote nothing. Fail fast (before any
+  // spend) with a clear config error — this is the cron path's only guard. Skipped when a
+  // scoreFn is injected (tests) or for a --dry-run preview (which still shows held rows).
+  if (!dryRun && !scoreFn && !process.env.ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY required for a live local-opportunity run (lane routing needs reliable LLM classification)');
+  }
+
   // 1. discover (read-only SERP)
   let candidates = await discover({ perQuery, concurrency: discoveryConcurrency });
   const discovered = candidates.length;
@@ -84,23 +93,28 @@ async function run({
   const writable = promotable.filter(({ s }) => prospector.isReliablyClassified(s));
   const heldBack = promotable.length - writable.length;
 
-  const items = writable.map(({ s, cand }) => ({
+  // items = the full promotable set, each flagged `held` when heuristic-classified.
+  // Live writes are limited to writable (below), but the preview must still list held
+  // rows — otherwise a --dry-run without ANTHROPIC_API_KEY (all heuristic) shows nothing.
+  const items = promotable.map(({ s, cand }) => ({
     domain: cand.domain, score: s.score, tier: s.tier, lane: s.gate.lane, intent: s.intent_class,
     opportunity_type: cand.opportunity_type, appearances: cand.appearances, markets: cand.markets.length,
     contact: s.contact?.contact_email ? 'email' : s.contact?.contact_url ? 'form' : 'none',
+    held: !prospector.isReliablyClassified(s),
   }));
   const byLane = {}; writable.forEach(({ s }) => { byLane[s.gate.lane] = (byLane[s.gate.lane] || 0) + 1; });
   const summary = { discovered, excludedOwned, scored: scored.length, promotable: promotable.length, heldBack, promoted: 0, dupes: 0, dryRun, byLane, items };
 
   if (dryRun) return summary;
 
-  // 5. promote survivors (dedupe on target_domain+target_page; a domain already on the
-  // board — from the harvest or a prior run — is skipped, no duplicate).
+  // 5. promote survivors. Dedupe ATOMICALLY on the (target_domain, target_page) unique
+  // index via ON CONFLICT DO NOTHING — a plain SELECT-then-INSERT races the weekly cron
+  // against a manual CLI run (or any other prospect writer) and the second insert would
+  // throw a unique violation, aborting the rest of the run. `.returning('id')` is empty
+  // when the row already existed, so the dupe is counted, not crashed on.
   const tag = `local_opportunity_${todayTag()}`;
   for (const { s, cand } of writable) {
-    const dup = await db('seo_link_prospects').where({ target_domain: cand.domain, target_page: HOME }).first();
-    if (dup) { summary.dupes++; continue; }
-    await db('seo_link_prospects').insert({
+    const inserted = await db('seo_link_prospects').insert({
       target_domain: cand.domain, target_page: HOME, target_url: cand.source_url || null,
       anchor_planned: s.suggested_anchor || null, link_type: s.intent_class, priority: s.priority,
       domain_rating: null, score: s.score, tier: s.tier,
@@ -113,8 +127,8 @@ async function run({
         scored_by: 'local_opportunity',
       }),
       source: tag, owner: 'strategy_agent',
-    });
-    summary.promoted++;
+    }).onConflict(['target_domain', 'target_page']).ignore().returning('id');
+    if (inserted.length) summary.promoted++; else summary.dupes++;
   }
   log.info(`[local-opportunity] promoted=${summary.promoted} dupes=${summary.dupes} held=${heldBack} (discovered=${discovered}, excludedOwned=${excludedOwned}, scored=${scored.length})`);
   return summary;
