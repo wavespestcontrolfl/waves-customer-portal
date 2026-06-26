@@ -24,12 +24,18 @@ describe('analytics-sql-sandbox validateAnalyticsSql (static defense-in-depth)',
     bad('SELECT 1 FROM customers; SELECT 2 FROM leads');
   });
 
-  test('rejects non-SELECT / write / DDL / CTE leading forms', () => {
+  test('rejects non-SELECT / write / DDL leading forms', () => {
     bad('UPDATE customers SET active=false');
     bad('DELETE FROM customers');
     bad('INSERT INTO leads (id) VALUES (1)');
     bad('DROP TABLE customers');
-    bad('WITH x AS (SELECT 1 FROM customers) SELECT * FROM x'); // CTEs disallowed
+  });
+
+  test('allows a read-only WITH/CTE (role + READ ONLY tx enforce safety, not this prefix)', () => {
+    ok('WITH x AS (SELECT 1 AS n FROM customers) SELECT n FROM x');
+    // a write inside a CTE still passes the STATIC check (the role / read-only
+    // transaction reject it at run time) — but a chained statement does not:
+    bad('WITH x AS (SELECT 1 FROM customers) SELECT 1; DROP TABLE customers');
   });
 
   test('rejects comments and dollar-quoting (injection vectors)', () => {

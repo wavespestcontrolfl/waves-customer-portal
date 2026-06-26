@@ -37,11 +37,27 @@ async function aiFetch(path, opts = {}) {
   return data;
 }
 
-const fmtNum = (v) => {
+// Format a value per the spec's yFormat so axes/labels read right (currency,
+// percent — fraction×100, count, hours, rating, or plain number).
+const fmtVal = (v, fmt = "number") => {
   const n = Number(v);
   if (!Number.isFinite(n)) return String(v ?? "—");
-  if (Math.abs(n) >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
-  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  switch (fmt) {
+    case "currency":
+      return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: Math.abs(n) >= 1000 ? 0 : 2 });
+    case "percent":
+      return `${(n * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+    case "hours":
+      return `${n.toLocaleString(undefined, { maximumFractionDigits: 1 })}h`;
+    case "rating":
+      return `${n.toLocaleString(undefined, { maximumFractionDigits: 1 })}★`;
+    case "count":
+      return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    default:
+      return Math.abs(n) >= 1000
+        ? n.toLocaleString(undefined, { maximumFractionDigits: 0 })
+        : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
 };
 
 // Generic, monochrome renderer for an AI chart spec + result rows.
@@ -50,12 +66,14 @@ function AiChart({ chartType, spec, rows, fields }) {
   const cols = fields && fields.length ? fields : Object.keys(rows[0]);
   const xKey = spec?.x && cols.includes(spec.x) ? spec.x : cols[0];
   const yKey = (spec?.y || []).find((k) => cols.includes(k)) || cols.find((c) => c !== xKey) || cols[0];
+  const fmt = spec?.yFormat || "number";
+  const yCols = new Set((spec?.y || []).filter((k) => cols.includes(k)));
 
   if (chartType === "kpi") {
     const v = rows[0][yKey] ?? rows[0][cols[0]];
     return (
       <div className="py-4">
-        <div className="text-28 u-nums text-ink-primary">{fmtNum(v)}</div>
+        <div className="text-28 u-nums text-ink-primary">{fmtVal(v, fmt)}</div>
         {spec?.explanation && <div className="text-12 text-ink-tertiary mt-1">{spec.explanation}</div>}
       </div>
     );
@@ -71,7 +89,7 @@ function AiChart({ chartType, spec, rows, fields }) {
           <tbody>
             {rows.slice(0, 50).map((r, i) => (
               <tr key={i} className="border-t border-hairline border-zinc-100">
-                {cols.map((c) => <td key={c} className="pr-4 py-1 u-nums text-ink-secondary">{typeof r[c] === "number" ? fmtNum(r[c]) : String(r[c] ?? "—")}</td>)}
+                {cols.map((c) => <td key={c} className="pr-4 py-1 u-nums text-ink-secondary">{typeof r[c] === "number" ? fmtVal(r[c], yCols.has(c) ? fmt : "number") : String(r[c] ?? "—")}</td>)}
               </tr>
             ))}
           </tbody>
@@ -89,6 +107,10 @@ function AiChart({ chartType, spec, rows, fields }) {
     const path = pts.map((v, i) => `${(i / (pts.length - 1)) * (W - pad * 2) + pad},${H - pad - ((v - min) / span) * (H - pad * 2)}`).join(" ");
     return (
       <div className="overflow-x-auto">
+        <div className="flex justify-between text-11 text-ink-tertiary mb-1">
+          <span>peak {fmtVal(max, fmt)}</span>
+          <span>latest {fmtVal(pts[pts.length - 1], fmt)}</span>
+        </div>
         <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: H }}>
           <polyline points={path} fill="none" stroke={CHART_PRIMARY} strokeWidth="2" />
         </svg>
@@ -111,7 +133,7 @@ function AiChart({ chartType, spec, rows, fields }) {
         <li key={i}>
           <div className="flex items-baseline justify-between text-12 mb-1">
             <span className="text-ink-secondary truncate pr-2">{b.label}</span>
-            <span className="u-nums text-ink-primary">{fmtNum(b.value)}</span>
+            <span className="u-nums text-ink-primary">{fmtVal(b.value, fmt)}</span>
           </div>
           <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
             <div
