@@ -220,6 +220,18 @@ function normalizeBlocks(blocks) {
         url: block.url ? String(block.url) : '',
       };
     }
+    if (type === 'image') {
+      return {
+        type,
+        src: String(block.src || ''),
+        alt: String(block.alt || ''),
+        width: block.width != null ? Number(block.width) : undefined,
+        radius: block.radius != null ? Number(block.radius) : undefined,
+        align: block.align ? String(block.align) : undefined,
+        url_variable: String(block.url_variable || ''),
+        href: block.href ? String(block.href) : '',
+      };
+    }
     return { type, content: String(block?.content || '') };
   });
 }
@@ -268,6 +280,30 @@ function renderBlocks(blocks, payload) {
         const label = renderInline(block.label || 'Open', payload, { html: false });
         htmlParts.push(`<div style="margin:24px 0;text-align:center;">${ctaButton(escapeHtml(href), escapeHtml(label))}</div>`);
         textParts.push(`${label}: ${href}`);
+      }
+    } else if (block.type === 'image') {
+      // Hosted image, optionally a clickable link (e.g. app-store badges).
+      // src/href resolve {{variables}} so URLs can come from payload; a static
+      // portal-hosted asset URL with no variable is fine too. Width is in CSS
+      // px (capped to 100% on narrow screens); radius rounds screenshots
+      // (badges pass radius 0). A missing/blank src renders nothing.
+      const src = renderInline(block.src, payload, { html: false }).trim();
+      if (src) {
+        const width = Number(block.width) > 0 ? Math.round(Number(block.width)) : 240;
+        const align = block.align === 'left' ? 'left' : block.align === 'right' ? 'right' : 'center';
+        const radius = Number(block.radius) > 0 ? Math.round(Number(block.radius)) : 0;
+        const altText = renderInline(block.alt || '', payload, { html: false });
+        const href = block.url_variable
+          ? textFor(payload, block.url_variable)
+          : (block.href ? renderInline(block.href, payload, { html: false }).trim() : '');
+        const img = `<img src="${escapeHtml(src)}" width="${width}" alt="${escapeHtml(altText)}" style="width:${width}px;max-width:100%;height:auto;border:0;outline:none;text-decoration:none;display:block;margin:0 auto;${radius ? `border-radius:${radius}px;` : ''}" />`;
+        const wrapped = href
+          ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener" style="display:inline-block;border:0;text-decoration:none;">${img}</a>`
+          : img;
+        htmlParts.push(`<div style="margin:18px 0;text-align:${align};">${wrapped}</div>`);
+        if (href && altText) textParts.push(`${altText}: ${href}`);
+        else if (altText) textParts.push(altText);
+        else if (href) textParts.push(href);
       }
     } else if (block.type === 'divider') {
       htmlParts.push('<hr style="border:none;border-top:1px solid #E2E8F0;margin:22px 0;" />');

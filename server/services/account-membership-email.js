@@ -410,6 +410,30 @@ async function sendMembershipStarted({
   });
 }
 
+// One-time "introducing the Waves app" onboarding email. The idempotency key is
+// scoped to the customer alone, so it sends at most once per customer no matter
+// how many times the trigger fires. Store links are passed in payload so the
+// app_intro template body stays link-agnostic.
+const APP_STORE_URL = 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
+const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
+
+async function sendAppIntro({ customerId, sourceId = null } = {}) {
+  const customer = await loadCustomer(customerId);
+  if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  return sendTemplate({
+    customerId,
+    templateKey: 'app_intro',
+    eventType: 'app_intro.first_visit',
+    payload: {
+      app_store_url: APP_STORE_URL,
+      play_store_url: PLAY_STORE_URL,
+    },
+    idempotencyKey: `app_intro:${customerId}`,
+    categories: ['app_intro', 'onboarding'],
+    metadata: { source_id: sourceId },
+  });
+}
+
 async function sendMembershipUpdated({
   customerId,
   before = {},
@@ -563,6 +587,7 @@ module.exports = {
   sendRequestReceived,
   sendRequestUpdated,
   sendMembershipStarted,
+  sendAppIntro,
   sendMembershipUpdated,
   sendMembershipRenewalReminder,
   sendMembershipCanceled,
