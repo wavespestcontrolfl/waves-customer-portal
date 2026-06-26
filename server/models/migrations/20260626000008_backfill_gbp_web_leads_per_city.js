@@ -26,9 +26,12 @@
  *     at customer creation — is the only and correct signal for them.
  *   - lead-webhook never overwrites customers.utm_data on a later submission from
  *     an *existing* customer (server/routes/lead-webhook.js:219-232). So where a
- *     lead DOES carry its own attribution, that is preferred (and takes priority
- *     for the city) over the customer's possibly-stale first touch — which is the
- *     case a customer-only filter would misattribute.
+ *     lead DOES carry its own attribution, that attribution is used EXCLUSIVELY
+ *     (for both the GBP check and the city) and the customer's possibly-stale
+ *     first touch is NOT consulted — a lead whose own submission is GBP-
+ *     unattributed (no resolvable area/utm_content) therefore stays on the generic
+ *     row rather than borrowing the customer's old GBP city. The customer fallback
+ *     applies ONLY to leads with no lead-level attribution at all.
  *   - GBP is matched the same way the live path does, via the shared
  *     isGbpUtmCampaign predicate: utm_source=gbp OR the legacy
  *     utm_source=google & medium=organic & campaign=gbp shape
@@ -90,19 +93,36 @@ exports.up = async function up(knex) {
   let notGbp = 0;
   const perCity = {};
   for (const lead of candidates) {
-    // Confirm GBP from the lead's OWN attribution first, then the customer's,
-    // using the shared predicate (covers utm_source=gbp AND the legacy
-    // google/organic/gbp campaign shape).
-    const leadGbp = lead.ls_source === 'google_business'
-      || isGbpUtmCampaign({ source: lead.l_utm_source, medium: lead.l_utm_medium, campaign: lead.l_utm_campaign });
-    const custGbp = isGbpUtmCampaign({ source: lead.c_utm_source, medium: lead.c_utm_medium, campaign: lead.c_utm_campaign });
-    if (!leadGbp && !custGbp) { notGbp += 1; continue; } // not a GBP web lead → leave it
+    // Does this lead carry its OWN recorded attribution (extracted_data
+    // .attribution — leadSource is always set by determineLeadSource when the
+    // block is written)? If so, trust ONLY it — for both the GBP check AND the
+    // city. The customer's first-touch utm_data is consulted solely for historical
+    // leads that have no lead-level attribution at all.
+    //
+    // This mirrors the live webhook, which attributes from the submission's own
+    // signal and never the customer's prior touch: a lead whose own submission is
+    // GBP-*unattributed* (no resolvable area/utm_content) stays on the generic row
+    // rather than borrowing the customer's old GBP city.
+    const hasLeadAttr = lead.ls_source != null
+      || lead.l_utm_source != null || lead.l_utm_content != null || lead.ls_area != null;
 
-    // Resolve the city from the lead's own attribution first (resolved GBP
-    // location id, then raw utm_content), then the customer's first-touch tokens.
-    const token = lead.ls_area || lead.l_utm_content || lead.c_area || lead.c_utm_content;
+    let isGbp;
+    let token;
+    if (hasLeadAttr) {
+      // leadSource.source='google_business' is set exactly on a GBP campaign;
+      // also accept the raw utm matching either GBP shape (utm_source=gbp OR the
+      // legacy google/organic/gbp) via the shared predicate.
+      isGbp = lead.ls_source === 'google_business'
+        || isGbpUtmCampaign({ source: lead.l_utm_source, medium: lead.l_utm_medium, campaign: lead.l_utm_campaign });
+      token = lead.ls_area || lead.l_utm_content; // lead-only; no customer fallback
+    } else {
+      isGbp = isGbpUtmCampaign({ source: lead.c_utm_source, medium: lead.c_utm_medium, campaign: lead.c_utm_campaign });
+      token = lead.c_area || lead.c_utm_content;
+    }
+    if (!isGbp) { notGbp += 1; continue; } // not a GBP web lead → leave it
+
     const loc = token ? findGbpLocationByUtmContent(token) : null;
-    if (!loc || !loc.googleLocationId) { unmapped += 1; continue; } // city not resolvable → leave it
+    if (!loc || !loc.googleLocationId) { unmapped += 1; continue; } // city unresolved → leave generic
     const dest = rowByGoogleId.get(String(loc.googleLocationId));
     if (!dest) { unmapped += 1; continue; }
     await knex('leads').where({ id: lead.lead_id }).update({ lead_source_id: dest.id });
