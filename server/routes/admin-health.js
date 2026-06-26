@@ -445,6 +445,7 @@ router.get('/quiet', async (req, res) => {
       rows = await db('customer_health_scores as h')
         .join('customers as c', 'h.customer_id', 'c.id')
         .where('c.active', true)
+        .whereNull('c.deleted_at')                                          // archived customers set deleted_at without clearing active
         .whereIn('c.pipeline_stage', ['active_customer', 'won', 'at_risk']) // real customers, not leads
         .whereIn('h.churn_risk', ['low', 'moderate'])                       // healthy band — not already at-risk
         .whereRaw('COALESCE(c.member_since, c.created_at) < ?', [cutoff])   // exclude brand-new customers awaiting a first visit
