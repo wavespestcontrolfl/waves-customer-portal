@@ -13,6 +13,8 @@ const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
 const { autopayActivePredicate } = require('../services/autopay-eligibility');
+const { generateChartSpec } = require('../services/ai-chart-builder');
+const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -1629,6 +1631,110 @@ router.get('/alerts', dashboardCache, async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[admin-dashboard] /alerts failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// AI chart builder + pinned widgets (feature-flagged off by default on the
+// client). The model only PROPOSES SQL; every query runs through the read-only
+// sandbox (analytics-sql-sandbox.js) before it touches the DB, both here at
+// preview time and on every widget load below.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Generate + safely run a chart from a natural-language prompt (no persistence).
+// One repair round: if the first SQL fails to validate/run, the error is fed
+// back to the model for a corrected query.
+router.post('/ai-chart/preview', async (req, res) => {
+  const prompt = String(req.body?.prompt || '').trim();
+  if (!prompt) return res.status(400).json({ error: 'A prompt is required.' });
+
+  let gen = await generateChartSpec(prompt);
+  if (!gen.ok) {
+    return res.status(422).json({ error: gen.message || `Could not build a chart (${gen.reason}).` });
+  }
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const { rows, fields } = await runReadOnlyAnalyticsQuery(gen.spec.sql);
+      return res.json({ spec: gen.spec, rows, fields });
+    } catch (err) {
+      const guard = err instanceof SqlGuardError;
+      logger.warn(`[admin-dashboard] ai-chart preview attempt ${attempt + 1} failed (${guard ? 'guard' : 'exec'}): ${err.message}`);
+      if (attempt === 0) {
+        const repaired = await generateChartSpec(prompt, { errorContext: err.message });
+        if (repaired.ok) { gen = repaired; continue; }
+      }
+      return res.status(422).json({ error: 'The generated query was rejected or failed to run. Try rephrasing.' });
+    }
+  }
+  return res.status(422).json({ error: 'Could not build a safe query for that request.' });
+});
+
+// List the current admin's pinned widgets, each re-validated + re-run read-only.
+// A single broken/blocked widget fails soft (returns its error) rather than
+// breaking the list.
+router.get('/widgets', async (req, res, next) => {
+  try {
+    const rows = await db('user_dashboard_widgets')
+      .where('owner_technician_id', req.technicianId)
+      .orderBy([{ column: 'position', order: 'asc' }, { column: 'id', order: 'asc' }])
+      .select('id', 'title', 'prompt', 'sql', 'chart_spec');
+    const widgets = await Promise.all(rows.map(async (w) => {
+      const base = { id: w.id, title: w.title, prompt: w.prompt, chartSpec: w.chart_spec };
+      try {
+        const { rows: data, fields } = await runReadOnlyAnalyticsQuery(w.sql);
+        return { ...base, rows: data, fields };
+      } catch (err) {
+        return { ...base, rows: [], fields: [], error: err instanceof SqlGuardError ? err.message : 'Query failed to run.' };
+      }
+    }));
+    res.json({ widgets });
+  } catch (err) {
+    logger.error(`[admin-dashboard] GET /widgets failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// Pin a widget. The SQL is re-validated server-side before it's stored (never
+// trust a client-supplied query), so only sandbox-safe SQL is ever persisted.
+router.post('/widgets', async (req, res, next) => {
+  try {
+    const { title, prompt, sql, chartSpec } = req.body || {};
+    if (!title || !sql || !chartSpec) return res.status(400).json({ error: 'title, sql and chartSpec are required.' });
+    let cleanSql;
+    try {
+      cleanSql = validateAnalyticsSql(sql);
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof SqlGuardError ? err.message : 'Invalid query.' });
+    }
+    const [row] = await db('user_dashboard_widgets')
+      .insert({
+        owner_technician_id: req.technicianId,
+        title: String(title).slice(0, 200),
+        prompt: prompt ? String(prompt).slice(0, 500) : null,
+        sql: cleanSql,
+        chart_spec: JSON.stringify(chartSpec),
+        updated_at: new Date(),
+      })
+      .returning(['id', 'title', 'prompt', 'chart_spec']);
+    res.status(201).json({ widget: { id: row.id, title: row.title, prompt: row.prompt, chartSpec: row.chart_spec } });
+  } catch (err) {
+    logger.error(`[admin-dashboard] POST /widgets failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// Unpin a widget (scoped to the owner).
+router.delete('/widgets/:id', async (req, res, next) => {
+  try {
+    const deleted = await db('user_dashboard_widgets')
+      .where({ id: req.params.id, owner_technician_id: req.technicianId })
+      .del();
+    if (!deleted) return res.status(404).json({ error: 'Widget not found.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[admin-dashboard] DELETE /widgets failed: ${err.message}`);
     next(err);
   }
 });

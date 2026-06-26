@@ -1,0 +1,94 @@
+/**
+ * AI chart builder — turns a plain-English request into a read-only SQL SELECT
+ * plus a chart spec. The SQL is ALWAYS run through analytics-sql-sandbox before
+ * it touches the database; this module only proposes, it never executes.
+ *
+ * Uses the FLAGSHIP reasoning tier via the shared cross-provider dispatcher
+ * (services/llm/call.js → callAnthropic), with jsonMode for a structured reply.
+ */
+
+const { callAnthropic } = require('./llm/call');
+const { FLAGSHIP } = require('../config/models');
+const logger = require('./logger');
+
+const CHART_TYPES = ['line', 'bar', 'donut', 'kpi', 'table'];
+
+// Curated schema handed to the model. Mirrors analytics-sql-sandbox's allowlist —
+// only these tables/columns are readable. Correctness is still enforced at run
+// time (the sandbox validates + executes read-only), so a hallucinated column
+// simply errors and is surfaced; this doc just steers the model.
+const SCHEMA_DOC = `
+customers(id uuid, first_name, last_name, city, state, member_since date, created_at, active bool, deleted_at, pipeline_stage [active_customer|won|at_risk|churned|dormant|lost|new_lead|...], monthly_rate numeric$/mo, waveguard_tier [Bronze|Silver|Gold|Platinum], lead_source, churned_at date, lifetime_revenue numeric)
+leads(id, first_contact_at timestamptz, status [new|contacted|estimate_sent|won|lost|...], lead_source_id->lead_sources.id, monthly_value numeric, service_interest, city, first_contact_channel [form|phone|email|referral])
+lead_sources(id, name, source_type, channel)
+invoices(id, customer_id->customers.id, status [paid|unpaid|overdue|void|...], total numeric$, paid_at timestamptz, created_at, due_date date)
+payments(id, customer_id, amount numeric$, status [paid|...], payment_date timestamptz)
+service_records(id, customer_id, service_date date, service_type, revenue numeric$, labor_hours numeric, gross_margin_pct numeric, revenue_per_man_hour numeric, is_callback bool)
+scheduled_services(id, customer_id, scheduled_date date, status [scheduled|completed|cancelled|...], service_type)
+services(id, name, is_active)
+review_requests(id, submitted_at timestamptz, status [submitted|...], score int 1-10)
+estimates(id, customer_id, status, total numeric$, created_at, service_interest)
+mrr_snapshots(period_month date, total_mrr numeric$, committed_mrr, at_risk_mrr, customer_count int)
+kpi_snapshots(snapshot_date date, metric text, value numeric)`;
+
+function buildSystemPrompt() {
+  return `You are a careful analytics engineer for Waves, a pest-control & lawn-care business (SW Florida). Turn the user's question into ONE read-only PostgreSQL query and a chart spec.
+
+Return JSON only, no prose:
+{ "sql": "<single SELECT>", "chartType": "line|bar|donut|kpi|table", "title": "<short>", "x": "<column alias or null>", "y": ["<column alias>", ...], "explanation": "<one sentence>" }
+If the question cannot be answered from the schema below, return { "error": "<short reason>" } instead.
+
+Hard rules for "sql" (queries that break these are rejected):
+- A SINGLE SELECT statement. No semicolons, no comments, no CTEs/WITH, no DDL/DML, no catalog/system functions (pg_*, information_schema, current_setting).
+- Only these tables and columns exist:${SCHEMA_DOC}
+- Alias output columns clearly (these alias names are what "x" and "y" must reference).
+- Aggregate sensibly; ORDER BY for time series; end with LIMIT 100 or less.
+- Dates/timestamps are US Eastern; money columns are already in dollars.
+- For chartType "kpi", select a single row with one numeric column. For "line"/"bar", "x" is the category/time column and "y" the numeric series. For "donut", "x" is the label and y[0] the value. For "table", list "y" columns in order.`;
+}
+
+/**
+ * Generate a chart spec for a natural-language prompt. Single-shot; the caller
+ * validates/executes the SQL and may request a repair on failure.
+ * @param {string} prompt
+ * @param {{ errorContext?: string }} [opts] - prior SQL + DB error, for a repair round
+ * @returns {Promise<{ok:true, spec:object} | {ok:false, reason:string, message?:string}>}
+ */
+async function generateChartSpec(prompt, opts = {}) {
+  const cleanPrompt = String(prompt || '').trim().slice(0, 500);
+  if (!cleanPrompt) return { ok: false, reason: 'empty_prompt' };
+
+  let text = cleanPrompt;
+  if (opts.errorContext) {
+    text = `${cleanPrompt}\n\nYour previous attempt failed with: ${String(opts.errorContext).slice(0, 300)}\nReturn a corrected query that obeys all the rules.`;
+  }
+
+  let res;
+  try {
+    res = await callAnthropic({ model: FLAGSHIP, system: buildSystemPrompt(), text, jsonMode: true, maxTokens: 1200 });
+  } catch (err) {
+    logger.error(`[ai-chart-builder] LLM call threw: ${err.message}`);
+    return { ok: false, reason: 'llm_error' };
+  }
+  if (!res || !res.ok || !res.json) return { ok: false, reason: res?.reason || 'no_json' };
+
+  const j = res.json;
+  if (j.error) return { ok: false, reason: 'unanswerable', message: String(j.error).slice(0, 200) };
+  if (!j.sql || typeof j.sql !== 'string') return { ok: false, reason: 'no_sql' };
+  if (!CHART_TYPES.includes(j.chartType)) return { ok: false, reason: 'bad_chart_type' };
+
+  const y = Array.isArray(j.y) ? j.y.filter((v) => typeof v === 'string') : (typeof j.y === 'string' ? [j.y] : []);
+  return {
+    ok: true,
+    spec: {
+      sql: j.sql,
+      chartType: j.chartType,
+      title: (typeof j.title === 'string' && j.title.trim()) ? j.title.trim().slice(0, 120) : cleanPrompt.slice(0, 120),
+      x: typeof j.x === 'string' ? j.x : null,
+      y,
+      explanation: typeof j.explanation === 'string' ? j.explanation.slice(0, 240) : '',
+    },
+  };
+}
+
+module.exports = { generateChartSpec, CHART_TYPES, SCHEMA_DOC };

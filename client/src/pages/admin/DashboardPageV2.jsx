@@ -33,6 +33,8 @@ import {
   fmtMoneyCompact,
 } from "../../components/dashboard/charts";
 import useIsMobile from "../../hooks/useIsMobile";
+import { useFeatureFlag } from "../../hooks/useFeatureFlag";
+import AiChartsPanel from "../../components/dashboard/AiChartsPanel";
 import {
   adminFetch,
   isForbiddenError,
@@ -101,6 +103,7 @@ function sparkSeries(daily) {
 
 export default function DashboardPageV2() {
   const isMobile = useIsMobile();
+  const aiChartsEnabled = useFeatureFlag("dashboard-ai-charts");
   const [data, setData] = useState(null); // /admin/dashboard
   const [kpis, setKpis] = useState(null); // /admin/dashboard/core-kpis
   const [compare, setCompare] = useState(null); // /admin/dashboard/compare
@@ -1005,6 +1008,13 @@ export default function DashboardPageV2() {
               maxOffset={cohort?.maxOffset || 0}
             />{" "}
           </ChartCard>{" "}
+        </div>
+      )}
+      {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
+          by default; the model only proposes SQL, the server sandboxes it. */}
+      {aiChartsEnabled && (
+        <div className="mb-5">
+          <AiChartsPanel />
         </div>
       )}
       {/* Upstream lead-attribution row.
