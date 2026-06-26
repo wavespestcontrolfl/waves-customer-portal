@@ -23,7 +23,7 @@ async function executeRetentionTool(toolName, input) {
     }
 
     case 'detect_signals': {
-      const SignalDetector = require('./signal-detector');
+      const SignalDetector = require('./customer-intelligence/signal-detector');
       return SignalDetector.detectAllSignals();
     }
 
@@ -140,14 +140,14 @@ async function executeRetentionTool(toolName, input) {
     }
 
     case 'get_retention_metrics': {
-      const RetentionEngine = require('./retention-engine');
+      const RetentionEngine = require('./customer-intelligence/retention-engine');
       return RetentionEngine.getMetrics(input.days || 30);
     }
 
     // ── Outreach & Intervention ─────────────────────────────────
 
     case 'generate_retention_outreach': {
-      const RetentionEngine = require('./retention-engine');
+      const RetentionEngine = require('./customer-intelligence/retention-engine');
       const result = await RetentionEngine.generateRetentionOutreach(input.customer_id);
       return result || { skipped: true, reason: 'Customer not eligible (healthy or recently contacted)' };
     }
@@ -222,7 +222,7 @@ async function executeRetentionTool(toolName, input) {
     // ── Upsell ──────────────────────────────────────────────────
 
     case 'identify_upsells': {
-      const HealthScorer = require('./health-scorer');
+      const HealthScorer = require('./customer-intelligence/health-scorer');
       const customer = await db('customers').where('id', input.customer_id).first();
       if (!customer) return { error: 'Customer not found' };
       const opps = await HealthScorer.identifyUpsells(customer);
