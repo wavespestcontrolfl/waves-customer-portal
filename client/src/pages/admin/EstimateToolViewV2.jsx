@@ -2274,7 +2274,7 @@ export default function EstimateToolViewV2({
         ...(key === "preslabVolume" && !f._preslabJobContextEdited
           ? { preslabJobContext: String(val || "NONE").toUpperCase() === "NONE" ? "standalone" : "builderBatch" }
           : {}),
-        ...(key === "address" ? { measuredTurfSf: "" } : {}),
+        ...(key === "address" ? { measuredTurfSf: "", units: "" } : {}),
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
         ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
@@ -2658,7 +2658,10 @@ export default function EstimateToolViewV2({
       type: "loading",
       msg: "Running AI satellite analysis...",
     });
-    setForm((f) => ({ ...f, measuredTurfSf: "" }));
+    // Clear per-property inputs that must not leak from a prior lookup: turf
+    // measurement and the commercial unit count (stale units would otherwise
+    // ride into the next property's pilot per-unit reserve).
+    setForm((f) => ({ ...f, measuredTurfSf: "", units: "" }));
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
