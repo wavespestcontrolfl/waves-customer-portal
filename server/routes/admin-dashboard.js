@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { etDateString, etMonthStart, etMonthEnd, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { cacheRoute } = require('../utils/route-cache');
 const {
   executeDashboardTool,
@@ -69,6 +69,38 @@ function inclusiveDayCount(from, to) {
   return Math.max(1, Math.round((b - a) / 86400000) + 1);
 }
 function minDateStr(a, b) { return a <= b ? a : b; }
+
+// Single source of truth for the dashboard period control. Every window ends
+// "today" (ET); the period only varies the start. Both the attribution resolver
+// and the Core-KPIs computation read from here so they can't drift as options
+// are added. Rolling windows are inclusive of today (last_7 = today + prior 6).
+const PERIOD_LABELS = {
+  today: 'Today',
+  wtd: 'Week to Date',
+  last_7: 'Last 7 days',
+  last_30: 'Last 30 days',
+  mtd: 'Month to Date',
+  last_90: 'Last 90 days',
+  qtd: 'Quarter to Date',
+  ytd: 'Year to Date',
+};
+function periodStartDate(period) {
+  const today = etDateString();
+  switch (String(period || 'mtd').toLowerCase()) {
+    case 'today':   return today;
+    case 'wtd':     return etWeekStart();
+    case 'last_7':  return addDaysET(today, -6);
+    case 'last_30': return addDaysET(today, -29);
+    case 'last_90': return addDaysET(today, -89);
+    case 'qtd':     return etQuarterStart();
+    case 'ytd':     return etYearStart();
+    case 'mtd':
+    default:        return etMonthStart();
+  }
+}
+function periodLabel(period) {
+  return PERIOD_LABELS[String(period || 'mtd').toLowerCase()] || PERIOD_LABELS.mtd;
+}
 
 function applyETTimestampWindow(qb, column, from, to) {
   return qb
@@ -322,11 +354,9 @@ async function computeCoreKpis(period = 'mtd') {
     const now = new Date();
     const todayStr = etDateString(now);
 
-    let start;
-    if (period === 'today') start = todayStr;
-    else if (period === 'wtd') start = mondayThisWeek();
-    else if (period === 'ytd') start = etYearStart(now);
-    else start = startOfMonth();
+    // Shared period resolver (periodStartDate) — same windows the attribution
+    // panels use; every window ends today.
+    const start = periodStartDate(period);
 
     // Service completion rate — scheduled_services in window
     const svcAgg = await db('scheduled_services')
@@ -782,7 +812,7 @@ async function computeCoreKpis(period = 'mtd') {
 
     return {
       period,
-      periodLabel: { today: 'Today', wtd: 'Week to Date', mtd: 'Month to Date', ytd: 'Year to Date' }[period] || 'Month to Date',
+      periodLabel: periodLabel(period),
       service: {
         completionRate,
         scheduled: svcDenom, // non-cancelled, so the tile's "completed/scheduled" matches the rate
@@ -1257,14 +1287,7 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────
 
 function resolveAttributionWindow(period) {
-  const today = etDateString();
-  switch (String(period || 'mtd').toLowerCase()) {
-    case 'today': return { from: today,           to: today, label: 'Today' };
-    case 'wtd':   return { from: etWeekStart(),   to: today, label: 'Week to Date' };
-    case 'ytd':   return { from: etYearStart(),   to: today, label: 'Year to Date' };
-    case 'mtd':
-    default:      return { from: etMonthStart(),  to: today, label: 'Month to Date' };
-  }
+  return { from: periodStartDate(period), to: etDateString(), label: periodLabel(period) };
 }
 
 // GET /api/admin/dashboard/calls-by-source?period=mtd
