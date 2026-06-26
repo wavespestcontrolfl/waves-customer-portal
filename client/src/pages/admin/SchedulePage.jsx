@@ -36,7 +36,7 @@ import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
-import PrepaymentModal from "../../components/schedule/PrepaymentModal";
+import AnnualPrepayLauncher from "../../components/schedule/AnnualPrepayLauncher";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
@@ -9501,12 +9501,10 @@ export function CompletionPanel({
             </div>
           )}
           {showPrepay && (
-            <PrepaymentModal
-              service={service}
+            <AnnualPrepayLauncher
               customerId={service.customerId || service.customer_id}
-              customerName={service.customerName}
               onClose={() => setShowPrepay(false)}
-              onSent={() => setShowPrepay(false)}
+              onSaved={() => setShowPrepay(false)}
             />
           )}
           {/* Sticky top bar — Square pattern: ← · centered title · ⋯ */}

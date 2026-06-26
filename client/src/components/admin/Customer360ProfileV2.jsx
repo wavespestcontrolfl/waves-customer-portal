@@ -3013,7 +3013,11 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
   );
 }
 
-function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved }) {
+// Exported so the completion screen can reuse the exact same annual-prepay
+// invoice flow (correct commercial-tax preview, full cadence set, term dates,
+// amount inference) instead of maintaining a parallel modal. See
+// schedule/AnnualPrepayLauncher.
+export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved }) {
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
   const defaultServiceBase = serviceOptions[0]?.value || inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
