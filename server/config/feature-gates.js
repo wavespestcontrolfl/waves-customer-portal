@@ -167,6 +167,15 @@ const gates = {
   // runner drives a headless browser against untrusted pages (see signup-runner.js).
   signupRunner: isProd ? process.env.GATE_SIGNUP_RUNNER === 'true' : true,
 
+  // Local-Opportunity Prospector — the PROACTIVE link lane: a weekly cron that runs
+  // curated local-intent SERP queries (youth-sports/charity-run sponsorships, chamber
+  // member directories, community calendars, local podcasts) and promotes the scored,
+  // lane-routed result domains onto the seo_link_prospects board. Read-only discovery +
+  // dedupe-guarded inserts; NEVER sends — rows sit inert behind GATE_LINK_OUTREACH /
+  // GATE_SIGNUP_RUNNER like harvested rows. Default OFF in prod; the manual CLI works
+  // regardless. Complements the reactive competitor harvest (backlink-deep-harvest.js).
+  localOpportunityProspector: isProd ? process.env.GATE_LOCAL_OPPORTUNITY_PROSPECTOR === 'true' : true,
+
   // Marchex Auto-Block — reject inbound calls the Marchex Clean Call
   // Marketplace add-on flags as spam. Explicit opt-in everywhere: until the
   // gate is on, verdicts are only logged (shadow) and never block a caller.
