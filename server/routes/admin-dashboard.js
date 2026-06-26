@@ -13,6 +13,40 @@ const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
 const { autopayActivePredicate } = require('../services/autopay-eligibility');
+const { generateChartSpec } = require('../services/ai-chart-builder');
+const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
+const { isUserFeatureEnabled } = require('../services/feature-flags');
+const rateLimit = require('express-rate-limit');
+
+// Server-side gate for the AI chart builder. The client hides the panel behind
+// the same flag, but the endpoints must enforce it too — otherwise any admin who
+// knows the route could reach the LLM + SQL sandbox while it's dark-launched.
+const AI_CHARTS_FLAG = 'dashboard-ai-charts';
+async function requireAiChartsEnabled(req, res, next) {
+  try {
+    if (await isUserFeatureEnabled(req.technicianId, AI_CHARTS_FLAG)) return next();
+  } catch (err) {
+    logger.error(`[admin-dashboard] ai-charts flag check failed: ${err.message}`);
+  }
+  return res.status(403).json({ error: 'AI charts are not enabled for your account.' });
+}
+
+// Per-admin limiter on the LLM-backed preview (each call can fire up to two
+// FLAGSHIP requests) — the app-wide limiter is too coarse to stop a runaway tab
+// or compromised token from burning model spend. Mirrors the newsletter/
+// automation AI-draft limiters.
+const aiChartLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `aichart_${req.technicianId || req.ip}`,
+  message: { error: 'Too many AI chart requests in the last hour. Try again later.' },
+});
+
+// Cap on pinned widgets per admin — bounds GET /widgets fan-out (one sandbox
+// query per widget) and prevents unbounded persistence.
+const MAX_WIDGETS_PER_USER = 24;
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -1629,6 +1663,124 @@ router.get('/alerts', dashboardCache, async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[admin-dashboard] /alerts failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// AI chart builder + pinned widgets (feature-flagged off by default on the
+// client). The model only PROPOSES SQL; every query runs through the read-only
+// sandbox (analytics-sql-sandbox.js) before it touches the DB, both here at
+// preview time and on every widget load below.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Generate + safely run a chart from a natural-language prompt (no persistence).
+// One repair round: if the first SQL fails to validate/run, the error is fed
+// back to the model for a corrected query.
+router.post('/ai-chart/preview', requireAiChartsEnabled, aiChartLimiter, async (req, res) => {
+  const prompt = String(req.body?.prompt || '').trim();
+  if (!prompt) return res.status(400).json({ error: 'A prompt is required.' });
+
+  let gen = await generateChartSpec(prompt);
+  if (!gen.ok) {
+    return res.status(422).json({ error: gen.message || `Could not build a chart (${gen.reason}).` });
+  }
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const { rows, fields } = await runReadOnlyAnalyticsQuery(gen.spec.sql);
+      return res.json({ spec: gen.spec, rows, fields });
+    } catch (err) {
+      const guard = err instanceof SqlGuardError;
+      logger.warn(`[admin-dashboard] ai-chart preview attempt ${attempt + 1} failed (${guard ? 'guard' : 'exec'}): ${err.message}`);
+      if (attempt === 0) {
+        const repaired = await generateChartSpec(prompt, { errorContext: err.message });
+        if (repaired.ok) { gen = repaired; continue; }
+      }
+      return res.status(422).json({ error: 'The generated query was rejected or failed to run. Try rephrasing.' });
+    }
+  }
+  return res.status(422).json({ error: 'Could not build a safe query for that request.' });
+});
+
+// List the current admin's pinned widgets, each re-validated + re-run read-only.
+// A single broken/blocked widget fails soft (returns its error) rather than
+// breaking the list.
+router.get('/widgets', requireAiChartsEnabled, async (req, res, next) => {
+  try {
+    const rows = await db('user_dashboard_widgets')
+      .where('owner_technician_id', req.technicianId)
+      .orderBy([{ column: 'position', order: 'asc' }, { column: 'id', order: 'asc' }])
+      .select('id', 'title', 'prompt', 'sql', 'chart_spec');
+    const widgets = await Promise.all(rows.map(async (w) => {
+      const base = { id: w.id, title: w.title, prompt: w.prompt, chartSpec: w.chart_spec };
+      try {
+        const { rows: data, fields } = await runReadOnlyAnalyticsQuery(w.sql);
+        return { ...base, rows: data, fields };
+      } catch (err) {
+        return { ...base, rows: [], fields: [], error: err instanceof SqlGuardError ? err.message : 'Query failed to run.' };
+      }
+    }));
+    res.json({ widgets });
+  } catch (err) {
+    logger.error(`[admin-dashboard] GET /widgets failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// Pin a widget. The SQL is re-validated server-side before it's stored (never
+// trust a client-supplied query), so only sandbox-safe SQL is ever persisted.
+router.post('/widgets', requireAiChartsEnabled, async (req, res, next) => {
+  try {
+    const { title, prompt, sql, chartSpec } = req.body || {};
+    if (!title || !sql || !chartSpec) return res.status(400).json({ error: 'title, sql and chartSpec are required.' });
+    let cleanSql;
+    try {
+      cleanSql = validateAnalyticsSql(sql);
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof SqlGuardError ? err.message : 'Invalid query.' });
+    }
+    // Enforce the cap atomically: a per-owner advisory lock serializes concurrent
+    // pins (double-submit / scripted parallel POSTs) so the count+insert can't
+    // race past MAX_WIDGETS_PER_USER and blow up GET /widgets fan-out.
+    const result = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`aiwidget:${req.technicianId}`]);
+      const countRow = await trx('user_dashboard_widgets')
+        .where('owner_technician_id', req.technicianId).count({ c: '*' }).first();
+      if (parseInt(countRow?.c || 0, 10) >= MAX_WIDGETS_PER_USER) return { capped: true };
+      const [row] = await trx('user_dashboard_widgets')
+        .insert({
+          owner_technician_id: req.technicianId,
+          title: String(title).slice(0, 200),
+          prompt: prompt ? String(prompt).slice(0, 500) : null,
+          sql: cleanSql,
+          chart_spec: JSON.stringify(chartSpec),
+          updated_at: new Date(),
+        })
+        .returning(['id', 'title', 'prompt', 'chart_spec']);
+      return { row };
+    });
+    if (result.capped) {
+      return res.status(409).json({ error: `You can pin up to ${MAX_WIDGETS_PER_USER} charts. Remove one first.` });
+    }
+    const { row } = result;
+    res.status(201).json({ widget: { id: row.id, title: row.title, prompt: row.prompt, chartSpec: row.chart_spec } });
+  } catch (err) {
+    logger.error(`[admin-dashboard] POST /widgets failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// Unpin a widget (scoped to the owner).
+router.delete('/widgets/:id', requireAiChartsEnabled, async (req, res, next) => {
+  try {
+    const deleted = await db('user_dashboard_widgets')
+      .where({ id: req.params.id, owner_technician_id: req.technicianId })
+      .del();
+    if (!deleted) return res.status(404).json({ error: 'Widget not found.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[admin-dashboard] DELETE /widgets failed: ${err.message}`);
     next(err);
   }
 });
