@@ -994,3 +994,13 @@ Four more edge cases, all fixed:
 - **V2 estimator sqft guard** (`EstimateToolViewV2.jsx`): a foam-only quote was blocked by the "Enter home sq ft or lot size" dimension guard (only bed bug / pre-slab / Bora-Care were exempt). Recurring foam is priced from drill points + cadence, not footprint, so added a `foamRecurringOnly` exemption — operators can quote it before a property lookup.
 
 **Verification:** 755 tests green across 30 suites (prepay split unit-verified for foam-only / foam+lawn / lawn-only); client `vite build` clean. Public self-serve render/accept still wants a Railway preview (unchanged from round 3).
+
+### Round 5 (Codex re-review on 833eaa2) — engine-result cadence/duration/label polish
+
+Three more, all in `estimate-public.js`, all on the engine-result ingestion + per-treatment rendering paths:
+
+- **Cadence on engine-result supplements (P2)** (`recurringServicesWithSupplements`): a raw `foam_recurring` line item ingested here built a supplement row that dropped `item.cadence` and used the generic display name (no cadence), so on accept the seeder could fall back to the billing key `monthly` and seed monthly follow-ups for a quarterly/bimonthly plan. Now carries `item.name` (which holds the cadence) ahead of the generic name, plus `cadence`/`frequencyKey`/`estimatedDurationMinutes` on the row.
+- **Tier duration in the foam frequency (P2)** (`foamFrequenciesFromV1Services`): the foam frequency object dropped `estimatedDurationMinutes` and emitted no `perServiceTreatments` row, but the slot profile reads `frequencies[].perServiceTreatments` first — so 15–20pt foam fell back to the generic 90-min window. Now carries `estimatedDurationMinutes` on the frequency and a `perServiceTreatments` row with the tier duration; `shapeFrequencyEntry`'s per-treatment rows carry it too.
+- **Foam label on per-treatment rows (P3)** (`shapeFrequencyEntry.labelForRecurring`): added a `foam_recurring → 'Recurring Foam Treatment'` case (+ `li.name` fallback) so an engine-backed mixed estimate doesn't render a raw `foam_recurring` row. The client `PriceCard` renders `perServiceTreatments[].label` directly (no category-keyed benefit map needed).
+
+**Verification:** 735 tests green across 29 suites; pipeline confirms the foam recurring row survives the supplement merge with cadence/visits/duration/name intact (bimonthly 20pt → 180min). Only `estimate-public.js` changed; no client rebuild. Public self-serve flow still wants a Railway preview.

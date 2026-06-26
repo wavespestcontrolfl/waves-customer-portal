@@ -2183,13 +2183,21 @@ function recurringServicesWithSupplements(estResult = {}) {
       if (key === 'lawn_care' && itemDiscount) delete itemDiscount.policy;
       upsertSupplement(key, {
         service: key,
-        name: item.displayName || item.label || recurringServiceDisplayName(key),
-        displayName: item.displayName || item.label || recurringServiceDisplayName(key),
+        // item.name carries the cadence for foam ("Recurring Foam Treatment
+        // (Quarterly)"); keep it ahead of the generic display name so the
+        // recurrence pattern inferred on accept matches the sold cadence.
+        name: item.displayName || item.label || item.name || recurringServiceDisplayName(key),
+        displayName: item.displayName || item.label || item.name || recurringServiceDisplayName(key),
         mo: monthly || null,
         monthly: monthly || null,
         annual: annual || (monthly ? Math.round(monthly * 12 * 100) / 100 : null),
         perTreatment: firstPositiveNumber(item.perApp, item.perVisit),
         visitsPerYear: firstPositiveNumber(item.visitsPerYear, item.visits, item.frequency, item.appsPerYear),
+        // Carry cadence (foam) so pattern inference / cadence-aware shapers don't
+        // fall back to the monthly billing key; null for services without one.
+        cadence: item.cadence || null,
+        frequencyKey: item.cadence || null,
+        estimatedDurationMinutes: firstPositiveNumber(item.estimatedDurationMinutes, item.estimated_duration_minutes) || null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(item),
         waveGuardTierEligible: item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false,
         countsTowardWaveGuardTier: item.countsTowardWaveGuardTier !== false,
@@ -7892,6 +7900,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
       case 'termite_bait': return 'Termite Bait';
       case 'palm_injection': return 'Palm Injection';
       case 'rodent_bait': return 'Rodent Bait Stations';
+      case 'foam_recurring': return 'Recurring Foam Treatment';
       default: return svc;
     }
   };
@@ -7912,10 +7921,11 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
         : (Number.isFinite(pa) && pa > 0 ? Math.round(pa * 100) / 100 : null);
       return {
         service: li.service,
-        label: li.displayName || labelForRecurring(li.service),
+        label: li.displayName || li.name || labelForRecurring(li.service),
         perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
         displayPrice,
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
+        estimatedDurationMinutes: firstPositiveNumber(li.estimatedDurationMinutes, li.estimated_duration_minutes) || null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(li),
       };
     });
@@ -9781,6 +9791,10 @@ function foamFrequenciesFromV1Services(services = []) {
   const perTreatment = perTreatmentBase != null
     ? perTreatmentBase
     : (annual != null && visits ? roundMonthly(annual / visits) : null);
+  // Tier labor duration (priceRecurringFoam → 60/90/120/180) drives slot sizing.
+  // The slot profile reads frequencies[].perServiceTreatments first, so carry it
+  // both on the frequency and on a per-service treatment row.
+  const estimatedDurationMinutes = finiteNumberOrNull(row.estimatedDurationMinutes ?? row.estimated_duration_minutes);
   const label = LABELS[cadence];
   return [{
     key: cadence,
@@ -9793,6 +9807,7 @@ function foamFrequenciesFromV1Services(services = []) {
     perTreatment,
     visitsPerYear: visits,
     billingFrequencyKey: 'monthly',
+    estimatedDurationMinutes,
     // foam_recurring is non-discountable (cadence multiplier is its only
     // discount), so no manual-discount shaping here.
     manualDiscount: null,
@@ -9803,6 +9818,15 @@ function foamFrequenciesFromV1Services(services = []) {
       includedAtThisFrequency: true,
     }],
     addOns: [],
+    perServiceTreatments: [{
+      service: 'foam_recurring',
+      label: 'Recurring Foam Treatment',
+      perTreatment,
+      displayPrice: perTreatment,
+      visitsPerYear: visits,
+      estimatedDurationMinutes,
+      waveGuardDiscountEligible: false,
+    }],
   }];
 }
 
