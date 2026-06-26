@@ -1,5 +1,6 @@
 // Regression: a call whose AI-extracted name is wrong (e.g. the technician's
 // name) must NOT spawn a duplicate customer when the phone already maps to one.
+// Fixtures are fictitious; phone is a reserved 555-01xx test number.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -26,34 +27,36 @@ function mockDbWithResults(resultArrays) {
   });
 }
 
-const robert = { id: 'robert-1', first_name: 'Robert', last_name: 'Lammon', phone: '+18475258420' };
+const PHONE = '+15555550123'; // reserved fictitious test number
+const KEEPER = { id: 'cust-keeper', first_name: 'Jordan', last_name: 'Rivers', phone: PHONE };
+const WRONG_NAME = { first_name: 'Sam' }; // AI mis-extracted (e.g. the tech's name)
 
 describe('findCustomerForCallContact phone fallback', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('wrong extracted name falls back to the single phone match (no duplicate)', async () => {
-    // named query (phone + first_name="adam") → no match; phone-only → one match.
-    mockDbWithResults([[], [robert]]);
-    const result = await findCustomerForCallContact('+18475258420', { first_name: 'Adam' });
-    expect(result).toBe(robert);
+    // named query (phone + first_name="sam") → no match; phone-only → one match.
+    mockDbWithResults([[], [KEEPER]]);
+    const result = await findCustomerForCallContact(PHONE, WRONG_NAME);
+    expect(result).toBe(KEEPER);
   });
 
   test('exact name match still wins', async () => {
-    mockDbWithResults([[robert]]);
-    const result = await findCustomerForCallContact('+18475258420', { first_name: 'Robert', last_name: 'Lammon' });
-    expect(result).toBe(robert);
+    mockDbWithResults([[KEEPER]]);
+    const result = await findCustomerForCallContact(PHONE, { first_name: 'Jordan', last_name: 'Rivers' });
+    expect(result).toBe(KEEPER);
   });
 
   test('does NOT auto-link when 2+ customers share the phone and no name matches', async () => {
-    const other = { id: 'other-1', first_name: 'Carla', phone: '+18475258420' };
-    mockDbWithResults([[], [robert, other]]); // named → none; phone-only → two
-    const result = await findCustomerForCallContact('+18475258420', { first_name: 'Adam' });
+    const other = { id: 'cust-other', first_name: 'Alex', phone: PHONE };
+    mockDbWithResults([[], [KEEPER, other]]); // named → none; phone-only → two
+    const result = await findCustomerForCallContact(PHONE, WRONG_NAME);
     expect(result).toBeNull();
   });
 
   test('no extracted name uses phone-only single match (unchanged behavior)', async () => {
-    mockDbWithResults([[robert]]);
-    const result = await findCustomerForCallContact('+18475258420', {});
-    expect(result).toBe(robert);
+    mockDbWithResults([[KEEPER]]);
+    const result = await findCustomerForCallContact(PHONE, {});
+    expect(result).toBe(KEEPER);
   });
 });
