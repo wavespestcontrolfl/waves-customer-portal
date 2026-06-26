@@ -15,30 +15,6 @@ const trackTransitions = require('./track-transitions');
 const auditLog = require('./audit-log');
 const { parseETDateTime } = require('../utils/datetime-et');
 
-let twilioService = null;
-function getTwilio() {
-  if (twilioService === null) {
-    try { twilioService = require('./twilio'); } catch { twilioService = false; }
-  }
-  return twilioService || null;
-}
-
-/**
- * Best-effort arrival SMS to the customer ("Tech is on-site now").
- * Reuses the same appointment-progress preference gate as en-route SMS,
- * but sends arrival-specific copy.
- */
-async function sendArrivalSms(customerId, techName) {
-  try {
-    const tw = getTwilio();
-    if (!tw || !tw.sendTechArrived) return;
-    // Skip if customer has no prefs row or opt-out — sendTechArrived guards internally.
-    await tw.sendTechArrived(customerId, techName || 'Your tech');
-  } catch (err) {
-    logger.warn(`[geofence-handler] arrival SMS failed: ${err.message}`);
-  }
-}
-
 /**
  * Insert a notification for the tech PWA to poll.
  */
@@ -55,10 +31,10 @@ async function sendTechNotification(technicianId, { type, message, payload }) {
   }
 }
 
-async function markOnPropertyFromGeofence(scheduledServiceId, eventTime = new Date()) {
+async function markOnPropertyFromGeofence(scheduledServiceId, eventTime = new Date(), opts = {}) {
   let canonical = null;
   try {
-    canonical = await trackTransitions.markOnProperty(scheduledServiceId);
+    canonical = await trackTransitions.markOnProperty(scheduledServiceId, opts);
   } catch (err) {
     logger.error(`[geofence-handler] markOnProperty failed for job ${scheduledServiceId}: ${err.message}`);
   }
@@ -165,8 +141,19 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   const mode = await matcher.getMode();
   const cooldown = await matcher.getCooldownMinutes();
 
-  // Duplicate guard
+  // Duplicate guard — GPS jitter / repeat ENTERs for the same tech+customer
+  // within the cooldown must not start a second timer or re-process arrival.
   if (await matcher.isDuplicateEnter(tech.id, customer.id, cooldown)) {
+    // One exception: if a prior arrival already flipped THIS job on_property but
+    // its arrival SMS is still pending (guard NULL — a retryable first-send miss
+    // released it), let the idempotent retry run. Otherwise a transient
+    // provider/quiet-hours miss is stranded until a manual retap or an event
+    // after the cooldown clears. markOnProperty's CAS makes this a no-op once
+    // the guard is stamped, and gating on track_state === 'on_property' avoids
+    // flipping a still-scheduled (e.g. reminder-mode) job from a duplicate ENTER.
+    if (job && job.track_state === 'on_property' && !job.arrival_sms_sent_at) {
+      await markOnPropertyFromGeofence(job.id, eventTime, { actingTechId: tech.id });
+    }
     await matcher.logEvent({
       bouncie_imei: imei,
       technician_id: tech.id,
@@ -185,8 +172,27 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   // If tech already has a running job timer, don't start a second one.
   const existingTimer = await matcher.getActiveJobTimer(tech.id);
   if (existingTimer) {
+    let actionTaken = 'timer_already_running';
     if (job) {
-      await markOnPropertyFromGeofence(job.id, eventTime);
+      // Suppress the arrival SMS only when the running timer belongs to a
+      // DIFFERENT job — i.e. the tech is driving past this customer mid-job and
+      // hasn't actually started here, so "your tech has arrived" would be
+      // premature. When the timer is already for THIS job (e.g. a repeat ENTER
+      // after a manual start whose first arrival send failed and released the
+      // guard), let the SMS fire/retry — the tech really is on this property.
+      const differentJob = String(existingTimer.job_id) !== String(job.id);
+      await markOnPropertyFromGeofence(job.id, eventTime, {
+        suppressArrivalSms: differentJob,
+        actingTechId: tech.id,
+      });
+      // A suppressed drive-past leaves the arrival SMS pending (guard NULL),
+      // relying on a later real arrival to send it. Don't let it consume the
+      // duplicate-ENTER cooldown: isDuplicateEnter() counts timer_already_running
+      // as a duplicate for ~15 min, so if the tech actually reaches this
+      // customer within that window the real arrival would be dropped as
+      // ignored_duplicate and the text would never fire. Log it under an action
+      // isDuplicateEnter() ignores so the real arrival is still processed.
+      if (differentJob) actionTaken = 'arrival_suppressed_other_job';
     }
     await matcher.logEvent({
       bouncie_imei: imei,
@@ -196,7 +202,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       longitude: lng,
       matched_customer_id: customer.id,
       matched_job_id: job ? job.id : null,
-      action_taken: 'timer_already_running',
+      action_taken: actionTaken,
       time_entry_id: existingTimer.id,
       raw_payload: payload,
       event_timestamp: eventTime,
@@ -236,9 +242,12 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
     }
 
     if (job) {
-      await markOnPropertyFromGeofence(job.id, eventTime);
-      // Fire-and-forget customer arrival SMS when tied to a real job
-      sendArrivalSms(customer.id, tech.name).catch(() => {});
+      // markOnProperty (track-transitions) is the sole owner of the customer
+      // arrival SMS now — it fires once when the tracker flips to on-site,
+      // idempotent across both Bouncie webhook paths. Don't double-send here.
+      // tech.id is the IMEI device's tech — the one actually arriving — which
+      // beats the job's stale assignment for the "{tech} has arrived" copy.
+      await markOnPropertyFromGeofence(job.id, eventTime, { actingTechId: tech.id });
     }
 
     await sendTechNotification(tech.id, {
@@ -775,6 +784,7 @@ function customerName(c) {
 
 module.exports = {
   handleGeozoneEvent,
+  handleArrival,
   sendTechNotification,
   markOnPropertyFromGeofence,
   markCompleteFromGeofence,

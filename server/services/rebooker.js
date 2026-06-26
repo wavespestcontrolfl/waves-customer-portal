@@ -36,6 +36,9 @@ const LIVE_LIFECYCLE_RESET = {
   actual_start_time: null,
   check_in_time: null,
   track_sms_sent_at: null,
+  // Clear the arrival-SMS guard too, mirroring track_sms_sent_at, so the
+  // "tech has arrived" text can re-send when the rescheduled visit arrives.
+  arrival_sms_sent_at: null,
 };
 
 function recurrenceOrdinalOptions(baseDateStr, opts = {}) {

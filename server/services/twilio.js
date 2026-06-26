@@ -738,20 +738,27 @@ const TwilioService = {
   /**
    * Send "tech arrived/on property" notification.
    *
-   * Uses the same customer preference gate as en-route notifications
-   * (`notification_prefs.tech_en_route`) because this is the same
-   * appointment-progress class, but the copy must not say "on the way".
+   * Gated on its own per-customer opt-in (`notification_prefs.tech_arrived`)
+   * so a customer can mute the arrival text independently of the en-route
+   * text. Copy must not say "on the way" (that's en-route). Fired from
+   * track-transitions markOnProperty when the live tracker flips to on-site.
    */
   async sendTechArrived(customerId, techName) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
       .first();
-    if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
+    // Deterministic local suppression (opt-out / SMS disabled / missing customer):
+    // the arrival is "handled", not a retryable failure. The caller (markOnProperty)
+    // keeps its idempotency guard stamped on this signal so no later same-job
+    // signal re-fires a stale arrival text if the pref flips while on-site.
+    if (!customer) return { success: false, suppressed: true, reason: "no_customer" };
+    if (!prefs?.sms_enabled) return { success: false, suppressed: true, reason: "sms_disabled" };
+    if (!prefs?.tech_arrived) return { success: false, suppressed: true, reason: "opt_out" };
 
     const { getAppointmentContacts, isServiceContactRole } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);
-    if (!contacts.length) return;
+    if (!contacts.length) return { success: false, suppressed: true, reason: "no_contacts" };
 
     const results = [];
     const {
@@ -779,21 +786,36 @@ const TwilioService = {
           body,
           channel: "sms",
           audience: "customer",
-          purpose: "tech_en_route",
+          purpose: "tech_arrived",
           customerId,
           identityTrustLevel:
             isServiceContactRole(contact.role)
               ? "service_contact_authorized"
               : "phone_matches_customer",
           metadata: {
-            original_message_type: "tech_en_route",
+            original_message_type: "tech_arrived",
             appointment_progress_event: "tech_arrived",
           },
         }),
       );
     }
 
-    return { success: results.some((r) => r?.sent), results };
+    if (results.some((r) => r?.sent)) return { success: true, results };
+
+    // Nothing delivered. Distinguish a RETRYABLE miss from deterministic
+    // suppression so the caller knows whether to release its arrival guard:
+    //  - retryable: a quiet-hours hold or a transient provider failure (both
+    //    carry retryable:true from sendCustomerMessage), or the template was
+    //    missing for every contact (results empty → re-seed fixes it).
+    //  - suppressed: every attempt was blocked/terminal for a deterministic
+    //    reason (STOP/wrong-number/manual-DNC suppression, consent, a non-mobile
+    //    or otherwise terminal provider result). Retrying can't change those, so
+    //    the arrival is HANDLED — the caller must keep the guard stamped, else a
+    //    later same-job signal could fire a stale "has arrived" if the
+    //    suppression/number is fixed while the job is still on-property.
+    const anyRetryable = results.length === 0 || results.some((r) => r?.retryable);
+    if (anyRetryable) return { success: false, results };
+    return { success: false, suppressed: true, reason: "blocked", results };
   },
 
   /**

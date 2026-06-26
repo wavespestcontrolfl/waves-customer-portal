@@ -69,6 +69,7 @@ const PREF_SELECT = [
   'service_reminder_72h',
   'service_reminder_24h',
   'tech_en_route',
+  'tech_arrived',
   'auto_flip_en_route',
   'service_completed',
   'billing_reminder',
@@ -100,6 +101,7 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
     serviceReminder72h: prefs.service_reminder_72h !== false,
     serviceReminder24h: prefs.service_reminder_24h !== false,
     techEnRoute: prefs.tech_en_route !== false,
+    techArrived: prefs.tech_arrived !== false,
     autoFlipEnRoute: prefs.auto_flip_en_route !== false,
     serviceCompleted: prefs.service_completed !== false,
     billingReminder: !!prefs.billing_reminder,
@@ -130,6 +132,7 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.serviceReminder72h !== undefined) dbUpdates.service_reminder_72h = updates.serviceReminder72h;
   if (updates.serviceReminder24h !== undefined) dbUpdates.service_reminder_24h = updates.serviceReminder24h;
   if (updates.techEnRoute !== undefined) dbUpdates.tech_en_route = updates.techEnRoute;
+  if (updates.techArrived !== undefined) dbUpdates.tech_arrived = updates.techArrived;
   if (updates.appointmentNotifyPrimary !== undefined) dbUpdates.appointment_notify_primary = updates.appointmentNotifyPrimary;
   if (updates.autoFlipEnRoute !== undefined) dbUpdates.auto_flip_en_route = updates.autoFlipEnRoute;
   if (updates.serviceCompleted !== undefined) dbUpdates.service_completed = updates.serviceCompleted;
@@ -165,6 +168,7 @@ const ACCOUNT_PREF_LABELS = {
   serviceReminder72h: '72-Hour Appointment Reminder',
   serviceReminder24h: '24-Hour Service Reminder',
   techEnRoute: 'Tech En Route Alert',
+  techArrived: 'Tech Arrived Alert',
   appointmentNotifyPrimary: 'Primary Account Appointment Copies',
   autoFlipEnRoute: 'Auto En Route from GPS',
   serviceCompleted: 'Service Complete Report',
@@ -196,6 +200,7 @@ const DB_FIELD_BY_PREF = {
   serviceReminder72h: 'service_reminder_72h',
   serviceReminder24h: 'service_reminder_24h',
   techEnRoute: 'tech_en_route',
+  techArrived: 'tech_arrived',
   appointmentNotifyPrimary: 'appointment_notify_primary',
   autoFlipEnRoute: 'auto_flip_en_route',
   serviceCompleted: 'service_completed',
@@ -277,6 +282,7 @@ async function ensurePrefs(customerId) {
       service_reminder_72h: true,
       service_reminder_24h: true,
       tech_en_route: true,
+      tech_arrived: true,
       service_completed: true,
       billing_reminder: false,
       seasonal_tips: true,
@@ -397,6 +403,7 @@ router.put('/preferences', async (req, res, next) => {
       serviceReminder72h: Joi.boolean(),
       serviceReminder24h: Joi.boolean(),
       techEnRoute: Joi.boolean(),
+      techArrived: Joi.boolean(),
       appointmentNotifyPrimary: Joi.boolean(),
       autoFlipEnRoute: Joi.boolean(),
       serviceCompleted: Joi.boolean(),
@@ -480,6 +487,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       serviceReminder72h: Joi.boolean(),
       serviceReminder24h: Joi.boolean(),
       techEnRoute: Joi.boolean(),
+      techArrived: Joi.boolean(),
       appointmentNotifyPrimary: Joi.boolean(),
       // phone max matches the service_contact*_phone column width (varchar 20)
       // so an over-long value is a 400, not a database length error.
@@ -505,6 +513,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     if (updates.serviceReminder72h !== undefined) dbUpdates.service_reminder_72h = updates.serviceReminder72h;
     if (updates.serviceReminder24h !== undefined) dbUpdates.service_reminder_24h = updates.serviceReminder24h;
     if (updates.techEnRoute !== undefined) dbUpdates.tech_en_route = updates.techEnRoute;
+    if (updates.techArrived !== undefined) dbUpdates.tech_arrived = updates.techArrived;
     if (updates.appointmentNotifyPrimary !== undefined) dbUpdates.appointment_notify_primary = updates.appointmentNotifyPrimary;
 
     let savedContacts;
@@ -559,6 +568,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
 router._private = {
   comparableEmail,
   notificationPrefsDbUpdates,
+  preferencePayload,
   preferenceChangeItems,
   serviceContactPayload,
   serviceContactsPayload,

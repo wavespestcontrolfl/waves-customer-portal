@@ -230,7 +230,7 @@ router.post('/:id/on-site', async (req, res, next) => {
       }
     }
 
-    const result = await trackTransitions.markOnProperty(svc.id);
+    const result = await trackTransitions.markOnProperty(svc.id, { actingTechId: req.technicianId });
     if (!result.ok) {
       const status = result.reason === 'not_found' ? 404 : 409;
       return res.status(status).json({ error: result.reason });

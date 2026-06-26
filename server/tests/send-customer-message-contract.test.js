@@ -92,4 +92,11 @@ describe('sendCustomerMessage contract guardrails', () => {
       prefsColumn: 'review_request',
     }));
   });
+
+  test('arrival texts gate on the independent tech_arrived preference, not tech_en_route', () => {
+    expect(resolvePolicy('customer', 'tech_arrived')).toEqual(expect.objectContaining({
+      prefsColumn: 'tech_arrived',
+      requireConsent: 'transactional',
+    }));
+  });
 });

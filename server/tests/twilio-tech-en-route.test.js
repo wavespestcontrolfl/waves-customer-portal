@@ -151,18 +151,18 @@ describe("TwilioService.sendTechEnRoute", () => {
     expect(result.success).toBe(false);
   });
 
-  test("sendTechArrived uses arrival copy instead of en-route copy", async () => {
+  test("sendTechArrived gates on the tech_arrived pref and uses arrival copy", async () => {
     db.mockReturnValueOnce(
       firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
     ).mockReturnValueOnce(
-      firstQuery({ tech_en_route: true, sms_enabled: true }),
+      firstQuery({ tech_arrived: true, sms_enabled: true }),
     );
 
     getAppointmentContacts.mockReturnValue([
       { phone: "+15551112222", name: "Sam", role: "primary" },
     ]);
     smsTemplates.getTemplate.mockResolvedValue(
-      "Hello Sam! Bryan has arrived and is servicing your property.\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.",
+      "Hello Sam! Bryan has arrived at your property for your scheduled service.\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.",
     );
     sendCustomerMessage.mockResolvedValue({ sent: true });
 
@@ -179,12 +179,10 @@ describe("TwilioService.sendTechEnRoute", () => {
     expect(sendCustomerMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         to: "+15551112222",
-        body: expect.stringContaining(
-          "has arrived and is servicing your property",
-        ),
-        purpose: "tech_en_route",
+        body: expect.stringContaining("has arrived at your property"),
+        purpose: "tech_arrived",
         metadata: {
-          original_message_type: "tech_en_route",
+          original_message_type: "tech_arrived",
           appointment_progress_event: "tech_arrived",
         },
       }),
@@ -193,6 +191,72 @@ describe("TwilioService.sendTechEnRoute", () => {
       "on the way",
     );
     expect(result.success).toBe(true);
+  });
+
+  test("sendTechArrived skips when the tech_arrived pref is off", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: false, sms_enabled: true }),
+    );
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan");
+
+    // Opt-out is deterministic local suppression, not a retryable miss: the
+    // caller keeps its arrival guard stamped so a later signal can't re-fire.
+    expect(result).toMatchObject({ success: false, suppressed: true, reason: "opt_out" });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test("sendTechArrived reports suppressed when every send is blocked terminally (DNC/non-mobile)", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: true }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    smsTemplates.getTemplate.mockResolvedValue("Hello Sam! Bryan has arrived.");
+    // Manual-DNC / wrong-number suppression — blocked and NOT retryable.
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      blocked: true,
+      code: "SUPPRESSED_WRONG_NUMBER",
+      retryable: false,
+    });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan");
+
+    // Deterministic terminal block — retrying can't help, so the arrival is
+    // handled and the caller must keep its guard stamped.
+    expect(result).toMatchObject({ success: false, suppressed: true, reason: "blocked" });
+  });
+
+  test("sendTechArrived stays retryable (not suppressed) on a quiet-hours / transient miss", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: true }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    smsTemplates.getTemplate.mockResolvedValue("Hello Sam! Bryan has arrived.");
+    // Quiet-hours hold is explicitly retryable.
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      blocked: true,
+      code: "QUIET_HOURS_HOLD",
+      retryable: true,
+    });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan");
+
+    // A retryable miss must NOT be marked suppressed — the caller releases the
+    // guard so a later signal can try again once the hold clears.
+    expect(result.success).toBe(false);
+    expect(result.suppressed).toBeFalsy();
   });
 });
 

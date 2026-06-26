@@ -352,7 +352,9 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
 
   let result = null;
   try {
-    result = await trackTransitions.markOnProperty(service.id);
+    // techStatus.tech_id is the tech reporting this GPS sample; the guard above
+    // already rejects a tech/assignment mismatch, so it's the one arriving.
+    result = await trackTransitions.markOnProperty(service.id, { actingTechId: techStatus.tech_id });
     await auditArrival({ service, techStatus, destination, distance, point, decision, result });
     return {
       ok: result?.ok === true,

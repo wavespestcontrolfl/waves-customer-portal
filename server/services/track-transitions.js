@@ -29,6 +29,7 @@ const {
 } = require('../utils/service-duration-capture');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
+const { isEnabled } = require('../config/feature-gates');
 
 const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 const CUSTOMER_EVENT = 'customer:job_update';
@@ -351,6 +352,87 @@ async function markEnRoute(serviceId, opts = {}) {
 }
 
 /**
+ * Best-effort customer arrival SMS — the arrival analogue of the en-route
+ * SMS in markEnRoute. Fired from markOnProperty (the one place both Bouncie
+ * webhook paths and a manual on-site tap converge) so it stays idempotent.
+ *
+ * arrival_sms_sent_at is the guard — "arrival handled", NOT "SMS delivered".
+ * It can't double-send, and because the send is best-effort and lives OUTSIDE
+ * the state-write, a transient failure releases the column back to NULL so a
+ * later arrival signal retries. Both the fresh-flip and the already-on_property
+ * branches call this — without the latter, a first-send failure would be
+ * permanently dropped (the job is already on_property, so every retry takes the
+ * idempotent branch).
+ *
+ * The guard is claimed even while the techArrivedSms gate is OFF (the documented
+ * post-deploy dark state). Otherwise a job that transitions to on_property
+ * during the deploy→gate-flip window keeps a NULL guard, and the first same-job
+ * geofence repeat or manual retap AFTER the gate is enabled would read it as
+ * never-sent and fire a stale "has arrived" for an arrival that predates the
+ * feature. Claiming under a disabled gate marks those as handled; nothing goes
+ * out. (Migration 20260626000010 does the same for rows already on_property at
+ * deploy.) sendTechArrived also self-guards on twilioSms + per-customer pref.
+ */
+async function maybeSendArrivalSms(svc, serviceId, actingTechId) {
+  if (svc.arrival_sms_sent_at) return;
+  // Atomically CLAIM the first on-site flip before doing anything else.
+  // Concurrent arrival signals (geofence + GPS + manual) can all reach an
+  // unstamped on_property row; the conditional NULL -> now() update is the
+  // serializer — exactly one caller wins and proceeds, racers see 0 rows and
+  // bail. We claim regardless of the gate (see doc above): the guard means
+  // "handled", so an arrival under a disabled gate is recorded but never sent.
+  const claimed = await db('scheduled_services')
+    .where({ id: serviceId })
+    .whereNull('arrival_sms_sent_at')
+    .update({ arrival_sms_sent_at: new Date() });
+  if (!claimed) return;
+
+  // Gate off: the claim stands as "handled" so no later signal re-sends. Don't
+  // release it — that's the whole point of stamping under a disabled gate.
+  if (!isEnabled('techArrivedSms')) return;
+
+  let sent = false;
+  let suppressed = false;
+  try {
+    // Name the tech actually working the visit, not the (possibly stale)
+    // scheduled assignment. After a crew swap, geofence-matcher.findScheduledJob
+    // falls back to any tech, and the confirm-start path uses the logged-in
+    // tech — so callers pass the acting tech and we prefer it over
+    // svc.technician_id, which can point at someone who isn't on the property.
+    const techId = actingTechId || svc.technician_id;
+    const tech = techId
+      ? await db('technicians').where({ id: techId }).first('name')
+      : null;
+    const techName = tech?.name || 'Your Waves technician';
+    const result = await TwilioService.sendTechArrived(svc.customer_id, techName);
+    // sendTechArrived returns { success } on a real attempt, or
+    // { suppressed: true } when it deterministically won't send for this
+    // customer (opt-out / SMS disabled / no SMS-capable contact). Suppression
+    // is "handled", NOT a retryable failure — see the release below.
+    sent = !!(result && result.success);
+    suppressed = !!(result && result.suppressed);
+  } catch (err) {
+    logger.error(`[track-transitions] arrival SMS failed: ${err.message}`);
+  }
+  if (!sent && !suppressed) {
+    // A RETRYABLE miss (provider error / quiet hours / missing template) —
+    // release the claim so a later arrival signal can retry. We deliberately do
+    // NOT release on deterministic opt-out: the arrival is already handled, and
+    // reopening the guard would let a later same-job geofence/manual signal fire
+    // a stale "has arrived" if the customer's pref flips while still on-site
+    // (the same stale-send class the disabled-gate claim prevents). On success
+    // the claim timestamp stays put as the permanent idempotency guard.
+    try {
+      await db('scheduled_services')
+        .where({ id: serviceId })
+        .update({ arrival_sms_sent_at: null });
+    } catch (err) {
+      logger.error(`[track-transitions] arrival SMS guard release failed: ${err.message}`);
+    }
+  }
+}
+
+/**
  * Phase 1 stub. Phase 2 wires this into geofence dwell detection.
  * Safe to call manually; just flips state when called from en_route.
  */
@@ -385,6 +467,9 @@ async function markOnProperty(serviceId, opts = {}) {
       }
     }
     emitCustomerTrackRefresh(svc, 'on_property', svc.arrived_at || lifecycleUpdates.arrived_at || new Date());
+    // Retry the arrival SMS if a prior on-site signal flipped the state but
+    // its send failed (arrival_sms_sent_at still NULL). No-op once stamped.
+    if (!opts.suppressArrivalSms) await maybeSendArrivalSms(svc, serviceId, opts.actingTechId);
     return { ok: true, state: 'on_property', arrivedAt: svc.arrived_at || lifecycleUpdates.arrived_at || null };
   }
   // Geofence arrival can be the first signal we get when a tech forgot
@@ -417,6 +502,16 @@ async function markOnProperty(serviceId, opts = {}) {
         logger.error(`[track-transitions] tech_status on_site race sync failed: ${err.message}`);
       }
     }
+    // We lost the on_property flip to a concurrent signal. We can't assume that
+    // winner owned the send: a geofence drive-past wins with suppressArrivalSms,
+    // leaving the guard NULL with no guaranteed later trigger (the manual
+    // start-job path that lost here won't re-fire). So a non-suppressed loser
+    // for an already-on_property job must still attempt the arrival SMS. The
+    // atomic claim in maybeSendArrivalSms prevents a double-send if the winner
+    // did already send.
+    if (!opts.suppressArrivalSms && fresh?.track_state === 'on_property') {
+      await maybeSendArrivalSms(fresh, serviceId, opts.actingTechId);
+    }
     return { ok: true, state: fresh?.track_state || 'on_property', arrivedAt: fresh?.arrived_at || null };
   }
   try {
@@ -436,6 +531,14 @@ async function markOnProperty(serviceId, opts = {}) {
     }
   }
   emitCustomerTrackRefresh(svc, 'on_property', now);
+  // Fire the arrival SMS on the first on-site flip. maybeSendArrivalSms claims
+  // the guard atomically, so this and the race-loser branch above can both
+  // safely attempt it without double-sending. suppressArrivalSms skips it for
+  // the geofence "timer already running for another job" path, which flips the
+  // tracker for a job the tech hasn't actually started (driving past the next
+  // customer mid-job); a later real arrival for that job still sends.
+  if (!opts.suppressArrivalSms) await maybeSendArrivalSms(svc, serviceId, opts.actingTechId);
+
   return { ok: true, state: 'on_property', arrivedAt: now };
 }
 

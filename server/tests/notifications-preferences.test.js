@@ -20,7 +20,7 @@ jest.mock('../services/account-membership-email', () => ({
 const db = require('../models/db');
 const notificationsRoute = require('../routes/notifications');
 
-const { notificationPrefsDbUpdates, preferenceChangeItems, resolvePrimaryProfileId, CHANNEL_DB_COLUMNS } = notificationsRoute._private;
+const { notificationPrefsDbUpdates, preferencePayload, preferenceChangeItems, resolvePrimaryProfileId, CHANNEL_DB_COLUMNS } = notificationsRoute._private;
 
 describe('notification preference updates', () => {
   test('clears stale billing contact name when billing email changes without a replacement name', () => {
@@ -88,6 +88,22 @@ describe('notification preference updates', () => {
     expect(updates).toEqual({
       billing_contact_name: 'Accounts Payable',
     });
+  });
+
+  test('exposes the tech_arrived opt-out independently of tech_en_route', () => {
+    // Read direction: a customer who muted en-route but kept arrival still
+    // surfaces techArrived=true so the portal can render its own toggle.
+    expect(preferencePayload({ tech_en_route: false, tech_arrived: true }))
+      .toMatchObject({ techEnRoute: false, techArrived: true });
+    // Default ON when the column is absent (mirrors tech_en_route).
+    expect(preferencePayload({})).toMatchObject({ techArrived: true });
+
+    // Write direction: techArrived maps to its own column and can be turned
+    // off without touching tech_en_route.
+    expect(notificationPrefsDbUpdates({ techArrived: false }))
+      .toEqual({ tech_arrived: false });
+    expect(notificationPrefsDbUpdates({ techEnRoute: false }))
+      .toEqual({ tech_en_route: false });
   });
 
   test('maps per-notification delivery channels to their db columns', () => {

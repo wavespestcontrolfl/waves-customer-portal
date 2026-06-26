@@ -1,6 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/twilio', () => ({
   sendTechEnRoute: jest.fn(),
+  sendTechArrived: jest.fn(),
 }));
 jest.mock('../services/tech-status', () => ({
   setTechJobStatus: jest.fn().mockResolvedValue({}),
@@ -12,17 +13,23 @@ jest.mock('../services/job-status', () => ({
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => null),
 }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => true),
+}));
 
 const db = require('../models/db');
+const { sendTechArrived } = require('../services/twilio');
 const { setTechJobStatus, clearTechCurrentJob } = require('../services/tech-status');
 const { transitionJobStatus } = require('../services/job-status');
 const { getIo } = require('../sockets');
+const { isEnabled } = require('../config/feature-gates');
 const trackTransitions = require('../services/track-transitions');
 
 function query(result) {
   return {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
     update: jest.fn().mockResolvedValue(result),
     first: jest.fn().mockResolvedValue(result),
   };
@@ -71,6 +78,9 @@ describe('track-transitions lifecycle side effects', () => {
       status: 'pending',
       track_state: 'scheduled',
       cancelled_at: null,
+      // Pre-stamped so the arrival-SMS block is skipped — keeps this test
+      // focused on the state/operational-status side effects.
+      arrival_sms_sent_at: new Date(),
     };
     const load = query(svc);
     const update = query(1);
@@ -100,6 +110,303 @@ describe('track-transitions lifecycle side effects', () => {
       tech_id: 'tech-2',
       status: 'on_site',
       current_job_id: 'job-2',
+    });
+  });
+
+  test('markOnProperty fires the arrival SMS once and claims arrival_sms_sent_at before sending', async () => {
+    const svc = {
+      id: 'job-6',
+      customer_id: 'cust-6',
+      technician_id: 'tech-6',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    sendTechArrived.mockResolvedValue({ success: true });
+    const claim = query(1);
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // on_property flip update
+      .mockReturnValueOnce(claim) // atomic claim of arrival_sms_sent_at
+      .mockReturnValueOnce(query({ name: 'Bryan' })); // technician name lookup
+
+    const result = await trackTransitions.markOnProperty('job-6');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('on_property');
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-6', 'Bryan');
+    // Guard is claimed (NULL -> now()) before the send, not stamped after.
+    expect(claim.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
+    expect(claim.update).toHaveBeenCalledWith({
+      arrival_sms_sent_at: expect.any(Date),
+    });
+  });
+
+  test('markOnProperty does not double-send when another arrival signal already claimed the guard', async () => {
+    const svc = {
+      id: 'job-c',
+      customer_id: 'cust-c',
+      technician_id: 'tech-c',
+      status: 'on_site', // syncOperationalStatus no-op
+      track_state: 'on_property', // idempotent branch
+      cancelled_at: null,
+      actual_start_time: new Date(),
+      check_in_time: new Date(),
+      arrived_at: new Date(),
+      arrival_sms_sent_at: null,
+    };
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(0)); // claim loses the race (0 rows updated)
+
+    const result = await trackTransitions.markOnProperty('job-c');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).not.toHaveBeenCalled();
+  });
+
+  test('markOnProperty releases the arrival guard when the send fails so a later signal retries', async () => {
+    const svc = {
+      id: 'job-f',
+      customer_id: 'cust-f',
+      technician_id: 'tech-f',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    sendTechArrived.mockResolvedValue({ success: false });
+    const release = query(1);
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // flip
+      .mockReturnValueOnce(query(1)) // claim
+      .mockReturnValueOnce(query({ name: 'Dana' })) // tech lookup
+      .mockReturnValueOnce(release); // release back to NULL
+
+    const result = await trackTransitions.markOnProperty('job-f');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).toHaveBeenCalled();
+    expect(release.update).toHaveBeenCalledWith({ arrival_sms_sent_at: null });
+  });
+
+  test('markOnProperty keeps the arrival guard stamped when the customer opted out (no release)', async () => {
+    const svc = {
+      id: 'job-o',
+      customer_id: 'cust-o',
+      technician_id: 'tech-o',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    // Deterministic local suppression — handled, not retryable. The guard must
+    // stay stamped so a later same-job signal can't fire a stale "has arrived"
+    // if the pref flips while still on-site.
+    sendTechArrived.mockResolvedValue({ success: false, suppressed: true, reason: 'opt_out' });
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // flip
+      .mockReturnValueOnce(query(1)) // claim
+      .mockReturnValueOnce(query({ name: 'Omar' })); // tech lookup — NO release after
+
+    const result = await trackTransitions.markOnProperty('job-o');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).toHaveBeenCalled();
+    // A release would be a 5th db() call (UPDATE ... arrival_sms_sent_at = null).
+    // Suppression is handled, so the guard stays stamped — exactly 4 db calls:
+    // loadService, flip, claim, tech lookup.
+    expect(db).toHaveBeenCalledTimes(4);
+  });
+
+  test('markOnProperty names the acting tech, not the stale assignment, in the arrival SMS', async () => {
+    const svc = {
+      id: 'job-a',
+      customer_id: 'cust-a',
+      technician_id: 'tech-assigned', // stale assignment after a crew swap
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    sendTechArrived.mockResolvedValue({ success: true });
+    const techLookup = query({ name: 'Acting Andy' });
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // flip
+      .mockReturnValueOnce(query(1)) // claim
+      .mockReturnValueOnce(techLookup); // tech name lookup
+
+    const result = await trackTransitions.markOnProperty('job-a', { actingTechId: 'tech-acting' });
+
+    expect(result.ok).toBe(true);
+    // Name resolves from the acting tech the caller passed, not technician_id.
+    expect(techLookup.where).toHaveBeenCalledWith({ id: 'tech-acting' });
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-a', 'Acting Andy');
+  });
+
+  test('markOnProperty suppresses the arrival SMS on the timer-already-running path', async () => {
+    const svc = {
+      id: 'job-s',
+      customer_id: 'cust-s',
+      technician_id: 'tech-s',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)); // flip
+
+    const result = await trackTransitions.markOnProperty('job-s', { suppressArrivalSms: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('on_property');
+    expect(sendTechArrived).not.toHaveBeenCalled();
+  });
+
+  test('markOnProperty race-loser still sends the arrival SMS when the flip-winner suppressed it', async () => {
+    // A geofence drive-past wins the scheduled->on_property flip with
+    // suppressArrivalSms, leaving the guard NULL. A real (non-suppressed)
+    // arrival for the same job loses the conditional flip (0 rows) — it must
+    // still claim and send rather than returning on the stale "winner owns it"
+    // assumption.
+    const svc = {
+      id: 'job-l',
+      customer_id: 'cust-l',
+      technician_id: 'tech-l',
+      status: 'confirmed',
+      track_state: 'scheduled', // loaded before the winner flipped it
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    const fresh = {
+      ...svc,
+      track_state: 'on_property', // winner already flipped it
+      arrival_sms_sent_at: null, // winner suppressed, so guard is still open
+    };
+    sendTechArrived.mockResolvedValue({ success: true });
+    const claim = query(1);
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(0)) // conditional flip loses the race
+      .mockReturnValueOnce(query(fresh)) // fresh reload in the race-loser branch
+      .mockReturnValueOnce(claim) // atomic claim succeeds (winner left it NULL)
+      .mockReturnValueOnce(query({ name: 'Lee' })); // technician name lookup
+
+    const result = await trackTransitions.markOnProperty('job-l');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-l', 'Lee');
+    expect(claim.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
+  });
+
+  test('markOnProperty race-loser does NOT send when it is itself the suppressed signal', async () => {
+    const svc = {
+      id: 'job-ls',
+      customer_id: 'cust-ls',
+      technician_id: 'tech-ls',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    const fresh = { ...svc, track_state: 'on_property', arrival_sms_sent_at: null };
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(0)) // conditional flip loses the race
+      .mockReturnValueOnce(query(fresh)); // fresh reload — no claim/send follows
+
+    const result = await trackTransitions.markOnProperty('job-ls', { suppressArrivalSms: true });
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).not.toHaveBeenCalled();
+  });
+
+  test('markOnProperty does not re-send the arrival SMS when already stamped', async () => {
+    const svc = {
+      id: 'job-7',
+      customer_id: 'cust-7',
+      technician_id: 'tech-7',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: new Date(),
+    };
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(query(1));
+
+    const result = await trackTransitions.markOnProperty('job-7');
+
+    expect(result.ok).toBe(true);
+    expect(sendTechArrived).not.toHaveBeenCalled();
+  });
+
+  test('markOnProperty stamps the guard but sends nothing when the gate is off', async () => {
+    // Post-deploy dark state: the arrival flips the tracker, the gate is off.
+    // Claim the guard anyway (mark handled) so a same-job retap AFTER the gate
+    // is enabled can't fire a stale "has arrived" for this already-past arrival.
+    isEnabled.mockReturnValueOnce(false);
+    const svc = {
+      id: 'job-8',
+      customer_id: 'cust-8',
+      technician_id: 'tech-8',
+      status: 'confirmed',
+      track_state: 'scheduled',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+    };
+    const claim = query(1);
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // flip
+      .mockReturnValueOnce(claim); // claim — guard stamped, then gate-off returns
+
+    const result = await trackTransitions.markOnProperty('job-8');
+
+    expect(result.ok).toBe(true);
+    // Guard claimed (NULL -> now) so a later gate-on retap is a no-op...
+    expect(claim.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
+    expect(claim.update).toHaveBeenCalledWith({ arrival_sms_sent_at: expect.any(Date) });
+    // ...but nothing goes out, and the claim is NOT released (no failed send to
+    // retry — the feature is simply off).
+    expect(sendTechArrived).not.toHaveBeenCalled();
+    expect(claim.update).toHaveBeenCalledTimes(1);
+  });
+
+  test('markOnProperty retries the arrival SMS on a later on-site signal when the first send failed', async () => {
+    const svc = {
+      id: 'job-r',
+      customer_id: 'cust-r',
+      technician_id: 'tech-r',
+      status: 'on_site', // syncOperationalStatus is a no-op (already in status)
+      track_state: 'on_property', // already flipped — takes the idempotent branch
+      cancelled_at: null,
+      // lifecycle fields present so buildOnSiteLifecycleUpdates returns {}
+      actual_start_time: new Date(),
+      check_in_time: new Date(),
+      arrived_at: new Date(),
+      arrival_sms_sent_at: null, // prior send failed — should retry, not be dropped
+    };
+    sendTechArrived.mockResolvedValue({ success: true });
+    const claim = query(1);
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(claim) // atomic claim of arrival_sms_sent_at
+      .mockReturnValueOnce(query({ name: 'Casey' })); // technician name lookup
+
+    const result = await trackTransitions.markOnProperty('job-r');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('on_property');
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-r', 'Casey');
+    expect(claim.update).toHaveBeenCalledWith({
+      arrival_sms_sent_at: expect.any(Date),
     });
   });
 
