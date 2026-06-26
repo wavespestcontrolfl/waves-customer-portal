@@ -47,6 +47,11 @@ const SERVICE_INCLUSIONS = {
     'Rodent activity documentation',
     'Entry-point observations when visible',
   ],
+  foam_recurring: [
+    'Targeted drill-and-foam treatment at active termite points',
+    'Recurring coverage at your selected service cadence',
+    'Treatment notes carried forward for each visit',
+  ],
 };
 
 function fmtMoney(n) {
@@ -65,6 +70,7 @@ function serviceKey(row = {}) {
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('tree') || raw.includes('shrub')) return 'tree_shrub';
+  if (raw.includes('foam')) return 'foam_recurring';
   if (raw.includes('termite')) return 'termite_bait';
   if (raw.includes('palm')) return 'palm_injection';
   if (raw.includes('rodent') || raw.includes('bait station')) return 'rodent_bait';
