@@ -167,6 +167,15 @@ const gates = {
   // runner drives a headless browser against untrusted pages (see signup-runner.js).
   signupRunner: isProd ? process.env.GATE_SIGNUP_RUNNER === 'true' : true,
 
+  // Local-Opportunity Prospector — the PROACTIVE link lane: a weekly cron that runs
+  // curated local-intent SERP queries (youth-sports/charity-run sponsorships, chamber
+  // member directories, community calendars, local podcasts) and promotes the scored,
+  // lane-routed result domains onto the seo_link_prospects board. Read-only discovery +
+  // dedupe-guarded inserts; NEVER sends — rows sit inert behind GATE_LINK_OUTREACH /
+  // GATE_SIGNUP_RUNNER like harvested rows. Default OFF in prod; the manual CLI works
+  // regardless. Complements the reactive competitor harvest (backlink-deep-harvest.js).
+  localOpportunityProspector: isProd ? process.env.GATE_LOCAL_OPPORTUNITY_PROSPECTOR === 'true' : true,
+
   // Marchex Auto-Block — reject inbound calls the Marchex Clean Call
   // Marketplace add-on flags as spam. Explicit opt-in everywhere: until the
   // gate is on, verdicts are only logged (shadow) and never block a caller.
@@ -318,6 +327,18 @@ const gates = {
   // follow-up sweeps send a verification re-nudge on the same cadence. Changes
   // customer-facing messaging, so off by default in prod until verified.
   divertMicrodepositDunning: isProd ? process.env.GATE_MICRODEPOSIT_DUNNING_DIVERSION === 'true' : true,
+
+  // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
+  // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"
+  // checked, mint the visit's invoice, apply the prepaid amount as payment, and
+  // — only if it lands fully paid — send the customer a branded paid receipt
+  // (email + SMS, via the same idempotent pipeline as /admin/invoices/:id/
+  // send-receipt). Touches a real customer email/SMS AND mints a paid invoice,
+  // so it ships dark in prod until verified. OFF means the Mark-prepaid flow
+  // behaves exactly as before: it records the prepayment and nothing is minted
+  // or sent. The mint/credit/send building blocks (Charge-now, send-receipt)
+  // stay individually available regardless of this gate.
+  prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
 };
 
 function isEnabled(gate) {

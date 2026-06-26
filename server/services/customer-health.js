@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { SIGNAL_TYPES } = require('./customer-intelligence/signal-detector');
 
 // ---------------------------------------------------------------------------
 // Weights for composite score
@@ -13,6 +14,12 @@ const WEIGHTS = {
   loyalty: 0.10,
   growth: 0.10,
 };
+
+// Bounds on how far behavioral signals (from signal-detector) can move the
+// composite score. Signals nudge the 6-factor diagnostic; they never dominate
+// it, so the radar (sub-scores) and the headline score stay within this band.
+const SIGNAL_SCORE_FLOOR = -20; // max points behavioral signals can subtract
+const SIGNAL_SCORE_CEIL = 10;   // max points behavioral signals can add
 
 // ---------------------------------------------------------------------------
 // Grade helpers
@@ -554,6 +561,46 @@ async function computeTrend(customerId) {
 }
 
 // ---------------------------------------------------------------------------
+// Behavioral signals (from signal-detector) — folded into the score so the
+// canonical engine reflects ALL inputs, not just the 6 diagnostic factors.
+// ---------------------------------------------------------------------------
+async function loadBehavioralSignals(customerId) {
+  try {
+    if (!(await tableExists('customer_signals'))) return [];
+    return await db('customer_signals')
+      .where('customer_id', customerId)
+      .where('resolved', false);
+  } catch (err) {
+    logger.debug(`[health] signal load error for ${customerId}: ${err.message}`);
+    return [];
+  }
+}
+
+// Pure: given raw customer_signals rows, return the bounded score adjustment
+// and the negative drivers normalized for the churn-signal list. Exported for
+// tests. 'info'-severity signals don't surface as churn drivers; 'warning'
+// maps to 'moderate', 'critical' stays 'critical' (so determineChurnRisk
+// escalates on any critical behavioral signal).
+function summarizeBehavioralSignals(rows) {
+  let net = 0;
+  const churnSignals = [];
+  for (const r of rows || []) {
+    const cfg = SIGNAL_TYPES[r.signal_type];
+    if (!cfg) continue;
+    net += cfg.weight;
+    if (cfg.weight < 0 && cfg.severity !== 'info') {
+      churnSignals.push({
+        signal: r.signal_type,
+        severity: cfg.severity === 'critical' ? 'critical' : 'moderate',
+        message: r.signal_value || r.signal_type,
+      });
+    }
+  }
+  const adjustment = Math.max(SIGNAL_SCORE_FLOOR, Math.min(SIGNAL_SCORE_CEIL, net));
+  return { adjustment, churnSignals };
+}
+
+// ---------------------------------------------------------------------------
 // Main scoring function
 // ---------------------------------------------------------------------------
 async function scoreCustomer(customerId) {
@@ -574,8 +621,8 @@ async function scoreCustomer(customerId) {
       computeGrowthScore(customerId),
     ]);
 
-    // Weighted composite
-    const overall = clamp(Math.round(
+    // Diagnostic composite from the 6 sub-scores
+    const baseOverall = clamp(Math.round(
       payment.score * WEIGHTS.payment +
       service.score * WEIGHTS.service +
       satisfaction.score * WEIGHTS.satisfaction +
@@ -583,6 +630,15 @@ async function scoreCustomer(customerId) {
       loyalty.score * WEIGHTS.loyalty +
       growth.score * WEIGHTS.growth
     ));
+
+    // Fold behavioral signals (signal-detector) into the canonical score so a
+    // signal-only churner — e.g. clean billing but "switching to Orkin" — is
+    // caught, and so the drivers surface in the churn-signal list. Bounded so
+    // the 6-factor diagnostic stays dominant and the radar never diverges from
+    // the headline by more than the cap.
+    const behavioralRows = await loadBehavioralSignals(customerId);
+    const behavioral = summarizeBehavioralSignals(behavioralRows);
+    const overall = clamp(baseOverall + behavioral.adjustment);
 
     const grade = getGrade(overall);
 
@@ -607,8 +663,19 @@ async function scoreCustomer(customerId) {
       scoreChange30d: change30d,
     };
 
-    // Churn signals
+    // Churn signals — diagnostic (sub-score derived) + behavioral (signal-detector).
+    // Merging the behavioral drivers makes them visible in the UI and lets a
+    // critical behavioral signal escalate churn risk (determineChurnRisk treats
+    // any 'critical'-severity signal as critical).
     const churnSignals = await detectChurnSignals(customerId, scoreData);
+    for (const bs of behavioral.churnSignals) churnSignals.push(bs);
+    // Consumers read different fields off each driver: the /admin/health UI
+    // reads `message`, the retention engine + Adam churn-alert read `value`.
+    // Keep both populated so neither surfaces `undefined`.
+    for (const s of churnSignals) {
+      if (s.value === undefined) s.value = s.message;
+      if (s.message === undefined) s.message = s.value;
+    }
     const churnRisk = determineChurnRisk(churnSignals, overall);
     const churnProbability = estimateChurnProbability(churnRisk, overall);
     const daysUntilChurn = estimateDaysUntilChurn(churnRisk);
@@ -698,25 +765,40 @@ async function scoreCustomer(customerId) {
       else await db('customer_health_scores').insert({ ...minimal, created_at: now }).catch(err => logger.error(`[health] Minimal score insert failed: ${err.message}`));
     }
 
-    // Insert history snapshot
+    // Insert/refresh today's history snapshot. Idempotent per (customer, day)
+    // so a manual re-scan on the same day refreshes the point instead of
+    // appending a duplicate (which would skew the trend chart).
+    const snapshot = {
+      customer_id: customerId,
+      overall_score: overall,
+      payment_score: payment.score,
+      service_score: service.score,
+      engagement_score: engagement.score,
+      satisfaction_score: satisfaction.score,
+      loyalty_score: loyalty.score,
+      growth_score: growth.score,
+      churn_risk: churnRisk,
+      scored_at: today,
+    };
     try {
-      await db('customer_health_history').insert({
-        customer_id: customerId,
-        overall_score: overall,
-        payment_score: payment.score,
-        service_score: service.score,
-        engagement_score: engagement.score,
-        satisfaction_score: satisfaction.score,
-        loyalty_score: loyalty.score,
-        growth_score: growth.score,
-        churn_risk: churnRisk,
-        scored_at: today,
-      });
+      const existingSnapshot = await db('customer_health_history')
+        .where('customer_id', customerId)
+        .where('scored_at', today)
+        .first();
+      if (existingSnapshot) {
+        await db('customer_health_history').where('id', existingSnapshot.id).update(snapshot);
+      } else {
+        await db('customer_health_history').insert(snapshot);
+      }
     } catch (e) {
-      // Fallback: minimal history
-      await db('customer_health_history').insert({
-        customer_id: customerId, overall_score: overall, scored_at: today,
-      }).catch(() => {});
+      // Fallback: minimal, still idempotent per (customer, day)
+      try {
+        const existingSnapshot = await db('customer_health_history')
+          .where('customer_id', customerId).where('scored_at', today).first();
+        if (!existingSnapshot) {
+          await db('customer_health_history').insert({ customer_id: customerId, overall_score: overall, scored_at: today });
+        }
+      } catch { /* ignore */ }
     }
 
     // Generate alerts
@@ -790,5 +872,6 @@ module.exports = {
   scoreCustomer,
   scoreAllCustomers,
   getGrade,
+  summarizeBehavioralSignals,
   WEIGHTS,
 };

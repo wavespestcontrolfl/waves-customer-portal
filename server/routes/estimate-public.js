@@ -934,6 +934,21 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for this plan.",
     },
   },
+  foam_recurring: {
+    headline: "Hey {first}, choose your recurring foam treatment option.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your foam treatment scope before pricing this plan',
+    aiBody: 'We reviewed the drill points and treatment areas before pricing this recurring foam plan.',
+    askChips: [
+      'What does each visit cover?',
+      'How often do you come out?',
+      'Can I prepay annually?',
+      'What about active termites?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this plan.",
+    },
+  },
   termite_trenching: {
     headline: "Hey {first}, here's your termite trenching quote.",
     aiEyebrow: 'Waves AI',
@@ -1864,6 +1879,7 @@ function recurringServiceDisplayName(key) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito';
     case 'termite_bait': return 'Termite Bait';
+    case 'foam_recurring': return 'Recurring Foam Treatment';
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
@@ -2149,7 +2165,7 @@ function recurringServicesWithSupplements(estResult = {}) {
     indexByKey.set(key, services.length - 1);
   };
 
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring']);
   if (Array.isArray(estResult.lineItems)) {
     estResult.lineItems.forEach((item) => {
       const key = recurringServiceKey(item);
@@ -2167,13 +2183,21 @@ function recurringServicesWithSupplements(estResult = {}) {
       if (key === 'lawn_care' && itemDiscount) delete itemDiscount.policy;
       upsertSupplement(key, {
         service: key,
-        name: item.displayName || item.label || recurringServiceDisplayName(key),
-        displayName: item.displayName || item.label || recurringServiceDisplayName(key),
+        // item.name carries the cadence for foam ("Recurring Foam Treatment
+        // (Quarterly)"); keep it ahead of the generic display name so the
+        // recurrence pattern inferred on accept matches the sold cadence.
+        name: item.displayName || item.label || item.name || recurringServiceDisplayName(key),
+        displayName: item.displayName || item.label || item.name || recurringServiceDisplayName(key),
         mo: monthly || null,
         monthly: monthly || null,
         annual: annual || (monthly ? Math.round(monthly * 12 * 100) / 100 : null),
         perTreatment: firstPositiveNumber(item.perApp, item.perVisit),
         visitsPerYear: firstPositiveNumber(item.visitsPerYear, item.visits, item.frequency, item.appsPerYear),
+        // Carry cadence (foam) so pattern inference / cadence-aware shapers don't
+        // fall back to the monthly billing key; null for services without one.
+        cadence: item.cadence || null,
+        frequencyKey: item.cadence || null,
+        estimatedDurationMinutes: firstPositiveNumber(item.estimatedDurationMinutes, item.estimated_duration_minutes) || null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(item),
         waveGuardTierEligible: item.waveGuardTierEligible !== false && item.countsTowardWaveGuardTier !== false,
         countsTowardWaveGuardTier: item.countsTowardWaveGuardTier !== false,
@@ -7866,7 +7890,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   // (mosquito uses `visits`, T&S uses `frequency`; palm and rodent bait
   // are separate recurring lines that do not receive WaveGuard percentage
   // discounts).
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring']);
   const labelForRecurring = (svc) => {
     switch (svc) {
       case 'pest_control': return 'Pest Control';
@@ -7876,6 +7900,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
       case 'termite_bait': return 'Termite Bait';
       case 'palm_injection': return 'Palm Injection';
       case 'rodent_bait': return 'Rodent Bait Stations';
+      case 'foam_recurring': return 'Recurring Foam Treatment';
       default: return svc;
     }
   };
@@ -7896,10 +7921,16 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
         : (Number.isFinite(pa) && pa > 0 ? Math.round(pa * 100) / 100 : null);
       return {
         service: li.service,
-        label: li.displayName || labelForRecurring(li.service),
+        label: li.displayName || li.name || labelForRecurring(li.service),
         perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
         displayPrice,
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
+        estimatedDurationMinutes: firstPositiveNumber(li.estimatedDurationMinutes, li.estimated_duration_minutes) || null,
+        // Carry the per-service cadence (foam has its own, e.g. bimonthly) so a
+        // mixed plan whose top-level frequency is the generic quarterly ladder
+        // row still surfaces/seeds each service at its sold cadence.
+        cadence: li.cadence || null,
+        frequencyKey: li.cadence || li.frequencyKey || null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(li),
       };
     });
@@ -8666,7 +8697,13 @@ function acceptanceServiceLists(estData) {
 
   return {
     recurringSvcList: uniqueRecurringServiceRows([
-      ...recurringServicesWithSupplements(result),
+      // Engine-invocation estimates (quote wizard / IB agent drafts) persist the
+      // priced lines under estData.engineResult with no v1-mapped
+      // result.recurring.services, so source recurring rows from engineResult too
+      // (same `result || engineResult || estData` idiom used elsewhere in this
+      // file) — otherwise a foam-only engine-backed accept yields an empty
+      // recurring list and EstimateConverter schedules/seeds/invoices nothing.
+      ...recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),
       ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
     ]),
     oneTimeList,
@@ -8688,6 +8725,14 @@ function withSupplementedRecurringServices(estData) {
   if (!estData || typeof estData !== 'object') return estData;
   const hasResult = estData.result && typeof estData.result === 'object';
   const result = hasResult ? estData.result : estData;
+  // Engine-invocation estimates have no v1-mapped result; their priced recurring
+  // lines live under estData.engineResult.lineItems. Pull those in so foam (and
+  // any other engine-backed recurring service) is supplemented onto the estData
+  // the accept path reads, matching the result|engineResult fallback used across
+  // this file.
+  const engineResult = !hasResult && estData.engineResult && typeof estData.engineResult === 'object'
+    ? estData.engineResult
+    : null;
   const rootRecurring = hasResult && estData.recurring && typeof estData.recurring === 'object'
     ? estData.recurring
     : null;
@@ -8698,10 +8743,28 @@ function withSupplementedRecurringServices(estData) {
         results: estData.results || result.results,
       }
     : null;
-  const services = uniqueRecurringServiceRows([
+  let services = uniqueRecurringServiceRows([
     ...recurringServicesWithSupplements(result),
+    ...(engineResult ? recurringServicesWithSupplements(engineResult) : []),
     ...(rootResult ? recurringServicesWithSupplements(rootResult) : []),
   ]);
+  // engineInputs-only estimates (no stored result/engineResult) are a supported
+  // path — buildPricingBundle replays the engine to show a sellable frequency.
+  // Replay here too so the accept path / EstimateConverter see the same recurring
+  // rows; otherwise such a foam quote accepts with a locked total but an empty
+  // recurring list (no schedule, follow-ups, or invoice).
+  if (!services.length && !hasResult && !engineResult) {
+    const engineInputs = extractEngineInputs(estData);
+    if (engineInputs) {
+      try {
+        services = uniqueRecurringServiceRows(
+          recurringServicesWithSupplements(generateEstimate(engineInputs)),
+        );
+      } catch (err) {
+        logger.error(`[estimate-data] recurring supplement engine replay failed: ${err.message}`);
+      }
+    }
+  }
   if (!services.length) return estData;
   const nextResult = {
     ...result,
@@ -9256,6 +9319,7 @@ function categoryForRecurringServiceKey(key) {
     case 'tree_shrub': return 'tree_shrub';
     case 'mosquito': return 'mosquito';
     case 'termite_bait': return 'termite_bait';
+    case 'foam_recurring': return 'foam_recurring';
     case 'pre_slab_termiticide': return 'pre_slab_termiticide';
     case 'rodent': return 'rodent';
     case 'rodent_bait': return 'rodent';
@@ -9272,6 +9336,7 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito Control';
     case 'termite_bait': return 'Termite Bait Stations';
+    case 'foam_recurring': return 'Recurring Foam Treatment';
     case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
     case 'bora_care': return 'Bora-Care Wood Treatment';
     case 'termite_trenching': return 'Termite Trenching';
@@ -9330,6 +9395,10 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     services.boraCare || services.bora_care || inputs.svcBoracare ? 'bora_care' : null,
     services.trenching || inputs.svcTrenching ? 'termite_trenching' : null,
     services.rodent || inputs.svcRodent ? 'rodent' : null,
+    // Recurring foam can be the whole estimate; an engineInputs-only foam quote
+    // has no saved recurring.services row, so without this it falls through to
+    // the 'pest_control' default and the public page mislabels it as Pest Control.
+    services.foamRecurring || inputs.svcFoamRecurring ? 'foam_recurring' : null,
   ].filter(Boolean);
   return inferred.length > 1 ? 'bundle' : (inferred[0] || 'pest_control');
 }
@@ -9566,7 +9635,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
 // is a one-time specialty that fuzzily maps onto 'rodent').
 const RECURRING_SERVICE_KEYS = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'mosquito',
-  'termite_bait', 'palm_injection', 'rodent_bait',
+  'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring',
 ]);
 
 // A recurring engine line carries real monthly/annual billing. One-time
@@ -9737,6 +9806,107 @@ function mosquitoFrequenciesFromResultStats(estData = {}) {
       const order = { seasonal9: 0, monthly12: 1 };
       return (order[a.key] ?? 99) - (order[b.key] ?? 99);
     });
+}
+
+// Recurring foam is a single operator-chosen cadence (not a customer-selectable
+// ladder like pest/mosquito), so build ONE frequency entry from the saved foam
+// service row's cadence/visitsPerYear/monthly. Without this, a non-quarterly
+// foam quote falls back to frequencies.slice(0,1) and is presented/billed as
+// quarterly. Billed monthly (annual/12); serviced at the cadence's visitsPerYear.
+function foamFrequenciesFromV1Services(services = []) {
+  const row = (Array.isArray(services) ? services : [])
+    .find((svc) => recurringServiceKey(svc) === 'foam_recurring');
+  if (!row) return [];
+  const VISITS = { quarterly: 4, bimonthly: 6, monthly: 12 };
+  const VISITS_TO_CADENCE = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
+  const LABELS = { quarterly: 'Quarterly', bimonthly: 'Bimonthly', monthly: 'Monthly' };
+  // Compact engine-backed rows (quote wizard / lead automation) persist name +
+  // frequency but drop `cadence`, so derive it: explicit field → visit count →
+  // the cadence baked into the line name, before defaulting to quarterly. (Check
+  // bi-monthly before monthly — "bimonthly" contains "monthly".)
+  const rawVisits = finiteNumberOrNull(row.visitsPerYear ?? row.visits ?? row.frequency);
+  const nameLc = String(row.name ?? row.displayName ?? row.label ?? '').toLowerCase();
+  const cadenceFromName = /bi-?monthly/.test(nameLc) ? 'bimonthly'
+    : /monthly/.test(nameLc) ? 'monthly'
+    : /quarterly/.test(nameLc) ? 'quarterly'
+    : null;
+  // Normalize aliases (bi_monthly → bimonthly) so an explicit row.cadence in the
+  // alias form doesn't short-circuit the chain into the quarterly fallback.
+  const CADENCE_ALIASES = { bi_monthly: 'bimonthly', 'bi-monthly': 'bimonthly', bimonth: 'bimonthly' };
+  const normCadence = (c) => {
+    const key = String(c || '').toLowerCase();
+    return CADENCE_ALIASES[key] || (['quarterly', 'bimonthly', 'monthly'].includes(key) ? key : null);
+  };
+  const cadenceCandidate = normCadence(row.cadence)
+    || normCadence(row.frequencyKey)
+    || (rawVisits != null ? VISITS_TO_CADENCE[rawVisits] : null)
+    || cadenceFromName;
+  const cadence = ['quarterly', 'bimonthly', 'monthly'].includes(cadenceCandidate) ? cadenceCandidate : 'quarterly';
+  const visits = rawVisits || VISITS[cadence];
+  const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
+  const perTreatmentBase = finiteNumberOrNull(row.perTreatment ?? row.perVisit ?? row.pv);
+  // Prefer the authoritative sold annual (e.g. engine persists annual:1108,
+  // monthly:92.33) so accept/invoice lock the engine price, not 92.33×12=1107.96.
+  const annualBase = finiteNumberOrNull(row.annual ?? row.ann);
+  const annual = annualBase != null
+    ? annualBase
+    : (monthlyBase != null
+      ? roundMonthly(monthlyBase * 12)
+      : (perTreatmentBase != null && visits ? roundMonthly(perTreatmentBase * visits) : null));
+  const monthly = monthlyBase != null
+    ? monthlyBase
+    : (annual != null ? roundMonthly(annual / 12) : null);
+  const perTreatment = perTreatmentBase != null
+    ? perTreatmentBase
+    : (annual != null && visits ? roundMonthly(annual / visits) : null);
+  // Tier labor duration (priceRecurringFoam → 60/90/120/180) drives slot sizing.
+  // The slot profile reads frequencies[].perServiceTreatments first, so carry it
+  // both on the frequency and on a per-service treatment row.
+  const estimatedDurationMinutes = finiteNumberOrNull(row.estimatedDurationMinutes ?? row.estimated_duration_minutes);
+  const label = LABELS[cadence];
+  return [{
+    key: cadence,
+    label,
+    serviceCategory: 'foam_recurring',
+    serviceTierKey: cadence,
+    monthlyBase,
+    monthly,
+    annual,
+    perTreatment,
+    visitsPerYear: visits,
+    billingFrequencyKey: 'monthly',
+    estimatedDurationMinutes,
+    // foam_recurring is non-discountable (cadence multiplier is its only
+    // discount), so no manual-discount shaping here.
+    manualDiscount: null,
+    included: [{
+      key: `foam_recurring_${cadence}`,
+      label: `${label} foam treatment program`,
+      detail: visits ? `${Math.round(visits)} visits per year` : null,
+      includedAtThisFrequency: true,
+    }],
+    addOns: [],
+    perServiceTreatments: [{
+      service: 'foam_recurring',
+      label: 'Recurring Foam Treatment',
+      perTreatment,
+      displayPrice: perTreatment,
+      visitsPerYear: visits,
+      estimatedDurationMinutes,
+      waveGuardDiscountEligible: false,
+    }],
+  }];
+}
+
+// Engine-invocation path: build the foam frequency from the live engine result's
+// foam_recurring line item (carries cadence/visitsPerYear/monthly/perVisit), so
+// an engineInputs/engineResult foam quote isn't exposed as the default quarterly
+// FREQUENCY_LADDER[0] entry.
+function foamFrequenciesFromEngineResult(engineResult = {}) {
+  const lineItems = Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [];
+  const foam = lineItems.find((li) => li && (li.service === 'foam_recurring' || recurringServiceKey(li) === 'foam_recurring'));
+  if (!foam) return [];
+  return foamFrequenciesFromV1Services([foam]);
 }
 
 function quoteRequiredFromFrequency(frequency = {}) {
@@ -10845,11 +11015,15 @@ async function buildPricingBundle(estimate) {
     const lawnFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'lawn_care'
       ? lawnFrequenciesFromResultStats(estData)
       : [];
+    const foamFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'foam_recurring'
+      ? foamFrequenciesFromV1Services(v1.services)
+      : [];
     const finalFreqs = hasPest
       ? frequencies
       : (treeShrubFreqs.length ? treeShrubFreqs
         : (mosquitoFreqs.length ? mosquitoFreqs
-          : (lawnFreqs.length ? lawnFreqs : frequencies.slice(0, 1))));
+          : (lawnFreqs.length ? lawnFreqs
+            : (foamFreqs.length ? foamFreqs : frequencies.slice(0, 1)))));
     const annualPrepayEligible = annualPrepayEligibleForEstimateData(estData);
 
     // First-visit fees stack — non-recurring charges shown to the customer
@@ -10971,8 +11145,22 @@ async function buildPricingBundle(estimate) {
       // the v1 result.results.lawn path. Mixed bundles and other single-service
       // estimates keep the existing single-entry view.
       const lawnFreqs = lawnFrequenciesFromEngineResult(engineResult, estData);
+      // The foam-specific frequency prices ONLY the foam line, so use it just for
+      // a foam-only recurring mix. With another recurring service present (foam +
+      // lawn/tree/mosquito), fall through to the full-summary shapeFrequencyEntry
+      // so the price lock / annual prepay don't drop the other service.
+      const recurringKeys = recurringServicesWithSupplements(engineResult)
+        .map(recurringServiceKey)
+        .filter(Boolean);
+      const foamOnlyRecurring = recurringKeys.length > 0
+        && recurringKeys.every((k) => k === 'foam_recurring');
+      const foamFreqs = (lawnFreqs.length || !foamOnlyRecurring)
+        ? []
+        : foamFrequenciesFromEngineResult(engineResult);
       if (lawnFreqs.length) {
         frequencies.push(...lawnFreqs);
+      } else if (foamFreqs.length) {
+        frequencies.push(...foamFreqs);
       } else {
         frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
       }
@@ -11397,6 +11585,7 @@ module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
+module.exports.foamFrequenciesFromEngineResult = foamFrequenciesFromEngineResult;
 module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;
 module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.attachPublicPricingContract = attachPublicPricingContract;

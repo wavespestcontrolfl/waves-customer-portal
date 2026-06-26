@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { etDateString, etMonthStart, etMonthEnd, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { cacheRoute } = require('../utils/route-cache');
 const {
   executeDashboardTool,
@@ -13,6 +13,40 @@ const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
 const { autopayActivePredicate } = require('../services/autopay-eligibility');
+const { generateChartSpec } = require('../services/ai-chart-builder');
+const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
+const { isUserFeatureEnabled } = require('../services/feature-flags');
+const rateLimit = require('express-rate-limit');
+
+// Server-side gate for the AI chart builder. The client hides the panel behind
+// the same flag, but the endpoints must enforce it too — otherwise any admin who
+// knows the route could reach the LLM + SQL sandbox while it's dark-launched.
+const AI_CHARTS_FLAG = 'dashboard-ai-charts';
+async function requireAiChartsEnabled(req, res, next) {
+  try {
+    if (await isUserFeatureEnabled(req.technicianId, AI_CHARTS_FLAG)) return next();
+  } catch (err) {
+    logger.error(`[admin-dashboard] ai-charts flag check failed: ${err.message}`);
+  }
+  return res.status(403).json({ error: 'AI charts are not enabled for your account.' });
+}
+
+// Per-admin limiter on the LLM-backed preview (each call can fire up to two
+// FLAGSHIP requests) — the app-wide limiter is too coarse to stop a runaway tab
+// or compromised token from burning model spend. Mirrors the newsletter/
+// automation AI-draft limiters.
+const aiChartLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `aichart_${req.technicianId || req.ip}`,
+  message: { error: 'Too many AI chart requests in the last hour. Try again later.' },
+});
+
+// Cap on pinned widgets per admin — bounds GET /widgets fan-out (one sandbox
+// query per widget) and prevents unbounded persistence.
+const MAX_WIDGETS_PER_USER = 24;
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -69,6 +103,38 @@ function inclusiveDayCount(from, to) {
   return Math.max(1, Math.round((b - a) / 86400000) + 1);
 }
 function minDateStr(a, b) { return a <= b ? a : b; }
+
+// Single source of truth for the dashboard period control. Every window ends
+// "today" (ET); the period only varies the start. Both the attribution resolver
+// and the Core-KPIs computation read from here so they can't drift as options
+// are added. Rolling windows are inclusive of today (last_7 = today + prior 6).
+const PERIOD_LABELS = {
+  today: 'Today',
+  wtd: 'Week to Date',
+  last_7: 'Last 7 days',
+  last_30: 'Last 30 days',
+  mtd: 'Month to Date',
+  last_90: 'Last 90 days',
+  qtd: 'Quarter to Date',
+  ytd: 'Year to Date',
+};
+function periodStartDate(period) {
+  const today = etDateString();
+  switch (String(period || 'mtd').toLowerCase()) {
+    case 'today':   return today;
+    case 'wtd':     return etWeekStart();
+    case 'last_7':  return addDaysET(today, -6);
+    case 'last_30': return addDaysET(today, -29);
+    case 'last_90': return addDaysET(today, -89);
+    case 'qtd':     return etQuarterStart();
+    case 'ytd':     return etYearStart();
+    case 'mtd':
+    default:        return etMonthStart();
+  }
+}
+function periodLabel(period) {
+  return PERIOD_LABELS[String(period || 'mtd').toLowerCase()] || PERIOD_LABELS.mtd;
+}
 
 function applyETTimestampWindow(qb, column, from, to) {
   return qb
@@ -322,11 +388,9 @@ async function computeCoreKpis(period = 'mtd') {
     const now = new Date();
     const todayStr = etDateString(now);
 
-    let start;
-    if (period === 'today') start = todayStr;
-    else if (period === 'wtd') start = mondayThisWeek();
-    else if (period === 'ytd') start = etYearStart(now);
-    else start = startOfMonth();
+    // Shared period resolver (periodStartDate) — same windows the attribution
+    // panels use; every window ends today.
+    const start = periodStartDate(period);
 
     // Service completion rate — scheduled_services in window
     const svcAgg = await db('scheduled_services')
@@ -782,7 +846,7 @@ async function computeCoreKpis(period = 'mtd') {
 
     return {
       period,
-      periodLabel: { today: 'Today', wtd: 'Week to Date', mtd: 'Month to Date', ytd: 'Year to Date' }[period] || 'Month to Date',
+      periodLabel: periodLabel(period),
       service: {
         completionRate,
         scheduled: svcDenom, // non-cancelled, so the tile's "completed/scheduled" matches the rate
@@ -883,6 +947,120 @@ router.get('/mrr-trend', dashboardCache, async (req, res, next) => {
     if (result?.error) return res.status(500).json({ error: result.error });
     res.json(result);
   } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/retention-cohort?months=12
+// Signup-cohort retention grid: rows = the ET month a customer converted
+// (member_since, via the canonical CONVERSION_DATE_SQL), columns = whole months
+// since signup, cells = % of that cohort still a live customer at the end of
+// each month.
+//
+// Definitions are deliberately the SAME as the core-KPIs retention metric so the
+// two can't disagree:
+//   - cohort entry  = CONVERSION_DATE_SQL (member_since, else created_at ET date)
+//   - "live"        = active AND deleted_at IS NULL AND pipeline_stage IN CUSTOMER_STAGES
+//   - a member who is NOT live now is treated as having departed on the best
+//     available date: churned_at, else the ET date of pipeline_stage_changed_at,
+//     else of deleted_at. (No per-month membership history is stored anywhere —
+//     mrr_snapshots only keeps aggregate totals — so retention over time is
+//     reconstructed from these entry/exit dates. Reactivations keep "live now =
+//     retained" just like the KPI, so a churn-then-return reads as retained.)
+// Month 0 is the signup month itself (100% by definition — the cohort base).
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const monthIndexOf = (ym) => Number(ym.slice(0, 4)) * 12 + (Number(ym.slice(5, 7)) - 1);
+const monthLabelOf = (ym) => `${MONTH_ABBR[Number(ym.slice(5, 7)) - 1]} ’${ym.slice(2, 4)}`;
+
+router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
+  try {
+    const months = Math.max(3, Math.min(24, parseInt(req.query.months || 12, 10) || 12));
+    const nowMonth = etDateString().slice(0, 7); // YYYY-MM (ET)
+    const nowIdx = monthIndexOf(nowMonth);
+    const firstIdx = nowIdx - (months - 1);
+    // First day of the oldest cohort month, to bound the scan on the conversion date.
+    const rangeStart = `${String(Math.floor(firstIdx / 12)).padStart(4, '0')}-${String((firstIdx % 12) + 1).padStart(2, '0')}-01`;
+
+    let rows = [];
+    try {
+      const qb = db('customers')
+        .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [rangeStart])
+        // Converted at some point → currently a customer stage, or churned/dormant
+        // (a former customer). Pure leads (new_lead/contacted/lost/…) are excluded,
+        // mirroring the retention KPI's cohort.
+        .whereIn('pipeline_stage', [...CUSTOMER_STAGES, 'churned', 'dormant']);
+      if (INTERNAL_TEST_CUSTOMERS.length) {
+        qb.whereNotIn(
+          db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
+          INTERNAL_TEST_CUSTOMERS,
+        );
+      }
+      // Keep the three exit signals separate so the departure month can be picked
+      // by CAUSE in JS — a flat COALESCE would grab a stale pre-exit stage change.
+      rows = await qb.select(
+        db.raw(`to_char(${CONVERSION_DATE_SQL}, 'YYYY-MM') as cohort_month`),
+        'active',
+        'deleted_at',
+        'pipeline_stage',
+        db.raw("to_char(churned_at, 'YYYY-MM') as churned_month"),
+        db.raw("to_char((pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM') as stage_changed_month"),
+        db.raw("to_char((deleted_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM') as deleted_month"),
+      );
+    } catch (err) {
+      logger.error(`[admin-dashboard] /retention-cohort query failed: ${err.message}`);
+      return res.json({ cohorts: [], maxOffset: 0, months });
+    }
+
+    const LEFT_STAGES = new Set(['churned', 'dormant']);
+    // Bucket members by cohort month, precomputing a churn month index.
+    const byCohort = new Map(); // 'YYYY-MM' -> [{ churnIdx }]
+    for (const r of rows) {
+      const cohort = r.cohort_month;
+      if (!cohort) continue;
+      const cIdx = monthIndexOf(cohort);
+      const liveNow = r.active === true && r.deleted_at == null && CUSTOMER_STAGES.includes(r.pipeline_stage);
+      let churnIdx;
+      if (liveNow) {
+        churnIdx = Infinity;
+      } else {
+        // Resolve the exit month by CAUSE, never a stale stage change:
+        //   - churned/dormant: the stage move IS the exit (churned_at, else its ts)
+        //   - otherwise deleted: the archive (deleted_at) is the exit — the archive
+        //     route only stamps deleted_at, leaving pipeline_stage live
+        //   - active=false with no churn/delete: an admin deactivation carries no
+        //     departure date, so it's dropped entirely (mirrors the core-KPIs
+        //     retention cohort) rather than backdated to signup/last-stage-change.
+        let exitMonth = null;
+        if (LEFT_STAGES.has(r.pipeline_stage)) exitMonth = r.churned_month || r.stage_changed_month;
+        else if (r.deleted_month) exitMonth = r.deleted_month;
+        if (!exitMonth) continue; // undatable deactivation → exclude
+        churnIdx = Math.max(cIdx, monthIndexOf(exitMonth));
+      }
+      if (!byCohort.has(cohort)) byCohort.set(cohort, []);
+      byCohort.get(cohort).push({ churnIdx });
+    }
+
+    const cohorts = [];
+    for (let idx = firstIdx; idx <= nowIdx; idx += 1) {
+      const ym = `${String(Math.floor(idx / 12)).padStart(4, '0')}-${String((idx % 12) + 1).padStart(2, '0')}`;
+      const members = byCohort.get(ym) || [];
+      const size = members.length;
+      const elapsed = nowIdx - idx; // number of offset columns available (0..elapsed)
+      const retention = [];
+      for (let m = 0; m <= elapsed; m += 1) {
+        if (size === 0) { retention.push(null); continue; }
+        if (m === 0) { retention.push(100); continue; } // signup month = base
+        // Active through the END of month (idx + m): still live, or churned strictly later.
+        const k = idx + m;
+        const alive = members.filter((mem) => mem.churnIdx > k).length;
+        retention.push(Math.round((alive / size) * 1000) / 10);
+      }
+      cohorts.push({ month: ym, label: monthLabelOf(ym), size, retention });
+    }
+
+    res.json({ cohorts, maxOffset: months - 1, months });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /retention-cohort failed: ${err.message}`);
+    next(err);
+  }
 });
 
 // GET /api/admin/dashboard/review-trend — last 12 ET months of Google reviews
@@ -1257,14 +1435,7 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────
 
 function resolveAttributionWindow(period) {
-  const today = etDateString();
-  switch (String(period || 'mtd').toLowerCase()) {
-    case 'today': return { from: today,           to: today, label: 'Today' };
-    case 'wtd':   return { from: etWeekStart(),   to: today, label: 'Week to Date' };
-    case 'ytd':   return { from: etYearStart(),   to: today, label: 'Year to Date' };
-    case 'mtd':
-    default:      return { from: etMonthStart(),  to: today, label: 'Month to Date' };
-  }
+  return { from: periodStartDate(period), to: etDateString(), label: periodLabel(period) };
 }
 
 // GET /api/admin/dashboard/calls-by-source?period=mtd
@@ -1492,6 +1663,124 @@ router.get('/alerts', dashboardCache, async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[admin-dashboard] /alerts failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// AI chart builder + pinned widgets (feature-flagged off by default on the
+// client). The model only PROPOSES SQL; every query runs through the read-only
+// sandbox (analytics-sql-sandbox.js) before it touches the DB, both here at
+// preview time and on every widget load below.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Generate + safely run a chart from a natural-language prompt (no persistence).
+// One repair round: if the first SQL fails to validate/run, the error is fed
+// back to the model for a corrected query.
+router.post('/ai-chart/preview', requireAiChartsEnabled, aiChartLimiter, async (req, res) => {
+  const prompt = String(req.body?.prompt || '').trim();
+  if (!prompt) return res.status(400).json({ error: 'A prompt is required.' });
+
+  let gen = await generateChartSpec(prompt);
+  if (!gen.ok) {
+    return res.status(422).json({ error: gen.message || `Could not build a chart (${gen.reason}).` });
+  }
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const { rows, fields } = await runReadOnlyAnalyticsQuery(gen.spec.sql);
+      return res.json({ spec: gen.spec, rows, fields });
+    } catch (err) {
+      const guard = err instanceof SqlGuardError;
+      logger.warn(`[admin-dashboard] ai-chart preview attempt ${attempt + 1} failed (${guard ? 'guard' : 'exec'}): ${err.message}`);
+      if (attempt === 0) {
+        const repaired = await generateChartSpec(prompt, { errorContext: err.message });
+        if (repaired.ok) { gen = repaired; continue; }
+      }
+      return res.status(422).json({ error: 'The generated query was rejected or failed to run. Try rephrasing.' });
+    }
+  }
+  return res.status(422).json({ error: 'Could not build a safe query for that request.' });
+});
+
+// List the current admin's pinned widgets, each re-validated + re-run read-only.
+// A single broken/blocked widget fails soft (returns its error) rather than
+// breaking the list.
+router.get('/widgets', requireAiChartsEnabled, async (req, res, next) => {
+  try {
+    const rows = await db('user_dashboard_widgets')
+      .where('owner_technician_id', req.technicianId)
+      .orderBy([{ column: 'position', order: 'asc' }, { column: 'id', order: 'asc' }])
+      .select('id', 'title', 'prompt', 'sql', 'chart_spec');
+    const widgets = await Promise.all(rows.map(async (w) => {
+      const base = { id: w.id, title: w.title, prompt: w.prompt, chartSpec: w.chart_spec };
+      try {
+        const { rows: data, fields } = await runReadOnlyAnalyticsQuery(w.sql);
+        return { ...base, rows: data, fields };
+      } catch (err) {
+        return { ...base, rows: [], fields: [], error: err instanceof SqlGuardError ? err.message : 'Query failed to run.' };
+      }
+    }));
+    res.json({ widgets });
+  } catch (err) {
+    logger.error(`[admin-dashboard] GET /widgets failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// Pin a widget. The SQL is re-validated server-side before it's stored (never
+// trust a client-supplied query), so only sandbox-safe SQL is ever persisted.
+router.post('/widgets', requireAiChartsEnabled, async (req, res, next) => {
+  try {
+    const { title, prompt, sql, chartSpec } = req.body || {};
+    if (!title || !sql || !chartSpec) return res.status(400).json({ error: 'title, sql and chartSpec are required.' });
+    let cleanSql;
+    try {
+      cleanSql = validateAnalyticsSql(sql);
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof SqlGuardError ? err.message : 'Invalid query.' });
+    }
+    // Enforce the cap atomically: a per-owner advisory lock serializes concurrent
+    // pins (double-submit / scripted parallel POSTs) so the count+insert can't
+    // race past MAX_WIDGETS_PER_USER and blow up GET /widgets fan-out.
+    const result = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`aiwidget:${req.technicianId}`]);
+      const countRow = await trx('user_dashboard_widgets')
+        .where('owner_technician_id', req.technicianId).count({ c: '*' }).first();
+      if (parseInt(countRow?.c || 0, 10) >= MAX_WIDGETS_PER_USER) return { capped: true };
+      const [row] = await trx('user_dashboard_widgets')
+        .insert({
+          owner_technician_id: req.technicianId,
+          title: String(title).slice(0, 200),
+          prompt: prompt ? String(prompt).slice(0, 500) : null,
+          sql: cleanSql,
+          chart_spec: JSON.stringify(chartSpec),
+          updated_at: new Date(),
+        })
+        .returning(['id', 'title', 'prompt', 'chart_spec']);
+      return { row };
+    });
+    if (result.capped) {
+      return res.status(409).json({ error: `You can pin up to ${MAX_WIDGETS_PER_USER} charts. Remove one first.` });
+    }
+    const { row } = result;
+    res.status(201).json({ widget: { id: row.id, title: row.title, prompt: row.prompt, chartSpec: row.chart_spec } });
+  } catch (err) {
+    logger.error(`[admin-dashboard] POST /widgets failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// Unpin a widget (scoped to the owner).
+router.delete('/widgets/:id', requireAiChartsEnabled, async (req, res, next) => {
+  try {
+    const deleted = await db('user_dashboard_widgets')
+      .where({ id: req.params.id, owner_technician_id: req.technicianId })
+      .del();
+    if (!deleted) return res.status(404).json({ error: 'Widget not found.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[admin-dashboard] DELETE /widgets failed: ${err.message}`);
     next(err);
   }
 });

@@ -38,7 +38,6 @@ import { addETDays, etDateString } from "../../lib/timezone";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
-import FastCloseoutSummary from "../../components/tech/FastCloseoutSummary";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
 import TreeShrubCloseoutSummary from "../../components/tech/TreeShrubCloseoutSummary";
 
@@ -249,7 +248,6 @@ const AREAS_BY_SERVICE = {
     "Irrigation zone",
   ],
   universal: [
-    "Customer spoke with tech",
     "No issues found",
     "Follow-up recommended",
   ],
@@ -6592,7 +6590,7 @@ function RecapCapture({ serviceId }) {
   return (
     <div style={wrap}>
       <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: D.text, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: D.teal }} /> Recap clips</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "#111" }} /> Recap clips</span>
         <span style={{ fontSize: 12, color: D.muted }}>{items.length ? `${items.length} captured` : "optional"}</span>
       </div>
       <div style={{ fontSize: 12.5, color: D.muted, margin: "6px 0 10px", lineHeight: 1.45 }}>Grab a few 5-sec clips of the work — they play in the customer’s recap. Skip it and the recap still generates.</div>
@@ -6603,12 +6601,12 @@ function RecapCapture({ serviceId }) {
         <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
           {items.map((m) => (
             <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 8 }}>
-              <div style={{ width: 40, height: 40, borderRadius: 7, background: "linear-gradient(135deg,#0ea5e9,#0b1220)", flexShrink: 0 }} />
+              <div style={{ width: 40, height: 40, borderRadius: 7, background: "linear-gradient(135deg,#3f3f46,#18181b)", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 700, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
-                <div style={{ fontSize: 11.5, color: D.teal }}>“{m.caption}”</div>
+                <div style={{ fontSize: 11.5, color: "#111" }}>“{m.caption}”</div>
               </div>
-              <span style={{ fontSize: 10.5, color: m.status === "ready" ? D.green : D.muted, fontWeight: 700 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
+              <span style={{ fontSize: 10.5, color: m.status === "ready" ? "#111" : D.muted, fontWeight: 700 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
               <button onClick={() => remove(m.id)} style={{ background: "none", border: "none", color: D.muted, fontSize: 18, cursor: "pointer" }}>×</button>
             </div>
           ))}
@@ -6616,7 +6614,7 @@ function RecapCapture({ serviceId }) {
       )}
 
       {err && <div style={{ fontSize: 12, color: D.red, margin: "0 0 8px", lineHeight: 1.4 }}>{err}</div>}
-      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: D.teal, color: "#04240f", fontWeight: 800, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
+      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: "#111", color: "#fff", fontWeight: 800, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
         {uploading ? `Uploading… (${uploading})` : "+ Capture clip"}
       </button>
 
@@ -6628,7 +6626,7 @@ function RecapCapture({ serviceId }) {
             <div style={{ fontSize: 12, color: D.muted, textAlign: "center", margin: "4px 0 12px" }}>One tap. We caption it for the customer.</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               {(showMore ? [...RECAP_CHIPS_TOP, ...RECAP_CHIPS_MORE] : RECAP_CHIPS_TOP).map((c) => (
-                <button key={c.role} onClick={() => tag(c.role)} style={chip}><span style={{ width: 9, height: 9, borderRadius: "50%", background: D.teal, flexShrink: 0 }} />{c.label}</button>
+                <button key={c.role} onClick={() => tag(c.role)} style={chip}><span style={{ width: 9, height: 9, borderRadius: "50%", background: "#111", flexShrink: 0 }} />{c.label}</button>
               ))}
             </div>
             {!showMore && <button onClick={() => setShowMore(true)} style={{ marginTop: 9, width: "100%", padding: 10, borderRadius: 9, background: "none", border: `1px solid ${D.border}`, color: D.muted, fontSize: 12.5, cursor: "pointer" }}>More actions…</button>}
@@ -6701,17 +6699,17 @@ function PestRecapCard({ serviceId }) {
   return (
     <div style={wrap}>
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
-      <div style={head}><span style={{ width: 8, height: 8, borderRadius: "50%", background: D.teal }} /> Visit recap video</div>
+      <div style={head}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "#111" }} /> Visit recap video</div>
       {s === "loading" && <div style={{ fontSize: 13, color: D.muted }}>Checking recap…</div>}
       {(s === "none") && (
         <>
           <div style={{ fontSize: 12.5, color: D.muted, marginBottom: 10 }}>Generate a ~30-sec recap from this visit. You’ll preview & approve before it sends.</div>
-          <button style={btn(D.teal, "#04240f")} disabled={busy} onClick={() => act("generate")}>Generate recap</button>
+          <button style={btn("#111", "#fff")} disabled={busy} onClick={() => act("generate")}>Generate recap</button>
         </>
       )}
       {(s === "pending" || s === "rendering") && (
         <div style={{ fontSize: 13, color: D.muted, display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ width: 16, height: 16, border: `2px solid ${D.border}`, borderTopColor: D.teal, borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
+          <span style={{ width: 16, height: 16, border: `2px solid ${D.border}`, borderTopColor: "#111", borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
           Rendering the recap… this takes about a minute.
         </div>
       )}
@@ -6723,19 +6721,19 @@ function PestRecapCard({ serviceId }) {
           {s === "approved" ? (
             state.sent ? (
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ flex: 1, fontSize: 12.5, color: D.green, fontWeight: 700 }}>Approved &amp; sent to the customer</span>
+                <span style={{ flex: 1, fontSize: 12.5, color: "#111", fontWeight: 700 }}>Approved &amp; sent to the customer</span>
                 <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
               </div>
             ) : (
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <span style={{ flex: 1, fontSize: 12, color: D.amber, fontWeight: 700, minWidth: 130 }}>Approved — the text didn’t send</span>
-                <button style={btn(D.green, "#04240f")} disabled={busy} onClick={() => act("approve")}>Retry send</button>
+                <button style={btn("#111", "#fff")} disabled={busy} onClick={() => act("approve")}>Retry send</button>
                 <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
               </div>
             )
           ) : (
             <div style={{ display: "flex", gap: 8 }}>
-              <button style={btn(D.green, "#04240f")} disabled={busy} onClick={() => act("approve")}>Approve &amp; send</button>
+              <button style={btn("#111", "#fff")} disabled={busy} onClick={() => act("approve")}>Approve &amp; send</button>
               <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
             </div>
           )}
@@ -6744,7 +6742,7 @@ function PestRecapCard({ serviceId }) {
       {s === "failed" && (
         <>
           <div style={{ fontSize: 12.5, color: D.amber, marginBottom: 10 }}>Recap render didn’t complete.{state.error ? ` (${state.error})` : ""}</div>
-          <button style={btn(D.teal, "#04240f")} disabled={busy} onClick={regenerate}>Try again</button>
+          <button style={btn("#111", "#fff")} disabled={busy} onClick={regenerate}>Try again</button>
         </>
       )}
       {s === "error" && <div style={{ fontSize: 12.5, color: D.muted }}>Couldn’t load recap status.</div>}
@@ -6778,10 +6776,6 @@ export function CompletionPanel({
   });
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState("");
-  const [soilTemp, setSoilTemp] = useState("");
-  const [thatchMeasurement, setThatchMeasurement] = useState("");
-  const [soilPh, setSoilPh] = useState("");
-  const [soilMoisture, setSoilMoisture] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
@@ -6807,7 +6801,6 @@ export function CompletionPanel({
   // otherwise a pre-load submit hides the field the server still requires (422).
   const { enabled: turfHeightFlag, ready: turfHeightFlagReady } = useFeatureFlagReady("turf-height-capture");
   // Phase 3 fast closeout — flag-gated (default off). Existing completion flow is unchanged when off.
-  const { enabled: fastCloseoutFlag, ready: fastCloseoutReady } = useFeatureFlagReady("fast-closeout-v2");
   // Tree & Shrub exception-based closeout — flag-gated (default off). When off the
   // completion flow is unchanged and the server's post-commit auto-score still runs.
   const { enabled: treeShrubCloseoutFlag, ready: treeShrubCloseoutReady } = useFeatureFlagReady("tree-shrub-closeout-v2");
@@ -7689,10 +7682,6 @@ export function CompletionPanel({
         savedAt: new Date().toISOString(),
         notes,
         selectedProducts,
-        soilTemp,
-        thatchMeasurement,
-        soilPh,
-        soilMoisture,
         sendSms,
         includePayLink,
         requestReview,
@@ -7753,10 +7742,6 @@ export function CompletionPanel({
     success,
     notes,
     selectedProducts,
-    soilTemp,
-    thatchMeasurement,
-    soilPh,
-    soilMoisture,
     sendSms,
     includePayLink,
     requestReview,
@@ -7811,10 +7796,6 @@ export function CompletionPanel({
           )
         : [],
     );
-    setSoilTemp(savedDraft.soilTemp || "");
-    setThatchMeasurement(savedDraft.thatchMeasurement || "");
-    setSoilPh(savedDraft.soilPh || "");
-    setSoilMoisture(savedDraft.soilMoisture || "");
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
@@ -8895,13 +8876,6 @@ export function CompletionPanel({
       if (nextVisitNote) {
         body.nextVisitAdjustmentNote = nextVisitNote;
       }
-      if (isLawn) {
-        if (soilTemp) body.soilTemp = parseFloat(soilTemp);
-        if (thatchMeasurement)
-          body.thatchMeasurement = parseFloat(thatchMeasurement);
-        if (soilPh) body.soilPh = parseFloat(soilPh);
-        if (soilMoisture) body.soilMoisture = parseFloat(soilMoisture);
-      }
       if (service?.completionInvoiceAlreadySent) {
         body.invoiceAlreadySent = true;
       }
@@ -9312,47 +9286,6 @@ export function CompletionPanel({
     const Field = CPField;
     const Chip = CPChip;
 
-    // ── Phase 3 fast closeout (flag-gated, additive) ──────────────────────────
-    // A one-tap summary at the top of the panel for lawn visits: confirms defaults,
-    // surfaces the AI insight, and lets the tech attach an exception via chips that
-    // map to the EXISTING observation-chip handler (so they feed the report exactly
-    // as today). "Complete + Send" calls the real submit; the full form stays below.
-    const fastCloseoutOn = fastCloseoutReady && fastCloseoutFlag && serviceLineForCloseout === "lawn";
-    const EXCEPTION_TO_CHIP = {
-      dry_stress: "Lawn stress/dry patches", coverage: "Irrigation issue", weeds: "Weeds spreading",
-      fungus: "Fungus visible", pest: "Pest activity noted", concern: "Customer concern discussed",
-    };
-    const fastCloseoutExceptions = [
-      { key: "none", label: "No issues found", status: "ready" },
-      { key: "dry_stress", label: "Dry stress", status: "watch" },
-      { key: "coverage", label: "Irrigation coverage", status: "watch" },
-      { key: "weeds", label: "Weed pressure", status: "watch" },
-      { key: "pest", label: "Pest monitoring", status: "watch" },
-      { key: "fungus", label: "Fungus watch", status: "attention" },
-      { key: "concern", label: "Customer concern", status: "attention" },
-    ].map((e) => ({
-      ...e,
-      active: EXCEPTION_TO_CHIP[e.key]
-        ? selectedObservationLabels.includes(EXCEPTION_TO_CHIP[e.key])
-        : (e.key === "none" ? selectedObservationLabels.length === 0 : false),
-    }));
-    const fastCloseoutSummary = {
-      productsReady: selectedProducts.length > 0,
-      protocolReady: true,
-      photosReady: servicePhotos.length > 0 || !!lawnAssessmentId,
-      smsEnabled: true,
-      aiAnalysisStatus: lawnAssessmentId ? "complete" : "pending",
-      aiInsights: [],
-      suggestedCustomerAction: "",
-      exceptions: fastCloseoutExceptions,
-      canComplete: !submitting,
-    };
-    function handleFastException(key) {
-      if (!key) return; // "Advanced" / no-op — the full form is already below
-      const chip = EXCEPTION_TO_CHIP[key];
-      if (chip && typeof handleObservationSelect === "function") handleObservationSelect(chip);
-    }
-
     return createPortal(
       <>
         {" "}
@@ -9381,16 +9314,6 @@ export function CompletionPanel({
             animation: "slideIn 0.25s ease",
           }}
         >
-          {fastCloseoutOn && (
-            <div style={{ padding: "12px 16px 0" }}>
-              <FastCloseoutSummary
-                summary={fastCloseoutSummary}
-                completing={submitting}
-                onAddIssue={handleFastException}
-                onComplete={handleSubmit}
-              />
-            </div>
-          )}
           {treeShrubCloseoutOn && (
             <div style={{ padding: "12px 16px 0" }}>
               <TreeShrubCloseoutSummary
@@ -9417,12 +9340,6 @@ export function CompletionPanel({
                   handleSubmit();
                 }}
               />
-            </div>
-          )}
-          {recapEligible && (
-            <div style={{ padding: "12px 16px 0" }}>
-              <RecapCapture serviceId={service.id} />
-              <PestRecapCard serviceId={service.id} />
             </div>
           )}
           {success && (
@@ -9651,6 +9568,13 @@ export function CompletionPanel({
             )}
           </div>{" "}
           <div style={{ padding: 20, maxWidth: 560, margin: "0 auto" }}>
+            {/* Visit recap (pest) — below the title, top of the form body */}
+            {recapEligible && (
+              <div style={{ marginBottom: 16 }}>
+                <RecapCapture serviceId={service.id} />
+                <PestRecapCard serviceId={service.id} />
+              </div>
+            )}
             {showDraftPrompt && (
               <div
                 style={{
@@ -9745,46 +9669,6 @@ export function CompletionPanel({
                 </div>{" "}
               </div>
             )}
-            {/* Quick complete */}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-                marginBottom: 24,
-              }}
-            >
-              {" "}
-              <button
-                type="button"
-                onClick={() => {
-                  if (structuredCloseoutRequired) return;
-                  setQuickComplete(!quickComplete);
-                }}
-                disabled={structuredCloseoutRequired}
-                style={{
-                  height: 36,
-                  padding: "0 16px",
-                  borderRadius: 999,
-                  background: quickComplete ? M.ink : "transparent",
-                  color: quickComplete ? M.actionFg : M.ink,
-                  border: quickComplete ? "none" : `1px solid ${M.ink}`,
-                  fontFamily: font,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.3px",
-                  cursor:
-                    structuredCloseoutRequired
-                      ? "not-allowed"
-                      : "pointer",
-                  opacity: structuredCloseoutRequired ? 0.55 : 1,
-                  whiteSpace: "nowrap",
-                }}
-              >
-                Quick complete {quickComplete ? "on" : "off"}
-              </button>{" "}
-            </div>
             {/* Callback banner */}
             {isCallback && (
               <div
@@ -11248,75 +11132,6 @@ export function CompletionPanel({
                 </div>
               </Field>
             )}
-            {/* Lawn measurements */}
-            {isLawn && !quickComplete && (
-              <Field label="Lawn measurements">
-                {" "}
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "1fr 1fr",
-                    gap: 12,
-                  }}
-                >
-                  {" "}
-                  <div>
-                    {" "}
-                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>
-                      Soil temp (°F)
-                    </label>{" "}
-                    <input
-                      type="number"
-                      value={soilTemp}
-                      onChange={(e) => setSoilTemp(e.target.value)}
-                      placeholder="—"
-                      style={mInput}
-                    />{" "}
-                  </div>{" "}
-                  <div>
-                    {" "}
-                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>
-                      Thatch (in)
-                    </label>{" "}
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={thatchMeasurement}
-                      onChange={(e) => setThatchMeasurement(e.target.value)}
-                      placeholder="—"
-                      style={mInput}
-                    />{" "}
-                  </div>{" "}
-                  <div>
-                    {" "}
-                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>
-                      Soil pH
-                    </label>{" "}
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={soilPh}
-                      onChange={(e) => setSoilPh(e.target.value)}
-                      placeholder="—"
-                      style={mInput}
-                    />{" "}
-                  </div>{" "}
-                  <div>
-                    {" "}
-                    <label style={{ ...eyebrowStyle, marginBottom: 6 }}>
-                      Moisture (%)
-                    </label>{" "}
-                    <input
-                      type="number"
-                      value={soilMoisture}
-                      onChange={(e) => setSoilMoisture(e.target.value)}
-                      placeholder="—"
-                      style={mInput}
-                    />{" "}
-                  </div>{" "}
-                </div>{" "}
-              </Field>
-            )}
             {/* Options */}
             <Field label="Options">
               {" "}
@@ -11812,50 +11627,6 @@ export function CompletionPanel({
               </div>{" "}
             </div>
           )}
-          {/* Quick Complete toggle */}
-          <div
-            style={{
-              marginTop: 10,
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            {" "}
-            <button
-              onClick={() => {
-                if (structuredCloseoutRequired) return;
-                setQuickComplete(!quickComplete);
-              }}
-              disabled={structuredCloseoutRequired}
-              style={{
-                padding: "6px 14px",
-                borderRadius: 8,
-                fontSize: 12,
-                fontWeight: 700,
-                cursor:
-                  structuredCloseoutRequired
-                    ? "not-allowed"
-                    : "pointer",
-                background: quickComplete ? D.amber : "transparent",
-                color: quickComplete ? D.bg : D.amber,
-                border: `1px solid ${D.amber}`,
-                opacity: structuredCloseoutRequired ? 0.55 : 1,
-                transition: "all 0.15s",
-              }}
-            >
-              {quickComplete ? "Quick Complete ON" : "Quick Complete"}
-            </button>{" "}
-            <span style={{ fontSize: 11, color: D.muted }}>
-              {structuredCloseoutRequired
-                ? treeShrubCloseoutRequired
-                  ? "Tree/Shrub protocol closeout requires full form"
-                  : "WaveGuard lawn closeout requires full execution checklist"
-                : quickComplete
-                ? "Showing minimal fields"
-                : "Bulk end-of-day mode"}
-            </span>{" "}
-          </div>{" "}
         </div>
         {/* Callback banner */}
         {isCallback && (
@@ -13380,69 +13151,6 @@ export function CompletionPanel({
                 0 = none, 5 = severe. Tap a number again to clear.
               </div>
             </div>
-          )}
-          {/* Lawn Measurements — hidden in quick complete */}
-          {isLawn && !quickComplete && (
-            <>
-              {" "}
-              <label style={labelStyle}>Lawn Measurements</label>{" "}
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
-                  gap: 10,
-                  marginBottom: 20,
-                }}
-              >
-                {" "}
-                <div>
-                  {" "}
-                  <div style={subLabelStyle}>Soil Temp (F)</div>{" "}
-                  <input
-                    type="number"
-                    value={soilTemp}
-                    onChange={(e) => setSoilTemp(e.target.value)}
-                    placeholder="--"
-                    style={inputStyle}
-                  />{" "}
-                </div>{" "}
-                <div>
-                  {" "}
-                  <div style={subLabelStyle}>Thatch (in)</div>{" "}
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={thatchMeasurement}
-                    onChange={(e) => setThatchMeasurement(e.target.value)}
-                    placeholder="--"
-                    style={inputStyle}
-                  />{" "}
-                </div>{" "}
-                <div>
-                  {" "}
-                  <div style={subLabelStyle}>Soil pH</div>{" "}
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={soilPh}
-                    onChange={(e) => setSoilPh(e.target.value)}
-                    placeholder="--"
-                    style={inputStyle}
-                  />{" "}
-                </div>{" "}
-                <div>
-                  {" "}
-                  <div style={subLabelStyle}>Moisture (%)</div>{" "}
-                  <input
-                    type="number"
-                    value={soilMoisture}
-                    onChange={(e) => setSoilMoisture(e.target.value)}
-                    placeholder="--"
-                    style={inputStyle}
-                  />{" "}
-                </div>{" "}
-              </div>{" "}
-            </>
           )}
           {/* Options */}
           <label style={labelStyle}>Options</label>{" "}

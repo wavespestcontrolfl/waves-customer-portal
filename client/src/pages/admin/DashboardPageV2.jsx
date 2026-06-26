@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Badge,
   Card,
@@ -21,6 +22,7 @@ import {
   KpiRing,
   KpiSparklineTile,
   MrrTrendChart,
+  RetentionCohortGrid,
   ReviewTrendChart,
   RevenueByCity,
   RevenueTrendArea,
@@ -31,16 +33,24 @@ import {
   fmtMoneyCompact,
 } from "../../components/dashboard/charts";
 import useIsMobile from "../../hooks/useIsMobile";
+import { useFeatureFlag } from "../../hooks/useFeatureFlag";
+import AiChartsPanel from "../../components/dashboard/AiChartsPanel";
 import {
   adminFetch,
   isForbiddenError,
   isRateLimitError,
 } from "../../utils/admin-fetch";
 
+// Point-in-time → rolling windows (inclusive of today) → calendar-to-date.
+// Server resolves each id via the shared periodStartDate (admin-dashboard.js).
 const PERIODS = [
   { id: "today", label: "Today" },
+  { id: "last_7", label: "7D" },
+  { id: "last_30", label: "30D" },
+  { id: "last_90", label: "90D" },
   { id: "wtd", label: "WTD" },
   { id: "mtd", label: "MTD" },
+  { id: "qtd", label: "QTD" },
   { id: "ytd", label: "YTD" },
 ];
 
@@ -93,6 +103,7 @@ function sparkSeries(daily) {
 
 export default function DashboardPageV2() {
   const isMobile = useIsMobile();
+  const aiChartsEnabled = useFeatureFlag("dashboard-ai-charts");
   const [data, setData] = useState(null); // /admin/dashboard
   const [kpis, setKpis] = useState(null); // /admin/dashboard/core-kpis
   const [compare, setCompare] = useState(null); // /admin/dashboard/compare
@@ -100,6 +111,7 @@ export default function DashboardPageV2() {
   const [funnel, setFunnel] = useState(null);
   const [aging, setAging] = useState(null);
   const [mrrTrend, setMrrTrend] = useState(null);
+  const [cohort, setCohort] = useState(null);
   // /lead-source (downstream string aggregation) is intentionally dropped
   // in favor of the upstream attribution endpoints below.
   const [callsBySource, setCallsBySource] = useState(null);
@@ -144,6 +156,21 @@ export default function DashboardPageV2() {
     if (g.pending <= 0 && !g.failed && mountedRef.current) setLastUpdated(Date.now());
   }, []);
   const [period, setPeriod] = useState("mtd");
+  const navigate = useNavigate();
+  // Drill-down: open the Leads list filtered to this attribution source, scoped
+  // to the same period window the panel is showing so the list matches the count.
+  const drillToSource = useCallback(
+    (name) => {
+      if (!name) return;
+      const p = new URLSearchParams({ source_name: name });
+      const w = leadsBySource?.period;
+      if (w?.from) p.set("from", w.from);
+      if (w?.to) p.set("to", w.to);
+      if (w?.label) p.set("period_label", w.label);
+      navigate(`/admin/leads?${p.toString()}`);
+    },
+    [navigate, leadsBySource],
+  );
   const [showAllKpis, setShowAllKpis] = useState(false);
   const [kpisLoading, setKpisLoading] = useState(false);
   const [kpisError, setKpisError] = useState(null);
@@ -206,15 +233,17 @@ export default function DashboardPageV2() {
       track("/service-mix", adminFetch("/admin/dashboard/service-mix")),
       track("/revenue-by-city", adminFetch("/admin/dashboard/revenue-by-city")),
       track("/review-trend", adminFetch("/admin/dashboard/review-trend")),
+      track("/retention-cohort", adminFetch("/admin/dashboard/retention-cohort?months=12")),
     ]);
     if (!mountedRef.current) { inFlightRef.current = false; return; }
-    const [fnl, ag, mrr, mx, rbc, rev] = wave2;
+    const [fnl, ag, mrr, mx, rbc, rev, coh] = wave2;
     setFunnel((prev) => fnl ?? prev);
     setAging((prev) => ag ?? prev);
     setMrrTrend((prev) => mrr ?? prev);
     setMix((prev) => mx ?? prev);
     setRevenueByCity((prev) => rbc ?? prev);
     setReviewTrend((prev) => rev ?? prev);
+    setCohort((prev) => coh ?? prev);
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -659,21 +688,23 @@ export default function DashboardPageV2() {
               {kpis?.periodLabel || "Month to Date"}
             </div>{" "}
           </div>{" "}
-          <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
-            {PERIODS.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => setPeriod(p.id)}
-                className={cn(
-                  "h-11 sm:h-7 px-4 sm:px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors",
-                  period === p.id
-                    ? "bg-zinc-900 text-white"
-                    : "bg-white text-ink-secondary hover:bg-zinc-50",
-                )}
-              >
-                {p.label}
-              </button>
-            ))}
+          <div className="max-w-full overflow-x-auto">
+            <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
+              {PERIODS.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => setPeriod(p.id)}
+                  className={cn(
+                    "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0",
+                    period === p.id
+                      ? "bg-zinc-900 text-white"
+                      : "bg-white text-ink-secondary hover:bg-zinc-50",
+                  )}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
           </div>{" "}
         </CardHeader>{" "}
         <CardBody>
@@ -945,6 +976,47 @@ export default function DashboardPageV2() {
           </ChartCard>{" "}
         </div>
       )}
+      {/* Retention by signup cohort — % of each month's new customers still
+          active over the months since they joined. */}
+      {isMobile ? (
+        <MobileFold
+          title="Retention by Cohort"
+          sub="% still active by signup month"
+        >
+          {" "}
+          <ChartCard
+            title="Retention by Cohort"
+            sub="% still active by signup month"
+          >
+            {" "}
+            <RetentionCohortGrid
+              cohorts={cohort?.cohorts || []}
+              maxOffset={cohort?.maxOffset || 0}
+            />{" "}
+          </ChartCard>{" "}
+        </MobileFold>
+      ) : (
+        <div className="mb-5">
+          {" "}
+          <ChartCard
+            title="Retention by Cohort"
+            sub="% of each signup month still active"
+          >
+            {" "}
+            <RetentionCohortGrid
+              cohorts={cohort?.cohorts || []}
+              maxOffset={cohort?.maxOffset || 0}
+            />{" "}
+          </ChartCard>{" "}
+        </div>
+      )}
+      {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
+          by default; the model only proposes SQL, the server sandboxes it. */}
+      {aiChartsEnabled && (
+        <div className="mb-5">
+          <AiChartsPanel />
+        </div>
+      )}
       {/* Upstream lead-attribution row.
           Replaces the prior single Lead Source panel (which aggregated the
           downstream customers.lead_source string) with three upstream views
@@ -967,6 +1039,7 @@ export default function DashboardPageV2() {
             channelMix={channelMix}
             loading={attributionLoading}
             error={attributionError}
+            onDrillSource={drillToSource}
           />{" "}
         </MobileFold>
       ) : (
@@ -983,6 +1056,7 @@ export default function DashboardPageV2() {
             channelMix={channelMix}
             loading={attributionLoading}
             error={attributionError}
+            onDrillSource={drillToSource}
           />
         </ChartCard>
       )}

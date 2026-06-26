@@ -12,8 +12,14 @@ async function executeRetentionTool(toolName, input) {
     // ── Health & Signals ────────────────────────────────────────
 
     case 'run_overall_scores': {
-      const HealthScorer = require('./health-scorer');
-      return HealthScorer.calculateAllHealthScores();
+      // Canonical scoring + intelligence enrichment, mirroring the nightly
+      // pipeline. Scoring lives in customer-health.js (sole engine); the
+      // customer-intelligence layer only enriches (upsell/next-action/LTV).
+      const { scoreAllCustomers } = require('./customer-health');
+      const HealthScorer = require('./customer-intelligence/health-scorer');
+      const health = await scoreAllCustomers();
+      const enrichment = await HealthScorer.enrichAllCustomers();
+      return { ...health, ...enrichment };
     }
 
     case 'detect_signals': {
@@ -22,10 +28,10 @@ async function executeRetentionTool(toolName, input) {
     }
 
     case 'get_at_risk_customers': {
-      // Default levels cover both engines' vocabularies (the CI scorer
-      // writes at_risk/watch, the v3 scorer writes high/moderate onto the
-      // same current row).
-      const levels = input.risk_levels || ['critical', 'at_risk', 'watch', 'high', 'moderate'];
+      // Canonical churn-risk vocabulary: critical / high / moderate / low.
+      // (at_risk/watch retained only to still match any legacy row not yet
+      // re-scored after the engine consolidation.)
+      const levels = input.risk_levels || ['critical', 'high', 'moderate', 'at_risk', 'watch'];
       const limit = input.limit || 30;
 
       // Get the most recent health score for each customer
@@ -44,7 +50,7 @@ async function executeRetentionTool(toolName, input) {
           'h.churn_signals', 'h.next_best_action', 'h.engagement_trend',
           'h.lifetime_value_estimate', 'h.upsell_opportunities'
         )
-        .orderByRaw("CASE WHEN h.churn_risk = 'critical' THEN 0 WHEN h.churn_risk = 'at_risk' THEN 1 ELSE 2 END")
+        .orderByRaw("CASE WHEN h.churn_risk = 'critical' THEN 0 WHEN h.churn_risk IN ('high', 'at_risk') THEN 1 ELSE 2 END")
         .orderBy('h.lifetime_value_estimate', 'desc')
         .limit(limit);
 

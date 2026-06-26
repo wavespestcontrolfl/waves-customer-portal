@@ -4178,6 +4178,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // it directly.
       if (invoiceRow.payer_id) return invoiceRow;
 
+      // PI safety: a pre-minted / sent invoice can carry a live PaymentIntent.
+      // Crediting the prepayment (marking it paid) without neutralizing the PI
+      // lets a stale client secret still charge the card. Cancel a cancelable PI;
+      // if money is in flight or the PI can't be verified, skip applying (leave it
+      // to settle) and alert for manual reconciliation. Shared guard with the
+      // mark-prepaid receipt path (services/prepaid-pi-guard).
+      let prepaidPiId = invoiceRow.stripe_payment_intent_id || null;
+      if (prepaidPiId) {
+        const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
+        const guard = await guardOpenPaymentIntentForPrepaid(invoiceRow);
+        if (!guard.ok) {
+          logger.error(`[dispatch] Prepaid credit NOT applied to invoice ${invoiceRow.invoice_number} for service ${svc.id}: open PaymentIntent (${guard.reason}) — a card/ACH payment may still settle; manual reconciliation needed`);
+          return invoiceRow;
+        }
+        prepaidPiId = guard.piId;
+      }
+
       return db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceRow.id })
@@ -4185,6 +4202,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .first();
         if (!lockedInvoice) return invoiceRow;
         if (['paid', 'prepaid'].includes(lockedInvoice.status)) return lockedInvoice;
+        // PI re-check under lock: a new /pay session could have minted a different
+        // PI since the triage above; refuse and leave the prepayment for a later
+        // pass rather than mark paid alongside a live session.
+        if ((lockedInvoice.stripe_payment_intent_id || null) !== (prepaidPiId || null)) {
+          logger.error(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: PaymentIntent changed under lock — manual reconciliation needed`);
+          return lockedInvoice;
+        }
         const invoiceTotalCents = toCents(lockedInvoice.total);
         if (!(invoiceTotalCents > 0)) return lockedInvoice;
         const existingCredit = await trx('payments')

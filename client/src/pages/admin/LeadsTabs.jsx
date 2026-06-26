@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Trash2 } from "lucide-react";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import useIsMobile from "../../hooks/useIsMobile";
@@ -564,8 +564,26 @@ const LOST_REASONS = [
 // ═══════════════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════
+// Read the dashboard "drill into source" params off the URL once, so the leads
+// filters can be initialized from them on the very first render — the initial
+// pipeline load is then already scoped, avoiding an unfiltered first fetch that
+// (with no stale-response guard) could resolve last and overwrite the results.
+function readSourceDrillParams() {
+  if (typeof window === "undefined") return null;
+  const sp = new URLSearchParams(window.location.search);
+  const sourceName = sp.get("source_name");
+  if (!sourceName) return null;
+  return {
+    source_name: sourceName,
+    start_date: sp.get("from") || "",
+    end_date: sp.get("to") || "",
+    period_label: sp.get("period_label") || "",
+  };
+}
+
 export function LeadsSection() {
   const navigate = useNavigate();
+  const [, setSearchParams] = useSearchParams();
   const isMobile = useIsMobile();
   const [tab, setTab] = useState("pipeline");
   const [smsCompose, setSmsCompose] = useState(null); // { leadId, message }
@@ -594,12 +612,25 @@ export function LeadsSection() {
   const [leadActivitiesError, setLeadActivitiesError] = useState(null);
   const [showModal, setShowModal] = useState(null);
   const [formData, setFormData] = useState({});
-  const [filters, setFilters] = useState({
-    status: "",
-    search: "",
-    sort: "first_contact_at",
-    page: 1,
+  const [filters, setFilters] = useState(() => {
+    // Drill-down from the dashboard Marketing Attribution panel: filter to a
+    // single source name, scoped to the period window the panel was showing.
+    // Initialized from the URL so the first load is already scoped.
+    const drill = readSourceDrillParams();
+    return {
+      status: "",
+      search: "",
+      sort: "first_contact_at",
+      page: 1,
+      source_name: drill?.source_name || "",
+      start_date: drill?.start_date || "",
+      end_date: drill?.end_date || "",
+    };
   });
+  // Human label for the active source-drill chip (e.g. "This month").
+  const [sourcePeriodLabel, setSourcePeriodLabel] = useState(
+    () => readSourceDrillParams()?.period_label || "",
+  );
   const [pipelineView, setPipelineView] = useState("table");
   const [draggingLeadId, setDraggingLeadId] = useState(null);
   const [deletingLeadId, setDeletingLeadId] = useState(null);
@@ -618,6 +649,9 @@ export function LeadsSection() {
       const params = new URLSearchParams();
       if (filters.status) params.set("status", filters.status);
       if (filters.search) params.set("search", filters.search);
+      if (filters.source_name) params.set("source_name", filters.source_name);
+      if (filters.start_date) params.set("start_date", filters.start_date);
+      if (filters.end_date) params.set("end_date", filters.end_date);
       params.set("sort", filters.sort);
       params.set("page", filters.page);
       params.set("limit", "50");
@@ -799,6 +833,27 @@ export function LeadsSection() {
     setActiveLead(leadId);
     loadLeadActivities(leadId);
   }, [setActiveLead, loadLeadActivities]);
+
+  // Drill-down from the dashboard Marketing Attribution panel:
+  // /admin/leads?source_name=<name>&from=<YYYY-MM-DD>&to=<YYYY-MM-DD>&period_label=<label>
+  // filters the pipeline table to that source for the panel's period window.
+  // Runs once, then strips the drill params so the chip (state) is the single
+  // source of truth and a refresh/share keeps the URL clean.
+  // The `filters` + chip label were already initialized from these params (lazy
+  // useState above), so the first pipeline load is correctly scoped. This effect
+  // just snaps to the table view and strips the drill params, leaving the chip
+  // state as the single source of truth (clean URL on refresh/share).
+  const sourceDeepLinkDone = useRef(false);
+  useEffect(() => {
+    if (sourceDeepLinkDone.current) return;
+    sourceDeepLinkDone.current = true;
+    const sp = new URLSearchParams(window.location.search);
+    if (!sp.get("source_name")) return;
+    setTab("pipeline");
+    setPipelineView("table");
+    ["source_name", "from", "to", "period_label"].forEach((k) => sp.delete(k));
+    setSearchParams(sp, { replace: true });
+  }, [setSearchParams]);
 
   const expandLead = async (lead) => {
     if (expandedLead === lead.id) {
@@ -1168,6 +1223,59 @@ export function LeadsSection() {
               <option value="response_time">Response Time</option>{" "}
               <option value="monthly_value">Value</option>{" "}
             </select>
+          )}
+          {filters.source_name && (
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                backgroundColor: C.bg,
+                border: `1px solid ${C.border}`,
+                borderRadius: 999,
+                padding: "5px 6px 5px 12px",
+                fontSize: 13,
+                color: C.text,
+                fontFamily: ROBOTO,
+              }}
+            >
+              <span style={{ color: C.muted }}>Source:</span>
+              <span style={{ fontWeight: 600 }}>{filters.source_name}</span>
+              {sourcePeriodLabel && (
+                <span style={{ color: C.muted }}>· {sourcePeriodLabel}</span>
+              )}
+              <button
+                type="button"
+                aria-label="Clear source filter"
+                title="Clear source filter"
+                onClick={() => {
+                  setFilters((f) => ({
+                    ...f,
+                    source_name: "",
+                    start_date: "",
+                    end_date: "",
+                    page: 1,
+                  }));
+                  setSourcePeriodLabel("");
+                }}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 18,
+                  height: 18,
+                  borderRadius: 999,
+                  border: "none",
+                  background: "transparent",
+                  color: C.muted,
+                  cursor: "pointer",
+                  fontSize: 14,
+                  lineHeight: 1,
+                }}
+              >
+                ×
+              </button>
+            </div>
           )}
           <div style={{ flex: 1 }} />{" "}
           <Btn

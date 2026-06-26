@@ -753,6 +753,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             total: item.totalAfterDiscount ?? item.total ?? null,
             perApp: item.perApp ?? null,
             frequency: item.frequency ?? item.visitsPerYear ?? null,
+            // Recurring foam carries an operator-chosen cadence + tier labor
+            // duration; keep them so the accept/render/booking paths present the
+            // sold cadence and reserve a long-enough slot (not quarterly/45-90min).
+            cadence: item.cadence ?? null,
+            estimatedDurationMinutes: item.estimatedDurationMinutes ?? null,
           })),
           waveGuard: estimate?.waveGuard || null,
         },

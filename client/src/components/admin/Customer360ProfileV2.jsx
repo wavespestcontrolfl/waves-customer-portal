@@ -4046,16 +4046,29 @@ export default function Customer360ProfileV2({
           </div>
           {/* Mobile header (< 768px) — per mobile-admin-audit PR #3 item 2:
               back / menu / Text pills on top, large name, three-stat row */}
-          <div
-            className="c360-header-mobile px-4 pt-3 pb-3"
-            // Clear the iPhone notch/translucent status bar in standalone PWA
-            // mode so the back / Text / Call pills aren't hidden under it.
-            style={{
-              paddingTop: "calc(0.75rem + env(safe-area-inset-top, 0px))",
-            }}
-          >
+          <div className="c360-header-mobile px-4 pb-3">
             {" "}
-            <div className="flex items-center justify-between mb-3">
+            {/* Spacer reserving the fixed top action bar's height (incl. the
+                iPhone safe-area inset) so the name/stats start below it. */}
+            <div
+              aria-hidden="true"
+              style={{ height: "calc(52px + env(safe-area-inset-top, 0px))" }}
+            />
+            {/* Top action bar — fixed to the viewport top (z-[1001]), mirroring
+                the fixed bottom CustomerActionBar. Replaces the old
+                position:sticky header row, which on iOS standalone PWAs let
+                Back / Text / Call / ⋯ scroll out of reach (only revealed by
+                rubber-band overscroll, never tappable). No Tailwind md:hidden
+                here on purpose: this bar lives inside .c360-header-mobile, whose
+                @media (max-width:768px) rule already shows/hides it on the exact
+                same boundary — md:hidden (min-width:768px) would blank the
+                controls at exactly 768px (iPad portrait). */}
+            <div
+              className="c360-mobile-actionbar fixed top-0 left-0 right-0 z-[1001] flex items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
+              style={{
+                paddingTop: "calc(0.5rem + env(safe-area-inset-top, 0px))",
+              }}
+            >
               {" "}
               <button
                 onClick={onClose}

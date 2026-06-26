@@ -1274,8 +1274,18 @@ const SPECIALTY = {
       { maxPoints: 15, cans: 3, laborHrs: 2.0, label: 'Extensive' },
       { maxPoints: 20, cans: 4, laborHrs: 3.0, label: 'Full Perimeter' },
     ],
-    floor: r(250),
+    floor: 0,             // Owner directive 2026-06-25: $250 minimum removed for foam (one-time + recurring); true tiered cost flows through
     marginDivisor: 0.45,  // 55% target margin
+  },
+  // Recurring spot-foam termite program (owner directive 2026-06-25). Per-visit
+  // price is the one-time foam cost basis (material + labor, no floor) ÷ margin,
+  // times a cadence multiplier — the more frequent the cadence, the deeper the
+  // per-visit discount vs the one-time service. STANDALONE: does NOT count
+  // toward WaveGuard tier and is excluded from the bundle % discount.
+  foamDrillRecurring: {
+    cadenceMultipliers: { quarterly: 0.90, bimonthly: 0.85, monthly: 0.80 },
+    frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },
+    defaultCadence: 'quarterly',
   },
   germanRoach: {
     // Severity-based, all-in flat pricing. The tier price is the full customer
@@ -1642,6 +1652,7 @@ const WAVEGUARD = {
     bora_care: true,            // Excluded — no discount
     pre_slab_termiticide: true, // Excluded — no discount
     pre_slab_termidor: true,    // Excluded — no discount
+    foam_recurring: true,       // Recurring spot-foam: standalone, no WaveGuard tier or bundle % discount (cadence multiplier is its only discount)
     // priceGermanRoachInitial bakes urgency × rc in a single Math.round to
     // match v2's applyOT exactly (pricing-engine-v2.js:183, 482). Excluding
     // it here stops the orchestrator discount loop from applying the 15% rc

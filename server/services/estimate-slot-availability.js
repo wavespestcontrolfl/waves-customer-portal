@@ -166,6 +166,11 @@ function serviceKeyFor(value = {}) {
   if (/palm/.test(raw)) return 'palm_injection';
   if (/rodent|rat|mouse|mice/.test(raw)) return 'rodent_bait';
   if (/termite/.test(raw)) return 'termite_bait';
+  // Recurring foam can reach slot sizing labeled only "Recurring Foam Treatment"
+  // / "FoamRecurring" (no mapped service key), so classify foam here — after
+  // termite so the one-time "Drill-and-Foam Termite" still maps to termite — or
+  // the booking falls to the generic window instead of the 120/180-min tier.
+  if (/foam/.test(raw)) return 'foam_recurring';
   if (/pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'service';
 }
@@ -229,6 +234,14 @@ function durationForService(row = {}, estData = {}) {
   if (key === 'termite_bait') return 45;
   if (key === 'palm_injection') return 30;
   if (key === 'rodent_bait') return 45;
+  if (key === 'foam_recurring') {
+    // Drill-and-foam visits run the full labor (1.0–3.0 hrs by point tier), so
+    // size the slot from the tier duration carried on the row, not the generic
+    // 45-min fallback. Default to ~1.5 hr (Moderate) when it wasn't carried.
+    const explicit = firstPositiveNumber(row.estimatedDurationMinutes, row.estimated_duration_minutes, row.durationMinutes);
+    if (explicit) return Math.min(MAX_ESTIMATE_SLOT_DURATION_MINUTES, Math.max(60, Math.round(explicit)));
+    return 90;
+  }
   if (homeSqFt || lotSqFt) return 45;
   return 30;
 }

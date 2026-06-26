@@ -45,6 +45,7 @@ const KNOWN_FLAGS = [
   "ff_invoice_email_message", // AI thank-you message in the invoice email (PR #2111)
   "visual_service_notes_enabled",
   "tech_social_enabled", // gates the Tech portal "Social Post" tile (UI side of TECH_SOCIAL_ENABLED)
+  "dashboard-ai-charts", // gates the dashboard AI chart builder + pinned widgets (PR #2130)
 ];
 
 const DEFAULT_VISUAL_SETTINGS = {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
+import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
 
 const DARK = {
   bg: '#0f1923',
@@ -24,15 +25,99 @@ export default function TechLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [techName, setTechName] = useState('Tech');
+  const [authed, setAuthed] = useState(() => Boolean(getAdminAuthToken()));
 
   useEffect(() => {
     const token = getAdminAuthToken();
-    if (!token) {
-      navigate('/admin/login', { replace: true });
-      return;
-    }
-    setTechName(getAdminDisplayName('Tech'));
-  }, [navigate]);
+    setAuthed(Boolean(token));
+    if (token) setTechName(getAdminDisplayName('Tech'));
+  }, []);
+
+  // While in the tech portal, point the PWA manifest + home-screen title at
+  // the field app. The default manifest pins start_url to "/" (the customer
+  // portal), so an "Add to Home Screen" install that honors the manifest start
+  // URL would otherwise launch the tech into the customer app. manifest.tech
+  // uses start_url "/tech" with scope "/" (kept broad so the /admin/login auth
+  // hop stays in the standalone window instead of popping out to Safari).
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const link = document.querySelector('link[rel="manifest"]');
+    const title = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+    const prevManifest = link?.getAttribute('href');
+    const prevTitle = title?.getAttribute('content');
+    link?.setAttribute('href', '/manifest.tech.json');
+    title?.setAttribute('content', 'Field Tools');
+    return () => {
+      if (link && prevManifest) link.setAttribute('href', prevManifest);
+      if (title && prevTitle) title.setAttribute('content', prevTitle);
+    };
+  }, []);
+
+  // Unauthenticated landing. Keep first-time techs on /tech (rather than
+  // bouncing straight to /admin/login) so they can read the install hint and
+  // so an "Add to Home Screen" install captures /tech as the launch URL. The
+  // hint self-hides off iOS / when already installed; the Sign in button
+  // continues to the shared admin/tech login.
+  if (!authed) {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          background: DARK.bg,
+          color: DARK.text,
+          fontFamily: "'Nunito Sans', sans-serif",
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '24px',
+          paddingTop: 'calc(24px + env(safe-area-inset-top, 0px))',
+          gap: 24,
+        }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+          <div
+            style={{
+              width: 56, height: 56, borderRadius: 14,
+              background: `linear-gradient(135deg, ${DARK.teal}, #2563eb)`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 28, fontWeight: 800, fontFamily: "'Montserrat', sans-serif",
+              color: '#fff',
+            }}
+          >W</div>
+          <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'Montserrat', sans-serif" }}>
+            Waves Field Tools
+          </div>
+        </div>
+        <div style={{ width: '100%', maxWidth: 420 }}>
+          <AddToHomeScreenHint />
+          <button
+            type="button"
+            onClick={() => {
+              const next = location.pathname.startsWith('/tech')
+                ? location.pathname
+                : '/tech';
+              navigate(`/admin/login?next=${encodeURIComponent(next)}`);
+            }}
+            style={{
+              width: '100%',
+              padding: '14px 16px',
+              borderRadius: 10,
+              border: 'none',
+              background: DARK.teal,
+              color: '#fff',
+              fontSize: 15,
+              fontWeight: 700,
+              fontFamily: "'Montserrat', sans-serif",
+              cursor: 'pointer',
+            }}
+          >
+            Sign in
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const isActive = (item) => {
     if (item.exact) return location.pathname === item.path;
@@ -81,6 +166,7 @@ export default function TechLayout() {
 
       {/* Main content area */}
       <main style={{ flex: 1, padding: '16px', paddingBottom: 80, overflowY: 'auto' }}>
+        <AddToHomeScreenHint />
         <Outlet />
       </main>
 

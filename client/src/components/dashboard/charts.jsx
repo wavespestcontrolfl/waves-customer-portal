@@ -861,6 +861,57 @@ export function LeadSourceBars({ bySource = [], maxRows = 8 }) {
   );
 }
 
+// ─── Retention cohort grid ────────────────────────────────────────
+
+// Signup-cohort retention heatmap. Rows = the month a customer converted,
+// columns = whole months since signup (M0 = signup month = 100% base), cell =
+// % of that cohort still a live customer. Monochrome zinc heat (darker = higher
+// retention); the % is always printed so small differences in the high range
+// stay legible. Future cells (a cohort hasn't aged that far yet) are blank.
+export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
+  if (!cohorts.length) return <EmptyState>Not enough customer history yet</EmptyState>;
+  const cols = Array.from({ length: maxOffset + 1 }, (_, i) => i);
+  // Zinc-900 wash whose opacity tracks retention; text flips to white once the
+  // wash is dark enough to keep contrast readable.
+  const cellStyle = (pct) => ({
+    backgroundColor: `rgba(24, 24, 27, ${0.06 + (pct / 100) * 0.84})`,
+    color: pct >= 45 ? "#fff" : "#3f3f46",
+  });
+  return (
+    <div className="overflow-x-auto">
+      <div className="min-w-max">
+        <div className="flex items-center gap-1 mb-1">
+          <div className="w-16 shrink-0 u-label text-ink-tertiary">Cohort</div>
+          <div className="w-10 shrink-0 u-label text-ink-tertiary text-right">N</div>
+          {cols.map((m) => (
+            <div key={m} className="w-10 shrink-0 u-label text-ink-tertiary text-center">{`M${m}`}</div>
+          ))}
+        </div>
+        {cohorts.map((c) => (
+          <div key={c.month} className="flex items-center gap-1 mb-1">
+            <div className="w-16 shrink-0 text-12 text-ink-secondary truncate">{c.label}</div>
+            <div className="w-10 shrink-0 text-12 u-nums text-ink-tertiary text-right">{fmtInt(c.size)}</div>
+            {cols.map((m) => {
+              const pct = c.retention?.[m];
+              if (pct == null) return <div key={m} className="w-10 h-7 shrink-0" />;
+              return (
+                <div
+                  key={m}
+                  className="w-10 h-7 shrink-0 rounded-xs flex items-center justify-center text-11 u-nums"
+                  style={cellStyle(pct)}
+                  title={`${c.label} · month ${m}: ${pct}% of ${c.size} retained`}
+                >
+                  {Math.round(pct)}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Tech leaderboard bars ────────────────────────────────────────
 
 // Horizontal-bar variant of the existing leaderboard table — same data,
@@ -1138,7 +1189,12 @@ function ChannelMixBar({ channels }) {
 const SCORECARD_GRID =
   'grid-cols-[minmax(0,1fr)_3rem_3rem_3rem_3rem_3rem_4.25rem_3.75rem]';
 
-export function AttributionScorecard({ callsBySource, leadsBySource, channelMix, loading, error }) {
+// Source rows that don't map to a real lead_sources.name (synthetic fallbacks /
+// calls-only buckets) can't be filtered in the Leads list, so they aren't
+// drillable — gating on these avoids a click that lands on an empty list.
+const DRILL_BLOCKED_SOURCE_TYPES = new Set(['unattributed', 'unmapped']);
+
+export function AttributionScorecard({ callsBySource, leadsBySource, channelMix, loading, error, onDrillSource }) {
   const [sortKey, setSortKey] = useState('leads');
   const [sortDir, setSortDir] = useState('desc');
   const [showAll, setShowAll] = useState(false);
@@ -1174,6 +1230,29 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
   const cell = (has, value) =>
     has ? value : <span className="text-ink-disabled">—</span>;
 
+  // A row drills into the Leads list filtered by its source name (matching the
+  // panel's name-based grouping). Only real, lead-bearing sources are clickable.
+  const canDrill = (r) =>
+    typeof onDrillSource === 'function'
+    && !!r.sourceType
+    && !DRILL_BLOCKED_SOURCE_TYPES.has(r.sourceType)
+    && r.hasLeads;
+  const drillProps = (r) =>
+    canDrill(r)
+      ? {
+          role: 'button',
+          tabIndex: 0,
+          onClick: () => onDrillSource(r.name),
+          onKeyDown: (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onDrillSource(r.name);
+            }
+          },
+          title: `View ${r.name} leads`,
+        }
+      : {};
+
   return (
     <div>
       <AttributionFunnel
@@ -1188,8 +1267,17 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
       <div className="flex flex-col gap-2">
         {topLeadRows.map((r, i) => {
           const won = r.booked > 0;
+          const drill = canDrill(r);
           return (
-            <div key={`${r.name}-${i}`} className="flex items-center gap-2 sm:gap-3">
+            <div
+              key={`${r.name}-${i}`}
+              {...drillProps(r)}
+              className={cn(
+                'flex items-center gap-2 sm:gap-3',
+                drill
+                  && 'cursor-pointer rounded-xs -mx-1 px-1 py-0.5 hover:bg-surface-sunken focus:outline-none focus-visible:ring-1 focus-visible:ring-zinc-400',
+              )}
+            >
               {/* Narrower name column on phones so the bar + revenue still fit;
                   the bar keeps a min width and the revenue column is content-sized
                   on mobile (sm:w-24 aligns desktop) so neither collapses or clips. */}
@@ -1260,7 +1348,13 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
               return (
                 <div
                   key={`${r.name}-${i}`}
-                  className={cn('relative grid gap-x-2 items-center py-1.5 text-12 border-t border-hairline border-zinc-100', SCORECARD_GRID)}
+                  {...drillProps(r)}
+                  className={cn(
+                    'relative grid gap-x-2 items-center py-1.5 text-12 border-t border-hairline border-zinc-100',
+                    canDrill(r)
+                      && 'cursor-pointer hover:bg-surface-sunken focus:outline-none focus-visible:ring-1 focus-visible:ring-zinc-400',
+                    SCORECARD_GRID,
+                  )}
                 >
                   <div
                     className="absolute inset-y-0.5 left-0 rounded-xs pointer-events-none"

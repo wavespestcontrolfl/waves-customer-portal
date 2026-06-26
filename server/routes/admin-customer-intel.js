@@ -269,9 +269,13 @@ router.get('/metrics/summary', async (req, res, next) => {
 // POST /api/admin/customers/intelligence/scan — trigger manual scan
 router.post('/scan', async (req, res, next) => {
   try {
+    // Same order as the nightly pipeline: detect signals → score (canonical
+    // engine, folds the fresh signals) → enrich (upsell/next-action/LTV).
     const signalResult = await SignalDetector.detectAllSignals();
-    const healthResult = await HealthScorer.calculateAllHealthScores();
-    res.json({ signals: signalResult, health: healthResult });
+    const { scoreAllCustomers } = require('../services/customer-health');
+    const healthResult = await scoreAllCustomers();
+    const enrichResult = await HealthScorer.enrichAllCustomers();
+    res.json({ signals: signalResult, health: healthResult, enrichment: enrichResult });
   } catch (err) { next(err); }
 });
 

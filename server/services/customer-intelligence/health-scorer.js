@@ -1,187 +1,89 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { SIGNAL_TYPES } = require('./signal-detector');
-const { etDateString } = require('../../utils/datetime-et');
 
-// Same A–F thresholds as customer-health.js getGrade() and the admin-health
-// dashboard's derived-grade fallback — keeps score_grade consistent with
-// overall_score regardless of which scoring engine wrote the row last.
-function scoreGrade(score) {
-  if (score >= 80) return 'A';
-  if (score >= 65) return 'B';
-  if (score >= 50) return 'C';
-  if (score >= 35) return 'D';
-  return 'F';
-}
-
+// Intelligence ENRICHMENT layer.
+//
+// The canonical health SCORE — overall_score, score_grade, the 6 sub-scores,
+// churn_risk/probability/signals, per-day history, and alerts — is owned
+// solely by customer-health.js (the nightly diagnostic engine, which also
+// folds in this module's behavioral signals). This pass runs AFTER it and only
+// ADDS intelligence columns to the current customer_health_scores row:
+// upsell_opportunities, next_best_action, lifetime_value_estimate. It never
+// recomputes or overwrites the score. This eliminates the prior two-engine
+// collision where this file and customer-health.js wrote the same row with
+// different algorithms.
 class HealthScorer {
 
-  async calculateAllHealthScores() {
+  async enrichAllCustomers() {
     const customers = await db('customers').where('active', true).select('id');
-    logger.info(`Health scoring: ${customers.length} customers`);
+    logger.info(`Customer enrichment: ${customers.length} customers`);
 
-    let atRisk = 0, critical = 0;
+    let enriched = 0, upsells = 0;
     for (const c of customers) {
-      const result = await this.calculateHealth(c.id);
-      if (result.riskLevel === 'at_risk') atRisk++;
-      if (result.riskLevel === 'critical') critical++;
-    }
-
-    logger.info(`Health scoring complete: ${atRisk} at-risk, ${critical} critical`);
-    return { scored: customers.length, atRisk, critical };
-  }
-
-  async calculateHealth(customerId) {
-    const customer = await db('customers').where('id', customerId).first();
-    if (!customer) return { score: 0, riskLevel: 'unknown' };
-
-    const signals = await db('customer_signals')
-      .where('customer_id', customerId)
-      .where('resolved', false);
-
-    // Start at 70 (healthy baseline)
-    let score = 70;
-    const riskFactors = [];
-
-    for (const signal of signals) {
-      const config = SIGNAL_TYPES[signal.signal_type];
-      if (config) {
-        score += config.weight;
-        if (config.weight < 0) {
-          riskFactors.push({
-            signal: signal.signal_type,
-            value: signal.signal_value,
-            severity: signal.severity,
-            impact: config.weight,
-          });
-        }
+      try {
+        const result = await this.enrichCustomer(c.id);
+        if (result) { enriched++; upsells += result.upsellCount; }
+      } catch (err) {
+        logger.error(`Enrichment failed for customer ${c.id}: ${err.message}`);
       }
     }
 
-    // Tenure bonus
-    const memberSince = customer.member_since || customer.created_at;
-    if (memberSince) {
-      const months = Math.floor((Date.now() - new Date(memberSince).getTime()) / (86400000 * 30));
-      if (months > 24) score += 10;
-      else if (months > 12) score += 5;
-    }
+    logger.info(`Customer enrichment complete: ${enriched} enriched, ${upsells} upsell opportunities`);
+    return { enriched, upsells };
+  }
 
-    // Tier bonus
-    const tierBonus = { Platinum: 8, Gold: 5, Silver: 3, Bronze: 0 };
-    score += tierBonus[customer.waveguard_tier] || 0;
+  async enrichCustomer(customerId) {
+    const customer = await db('customers').where('id', customerId).first();
+    if (!customer) return null;
 
-    score = Math.max(0, Math.min(100, score));
-
-    // Risk level + churn probability
-    let riskLevel, churnProbability;
-    if (score < 30) { riskLevel = 'critical'; churnProbability = 0.8; }
-    else if (score < 50) { riskLevel = 'at_risk'; churnProbability = 0.5; }
-    else if (score < 65) { riskLevel = 'watch'; churnProbability = 0.25; }
-    else { riskLevel = 'healthy'; churnProbability = 0.05; }
-
-    // Engagement trend
-    const recent = signals.filter(s => new Date(s.detected_at) > new Date(Date.now() - 30 * 86400000));
-    const prior = signals.filter(s => {
-      const d = new Date(s.detected_at);
-      return d > new Date(Date.now() - 60 * 86400000) && d <= new Date(Date.now() - 30 * 86400000);
-    });
-    const recentNeg = recent.filter(s => SIGNAL_TYPES[s.signal_type]?.weight < 0).length;
-    const priorNeg = prior.filter(s => SIGNAL_TYPES[s.signal_type]?.weight < 0).length;
-
-    let trend = 'stable';
-    if (recentNeg > priorNeg + 3) trend = 'disengaging';
-    else if (recentNeg > priorNeg + 1) trend = 'declining';
-    else if (recentNeg < priorNeg) trend = 'improving';
-
-    // Upsell opportunities
-    const upsellOpps = await this.identifyUpsells(customer);
-
-    // Next best action
-    const nextAction = this.determineNextAction(customer, riskLevel, riskFactors, upsellOpps);
-
-    // LTV
-    const ltv = customer.monthly_rate ? parseFloat(customer.monthly_rate) * 12 * (1 - churnProbability) : 0;
-
-    // Save — one row per customer (latest score), updated in place.
-    // Every reader of this table consumes only the latest score per customer
-    // (MAX(scored_at) joins / ORDER BY scored_at DESC LIMIT 1); per-day
-    // history lives in customer_health_history. Keying the upsert on
-    // customer_id alone (find latest row, update it, else insert) is
-    // idempotent per (customer, day) without relying on a unique constraint:
-    // it avoids the 23505 unique violation on tables created with
-    // UNIQUE(customer_id) (093 shape) and works identically when no unique
-    // constraint exists (un-reconciled 037 shape).
-    //
-    // Shared-row ownership: customer-health.js (v3, nightly 2:15AM ET)
-    // refreshes the full diagnostic record (sub-scores, details, trend);
-    // this pipeline (nightly 3AM ET) is the later writer and therefore the
-    // canonical daily owner of overall_score / churn_risk /
-    // churn_probability / churn_signals / scored_at plus the
-    // intelligence-only fields below. score_grade is re-derived here with
-    // the same thresholds v3 uses, so the grade always matches the score on
-    // the row. churn_risk vocabulary differs by engine (v3:
-    // low/moderate/high/critical, here: healthy/watch/at_risk/critical) —
-    // aggregate readers that gate on it accept both (see admin-health.js).
-    const today = etDateString();
-
-    const record = {
-      overall_score: score,
-      score_grade: scoreGrade(score),
-      churn_probability: churnProbability,
-      churn_risk: riskLevel,
-      churn_signals: JSON.stringify(riskFactors),
-      upsell_opportunities: JSON.stringify(upsellOpps),
-      next_best_action: nextAction,
-      engagement_trend: trend,
-      lifetime_value_estimate: ltv,
-      scored_at: today,
-    };
-
-    const existing = await db('customer_health_scores')
+    // Canonical health row (written by customer-health.js earlier in the
+    // pipeline). Latest row per customer.
+    const row = await db('customer_health_scores')
       .where('customer_id', customerId)
       .orderByRaw('scored_at DESC NULLS LAST')
       .first();
 
-    if (existing) {
-      await db('customer_health_scores').where('id', existing.id).update({ ...record, updated_at: new Date() });
-    } else {
-      try {
-        await db('customer_health_scores').insert({ customer_id: customerId, ...record });
-      } catch (err) {
-        if (err.code !== '23505') throw err;
-        // Lost a first-insert race against the other scoring job on a table
-        // with UNIQUE(customer_id) — the row exists now, so update it.
-        const row = await db('customer_health_scores')
-          .where('customer_id', customerId)
-          .orderByRaw('scored_at DESC NULLS LAST')
-          .first();
-        if (row) {
-          await db('customer_health_scores').where('id', row.id).update({ ...record, updated_at: new Date() });
-        }
-      }
+    // Behavioral signals → next best action (unresolved only)
+    const signals = await db('customer_signals')
+      .where('customer_id', customerId)
+      .where('resolved', false);
+    const riskFactors = signals
+      .filter(s => (SIGNAL_TYPES[s.signal_type]?.weight ?? 0) < 0)
+      .map(s => ({
+        signal: s.signal_type,
+        value: s.signal_value,
+        severity: s.severity,
+        impact: SIGNAL_TYPES[s.signal_type]?.weight,
+      }));
+
+    // Upsell opportunities (also persisted to the upsell_opportunities table).
+    const upsellOpps = await this.identifyUpsells(customer);
+
+    // Read risk/probability from the canonical row — never recompute them here.
+    const churnRisk = row?.churn_risk || 'low';
+    const churnProbability = row?.churn_probability != null ? parseFloat(row.churn_probability) : 0.1;
+    const nextAction = this.determineNextAction(customer, churnRisk, riskFactors, upsellOpps);
+    const ltv = customer.monthly_rate ? parseFloat(customer.monthly_rate) * 12 * (1 - churnProbability) : 0;
+
+    // Write ONLY enrichment columns onto the canonical row. If no row exists
+    // yet (scorer hasn't run for this customer), skip the update — writing a
+    // score is not this layer's job. Upsells were still persisted above.
+    // engagement_trend is mirrored from the canonical score_trend (which the
+    // scorer just refreshed) so consumers that surface engagement_trend — e.g.
+    // retention-agent-tools get_at_risk_customers — never read a stale value
+    // left over from the old engine.
+    if (row) {
+      await db('customer_health_scores').where('id', row.id).update({
+        upsell_opportunities: JSON.stringify(upsellOpps),
+        next_best_action: nextAction,
+        lifetime_value_estimate: ltv,
+        engagement_trend: row.score_trend || 'stable',
+        updated_at: new Date(),
+      });
     }
 
-    // Retain per-day history in customer_health_history (the scores table
-    // holds only the current row per customer). Idempotent per
-    // (customer, day): refresh today's snapshot if one exists (e.g. written
-    // by the 2:15AM v3 scorer), else insert. Snapshot failures must not
-    // abort scoring, but are logged loudly with context.
-    try {
-      const snapshot = { customer_id: customerId, overall_score: score, churn_risk: riskLevel, scored_at: today };
-      const todaysSnapshot = await db('customer_health_history')
-        .where('customer_id', customerId)
-        .where('scored_at', today)
-        .first();
-      if (todaysSnapshot) {
-        await db('customer_health_history').where('id', todaysSnapshot.id).update(snapshot);
-      } else {
-        await db('customer_health_history').insert(snapshot);
-      }
-    } catch (err) {
-      logger.error(`Health scoring: daily history snapshot failed for customer ${customerId}: ${err.message}`);
-    }
-
-    return { score, riskLevel, churnProbability, trend, riskFactors, upsellOpps, nextAction };
+    return { upsellCount: upsellOpps.length, nextAction, hadRow: !!row };
   }
 
   async identifyUpsells(customer) {
@@ -251,6 +153,7 @@ class HealthScorer {
     return opps;
   }
 
+  // Risk vocabulary is the canonical engine's: low / moderate / high / critical.
   determineNextAction(customer, riskLevel, riskFactors, upsells) {
     if (riskLevel === 'critical') {
       const top = riskFactors[0];
@@ -260,13 +163,13 @@ class HealthScorer {
       return `CALL: Urgent retention check-in with ${customer.first_name}`;
     }
 
-    if (riskLevel === 'at_risk') {
+    if (riskLevel === 'high') {
       if (riskFactors.some(f => f.signal.includes('SERVICE_GAP'))) return `SMS: Re-engage — hasn't had service in 60+ days`;
       if (riskFactors.some(f => f.signal === 'PRICE_COMPLAINT')) return `SMS: Value reminder — highlight plan perks + savings`;
       return `SMS: Check-in — ask if everything is going well`;
     }
 
-    if (riskLevel === 'watch') return `MONITOR: Watch ${customer.first_name} — minor signals detected`;
+    if (riskLevel === 'moderate') return `MONITOR: Watch ${customer.first_name} — minor signals detected`;
 
     if (upsells.length > 0) {
       const best = upsells.sort((a, b) => b.confidence - a.confidence)[0];
