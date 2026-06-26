@@ -3387,43 +3387,10 @@ function shouldAttemptPrepaidReceipt({ gateEnabled, emailReceipt, applyToSeries,
   return { attempt: true, reason: null };
 }
 
-// Apply a scheduled_service's recorded prepayment as a payment against its
-// invoice: reduce the balance, mark paid when fully covered, and write one
-// idempotent prepaid-credit payment row. Extracted from the Charge-now route so
-// both paths share one implementation (and one dedupe guard).
-// Stripe PI statuses where money is already moving — we must NOT cancel the PI
-// or mark the invoice paid out from under it (mirrors /admin/invoices apply-credit).
-const PI_MONEY_IN_FLIGHT_STATUSES = ['processing', 'succeeded', 'requires_capture'];
-
-// Neutralize any open PaymentIntent on a reused invoice before marking it paid by
-// cash, so a stale /pay client secret can't still charge the card. Mirrors the
-// /apply-credit triage: refuse if money is in flight or the PI can't be verified;
-// otherwise cancel it. Returns { ok, piId } or { ok:false, reason }.
-async function guardOpenPaymentIntentForPrepaid(invoice) {
-  const piId = invoice.stripe_payment_intent_id || null;
-  if (!piId) return { ok: true, piId: null };
-  const StripeService = require('../services/stripe');
-  let pi;
-  try {
-    pi = await StripeService.retrievePaymentIntent(piId);
-  } catch (e) {
-    logger.warn(`[schedule] prepaid-receipt PI verify failed for ${piId}: ${e.message}`);
-    return { ok: false, reason: 'payment_session_unverifiable' };
-  }
-  // Null = Stripe unconfigured/unreachable — fail closed rather than mark paid
-  // while a live client secret could still settle.
-  if (!pi) return { ok: false, reason: 'payment_session_unverifiable' };
-  if (PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) return { ok: false, reason: 'payment_in_flight' };
-  if (pi.status !== 'canceled') {
-    try {
-      await StripeService.cancelPaymentIntent(piId, { cancellation_reason: 'abandoned' });
-    } catch (e) {
-      logger.warn(`[schedule] prepaid-receipt PI cancel failed for ${piId}: ${e.message}`);
-      return { ok: false, reason: 'payment_session_unverifiable' };
-    }
-  }
-  return { ok: true, piId };
-}
+// Cancel/refuse an open PaymentIntent before marking an invoice paid by cash —
+// shared with the completion-side prepaid application so both close the same
+// double-charge window. See services/prepaid-pi-guard.
+const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
 
 // Mint-or-reuse the invoice for a scheduled visit at the visit's standard price
 // (no operator extras — that's the Charge-now sheet's job, which is why that
@@ -3529,20 +3496,6 @@ async function sendPrepaidReceiptForInvoice(invoice) {
   };
 }
 
-// Roll back the prepayment stamped on a scheduled_service. Used when we refuse to
-// finalize because a live PaymentIntent can't be safely neutralized: the
-// completion-side prepaid application (admin-dispatch) has no PI guard, so leaving
-// the coverage would let it settle the invoice while the card/ACH session can
-// still charge. Best-effort; never blocks the response.
-async function clearStampedPrepaidCoverage(serviceId) {
-  await db('scheduled_services').where({ id: serviceId }).update({
-    prepaid_amount: null,
-    prepaid_method: null,
-    prepaid_note: null,
-    prepaid_at: null,
-  }).catch((e) => logger.warn(`[schedule] failed to clear prepaid coverage for ${serviceId}: ${e.message}`));
-}
-
 // Orchestrator: from a just-stamped single prepaid visit, mint/reuse its invoice
 // and — only when the cash fully covers it — finalize it the canonical way the
 // /admin/invoices record-payment + apply-credit routes do (NO total reduction;
@@ -3604,14 +3557,13 @@ async function generatePrepaidReceiptForService(serviceId) {
     };
   }
 
-  // P0: cancel/refuse any open PaymentIntent before marking paid.
+  // P0: cancel/refuse any open PaymentIntent before marking paid. A cancelable PI
+  // is cancelled and we proceed; if money is in flight or the PI can't be verified
+  // we refuse and leave the recorded prepayment in place — the completion-side
+  // application runs the SAME guard, so the operator's cash isn't lost and can't
+  // double-charge.
   const piGuard = await guardOpenPaymentIntentForPrepaid(invoice);
   if (!piGuard.ok) {
-    // A live card/ACH session blocks safely marking this invoice paid, and the
-    // completion-side prepaid application has no PI guard — so leaving the stamped
-    // coverage would let it settle the invoice while the session can still charge.
-    // Clear it; the operator resolves the open payment, then re-records.
-    await clearStampedPrepaidCoverage(svc.id);
     return { sent: false, reason: piGuard.reason, invoiceId: invoice.id, invoiceNumber: invoice.invoice_number };
   }
 
@@ -3669,12 +3621,6 @@ async function generatePrepaidReceiptForService(serviceId) {
   }
 
   if (outcome.reason) {
-    // Same PI safety as the pre-lock guard: a refusal here (a new /pay session
-    // appeared mid-finalize) must not leave stamped coverage for the unguarded
-    // completion path to apply against this PI-bearing invoice.
-    if (['payment_in_flight', 'payment_session_unverifiable', 'payment_session_changed'].includes(outcome.reason)) {
-      await clearStampedPrepaidCoverage(svc.id);
-    }
     return {
       sent: false,
       reason: outcome.reason,

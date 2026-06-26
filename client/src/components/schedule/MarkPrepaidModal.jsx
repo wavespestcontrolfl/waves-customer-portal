@@ -68,11 +68,11 @@ const RECEIPT_REASON_TEXT = {
   payer_billed:
     'This visit is billed to a third-party payer, so no homeowner receipt was sent — the prepayment was recorded.',
   payment_in_flight:
-    'A card payment is already in progress for this visit, so the cash prepayment was NOT recorded. Resolve that payment first, then try again.',
+    'The prepayment was recorded, but a card payment is already in progress for this visit, so no receipt was sent. Resolve the card payment to avoid a double charge.',
   payment_session_unverifiable:
-    'Couldn’t verify an open card payment for this visit, so the cash prepayment was NOT recorded. Try again in a moment.',
+    'The prepayment was recorded, but an open card payment for this visit couldn’t be verified, so no receipt was sent. Try again in a moment.',
   payment_session_changed:
-    'A new card payment session started for this visit, so the cash prepayment was NOT recorded. Try again.',
+    'The prepayment was recorded, but a new card payment session started for this visit, so no receipt was sent. Try again.',
   not_collectible:
     'This visit’s invoice can’t be marked paid right now, so no receipt was sent — the prepayment was recorded.',
   send_failed:
