@@ -318,6 +318,18 @@ const gates = {
   // follow-up sweeps send a verification re-nudge on the same cadence. Changes
   // customer-facing messaging, so off by default in prod until verified.
   divertMicrodepositDunning: isProd ? process.env.GATE_MICRODEPOSIT_DUNNING_DIVERSION === 'true' : true,
+
+  // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
+  // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"
+  // checked, mint the visit's invoice, apply the prepaid amount as payment, and
+  // — only if it lands fully paid — send the customer a branded paid receipt
+  // (email + SMS, via the same idempotent pipeline as /admin/invoices/:id/
+  // send-receipt). Touches a real customer email/SMS AND mints a paid invoice,
+  // so it ships dark in prod until verified. OFF means the Mark-prepaid flow
+  // behaves exactly as before: it records the prepayment and nothing is minted
+  // or sent. The mint/credit/send building blocks (Charge-now, send-receipt)
+  // stay individually available regardless of this gate.
+  prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
 };
 
 function isEnabled(gate) {
