@@ -64,8 +64,10 @@ import {
   ExternalLink,
   FileText,
   ListChecks,
+  Loader2,
   Paperclip,
   Plus,
+  Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -74,6 +76,7 @@ import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import { computeCardTotal } from "../../lib/cardSurcharge";
 import { invoiceDateOnly, formatInvoiceDate } from "../../lib/invoiceDates";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import DictationButton from "../../components/tech/DictationButton";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -199,6 +202,61 @@ const sInput = (isMobile) => ({
   boxSizing: "border-box",
   minHeight: isMobile ? 44 : undefined,
 });
+
+// In-box AI "write/rewrite" icon button. Mirrors the Sparkles control in the
+// CommunicationsPageV2 SMS composer (round icon, Loader2 spinner while working),
+// styled to pair with DictationButton on this inline-styled (legacy palette) page.
+function AiWriteButton({ loading, onClick, title, size = 30 }) {
+  const icon = Math.round(size * 0.52);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={loading}
+      title={title}
+      aria-label={title}
+      style={{
+        width: size,
+        height: size,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: "50%",
+        border: `1px solid ${D.inputBorder}`,
+        background: D.card,
+        color: D.teal,
+        cursor: loading ? "default" : "pointer",
+        opacity: loading ? 0.55 : 1,
+        padding: 0,
+        flex: "0 0 auto",
+        transition: "background 0.15s",
+      }}
+    >
+      {loading ? (
+        <Loader2 size={icon} strokeWidth={2.2} className="animate-spin" />
+      ) : (
+        <Sparkles size={icon} strokeWidth={2.2} />
+      )}
+    </button>
+  );
+}
+
+// Merge a dictated transcript chunk onto the current field value, inserting a
+// space at the seam and clamping to maxLen when the field is length-capped.
+function appendDictation(prev, chunk, maxLen) {
+  const base = prev || "";
+  const sep = base && !/\s$/.test(base) ? " " : "";
+  const next = base + sep + chunk;
+  return typeof maxLen === "number" ? next.slice(0, maxLen) : next;
+}
+
+// Shared palette for in-box DictationButton instances on this page.
+const DICTATION_PALETTE = {
+  accent: D.teal,
+  muted: D.inputBorder,
+  red: D.red,
+  card: D.card,
+};
 
 const ATTACHMENT_MAX_COUNT = 10;
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
@@ -5439,25 +5497,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               >
                 Notes (optional)
               </label>{" "}
-              <button
-                type="button"
-                onClick={handleWriteNotesWithAI}
-                disabled={aiNotesLoading}
-                style={{
-                  ...sBtn("transparent", D.teal, isMobile),
-                  padding: isMobile ? "9px 10px" : "6px 8px",
-                  fontSize: isMobile ? 12 : 11,
-                  minHeight: isMobile ? 38 : 30,
-                  opacity: aiNotesLoading ? 0.55 : 1,
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {aiNotesLoading
-                  ? "Writing..."
-                  : notes.trim()
-                    ? "Rewrite with AI"
-                    : "Write with AI"}
-              </button>{" "}
             </div>{" "}
             {aiSummaryEnabled && linkedServiceRecordId && (
               <div
@@ -5503,13 +5542,38 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                 ))}
               </div>
             )}
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={2}
-              placeholder=""
-              style={{ ...sInput(isMobile), resize: "vertical" }}
-            />{" "}
+            <div style={{ position: "relative" }}>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={2}
+                placeholder=""
+                style={{ ...sInput(isMobile), resize: "vertical", paddingRight: 76 }}
+              />
+              <div
+                style={{
+                  position: "absolute",
+                  top: 8,
+                  right: 8,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+              >
+                <AiWriteButton
+                  loading={aiNotesLoading}
+                  onClick={handleWriteNotesWithAI}
+                  title={notes.trim() ? "Rewrite with AI" : "Write with AI"}
+                />
+                <DictationButton
+                  onAppend={(t) =>
+                    setNotes((prev) => appendDictation(prev, t))
+                  }
+                  palette={DICTATION_PALETTE}
+                  title="Dictate notes"
+                />
+              </div>
+            </div>{" "}
           </div>{" "}
           {emailMessageEnabled && (
             <div style={{ marginBottom: 14 }}>
@@ -5535,33 +5599,41 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                 >
                   Email thank-you (optional)
                 </label>{" "}
-                <button
-                  type="button"
-                  onClick={handleWriteThankYouWithAI}
-                  disabled={aiMessageLoading}
+              </div>{" "}
+              <div style={{ position: "relative" }}>
+                <textarea
+                  value={emailMessage}
+                  onChange={(e) => setEmailMessage(e.target.value.slice(0, 800))}
+                  rows={2}
+                  placeholder="A short, warm thank-you note for the invoice email."
+                  style={{ ...sInput(isMobile), resize: "vertical", paddingRight: 76 }}
+                />
+                <div
                   style={{
-                    ...sBtn("transparent", D.teal, isMobile),
-                    padding: isMobile ? "9px 10px" : "6px 8px",
-                    fontSize: isMobile ? 12 : 11,
-                    minHeight: isMobile ? 38 : 30,
-                    opacity: aiMessageLoading ? 0.55 : 1,
-                    whiteSpace: "nowrap",
+                    position: "absolute",
+                    top: 8,
+                    right: 8,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
                   }}
                 >
-                  {aiMessageLoading
-                    ? "Writing..."
-                    : emailMessage.trim()
-                      ? "Rewrite with AI"
-                      : "Write with AI"}
-                </button>{" "}
+                  <AiWriteButton
+                    loading={aiMessageLoading}
+                    onClick={handleWriteThankYouWithAI}
+                    title={
+                      emailMessage.trim() ? "Rewrite with AI" : "Write with AI"
+                    }
+                  />
+                  <DictationButton
+                    onAppend={(t) =>
+                      setEmailMessage((prev) => appendDictation(prev, t, 800))
+                    }
+                    palette={DICTATION_PALETTE}
+                    title="Dictate thank-you"
+                  />
+                </div>
               </div>{" "}
-              <textarea
-                value={emailMessage}
-                onChange={(e) => setEmailMessage(e.target.value.slice(0, 800))}
-                rows={2}
-                placeholder="A short, warm thank-you note for the invoice email."
-                style={{ ...sInput(isMobile), resize: "vertical" }}
-              />{" "}
               <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
                 Appears in the invoice email, below the service summary — not on
                 the PDF.
