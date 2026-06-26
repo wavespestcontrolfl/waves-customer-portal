@@ -9,7 +9,12 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) =>
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) => url }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.test' }));
 jest.mock('../services/customer-contact', () => ({
-  getServiceContact: (c) => ({ phone: c.phone || '+19410000000', email: c.email || 'x@y.com', name: c.first_name || 'Stan' }),
+  // Honor explicit null/'' so tests can model a customer missing a channel.
+  getServiceContact: (c) => ({
+    phone: c.phone !== undefined ? c.phone : '+19410000000',
+    email: c.email !== undefined ? c.email : 'x@y.com',
+    name: c.first_name || 'Stan',
+  }),
 }));
 
 const db = require('../models/db');
@@ -194,6 +199,34 @@ describe('review sequences — cadence engine', () => {
     expect(out.started).toBe(false);
     expect(out.reason).toBe('at_cap');
     expect(mock.__state.rows.review_sequences).toHaveLength(0);
+  });
+
+  test('an explicit "sms" channel preference does NOT fall back to email', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'p1', first_name: 'Pat', last_name: 'C', phone: null, email: 'pat@x.com', nearest_location_id: 'venice' }],
+      notification_prefs: [{ customer_id: 'p1', review_request: true, review_request_channel: 'sms' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'cron' });
+
+    // Chose SMS, has no phone, prefers SMS only → no contact, NOT an email send.
+    expect(out.ok).toBeFalsy();
+    expect(out.reason).toBe('no_contact');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a no-link template (resolution_check) sends without a /rate link', async () => {
+    const mock = makeMock({ customers: [{ id: 'n1', first_name: 'Ron', last_name: 'R', phone: '+19410000009', nearest_location_id: 'parrish' }] });
+    db.mockImplementation(mock);
+
+    await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'resolution_check', manageRetryVia: 'cron' });
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(body).not.toMatch(/\/rate\//);
+    expect(body).not.toMatch(/portal\.test/);
   });
 
   test('a terminal SMS failure (invalid number) is suppressed, not retried forever', async () => {

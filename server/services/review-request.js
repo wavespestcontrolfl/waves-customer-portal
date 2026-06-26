@@ -368,7 +368,12 @@ const ReviewService = {
       ? OUTREACH.getOutreachTemplate(request.template_key)
       : null;
     if (request.custom_body) {
-      // Edited copy always belongs to an ask, so guarantee the /rate link.
+      // Whether to guarantee the /rate link is based on the STORED template, not
+      // "custom body ⇒ ask" — otherwise an edited no-link check-in (e.g.
+      // resolution_check / satisfaction_confirm) would retry as a review ask
+      // with a Google link appended. A pure custom body with no known template
+      // is treated as an ask.
+      const customRequiresLink = outreachTpl ? outreachTpl.body.includes("{review_url}") : true;
       body = OUTREACH.renderOutreachBody(
         request.custom_body,
         {
@@ -377,7 +382,7 @@ const ReviewService = {
           service_type: request.service_type || "service",
           review_url: reviewUrl,
         },
-        { requireLink: true },
+        { requireLink: customRequiresLink },
       );
     } else if (outreachTpl) {
       body = OUTREACH.renderOutreachBody(
@@ -1230,15 +1235,21 @@ const ReviewService = {
     const canSms = !!contact.phone && !smsBlocked;
     const canEmail = !!contact.email && !emailBlocked && !prefsLookupFailed;
 
-    // Per-type channel preference overrides the step's default channel intent.
+    // Per-type channel preference. An EXPLICIT single-channel preference
+    // ('sms' | 'email') is treated as the ALLOWED channel set, not a hint — we
+    // never contact a customer on a channel they didn't choose, so if their
+    // chosen channel is unavailable we stop rather than falling back to the
+    // other one. 'both' / unset allows either (with fallback).
     const prefChannel = prefs && prefs.review_request_channel;
+    const allowSms = canSms && prefChannel !== "email";
+    const allowEmail = canEmail && prefChannel !== "sms";
     let intended = channel === "email" ? "email" : "sms";
     if (prefChannel === "email") intended = "email";
     else if (prefChannel === "sms") intended = "sms";
 
     let actualChannel = intended;
-    if (actualChannel === "sms" && !canSms) actualChannel = canEmail ? "email" : null;
-    if (actualChannel === "email" && !canEmail) actualChannel = canSms ? "sms" : null;
+    if (actualChannel === "sms" && !allowSms) actualChannel = allowEmail ? "email" : null;
+    if (actualChannel === "email" && !allowEmail) actualChannel = allowSms ? "sms" : null;
     if (!actualChannel) {
       const optedOut = reviewBlocked || (intended === "email" ? emailBlocked : smsBlocked);
       return { ok: false, reason: optedOut ? "opted_out" : "no_contact", blocked: optedOut, terminal: true };
@@ -1544,6 +1555,17 @@ const ReviewService = {
     }
 
     const step = plan[seq.current_step] || {};
+
+    // Final atomic claim right before sending: an admin Stop (or a completing
+    // touch on a sibling row) can land between the reads above and here. Flip
+    // next_run_at to NULL only if the row is STILL active — if 0 rows update,
+    // it was stopped/completed concurrently, so bail without sending. (The
+    // value is restored to the real schedule on success/retry below.)
+    const claimed = await db("review_sequences")
+      .where({ id: seq.id, status: "active" })
+      .update({ next_run_at: null, updated_at: new Date() });
+    if (!claimed) return { ran: false, reason: "not_active" };
+
     const outcome = await this.sendOutreachTouch({
       customer,
       channel: step.channel || "sms",

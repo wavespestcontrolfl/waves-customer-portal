@@ -398,6 +398,8 @@ function apiToCustomer(row) {
 const ELIGIBILITY_LABELS = {
   no_contact: "No phone or email on file",
   no_phone: "No SMS phone (email only — use a cadence)",
+  sms_opted_out: "Opted out of review texts (email cadence still OK)",
+  sms_suppressed: "Phone on do-not-contact (email cadence still OK)",
   opted_out: "Opted out of review texts",
   suppressed: "On the do-not-contact list",
   at_cap: "Already asked 3 times",

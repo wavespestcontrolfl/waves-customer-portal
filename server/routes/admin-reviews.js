@@ -533,26 +533,31 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         const ls = lastSvcMap[c.id];
         const ask = askMap[c.id] || { askCount: 0, lastAsked: null };
         const prefs = prefsMap[c.id];
-        const optedOut = !!prefs && (prefs.sms_enabled === false || prefs.review_request === false);
-        const emailOptedOut = !!prefs && (prefs.email_enabled === false || prefs.review_request === false);
+        const reviewOptedOut = !!prefs && prefs.review_request === false; // review-wide opt-out
+        const smsPrefOff = !!prefs && prefs.sms_enabled === false;
+        const emailPrefOff = !!prefs && prefs.email_enabled === false;
         const suppressed = phone ? suppressedSet.has(phone) : false;
         const inCooldown = ask.lastAsked ? (new Date(ask.lastAsked).getTime() >= thirtyDaysAgo) : false;
         const atCap = ask.askCount >= 3;
-        const smsable = !!phone && !optedOut && !suppressed;
-        const emailable = !!email && !emailOptedOut;
+        const smsable = !!phone && !reviewOptedOut && !smsPrefOff && !suppressed;
+        const emailable = !!email && !reviewOptedOut && !emailPrefOff;
         const sequence = sequenceMap[c.id] || null;
-        // `sendable` gates the manual Send button, which is SMS-only — so it
-        // requires an SMS-reachable contact (audit: email-only customers used to
-        // show an enabled Send that always 400s "No SMS-capable phone").
-        // `cadenceable` gates Start-Cadence, which can fall back to email.
+        // `sendable` gates the SMS-only manual Send; `cadenceable` gates
+        // Start-Cadence (can use email). A customer who turned OFF review SMS but
+        // still allows email must STAY visible for the email cadence — so only
+        // the row-hiding reasons (opted_out / suppressed) are emitted when NO
+        // review channel remains; an SMS-only block uses a soft `sms_*` reason.
         const baseBlocked = atCap || inCooldown || !!sequence;
         const sendable = smsable && !baseBlocked;
         const cadenceable = (smsable || emailable) && !baseBlocked;
         const eligibilityReasons = [];
-        if (!phone && !email) eligibilityReasons.push('no_contact');
-        else if (!smsable && !suppressed && !optedOut) eligibilityReasons.push('no_phone');
-        if (optedOut) eligibilityReasons.push('opted_out');
-        if (suppressed) eligibilityReasons.push('suppressed');
+        if (!smsable && !emailable) {
+          if (reviewOptedOut) eligibilityReasons.push('opted_out');
+          else if (suppressed) eligibilityReasons.push('suppressed');
+          else eligibilityReasons.push('no_contact');
+        } else if (!smsable && emailable) {
+          eligibilityReasons.push(suppressed ? 'sms_suppressed' : smsPrefOff ? 'sms_opted_out' : 'no_phone');
+        }
         if (atCap) eligibilityReasons.push('at_cap');
         if (inCooldown) eligibilityReasons.push('cooldown');
         if (sequence) eligibilityReasons.push('in_sequence');
@@ -620,6 +625,24 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
       if (stats.count >= 3) return { status: 409, payload: { error: 'Customer has already received 3 review requests' } };
       if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
         return { status: 409, payload: { error: 'Customer received a review request in the last 30 days' } };
+      }
+      // A previous send may have DEFERRED (quiet hours) or hit a transient
+      // failure, leaving a pending row scheduled for processScheduled() with no
+      // sent timestamp. The cap counts only delivered asks, so a second click on
+      // the 202 response would queue ANOTHER pending row and processScheduled
+      // would send both → duplicate texts. Reuse the existing queued row instead.
+      const queued = await db('review_requests')
+        .where({ customer_id: customer.id, status: 'pending' })
+        .whereNull('sms_sent_at')
+        .whereNotNull('scheduled_for')
+        .orderBy('scheduled_for', 'asc')
+        .first();
+      if (queued) {
+        return { status: 202, payload: {
+          success: false, deferred: true, alreadyQueued: true,
+          nextAllowedAt: queued.scheduled_for,
+          message: 'A review request to this customer is already queued and will send automatically.',
+        } };
       }
 
       const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
