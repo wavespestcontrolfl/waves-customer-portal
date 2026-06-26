@@ -133,10 +133,36 @@ Once §2–§4 pass:
 
 ## Rollback
 
-`GATE_PAYER_STATEMENTS=false` instantly reverts to per-visit billing for everyone.
-Already-accrued OPEN statements simply stop being the unit of billing; their
-child invoices remain real `invoices`. A `Sent`/`Paid` statement is a historical
-document and is unaffected. No data is destroyed by toggling the gate.
+`GATE_PAYER_STATEMENTS=false` instantly reverts to per-visit billing for **new**
+visits, and a `Sent`/`Paid` statement is a historical document that is
+unaffected. No data is destroyed by toggling the gate.
+
+**But a clean rollback is only clean if no invoice has accrued to an OPEN
+statement yet.** Once invoices are attached to an OPEN statement, flipping the
+gate off **strands** them rather than freeing them:
+
+- the admin close/send/reconcile paths are gated and return `403`
+  (`server/routes/admin-payers.js`), so you can't deliver the statement; and
+- the individual invoice email and pay surfaces refuse any invoice carrying a
+  `payer_statement_id` — and those guards are **gate-independent, fail-closed**
+  (`server/services/invoice-email.js`, `server/routes/pay-v2.js`), so the child
+  invoices can't be billed one-by-one either.
+
+So those balances sit uncollectable until you act. To roll back cleanly when an
+OPEN statement has already accrued lines, do one of:
+
+1. **Drain first (preferred).** Leave the gate **on**, **Close & send** the OPEN
+   statement(s), let them settle (or **Record offline payment**), then flip the
+   gate off once nothing is `Open (accruing)`. During the §2/§3 dry-run this just
+   means finishing the test statement you created instead of abandoning it.
+2. **Detach.** If you must flip off immediately, clear `payer_statement_id` on
+   the affected child invoices (and reopen/void the empty statement) so they
+   become individually billable again under per-visit billing. Treat this as a
+   deliberate, audited DB step — there is no UI for it.
+
+Sanity check before flipping off:
+`select id, payer_id, status from payer_statements where status = 'open';` — if
+that returns rows with lines, drain or detach before rollback.
 
 ## Still deferred (not blockers for go-live)
 
