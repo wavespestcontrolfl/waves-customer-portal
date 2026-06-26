@@ -69,13 +69,13 @@ Analyze top 20 by priority (critical first, then by LTV). Save a retention repor
     {
       type: 'custom',
       name: 'get_at_risk_customers',
-      description: `Get the list of customers with health scores in critical, at_risk, or watch status. Returns customer name, tier, monthly rate, health score, risk level, churn probability, top risk factors, lifetime value estimate, engagement trend, and next best action. Sorted by risk severity then lifetime value. Use this to build your priority list.`,
+      description: `Get the list of customers with health scores in critical, high, or moderate churn-risk status. Returns customer name, tier, monthly rate, health score, risk level, churn probability, top risk factors, lifetime value estimate, engagement trend, and next best action. Sorted by risk severity then lifetime value. Use this to build your priority list.`,
       input_schema: {
         type: 'object',
         properties: {
           risk_levels: {
             type: 'array', items: { type: 'string' },
-            description: 'Filter by risk levels: ["critical", "at_risk", "watch"]. Default: all three.',
+            description: 'Filter by churn-risk levels: ["critical", "high", "moderate"]. Default: all three.',
           },
           limit: { type: 'number', description: 'Max customers to return (default 30)' },
         },

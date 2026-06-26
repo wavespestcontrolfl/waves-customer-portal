@@ -49,11 +49,12 @@ const ALL_SERVICES = [
   { name: 'Ornamental Care', category: 'ornamental', avgMonthly: 40 },
 ];
 
-// Health-status to estimated retention months mapping
+// Health churn-risk to estimated retention months. Keyed on the canonical
+// customer-health.js vocabulary (low/moderate/high/critical).
 const RETENTION_MONTHS = {
-  healthy: 24,
-  watch: 12,
-  at_risk: 6,
+  low: 24,
+  moderate: 12,
+  high: 6,
   critical: 3,
 };
 
@@ -120,7 +121,7 @@ class PricingIntelligence {
       .orderBy('scored_at', 'desc')
       .first();
 
-    const healthStatus = healthRow?.churn_risk || 'watch';
+    const healthStatus = healthRow?.churn_risk || 'moderate';
     const retentionMonths = RETENTION_MONTHS[healthStatus] || 12;
 
     // Total revenue to date
@@ -174,7 +175,7 @@ class PricingIntelligence {
     }
 
     const ltvToCac = acquisitionCost > 0 ? Math.round((estimatedLtv / acquisitionCost) * 100) / 100 : null;
-    const churnRisk = healthStatus === 'healthy' ? 'low' : healthStatus === 'watch' ? 'medium' : 'high';
+    const churnRisk = healthStatus === 'low' ? 'low' : healthStatus === 'moderate' ? 'medium' : 'high';
 
     const record = {
       customer_id: customerId,

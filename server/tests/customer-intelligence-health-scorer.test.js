@@ -61,7 +61,7 @@ describe('health-scorer enrichment (customer_health_scores)', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
   test('updates ONLY enrichment columns on the canonical row — never the score/risk', async () => {
-    const row = { id: 'row-1', customer_id: 'c1', churn_risk: 'high', churn_probability: '0.55' };
+    const row = { id: 'row-1', customer_id: 'c1', churn_risk: 'high', churn_probability: '0.55', score_trend: 'declining' };
     const updateChain = makeChain(undefined);
 
     wireDb({
@@ -78,9 +78,11 @@ describe('health-scorer enrichment (customer_health_scores)', () => {
 
     const written = updateChain.update.mock.calls[0][0];
     // Exactly the enrichment columns — nothing that belongs to the scorer.
+    // engagement_trend is mirrored from the canonical score_trend, not recomputed.
     expect(Object.keys(written).sort()).toEqual(
-      ['lifetime_value_estimate', 'next_best_action', 'updated_at', 'upsell_opportunities'].sort()
+      ['engagement_trend', 'lifetime_value_estimate', 'next_best_action', 'updated_at', 'upsell_opportunities'].sort()
     );
+    expect(written.engagement_trend).toBe('declining'); // mirrored from canonical score_trend
     expect(written).not.toHaveProperty('overall_score');
     expect(written).not.toHaveProperty('churn_risk');
     expect(written).not.toHaveProperty('score_grade');

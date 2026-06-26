@@ -69,11 +69,16 @@ class HealthScorer {
     // Write ONLY enrichment columns onto the canonical row. If no row exists
     // yet (scorer hasn't run for this customer), skip the update — writing a
     // score is not this layer's job. Upsells were still persisted above.
+    // engagement_trend is mirrored from the canonical score_trend (which the
+    // scorer just refreshed) so consumers that surface engagement_trend — e.g.
+    // retention-agent-tools get_at_risk_customers — never read a stale value
+    // left over from the old engine.
     if (row) {
       await db('customer_health_scores').where('id', row.id).update({
         upsell_opportunities: JSON.stringify(upsellOpps),
         next_best_action: nextAction,
         lifetime_value_estimate: ltv,
+        engagement_trend: row.score_trend || 'stable',
         updated_at: new Date(),
       });
     }
