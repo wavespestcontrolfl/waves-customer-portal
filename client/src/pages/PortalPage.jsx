@@ -2907,6 +2907,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '72-Hour Appointment Reminder', desc: 'A reminder 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
                 { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: '24-Hour Service Reminder', desc: 'A reminder the day before every visit', icon: 'smartphone', locked: false, defaultOn: true },
                 { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
+                // Arrival alert — fires when the tracker flips to on-site, the
+                // moment the tech reaches the property. Independent of the
+                // en-route text so a customer can keep one and mute the other.
+                { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
                 // Phase 2E: per-customer auto-flip opt-out. Distinct
                 // from techEnRoute — that one fires when the tech taps
                 // "En Route". This one fires automatically when the
@@ -3020,6 +3024,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 { key: 'serviceReminder72h', label: '72 hr' },
                 { key: 'serviceReminder24h', label: '24 hr' },
                 { key: 'techEnRoute', label: 'En route' },
+                { key: 'techArrived', label: 'Arrived' },
                 { key: 'appointmentNotifyPrimary', label: 'Me too' },
               ];
               const contacts = displayContacts(property);
