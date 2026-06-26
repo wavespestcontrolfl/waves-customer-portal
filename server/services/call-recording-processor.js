@@ -222,7 +222,14 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     }
 
     const [named] = await namedQuery.orderBy('updated_at', 'desc').limit(1);
-    return named && extractedNameMatchesCustomer(extracted, named) ? named : null;
+    if (named && extractedNameMatchesCustomer(extracted, named)) return named;
+    // No name match — but the AI-extracted name is frequently wrong (it can pick
+    // up the technician's name from the call audio, e.g. "Adam"). Returning null
+    // here makes the caller spawn a NEW customer even when the phone already maps
+    // to one, creating a duplicate. Fall through to the phone-only single-match
+    // below instead — this is the behavior the caller already documents
+    // ("phone-only matching is allowed only when the number maps to a single
+    // active customer") and keeps the genuine shared-phone case (2+ matches) safe.
   }
 
   const matches = await base().orderBy('updated_at', 'desc').limit(2);
@@ -2901,6 +2908,7 @@ CallRecordingProcessor._test = {
   maskPhone,
   validatePhoneCallAppointmentCustomer,
   extractedNameMatchesCustomer,
+  findCustomerForCallContact,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   transcribeRecording,
