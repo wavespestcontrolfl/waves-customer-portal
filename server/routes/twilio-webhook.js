@@ -402,6 +402,15 @@ router.post('/sms', async (req, res) => {
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
 
+    // Event-driven health rescore on hot inbound signals (competitor mention,
+    // cancellation language, price complaint). Fire-and-forget so it never
+    // delays the webhook ack; gated behind GATE_EVENT_RESCORE (no-op when off).
+    if (messageType === 'inbound' && customer?.id) {
+      void require('../services/customer-intelligence/event-rescore')
+        .rescoreOnInboundMessage(customer.id, { source: 'inbound_sms' })
+        .catch(err => logger.debug(`[twilio-webhook] event rescore failed: ${err.message}`));
+    }
+
     await db('activity_log').insert({
       customer_id: customer?.id || null,
       action: messageType === 'inbound' ? 'sms_received' : 'lead_received',
