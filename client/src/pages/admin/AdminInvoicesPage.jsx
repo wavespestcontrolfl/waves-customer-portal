@@ -3971,6 +3971,9 @@ function PaymentPlanModal({
 // ── Create Invoice ──
 function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   const editMode = !!editInvoice;
+  // One-tap AI summary (pulls context from the linked visit + source toggles).
+  // Off by default; the base "Write with AI" still works from typed input + lines.
+  const aiSummaryEnabled = useFeatureFlag("ff_invoice_ai_summary");
   function defaultServiceDate() {
     const parts = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
@@ -4010,6 +4013,11 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   const [discountSearchIdx, setDiscountSearchIdx] = useState(null);
   const [discountQueries, setDiscountQueries] = useState({});
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
+  const [aiSources, setAiSources] = useState({
+    jobSummary: true,
+    forms: true,
+    lineItems: true,
+  });
   const [queuedAttachments, setQueuedAttachments] = useState([]);
   const attachmentInputRef = useRef(null);
   // Snapshot of the line items as loaded in edit mode, so a save that didn't
@@ -4405,11 +4413,17 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     return Number(reviewTiming) || 120;
   };
 
+  // The completed visit this invoice is tied to — set when picking a service
+  // in create mode, or carried on the invoice row in edit mode.
+  const linkedServiceRecordId =
+    selectedService?.id || editInvoice?.service_record_id || null;
+
   const handleWriteNotesWithAI = async () => {
     const usableLines = lineItems.filter(
       (i) => i._kind !== "discount" && i.description,
     );
-    if (!notes.trim() && usableLines.length === 0) {
+    const canPullVisit = aiSummaryEnabled && !!linkedServiceRecordId;
+    if (!notes.trim() && usableLines.length === 0 && !canPullVisit) {
       showToast("Add notes or services first");
       return;
     }
@@ -4422,20 +4436,25 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
           customerName: selectedCustomer
             ? `${selectedCustomer.first_name || ""} ${selectedCustomer.last_name || ""}`.trim()
             : "",
+          // Required server-side to scope the visit lookup to THIS customer.
+          customerId: selectedCustomer?.id || editInvoice?.customer_id || null,
           services: usableLines.map((item) => ({
             description: item.description,
             quantity: Number(item.quantity) || 1,
           })),
+          ...(canPullVisit
+            ? { serviceRecordId: linkedServiceRecordId, sources: aiSources }
+            : {}),
         }),
       });
       if (result.notes) {
         setNotes(result.notes);
-        showToast("Notes written with AI");
+        showToast("Summary written with AI");
       } else {
-        showToast("AI did not return notes");
+        showToast("AI did not return a summary");
       }
     } catch (e) {
-      showToast(`AI notes failed: ${e.message}`);
+      showToast(`AI summary failed: ${e.message}`);
     }
     setAiNotesLoading(false);
   };
@@ -4830,6 +4849,10 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                       key={c.id}
                       onClick={() => {
                         setSelectedCustomer(c);
+                        // Drop any visit picked for the previous customer so a
+                        // stale service record can't be linked across customers.
+                        setSelectedService(null);
+                        setServiceRecords([]);
                         setCustomers([]);
                         setCustomerQuery("");
                       }}
@@ -5392,9 +5415,57 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                   whiteSpace: "nowrap",
                 }}
               >
-                {aiNotesLoading ? "Writing..." : "Write with AI"}
+                {aiNotesLoading
+                  ? "Writing..."
+                  : notes.trim()
+                    ? "Rewrite with AI"
+                    : "Write with AI"}
               </button>{" "}
             </div>{" "}
+            {aiSummaryEnabled && linkedServiceRecordId && (
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  gap: 14,
+                  marginBottom: 8,
+                }}
+              >
+                <span style={{ fontSize: 11, color: D.muted }}>
+                  Pull from visit:
+                </span>
+                {[
+                  { key: "jobSummary", label: "Job summary" },
+                  { key: "forms", label: "Field observations" },
+                  { key: "lineItems", label: "Line items" },
+                ].map(({ key, label }) => (
+                  <label
+                    key={key}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: 12,
+                      color: D.text,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={aiSources[key]}
+                      onChange={(e) =>
+                        setAiSources((prev) => ({
+                          ...prev,
+                          [key]: e.target.checked,
+                        }))
+                      }
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            )}
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
