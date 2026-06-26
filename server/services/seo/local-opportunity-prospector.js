@@ -125,25 +125,43 @@ async function discoverLocalOpportunities({
   concurrency = 6,
   dfs = dataforseo,
 } = {}) {
+  // Type precedence for deterministic tie-breaking = first-appearance order of each
+  // type in the query list (sponsorship < event < chamber < community < podcast for
+  // the default catalog). Because the SERP sweep runs concurrently, the "best
+  // appearance" (which drives opportunity_type + source_url) must be chosen by the
+  // data — not by whichever request returns first — so identical SERP data always
+  // yields the same primary type and landing page across runs.
+  const typeOrder = [...new Set(queries.map((q) => q.type))];
+  const typeRank = (t) => { const i = typeOrder.indexOf(t); return i < 0 ? 999 : i; };
+
   const tally = new Map();
   const bump = (host, { market, query, type, position, url, title }) => {
     if (isExcludedHost(host, ownHosts)) return;
     const cur = tally.get(host) || {
       domain: host, appearances: 0, bestPosition: 999,
       markets: new Set(), queries: new Set(), types: new Set(),
-      source_url: null, title: null, firstPosition: 999,
+      source_url: null, title: null, primaryType: null, primaryQuery: null,
     };
     cur.appearances += 1;
     cur.bestPosition = Math.min(cur.bestPosition, position || 999);
     cur.markets.add(market);
     cur.queries.add(query);
     cur.types.add(type);
-    // Keep the highest-ranked result's URL/title as the representative landing page
-    // — it's the strongest intent signal the scorer reads (/sponsors, /members, …).
-    if ((position || 999) < cur.firstPosition) {
-      cur.firstPosition = position || 999;
-      cur.source_url = url || cur.source_url;
-      cur.title = title || cur.title;
+    // Pick the representative appearance deterministically: best (lowest) SERP rank,
+    // then higher type precedence, then lexicographically-smallest query — all from
+    // the data, so fetch order can't change which one wins. It supplies both the
+    // primary opportunity_type and the landing page URL/title the scorer reads.
+    const p = position || 999;
+    const better = cur.primaryType === null
+      || p < cur.bestPositionPrimary
+      || (p === cur.bestPositionPrimary && typeRank(type) < typeRank(cur.primaryType))
+      || (p === cur.bestPositionPrimary && typeRank(type) === typeRank(cur.primaryType) && query < cur.primaryQuery);
+    if (better) {
+      cur.bestPositionPrimary = p;
+      cur.primaryType = type;
+      cur.primaryQuery = query;
+      cur.source_url = url || null;
+      cur.title = title || null;
     }
     tally.set(host, cur);
   };
@@ -175,18 +193,21 @@ async function discoverLocalOpportunities({
   return [...tally.values()]
     .map((c) => ({
       domain: c.domain,
-      // Primary type = the type of the highest-ranked appearance is ambiguous to
-      // recover post-hoc; use the first inserted type as primary, keep the full set.
-      opportunity_type: [...c.types][0] || 'community',
-      opportunity_types: [...c.types],
+      opportunity_type: c.primaryType || 'community',
+      // Sort the value arrays deterministically (types by precedence, markets/queries
+      // lexically) so identical SERP data serializes identically into notes/quality_signals.
+      opportunity_types: [...c.types].sort((a, b) => typeRank(a) - typeRank(b)),
       source_url: c.source_url,
       title: c.title,
       appearances: c.appearances,
       bestPosition: c.bestPosition,
-      markets: [...c.markets],
-      queries: [...c.queries],
+      markets: [...c.markets].sort(),
+      queries: [...c.queries].sort(),
     }))
-    .sort((a, b) => (b.appearances - a.appearances) || (a.bestPosition - b.bestPosition));
+    // domain tiebreak makes the ranking (and therefore --limit selection) deterministic
+    // when appearances + bestPosition tie.
+    .sort((a, b) => (b.appearances - a.appearances) || (a.bestPosition - b.bestPosition)
+      || (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0));
 }
 
 /**

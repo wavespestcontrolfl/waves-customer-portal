@@ -115,6 +115,25 @@ describe('local-opportunity-prospector', () => {
     expect(maxInFlight).toBeGreaterThan(1);     // genuinely ran in parallel (not serial)
   });
 
+  test('primary opportunity_type + landing page come from the best-ranked appearance (deterministic, not fetch order)', async () => {
+    const markets = [{ label: 'Venice', location: 'v' }];
+    // 'community' is listed first, but the domain ranks far better under 'sponsorship' —
+    // rank must decide the primary, so a concurrent sweep can't flip it between runs.
+    const queries = [
+      { type: 'community', tmpl: (c) => `${c} community calendar` },
+      { type: 'sponsorship', tmpl: (c) => `${c} little league sponsors` },
+    ];
+    const dfs = fakeDfs({
+      'Venice community calendar': [{ type: 'organic', domain: 'civichub.org', url: 'https://civichub.org/events', rank_absolute: 6 }],
+      'Venice little league sponsors': [{ type: 'organic', domain: 'civichub.org', url: 'https://civichub.org/sponsors', rank_absolute: 1 }],
+    });
+    const found = await discoverLocalOpportunities({ markets, queries, dfs });
+    const c = found.find((f) => f.domain === 'civichub.org');
+    expect(c.opportunity_type).toBe('sponsorship');               // best rank wins
+    expect(c.source_url).toBe('https://civichub.org/sponsors');   // landing page follows the same pick
+    expect(c.opportunity_types).toEqual(['community', 'sponsorship']); // sorted by query-order precedence
+  });
+
   test('excludeOwned drops domains we already have an active link from', () => {
     const candidates = [
       { domain: 'veniceyouthbaseball.org' },
