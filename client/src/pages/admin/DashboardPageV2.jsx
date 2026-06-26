@@ -38,10 +38,16 @@ import {
   isRateLimitError,
 } from "../../utils/admin-fetch";
 
+// Point-in-time → rolling windows (inclusive of today) → calendar-to-date.
+// Server resolves each id via the shared periodStartDate (admin-dashboard.js).
 const PERIODS = [
   { id: "today", label: "Today" },
+  { id: "last_7", label: "7D" },
+  { id: "last_30", label: "30D" },
+  { id: "last_90", label: "90D" },
   { id: "wtd", label: "WTD" },
   { id: "mtd", label: "MTD" },
+  { id: "qtd", label: "QTD" },
   { id: "ytd", label: "YTD" },
 ];
 
@@ -675,21 +681,23 @@ export default function DashboardPageV2() {
               {kpis?.periodLabel || "Month to Date"}
             </div>{" "}
           </div>{" "}
-          <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
-            {PERIODS.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => setPeriod(p.id)}
-                className={cn(
-                  "h-11 sm:h-7 px-4 sm:px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors",
-                  period === p.id
-                    ? "bg-zinc-900 text-white"
-                    : "bg-white text-ink-secondary hover:bg-zinc-50",
-                )}
-              >
-                {p.label}
-              </button>
-            ))}
+          <div className="max-w-full overflow-x-auto">
+            <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
+              {PERIODS.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => setPeriod(p.id)}
+                  className={cn(
+                    "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0",
+                    period === p.id
+                      ? "bg-zinc-900 text-white"
+                      : "bg-white text-ink-secondary hover:bg-zinc-50",
+                  )}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
           </div>{" "}
         </CardHeader>{" "}
         <CardBody>
