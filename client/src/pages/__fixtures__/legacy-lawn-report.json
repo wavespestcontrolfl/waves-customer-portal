@@ -357,7 +357,7 @@
     "title": "Lawn Coverage",
     "intro": "Here's where your technician completed lawn service, inspected, or marked an area as inaccessible during today's visit.",
     "introText": "Here's where your technician completed lawn service, inspected, or marked an area as inaccessible during today's visit.",
-    "address": "5949 Lexington Dr, Parrish, FL 34219",
+    "address": "123 Test St, Testville, FL 34000",
     "serviceDate": "2026-06-25T00:00:00.000Z",
     "disclaimer": "Service coverage is based on technician-marked locations and available visit data. It is not a property survey.",
     "summary": {
@@ -375,8 +375,8 @@
     "map": {
       "available": true,
       "center": {
-        "lat": 27.5678038,
-        "lng": -82.4348703
+        "lat": null,
+        "lng": null
       },
       "zoom": 18,
       "markers": [
