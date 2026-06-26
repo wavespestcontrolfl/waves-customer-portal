@@ -2048,6 +2048,30 @@ const CallRecordingProcessor = {
           }).returning('*');
           leadId = newLead.id;
           logger.info(`[call-proc] Created new lead ${leadId} for ${extracted.first_name} ${extracted.last_name}`);
+
+          // Untracked inbound call → no lead_source matched (caller reached the
+          // main line / caller-ID didn't match a tracking number). These are the
+          // "Unattributed" call leads the dashboard surfaces — notify an admin so
+          // it can be source-tagged or followed up. Best-effort; a notify failure
+          // must never break call processing.
+          if (!leadSourceId) {
+            try {
+              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+                .filter(Boolean)
+                .join(' ');
+              await require('./notification-service').notifyAdmin(
+                'lead',
+                'Untracked call lead',
+                `New lead from a call we couldn't attribute: ${callerName || 'Unknown caller'} (${phone || 'unknown number'}). No marketing source matched — tag the source or follow up.`,
+                {
+                  link: `/admin/leads?lead=${leadId}`,
+                  metadata: { leadId, phone, callSid: call.twilio_call_sid },
+                },
+              );
+            } catch (notifyErr) {
+              logger.warn(`[call-proc] untracked-call admin notify failed: ${notifyErr.message}`);
+            }
+          }
         }
 
         // Enrich lead with AI-extracted data. For an existing lead, only fill
