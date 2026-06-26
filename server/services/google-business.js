@@ -370,11 +370,28 @@ class GoogleBusinessService {
     // deleted_at) AND the unlinked-review alert, dropping the review from the
     // manual-match queue. Treating a deleted-only name match as "no match"
     // routes it to the admin notification instead.
-    const customer = await db('customers')
+    //
+    // Require an UNAMBIGUOUS match. Google display names are not unique, so if
+    // two active customers share the reviewer's name we can't tell which one
+    // actually left the review. Auto-marking an arbitrary one would suppress
+    // review outreach (initial ask, inline suffix, 48h followup) for a customer
+    // who never reviewed. Treat 2+ matches as "no match" so the review falls
+    // through to the manual-match alert instead of an arbitrary auto-link.
+    // limit(2) is all we need to detect ambiguity.
+    const matches = await db('customers')
       .whereNull('deleted_at')
       .whereRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))) = LOWER(?)", [reviewerName])
-      .first();
-    return customer?.id || null;
+      .select('id')
+      .limit(2);
+    if (matches.length !== 1) {
+      if (matches.length > 1) {
+        // ID-less log — reviewer names are PII (AGENTS.md); the name rides in
+        // the unlinked-review admin notification, not the plaintext log.
+        logger.info('[gbp] Reviewer name matched multiple active customers — routing to manual match, no auto-mark');
+      }
+      return null;
+    }
+    return matches[0].id;
   }
 
   /**

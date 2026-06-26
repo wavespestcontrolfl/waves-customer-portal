@@ -46,11 +46,14 @@ function createDbMock(initialRows = {}) {
         return this;
       },
       whereRaw(sql, bindings = []) {
-        // Implemented only for the reviewer-name dedup match; other raw
-        // clauses keep the historical pass-through behavior.
+        // Implemented for the two name-match clauses the service relies on;
+        // other raw clauses keep the historical pass-through behavior.
         if (typeof sql === 'string' && sql.includes('LOWER(reviewer_name) = LOWER(?)')) {
           const name = String(bindings[0] || '').toLowerCase();
           this._rawFilters.push(row => String(row.reviewer_name || '').toLowerCase() === name);
+        } else if (typeof sql === 'string' && sql.includes("first_name || ' ' || COALESCE(last_name")) {
+          const name = String(bindings[0] || '').trim().toLowerCase();
+          this._rawFilters.push(row => `${row.first_name || ''} ${row.last_name || ''}`.trim().toLowerCase() === name);
         }
         return this;
       },
@@ -544,6 +547,41 @@ describe('Google Business review sync', () => {
     // The deleted record is never auto-flagged...
     expect(db.__state.rows.customers.find(c => c.id === 'cust-deleted').has_left_google_review).toBe(false);
     // ...and the review still surfaces for manual matching.
+    const alert = (db.__state.rows.notifications || []).find(n => n.category === 'review');
+    expect(alert).toBeTruthy();
+    expect(alert.title).toContain('John Doe');
+  });
+
+  test('does not auto-mark when a reviewer name matches multiple active customers', async () => {
+    // Display names are not unique. Two active "John Doe" customers → we can't
+    // tell which one left the review, so neither is auto-flagged (auto-marking
+    // an arbitrary one would suppress outreach for someone who never reviewed)
+    // and the review is routed to the manual-match alert instead.
+    db.__state.rows.customers.push(
+      { id: 'cust-a', first_name: 'John', last_name: 'Doe', has_left_google_review: false, review_marked_at: null, deleted_at: null },
+      { id: 'cust-b', first_name: 'John', last_name: 'Doe', has_left_google_review: false, review_marked_at: null, deleted_at: null },
+    );
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-1',
+        reviewer: { displayName: 'John Doe' },
+        starRating: 'FIVE',
+        comment: 'Great work',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    // Neither ambiguous customer is flipped...
+    expect(db.__state.rows.customers.every(c => c.has_left_google_review === false)).toBe(true);
+    // ...the review is left unlinked...
+    const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-1');
+    expect(review.customer_id).toBeNull();
+    // ...and the office is alerted to match it manually.
     const alert = (db.__state.rows.notifications || []).find(n => n.category === 'review');
     expect(alert).toBeTruthy();
     expect(alert.title).toContain('John Doe');
