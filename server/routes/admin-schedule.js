@@ -1213,7 +1213,7 @@ router.get('/', async (req, res, next) => {
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
-        address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,
+        address: [s.address_line1, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         serviceType: normalizedType,                    // FIX #2: clean label
         serviceTypeDisplay,
