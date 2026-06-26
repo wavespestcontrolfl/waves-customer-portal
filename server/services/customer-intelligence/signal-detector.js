@@ -268,12 +268,28 @@ class SignalDetector {
         .where('customer_id', customerId)
         .where('direction', 'inbound')
         .where('created_at', '>', new Date(now - 30 * 86400000))
-        .select('message_body');
+        .select('message_body', 'message_type', 'metadata');
 
       const allText = recentMessages.map(m => (m.message_body || '').toLowerCase()).join(' ');
+      // An explicit SMS opt-out (STOP/UNSUBSCRIBE/QUIT/CANCEL) is logged with
+      // message_type 'opt_out' regardless of the exact keyword the body matched.
+      // Treat it as the same cancellation-intent signal as the keyword rule, so
+      // a bare "STOP" is caught (not just "cancel"/"stop service") — but EXCLUDE
+      // "wrong number" reports, which are also logged as opt_out (opt_out_reason
+      // in metadata) and are not churn intent.
+      const hasOptOut = recentMessages.some(m => {
+        if (m.message_type !== 'opt_out') return false;
+        let meta = m.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+        return (meta?.opt_out_reason || '') !== 'wrong_number';
+      });
 
-      if ((allText.includes('cancel') || allText.includes('stop service') || allText.includes('not renew')) && !existing.has('DOWNGRADE_REQUEST')) {
-        newSignals.push({ signal_type: 'DOWNGRADE_REQUEST', signal_value: 'Cancellation language detected', severity: 'critical' });
+      if ((hasOptOut || allText.includes('cancel') || allText.includes('stop service') || allText.includes('not renew')) && !existing.has('DOWNGRADE_REQUEST')) {
+        newSignals.push({
+          signal_type: 'DOWNGRADE_REQUEST',
+          signal_value: hasOptOut ? 'SMS opt-out — cancellation intent' : 'Cancellation language detected',
+          severity: 'critical',
+        });
       }
       if ((allText.includes('too expensive') || allText.includes('too much') || allText.includes('cheaper') || allText.includes("can't afford")) && !existing.has('PRICE_COMPLAINT')) {
         newSignals.push({ signal_type: 'PRICE_COMPLAINT', signal_value: 'Price sensitivity detected', severity: 'warning' });
@@ -331,13 +347,21 @@ class SignalDetector {
       logger.debug(`[signal-detector] AI sentiment step failed for ${customerId}: ${err.message}`);
     }
 
-    // Save new signals
+    // Save new signals. Idempotent under concurrency: the partial unique index
+    // customer_signals_unresolved_uniq (customer_id, signal_type) WHERE
+    // resolved = false means two inbound-SMS webhooks racing to detect the same
+    // signal for one customer can't both insert it — the loser hits 23505 and
+    // is ignored, so the duplicate weight is never folded into the score.
     for (const signal of newSignals) {
-      await db('customer_signals').insert({
-        customer_id: customerId,
-        ...signal,
-        detected_at: new Date(),
-      });
+      try {
+        await db('customer_signals').insert({
+          customer_id: customerId,
+          ...signal,
+          detected_at: new Date(),
+        });
+      } catch (err) {
+        if (err.code !== '23505') throw err;
+      }
     }
 
     return newSignals;

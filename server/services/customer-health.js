@@ -711,6 +711,13 @@ async function scoreCustomer(customerId) {
       updated_at: now,
     };
 
+    // Live-alert claim for the event-driven critical alert (event-rescore.js):
+    // clear it whenever the customer is NOT critical so a future re-entry into
+    // critical can atomically re-claim and re-alert. While critical, leave the
+    // column untouched so the claim persists across nightly rescores — exactly
+    // one live alert per critical episode.
+    if (churnRisk !== 'critical') record.critical_alert_sent_at = null;
+
     // Ensure sub-score columns exist before writing (Railway auto-heal may have created table without them)
     try {
       const hasPmtScore = await db.schema.hasColumn('customer_health_scores', 'payment_score');
@@ -747,6 +754,13 @@ async function scoreCustomer(customerId) {
           await db.schema.alterTable('customer_health_scores', t => { t.integer('overall_score').defaultTo(50); });
         }
         logger.info('[health] Auto-added missing sub-score columns');
+      }
+      // Independent of the sub-score auto-heal above: the table can be
+      // auto-created WITH payment_score but WITHOUT critical_alert_sent_at, and
+      // the event-driven live-alert claim (event-rescore.js) needs it. Ensure
+      // it regardless so claimCriticalAlert never hits an undefined column.
+      if (!(await db.schema.hasColumn('customer_health_scores', 'critical_alert_sent_at'))) {
+        await db.schema.alterTable('customer_health_scores', t => { t.timestamp('critical_alert_sent_at'); });
       }
     } catch (e) { logger.error('[health] Column check error:', e.message); }
 
