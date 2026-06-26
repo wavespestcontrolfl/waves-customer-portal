@@ -2506,47 +2506,45 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         dueDate,
       });
 
+      // Payer-billed customers can't be charged via the payment sheet (statement
+      // invoices reject card/cash/check tenders), so there's no in-person path to
+      // activate coverage — reject charge-in-person before committing. The operator
+      // sends the invoice instead (allowed: the term below suppresses billing).
+      // Re-read the persisted row because the payer-statement accrual is applied
+      // after the insert, so the create() return may not carry payer_statement_id.
       if (chargeInPerson) {
-        // Defer the term to payment — stash the coverage config on the invoice so
-        // the webhook can reconstruct it when the invoice is paid.
-        await trx('invoices').where({ id: invoice.id }).update({
-          metadata: JSON.stringify({
-            annualPrepay: {
-              serviceType: coverageServiceType,
-              visitCount,
-              cadence: coverageCadence,
-              termStart,
-              termEnd,
-              planLabel,
-              // Tax-inclusive SERVICE amount captured at mint time (BEFORE any card
-              // surcharge is added to invoice.total at payment). The webhook splits
-              // this across covered visits — using the paid total would spread the
-              // processing fee into prepaid coverage and break the ledger.
-              prepayAmount: Number(invoice.total),
-            },
-          }),
-        });
-      } else {
-        term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
-          customerId: customer.id,
-          prepayInvoiceId: invoice.id,
-          planLabel,
-          monthlyRate: Math.round((amount / 12) * 100) / 100,
-          // Store what the customer is actually billed (commercial invoices add
-          // county tax via InvoiceService.create), not the pretax request amount —
-          // applyPrepaidCoverageForTerm splits prepay_amount across the covered
-          // visits, so a pretax value would leave the tax portion uncredited and
-          // make the coverage ledger disagree with the invoice/payment total.
-          prepayAmount: Number(invoice.total),
-          termStart,
-          termEnd,
-          coverageServiceType,
-          coverageVisitCount: visitCount,
-          coverageCadence,
-          conn: trx,
-        });
-        if (!term) throw new Error('Annual prepay term could not be created');
+        const minted = await trx('invoices').where({ id: invoice.id }).first('payer_statement_id');
+        if (minted?.payer_statement_id) {
+          const err = new Error("Charge in person isn't available for payer-billed customers — send the invoice instead.");
+          err.chargeInPersonPayerBlocked = true;
+          throw err;
+        }
       }
+
+      // Create the payment_pending term up front for BOTH paths (charge-in-person
+      // only differs by skipping delivery). The term reserves the coverage window
+      // (the overlap lock above dedupes concurrent mints) and suppresses monthly
+      // billing while unpaid; the webhook flips it active on payment, and an aborted
+      // in-person charge is cleaned up by voiding the invoice (which cancels it).
+      term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+        customerId: customer.id,
+        prepayInvoiceId: invoice.id,
+        planLabel,
+        monthlyRate: Math.round((amount / 12) * 100) / 100,
+        // Store what the customer is actually billed (commercial invoices add
+        // county tax via InvoiceService.create), not the pretax request amount —
+        // applyPrepaidCoverageForTerm splits prepay_amount across the covered
+        // visits, so a pretax value would leave the tax portion uncredited and
+        // make the coverage ledger disagree with the invoice/payment total.
+        prepayAmount: Number(invoice.total),
+        termStart,
+        termEnd,
+        coverageServiceType,
+        coverageVisitCount: visitCount,
+        coverageCadence,
+        conn: trx,
+      });
+      if (!term) throw new Error('Annual prepay term could not be created');
 
       await trx('activity_log').insert({
         customer_id: customer.id,
@@ -2611,6 +2609,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     });
   } catch (err) {
     if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+    if (err && err.chargeInPersonPayerBlocked) return res.status(400).json({ error: err.message });
     next(err);
   }
 });

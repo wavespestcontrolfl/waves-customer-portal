@@ -8,10 +8,6 @@ const AccountMembershipEmail = require('./account-membership-email');
 const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 const COVERED_STATUSES = [...ACTIVE_STATUSES, 'renewed', 'switch_plan'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
-// Per-customer advisory-lock namespace for annual-prepay term creation. MUST match
-// admin-customers.js ANNUAL_PREPAY_LOCK_NS so the mint route and the deferred
-// (charge-in-person) webhook activation mutually exclude on the same customer.
-const ANNUAL_PREPAY_LOCK_NS = 0x4150;
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
 const DEFAULT_ALERT_DAYS = 30;
 const LAST_SERVICE_GRACE_DAYS = 14;
@@ -769,31 +765,6 @@ async function statusForPrepayInvoice(invoiceId, conn = db) {
   }
 }
 
-// Parse an invoice's metadata jsonb (string OR object) for a deferred annual-prepay
-// coverage config (written by the charge-in-person mint). Returns the normalized
-// config or null when malformed / missing / no positive visit count — this is the
-// gate for webhook-time term creation, so a bad/absent payload must never create a
-// term. Pure; exported for tests.
-function parseAnnualPrepayMeta(metadata) {
-  if (metadata == null) return null;
-  let parsed;
-  try { parsed = typeof metadata === 'string' ? JSON.parse(metadata) : metadata; } catch { return null; }
-  const ap = parsed && parsed.annualPrepay;
-  if (!ap || !(Number(ap.visitCount) > 0)) return null;
-  const prepayAmount = Number(ap.prepayAmount);
-  return {
-    serviceType: ap.serviceType || undefined,
-    visitCount: Number(ap.visitCount),
-    cadence: ap.cadence || undefined,
-    termStart: ap.termStart || undefined,
-    termEnd: ap.termEnd || undefined,
-    planLabel: ap.planLabel || undefined,
-    // Pre-surcharge service amount the mint captured; undefined falls back to the
-    // paid invoice total at activation (legacy/missing payloads only).
-    prepayAmount: Number.isFinite(prepayAmount) && prepayAmount > 0 ? prepayAmount : undefined,
-  };
-}
-
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return [];
   const invoice = typeof invoiceOrId === 'object'
@@ -838,74 +809,6 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       results.push(refreshed || current);
     } else {
       results.push(current);
-    }
-  }
-
-  // Deferred term creation (charge-in-person flow): a now-PAID annual-prepay
-  // invoice that carries its coverage config in metadata.annualPrepay but has NO
-  // term yet — create + activate it now (createTermForAnnualPrepay reads the paid
-  // invoice and creates it `active` + stamps the covered visits). Deferring the
-  // term to payment is what keeps an aborted in-person charge from leaving an
-  // orphan payment_pending term (which would suppress the customer's billing).
-  if (nextStatus === 'active' && terms.length === 0) {
-    const rawMeta = invoice.metadata !== undefined
-      ? invoice.metadata
-      : (await conn('invoices').where({ id: invoice.id }).first('metadata'))?.metadata;
-    const meta = parseAnnualPrepayMeta(rawMeta);
-    if (meta) {
-      const full = await conn('invoices').where({ id: invoice.id }).first('id', 'customer_id', 'total');
-      if (full?.customer_id) {
-        // Serialize per-customer with the SAME advisory lock as the mint route so
-        // two deferred invoices paid at once (or a concurrent mint) can't both pass
-        // the overlap check and insert duplicate active terms. The existence +
-        // overlap re-checks and the insert all happen inside the lock.
-        const created = await conn.transaction(async (trx) => {
-          await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [ANNUAL_PREPAY_LOCK_NS, String(full.customer_id)]);
-          const existing = await trx('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id');
-          if (existing) return null;
-          // Re-check coverage overlap at activation time. The deferred flow holds no
-          // payment_pending term to reserve the window, so another annual-prepay
-          // term may exist by now. NULL prepay_invoice_id rows (invoice-less terms)
-          // must be included in the "not this invoice" set — `NOT (NULL = id)` is
-          // UNKNOWN and would drop them. Statuses mirror lockAndAssertNoAnnualPrepayOverlap.
-          const overlap = await trx('annual_prepay_terms')
-            .where({ customer_id: full.customer_id })
-            .whereRaw('(prepay_invoice_id IS NULL OR prepay_invoice_id <> ?)', [invoice.id])
-            .where(function bindingOverlap() {
-              this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
-                .orWhere(function lapsedRenewalStillInTerm() {
-                  this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
-                });
-            })
-            .modify((qb) => {
-              if (meta.termEnd) qb.where('term_start', '<=', meta.termEnd);
-              if (meta.termStart) qb.where('term_end', '>=', meta.termStart);
-            })
-            .first('id');
-          if (overlap) {
-            logger.warn(`[annual-prepay] charge-in-person invoice ${invoice.id} paid but its coverage overlaps existing term ${overlap.id}; skipping duplicate term — reconcile the payment`);
-            return null;
-          }
-          // Use the pre-surcharge service amount the mint captured (falls back to
-          // the paid total only for legacy payloads) so the coverage credit excludes
-          // any card processing fee that was added to invoice.total at payment.
-          const coverageAmount = meta.prepayAmount != null ? meta.prepayAmount : Number(full.total);
-          return createTermForAnnualPrepay({
-            customerId: full.customer_id,
-            prepayInvoiceId: invoice.id,
-            prepayAmount: coverageAmount,
-            planLabel: meta.planLabel || undefined,
-            monthlyRate: Math.round((coverageAmount / 12) * 100) / 100,
-            coverageServiceType: meta.serviceType || undefined,
-            coverageVisitCount: Number(meta.visitCount),
-            coverageCadence: meta.cadence || undefined,
-            termStart: meta.termStart || undefined,
-            termEnd: meta.termEnd || undefined,
-            conn: trx,
-          });
-        });
-        if (created) results.push(created);
-      }
     }
   }
 
@@ -1600,7 +1503,6 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
 
 module.exports = {
   createTermForAnnualPrepay,
-  parseAnnualPrepayMeta,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
   syncTermForInvoicePayment,

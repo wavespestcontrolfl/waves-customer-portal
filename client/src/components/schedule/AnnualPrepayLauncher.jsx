@@ -4,15 +4,16 @@
 // annual-prepay invoice flow (commercial-tax preview, full cadence set, term
 // dates, amount inference) rather than a parallel reimplementation.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { AnnualPrepayInvoiceModal } from '../admin/Customer360ProfileV2';
 import MobilePaymentSheet from './MobilePaymentSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-function adminFetch(path) {
+function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+    ...options,
+    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, ...(options.headers || {}) },
   }).then(async (r) => {
     if (!r.ok) {
       let msg = `${r.status}`;
@@ -46,6 +47,7 @@ export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [paymentInvoice, setPaymentInvoice] = useState(null);
+  const paidRef = useRef(false);
 
   useEffect(() => {
     if (!customerId) { setError('No customer for this visit'); return undefined; }
@@ -90,10 +92,21 @@ export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
     .filter(Boolean).join(' ').trim() || 'Customer';
 
   // Tap-to-Pay handoff: once the operator chose "Charge in person", the prepay
-  // invoice is minted (no term yet) — charge it on the spot. Any successful tender
-  // marks it paid and the webhook creates + activates the term; an abort just
-  // leaves a benign unpaid draft (no orphan term).
+  // invoice is minted with a payment_pending term reserving coverage. Charge it on
+  // the spot — any successful tender flips the term active (webhook / record-payment).
   if (paymentInvoice) {
+    const markPaidAndClose = () => { paidRef.current = true; onSaved?.(); onClose?.(); };
+    // Abort: void the just-minted invoice so its payment_pending term is cancelled
+    // and the customer isn't left with billing suppressed by an uncollected charge.
+    // Skip when a tender already succeeded; voidInvoice also cancels the PaymentIntent
+    // first and refuses an already-settled invoice, so a Tap-to-Pay charge that landed
+    // without a client signal stays paid (the webhook activates the term).
+    const abortAndClose = async () => {
+      if (!paidRef.current) {
+        try { await adminFetch(`/admin/invoices/${paymentInvoice.id}/void`, { method: 'POST' }); } catch { /* best-effort */ }
+      }
+      onClose?.();
+    };
     return (
       <MobilePaymentSheet
         desktopVisible
@@ -102,9 +115,9 @@ export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
         invoiceId={paymentInvoice.id}
         invoiceToken={paymentInvoice.token}
         amount={Number(paymentInvoice.total) || 0}
-        onClose={onClose}
-        onChargeSuccess={() => { onSaved?.(); onClose?.(); }}
-        onPrepaidRecorded={() => { onSaved?.(); onClose?.(); }}
+        onClose={abortAndClose}
+        onChargeSuccess={markPaidAndClose}
+        onPrepaidRecorded={markPaidAndClose}
       />
     );
   }
