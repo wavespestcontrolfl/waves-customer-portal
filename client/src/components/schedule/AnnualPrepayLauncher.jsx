@@ -4,14 +4,16 @@
 // annual-prepay invoice flow (commercial-tax preview, full cadence set, term
 // dates, amount inference) rather than a parallel reimplementation.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { AnnualPrepayInvoiceModal } from '../admin/Customer360ProfileV2';
+import MobilePaymentSheet from './MobilePaymentSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-function adminFetch(path) {
+function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+    ...options,
+    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, ...(options.headers || {}) },
   }).then(async (r) => {
     if (!r.ok) {
       let msg = `${r.status}`;
@@ -44,6 +46,10 @@ function pickActiveTerm(terms = []) {
 export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [paymentInvoice, setPaymentInvoice] = useState(null);
+  const [voiding, setVoiding] = useState(false);
+  const [voidError, setVoidError] = useState('');
+  const paidRef = useRef(false);
 
   useEffect(() => {
     if (!customerId) { setError('No customer for this visit'); return undefined; }
@@ -84,12 +90,107 @@ export default function AnnualPrepayLauncher({ customerId, onClose, onSaved }) {
     );
   }
 
+  const customerName = [data.customer?.firstName, data.customer?.lastName]
+    .filter(Boolean).join(' ').trim() || 'Customer';
+
+  // Tap-to-Pay handoff: once the operator chose "Charge in person", the prepay
+  // invoice is minted with a payment_pending term reserving coverage. Charge it on
+  // the spot — any successful tender flips the term active (webhook / record-payment).
+  if (paymentInvoice) {
+    const markPaidAndClose = () => { paidRef.current = true; onSaved?.(); onClose?.(); };
+
+    // True when the invoice is anything other than collectible-unpaid — paid, or
+    // prepaid by auto-applied account credit (which can settle it with no tender
+    // callback), or already processing/void. Those are clean closes, NOT aborts.
+    const isSettled = async () => {
+      const inv = await adminFetch(`/admin/invoices/${paymentInvoice.id}`);
+      return !['draft', 'sent', 'overdue'].includes(String(inv?.status || '').toLowerCase());
+    };
+
+    // Abort: void the just-minted invoice so its payment_pending term is cancelled
+    // and the customer isn't left with billing suppressed by an uncollected charge.
+    const abortAndClose = async () => {
+      if (paidRef.current) { onClose?.(); return; }
+      setVoiding(true);
+      setVoidError('');
+      try {
+        // A credit-covered / settled invoice must NOT be voided (that would refund
+        // the credit + cancel a legitimately-paid term) — re-read status first.
+        if (await isSettled()) { onClose?.(); return; }
+        try {
+          await adminFetch(`/admin/invoices/${paymentInvoice.id}/void`, { method: 'POST' });
+          onClose?.();
+        } catch (voidErr) {
+          // Void can fail because a Tap-to-Pay charge settled in the gap (webhook
+          // lag, PaymentIntent already captured). If it's settled now, that's a
+          // successful close; otherwise it's a real cleanup failure.
+          if (await isSettled()) { onClose?.(); return; }
+          throw voidErr;
+        }
+      } catch (e) {
+        // Don't silently close: the pending term would keep suppressing monthly
+        // billing. Surface it so the operator retries (or voids from Invoices).
+        setVoidError(e?.message || 'Could not cancel the uncollected prepay invoice.');
+      } finally {
+        setVoiding(false);
+      }
+    };
+
+    if (voidError) {
+      return (
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center" style={{ background: 'rgba(15,23,42,0.55)', padding: 16 }}>
+          <div className="bg-white rounded-2xl" style={{ padding: 20, maxWidth: 440 }}>
+            <div className="text-alert-fg" style={{ fontSize: 14, marginBottom: 12 }}>
+              Couldn’t cancel the uncollected prepay invoice — this customer’s monthly billing stays paused until it’s voided. {voidError}
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={voiding}
+                onClick={abortAndClose}
+                className="flex-1 rounded-full bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-60"
+                style={{ padding: '12px 16px', fontSize: 14 }}
+              >
+                {voiding ? 'Retrying…' : 'Retry'}
+              </button>
+              <button
+                type="button"
+                disabled={voiding}
+                onClick={() => onClose?.()}
+                className="flex-1 rounded-full border border-zinc-300 text-zinc-700 font-medium u-focus-ring disabled:opacity-60"
+                style={{ padding: '12px 16px', fontSize: 14 }}
+              >
+                Close (void from Invoices)
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <MobilePaymentSheet
+        desktopVisible
+        hideInvoiceTender
+        service={{ customerId: data.customer?.id || customerId, customerName }}
+        invoiceId={paymentInvoice.id}
+        invoiceToken={paymentInvoice.token}
+        amount={Number(paymentInvoice.total) || 0}
+        onClose={abortAndClose}
+        onChargeSuccess={markPaidAndClose}
+        onPrepaidRecorded={markPaidAndClose}
+      />
+    );
+  }
+
   return (
     <AnnualPrepayInvoiceModal
       customer={data.customer}
       activeTerm={pickActiveTerm(data.annualPrepayTerms)}
       prepaidPlans={data.prepaidPlans || []}
       annualPrepayTerms={data.annualPrepayTerms || []}
+      allowChargeInPerson
+      onChargeInPerson={(invoice) => setPaymentInvoice(invoice)}
       onClose={onClose}
       onSaved={() => { onSaved?.(); onClose?.(); }}
     />

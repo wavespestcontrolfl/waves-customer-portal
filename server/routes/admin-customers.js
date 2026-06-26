@@ -2477,10 +2477,17 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       note,
     ].filter(Boolean).join('\n');
 
+    // Charge-in-person (Tap to Pay) mints the invoice and creates the payment_pending
+    // term up front, exactly like the send path but WITHOUT delivering a pay link —
+    // the operator collects on the spot. The term reserves coverage + suppresses
+    // billing immediately; the webhook flips it active on payment, and an aborted
+    // charge is cleaned up by voiding the invoice (which cancels the term). Rejected
+    // for payer-billed customers below (their invoices can't be tendered in person).
+    const chargeInPerson = req.body?.chargeInPerson === true;
     const InvoiceService = require('../services/invoice');
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
     let invoice;
-    let term;
+    let term = null;
     await db.transaction(async (trx) => {
       await lockAndAssertNoAnnualPrepayOverlap(
         trx, customer.id, termStart, req.body?.allowOverlap === true,
@@ -2500,6 +2507,27 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         dueDate,
       });
 
+      // Payer-billed customers can't be charged in person: NET third-party invoices
+      // accrue to a payer statement, and due-on-receipt Bill-To invoices carry a
+      // payer_id (the terminal handoff rejects any payer_id — a tech must not collect
+      // the AP's invoice from the service-recipient flow). Block on EITHER payer field
+      // before committing; the operator sends the invoice instead (the term below
+      // suppresses billing meanwhile). Re-read the persisted row because the payer
+      // accrual/stamp is applied after the insert, so create()'s return may omit them.
+      if (chargeInPerson) {
+        const minted = await trx('invoices').where({ id: invoice.id }).first('payer_statement_id', 'payer_id');
+        if (minted?.payer_statement_id || minted?.payer_id) {
+          const err = new Error("Charge in person isn't available for payer-billed customers — send the invoice instead.");
+          err.chargeInPersonPayerBlocked = true;
+          throw err;
+        }
+      }
+
+      // Create the payment_pending term up front for BOTH paths (charge-in-person
+      // only differs by skipping delivery). The term reserves the coverage window
+      // (the overlap lock above dedupes concurrent mints) and suppresses monthly
+      // billing while unpaid; the webhook flips it active on payment, and an aborted
+      // in-person charge is cleaned up by voiding the invoice (which cancels it).
       term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
         prepayInvoiceId: invoice.id,
@@ -2523,11 +2551,13 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       await trx('activity_log').insert({
         customer_id: customer.id,
         action: 'annual_prepay_invoice_created',
-        description: `Annual prepay invoice ${invoice.invoice_number} created for ${coverageServiceType}: $${amount.toFixed(2)} covering ${visitCount} visit(s)`,
+        description: `Annual prepay invoice ${invoice.invoice_number} created for ${coverageServiceType}: $${amount.toFixed(2)} covering ${visitCount} visit(s)`
+          + (chargeInPerson ? ' (charge in person — term activates on payment)' : ''),
         metadata: JSON.stringify({
           invoice_id: invoice.id,
           invoice_number: invoice.invoice_number,
-          annual_prepay_term_id: term.id,
+          annual_prepay_term_id: term?.id || null,
+          charge_in_person: chargeInPerson,
           coverage_service_type: coverageServiceType,
           coverage_visit_count: visitCount,
           coverage_cadence: coverageCadence,
@@ -2539,11 +2569,13 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     });
 
     let delivery = null;
-    try {
-      delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id);
-    } catch (err) {
-      delivery = { ok: false, error: err.message };
-      logger.warn(`[customers:annual-prepay-invoice] send failed for ${invoice.id}: ${err.message}`);
+    if (!chargeInPerson) {
+      try {
+        delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id);
+      } catch (err) {
+        delivery = { ok: false, error: err.message };
+        logger.warn(`[customers:annual-prepay-invoice] send failed for ${invoice.id}: ${err.message}`);
+      }
     }
 
     const payUrl = delivery?.payUrl || await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
@@ -2557,7 +2589,8 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     await auditCustomerMutation(req, 'customer.annual_prepay.invoice_send', customer.id, {
       invoiceId: invoice.id,
       invoiceNumber: invoice.invoice_number,
-      annualPrepayTermId: term.id,
+      annualPrepayTermId: term?.id || null,
+      chargeInPerson,
       amount,
       serviceType: coverageServiceType,
       visitCount,
@@ -2573,11 +2606,12 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         ...invoice,
         payUrl,
       },
-      annualPrepayTerm: mapAnnualPrepayTerm(term),
+      annualPrepayTerm: term ? mapAnnualPrepayTerm(term) : null,
       delivery,
     });
   } catch (err) {
     if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+    if (err && err.chargeInPersonPayerBlocked) return res.status(400).json({ error: err.message });
     next(err);
   }
 });
