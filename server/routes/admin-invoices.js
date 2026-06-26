@@ -6,11 +6,11 @@ const InvoiceService = require('../services/invoice');
 const InvoiceAttachments = require('../services/invoice-attachments');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const MODELS = require('../config/models');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
+const { generateInvoiceSummary } = require('../services/invoice-ai-summary');
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
@@ -487,56 +487,24 @@ router.get('/service-records/:customerId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /notes/ai — draft customer-facing invoice notes from tech input.
+// POST /notes/ai — draft a customer-facing invoice summary. Pulls one-tap
+// context from a linked completed visit (serviceRecordId + source toggles) and
+// blends in any line items / typed input the operator adds.
 router.post('/notes/ai', requireAdmin, async (req, res, next) => {
   try {
     if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
 
-    const rawInput = String(req.body.input || '').trim().slice(0, 2000);
-    const customerName = String(req.body.customerName || 'Customer').trim().slice(0, 160);
-    const services = Array.isArray(req.body.services) ? req.body.services.slice(0, 12) : [];
-    const serviceLines = services
-      .map(s => {
-        const description = String(s.description || '').trim().slice(0, 160);
-        const quantity = Number(s.quantity) || 1;
-        return description ? `- ${description}${quantity > 1 ? ` x${quantity}` : ''}` : null;
-      })
-      .filter(Boolean)
-      .join('\n') || '- No service lines provided';
-
-    if (!rawInput && serviceLines === '- No service lines provided') {
-      return res.status(400).json({ error: 'Add notes or service lines first' });
-    }
-
-    const prompt = `Write a short customer-facing invoice note for Waves Pest Control & Lawn Care.
-
-Requirements:
-- Plain text only.
-- 2 to 4 sentences.
-- Professional, friendly, and specific.
-- Use the technician input and service lines only.
-- Do not invent products, pests, locations, guarantees, follow-up dates, prices, discounts, or payment claims.
-- Do not include a greeting, subject line, sign-off, markdown, or bullets.
-
-Customer: ${customerName || 'Customer'}
-
-Service lines:
-${serviceLines}
-
-Technician input:
-${rawInput || '[none provided]'}`;
-
-    const Anthropic = require('@anthropic-ai/sdk');
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const msg = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 260,
-      messages: [{ role: 'user', content: prompt }],
+    const result = await generateInvoiceSummary({
+      input: req.body.input,
+      customerName: req.body.customerName,
+      services: req.body.services,
+      serviceRecordId: req.body.serviceRecordId,
+      sources: req.body.sources,
     });
+    if (result.error) return res.status(400).json({ error: result.error });
 
-    const notes = (msg.content?.[0]?.text || '').trim();
-    logger.info(`[invoices] ai-notes ${notes.length} chars`);
-    res.json({ notes });
+    logger.info(`[invoices] ai-notes ${result.notes.length} chars (sources: ${result.sourcesUsed.join(',') || 'none'})`);
+    res.json({ notes: result.notes, sourcesUsed: result.sourcesUsed });
   } catch (err) {
     logger.error(`[invoices] ai-notes failed: ${err.message}`);
     next(err);
