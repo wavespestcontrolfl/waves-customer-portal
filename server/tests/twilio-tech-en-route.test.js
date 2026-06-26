@@ -180,9 +180,9 @@ describe("TwilioService.sendTechEnRoute", () => {
       expect.objectContaining({
         to: "+15551112222",
         body: expect.stringContaining("has arrived at your property"),
-        purpose: "tech_en_route",
+        purpose: "tech_arrived",
         metadata: {
-          original_message_type: "tech_en_route",
+          original_message_type: "tech_arrived",
           appointment_progress_event: "tech_arrived",
         },
       }),

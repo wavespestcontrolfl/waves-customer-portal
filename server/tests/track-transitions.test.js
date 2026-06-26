@@ -181,6 +181,37 @@ describe('track-transitions lifecycle side effects', () => {
     expect(sendTechArrived).not.toHaveBeenCalled();
   });
 
+  test('markOnProperty retries the arrival SMS on a later on-site signal when the first send failed', async () => {
+    const svc = {
+      id: 'job-r',
+      customer_id: 'cust-r',
+      technician_id: 'tech-r',
+      status: 'on_site', // syncOperationalStatus is a no-op (already in status)
+      track_state: 'on_property', // already flipped — takes the idempotent branch
+      cancelled_at: null,
+      // lifecycle fields present so buildOnSiteLifecycleUpdates returns {}
+      actual_start_time: new Date(),
+      check_in_time: new Date(),
+      arrived_at: new Date(),
+      arrival_sms_sent_at: null, // prior send failed — should retry, not be dropped
+    };
+    sendTechArrived.mockResolvedValue({ success: true });
+    const stamp = query(1);
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query({ name: 'Casey' })) // technician name lookup
+      .mockReturnValueOnce(stamp); // arrival_sms_sent_at stamp
+
+    const result = await trackTransitions.markOnProperty('job-r');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('on_property');
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-r', 'Casey');
+    expect(stamp.update).toHaveBeenCalledWith({
+      arrival_sms_sent_at: expect.any(Date),
+    });
+  });
+
   test('markComplete writes end aliases and duration from the captured start time', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-05-15T14:45:00.000Z'));
     const start = new Date('2026-05-15T14:00:00.000Z');

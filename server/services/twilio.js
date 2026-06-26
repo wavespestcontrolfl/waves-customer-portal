@@ -780,14 +780,14 @@ const TwilioService = {
           body,
           channel: "sms",
           audience: "customer",
-          purpose: "tech_en_route",
+          purpose: "tech_arrived",
           customerId,
           identityTrustLevel:
             isServiceContactRole(contact.role)
               ? "service_contact_authorized"
               : "phone_matches_customer",
           metadata: {
-            original_message_type: "tech_en_route",
+            original_message_type: "tech_arrived",
             appointment_progress_event: "tech_arrived",
           },
         }),

@@ -46,7 +46,19 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down() {
-  // The arrival template is intentionally left in place on rollback;
-  // sendTechArrived no-ops without the markOnProperty fire + gate anyway.
+exports.down = async function down(knex) {
+  // Remove the seeded template on rollback so it restores the prior
+  // (deleted/dead) state. This matters because the pre-PR code paths
+  // (geofence-handler, tech-notifications) call sendTechArrived directly
+  // and do NOT check GATE_TECH_ARRIVED_SMS — leaving the template active
+  // after a rollback would re-enable ungated customer arrival texts.
+  if (!(await knex.schema.hasTable('sms_templates'))) return;
+  if (await knex.schema.hasTable('sms_template_variants')) {
+    await knex('sms_template_variants')
+      .where({ template_key: 'tech_arrived' })
+      .del();
+  }
+  await knex('sms_templates')
+    .where({ template_key: 'tech_arrived' })
+    .del();
 };
