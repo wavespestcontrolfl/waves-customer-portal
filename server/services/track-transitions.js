@@ -323,6 +323,17 @@ async function markEnRoute(serviceId, opts = {}) {
     }
   }
 
+  // One-time "introducing the app" email for a new recurring customer's first
+  // visit — fired here so it lands exactly when "watch your tech arrive live"
+  // is true. Best-effort and fully self-gating (flag + recurring + first-visit
+  // + per-customer idempotency); never affects the transition result.
+  try {
+    const RecurringAppIntro = require('./recurring-app-intro-email');
+    await RecurringAppIntro.maybeSendOnEnRoute(svc);
+  } catch (err) {
+    logger.error(`[track-transitions] app-intro email hook failed: ${err.message}`);
+  }
+
   return {
     ok: true,
     state: 'en_route',
