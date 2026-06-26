@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { BUTTON_BASE } from '../theme';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 
@@ -7,8 +7,12 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', red: '#A83B34' };
 const ADMIN_FONT = "'Roboto', Arial, sans-serif";
 
+// Only honor same-origin relative redirect targets (block //host and schemes).
+const isInternalPath = (p) => typeof p === 'string' && /^\/(?![/\\])/.test(p);
+
 export default function AdminLoginPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -34,7 +38,11 @@ export default function AdminLoginPage() {
       // will decide gated surfaces on the next render. Invalidate + refetch
       // with the new token before we navigate so flag reads see truth.
       await refetchFlags();
-      navigate('/admin', { replace: true });
+      // Honor a ?next= return target (e.g. the tech entry point sends
+      // ?next=/tech) so techs land in Field Tools rather than the admin-only
+      // dashboard. Defaults to /admin for the normal admin sign-in.
+      const next = searchParams.get('next');
+      navigate(isInternalPath(next) ? next : '/admin', { replace: true });
     } catch (e) { setError(e.message); }
     setLoading(false);
   };
