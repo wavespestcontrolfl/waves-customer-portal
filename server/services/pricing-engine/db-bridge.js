@@ -1552,11 +1552,19 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(target, 'ceilingSqFt', c.ceilingSqFt, Number);
       setString(target, 'taxCategory', c.taxCategory);
       if (Array.isArray(c.quarterlyBrackets) && c.quarterlyBrackets.length) {
-        const brackets = c.quarterlyBrackets
-          .filter(b => isFiniteNumber(b?.sqft) && isFiniteNumber(b?.price))
-          .map(b => ({ sqft: Number(b.sqft), price: money(b.price) }))
-          .sort((a, b2) => a.sqft - b2.sqft);
-        if (brackets.length) target.quarterlyBrackets = brackets;
+        // Fail closed: apply the admin brackets ONLY if every entry is numeric.
+        // Silently filtering out a malformed bracket would change the
+        // interpolation curve (e.g. dropping the 15k point makes 10k pricing
+        // extend to the ceiling and underquote), so a bad edit keeps the safe
+        // in-code default curve instead.
+        const allValid = c.quarterlyBrackets.every(
+          b => isFiniteNumber(b?.sqft) && isFiniteNumber(b?.price),
+        );
+        if (allValid) {
+          target.quarterlyBrackets = c.quarterlyBrackets
+            .map(b => ({ sqft: Number(b.sqft), price: money(b.price) }))
+            .sort((a, b2) => a.sqft - b2.sqft);
+        }
       }
       if (c.frequencyMultipliers && typeof c.frequencyMultipliers === 'object') {
         for (const freq of ['quarterly', 'bimonthly', 'monthly']) {

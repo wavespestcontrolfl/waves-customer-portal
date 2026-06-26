@@ -2103,7 +2103,12 @@ export default function EstimateToolViewV2({
           next[key] = value;
         }
       }
-      if (prefillIdentityChanged) next.measuredTurfSf = "";
+      if (prefillIdentityChanged) {
+        next.measuredTurfSf = "";
+        // A different lead/customer/property → drop the prior commercial unit
+        // count so it can't ride into the next pilot per-unit reserve.
+        next.units = "";
+      }
       return next;
     });
   }, [
