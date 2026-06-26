@@ -1,4 +1,4 @@
-const { normalizeLeadAddress, parseRawAddress } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, parseRawAddress, formatAddress } = require('../utils/address-normalizer');
 
 describe('address normalizer', () => {
   test('splits the malformed Bill Waterman Parrish address into street/city/state/zip', () => {
@@ -240,5 +240,51 @@ describe('address normalizer', () => {
       zip: '34236',
       fullAddress: '123 Main St Apt 4, Sarasota, FL 34236',
     });
+  });
+});
+
+describe('formatAddress', () => {
+  test('joins a complete address', () => {
+    expect(formatAddress({ line1: '123 Main St', city: 'Sarasota', state: 'FL', zip: '34231' }))
+      .toBe('123 Main St, Sarasota, FL 34231');
+  });
+
+  test('drops a missing zip instead of rendering "FL null"', () => {
+    expect(formatAddress({ line1: '123 Main St', city: 'Sarasota', state: 'FL', zip: null }))
+      .toBe('123 Main St, Sarasota, FL');
+  });
+
+  test('drops a missing state and zip cleanly', () => {
+    expect(formatAddress({ line1: '123 Main St', city: 'Sarasota' }))
+      .toBe('123 Main St, Sarasota');
+  });
+
+  test('skips a missing city without leaving a double comma', () => {
+    expect(formatAddress({ line1: '123 Main St', city: '', state: 'FL', zip: '34231' }))
+      .toBe('123 Main St, FL 34231');
+  });
+
+  test('handles a city/state/zip-only label (no street line)', () => {
+    expect(formatAddress({ city: 'Sarasota', state: 'FL', zip: '34231' }))
+      .toBe('Sarasota, FL 34231');
+  });
+
+  test('keeps a zip with no state', () => {
+    expect(formatAddress({ line1: '123 Main St', city: 'Sarasota', zip: '34231' }))
+      .toBe('123 Main St, Sarasota, 34231');
+  });
+
+  test('trims whitespace-only parts to empty', () => {
+    expect(formatAddress({ line1: '  ', city: '  ', state: '  ', zip: '  ' })).toBe('');
+  });
+
+  test('returns an empty string for no input', () => {
+    expect(formatAddress()).toBe('');
+    expect(formatAddress({})).toBe('');
+  });
+
+  test('coerces non-string zip values', () => {
+    expect(formatAddress({ line1: '123 Main St', city: 'Sarasota', state: 'FL', zip: 34231 }))
+      .toBe('123 Main St, Sarasota, FL 34231');
   });
 });
