@@ -33,12 +33,74 @@ ai_estimates(id, customer_id, status [draft|sent|viewed|accepted|declined|expire
 ai_mrr_snapshots(period_month date, total_mrr numeric$, committed_mrr, at_risk_mrr, customer_count int, captured_at)
 ai_kpi_snapshots(snapshot_date date, metric text, value numeric, captured_at)`;
 
+// Hardened metric fragments — the handful of hero metrics that are most asked and
+// most easily mis-derived (wrong predicate / wrong source). When the model
+// recognizes a request as one of these (sets "heroMetric"), the server uses the
+// VETTED spec below instead of the model's free-written SQL, so these hit the
+// right answer every time. The model only free-writes the long tail.
+// Every fragment is sandbox-safe (ai_* views only) and prod-verified.
+const HERO_METRICS = {
+  current_mrr: {
+    label: 'Current MRR',
+    desc: 'current total monthly recurring revenue (a single number)',
+    spec: {
+      sql: 'SELECT total_mrr AS mrr FROM ai_mrr_snapshots ORDER BY period_month DESC LIMIT 1',
+      chartType: 'kpi', x: null, y: ['mrr'], yFormat: 'currency',
+      explanation: 'Latest monthly MRR snapshot (total_mrr).',
+    },
+  },
+  mrr_trend: {
+    label: 'MRR Trend',
+    desc: 'monthly recurring revenue over time (a trend line)',
+    spec: {
+      sql: "SELECT period_month AS month, total_mrr AS mrr FROM ai_mrr_snapshots WHERE period_month >= CURRENT_DATE - INTERVAL '12 months' ORDER BY period_month ASC LIMIT 100",
+      chartType: 'line', x: 'month', y: ['mrr'], yFormat: 'currency',
+      explanation: 'Total MRR by month from the snapshot series, last 12 months.',
+    },
+  },
+  active_customers: {
+    label: 'Active Customers',
+    desc: 'current count of active / live customers (a single number)',
+    spec: {
+      sql: 'SELECT COUNT(*) AS active_customers FROM ai_customers WHERE is_live_customer = true',
+      chartType: 'kpi', x: null, y: ['active_customers'], yFormat: 'count',
+      explanation: 'Customers currently live (is_live_customer = true).',
+    },
+  },
+  monthly_churn_rate: {
+    label: 'Monthly Churn Rate',
+    desc: 'customer churn rate by month (departures ÷ that month’s active base)',
+    spec: {
+      sql: "SELECT s.period_month AS month, (SELECT COUNT(*) FROM ai_customers c WHERE c.churned_at >= s.period_month AND c.churned_at < (s.period_month + INTERVAL '1 month'))::numeric / NULLIF(s.customer_count, 0) AS churn_rate FROM ai_mrr_snapshots s WHERE s.period_month >= CURRENT_DATE - INTERVAL '12 months' ORDER BY s.period_month ASC LIMIT 100",
+      chartType: 'line', x: 'month', y: ['churn_rate'], yFormat: 'percent',
+      explanation: 'Customers who churned each month ÷ that month’s active base (snapshot), last 12 months.',
+    },
+  },
+  lead_conversion_rate: {
+    label: 'Lead Conversion Rate (90d)',
+    desc: 'lead-to-won conversion rate over the last 90 days (a single number)',
+    spec: {
+      sql: "SELECT COALESCE(COUNT(*) FILTER (WHERE status = 'won'), 0)::numeric / NULLIF(COUNT(*), 0) AS conversion FROM ai_leads WHERE first_contact_at >= CURRENT_DATE - INTERVAL '90 days'",
+      chartType: 'kpi', x: null, y: ['conversion'], yFormat: 'percent',
+      explanation: 'Won leads ÷ all leads first contacted in the last 90 days.',
+    },
+  },
+};
+const HERO_KEYS = Object.keys(HERO_METRICS);
+
 function buildSystemPrompt() {
   return `You are a careful analytics engineer for Waves, a pest-control & lawn-care business (SW Florida). Turn the user's question (and any attached reference image) into ONE read-only PostgreSQL query and a chart spec.
 
 Return JSON only, no prose:
-{ "sql": "<single SELECT, may begin with a read-only WITH>", "chartType": "line|bar|donut|kpi|table", "title": "<short>", "x": "<column alias or null>", "y": ["<column alias>", ...], "yFormat": "currency|percent|count|hours|rating|number", "explanation": "<one sentence — STATE the exact time window you used>" }
+{ "sql": "<single SELECT, may begin with a read-only WITH>", "chartType": "line|bar|donut|kpi|table", "title": "<short>", "x": "<column alias or null>", "y": ["<column alias>", ...], "yFormat": "currency|percent|count|hours|rating|number", "heroMetric": "<one of the canonical keys below, or omit>", "explanation": "<one sentence — STATE the exact time window you used>" }
 If the question cannot be answered from the schema below, return { "error": "<short reason>" } instead.
+
+Canonical metric shortcuts — if the request is CLEARLY one of these, set "heroMetric" to its key (still write your best sql/spec as a fallback; the server uses a vetted query for these). If it's a variation (different window, breakdown, or filter), do NOT set heroMetric — write the SQL yourself.
+- current_mrr — current total monthly recurring revenue (single number)
+- mrr_trend — monthly recurring revenue over time
+- active_customers — current count of active / live customers
+- monthly_churn_rate — customer churn rate by month
+- lead_conversion_rate — lead-to-won conversion rate, last 90 days
 
 Hard rules for "sql" (queries that break these are rejected):
 - A SINGLE statement: a SELECT, optionally led by a read-only WITH/CTE. No semicolons, no comments, no DDL/DML, no catalog/system functions (pg_*, information_schema, current_setting).
@@ -153,6 +215,29 @@ async function generateChartSpec(prompt, opts = {}) {
 
   const j = res.json;
   if (j.error) return { ok: false, reason: 'unanswerable', message: String(j.error).slice(0, 200) };
+
+  // Hardened fragment: if the model recognized a canonical metric, use the VETTED
+  // spec instead of its free-written SQL so hero metrics are always exactly right.
+  // Skipped on a repair round so a (rare) fragment failure can fall back to a
+  // model-written query rather than re-trying the same SQL.
+  const heroKey = typeof j.heroMetric === 'string' && HERO_METRICS[j.heroMetric] ? j.heroMetric : null;
+  if (heroKey && !opts.errorContext) {
+    const hero = HERO_METRICS[heroKey];
+    return {
+      ok: true,
+      spec: {
+        sql: hero.spec.sql,
+        chartType: hero.spec.chartType,
+        title: (typeof j.title === 'string' && j.title.trim()) ? j.title.trim().slice(0, 120) : hero.label,
+        x: hero.spec.x,
+        y: hero.spec.y,
+        yFormat: hero.spec.yFormat,
+        explanation: hero.spec.explanation,
+        heroMetric: heroKey,
+      },
+    };
+  }
+
   if (!j.sql || typeof j.sql !== 'string') return { ok: false, reason: 'no_sql' };
   if (!CHART_TYPES.includes(j.chartType)) return { ok: false, reason: 'bad_chart_type' };
 
@@ -172,4 +257,4 @@ async function generateChartSpec(prompt, opts = {}) {
   };
 }
 
-module.exports = { generateChartSpec, extractImageIntent, CHART_TYPES, Y_FORMATS, SCHEMA_DOC };
+module.exports = { generateChartSpec, extractImageIntent, HERO_METRICS, CHART_TYPES, Y_FORMATS, SCHEMA_DOC };
