@@ -915,6 +915,120 @@ router.get('/mrr-trend', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/retention-cohort?months=12
+// Signup-cohort retention grid: rows = the ET month a customer converted
+// (member_since, via the canonical CONVERSION_DATE_SQL), columns = whole months
+// since signup, cells = % of that cohort still a live customer at the end of
+// each month.
+//
+// Definitions are deliberately the SAME as the core-KPIs retention metric so the
+// two can't disagree:
+//   - cohort entry  = CONVERSION_DATE_SQL (member_since, else created_at ET date)
+//   - "live"        = active AND deleted_at IS NULL AND pipeline_stage IN CUSTOMER_STAGES
+//   - a member who is NOT live now is treated as having departed on the best
+//     available date: churned_at, else the ET date of pipeline_stage_changed_at,
+//     else of deleted_at. (No per-month membership history is stored anywhere —
+//     mrr_snapshots only keeps aggregate totals — so retention over time is
+//     reconstructed from these entry/exit dates. Reactivations keep "live now =
+//     retained" just like the KPI, so a churn-then-return reads as retained.)
+// Month 0 is the signup month itself (100% by definition — the cohort base).
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const monthIndexOf = (ym) => Number(ym.slice(0, 4)) * 12 + (Number(ym.slice(5, 7)) - 1);
+const monthLabelOf = (ym) => `${MONTH_ABBR[Number(ym.slice(5, 7)) - 1]} ’${ym.slice(2, 4)}`;
+
+router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
+  try {
+    const months = Math.max(3, Math.min(24, parseInt(req.query.months || 12, 10) || 12));
+    const nowMonth = etDateString().slice(0, 7); // YYYY-MM (ET)
+    const nowIdx = monthIndexOf(nowMonth);
+    const firstIdx = nowIdx - (months - 1);
+    // First day of the oldest cohort month, to bound the scan on the conversion date.
+    const rangeStart = `${String(Math.floor(firstIdx / 12)).padStart(4, '0')}-${String((firstIdx % 12) + 1).padStart(2, '0')}-01`;
+
+    let rows = [];
+    try {
+      const qb = db('customers')
+        .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [rangeStart])
+        // Converted at some point → currently a customer stage, or churned/dormant
+        // (a former customer). Pure leads (new_lead/contacted/lost/…) are excluded,
+        // mirroring the retention KPI's cohort.
+        .whereIn('pipeline_stage', [...CUSTOMER_STAGES, 'churned', 'dormant']);
+      if (INTERNAL_TEST_CUSTOMERS.length) {
+        qb.whereNotIn(
+          db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
+          INTERNAL_TEST_CUSTOMERS,
+        );
+      }
+      // Keep the three exit signals separate so the departure month can be picked
+      // by CAUSE in JS — a flat COALESCE would grab a stale pre-exit stage change.
+      rows = await qb.select(
+        db.raw(`to_char(${CONVERSION_DATE_SQL}, 'YYYY-MM') as cohort_month`),
+        'active',
+        'deleted_at',
+        'pipeline_stage',
+        db.raw("to_char(churned_at, 'YYYY-MM') as churned_month"),
+        db.raw("to_char((pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM') as stage_changed_month"),
+        db.raw("to_char((deleted_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM') as deleted_month"),
+      );
+    } catch (err) {
+      logger.error(`[admin-dashboard] /retention-cohort query failed: ${err.message}`);
+      return res.json({ cohorts: [], maxOffset: 0, months });
+    }
+
+    const LEFT_STAGES = new Set(['churned', 'dormant']);
+    // Bucket members by cohort month, precomputing a churn month index.
+    const byCohort = new Map(); // 'YYYY-MM' -> [{ churnIdx }]
+    for (const r of rows) {
+      const cohort = r.cohort_month;
+      if (!cohort) continue;
+      const cIdx = monthIndexOf(cohort);
+      const liveNow = r.active === true && r.deleted_at == null && CUSTOMER_STAGES.includes(r.pipeline_stage);
+      let churnIdx;
+      if (liveNow) {
+        churnIdx = Infinity;
+      } else {
+        // Resolve the exit month by CAUSE, never a stale stage change:
+        //   - churned/dormant: the stage move IS the exit (churned_at, else its ts)
+        //   - otherwise deleted: the archive (deleted_at) is the exit — the archive
+        //     route only stamps deleted_at, leaving pipeline_stage live
+        //   - active=false with no churn/delete: an admin deactivation carries no
+        //     departure date, so it's dropped entirely (mirrors the core-KPIs
+        //     retention cohort) rather than backdated to signup/last-stage-change.
+        let exitMonth = null;
+        if (LEFT_STAGES.has(r.pipeline_stage)) exitMonth = r.churned_month || r.stage_changed_month;
+        else if (r.deleted_month) exitMonth = r.deleted_month;
+        if (!exitMonth) continue; // undatable deactivation → exclude
+        churnIdx = Math.max(cIdx, monthIndexOf(exitMonth));
+      }
+      if (!byCohort.has(cohort)) byCohort.set(cohort, []);
+      byCohort.get(cohort).push({ churnIdx });
+    }
+
+    const cohorts = [];
+    for (let idx = firstIdx; idx <= nowIdx; idx += 1) {
+      const ym = `${String(Math.floor(idx / 12)).padStart(4, '0')}-${String((idx % 12) + 1).padStart(2, '0')}`;
+      const members = byCohort.get(ym) || [];
+      const size = members.length;
+      const elapsed = nowIdx - idx; // number of offset columns available (0..elapsed)
+      const retention = [];
+      for (let m = 0; m <= elapsed; m += 1) {
+        if (size === 0) { retention.push(null); continue; }
+        if (m === 0) { retention.push(100); continue; } // signup month = base
+        // Active through the END of month (idx + m): still live, or churned strictly later.
+        const k = idx + m;
+        const alive = members.filter((mem) => mem.churnIdx > k).length;
+        retention.push(Math.round((alive / size) * 1000) / 10);
+      }
+      cohorts.push({ month: ym, label: monthLabelOf(ym), size, retention });
+    }
+
+    res.json({ cohorts, maxOffset: months - 1, months });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /retention-cohort failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // GET /api/admin/dashboard/review-trend — last 12 ET months of Google reviews
 // (monthly count + avg star rating) plus all-time totals. Mirrors the
 // /mrr-trend 12-month window so the dashboard chart aligns month-for-month.

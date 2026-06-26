@@ -861,6 +861,57 @@ export function LeadSourceBars({ bySource = [], maxRows = 8 }) {
   );
 }
 
+// ─── Retention cohort grid ────────────────────────────────────────
+
+// Signup-cohort retention heatmap. Rows = the month a customer converted,
+// columns = whole months since signup (M0 = signup month = 100% base), cell =
+// % of that cohort still a live customer. Monochrome zinc heat (darker = higher
+// retention); the % is always printed so small differences in the high range
+// stay legible. Future cells (a cohort hasn't aged that far yet) are blank.
+export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
+  if (!cohorts.length) return <EmptyState>Not enough customer history yet</EmptyState>;
+  const cols = Array.from({ length: maxOffset + 1 }, (_, i) => i);
+  // Zinc-900 wash whose opacity tracks retention; text flips to white once the
+  // wash is dark enough to keep contrast readable.
+  const cellStyle = (pct) => ({
+    backgroundColor: `rgba(24, 24, 27, ${0.06 + (pct / 100) * 0.84})`,
+    color: pct >= 45 ? "#fff" : "#3f3f46",
+  });
+  return (
+    <div className="overflow-x-auto">
+      <div className="min-w-max">
+        <div className="flex items-center gap-1 mb-1">
+          <div className="w-16 shrink-0 u-label text-ink-tertiary">Cohort</div>
+          <div className="w-10 shrink-0 u-label text-ink-tertiary text-right">N</div>
+          {cols.map((m) => (
+            <div key={m} className="w-10 shrink-0 u-label text-ink-tertiary text-center">{`M${m}`}</div>
+          ))}
+        </div>
+        {cohorts.map((c) => (
+          <div key={c.month} className="flex items-center gap-1 mb-1">
+            <div className="w-16 shrink-0 text-12 text-ink-secondary truncate">{c.label}</div>
+            <div className="w-10 shrink-0 text-12 u-nums text-ink-tertiary text-right">{fmtInt(c.size)}</div>
+            {cols.map((m) => {
+              const pct = c.retention?.[m];
+              if (pct == null) return <div key={m} className="w-10 h-7 shrink-0" />;
+              return (
+                <div
+                  key={m}
+                  className="w-10 h-7 shrink-0 rounded-xs flex items-center justify-center text-11 u-nums"
+                  style={cellStyle(pct)}
+                  title={`${c.label} · month ${m}: ${pct}% of ${c.size} retained`}
+                >
+                  {Math.round(pct)}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Tech leaderboard bars ────────────────────────────────────────
 
 // Horizontal-bar variant of the existing leaderboard table — same data,
