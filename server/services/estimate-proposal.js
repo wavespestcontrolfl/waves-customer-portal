@@ -127,10 +127,14 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
     ...(Array.isArray(estimateData?.engineResult?.oneTime?.specItems) ? estimateData.engineResult.oneTime.specItems : []),
     ...(Array.isArray(estimateData?.engineResult?.specItems) ? estimateData.engineResult.specItems : []),
   ];
+  // Pull ALL commercial selections from the saved spec-item shape — both the
+  // pilot's suggested-price pest line AND any unpriced manual-quote line (e.g.
+  // a commercial LAWN selected alongside). Surfacing the unpriced lines (as $0
+  // "manual quote" rows below) keeps them from being silently dropped when the
+  // operator opens, saves, and sends the synthesized proposal.
   for (const s of specSources) {
     const svc = String(s?.service || '');
-    const hasSuggested = num(s?.suggestedMonthly) > 0 || num(s?.suggestedAnnual) > 0;
-    if (svc.startsWith('commercial_') && hasSuggested && !engineLines.some((l) => l.service === svc)) {
+    if (svc.startsWith('commercial_') && !engineLines.some((l) => l.service === svc)) {
       engineLines.push(s);
     }
   }
@@ -184,6 +188,16 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
         description: description || 'One-time service',
         unitPrice: oneTime,
         frequency: 'one_time',
+        taxable,
+      }));
+    } else if (String(line.service || '').startsWith('commercial_')) {
+      // Unpriced commercial selection (a manual-quote line with no suggested
+      // price). Surface it as a $0 row the operator must price before sending,
+      // rather than dropping it silently from the synthesized proposal.
+      lineItems.push(normalizeLineItem({
+        description: `${description || 'Commercial service'} — manual quote (enter price before sending)`,
+        unitPrice: 0,
+        frequency: 'monthly',
         taxable,
       }));
     }

@@ -216,6 +216,23 @@ describe('proposal synthesizes from the SAVED legacy spec-item shape', () => {
     const totals = computeProposalTotals(proposal);
     expect(totals.totalTax).toBeCloseTo(46.2, 2); // 660 annual × 7%
   });
+
+  test('a manual-quote commercial selection alongside the pilot is surfaced, not dropped', () => {
+    // Pilot pest + manual-quote lawn on the same commercial property.
+    const result = mapV1ToLegacyShape(generateEstimate({
+      propertyType: 'commercial', isCommercial: true,
+      buildingSqFt: 5000, stories: 1, lotSqFt: 20000, features: {},
+      services: {
+        pest: { frequency: 'quarterly', commercialPricingMode: 'small_commercial_pilot' },
+        lawn: { track: 'st_augustine', tier: 'enhanced', commercialPricingMode: 'small_commercial_pilot' },
+      },
+    }));
+    const proposal = normalizeProposal({ address: 'x', estimate_data: JSON.stringify({ result }) });
+    const rows = proposal.buildings[0].lineItems;
+    // Pilot pest priced; manual-quote lawn surfaced as a $0 "price before sending" row.
+    expect(rows).toContainEqual(expect.objectContaining({ description: 'Commercial Pest Control', unitPrice: 165 }));
+    expect(rows.some((r) => /Commercial Lawn Treatment — manual quote/.test(r.description) && r.unitPrice === 0)).toBe(true);
+  });
 });
 
 describe('customer-facing proposal applies FL commercial tax to the suggested pilot price', () => {

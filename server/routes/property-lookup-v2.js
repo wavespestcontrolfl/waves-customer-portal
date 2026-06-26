@@ -2398,7 +2398,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       ...(commercialProfile && Array.isArray(o.commercialBuildings) && o.commercialBuildings.length
         ? { buildings: o.commercialBuildings }
         : {}),
-      ...(commercialProfile && o.units != null && o.units !== '' ? { units: Number(o.units) } : {}),
+      // Operator-entered unit count wins; when blank, fall back to the property
+      // record's multi-family unit count (>1) so the per-unit reserve still
+      // applies without the operator re-typing it.
+      ...(commercialProfile
+        ? (o.units != null && o.units !== ''
+            ? { units: Number(o.units) }
+            : (Number(p.unitCount) > 1 ? { units: Number(p.unitCount) } : {}))
+        : {}),
     };
   }
   if (sel.has('LAWN')) {
