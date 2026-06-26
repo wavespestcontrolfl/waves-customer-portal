@@ -6590,7 +6590,7 @@ function RecapCapture({ serviceId }) {
   return (
     <div style={wrap}>
       <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: D.text, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: D.teal }} /> Recap clips</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "#111" }} /> Recap clips</span>
         <span style={{ fontSize: 12, color: D.muted }}>{items.length ? `${items.length} captured` : "optional"}</span>
       </div>
       <div style={{ fontSize: 12.5, color: D.muted, margin: "6px 0 10px", lineHeight: 1.45 }}>Grab a few 5-sec clips of the work — they play in the customer’s recap. Skip it and the recap still generates.</div>
@@ -6601,12 +6601,12 @@ function RecapCapture({ serviceId }) {
         <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
           {items.map((m) => (
             <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 8 }}>
-              <div style={{ width: 40, height: 40, borderRadius: 7, background: "linear-gradient(135deg,#0ea5e9,#0b1220)", flexShrink: 0 }} />
+              <div style={{ width: 40, height: 40, borderRadius: 7, background: "linear-gradient(135deg,#3f3f46,#18181b)", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 700, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
-                <div style={{ fontSize: 11.5, color: D.teal }}>“{m.caption}”</div>
+                <div style={{ fontSize: 11.5, color: "#111" }}>“{m.caption}”</div>
               </div>
-              <span style={{ fontSize: 10.5, color: m.status === "ready" ? D.green : D.muted, fontWeight: 700 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
+              <span style={{ fontSize: 10.5, color: m.status === "ready" ? "#111" : D.muted, fontWeight: 700 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
               <button onClick={() => remove(m.id)} style={{ background: "none", border: "none", color: D.muted, fontSize: 18, cursor: "pointer" }}>×</button>
             </div>
           ))}
@@ -6614,7 +6614,7 @@ function RecapCapture({ serviceId }) {
       )}
 
       {err && <div style={{ fontSize: 12, color: D.red, margin: "0 0 8px", lineHeight: 1.4 }}>{err}</div>}
-      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: D.teal, color: "#04240f", fontWeight: 800, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
+      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: "#111", color: "#fff", fontWeight: 800, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
         {uploading ? `Uploading… (${uploading})` : "+ Capture clip"}
       </button>
 
@@ -6626,7 +6626,7 @@ function RecapCapture({ serviceId }) {
             <div style={{ fontSize: 12, color: D.muted, textAlign: "center", margin: "4px 0 12px" }}>One tap. We caption it for the customer.</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               {(showMore ? [...RECAP_CHIPS_TOP, ...RECAP_CHIPS_MORE] : RECAP_CHIPS_TOP).map((c) => (
-                <button key={c.role} onClick={() => tag(c.role)} style={chip}><span style={{ width: 9, height: 9, borderRadius: "50%", background: D.teal, flexShrink: 0 }} />{c.label}</button>
+                <button key={c.role} onClick={() => tag(c.role)} style={chip}><span style={{ width: 9, height: 9, borderRadius: "50%", background: "#111", flexShrink: 0 }} />{c.label}</button>
               ))}
             </div>
             {!showMore && <button onClick={() => setShowMore(true)} style={{ marginTop: 9, width: "100%", padding: 10, borderRadius: 9, background: "none", border: `1px solid ${D.border}`, color: D.muted, fontSize: 12.5, cursor: "pointer" }}>More actions…</button>}
@@ -6699,17 +6699,17 @@ function PestRecapCard({ serviceId }) {
   return (
     <div style={wrap}>
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
-      <div style={head}><span style={{ width: 8, height: 8, borderRadius: "50%", background: D.teal }} /> Visit recap video</div>
+      <div style={head}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "#111" }} /> Visit recap video</div>
       {s === "loading" && <div style={{ fontSize: 13, color: D.muted }}>Checking recap…</div>}
       {(s === "none") && (
         <>
           <div style={{ fontSize: 12.5, color: D.muted, marginBottom: 10 }}>Generate a ~30-sec recap from this visit. You’ll preview & approve before it sends.</div>
-          <button style={btn(D.teal, "#04240f")} disabled={busy} onClick={() => act("generate")}>Generate recap</button>
+          <button style={btn("#111", "#fff")} disabled={busy} onClick={() => act("generate")}>Generate recap</button>
         </>
       )}
       {(s === "pending" || s === "rendering") && (
         <div style={{ fontSize: 13, color: D.muted, display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ width: 16, height: 16, border: `2px solid ${D.border}`, borderTopColor: D.teal, borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
+          <span style={{ width: 16, height: 16, border: `2px solid ${D.border}`, borderTopColor: "#111", borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
           Rendering the recap… this takes about a minute.
         </div>
       )}
@@ -6721,19 +6721,19 @@ function PestRecapCard({ serviceId }) {
           {s === "approved" ? (
             state.sent ? (
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ flex: 1, fontSize: 12.5, color: D.green, fontWeight: 700 }}>Approved &amp; sent to the customer</span>
+                <span style={{ flex: 1, fontSize: 12.5, color: "#111", fontWeight: 700 }}>Approved &amp; sent to the customer</span>
                 <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
               </div>
             ) : (
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <span style={{ flex: 1, fontSize: 12, color: D.amber, fontWeight: 700, minWidth: 130 }}>Approved — the text didn’t send</span>
-                <button style={btn(D.green, "#04240f")} disabled={busy} onClick={() => act("approve")}>Retry send</button>
+                <button style={btn("#111", "#fff")} disabled={busy} onClick={() => act("approve")}>Retry send</button>
                 <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
               </div>
             )
           ) : (
             <div style={{ display: "flex", gap: 8 }}>
-              <button style={btn(D.green, "#04240f")} disabled={busy} onClick={() => act("approve")}>Approve &amp; send</button>
+              <button style={btn("#111", "#fff")} disabled={busy} onClick={() => act("approve")}>Approve &amp; send</button>
               <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
             </div>
           )}
@@ -6742,7 +6742,7 @@ function PestRecapCard({ serviceId }) {
       {s === "failed" && (
         <>
           <div style={{ fontSize: 12.5, color: D.amber, marginBottom: 10 }}>Recap render didn’t complete.{state.error ? ` (${state.error})` : ""}</div>
-          <button style={btn(D.teal, "#04240f")} disabled={busy} onClick={regenerate}>Try again</button>
+          <button style={btn("#111", "#fff")} disabled={busy} onClick={regenerate}>Try again</button>
         </>
       )}
       {s === "error" && <div style={{ fontSize: 12.5, color: D.muted }}>Couldn’t load recap status.</div>}
