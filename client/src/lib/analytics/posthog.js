@@ -35,7 +35,13 @@ export function isPublicFunnelPath(pathname) {
   // a known slug is a tokenized customer estimate (PII) and stays excluded — as
   // do /pay/:token and /book/:token.
   const m = p.match(/^\/estimate\/([^/]+)\/?$/);
-  return !!(m && SERVICE_ESTIMATE_SLUGS.has(decodeURIComponent(m[1]).toLowerCase()));
+  if (!m) return false;
+  // Decode defensively — a malformed escape (/estimate/%E0%A4%A) throws, and
+  // this runs during render even when analytics is dark, so a bad URL must fall
+  // through to "not public", never blank the SPA.
+  let seg;
+  try { seg = decodeURIComponent(m[1]).toLowerCase(); } catch { return false; }
+  return SERVICE_ESTIMATE_SLUGS.has(seg);
 }
 
 /** True once the visitor has accepted cookies (set here or on the marketing
@@ -75,7 +81,18 @@ export function bootPostHog() {
     // Replay: mask every input value AND every rendered text node ('*'), so no
     // customer PII text (rendered name/phone/address, Places suggestions) can
     // reach replay on these pages. Recording sample rate is set in the UI.
-    session_recording: { maskAllInputs: true, maskTextSelector: '*' },
+    session_recording: {
+      maskAllInputs: true,
+      maskTextSelector: '*',
+      // If network capture is ever enabled in the PostHog UI, the booking flow
+      // sends address/phone in GET query strings (/booking/availability?address=…,
+      // /booking/customer-lookup?phone=…). Strip the query from captured request
+      // URLs so that PII can't ride along in replay network data.
+      maskCapturedNetworkRequestFn: (request) => {
+        if (request && typeof request.name === 'string') request.name = request.name.split('?')[0];
+        return request;
+      },
+    },
     cross_subdomain_cookie: true,
     // Hard gate + PII scrub: drop EVERY event (incl. replay $snapshot) whenever
     // the route isn't a funnel route (protects against a client-side nav into
@@ -84,12 +101,18 @@ export function bootPostHog() {
     // in /book?…&lead=… never reaches PostHog's automatic $pageview.
     before_send: (event) => {
       if (!isPublicFunnelPath()) return null;
-      const props = event && event.properties;
-      if (props) {
-        const strip = (u) => (typeof u === 'string' ? u.split('?')[0].split('#')[0] : u);
-        if (props.$current_url) props.$current_url = strip(props.$current_url);
-        if (props.$referrer) props.$referrer = strip(props.$referrer);
-      }
+      if (!event) return event;
+      const strip = (u) => (typeof u === 'string' ? u.split('?')[0].split('#')[0] : u);
+      // Scrub query/hash from URL + referrer fields wherever PostHog stores them:
+      // event properties AND the first-touch person props ($initial_*) carried on
+      // $set / $set_once, so a /book?…&lead=… landing leaks nothing.
+      const URL_KEYS = ['$current_url', '$referrer', '$initial_current_url', '$initial_referrer'];
+      const scrub = (bag) => { if (bag) for (const k of URL_KEYS) if (typeof bag[k] === 'string') bag[k] = strip(bag[k]); };
+      const props = event.properties;
+      scrub(props);
+      if (props) { scrub(props.$set); scrub(props.$set_once); }
+      scrub(event.$set);
+      scrub(event.$set_once);
       return event;
     },
   });

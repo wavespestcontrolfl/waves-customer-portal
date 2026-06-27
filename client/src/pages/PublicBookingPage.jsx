@@ -168,7 +168,10 @@ export default function PublicBookingPage() {
 
   // Top of the booking funnel — fires once on mount.
   useEffect(() => {
-    track(FUNNEL_EVENTS.BOOKING_VIEWED, { source, service: service.id });
+    // `source` comes from the public query string — shape-allowlist it so a
+    // crafted /book?source=<email-or-token> can't send raw PII as a property.
+    const safeSource = /^[a-z][a-z-]{0,32}$/.test(source) ? source : 'other';
+    track(FUNNEL_EVENTS.BOOKING_VIEWED, { source: safeSource, service: service.id });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
