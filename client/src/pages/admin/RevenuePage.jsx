@@ -324,10 +324,17 @@ function AdAttributionSection({ period }) {
             {fmt(attr.totalRevenue)}
           </span>
         </span>{" "}
-        <span>
-          Total ad spend:{" "}
+        <span
+          title={
+            attr.totalFixedCost > 0
+              ? `Ad ${fmt(attr.totalAdSpend)} + fixed ${fmt(attr.totalFixedCost)} (SEO retainer / mgmt fees)`
+              : undefined
+          }
+        >
+          {/* all-in (ad + fixed) so it reconciles with the all-in ROAS/CAC */}
+          Total spend:{" "}
           <span style={{ color: D.amber, fontFamily: MONO }}>
-            {fmt(attr.totalAdSpend)}
+            {fmt(attr.totalAllInSpend != null ? attr.totalAllInSpend : attr.totalAdSpend)}
           </span>
         </span>{" "}
       </div>{" "}

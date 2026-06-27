@@ -464,7 +464,14 @@ async function fetchChannelAttribution(since, months = 1) {
 
 function periodWindow(period) {
   const periodDays = period === 'quarter' ? 90 : period === 'ytd' ? 365 : 30;
-  return { since: etDateString(addETDays(new Date(), -periodDays)), months: periodDays / 30 };
+  // months = the actual span of THIS window (avg month = 30.44 days), so fixed
+  // costs (monthly_amount × months) are prorated to exactly the window the ad
+  // spend covers — never a full year on a shorter window. ('ytd' here is a
+  // trailing-365 window, matching the rest of this endpoint's period handling.)
+  return {
+    since: etDateString(addETDays(new Date(), -periodDays)),
+    months: periodDays / 30.44,
+  };
 }
 
 // GET /api/admin/ads/revenue-attribution?period=month
@@ -499,7 +506,13 @@ router.post('/fixed-costs', async (req, res, next) => {
   try {
     const channel = String(req.body.channel || '').trim();
     if (!channel) return res.status(400).json({ error: 'channel is required' });
-    const monthly_amount = Math.max(0, parseFloat(req.body.monthlyAmount) || 0);
+    // Require a finite amount ≥ 0. Don't coerce a missing/NaN value to 0 — that
+    // would silently wipe a configured retainer/fee (0 IS valid for clearing one).
+    const raw = req.body.monthlyAmount;
+    const monthly_amount = typeof raw === 'number' ? raw : parseFloat(raw);
+    if (!Number.isFinite(monthly_amount) || monthly_amount < 0) {
+      return res.status(400).json({ error: 'monthlyAmount must be a number ≥ 0' });
+    }
     const note = req.body.note != null ? String(req.body.note).slice(0, 500) : null;
     await db('channel_fixed_costs')
       .insert({ channel, monthly_amount, note, created_at: new Date(), updated_at: new Date() })
