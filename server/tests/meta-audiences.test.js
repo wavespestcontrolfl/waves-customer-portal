@@ -6,7 +6,7 @@ const inserts = [];
 
 const mockDb = jest.fn((table) => {
   const b = {};
-  ['where', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'whereIn', 'whereRaw', 'andWhere'].forEach((m) => {
+  ['where', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'whereIn', 'whereRaw', 'andWhere', 'whereNotExists'].forEach((m) => {
     b[m] = jest.fn(() => b);
   });
   b.select = jest.fn(() => Promise.resolve(tableData[table] || []));
@@ -107,14 +107,47 @@ describe('syncAudience', () => {
       { id: 'KEEP', email: 'keep@x.com', phone: '9412975749' },
       { id: 'NEW', email: 'new@x.com', phone: null },
     ];
-    stateRow = { meta_audience_id: 'AUD123', member_keys: ['customer:OLD', 'customer:KEEP'] };
+    stateRow = {
+      meta_audience_id: 'AUD123',
+      member_keys: [
+        { k: 'customer:OLD', d: ['h:old@x.com', ''] },
+        { k: 'customer:KEEP', d: ['h:keep@x.com', 'h:19412975749'] },
+      ],
+    };
     const r = await MetaAudiences.syncAudience('customers', {});
     expect(r.dryRun).toBe(true);
     expect(r.eligible).toBe(2);
+    expect(r.withMatchKeys).toBe(2);  // KEEP + NEW both have email
+    expect(r.skippedNoKeys).toBe(0);
     expect(r.toAdd).toBe(1);          // NEW
-    expect(r.toRemove).toBe(1);       // OLD
-    expect(r.addWithMatchKeys).toBe(1);
+    expect(r.toRemove).toBe(1);       // OLD (gone from current)
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('skips members with no usable keys and does NOT persist them (corrected later → uploads)', async () => {
+    configure();
+    tableData.customers = [
+      { id: 'good', email: 'good@x.com', phone: null },
+      { id: 'bad', email: 'not-an-email', phone: '123' }, // unusable
+    ];
+    const r = await MetaAudiences.syncAudience('customers', {});
+    expect(r.eligible).toBe(2);
+    expect(r.withMatchKeys).toBe(1);
+    expect(r.skippedNoKeys).toBe(1);
+    expect(r.toAdd).toBe(1); // only the good one is a member
+  });
+
+  test('removes a hard-deleted member using the stored hash (no DB re-read)', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({});
+    tableData.leads = []; // the lead was hard-deleted — not returned by any query
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'lead:GONE', d: ['h:gone@x.com', ''] }] };
+    const r = await MetaAudiences.syncAudience('unbooked_leads', {});
+    expect(r.toRemove).toBe(1);
+    expect(r.removed).toBe(1);
+    const del = global.fetch.mock.calls.find((c) => c[1] && c[1].method === 'DELETE');
+    expect(del).toBeTruthy();
+    expect(JSON.parse(del[1].body).payload.data).toEqual([['h:gone@x.com', '']]);
   });
 
   test('live run creates the audience and adds hashed users', async () => {

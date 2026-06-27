@@ -1,10 +1,11 @@
 /**
  * State for Meta Custom Audience syncs (suppression + retargeting lists).
  *
- * One row per audience key. `member_keys` is the set of entity keys
- * (e.g. "customer:<id>" / "lead:<id>") currently uploaded to Meta, so each sync
- * can compute add/remove deltas instead of re-uploading everything. PII never
- * lands here — only opaque entity keys + Meta's returned audience id.
+ * One row per audience key. `member_keys` holds the members currently uploaded to
+ * Meta as `[{ k: "customer:<id>"|"lead:<id>", d: [emailSha256, phoneSha256] }]`, so
+ * each sync computes add/remove deltas instead of re-uploading everything — and can
+ * still DELETE a member even after its source row is hard-deleted. Stored values are
+ * SHA-256 match-key hashes (the same data sent to Meta), never plaintext PII.
  */
 exports.up = async function up(knex) {
   await knex.schema.createTable('ad_audience_syncs', (t) => {

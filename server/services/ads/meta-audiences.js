@@ -18,6 +18,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { runExclusive } = require('../../utils/cron-lock');
 const { sha256Hex, normalizeEmail, normalizePhone } = require('./data-manager')._private;
+const { whereLiveCustomer } = require('../customer-stages');
 
 const GRAPH = 'https://graph.facebook.com';
 const STATE_TABLE = 'ad_audience_syncs';
@@ -25,9 +26,13 @@ const SCHEMA = ['EMAIL', 'PHONE']; // Meta multi-key schema; data rows align to 
 const MAX_USERS_PER_CALL = 1000; // Meta allows up to 10k/call; keep batches modest
 const DEFAULT_LEAD_WINDOW_DAYS = 180;
 
-// Lead lifecycle states that mean "no longer an unbooked prospect".
-const LEAD_BOOKED = ['booked', 'converted', 'won', 'customer', 'active_customer'];
-const LEAD_DEAD = ['lost', 'disqualified', 'unqualified', 'spam', 'invalid'];
+// Lead statuses that are no longer an "unbooked prospect" — booked/won or dead.
+// Mirrors the admin pipeline + agent-workflow closed-status sets (admin-leads.js,
+// admin-agents.js), incl. unresponsive/duplicate.
+const LEAD_CLOSED = [
+  'booked', 'converted', 'won', 'customer', 'active_customer',
+  'lost', 'disqualified', 'unqualified', 'spam', 'invalid', 'unresponsive', 'duplicate',
+];
 
 function boolEnv(name, defaultValue = false) {
   const raw = process.env[name];
@@ -69,23 +74,29 @@ const AUDIENCES = {
 
 // ── Member collection — returns [{ key, email, phone }] ──────────────
 async function collectCustomerMembers() {
-  const rows = await db('customers')
-    .where('active', true)
-    .whereNull('churned_at')
+  // REAL customers only. `customers.active` is also true for CRM lead/prospect rows
+  // (public quote leads are inserted as customers at pipeline_stage 'new_lead'), so
+  // use the canonical live-customer predicate, not just `active`.
+  const rows = await whereLiveCustomer(db('customers'))
     .where((q) => q.whereNotNull('email').orWhereNotNull('phone'))
     .select('id', 'email', 'phone');
   return rows.map((r) => ({ key: `customer:${r.id}`, email: r.email, phone: r.phone }));
 }
 
 async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAYS } = {}) {
-  const excluded = [...LEAD_BOOKED, ...LEAD_DEAD];
   const cutoff = new Date(Date.now() - windowDays * 86400000).toISOString();
-  const placeholders = excluded.map(() => '?').join(',');
+  const placeholders = LEAD_CLOSED.map(() => '?').join(',');
+  // Recent, not-closed leads who are NOT already real customers. We can't filter on
+  // `whereNull('customer_id')` — quote-wizard leads get a 'new_lead' prospect customer
+  // linked back, which would drop the biggest retargeting source. Instead exclude only
+  // leads whose linked customer is a LIVE customer.
   const rows = await db('leads')
-    .whereNull('customer_id')
-    .whereRaw(`LOWER(COALESCE(status, '')) NOT IN (${placeholders})`, excluded)
+    .whereRaw(`LOWER(COALESCE(status, '')) NOT IN (${placeholders})`, LEAD_CLOSED)
     .where('created_at', '>=', cutoff)
     .where((q) => q.whereNotNull('email').orWhereNotNull('phone'))
+    .whereNotExists(function existsLiveCustomer() {
+      whereLiveCustomer(this.select(db.raw('1')).from('customers as c').whereRaw('c.id = leads.customer_id'));
+    })
     .select('id', 'email', 'phone');
   return rows.map((r) => ({ key: `lead:${r.id}`, email: r.email, phone: r.phone }));
 }
@@ -156,23 +167,6 @@ async function pushUsers(audienceId, rows, method) {
   return count;
 }
 
-// Re-hash members that dropped out of the audience (no longer eligible, but still
-// in the DB) so we can DELETE them from the Meta audience.
-async function hashRemovedMembers(keys) {
-  const out = [];
-  const customerIds = keys.filter((k) => k.startsWith('customer:')).map((k) => k.slice('customer:'.length));
-  const leadIds = keys.filter((k) => k.startsWith('lead:')).map((k) => k.slice('lead:'.length));
-  if (customerIds.length) {
-    const rows = await db('customers').whereIn('id', customerIds).select('email', 'phone');
-    for (const r of rows) { const h = hashMember(r); if (h) out.push(h); }
-  }
-  if (leadIds.length) {
-    const rows = await db('leads').whereIn('id', leadIds).select('email', 'phone');
-    for (const r of rows) { const h = hashMember(r); if (h) out.push(h); }
-  }
-  return out;
-}
-
 // ── Sync one audience (add/remove delta vs last sync) ────────────────
 async function syncAudience(audienceKey, { validateOnly = false } = {}) {
   const def = AUDIENCES[audienceKey];
@@ -184,23 +178,28 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
 
   return runExclusive(`meta-audiences:${audienceKey}`, async () => {
     const members = await def.collect();
-    const memberByKey = new Map(members.map((m) => [m.key, m]));
-    const currentKeys = members.map((m) => m.key);
-    const currentSet = new Set(currentKeys);
+
+    // Keep only members with usable match keys, and store the hashed row in state.
+    // Persisting the hash (not just the entity key) means: (a) members skipped for
+    // missing keys are NOT recorded, so they upload once their email/phone is fixed,
+    // and (b) removals work even if the source row was hard-deleted (we never re-read
+    // it). The stored values are SHA-256 hashes — the same match keys sent to Meta —
+    // not plaintext PII.
+    const current = [];
+    let skippedNoKeys = 0;
+    for (const m of members) {
+      const data = hashMember(m);
+      if (data) current.push({ k: m.key, d: data }); else skippedNoKeys++;
+    }
+    const currentByKey = new Map(current.map((e) => [e.k, e]));
 
     const state = await loadState(audienceKey);
-    const priorKeys = Array.isArray(state && state.member_keys) ? state.member_keys : [];
-    const priorSet = new Set(priorKeys);
+    const prior = (Array.isArray(state && state.member_keys) ? state.member_keys : [])
+      .filter((e) => e && e.k && Array.isArray(e.d));
+    const priorByKey = new Map(prior.map((e) => [e.k, e]));
 
-    const toAddKeys = currentKeys.filter((k) => !priorSet.has(k));
-    const toRemoveKeys = priorKeys.filter((k) => !currentSet.has(k));
-
-    let addSkippedNoKeys = 0;
-    const addRows = [];
-    for (const k of toAddKeys) {
-      const h = hashMember(memberByKey.get(k));
-      if (h) addRows.push(h); else addSkippedNoKeys++;
-    }
+    const toAdd = current.filter((e) => !priorByKey.has(e.k));
+    const toRemove = prior.filter((e) => !currentByKey.has(e.k));
 
     const summary = {
       audienceKey,
@@ -208,30 +207,29 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       dryRun,
       name: def.name,
       eligible: members.length,
-      toAdd: toAddKeys.length,
-      toRemove: toRemoveKeys.length,
-      addWithMatchKeys: addRows.length,
-      addSkippedNoKeys,
+      withMatchKeys: current.length,
+      skippedNoKeys,
+      toAdd: toAdd.length,
+      toRemove: toRemove.length,
     };
 
     if (dryRun) {
       return { ...summary, note: 'Dry run — set META_AUDIENCES_ALLOW_UPLOADS=true to apply.' };
     }
 
-    const removeRows = await hashRemovedMembers(toRemoveKeys);
     const audienceId = await ensureAudience(audienceKey, def);
-    const added = addRows.length ? await pushUsers(audienceId, addRows, 'POST') : 0;
-    const removed = removeRows.length ? await pushUsers(audienceId, removeRows, 'DELETE') : 0;
+    const added = toAdd.length ? await pushUsers(audienceId, toAdd.map((e) => e.d), 'POST') : 0;
+    const removed = toRemove.length ? await pushUsers(audienceId, toRemove.map((e) => e.d), 'DELETE') : 0;
 
     await saveState(audienceKey, {
       meta_audience_id: audienceId,
-      member_keys: JSON.stringify(currentKeys),
-      member_count: currentKeys.length,
+      member_keys: JSON.stringify(current),
+      member_count: current.length,
       last_synced_at: db.fn.now(),
       last_status: 'synced',
     });
 
-    return { ...summary, audienceId, added, removed, memberCount: currentKeys.length };
+    return { ...summary, audienceId, added, removed, memberCount: current.length };
   });
 }
 
@@ -292,7 +290,6 @@ module.exports = {
     collectCustomerMembers,
     collectUnbookedLeadMembers,
     hashMember,
-    hashRemovedMembers,
     uploadsAllowed,
   },
 };
