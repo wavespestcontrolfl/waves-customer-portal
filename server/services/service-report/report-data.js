@@ -2209,8 +2209,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       if (gaugeUrl) mowingHeight = { ...mowingHeight, photoUrl: gaugeUrl };
     } catch { /* fail-soft: report still renders the reading without the photo */ }
   }
+  // Only drop the gauge/lawn-length photo from the gallery when the V2 mowing module
+  // will actually render it (lawn + LAWN_REPORT_V2 + an assessment). The legacy report
+  // has no mowing-photo slot and renders the mowing block only for a numeric reading,
+  // so otherwise keep the photo in the gallery rather than losing a photo-only capture
+  // (Codex P1).
+  const mowingPhotoWillRender = serviceLine === 'lawn'
+    && process.env.LAWN_REPORT_V2 === 'true'
+    && !!lawnAssessment;
   const photoPayload = await Promise.all(photos
-    .filter((photo) => !gaugePhotoId || String(photo.id) !== String(gaugePhotoId))
+    .filter((photo) => !(gaugePhotoId && mowingPhotoWillRender) || String(photo.id) !== String(gaugePhotoId))
     .map(async (photo) => ({
       id: photo.id,
       url: await photoUrl(photo),
