@@ -28,9 +28,21 @@ silently (broken payments, SMS, GPS, email-event sync).
 
 ## 1. Inbound webhook skip-list (do this FIRST, before any bot/WAF change)
 
-Every inbound webhook below is already signature-verified in the app, so skipping it
-at the edge loses no security — it only prevents a challenge from black-holing
-automated callers.
+These are automated server-to-server (or first-party app) callers that **cannot solve a
+JS/CAPTCHA challenge** — a bot/WAF rule would black-hole them. Their app-layer auth
+**varies** (see the **Auth in app** column), so the edge bypass is not uniformly backed
+by a replay-safe signature:
+
+- **Provider signature (replay-safe):** Stripe (`/api/stripe/webhook`), SendGrid, Resend,
+  Twilio. These are the strongest — a forged request fails the signature check.
+- **First-party bearer:** Stripe Terminal (`/api/stripe/terminal/*`) — a scoped Bearer
+  JWT issued to the WavesPay iOS app, not an external provider.
+- **Shared-secret header (no replay protection):** Bouncie and the voice-agent callback.
+- **No app auth:** `/api/health` — a public liveness probe that exposes no data.
+
+Skipping the edge bot/WAF check does **not** remove these app-layer checks. But treat the
+shared-secret and no-auth rows as the weakest links: keep them path-exact (as below) and
+re-evaluate before any of them is ever changed to return sensitive data.
 
 **Cloudflare expression** — enumerate the server-to-server webhook prefixes
 **explicitly**. Do **not** use a blanket `starts_with(…, "/api/webhooks/")`: the
@@ -60,16 +72,18 @@ the marketing site:
 | `/api/webhooks/resend/*` | POST | Resend (dormant until secret set) | Svix HMAC |
 | `/api/webhooks/twilio/*` | POST | Twilio SMS + voice (sms/status/voice/call/recording/transcription) | `X-Twilio-Signature` |
 | `/api/webhooks/bouncie*` | POST/GET | Bouncie GPS (`/bouncie`, `/bouncie/ping`) | shared secret header |
-| `/api/webhooks/voice-agent/*` | POST | Voice-AI agent callback (gated off today — pre-added) | provider sig |
+| `/api/webhooks/voice-agent/*` | POST | Voice-AI agent callback (gated off today — pre-added) | shared-secret Bearer (`VOICE_AGENT_WEBHOOK_SECRET`) |
 | `/api/bouncie` | POST | Bouncie mileage webhook — **exact match**, leaves the `/api/bouncie/callback` OAuth redirect protected | shared secret header |
 | `/api/health` | GET | Railway healthcheck probe | none (public) |
 
 > **⚠️ Why explicit prefixes, not the whole `/api/webhooks/` tree:** `/api/webhooks/lead`
-> and `/api/leads` (website lead-form intake — `server/index.js:355-356`) live under that
-> path but are **browser-originated** and must **keep** bot protection — they're a spam
-> target and accept PII. A blanket `starts_with(…, "/api/webhooks/")` skip would silently
-> expose them. When a new server-to-server webhook provider is onboarded, add its prefix
-> to the expression **deliberately**.
+> (website lead-form intake — `server/index.js:355`) lives under that path but is
+> **browser-originated** and must **keep** bot protection — it's a spam target and accepts
+> PII. A blanket `starts_with(…, "/api/webhooks/")` skip would silently expose it.
+> (`/api/leads` — `server/index.js:356` — is the **same handler mounted at a separate
+> path**, *not* under `/api/webhooks/`, so a webhooks-tree skip would not reach it; it is
+> likewise browser-origin and must stay protected.) When a new server-to-server webhook
+> provider is onboarded, add its prefix to the expression **deliberately**.
 
 **Lead-form caveat:** the Astro forms post cross-subdomain (apex → portal host), so after
 enabling any bot rule, **submit a real test lead** — if legitimate submissions get
@@ -128,5 +142,3 @@ is already handled in the Astro repo's `public/_headers` (immutable 1-year cache
 - WAF managed rulesets present on the Pro zone: OWASP Core, Cloudflare Managed,
   Exposed-Credentials, DDoS L7. (Their on/off state was not readable via the limited MCP
   token — verify in **Security → WAF → Managed rules** if tuning.)
-</content>
-</invoke>
