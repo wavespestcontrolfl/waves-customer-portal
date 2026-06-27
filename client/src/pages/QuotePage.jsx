@@ -234,7 +234,9 @@ function captureAttribution() {
     const fbp = readCookie('_fbp');
     const referrer = document.referrer || null;
     const landing_url = window.location.href || null;
-    if (!hasUtm && !gclid && !wbraid && !gbraid && !fbclid && !fbc && !referrer) return null;
+    // Keep _fbp too: it's a Conversions API match key even when it's the only
+    // signal (view-through / direct return with no fbclid/_fbc/UTM/referrer).
+    if (!hasUtm && !gclid && !wbraid && !gbraid && !fbclid && !fbc && !fbp && !referrer) return null;
     return { utm: hasUtm ? utm : null, gclid, wbraid, gbraid, fbclid, fbc, fbp, referrer, landing_url };
   } catch {
     return null;

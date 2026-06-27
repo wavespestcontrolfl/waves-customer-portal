@@ -1,6 +1,7 @@
 // Tests services/ads/meta-data-manager.js — Meta Conversions API upload.
 
 let sentRows = [];   // rows existingSent() should return
+let priorRow;        // row logUpload's pre-write lookup should return
 const insertCalls = [];
 
 const mockDb = jest.fn(() => {
@@ -8,6 +9,7 @@ const mockDb = jest.fn(() => {
   b.where = jest.fn(() => b);
   b.whereIn = jest.fn(() => b);
   b.select = jest.fn(() => Promise.resolve(sentRows));
+  b.first = jest.fn(() => Promise.resolve(priorRow));
   b.insert = jest.fn((row) => {
     insertCalls.push(row);
     return { onConflict: jest.fn(() => ({ merge: jest.fn(() => Promise.resolve(1)) })) };
@@ -44,6 +46,7 @@ const env = process.env;
 beforeEach(() => {
   jest.clearAllMocks();
   sentRows = [];
+  priorRow = undefined;
   insertCalls.length = 0;
   process.env = { ...env, META_CAPI_PIXEL_ID: 'px1', META_CAPI_ACCESS_TOKEN: 'tok' };
   delete process.env.META_CAPI_ALLOW_UPLOADS;
@@ -156,6 +159,19 @@ describe('uploadConversions', () => {
     expect(body.test_event_code).toBe('TEST1');
     expect(r).toMatchObject({ testMode: true, validated: 1, sent: 0 });
     expect(insertCalls[0]).toMatchObject({ status: 'validated', test_mode: true });
+  });
+
+  test('a forced test run does not downgrade an already-sent row', async () => {
+    process.env.META_CAPI_TEST_EVENT_CODE = 'TEST1'; // dry run
+    mockCollect.mockResolvedValue([lead()]);
+    priorRow = { status: 'sent' }; // event already uploaded live
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ events_received: 1 }) });
+
+    const r = await MetaCapi.uploadConversions({ conversionType: 'qualified_lead', force: true });
+    // The test event is sent to Test Events, but the 'sent' log row is preserved
+    // (no validated/null-sent_at overwrite), so the next live cron won't re-upload.
+    expect(r.testMode).toBe(true);
+    expect(insertCalls).toHaveLength(0);
   });
 
   test('skips already-sent events (dedup by event_id)', async () => {

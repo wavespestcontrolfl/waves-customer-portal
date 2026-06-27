@@ -154,6 +154,15 @@ async function existingSent(conversionType, eventIds) {
 }
 
 async function logUpload(candidate, { status, testMode, eventsReceived = null, errorMessage = null }) {
+  // Never downgrade a real send: a forced validate-only/test run (or a later
+  // failure) for an already-'sent' event must not flip it to validated/failed,
+  // or existingSent() would treat it as unsent and re-upload it.
+  if (status !== SENT) {
+    const prior = await db('meta_conversion_uploads')
+      .where({ conversion_type: candidate.conversionType, event_id: candidate.transactionId })
+      .first();
+    if (prior && prior.status === SENT) return;
+  }
   const row = {
     conversion_type: candidate.conversionType,
     event_id: candidate.transactionId,
