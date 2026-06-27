@@ -64,6 +64,10 @@ const fmtVal = (v, fmt = "number") => {
 const SERIES_SHADES = ["#18181B", "#71717A", "#A1A1AA", "#3F3F46", "#D4D4D8", "#52525B"];
 const shade = (i) => SERIES_SHADES[i % SERIES_SHADES.length];
 
+// Numeric coercion that keeps SQL NULLs as NaN (Number(null)===0 would otherwise
+// turn a NULL bucket into a floor point). A real 0 stays a finite 0.
+const num = (v) => (v == null || v === "" ? NaN : Number(v));
+
 // Legend for multi-series charts — a swatch + the column alias per series.
 function Legend({ keys }) {
   return (
@@ -119,7 +123,7 @@ function AiChart({ chartType, spec, rows, fields }) {
   if (chartType === "line") {
     // One polyline per y column (multi-series); single series keeps CHART_PRIMARY.
     const yKeys = [...yCols].length ? [...yCols] : [yKey];
-    const series = yKeys.map((k) => rows.map((r) => Number(r[k])));
+    const series = yKeys.map((k) => rows.map((r) => num(r[k])));
     const allVals = series.flat().filter((n) => Number.isFinite(n));
     // A line needs ≥2 x-positions that carry data. Count x-positions where SOME
     // series is finite — a single bucket (even multi-series) falls back to bars
