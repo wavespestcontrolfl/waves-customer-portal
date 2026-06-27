@@ -85,8 +85,21 @@ function computeRangeStatus(manualHeightIn, band) {
 
 // Assemble the persisted/snapshotted fields for a reading from the manual gauge
 // value + the property's grass type: range-guards the value, snapshots the target
-// band, and computes range status. Throws `invalid_height` if out of range.
+// band, and computes range status. The numeric reading is OPTIONAL — when it's
+// absent (null/'') the row carries only the band snapshot + photo, with a null
+// height/range_status. Throws `invalid_height` only for a PROVIDED out-of-range
+// value.
 function buildReadingFields(grassType, manualHeightIn) {
+  if (manualHeightIn == null || manualHeightIn === '') {
+    const band = resolveHeightBand(grassType);
+    return {
+      manual_height_in: null,
+      target_min_in: band.min,
+      target_max_in: band.max,
+      range_status: null,
+      grass_defaulted: band.defaulted,
+    };
+  }
   if (!isValidHeight(manualHeightIn)) {
     const err = new Error(`manual_height_in must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches`);
     err.code = 'invalid_height';
@@ -113,13 +126,16 @@ function buildReadingFields(grassType, manualHeightIn) {
 function buildMowingHeightContext(reading, trend = []) {
   if (!reading) return null;
   const band = { min: Number(reading.target_min_in), max: Number(reading.target_max_in) };
-  const heightIn = Number(reading.manual_height_in);
+  // The numeric reading is optional (a photo-only visit carries a null height) —
+  // keep heightIn/status null in that case so the surface shows just the photo.
+  const hasHeight = reading.manual_height_in != null && reading.manual_height_in !== '';
+  const heightIn = hasHeight ? Number(reading.manual_height_in) : null;
   return {
     heightIn,
     unit: 'in',
     band,
     bandLabel: `${band.min}–${band.max}″`,
-    status: reading.range_status || computeRangeStatus(heightIn, band),
+    status: hasHeight ? (reading.range_status || computeRangeStatus(heightIn, band)) : null,
     mowTriggerIn: mowTriggerInches(band),
     grassType: reading.grass_type || null,
     measuredAt: reading.measured_at || null,

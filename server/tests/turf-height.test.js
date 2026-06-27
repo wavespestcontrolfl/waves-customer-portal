@@ -87,6 +87,16 @@ describe('turf-height: buildReadingFields (snapshot assembly)', () => {
     expect(() => buildReadingFields('st_augustine', 9)).toThrow(/between 0.5 and 8/);
     try { buildReadingFields('st_augustine', 0.2); } catch (e) { expect(e.code).toBe('invalid_height'); }
   });
+  test('null/blank height → optional row: band snapshot, null height + status, no throw', () => {
+    // The numeric reading is optional now (photo-only visits) — null/'' must NOT
+    // throw; the band is still snapshotted from the grass type.
+    expect(buildReadingFields('st_augustine', null)).toEqual({
+      manual_height_in: null, target_min_in: 3.5, target_max_in: 4.0, range_status: null, grass_defaulted: false,
+    });
+    expect(buildReadingFields('mixed', '')).toEqual({
+      manual_height_in: null, target_min_in: 3.5, target_max_in: 4.0, range_status: null, grass_defaulted: true,
+    });
+  });
 });
 
 describe('turf-height: buildMowingHeightContext (report/card payload)', () => {
@@ -113,6 +123,18 @@ describe('turf-height: buildMowingHeightContext (report/card payload)', () => {
   });
   test('null reading → null (surface hides the module)', () => {
     expect(buildMowingHeightContext(null)).toBeNull();
+  });
+  test('photo-only reading (null height) → null height + status, band still exposed', () => {
+    // A photo-only visit carries a null height: the context keeps heightIn/status
+    // null (no gauge graphic) while still exposing the band; report-data attaches
+    // the photo URL so the surface renders just the on-site lawn-length image.
+    const ctx = buildMowingHeightContext({
+      manual_height_in: null, target_min_in: '3.5', target_max_in: '4.0',
+      range_status: null, grass_type: 'st_augustine', measured_at: '2026-06-12T10:00:00Z',
+    }, []);
+    expect(ctx).toMatchObject({
+      heightIn: null, status: null, band: { min: 3.5, max: 4.0 }, bandLabel: '3.5–4″', grassType: 'st_augustine',
+    });
   });
 });
 

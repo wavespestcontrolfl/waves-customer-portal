@@ -1868,9 +1868,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       lawnProtocolCompletion = null,
       treeShrubCompletion = null,
       completionPhotos = [],
-      manualHeightIn = null,        // turf height-of-cut gauge reading (lawn)
-      gaugePhoto = null,            // gauge-in-turf photo (data URL), required with the reading
-      turfHeightOverrideReason = null, // reason-coded bypass when no reading is possible
+      manualHeightIn = null,        // turf height-of-cut gauge reading (lawn) — OPTIONAL
+      gaugePhoto = null,            // on-site lawn-length photo (data URL) — OPTIONAL
       clientPestRating = null,
       structuredFindings = null,
       companionFindings = null,
@@ -2288,25 +2287,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
 
-    // Turf height-of-cut capture gate (flag-gated; UAT → rollout). A LAWN visit
-    // cannot close without a maintained-height READING unless the tech logs a
-    // reason-coded override. The gauge photo is OPTIONAL (not gated).
-    // detectServiceLine keeps this strictly off pest / rodent / mosquito.
-    // The flag reads the SAME DB-backed source the tech UI checks
-    // (useFeatureFlag) — no env-only bypass, so the handler never requires a
-    // field the UI doesn't render (fail-closed rule). Validation itself runs in
-    // the claim.action === 'proceed' path below so a replay of an already-
-    // completed visit isn't 422'd if the flag flips on afterward.
-    const TURF_HEIGHT_OVERRIDE_REASONS = ['no_gauge_on_truck', 'gauge_unreadable', 'not_applicable'];
+    // Gauge-reading capture (flag-gated; UAT → rollout). On a LAWN visit the tech
+    // may log an OPTIONAL maintained-height reading and/or an OPTIONAL on-site
+    // lawn-length photo — neither blocks closing the visit. detectServiceLine
+    // keeps this strictly off pest / rodent / mosquito. The flag reads the SAME
+    // DB-backed source the tech UI checks (useFeatureFlag). A provided height is
+    // still range-validated (below), but its absence is fine.
     const turfHeightFlagOn = await isUserFeatureEnabled(req.technicianId, 'turf-height-capture', false).catch(() => false);
     // Exempt typed-findings lawn jobs (e.g. one_time_lawn_treatment): the client
-    // hides TurfHeightCapture when isTypedFindings, so the server must not require
+    // hides TurfHeightCapture when isTypedFindings, so the server must not capture
     // a field the UI never renders (matches client isLawn = !isTypedFindings && lawn).
-    const turfHeightRequired = turfHeightFlagOn && reportServiceLine === 'lawn'
+    const turfHeightApplicable = turfHeightFlagOn && reportServiceLine === 'lawn'
       && !isIncompleteVisit && !typedFindingsType;
-    const turfHeightOverride = turfHeightRequired
-      && TURF_HEIGHT_OVERRIDE_REASONS.includes(turfHeightOverrideReason)
-      ? turfHeightOverrideReason : null;
 
     // Typed completions (e.g. palm_injection detects to the 'palm' line)
     // capture their structured findings instead of the Tree/Shrub closeout —
@@ -2445,23 +2437,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         );
         return res.status(companionValidationError.status).json(companionValidationError.body);
       }
-      // Turf height-of-cut: required reading for a flagged lawn visit (gauge
-      // photo optional). Validated here — after replay/conflict handling — so a
-      // retry of an already-completed visit replays instead of 422-ing.
-      if (turfHeightRequired && !turfHeightOverride
-        && (manualHeightIn == null || !isValidHeight(manualHeightIn))) {
-        const code = manualHeightIn == null ? 'turf_height_required' : 'turf_height_invalid';
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(code));
+      // Gauge reading: OPTIONAL on a flagged lawn visit. The tech may close with
+      // no height and/or no photo. Only a PROVIDED out-of-range value is rejected
+      // (the reading drives the report's mowing status). Validated here — after
+      // replay/conflict handling — so a retry of an already-completed visit
+      // replays instead of 422-ing.
+      if (turfHeightApplicable && manualHeightIn != null && !isValidHeight(manualHeightIn)) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('turf_height_invalid'));
         return res.status(422).json({
-          error: manualHeightIn == null
-            ? 'A turf height reading is required to close a lawn visit.'
-            : 'Turf height must be between 0.5 and 8 inches.',
-          code,
-          ...(manualHeightIn == null ? { overrideReasons: TURF_HEIGHT_OVERRIDE_REASONS } : {}),
+          error: 'Turf height must be between 0.5 and 8 inches.',
+          code: 'turf_height_invalid',
         });
-      }
-      if (turfHeightOverride) {
-        logger.warn(`[turf-height] completion override service=${req.params.serviceId} reason=${turfHeightOverride} by=${req.technicianId}`);
       }
     }
 
@@ -2830,6 +2816,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             longitude: svc.customer_longitude,
           }).catch(() => null)
           : null;
+
+        // Auto-generate the customer-facing report summary from the tech's notes
+        // when the closeout didn't supply one (the manual "Customer recap" box was
+        // removed from the UI). Runs outside the txn; generateRecap has a
+        // deterministic fallback so it never blocks completion.
+        let effectiveCustomerRecap = customerRecap;
+        if (!String(effectiveCustomerRecap || '').trim() && !isIncompleteVisit) {
+          try {
+            const generatedRecap = await CompletionRecap.generateRecap({
+              notes: technicianNotes,
+              visitOutcome,
+              serviceType: svc.service_type,
+              areasTreated: Array.isArray(areasTreated) ? areasTreated : (areasServiced || []),
+            });
+            effectiveCustomerRecap = generatedRecap?.recap || null;
+          } catch (recapErr) {
+            logger.warn(`[completion] auto report-summary generation failed: ${recapErr.message}`);
+          }
+        }
+
         await db.transaction(async (trx) => {
           const completionEndedAt = new Date();
           const completionServiceDate = etDateString(completionEndedAt);
@@ -2847,7 +2853,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             reviewScheduledFor: reviewScheduledFor || null,
             incompleteReason,
             customerConcernText: concernText || null,
-            customerRecap: customerRecap || null,
+            customerRecap: effectiveCustomerRecap || null,
             timeOnSite: timeOnSite || null,
             customerInteraction: normalizedCustomerInteraction,
             invoiceAlreadySent: !!invoiceAlreadySent,
@@ -3106,13 +3112,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
 
-        // Turf height reading. The READING itself is REQUIRED, so it goes in the
-        // outer completion txn (atomic) — a persistence failure aborts completion
-        // (the existing catch cleans up + the tech retries) rather than silently
-        // completing without the required reading. The OPTIONAL gauge photo runs
-        // in its own SAVEPOINT so a photo/S3 failure can't block the reading; its
-        // uploaded row is registered for cleanup if the outer txn later aborts.
-        if (turfHeightRequired && !turfHeightOverride && manualHeightIn != null) {
+        // Gauge reading. Both the height and the on-site lawn-length photo are
+        // OPTIONAL — persist a row whenever EITHER is present (a photo-only visit
+        // carries a null height). It goes in the outer completion txn (atomic):
+        // a persistence failure aborts completion (the existing catch cleans up +
+        // the tech retries). The photo upload runs in its own SAVEPOINT so a
+        // photo/S3 failure can't block the reading row; its uploaded row is
+        // registered for cleanup if the outer txn later aborts.
+        if (turfHeightApplicable && (manualHeightIn != null || gaugePhoto)) {
           const turfRow = await trx('customer_turf_profiles')
             .where({ customer_id: svc.customer_id, active: true }).first();
           let gaugePhotoId = null;
@@ -3131,8 +3138,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 }
               });
             } catch (photoErr) {
-              gaugePhotoId = null; // optional — never block the required reading
-              logger.warn(`[turf-height] optional gauge photo skipped for service=${req.params.serviceId}: ${photoErr.message}`);
+              gaugePhotoId = null; // optional — never block the reading row
+              logger.warn(`[turf-height] optional lawn-length photo skipped for service=${req.params.serviceId}: ${photoErr.message}`);
             }
           }
           const turfReading = await createTurfHeightReading(trx, {
@@ -3143,8 +3150,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             gaugePhotoId,
             createdBy: req.technicianId,
           });
-          // Only cross-check when a gauge photo exists; OCR runs after commit.
-          if (gaugePhotoId && turfReading?.id) turfOcrReadingId = turfReading.id;
+          // Cross-check only when BOTH a gauge photo and a numeric reading exist
+          // (OCR compares the photo against the entered height); runs after commit.
+          if (gaugePhotoId && manualHeightIn != null && turfReading?.id) turfOcrReadingId = turfReading.id;
         }
 
         // Typed activity score — in the same trx as the record so retries
@@ -3598,6 +3606,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const pendingTurf = await db('turf_height_readings')
           .where({ service_record_id: record.id, verification_status: 'pending' })
           .whereNotNull('gauge_photo_id')
+          .whereNotNull('manual_height_in') // photo-only rows have no reading to cross-check
           .first('id');
         turfOcrReadingId = pendingTurf?.id || null;
       } catch (turfErr) {
