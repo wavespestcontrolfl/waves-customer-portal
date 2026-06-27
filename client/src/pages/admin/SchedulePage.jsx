@@ -8771,8 +8771,10 @@ export function CompletionPanel({
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
               ...treeShrubCloseout,
+              // Don't fall back to the hidden customerRecap state (auto-generated /
+              // restored, never reviewed) — use the tech's note or the typed notes.
               customerNote:
-                treeShrubCloseout.customerNote || customerRecap || notes || "",
+                treeShrubCloseout.customerNote || notes || "",
             }
           : null,
         oneTimeRecapOnly,

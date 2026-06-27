@@ -2848,6 +2848,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             logger.warn(`[completion] auto report-summary generation failed: ${recapErr.message}`);
             effectiveCustomerRecap = deterministicFallback();
           }
+          // The generated recap is LLM output and skips runTypedValidation's
+          // banned-customer-copy guard (that ran earlier on the now-omitted request
+          // field). Re-check it here; fall back to the deterministic recap on any
+          // violation (an LLM prompt is not a validator), and null it if even that trips.
+          if (effectiveCustomerRecap
+            && ActivityIndicators.findBannedCustomerCopy(effectiveCustomerRecap).length) {
+            effectiveCustomerRecap = deterministicFallback();
+            if (effectiveCustomerRecap
+              && ActivityIndicators.findBannedCustomerCopy(effectiveCustomerRecap).length) {
+              effectiveCustomerRecap = null;
+            }
+          }
         }
 
         await db.transaction(async (trx) => {
