@@ -22,8 +22,9 @@ const ReviewService = require('../services/review-request');
 
 function valueFor(row, column) { return row[String(column).split('.').pop()]; }
 
-function makeMock(initial = {}) {
+function makeMock(initial = {}, opts = {}) {
   const state = { rows: { customers: [], review_sequences: [], review_requests: [], notification_prefs: [], google_reviews: [], scheduled_services: [], activity_log: [], ...initial } };
+  const throwUpdateFor = new Set(opts.throwUpdateFor || []);
   function filtered(q) {
     let rows = [...(state.rows[q.table] || [])];
     rows = rows.filter((r) => q.equals.every(([k, v]) => valueFor(r, k) === v));
@@ -66,7 +67,7 @@ function makeMock(initial = {}) {
         state.rows[this.table].push(inserted);
         return { returning: async () => [inserted] };
       },
-      async update(patch) { const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
+      async update(patch) { if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
       then(res, rej) { return Promise.resolve(filtered(this)).then(res, rej); },
     };
     return q;
@@ -372,6 +373,23 @@ describe('review sequences — cadence engine', () => {
     expect(body).not.toMatch(/\/rate\//);
     expect(body).not.toMatch(/portal\.test/);
     expect(body).not.toContain('{review_url}');
+  });
+
+  test('a post-send DB failure does NOT requeue an already-accepted SMS (audit P1)', async () => {
+    // Twilio accepts (sent:true), but the post-send review_requests UPDATE throws.
+    const mock = makeMock(
+      { customers: [{ id: 'bk1', first_name: 'Bo', last_name: 'K', phone: '+19410000050', nearest_location_id: 'bradenton' }] },
+      { throwUpdateFor: ['review_requests'] },
+    );
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'cron' });
+
+    // The SMS already went out — must be reported sent, NOT retryable.
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(out.ok).toBe(true);
+    expect(out.sent).toBe(true);
+    expect(out.retryable).toBeFalsy();
   });
 
   test('a terminal SMS failure (invalid number) is suppressed, not retried forever', async () => {

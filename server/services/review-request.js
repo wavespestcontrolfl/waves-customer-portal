@@ -317,6 +317,12 @@ const ReviewService = {
       .where({ id: requestId })
       .first();
     if (!request || request.sms_sent_at) return;
+    // Don't send a row that was taken out of the pending queue after this id was
+    // batched by processScheduled — e.g. a cadence start that superseded this
+    // queued ask (sets status='suppressed'), or a failed/deferred row. Re-reading
+    // status here closes the race so the customer doesn't get the old ask AND the
+    // cadence's Day-0 touch.
+    if (["suppressed", "failed", "deferred"].includes(request.status)) return;
 
     const customer = await db("customers")
       .where({ id: request.customer_id })
@@ -1231,6 +1237,13 @@ const ReviewService = {
     } catch {
       prefsLookupFailed = true;
     }
+    // If we can't read the channel preferences, DEFER rather than resolve a
+    // channel: the downstream SMS wrapper doesn't enforce review_request_channel,
+    // so falling back to SMS here could text an email-only customer. Retry when
+    // prefs are readable. (No row created yet, so nothing to clean up.)
+    if (prefsLookupFailed) {
+      return { ok: false, retryable: true, reason: "prefs_unavailable" };
+    }
     const reviewBlocked = !!prefs && prefs.review_request === false;
     const smsBlocked = reviewBlocked || (!!prefs && prefs.sms_enabled === false);
     const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false);
@@ -1367,8 +1380,15 @@ const ReviewService = {
     // skipped cap/cooldown for this template, so it must never carry a review link.
     const renderVars = isNoLink ? { ...vars, review_url: "" } : vars;
     const body = OUTREACH.renderOutreachBody(rawBody, renderVars, { requireLink: requiresLink });
+
+    // ONLY the send attempt is in the retry-on-throw path. If sendCustomerMessage
+    // itself throws (network/provider), it's safe to retry — Twilio never
+    // accepted it. If it RETURNS and then post-send bookkeeping throws (a
+    // transient Postgres error after Twilio accepted), we must NOT retry, or the
+    // customer gets the SMS twice (audit P1).
+    let result;
     try {
-      const result = await sendCustomerMessage({
+      result = await sendCustomerMessage({
         to: contact.phone,
         body,
         channel: "sms",
@@ -1378,7 +1398,6 @@ const ReviewService = {
         entryPoint: "review_outreach_touch",
         metadata: request.sequence_id ? { review_sequence_id: request.sequence_id } : {},
       });
-      return await this._applyOutreachSendResult(request, result, manageRetryVia, "sms");
     } catch (err) {
       if (manageRetryVia === "cron") {
         await db("review_requests")
@@ -1388,8 +1407,21 @@ const ReviewService = {
       } else {
         await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
       }
-      logger.error(`[review] outreach SMS threw (requestId=${request.id} errType=${err?.name || "Error"})`);
+      logger.error(`[review] outreach SMS send threw (requestId=${request.id} errType=${err?.name || "Error"})`);
       return { ok: false, retryable: true, channel: "sms", requestId: request.id };
+    }
+
+    try {
+      return await this._applyOutreachSendResult(request, result, manageRetryVia, "sms");
+    } catch (bookErr) {
+      // The send already happened — do NOT requeue. Report based on what the
+      // provider did; the audit log holds the full record for reconciliation.
+      logger.error(
+        `[review] post-send bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`,
+      );
+      return result?.sent
+        ? { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: result.auditLogId }
+        : { ok: false, terminal: true, channel: "sms", requestId: request.id, reason: "bookkeeping_failed" };
     }
   },
 
@@ -1441,9 +1473,11 @@ const ReviewService = {
   },
 
   async _sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia }) {
+    // Same split as SMS (audit P1): only the SEND is in the retry-on-throw path.
+    let result;
     try {
       const EmailLib = require("./email-template-library");
-      const result = await EmailLib.sendTemplate({
+      result = await EmailLib.sendTemplate({
         templateKey: "review_request_email",
         to: contact.email,
         payload: {
@@ -1464,14 +1498,8 @@ const ReviewService = {
         suppressionGroupKey: "service_operational",
         categories: ["review_request"],
       });
-      if (result && result.sent) {
-        await db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() });
-        return { ok: true, sent: true, channel: "email", requestId: request.id };
-      }
-      await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
-      return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: result?.reason || "email_blocked" };
     } catch (err) {
-      logger.error(`[review] outreach email failed (requestId=${request.id} errType=${err?.name || "Error"})`);
+      logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"})`);
       // There is NO standalone email retry driver — processScheduled only
       // re-sends SMS (it excludes channel='email'). So:
       //  • sequence touch → the sequence cron re-runs this step; mark 'failed'
@@ -1483,6 +1511,22 @@ const ReviewService = {
         return { ok: false, retryable: true, channel: "email", requestId: request.id };
       }
       return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_send_failed" };
+    }
+
+    // Send returned — bookkeeping failures here must NOT requeue (the email
+    // library already deduped/sent). Report based on the result.
+    try {
+      if (result && result.sent) {
+        await db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() });
+        return { ok: true, sent: true, channel: "email", requestId: request.id };
+      }
+      await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
+      return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: result?.reason || "email_blocked" };
+    } catch (bookErr) {
+      logger.error(`[review] post-send email bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`);
+      return result?.sent
+        ? { ok: true, sent: true, channel: "email", requestId: request.id }
+        : { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "bookkeeping_failed" };
     }
   },
 
