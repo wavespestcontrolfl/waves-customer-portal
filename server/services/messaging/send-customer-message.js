@@ -41,6 +41,7 @@ const logger = require('../logger');
 const policyModule = require('./policy');
 const { loadContactState, checkConsentForPurpose } = require('./validators/consent');
 const { loadSuppressionState, checkSuppression } = require('./validators/suppression');
+const { checkLineType } = require('./validators/line-type');
 const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = require('./validators/identity');
 const { validateNoCustomerEmoji } = require('./validators/voice');
 const { checkFloridaQuietHours } = require('./quiet-hours');
@@ -161,6 +162,9 @@ async function sendCustomerMessage(input) {
     { name: 'check_florida_quiet_hours',  fn: () => checkFloridaQuietHours(sendInput, policy) },
     { name: 'validate_identity_trust',    fn: () => validateIdentityTrust(sendInput, policy, contactState) },
     { name: 'validate_no_customer_emoji', fn: () => validateNoCustomerEmoji(sendInput, policy) },
+    // Last: only pay for a Twilio line-type Lookup when the message would
+    // otherwise actually send (gated dark behind GATE_PROACTIVE_LINETYPE_LOOKUP).
+    { name: 'check_line_type',            fn: () => checkLineType(sendInput, policy, contactState) },
   ];
 
   const validatorsPassed = [];

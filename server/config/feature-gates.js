@@ -216,6 +216,15 @@ const gates = {
   // claims or sends.
   estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
 
+  // Proactive line-type lookup — before the first SMS to a number, Twilio Lookup
+  // its line type and skip landlines (avoids the wasted send + 30006 bounce that
+  // the reactive suppression in #2160 only catches after the fact). Adds a paid
+  // Lookup (~$0.008) on the first send to each uncached number, so it is opt-in
+  // in EVERY environment until the owner enables it; results cache in
+  // phone_line_types (one lookup per number, ever) and detected landlines also
+  // get a non_mobile suppression row.
+  proactiveLineTypeLookup: process.env.GATE_PROACTIVE_LINETYPE_LOOKUP === 'true',
+
   // Email Template Automations — executes trigger-mapped template sends from
   // the email template automation catalog. Off by default in prod until each
   // trigger has been verified with run history and idempotency checks.
