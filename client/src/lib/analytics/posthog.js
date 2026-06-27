@@ -75,7 +75,7 @@ export function bootPostHog() {
     // Fire posthog-ready (which flushes the pre-consent queue) only once the
     // REAL SDK has loaded — flushing into the array stub could lose a sendBeacon
     // capture if the asset load is slow and the page unloads first.
-    loaded: () => { window.dispatchEvent(new Event('posthog-ready')); },
+    loaded: () => { window.__wavesPhReady = true; window.dispatchEvent(new Event('posthog-ready')); },
     person_profiles: 'identified_only',
     capture_pageview: true,
     // The booking flow is PII-dense (name/phone/address text + Google Places
@@ -115,10 +115,16 @@ export function bootPostHog() {
       if (!isPublicFunnelPath()) return null;
       if (!event) return event;
       const strip = (u) => (typeof u === 'string' ? u.split('?')[0].split('#')[0] : u);
-      // Scrub query/hash from URL + referrer fields wherever PostHog stores them:
-      // event properties AND the first-touch person props ($initial_*) carried on
-      // $set / $set_once, so a /book?…&lead=… landing leaks nothing.
-      const URL_KEYS = ['$current_url', '$referrer', '$initial_current_url', '$initial_referrer'];
+      // Referrers can be a tokenized customer page the visitor came from (e.g.
+      // /estimate/<token>), so reduce them to ORIGIN — drop the path entirely.
+      // Our own funnel URLs keep their path (it's the funnel page, not PII) but
+      // lose query/hash. Covers event props AND first-touch/session person props.
+      const toOrigin = (u) => {
+        if (typeof u !== 'string') return u;
+        try { return new URL(u).origin; } catch (e) { return strip(u); }
+      };
+      const URL_KEYS = ['$current_url', '$initial_current_url', '$session_entry_url'];
+      const REFERRER_KEYS = ['$referrer', '$initial_referrer', '$session_entry_referrer'];
       // PostHog auto-copies UTM / click-id params onto events + person props, so
       // a crafted /book?utm_campaign=<email> would carry PII. Drop campaign
       // values that look like PII (email/whitespace/over-long); keep clean ones.
@@ -129,6 +135,7 @@ export function bootPostHog() {
       const scrub = (bag) => {
         if (!bag) return;
         for (const k of URL_KEYS) if (typeof bag[k] === 'string') bag[k] = strip(bag[k]);
+        for (const k of REFERRER_KEYS) if (typeof bag[k] === 'string') bag[k] = toOrigin(bag[k]);
         for (const k of Object.keys(bag)) if (CAMPAIGN_RE.test(k) && unsafe(bag[k])) delete bag[k];
       };
       const props = event.properties;

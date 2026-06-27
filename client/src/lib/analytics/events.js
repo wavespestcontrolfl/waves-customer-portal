@@ -48,6 +48,10 @@ export const FUNNEL_EVENTS = {
  */
 const PENDING = [];
 const MAX_PENDING = 25;
+// True only once the REAL SDK has loaded. Initialized from a global the loaded
+// callback sets, so if the SDK loaded before this module evaluated (the
+// posthog-ready event already fired and was missed), we still capture directly.
+let phReady = typeof window !== 'undefined' && !!window.__wavesPhReady;
 
 function cleanProps(props) {
   if (!props) return undefined;
@@ -62,7 +66,7 @@ export function track(event, props) {
   if (typeof window === 'undefined') return;
   const clean = cleanProps(props);
   const ph = window.posthog;
-  if (ph && typeof ph.capture === 'function') {
+  if (phReady && ph && typeof ph.capture === 'function') {
     ph.capture(event, clean);
     return;
   }
@@ -74,6 +78,7 @@ export function track(event, props) {
 }
 
 function flushPending() {
+  phReady = true;
   const ph = window.posthog;
   if (!ph || typeof ph.capture !== 'function') return;
   while (PENDING.length) {
