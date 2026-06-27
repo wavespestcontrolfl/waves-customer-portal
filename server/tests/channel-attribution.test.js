@@ -78,6 +78,32 @@ describe('buildChannelAttribution', () => {
     expect(out.totalAdSpend).toBe(130);
     expect(out.totalGrossProfit).toBe(270);
   });
+
+  test('fixed cost folds into all-in spend; ratios divide by ad + fixed', () => {
+    const completed = [
+      row('organic', 1000, 600, 'o1'), // no ad spend, but has an SEO retainer
+      row('google_ads', 500, 300, 'g1'),
+    ];
+    const out = buildChannelAttribution(
+      completed,
+      { google_ads: 100 }, // platform ad spend
+      { organic: 200, google_ads: 50 }, // fixed costs (SEO retainer, mgmt fee)
+    );
+    const org = out.sources.find((s) => s.sourceKey === 'organic');
+    expect(org.adSpend).toBe(0);
+    expect(org.fixedCost).toBe(200);
+    expect(org.allInSpend).toBe(200);
+    expect(org.roas).toBe(5); // 1000 / 200
+    expect(org.ltvCac).toBe(3); // 600 / 200 (one-time → realized GP)
+    expect(org.cac).toBe(200); // 200 / 1 customer
+
+    const g = out.sources.find((s) => s.sourceKey === 'google_ads');
+    expect(g.allInSpend).toBe(150); // 100 ad + 50 fixed
+    expect(g.ltvCac).toBe(2); // 300 / 150
+
+    expect(out.totalFixedCost).toBe(250);
+    expect(out.totalAllInSpend).toBe(350);
+  });
 });
 
 describe('splitFacebookByPaid', () => {

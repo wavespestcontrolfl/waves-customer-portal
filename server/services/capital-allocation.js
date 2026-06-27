@@ -47,11 +47,15 @@ function bandFor(ltvCac) {
  * @returns { channels (ranked, +band/tone/verdict/confidence), headline, minConfidentCustomers }
  */
 function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_CONFIDENT_CUSTOMERS } = {}) {
+  // All-in spend (ad spend + fixed costs) is the CAC denominator; fall back to
+  // adSpend for older callers that don't supply allInSpend.
+  const spendOf = (c) => Number(c.allInSpend != null ? c.allInSpend : c.adSpend) || 0;
   const channels = (attribution.sources || []).map((s) => {
-    // Band off the EXACT ratio (lifetimeValue / adSpend), not the display-rounded
-    // ltvCac — otherwise a 2.96:1 rounds to 3.0 and crosses the 3:1 floor into
-    // "Healthy". The rounded ltvCac is still carried through (spread) for display.
-    const exactRatio = Number(s.adSpend) > 0 ? (Number(s.lifetimeValue) || 0) / Number(s.adSpend) : null;
+    // Band off the EXACT ratio (lifetimeValue / all-in spend), not the display-
+    // rounded ltvCac — otherwise a 2.96:1 rounds to 3.0 and crosses the 3:1 floor
+    // into "Healthy". The rounded ltvCac is still carried through (spread) for display.
+    const spend = spendOf(s);
+    const exactRatio = spend > 0 ? (Number(s.lifetimeValue) || 0) / spend : null;
     const band = bandFor(exactRatio);
     const meta = BAND_META[band];
     return {
@@ -76,9 +80,9 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
   // Blend from PAID channels only. attribution.blendedLtvCac divides ALL sources'
   // lifetime value (incl. free organic/referral) by paid spend — for a "where to
   // put ad dollars" card that would let strong organic mask losing paid spend.
-  const paid = channels.filter((c) => c.ltvCac != null); // ltvCac null ⇒ no paid spend
+  const paid = channels.filter((c) => c.ltvCac != null); // ltvCac null ⇒ no spend (ad or fixed)
   const paidLifetime = paid.reduce((t, c) => t + (Number(c.lifetimeValue) || 0), 0);
-  const paidSpend = paid.reduce((t, c) => t + (Number(c.adSpend) || 0), 0);
+  const paidSpend = paid.reduce((t, c) => t + spendOf(c), 0);
   // Band off the EXACT blended ratio (round only for display) — same threshold-drift
   // guard as the per-channel bands, so a 2.96 blend isn't promoted to "Healthy".
   const blendedExact = paidSpend > 0 ? paidLifetime / paidSpend : null;
@@ -94,10 +98,10 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
   // Leak (the warning call) does NOT require confidence: a channel that spent
   // money and returned almost nothing is the clearest waste — and a zero-customer
   // channel (0 customers ⇒ low confidence by definition) is exactly the case to
-  // flag. Pick the one wasting the MOST cash (adSpend − lifetime value).
-  const wasted = (c) => (Number(c.adSpend) || 0) - (Number(c.lifetimeValue) || 0);
+  // flag. Pick the one wasting the MOST cash (all-in spend − lifetime value).
+  const wasted = (c) => spendOf(c) - (Number(c.lifetimeValue) || 0);
   const [leak] = channels
-    .filter((c) => c.band === 'losing' && c.adSpend > 0)
+    .filter((c) => c.band === 'losing' && spendOf(c) > 0)
     .sort((a, b) => wasted(b) - wasted(a));
 
   return {
