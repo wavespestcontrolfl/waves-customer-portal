@@ -68,4 +68,24 @@ function buildCohortSeries(members, cohortIdx, elapsed) {
   return { baseMrr, retention, retentionMrr };
 }
 
-module.exports = { buildCohortSeries, pointInTimeRate };
+/**
+ * Build a member's rateAt(monthIdx), keeping each cohort on ONE rate basis:
+ *  - If the cohort's base (signup) month is NOT snapshotted (e.g. it predates the
+ *    forward-only snapshots), the whole cohort stays on the current-rate basis —
+ *    never a current-rate base divided into snapshot offsets, which would invent
+ *    expansion/contraction and rewrite historical NRR.
+ *  - Otherwise per-month point-in-time via pointInTimeRate (snapshot where present;
+ *    current rate for months with no snapshot — notably the in-progress month,
+ *    which the caller excludes from snapshottedMonths since its 6:05am snapshot is
+ *    stale for same-day conversions/changes).
+ * Pure (ymOf injected).
+ */
+function makeRateAt({ rateByCustomer, snapshottedMonths, ymOf, cohortYm, customerId, currentRate }) {
+  if (!snapshottedMonths.has(cohortYm)) {
+    const flat = Number(currentRate) || 0;
+    return () => flat;
+  }
+  return (monthIdx) => pointInTimeRate(rateByCustomer, snapshottedMonths, customerId, currentRate, ymOf(monthIdx));
+}
+
+module.exports = { buildCohortSeries, pointInTimeRate, makeRateAt };

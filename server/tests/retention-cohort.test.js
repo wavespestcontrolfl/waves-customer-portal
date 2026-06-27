@@ -1,4 +1,4 @@
-const { buildCohortSeries, pointInTimeRate } = require('../services/retention-cohort');
+const { buildCohortSeries, pointInTimeRate, makeRateAt } = require('../services/retention-cohort');
 
 // helper: a member with a flat rate every month (the fallback / no-snapshot case)
 const flat = (churnIdx, rate) => ({ churnIdx, rateAt: () => rate });
@@ -79,5 +79,28 @@ describe('pointInTimeRate', () => {
 
   test('unsnapshotted month → current-rate fallback', () => {
     expect(pointInTimeRate(rateByCustomer, snapshottedMonths, 'c1', 80, '2026-03')).toBe(80);
+  });
+});
+
+describe('makeRateAt (per-cohort basis)', () => {
+  const ymOf = (idx) => `${String(Math.floor(idx / 12)).padStart(4, '0')}-${String((idx % 12) + 1).padStart(2, '0')}`;
+  const MAR = 2026 * 12 + 2; // 2026-03
+  const APR = MAR + 1; // 2026-04
+  const MAY = MAR + 2; // 2026-05
+  const rateByCustomer = new Map([['c1', new Map([['2026-03', 100], ['2026-05', 300]])]]);
+
+  test('base month snapshotted → point-in-time per month', () => {
+    const snap = new Set(['2026-03', '2026-04', '2026-05']);
+    const rateAt = makeRateAt({ rateByCustomer, snapshottedMonths: snap, ymOf, cohortYm: '2026-03', customerId: 'c1', currentRate: 999 });
+    expect(rateAt(MAR)).toBe(100); // snapshot
+    expect(rateAt(APR)).toBe(0); // snapshotted month, no c1 row → paused/$0 that month
+    expect(rateAt(MAY)).toBe(300); // snapshot
+  });
+
+  test('base month NOT snapshotted → whole cohort stays on current rate (no mixed basis)', () => {
+    const snap = new Set(['2026-05']); // base (2026-03) NOT snapshotted, but May is
+    const rateAt = makeRateAt({ rateByCustomer, snapshottedMonths: snap, ymOf, cohortYm: '2026-03', customerId: 'c1', currentRate: 999 });
+    expect(rateAt(MAR)).toBe(999); // base → current rate
+    expect(rateAt(MAY)).toBe(999); // May IS snapshotted, but base isn't → still current rate (consistency)
   });
 });

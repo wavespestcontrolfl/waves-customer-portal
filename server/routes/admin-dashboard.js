@@ -12,7 +12,7 @@ const {
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
-const { buildCohortSeries, pointInTimeRate } = require('../services/retention-cohort');
+const { buildCohortSeries, makeRateAt } = require('../services/retention-cohort');
 const { autopayActivePredicate } = require('../services/autopay-eligibility');
 const { generateChartSpec, extractImageIntent } = require('../services/ai-chart-builder');
 const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
@@ -1032,7 +1032,10 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
         .where('period_month', '>=', rangeStart)
         .select('customer_id', db.raw("to_char(period_month, 'YYYY-MM') as ym"), 'monthly_rate');
       for (const s of snapRows) {
-        snapshottedMonths.add(s.ym);
+        // The in-progress month's snapshot (written once at 6:05am ET) is stale for
+        // same-day conversions/price changes, so treat it as unsnapshotted → those
+        // cells use the live current rate (which IS the point-in-time truth for now).
+        if (s.ym !== nowMonth) snapshottedMonths.add(s.ym);
         if (!rateByCustomer.has(s.customer_id)) rateByCustomer.set(s.customer_id, new Map());
         rateByCustomer.get(s.customer_id).set(s.ym, Number(s.monthly_rate) || 0);
       }
@@ -1077,18 +1080,18 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
       byCohort.get(cohort).push({ churnIdx, customerId: r.id, currentRate: Number(r.monthly_rate) || 0 });
     }
 
-    // Resolve a member's MRR for an absolute month index. In a snapshotted month a
-    // missing customer row means $0 that month (not "unknown"); only months with no
-    // snapshot at all fall back to the current rate. See pointInTimeRate.
-    const rateAtFor = (mem) => (monthIdx) => pointInTimeRate(
-      rateByCustomer, snapshottedMonths, mem.customerId, mem.currentRate, ymOf(monthIdx),
-    );
-
     const cohorts = [];
     for (let idx = firstIdx; idx <= nowIdx; idx += 1) {
       const ym = ymOf(idx);
       const raw = byCohort.get(ym) || [];
-      const members = raw.map((mem) => ({ churnIdx: mem.churnIdx, rateAt: rateAtFor(mem) }));
+      // makeRateAt keeps each cohort on one basis: point-in-time when its base month
+      // is snapshotted, else the current-rate fallback for the whole cohort.
+      const members = raw.map((mem) => ({
+        churnIdx: mem.churnIdx,
+        rateAt: makeRateAt({
+          rateByCustomer, snapshottedMonths, ymOf, cohortYm: ym, customerId: mem.customerId, currentRate: mem.currentRate,
+        }),
+      }));
       const elapsed = nowIdx - idx; // number of offset columns available (0..elapsed)
       const { baseMrr, retention, retentionMrr } = buildCohortSeries(members, idx, elapsed);
       cohorts.push({ month: ym, label: monthLabelOf(ym), size: raw.length, baseMrr: Math.round(baseMrr), retention, retentionMrr });
