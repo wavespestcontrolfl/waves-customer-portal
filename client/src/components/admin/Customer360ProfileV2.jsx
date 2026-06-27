@@ -3858,9 +3858,11 @@ export default function Customer360ProfileV2({
             .c360-panel { width: 100% !important; max-width: 100% !important; }
             .c360-header-desktop { display: none !important; }
             .c360-header-mobile { display: block !important; }
+            .c360-mobile-actionbar { display: flex !important; }
             .c360-mobile-footer-spacer { display: block !important; }
           }
           .c360-header-mobile { display: none; }
+          .c360-mobile-actionbar { display: none; }
           .c360-mobile-footer-spacer { display: none; }
         `}</style>
         {/* ZONE 1 — STICKY HEADER */}
@@ -4093,140 +4095,6 @@ export default function Customer360ProfileV2({
               aria-hidden="true"
               style={{ height: "calc(52px + env(safe-area-inset-top, 0px))" }}
             />
-            {/* Top action bar — fixed to the viewport top (z-[1001]), mirroring
-                the fixed bottom CustomerActionBar. Replaces the old
-                position:sticky header row, which on iOS standalone PWAs let
-                Back / Text / Call / ⋯ scroll out of reach (only revealed by
-                rubber-band overscroll, never tappable). No Tailwind md:hidden
-                here on purpose: this bar lives inside .c360-header-mobile, whose
-                @media (max-width:768px) rule already shows/hides it on the exact
-                same boundary — md:hidden (min-width:768px) would blank the
-                controls at exactly 768px (iPad portrait). */}
-            <div
-              className="c360-mobile-actionbar fixed top-0 left-0 right-0 z-[1001] flex items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
-              style={{
-                paddingTop: "calc(0.5rem + env(safe-area-inset-top, 0px))",
-              }}
-            >
-              {" "}
-              <button
-                onClick={onClose}
-                aria-label="Back"
-                className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
-              >
-                {" "}
-                <ChevronLeft size={18} strokeWidth={1.75} />{" "}
-              </button>{" "}
-              <div className="flex items-center gap-2">
-                {c.phone && (
-                  <a
-                    href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
-                  >
-                    Text
-                  </a>
-                )}
-                {c.phone && (
-                  <CallBridgeLink
-                    phone={c.phone}
-                    customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
-                    styledButton
-                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
-                  >
-                    Call
-                  </CallBridgeLink>
-                )}
-                <div ref={menuRef} className="relative">
-                  {" "}
-                  <button
-                    onClick={() => setMenuOpen((v) => !v)}
-                    aria-label="More"
-                    aria-expanded={menuOpen}
-                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
-                  >
-                    {" "}
-                    <MoreHorizontal size={18} strokeWidth={1.75} />{" "}
-                  </button>
-                  {menuOpen && (
-                    <div
-                      role="menu"
-                      className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
-                    >
-                      {isAdmin && (
-                        <button
-                          role="menuitem"
-                          onClick={() => {
-                            setEditForm({
-                              firstName: c.firstName || "",
-                              lastName: c.lastName || "",
-                              email: c.email || "",
-                              phone: c.phone || "",
-                              addressLine1: c.address?.line1 || "",
-                              city: c.address?.city || "",
-                              state: c.address?.state || "",
-                              zip: c.address?.zip || "",
-                              monthlyRate: c.monthlyRate ?? "",
-                              tier: c.tier || "",
-                              pipelineStage: c.pipelineStage || "new_lead",
-                            });
-                            setEditErr("");
-                            setEditOpen(true);
-                            setMenuOpen(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                        >
-                          Edit customer
-                        </button>
-                      )}
-                      {isAdmin && (
-                        <button
-                          role="menuitem"
-                          onClick={() => {
-                            setAnnualPrepayInvoiceOpen(true);
-                            setMenuOpen(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                        >
-                          Send prepay invoice
-                        </button>
-                      )}
-                      {isAdmin && (
-                        <button
-                          role="menuitem"
-                          onClick={() => {
-                            setAnnualPrepayOpen(true);
-                            setMenuOpen(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                        >
-                          Record collected prepay
-                        </button>
-                      )}
-                      <button
-                        role="menuitem"
-                        onClick={() => {
-                          setActiveTab("comms");
-                          setMenuOpen(false);
-                        }}
-                        className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                      >
-                        Add note
-                      </button>{" "}
-                      <button
-                        role="menuitem"
-                        onClick={() => {
-                          onAddProperty?.(c);
-                          setMenuOpen(false);
-                        }}
-                        className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                      >
-                        Add property
-                      </button>{" "}
-                    </div>
-                  )}
-                </div>{" "}
-              </div>{" "}
-            </div>{" "}
             <div className="text-26 font-medium tracking-tight text-zinc-900 leading-tight mb-1">
               {c.firstName} {c.lastName}
             </div>
@@ -5800,6 +5668,144 @@ export default function Customer360ProfileV2({
         />{" "}
       </div>
       {/* Mobile sticky action bar (mirrors desktop pills) */}
+      {/* Mobile top action bar — rendered here as a sibling of the scrolling
+          .c360-panel (NOT inside it), exactly like the fixed bottom
+          CustomerActionBar below. iOS WebKit only honors position:fixed when
+          the element is NOT nested inside an overflow-scroll ancestor; #2125
+          set position:fixed but left this row inside .c360-panel, so on iOS
+          the Back / Text / Call / ⋯ row still scrolled out of reach and
+          wasn't tappable (it worked in desktop Chrome, which is why it
+          slipped through). Shown/hidden at the <=768px boundary via the
+          .c360-mobile-actionbar rule in the panel's <style> block (no
+          Tailwind md:hidden, which would blank it at exactly 768px / iPad
+          portrait). stopPropagation so taps on the bar (esp. the ⋯ menu)
+          don't bubble to the overlay's close handler. */}
+      <div
+        className="c360-mobile-actionbar fixed top-0 left-0 right-0 z-[1001] items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          paddingTop: "calc(0.5rem + env(safe-area-inset-top, 0px))",
+        }}
+      >
+        {" "}
+        <button
+          onClick={onClose}
+          aria-label="Back"
+          className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+        >
+          {" "}
+          <ChevronLeft size={18} strokeWidth={1.75} />{" "}
+        </button>{" "}
+        <div className="flex items-center gap-2">
+          {c.phone && (
+            <a
+              href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
+              className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+            >
+              Text
+            </a>
+          )}
+          {c.phone && (
+            <CallBridgeLink
+              phone={c.phone}
+              customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
+              styledButton
+              className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+            >
+              Call
+            </CallBridgeLink>
+          )}
+          <div ref={menuRef} className="relative">
+            {" "}
+            <button
+              onClick={() => setMenuOpen((v) => !v)}
+              aria-label="More"
+              aria-expanded={menuOpen}
+              className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+            >
+              {" "}
+              <MoreHorizontal size={18} strokeWidth={1.75} />{" "}
+            </button>
+            {menuOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
+              >
+                {isAdmin && (
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setEditForm({
+                        firstName: c.firstName || "",
+                        lastName: c.lastName || "",
+                        email: c.email || "",
+                        phone: c.phone || "",
+                        addressLine1: c.address?.line1 || "",
+                        city: c.address?.city || "",
+                        state: c.address?.state || "",
+                        zip: c.address?.zip || "",
+                        monthlyRate: c.monthlyRate ?? "",
+                        tier: c.tier || "",
+                        pipelineStage: c.pipelineStage || "new_lead",
+                      });
+                      setEditErr("");
+                      setEditOpen(true);
+                      setMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  >
+                    Edit customer
+                  </button>
+                )}
+                {isAdmin && (
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setAnnualPrepayInvoiceOpen(true);
+                      setMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  >
+                    Send prepay invoice
+                  </button>
+                )}
+                {isAdmin && (
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setAnnualPrepayOpen(true);
+                      setMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  >
+                    Record collected prepay
+                  </button>
+                )}
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setActiveTab("comms");
+                    setMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                >
+                  Add note
+                </button>{" "}
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    onAddProperty?.(c);
+                    setMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                >
+                  Add property
+                </button>{" "}
+              </div>
+            )}
+          </div>{" "}
+        </div>{" "}
+      </div>{" "}
       <CustomerActionBar
         customer={{
           id: customerId,
