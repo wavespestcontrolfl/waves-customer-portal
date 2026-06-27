@@ -11,6 +11,7 @@ import {
 import {
   AgingBar,
   AttributionScorecard,
+  CapitalAllocationCard,
   CaptureGauge,
   CHART_SUCCESS,
   ChartCard,
@@ -112,6 +113,7 @@ export default function DashboardPageV2() {
   const [aging, setAging] = useState(null);
   const [mrrTrend, setMrrTrend] = useState(null);
   const [cohort, setCohort] = useState(null);
+  const [capAlloc, setCapAlloc] = useState(null); // /admin/ads/capital-allocation
   // /lead-source (downstream string aggregation) is intentionally dropped
   // in favor of the upstream attribution endpoints below.
   const [callsBySource, setCallsBySource] = useState(null);
@@ -256,9 +258,10 @@ export default function DashboardPageV2() {
       track("/revenue-by-city", adminFetch("/admin/dashboard/revenue-by-city")),
       track("/review-trend", adminFetch("/admin/dashboard/review-trend")),
       track("/retention-cohort", adminFetch("/admin/dashboard/retention-cohort?months=12")),
+      track("/capital-allocation", adminFetch("/admin/ads/capital-allocation?period=quarter")),
     ]);
     if (!mountedRef.current) { inFlightRef.current = false; return; }
-    const [fnl, ag, mrr, mx, rbc, rev, coh] = wave2;
+    const [fnl, ag, mrr, mx, rbc, rev, coh, cap] = wave2;
     setFunnel((prev) => fnl ?? prev);
     setAging((prev) => ag ?? prev);
     setMrrTrend((prev) => mrr ?? prev);
@@ -266,6 +269,7 @@ export default function DashboardPageV2() {
     setRevenueByCity((prev) => rbc ?? prev);
     setReviewTrend((prev) => rev ?? prev);
     setCohort((prev) => coh ?? prev);
+    setCapAlloc((prev) => cap ?? prev);
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -1084,6 +1088,35 @@ export default function DashboardPageV2() {
               cohorts={cohort?.cohorts || []}
               maxOffset={cohort?.maxOffset || 0}
             />{" "}
+          </ChartCard>{" "}
+        </div>
+      )}
+      {/* Capital allocation — acquisition channels banded by LTV:CAC (lifetime
+          gross profit ÷ ad spend) so the owner can see where to pour cash and
+          where it's leaking. Trailing 90 days. */}
+      {isMobile ? (
+        <MobileFold
+          title="Where to Put Ad Dollars"
+          sub="channels by LTV:CAC · last 90 days"
+        >
+          {" "}
+          <ChartCard
+            title="Where to Put Ad Dollars"
+            sub="channels by LTV:CAC · last 90 days"
+          >
+            {" "}
+            <CapitalAllocationCard data={capAlloc} />{" "}
+          </ChartCard>{" "}
+        </MobileFold>
+      ) : (
+        <div className="mb-5">
+          {" "}
+          <ChartCard
+            title="Where to Put Ad Dollars"
+            sub="acquisition channels by LTV:CAC · last 90 days"
+          >
+            {" "}
+            <CapitalAllocationCard data={capAlloc} />{" "}
           </ChartCard>{" "}
         </div>
       )}

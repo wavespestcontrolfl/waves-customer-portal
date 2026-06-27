@@ -5,6 +5,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { buildChannelAttribution } = require('../services/channel-attribution');
+const { rankCapitalAllocation } = require('../services/capital-allocation');
 
 // Lazy-load heavy Google Ads modules (~87MB) — only loaded on first request
 let _BudgetManager, _CampaignAdvisor, _googleAds;
@@ -424,36 +425,46 @@ router.get('/capacity-heatmap', async (req, res, next) => {
 // AD ATTRIBUTION FOR REVENUE PAGE
 // =========================================================================
 
+// Shared channel attribution: completed-lead revenue/GP/customers + TRUE platform
+// spend (ad_performance_daily by platform, so a paid channel-month with spend but
+// zero tracked leads still surfaces, with no cent-rounding drift). Platform values
+// equal the paid lead_source keys (google_ads / google_lsa / facebook).
+async function fetchChannelAttribution(since) {
+  const completed = await db('ad_service_attribution')
+    .where('lead_date', '>=', since)
+    .where('funnel_stage', 'completed')
+    .select('lead_source', 'completed_revenue', 'gross_profit', 'projected_ltv_12mo', 'is_recurring', 'customer_id');
+
+  const spendRows = await db('ad_performance_daily as apd')
+    .join('ad_campaigns as ac', 'ac.id', 'apd.campaign_id')
+    .where('apd.date', '>=', since)
+    .groupBy('ac.platform')
+    .select('ac.platform', db.raw('SUM(apd.cost) as spend'));
+  const platformSpendBySource = {};
+  for (const r of spendRows) platformSpendBySource[r.platform] = parseFloat(r.spend) || 0;
+
+  const { sources, ...totals } = buildChannelAttribution(completed, platformSpendBySource);
+  return { sources: sources.map((s) => ({ source: formatSourceName(s.sourceKey), ...s })), ...totals };
+}
+
+function sinceForPeriod(period) {
+  const periodDays = period === 'quarter' ? 90 : period === 'ytd' ? 365 : 30;
+  return etDateString(addETDays(new Date(), -periodDays));
+}
+
 // GET /api/admin/ads/revenue-attribution?period=month
 router.get('/revenue-attribution', async (req, res, next) => {
   try {
-    const periodDays = req.query.period === 'quarter' ? 90 : req.query.period === 'ytd' ? 365 : 30;
-    const since = etDateString(addETDays(new Date(), -periodDays));
+    res.json(await fetchChannelAttribution(sinceForPeriod(req.query.period)));
+  } catch (err) { next(err); }
+});
 
-    // Revenue + gross profit + customers come from COMPLETED leads.
-    const completed = await db('ad_service_attribution')
-      .where('lead_date', '>=', since)
-      .where('funnel_stage', 'completed')
-      .select('lead_source', 'completed_revenue', 'gross_profit', 'projected_ltv_12mo', 'is_recurring', 'customer_id');
-
-    // Spend per channel = TRUE platform spend (ad_performance_daily by platform),
-    // not summed per-lead ad_cost — so a paid channel-month with spend but zero
-    // tracked leads still surfaces (and there's no cent-rounding drift). Platform
-    // values equal the paid lead_source keys (google_ads / google_lsa / facebook).
-    const spendRows = await db('ad_performance_daily as apd')
-      .join('ad_campaigns as ac', 'ac.id', 'apd.campaign_id')
-      .where('apd.date', '>=', since)
-      .groupBy('ac.platform')
-      .select('ac.platform', db.raw('SUM(apd.cost) as spend'));
-    const platformSpendBySource = {};
-    for (const r of spendRows) platformSpendBySource[r.platform] = parseFloat(r.spend) || 0;
-
-    const { sources, ...totals } = buildChannelAttribution(completed, platformSpendBySource);
-
-    res.json({
-      sources: sources.map((s) => ({ source: formatSourceName(s.sourceKey), ...s })),
-      ...totals,
-    });
+// GET /api/admin/ads/capital-allocation?period=quarter
+// Channels banded by LTV:CAC into a "where to dump cash" decision surface.
+router.get('/capital-allocation', async (req, res, next) => {
+  try {
+    const attribution = await fetchChannelAttribution(sinceForPeriod(req.query.period));
+    res.json(rankCapitalAllocation(attribution));
   } catch (err) { next(err); }
 });
 
