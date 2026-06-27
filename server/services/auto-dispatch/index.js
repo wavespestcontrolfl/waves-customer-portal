@@ -19,7 +19,7 @@ const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibil
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
-const { applyAutoDispatchMove } = require('./apply');
+const { applyAutoDispatchMove, revalidatePlacement } = require('./apply');
 const { toDateStr } = require('./dates');
 const { ensureCustomerGeocoded } = require('../geocoder');
 const audit = require('./audit');
@@ -320,6 +320,19 @@ async function runAutoDispatch(opts = {}) {
       for (const pm of plannedMoves) {
         let fresh = null;
         try {
+          // Supersession check FIRST: re-read the scored row, because an operator
+          // may have locked/excluded/cancelled or moved this visit during the run
+          // window. Without it, a now-ineligible visit would be re-scored from the
+          // stale pass-1 snapshot and could surface as a cap-held "valid move held"
+          // recommendation. Reporting-only — the apply path re-asserts this
+          // atomically; this just keeps the audit log honest. One point-read per
+          // planned move, so the pass stays O(pending).
+          const live = await revalidatePlacement(pm.service);
+          if (!live.ok) {
+            await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'SUPERSEDED_DURING_RUN', reason_description: `Superseded by an operator during the run — ${live.reason}`, ...pm.result.audit });
+            continue;
+          }
+
           fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
           if (fresh.kind !== 'move') {
             // Re-scoring against the live schedule no longer clears the bar (an

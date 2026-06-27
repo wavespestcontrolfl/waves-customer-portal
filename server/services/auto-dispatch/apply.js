@@ -16,6 +16,51 @@ const SmartRebooker = require('../rebooker');
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
 
+const norm = (t) => (t ? String(t).slice(0, 5) : null);
+
+/**
+ * Re-read the scored visit and decide whether its pass-1 placement is still
+ * live. Shared by two callers:
+ *   • applyAutoDispatchMove below — authoritative: it throws on a stale result
+ *     and then an atomic `expect` inside the rebooker re-asserts the same row
+ *     state inside the move transaction; and
+ *   • the orchestrator's pass-2 reporting — so a cap-held / no-longer-eligible
+ *     audit row reflects the CURRENT row, not the stale pass-1 snapshot. Without
+ *     this, an operator who locks/cancels/moves a visit during the run window
+ *     could see it logged as a "valid move held" cap-held recommendation.
+ *
+ * ok=false means the visit was locked/excluded, cancelled/rescheduled, or had
+ * its date/window/tech changed since it was scored — i.e. superseded mid-run.
+ * Returns the freshly-read row so the apply path builds its expect from the
+ * same read. One indexed point-read; callers stay O(pending).
+ */
+async function revalidatePlacement(service) {
+  const fresh = await db('scheduled_services')
+    .where({ id: service.id })
+    .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
+      'auto_dispatch_locked', 'auto_dispatch_excluded');
+  if (!fresh) {
+    return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
+  }
+  if (fresh.auto_dispatch_locked === true || fresh.auto_dispatch_excluded === true) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Visit was locked/excluded from auto-dispatch after scoring' };
+  }
+  // A customer reschedule request flips status→'rescheduled' (which the rebooker
+  // still treats as movable) without changing the date/window. Require it to
+  // still be a live pending/confirmed visit before moving.
+  if (!['pending', 'confirmed'].includes(String(fresh.status))) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
+  }
+  const changed = toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
+    || norm(fresh.window_start) !== norm(service.window_start)
+    || norm(fresh.window_end) !== norm(service.window_end)
+    || String(fresh.technician_id || '') !== String(service.technician_id || '');
+  if (changed) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Placement changed since it was scored' };
+  }
+  return { ok: true, fresh, code: null, reason: null };
+}
+
 /**
  * Deferred customer-notification hook. Builds the event payload; only attempts a
  * send when config.notifyCustomers is true. v1 keeps the send unwired (logs the
@@ -50,31 +95,13 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
 
   // Stale-recommendation guard: the row was loaded + scored earlier this run.
   // reschedule() reloads it but only guards status — if staff locked/excluded it
-  // or moved its date/window/tech since, do NOT overwrite that newer state.
-  const fresh = await db('scheduled_services')
-    .where({ id: service.id })
-    .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded');
-  if (!fresh) {
-    throw Object.assign(new Error('Service no longer exists'), { code: 'STALE_PLACEMENT' });
+  // or moved its date/window/tech since, do NOT overwrite that newer state. Same
+  // re-read the orchestrator's pass-2 reporting uses, so apply + report agree.
+  const check = await revalidatePlacement(service);
+  if (!check.ok) {
+    throw Object.assign(new Error(check.reason), { code: check.code });
   }
-  if (fresh.auto_dispatch_locked === true || fresh.auto_dispatch_excluded === true) {
-    throw Object.assign(new Error('Visit was locked/excluded from auto-dispatch after scoring'), { code: 'STALE_PLACEMENT' });
-  }
-  // A customer reschedule request flips status→'rescheduled' (which the rebooker
-  // still treats as movable) without changing the date/window. Require it to
-  // still be a live pending/confirmed visit before moving.
-  if (!['pending', 'confirmed'].includes(String(fresh.status))) {
-    throw Object.assign(new Error(`Visit status changed to '${fresh.status}' after scoring`), { code: 'STALE_PLACEMENT' });
-  }
-  const norm = (t) => (t ? String(t).slice(0, 5) : null);
-  const changed = toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
-    || norm(fresh.window_start) !== norm(service.window_start)
-    || norm(fresh.window_end) !== norm(service.window_end)
-    || String(fresh.technician_id || '') !== String(service.technician_id || '');
-  if (changed) {
-    throw Object.assign(new Error('Placement changed since it was scored — skipping stale move'), { code: 'STALE_PLACEMENT' });
-  }
+  const fresh = check.fresh;
 
   // Re-assert the operator opt-out flags + original date INSIDE the rebooker's
   // move transaction so a lock/reschedule landing between the read above and the
@@ -159,4 +186,4 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   return { ok: true, pre_status: fresh.status, post_status: postStatus, technician_changed: techChanged, notification };
 }
 
-module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged };
+module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement };
