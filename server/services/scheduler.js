@@ -2307,6 +2307,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:25AM — Ad cost allocation. Runs AFTER the Google (6am) + Meta
+  // (6:15am) syncs land fresh spend, spreading each paid channel-month's spend
+  // across that channel's leads into ad_service_attribution.ad_cost — the
+  // denominator the /admin/ads CAC / ROAS / LTV:CAC views read. Recomputes the
+  // trailing ~90 days (idempotent); free channels keep ad_cost null.
+  // =========================================================================
+  cron.schedule('25 6 * * *', async () => {
+    try {
+      const { allocateAdCosts } = require('./ad-cost-allocation');
+      const sinceDate = etDateString(addETDays(new Date(), -90));
+      const res = await allocateAdCosts(undefined, { sinceDate });
+      logger.info(`Ad cost allocation complete — rows ${res.updatedRows}, channel-months ${res.monthsTouched}`);
+    } catch (err) {
+      logger.error(`Ad cost allocation failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:40AM — Google Ads offline conversion upload (Data Manager API)
   // Automates the EXISTING DataManager.uploadConversions (qualified leads +
   // completed-job revenue) — previously admin-trigger only. Opt-in via
