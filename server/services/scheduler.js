@@ -2419,6 +2419,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:20AM ET — Google Customer Match sync (suppression + retargeting).
+  // Opt-in via GOOGLE_CUSTOMER_MATCH_CRON_ENABLED; no-ops unless configured +
+  // uploads allowed. Reuses the Data Manager service account + audience defs.
+  // =========================================================================
+  cron.schedule('20 7 * * *', async () => {
+    if (process.env.GOOGLE_CUSTOMER_MATCH_CRON_ENABLED !== 'true') return;
+    logger.info('Running: Google Customer Match sync');
+    try {
+      const GoogleCustomerMatch = require('./ads/google-customer-match');
+      const r = await GoogleCustomerMatch.syncAll({ validateOnly: false });
+      for (const [audience, res] of Object.entries(r)) {
+        if (res && res.error) logger.error(`[google-customer-match cron] ${audience} failed: ${res.error}`);
+      }
+      logger.info(`[google-customer-match cron] ${JSON.stringify(r)}`);
+    } catch (err) {
+      logger.error(`Google Customer Match sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6AM — Sync Google Search Console data (hub + all spoke domains)
   //
   // syncAllDomains walks NETWORK_DOMAINS in order (hub first) and catches
