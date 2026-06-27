@@ -22,11 +22,16 @@ Scope guard: PostHog initializes **only** on the *bare* acquisition routes
 A `before_send` hard-gate also drops any event/replay snapshot fired off-funnel
 after a client-side navigation, and the recorder is stopped on funnel exit.
 
-Replay on the portal funnel masks **all** input values AND **all** rendered text
-(`maskTextSelector: '*'`), and **autocapture is off** there — so no rendered
-name/phone/address or Google Places suggestion can reach PostHog. (The marketing
-site keeps readable replay + autocapture; it only masks inputs, the Places
-dropdown, and `.ph-mask` nodes — its pages carry no customer PII as text.)
+Replay masks **all** input values AND **all** rendered text
+(`maskTextSelector: '*'`) on **both** the marketing site and the portal funnel,
+and **autocapture is off** on both — so no rendered name/phone/address, Google
+Places suggestion, or href carrying a lead id can reach PostHog. Heatmaps (which
+need autocapture) are a deliberate later opt-in after a PII audit. Funnel signal
+comes from the explicit events + `$pageview`, which don't depend on autocapture.
+
+The marketing `CookieBanner` backfills the `.wavespestcontrol.com` consent
+cookie for visitors who opted in before this shipped (localStorage set, cookie
+absent), so the marketing→portal handoff keeps stitching for existing users.
 
 ## Owner provisioning steps
 
