@@ -60,6 +60,28 @@ const fmtVal = (v, fmt = "number") => {
   }
 };
 
+// Monochrome zinc ramp for multi-series charts (single series keeps CHART_PRIMARY).
+const SERIES_SHADES = ["#18181B", "#71717A", "#A1A1AA", "#3F3F46", "#D4D4D8", "#52525B"];
+const shade = (i) => SERIES_SHADES[i % SERIES_SHADES.length];
+
+// Numeric coercion that keeps SQL NULLs as NaN (Number(null)===0 would otherwise
+// turn a NULL bucket into a floor point). A real 0 stays a finite 0.
+const num = (v) => (v == null || v === "" ? NaN : Number(v));
+
+// Legend for multi-series charts — a swatch + the column alias per series.
+function Legend({ keys }) {
+  return (
+    <div className="flex flex-wrap gap-x-3 gap-y-1 mb-2 text-11 text-ink-tertiary">
+      {keys.map((k, i) => (
+        <span key={k} className="inline-flex items-center gap-1">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: shade(i) }} />
+          {k}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // Generic, monochrome renderer for an AI chart spec + result rows.
 function AiChart({ chartType, spec, rows, fields }) {
   if (!rows || rows.length === 0) return <EmptyState>No rows returned</EmptyState>;
@@ -99,51 +121,116 @@ function AiChart({ chartType, spec, rows, fields }) {
   }
 
   if (chartType === "line") {
-    const pts = rows.map((r) => Number(r[yKey])).filter((n) => Number.isFinite(n));
-    if (pts.length < 2) return <AiChart chartType="bar" spec={spec} rows={rows} fields={fields} />;
-    const max = Math.max(...pts), min = Math.min(...pts, 0);
-    const W = 560, H = 160, pad = 4;
+    // One polyline per y column (multi-series); single series keeps CHART_PRIMARY.
+    const yKeys = [...yCols].length ? [...yCols] : [yKey];
+    const series = yKeys.map((k) => rows.map((r) => num(r[k])));
+    const allVals = series.flat().filter((n) => Number.isFinite(n));
+    // A line needs ≥2 x-positions that carry data. Count x-positions where SOME
+    // series is finite — a single bucket (even multi-series) falls back to bars
+    // rather than drawing invisible one-point polylines.
+    const finiteX = rows.filter((_, i) => series.some((s) => Number.isFinite(s[i]))).length;
+    if (finiteX < 2) return <AiChart chartType="bar" spec={spec} rows={rows} fields={fields} />;
+    const max = Math.max(...allVals), min = Math.min(...allVals, 0);
+    const W = 600, H = 180, padL = 56, padR = 8, padT = 10, padB = 22;
     const span = max - min || 1;
-    const path = pts.map((v, i) => `${(i / (pts.length - 1)) * (W - pad * 2) + pad},${H - pad - ((v - min) / span) * (H - pad * 2)}`).join(" ");
+    const n = rows.length;
+    const xAt = (i) => padL + (n > 1 ? i / (n - 1) : 0.5) * (W - padL - padR);
+    const yAt = (v) => padT + (1 - (v - min) / span) * (H - padT - padB);
+    const ticks = [max, (max + min) / 2, min];
+    const xIdx = n > 2 ? [0, Math.floor((n - 1) / 2), n - 1] : [0, n - 1];
+    // Split each series into contiguous runs of finite points, so a NULL bucket
+    // (e.g. a NULLIF rate with no leads that month) reads as a GAP — not a drop
+    // to the floor. Isolated finite points render as a dot rather than vanishing.
+    const segmentsOf = (s) => {
+      const segs = []; let cur = [];
+      s.forEach((v, i) => {
+        if (Number.isFinite(v)) cur.push([xAt(i), yAt(v)]);
+        else if (cur.length) { segs.push(cur); cur = []; }
+      });
+      if (cur.length) segs.push(cur);
+      return segs;
+    };
     return (
       <div className="overflow-x-auto">
-        <div className="flex justify-between text-11 text-ink-tertiary mb-1">
-          <span>peak {fmtVal(max, fmt)}</span>
-          <span>latest {fmtVal(pts[pts.length - 1], fmt)}</span>
-        </div>
+        {yKeys.length > 1 && <Legend keys={yKeys} />}
         <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: H }}>
-          <polyline points={path} fill="none" stroke={CHART_PRIMARY} strokeWidth="2" />
+          {ticks.map((t, i) => (
+            <g key={`t${i}`}>
+              <line x1={padL} x2={W - padR} y1={yAt(t)} y2={yAt(t)} stroke="#E4E4E7" strokeWidth="1" />
+              <text x={padL - 6} y={yAt(t) + 3} textAnchor="end" fontSize="10" fill="#A1A1AA">{fmtVal(t, fmt)}</text>
+            </g>
+          ))}
+          {series.map((s, si) => {
+            const color = yKeys.length > 1 ? shade(si) : CHART_PRIMARY;
+            return segmentsOf(s).map((seg, gi) => (
+              seg.length > 1
+                ? <polyline key={`s${si}-${gi}`} points={seg.map((p) => p.join(",")).join(" ")} fill="none" stroke={color} strokeWidth="2" />
+                : <circle key={`s${si}-${gi}`} cx={seg[0][0]} cy={seg[0][1]} r="2.5" fill={color} />
+            ));
+          })}
+          {xIdx.map((idx, j) => (
+            <text key={`x${j}`} x={xAt(idx)} y={H - 6} textAnchor={j === 0 ? "start" : j === xIdx.length - 1 ? "end" : "middle"} fontSize="10" fill="#A1A1AA">{String(rows[idx][xKey] ?? "")}</text>
+          ))}
         </svg>
-        <div className="flex justify-between text-11 text-ink-tertiary">
-          <span>{String(rows[0][xKey] ?? "")}</span>
-          <span>{String(rows[rows.length - 1][xKey] ?? "")}</span>
-        </div>
       </div>
     );
   }
 
-  // bar (and donut → rendered as a share/bar breakdown — same single-series story).
+  // bar (and donut → rendered as a share/bar breakdown).
   // Scale by absolute magnitude so negative metrics (net change, churn deltas)
   // get a valid, proportional width; the signed value stays in the label.
-  const bars = rows.slice(0, 12).map((r) => ({ label: String(r[xKey] ?? "—"), value: Number(r[yKey]) || 0 }));
-  const absMax = Math.max(...bars.map((b) => Math.abs(b.value)), 1);
+  // NULL buckets (num → NaN) render as "—" with no bar — never a false zero —
+  // while a genuine 0 shows a zero-width bar labelled 0.
+  const barKeys = [...yCols].length ? [...yCols] : [yKey];
+  const cats = rows.slice(0, 12);
+  const absMax = Math.max(...cats.flatMap((r) => barKeys.map((k) => num(r[k]))).filter(Number.isFinite).map(Math.abs), 1);
+
+  if (barKeys.length <= 1) {
+    return (
+      <ul className="space-y-2">
+        {cats.map((r, i) => {
+          const value = num(r[yKey]);
+          const missing = !Number.isFinite(value);
+          return (
+            <li key={i}>
+              <div className="flex items-baseline justify-between text-12 mb-1">
+                <span className="text-ink-secondary truncate pr-2">{String(r[xKey] ?? "—")}</span>
+                <span className="u-nums text-ink-primary">{missing ? "—" : fmtVal(value, fmt)}</span>
+              </div>
+              <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
+                {!missing && <div className="h-full" style={{ width: `${Math.min(100, (Math.abs(value) / absMax) * 100)}%`, background: CHART_PRIMARY, opacity: value < 0 ? 0.5 : 1 }} />}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    );
+  }
+
+  // Multi-series → grouped bars per category, one sub-bar per series.
   return (
-    <ul className="space-y-2">
-      {bars.map((b, i) => (
-        <li key={i}>
-          <div className="flex items-baseline justify-between text-12 mb-1">
-            <span className="text-ink-secondary truncate pr-2">{b.label}</span>
-            <span className="u-nums text-ink-primary">{fmtVal(b.value, fmt)}</span>
-          </div>
-          <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
-            <div
-              className="h-full"
-              style={{ width: `${Math.min(100, (Math.abs(b.value) / absMax) * 100)}%`, background: CHART_PRIMARY, opacity: b.value < 0 ? 0.5 : 1 }}
-            />
-          </div>
-        </li>
-      ))}
-    </ul>
+    <div>
+      <Legend keys={barKeys} />
+      <ul className="space-y-3">
+        {cats.map((r, i) => (
+          <li key={i}>
+            <div className="text-12 text-ink-secondary truncate mb-1">{String(r[xKey] ?? "—")}</div>
+            {barKeys.map((k, ki) => {
+              const v = num(r[k]);
+              const missing = !Number.isFinite(v);
+              return (
+                <div key={k} className="flex items-center gap-2 mb-1">
+                  <div className="h-2 flex-1 bg-surface-sunken rounded-sm overflow-hidden">
+                    {!missing && <div className="h-full" style={{ width: `${Math.min(100, (Math.abs(v) / absMax) * 100)}%`, background: shade(ki), opacity: v < 0 ? 0.5 : 1 }} />}
+                  </div>
+                  <span className="u-nums text-ink-primary text-11" style={{ minWidth: 56, textAlign: "right" }}>{missing ? "—" : fmtVal(v, fmt)}</span>
+                </div>
+              );
+            })}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
