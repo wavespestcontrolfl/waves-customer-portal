@@ -869,7 +869,14 @@ export function LeadSourceBars({ bySource = [], maxRows = 8 }) {
 // retention); the % is always printed so small differences in the high range
 // stay legible. Future cells (a cohort hasn't aged that far yet) are blank.
 export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
+  // Toggle between headcount retention (% of customers still active) and
+  // MRR-weighted retention (% of the cohort's recurring revenue still active).
+  const [weight, setWeight] = useState("customers");
   if (!cohorts.length) return <EmptyState>Not enough customer history yet</EmptyState>;
+  const mrrAvailable = cohorts.some(
+    (c) => Array.isArray(c.retentionMrr) && c.retentionMrr.some((v) => v != null),
+  );
+  const byMrr = weight === "mrr" && mrrAvailable;
   const cols = Array.from({ length: maxOffset + 1 }, (_, i) => i);
   // Zinc-900 wash whose opacity tracks retention; text flips to white once the
   // wash is dark enough to keep contrast readable.
@@ -878,35 +885,65 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
     color: pct >= 45 ? "#fff" : "#3f3f46",
   });
   return (
-    <div className="overflow-x-auto">
-      <div className="min-w-max">
-        <div className="flex items-center gap-1 mb-1">
-          <div className="w-16 shrink-0 u-label text-ink-tertiary">Cohort</div>
-          <div className="w-10 shrink-0 u-label text-ink-tertiary text-right">N</div>
-          {cols.map((m) => (
-            <div key={m} className="w-10 shrink-0 u-label text-ink-tertiary text-center">{`M${m}`}</div>
-          ))}
-        </div>
-        {cohorts.map((c) => (
-          <div key={c.month} className="flex items-center gap-1 mb-1">
-            <div className="w-16 shrink-0 text-12 text-ink-secondary truncate">{c.label}</div>
-            <div className="w-10 shrink-0 text-12 u-nums text-ink-tertiary text-right">{fmtInt(c.size)}</div>
-            {cols.map((m) => {
-              const pct = c.retention?.[m];
-              if (pct == null) return <div key={m} className="w-10 h-7 shrink-0" />;
-              return (
-                <div
-                  key={m}
-                  className="w-10 h-7 shrink-0 rounded-xs flex items-center justify-center text-11 u-nums"
-                  style={cellStyle(pct)}
-                  title={`${c.label} · month ${m}: ${pct}% of ${c.size} retained`}
-                >
-                  {Math.round(pct)}
-                </div>
-              );
-            })}
+    <div>
+      {mrrAvailable && (
+        <div className="flex items-center gap-2 mb-3">
+          <div className="inline-flex border-hairline border-zinc-300 rounded-sm overflow-hidden">
+            {[["customers", "Customers"], ["mrr", "MRR"]].map(([k, lbl]) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setWeight(k)}
+                className={cn(
+                  "px-2.5 h-7 text-12",
+                  weight === k ? "bg-zinc-900 text-white" : "text-ink-secondary hover:bg-zinc-50",
+                )}
+              >
+                {lbl}
+              </button>
+            ))}
           </div>
-        ))}
+          <span className="text-11 text-ink-tertiary">
+            {byMrr ? "share of cohort MRR retained" : "share of customers retained"}
+          </span>
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        <div className="min-w-max">
+          <div className="flex items-center gap-1 mb-1">
+            <div className="w-16 shrink-0 u-label text-ink-tertiary">Cohort</div>
+            <div className="w-10 shrink-0 u-label text-ink-tertiary text-right">N</div>
+            {cols.map((m) => (
+              <div key={m} className="w-10 shrink-0 u-label text-ink-tertiary text-center">{`M${m}`}</div>
+            ))}
+          </div>
+          {cohorts.map((c) => {
+            const series = byMrr ? c.retentionMrr : c.retention;
+            return (
+              <div key={c.month} className="flex items-center gap-1 mb-1">
+                <div className="w-16 shrink-0 text-12 text-ink-secondary truncate">{c.label}</div>
+                <div className="w-10 shrink-0 text-12 u-nums text-ink-tertiary text-right">{fmtInt(c.size)}</div>
+                {cols.map((m) => {
+                  const pct = series?.[m];
+                  if (pct == null) return <div key={m} className="w-10 h-7 shrink-0" />;
+                  const title = byMrr
+                    ? `${c.label} · month ${m}: ${pct}% of ${fmtMoney(c.baseMrr)} cohort MRR retained`
+                    : `${c.label} · month ${m}: ${pct}% of ${c.size} retained`;
+                  return (
+                    <div
+                      key={m}
+                      className="w-10 h-7 shrink-0 rounded-xs flex items-center justify-center text-11 u-nums"
+                      style={cellStyle(pct)}
+                      title={title}
+                    >
+                      {Math.round(pct)}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
