@@ -129,12 +129,6 @@ function recurringServiceKey(svc = {}) {
     || raw.includes('rodent_monitoring')
     || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
   ) return 'rodent_bait';
-  // Commercial pest (small-commercial pilot) is NOT residential pest_control:
-  // it is WaveGuard-ineligible and must never trigger the residential
-  // membership setup fee or combined-service routing. Keep it a distinct key so
-  // recurringMixHasMembershipFeeService() / qualifying-tier checks skip it even
-  // if a future path routes it into recurring services.
-  if (raw.includes('commercial_pest') || /\bcommercial pest\b/.test(words)) return 'commercial_pest';
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
