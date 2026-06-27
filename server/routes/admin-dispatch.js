@@ -4531,7 +4531,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
-        const recapText = (customerRecap || '').trim();
+        // Use the recap STORED on the record (the server-generated effectiveCustomerRecap,
+        // or a resumed completion's persisted value) — the client no longer sends
+        // customerRecap, so reading the request field would drop the recap here.
+        const recapText = (recordStructuredNotes.customerRecap || customerRecap || '').trim();
         const withRecap = (body, conciseBody) => {
           const suffix = countSegments(`${conciseBody}${reviewSuffix}`).segmentCount <= 2 ? reviewSuffix : '';
           const tail = countSegments(`${body}${suffix}`).segmentCount <= 2 ? body : conciseBody;
