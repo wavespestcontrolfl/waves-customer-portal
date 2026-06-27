@@ -12,6 +12,7 @@ const {
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
+const { buildCohortSeries, makeRateAt } = require('../services/retention-cohort');
 const { autopayActivePredicate } = require('../services/autopay-eligibility');
 const { generateChartSpec, extractImageIntent } = require('../services/ai-chart-builder');
 const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
@@ -963,13 +964,21 @@ router.get('/mrr-trend', dashboardCache, async (req, res, next) => {
 //   - "live"        = active AND deleted_at IS NULL AND pipeline_stage IN CUSTOMER_STAGES
 //   - a member who is NOT live now is treated as having departed on the best
 //     available date: churned_at, else the ET date of pipeline_stage_changed_at,
-//     else of deleted_at. (No per-month membership history is stored anywhere —
-//     mrr_snapshots only keeps aggregate totals — so retention over time is
-//     reconstructed from these entry/exit dates. Reactivations keep "live now =
-//     retained" just like the KPI, so a churn-then-return reads as retained.)
+//     else of deleted_at. Membership over time is reconstructed from these
+//     entry/exit dates. Reactivations keep "live now = retained" just like the
+//     KPI, so a churn-then-return reads as retained.
+//
+// The MRR column is NET revenue retention (point-in-time): each surviving member's
+// rate AT month m comes from customer_mrr_snapshots (per-customer monthly rate,
+// accruing forward since that feature shipped), falling back to the member's
+// current monthly_rate for months not yet snapshotted. Because survivors' rate AT
+// month m is used (not a flat current rate), expansion can push it ABOVE 100% —
+// true NRR. Months with no snapshot yet fall back to current rate (≤100, like the
+// prior behavior) and sharpen automatically as snapshots accrue.
 // Month 0 is the signup month itself (100% by definition — the cohort base).
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const monthIndexOf = (ym) => Number(ym.slice(0, 4)) * 12 + (Number(ym.slice(5, 7)) - 1);
+const ymOf = (idx) => `${String(Math.floor(idx / 12)).padStart(4, '0')}-${String((idx % 12) + 1).padStart(2, '0')}`;
 const monthLabelOf = (ym) => `${MONTH_ABBR[Number(ym.slice(5, 7)) - 1]} ’${ym.slice(2, 4)}`;
 
 router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
@@ -998,6 +1007,7 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
       // Keep the three exit signals separate so the departure month can be picked
       // by CAUSE in JS — a flat COALESCE would grab a stale pre-exit stage change.
       rows = await qb.select(
+        'id',
         db.raw(`to_char(${CONVERSION_DATE_SQL}, 'YYYY-MM') as cohort_month`),
         'active',
         'deleted_at',
@@ -1012,12 +1022,38 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
       return res.json({ cohorts: [], maxOffset: 0, months });
     }
 
+    // Per-customer monthly rate history (forward-only). Used for point-in-time NRR;
+    // absent rows fall back to the member's current monthly_rate. Guarded so an
+    // environment without the table is a clean no-op (everything falls back).
+    const rateByCustomer = new Map(); // customerId -> Map('YYYY-MM' -> rate)
+    const snapshottedMonths = new Set(); // months with ANY snapshot row (vs none yet)
+    try {
+      const snapRows = await db('customer_mrr_snapshots')
+        .where('period_month', '>=', rangeStart)
+        .select('customer_id', db.raw("to_char(period_month, 'YYYY-MM') as ym"), 'monthly_rate');
+      for (const s of snapRows) {
+        // The in-progress month's snapshot (written once at 6:05am ET) is stale for
+        // same-day conversions/price changes, so treat it as unsnapshotted → those
+        // cells use the live current rate (which IS the point-in-time truth for now).
+        if (s.ym !== nowMonth) snapshottedMonths.add(s.ym);
+        if (!rateByCustomer.has(s.customer_id)) rateByCustomer.set(s.customer_id, new Map());
+        rateByCustomer.get(s.customer_id).set(s.ym, Number(s.monthly_rate) || 0);
+      }
+    } catch (err) {
+      // Missing table (pre-feature) is expected → silent. Any other failure (bad
+      // migration, permission, timeout) shouldn't silently revert "Net MRR" to the
+      // current-rate fallback unnoticed — log it. Either way the grid degrades to
+      // the current-rate fallback rather than erroring.
+      if (!/relation .*customer_mrr_snapshots.* does not exist/i.test(err.message || '')) {
+        logger.warn(`[admin-dashboard] /retention-cohort snapshot read failed; Net MRR falls back to current rate: ${err.message}`);
+      }
+    }
+
     const LEFT_STAGES = new Set(['churned', 'dormant']);
-    // Bucket members by cohort month, precomputing a churn month index + the
-    // member's current monthly_rate (for MRR-weighted retention — revenue
-    // retained, not headcount; current rate is used since no per-month rate
-    // history is stored, mirroring how the cohort reconstructs from entry/exit).
-    const byCohort = new Map(); // 'YYYY-MM' -> [{ churnIdx, mrr }]
+    // Bucket members by cohort month, precomputing a churn month index + the keys
+    // needed to resolve each member's point-in-time rate (customer id + current
+    // monthly_rate fallback).
+    const byCohort = new Map(); // 'YYYY-MM' -> [{ churnIdx, customerId, currentRate }]
     for (const r of rows) {
       const cohort = r.cohort_month;
       if (!cohort) continue;
@@ -1041,37 +1077,24 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
         churnIdx = Math.max(cIdx, monthIndexOf(exitMonth));
       }
       if (!byCohort.has(cohort)) byCohort.set(cohort, []);
-      byCohort.get(cohort).push({ churnIdx, mrr: Number(r.monthly_rate) || 0 });
+      byCohort.get(cohort).push({ churnIdx, customerId: r.id, currentRate: Number(r.monthly_rate) || 0 });
     }
 
     const cohorts = [];
     for (let idx = firstIdx; idx <= nowIdx; idx += 1) {
-      const ym = `${String(Math.floor(idx / 12)).padStart(4, '0')}-${String((idx % 12) + 1).padStart(2, '0')}`;
-      const members = byCohort.get(ym) || [];
-      const size = members.length;
-      const baseMrr = members.reduce((s, mem) => s + mem.mrr, 0); // cohort MRR at signup
+      const ym = ymOf(idx);
+      const raw = byCohort.get(ym) || [];
+      // makeRateAt keeps each cohort on one basis: point-in-time when its base month
+      // is snapshotted, else the current-rate fallback for the whole cohort.
+      const members = raw.map((mem) => ({
+        churnIdx: mem.churnIdx,
+        rateAt: makeRateAt({
+          rateByCustomer, snapshottedMonths, ymOf, cohortYm: ym, customerId: mem.customerId, currentRate: mem.currentRate,
+        }),
+      }));
       const elapsed = nowIdx - idx; // number of offset columns available (0..elapsed)
-      const retention = [];     // headcount-weighted
-      const retentionMrr = [];  // MRR-weighted (null when the cohort has no MRR)
-      for (let m = 0; m <= elapsed; m += 1) {
-        if (size === 0) { retention.push(null); retentionMrr.push(null); continue; }
-        if (m === 0) { // signup month = base
-          retention.push(100);
-          retentionMrr.push(baseMrr > 0 ? 100 : null);
-          continue;
-        }
-        // Active through the END of month (idx + m): still live, or churned strictly later.
-        const k = idx + m;
-        const aliveMembers = members.filter((mem) => mem.churnIdx > k);
-        retention.push(Math.round((aliveMembers.length / size) * 1000) / 10);
-        if (baseMrr > 0) {
-          const aliveMrr = aliveMembers.reduce((s, mem) => s + mem.mrr, 0);
-          retentionMrr.push(Math.round((aliveMrr / baseMrr) * 1000) / 10);
-        } else {
-          retentionMrr.push(null);
-        }
-      }
-      cohorts.push({ month: ym, label: monthLabelOf(ym), size, baseMrr: Math.round(baseMrr), retention, retentionMrr });
+      const { baseMrr, retention, retentionMrr } = buildCohortSeries(members, idx, elapsed);
+      cohorts.push({ month: ym, label: monthLabelOf(ym), size: raw.length, baseMrr: Math.round(baseMrr), retention, retentionMrr });
     }
 
     res.json({ cohorts, maxOffset: months - 1, months });
