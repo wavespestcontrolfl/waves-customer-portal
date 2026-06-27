@@ -20,6 +20,8 @@
 
 const MIN_CONFIDENT_CUSTOMERS = 5;
 
+function round1(n) { return Math.round((Number(n) || 0) * 10) / 10; }
+
 const BAND_META = {
   no_spend:     { label: 'No paid spend', tone: 'neutral', verdict: 'Free or untracked — no ad spend to measure.' },
   losing:       { label: 'Losing money',  tone: 'bad',     verdict: 'Returns less gross profit than it costs — cut or fix.' },
@@ -67,16 +69,26 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
     return (b.ltvCac || 0) - (a.ltvCac || 0);
   });
 
-  const blendedLtvCac = attribution.blendedLtvCac ?? null;
+  // Blend from PAID channels only. attribution.blendedLtvCac divides ALL sources'
+  // lifetime value (incl. free organic/referral) by paid spend — for a "where to
+  // put ad dollars" card that would let strong organic mask losing paid spend.
+  const paid = channels.filter((c) => c.ltvCac != null); // ltvCac null ⇒ no paid spend
+  const paidLifetime = paid.reduce((t, c) => t + (Number(c.lifetimeValue) || 0), 0);
+  const paidSpend = paid.reduce((t, c) => t + (Number(c.adSpend) || 0), 0);
+  const blendedLtvCac = paidSpend > 0 ? round1(paidLifetime / paidSpend) : null;
   const blendedBand = bandFor(blendedLtvCac);
 
   // Headline calls — only from CONFIDENT channels (don't headline a noisy ratio).
+  // Opportunity: the highest-ratio scale/pour-in channel (channels are already
+  // sorted by LTV:CAC desc). Leak: the channel wasting the MOST cash
+  // (adSpend − lifetime value), not merely the least-bad ratio.
   const opp = channels.find(
     (c) => c.confidence === 'ok' && (c.band === 'scale' || c.band === 'pour_in'),
   );
-  const leak = channels.find(
-    (c) => c.confidence === 'ok' && c.band === 'losing' && c.adSpend > 0,
-  );
+  const wasted = (c) => (Number(c.adSpend) || 0) - (Number(c.lifetimeValue) || 0);
+  const [leak] = channels
+    .filter((c) => c.confidence === 'ok' && c.band === 'losing' && c.adSpend > 0)
+    .sort((a, b) => wasted(b) - wasted(a));
 
   return {
     channels,

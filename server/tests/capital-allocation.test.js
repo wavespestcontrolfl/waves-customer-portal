@@ -15,43 +15,62 @@ describe('bandFor', () => {
   });
 });
 
-const src = (sourceKey, source, ltvCac, adSpend, customers, cac = null) => ({
-  sourceKey, source, ltvCac, adSpend, customers, cac,
+const src = (sourceKey, source, ltvCac, adSpend, customers, lifetimeValue, cac = null) => ({
+  sourceKey, source, ltvCac, adSpend, customers, lifetimeValue, cac,
 });
 
 describe('rankCapitalAllocation', () => {
-  test('bands, ranks (paid desc, no-spend last), and picks headline opportunity + leak', () => {
-    const attribution = {
-      blendedLtvCac: 5,
+  test('bands, ranks (paid desc, no-spend last), picks opportunity + leak, blends paid-only', () => {
+    const out = rankCapitalAllocation({
       sources: [
-        src('facebook', 'Facebook', 0.5, 300, 7),
-        src('organic', 'Organic', null, 0, 20),
-        src('google_ads', 'Google Ads', 34, 500, 12),
-        src('google_lsa', 'Google LSA', 6, 200, 8),
+        src('facebook', 'Facebook', 0.5, 300, 7, 150),
+        src('organic', 'Organic', null, 0, 20, 8000),
+        src('google_ads', 'Google Ads', 34, 500, 12, 17000),
+        src('google_lsa', 'Google LSA', 6, 200, 8, 1200),
       ],
-    };
-    const out = rankCapitalAllocation(attribution);
+    });
 
-    // ranked: paid channels by LTV:CAC desc, free/no-spend last
     expect(out.channels.map((c) => c.sourceKey)).toEqual(['google_ads', 'google_lsa', 'facebook', 'organic']);
-
     const g = out.channels.find((c) => c.sourceKey === 'google_ads');
     expect(g.band).toBe('pour_in');
     expect(g.tone).toBe('great');
     expect(g.confidence).toBe('ok');
-
     expect(out.channels.find((c) => c.sourceKey === 'facebook').band).toBe('losing');
     expect(out.channels.find((c) => c.sourceKey === 'organic').band).toBe('no_spend');
 
-    expect(out.headline.blendedBand).toBe('healthy');
+    // blended = paid lifetime (17000+1200+150) / paid spend (1000) = 18.35 → 18.4
+    expect(out.headline.blendedLtvCac).toBe(18.4);
+    expect(out.headline.blendedBand).toBe('scale');
     expect(out.headline.topOpportunity.sourceKey).toBe('google_ads');
     expect(out.headline.biggestLeak.sourceKey).toBe('facebook');
   });
 
+  test('blended ratio is paid-only — strong organic cannot mask losing paid spend', () => {
+    const out = rankCapitalAllocation({
+      sources: [
+        src('facebook', 'Facebook', 0.5, 1000, 9, 500), // paid, losing
+        src('organic', 'Organic', null, 0, 50, 50000), // free, huge value, no spend
+      ],
+    });
+    // organic's 50k lifetime value must NOT enter the numerator over paid spend
+    expect(out.headline.blendedLtvCac).toBe(0.5);
+    expect(out.headline.blendedBand).toBe('losing');
+  });
+
+  test('biggest leak = most cash wasted, not the worst ratio', () => {
+    const out = rankCapitalAllocation({
+      sources: [
+        src('google_ads', 'Google Ads', 0.9, 5000, 20, 4500), // mild ratio, $500 wasted
+        src('facebook', 'Facebook', 0.1, 200, 9, 20), // worst ratio, only $180 wasted
+      ],
+    });
+    // google_ads wastes more absolute cash → it's the bigger leak to cut first
+    expect(out.headline.biggestLeak.sourceKey).toBe('google_ads');
+  });
+
   test('small-N guard: a sky-high ratio off too few customers is flagged + not headlined', () => {
     const out = rankCapitalAllocation({
-      blendedLtvCac: 200,
-      sources: [src('facebook', 'Facebook', 200, 50, 2)], // only 2 customers
+      sources: [src('facebook', 'Facebook', 200, 50, 2, 10000)], // only 2 customers
     });
     const fb = out.channels[0];
     expect(fb.band).toBe('pour_in'); // band still reflects the ratio
@@ -60,16 +79,14 @@ describe('rankCapitalAllocation', () => {
   });
 
   test('biggest leak requires a confident, money-spending losing channel', () => {
-    // losing but low-N → not headlined as a leak
-    const lowN = rankCapitalAllocation({ blendedLtvCac: 0.4, sources: [src('facebook', 'Facebook', 0.4, 200, 2)] });
-    expect(lowN.headline.biggestLeak).toBeNull();
-    // losing, confident, real spend → headlined
-    const real = rankCapitalAllocation({ blendedLtvCac: 0.4, sources: [src('facebook', 'Facebook', 0.4, 200, 9)] });
+    const lowN = rankCapitalAllocation({ sources: [src('facebook', 'Facebook', 0.4, 200, 2, 80)] });
+    expect(lowN.headline.biggestLeak).toBeNull(); // low-N → not headlined
+    const real = rankCapitalAllocation({ sources: [src('facebook', 'Facebook', 0.4, 200, 9, 80)] });
     expect(real.headline.biggestLeak.sourceKey).toBe('facebook');
   });
 
   test('empty attribution → no channels, null headline calls', () => {
-    const out = rankCapitalAllocation({ blendedLtvCac: null, sources: [] });
+    const out = rankCapitalAllocation({ sources: [] });
     expect(out.channels).toEqual([]);
     expect(out.headline.topOpportunity).toBeNull();
     expect(out.headline.biggestLeak).toBeNull();
