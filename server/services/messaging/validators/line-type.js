@@ -36,14 +36,31 @@ function maskPhone(p) {
   return d ? `***${d.slice(-4)}` : 'unknown';
 }
 
+// Mirror send_customer_message's normalizeRecipient so a cache key is identical
+// whether it's written by this validator (which gets an already-normalized
+// input.to) or by the appointment path's isLandline (which passes a raw phone).
+// Normalizing here, in the cache layer, keeps both callers' keys in lockstep.
+function normalizeE164(phone) {
+  if (!phone) return null;
+  const trimmed = String(phone).trim();
+  if (!trimmed) return null;
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  if (trimmed.startsWith('+')) return trimmed;
+  return trimmed;
+}
+
 // Returns a discriminated result: { state: 'hit', lineType } | { state: 'miss' }
 // | { state: 'error' }. A read ERROR must NOT be treated as a miss — proceeding
 // to a paid Lookup we then can't cache would make EVERY send incur a lookup if
 // the table is missing/unreadable (e.g. migration not yet landed, or access
 // breaks after the gate is enabled).
 async function readCachedLineType(phone) {
+  const key = normalizeE164(phone);
+  if (!key) return { state: 'miss' };
   try {
-    const row = await db('phone_line_types').where({ phone }).first('line_type');
+    const row = await db('phone_line_types').where({ phone: key }).first('line_type');
     return row ? { state: 'hit', lineType: row.line_type } : { state: 'miss' };
   } catch (err) {
     if (!/relation .* does not exist|phone_line_types/i.test(err.message)) {
@@ -53,14 +70,20 @@ async function readCachedLineType(phone) {
   }
 }
 
+// Best-effort: never throws (callers treat caching as advisory). Quietly no-ops
+// when the table doesn't exist yet (pre-migration deploy window).
 async function cacheLineType(phone, lineType) {
+  const key = normalizeE164(phone);
+  if (!key || !lineType) return;
   try {
     await db('phone_line_types')
-      .insert({ phone, line_type: lineType, checked_at: db.fn.now() })
+      .insert({ phone: key, line_type: lineType, checked_at: db.fn.now() })
       .onConflict('phone')
       .merge({ line_type: lineType, checked_at: db.fn.now() });
   } catch (err) {
-    logger.warn(`[line-type] cache write failed: ${err.message}`);
+    if (!/relation .* does not exist|phone_line_types/i.test(err.message)) {
+      logger.warn(`[line-type] cache write failed: ${err.message}`);
+    }
   }
 }
 
@@ -123,5 +146,9 @@ async function checkLineType(input, _policy, _contactState) {
 
 module.exports = {
   checkLineType,
-  _internals: { readCachedLineType, cacheLineType, lookupLineType, NON_SMS_LINE_TYPES },
+  // Shared phone-keyed line-type cache — also consumed by appointment-reminders'
+  // isLandline so the two landline checks share one Lookup per number.
+  readCachedLineType,
+  cacheLineType,
+  _internals: { lookupLineType, normalizeE164, NON_SMS_LINE_TYPES },
 };
