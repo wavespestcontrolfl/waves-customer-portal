@@ -1891,6 +1891,9 @@ export default function EstimateToolViewV2({
           ...f,
           address: p.formatted_address,
           measuredTurfSf: "",
+          // New address → prior property's commercial unit count must not ride
+          // into the next pilot per-unit reserve (matches the typed-address path).
+          units: "",
         }));
       }
     });
@@ -1913,6 +1916,7 @@ export default function EstimateToolViewV2({
     isCommercial: "NO",
     commercialSubtype: "",
     commercialPricingMode: "manual_quote",
+    units: "",
     hasPool: "NO",
     hasPoolCage: "NO",
     poolCageSize: "MEDIUM",
@@ -2099,7 +2103,12 @@ export default function EstimateToolViewV2({
           next[key] = value;
         }
       }
-      if (prefillIdentityChanged) next.measuredTurfSf = "";
+      if (prefillIdentityChanged) {
+        next.measuredTurfSf = "";
+        // A different lead/customer/property → drop the prior commercial unit
+        // count so it can't ride into the next pilot per-unit reserve.
+        next.units = "";
+      }
       return next;
     });
   }, [
@@ -2273,7 +2282,7 @@ export default function EstimateToolViewV2({
         ...(key === "preslabVolume" && !f._preslabJobContextEdited
           ? { preslabJobContext: String(val || "NONE").toUpperCase() === "NONE" ? "standalone" : "builderBatch" }
           : {}),
-        ...(key === "address" ? { measuredTurfSf: "" } : {}),
+        ...(key === "address" ? { measuredTurfSf: "", units: "" } : {}),
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
         ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
@@ -2657,7 +2666,10 @@ export default function EstimateToolViewV2({
       type: "loading",
       msg: "Running AI satellite analysis...",
     });
-    setForm((f) => ({ ...f, measuredTurfSf: "" }));
+    // Clear per-property inputs that must not leak from a prior lookup: turf
+    // measurement and the commercial unit count (stale units would otherwise
+    // ride into the next property's pilot per-unit reserve).
+    setForm((f) => ({ ...f, measuredTurfSf: "", units: "" }));
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
@@ -3133,6 +3145,12 @@ export default function EstimateToolViewV2({
         onetimeLawnType: form.otLawnType || "FERT",
         commercialPricingMode: form.commercialPricingMode || "manual_quote",
         commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
+        // Omit only when truly blank so the server can fall back to the lookup
+        // unit count. An explicit 0 IS sent, so an operator can clear an
+        // incorrect multi-family count and price with no per-unit reserve.
+        units: formIsCommercial && String(form.units ?? "").trim() !== "" && Number.isFinite(parseInt(form.units, 10))
+          ? Math.max(0, parseInt(form.units, 10))
+          : undefined,
         fleaOfferKey: form.fleaOfferKey || "flea_elimination_two_visit",
         fleaComplexity: form.fleaComplexity || "light",
         fleaExteriorSourceSuspected: !!form.fleaExteriorSourceSuspected,
@@ -3620,6 +3638,7 @@ export default function EstimateToolViewV2({
       isCommercial: "NO",
       commercialSubtype: "",
       commercialPricingMode: "manual_quote",
+      units: "",
       hasPool: "NO",
       hasPoolCage: "NO",
       poolCageSize: "MEDIUM",
@@ -4328,9 +4347,19 @@ export default function EstimateToolViewV2({
                 </FieldV2>
               </div>
               {(commercialDetected || form.commercialSubtype) && (
-                <FieldV2 label="Commercial Subtype">
-                  <InputV2 k="commercialSubtype" placeholder="Optional" />
-                </FieldV2>
+                <div className="grid grid-cols-2 gap-3">
+                  <FieldV2 label="Commercial Subtype">
+                    <InputV2 k="commercialSubtype" placeholder="Optional" />
+                  </FieldV2>
+                  <FieldV2 label="Number of Units">
+                    <InputV2
+                      k="units"
+                      type="number"
+                      min="0"
+                      placeholder="Apartments / multi-family"
+                    />
+                  </FieldV2>
+                </div>
               )}
               {commercialDetected && (
                 <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">

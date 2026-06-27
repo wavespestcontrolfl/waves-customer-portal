@@ -178,6 +178,18 @@ function commercialManualQuoteFields(li = {}) {
     taxCategory: li.taxCategory || null,
     pricingConfidence: li.pricingConfidence || null,
     reason: li.reason || null,
+    // Small-commercial pilot: advisory suggested price + cadence + per-building
+    // breakdown for the admin estimate and the commercial proposal. Null on
+    // manual quotes. `frequency` lets the proposal emit the row at the pilot's
+    // real cadence (quarterly/bimonthly/monthly), not flattened to monthly.
+    ...(li.suggestedAnnual !== undefined && li.frequency !== undefined ? { frequency: li.frequency } : {}),
+    ...(li.suggestedAnnual !== undefined ? { suggestedAnnual: li.suggestedAnnual } : {}),
+    ...(li.suggestedMonthly !== undefined ? { suggestedMonthly: li.suggestedMonthly } : {}),
+    ...(li.suggestedPerApp !== undefined ? { suggestedPerApp: li.suggestedPerApp } : {}),
+    ...(li.suggestedQuarterlyPerVisit !== undefined ? { suggestedQuarterlyPerVisit: li.suggestedQuarterlyPerVisit } : {}),
+    ...(Array.isArray(li.buildings) ? { buildings: li.buildings } : {}),
+    ...(li.totalUnits !== undefined ? { totalUnits: li.totalUnits } : {}),
+    ...(li.buildingCount !== undefined ? { buildingCount: li.buildingCount } : {}),
   };
 }
 
@@ -887,6 +899,15 @@ function mapV1ToLegacyShape(v1Result) {
           taxable: s.taxable,
           taxCategory: s.taxCategory || null,
           pricingConfidence: s.pricingConfidence || null,
+          // Small-commercial pilot advisory price + cadence + per-building breakdown.
+          ...(s.suggestedAnnual !== undefined && s.frequency !== undefined ? { frequency: s.frequency } : {}),
+          ...(s.suggestedAnnual !== undefined ? { suggestedAnnual: s.suggestedAnnual } : {}),
+          ...(s.suggestedMonthly !== undefined ? { suggestedMonthly: s.suggestedMonthly } : {}),
+          ...(s.suggestedPerApp !== undefined ? { suggestedPerApp: s.suggestedPerApp } : {}),
+          ...(s.suggestedQuarterlyPerVisit !== undefined ? { suggestedQuarterlyPerVisit: s.suggestedQuarterlyPerVisit } : {}),
+          ...(Array.isArray(s.buildings) ? { buildings: s.buildings } : {}),
+          ...(s.totalUnits !== undefined ? { totalUnits: s.totalUnits } : {}),
+          ...(s.buildingCount !== undefined ? { buildingCount: s.buildingCount } : {}),
           requiresCustomQuote: !!s.requiresCustomQuote,
           customQuoteReason: s.customQuoteReason,
           fleaExteriorZones: s.fleaExteriorZones,
