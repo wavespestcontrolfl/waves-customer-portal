@@ -6759,12 +6759,13 @@ export function CompletionPanel({
   // it for the header contact card's tap-to-email link.
   const [customerEmail, setCustomerEmail] = useState("");
   useEffect(() => {
+    let live = true;
+    setCustomerEmail(""); // clear stale email before (re)fetching for a new service
     const cid = service.customerId || service.customer_id;
     if (!cid) return undefined;
-    let live = true;
     adminFetch(`/admin/customers/${cid}`)
       .then((d) => { if (live) setCustomerEmail(d?.customer?.email || ""); })
-      .catch(() => { /* contact card just omits the email link */ });
+      .catch(() => { if (live) setCustomerEmail(""); });
     return () => { live = false; };
   }, [service.customerId, service.customer_id]);
   const [selectedProducts, setSelectedProducts] = useState([]);
@@ -7155,13 +7156,12 @@ export function CompletionPanel({
   ]
     .filter(Boolean)
     .join("\n\n");
-  const canAutoDraftRecap =
-    !isIncompleteVisit &&
-    notes.trim().length >= 15 &&
-    (selectedProducts.length > 0 ||
-      areasServiced.length > 0 ||
-      visitOutcome !== "completed" ||
-      customerInteraction);
+  // Recap auto-drafting is disabled: the customer-facing report summary is now
+  // generated server-side from the technician notes at completion. There's no
+  // recap editor/preview to review a client draft, and drafting here would burn
+  // a second LLM call for hidden state. Kept as a const so dependent effects/deps
+  // stay inert.
+  const canAutoDraftRecap = false;
   const reviewScheduledFor = () => {
     if (!willReview || oneTimeRecapOnly) return null;
     if (reviewTiming === "tomorrow_8") {
