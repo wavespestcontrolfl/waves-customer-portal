@@ -1072,6 +1072,9 @@ export default function QuotePage({ serviceSlug = '' }) {
                 {satellite?.closeUrl && (
                   <div style={{ marginBottom: 16, borderRadius: 12, overflow: 'hidden', border: `1px solid ${COLORS.slate200}` }}>
                     <img
+                      // ph-no-capture blocks the property satellite image from
+                      // session replay — masking text/inputs doesn't hide images.
+                      className="ph-no-capture"
                       src={satellite.closeUrl}
                       alt="Property satellite view"
                       style={{ width: '100%', maxHeight: 220, objectFit: 'cover', objectPosition: 'center', display: 'block' }}
