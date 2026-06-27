@@ -689,7 +689,7 @@ router.post('/confirm', async (req, res, next) => {
     }
 
     const {
-      estimate_id, customer_id,
+      estimate_id, customer_id, lead_id,
       slot_date, slot_start, slot_end,
       technician_id,
       service_type,
@@ -731,6 +731,16 @@ router.post('/confirm', async (req, res, next) => {
     if (estimate_id) {
       estimate = await db('estimates').where('id', estimate_id).first();
       if (!custId) custId = estimate?.customer_id;
+    }
+
+    // A booking deep-linked from an accepted estimate carries ?lead=<lead_id>.
+    // Resolve the customer from the lead BEFORE the phone-on-file check below so
+    // the estimate-accept booking attaches to the lead's existing customer
+    // instead of 409-ing on "phone already on file" or spawning a duplicate.
+    let lead = null;
+    if (lead_id) {
+      lead = await db('leads').where('id', lead_id).first();
+      if (!custId) custId = lead?.customer_id || null;
     }
 
     const phoneDigits = new_customer?.phone ? String(new_customer.phone).replace(/\D/g, '') : '';
@@ -985,6 +995,18 @@ router.post('/confirm', async (req, res, next) => {
     }
 
     const { booking, serviceRow } = txResult;
+
+    // Close the loop on an estimate/lead deep link: mark the lead won + link it
+    // to the booked customer. Idempotent-ish (skips an already-won lead);
+    // best-effort so an attribution write never fails the confirmed booking.
+    if (lead && lead.status !== 'won' && custId) {
+      try {
+        const LeadAttribution = require('../services/lead-attribution');
+        await LeadAttribution.markConverted(lead.id, { customerId: custId, triggerSource: 'self_booking' });
+      } catch (err) {
+        logger.warn(`[booking:confirm] markConverted failed for lead ${lead.id}: ${err.message}`);
+      }
+    }
 
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
     const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
