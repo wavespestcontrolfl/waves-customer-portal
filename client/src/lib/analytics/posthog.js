@@ -89,7 +89,13 @@ export function bootPostHog() {
       // /booking/customer-lookup?phone=…). Strip the query from captured request
       // URLs so that PII can't ride along in replay network data.
       maskCapturedNetworkRequestFn: (request) => {
-        if (request && typeof request.name === 'string') request.name = request.name.split('?')[0];
+        if (!request) return request;
+        if (typeof request.name === 'string') request.name = request.name.split('?')[0];
+        // Providing this fn overrides PostHog's default body redaction, so drop
+        // request/response bodies entirely — the public flows POST
+        // name/phone/email/address/notes.
+        request.requestBody = undefined;
+        request.responseBody = undefined;
         return request;
       },
     },
@@ -107,7 +113,16 @@ export function bootPostHog() {
       // event properties AND the first-touch person props ($initial_*) carried on
       // $set / $set_once, so a /book?…&lead=… landing leaks nothing.
       const URL_KEYS = ['$current_url', '$referrer', '$initial_current_url', '$initial_referrer'];
-      const scrub = (bag) => { if (bag) for (const k of URL_KEYS) if (typeof bag[k] === 'string') bag[k] = strip(bag[k]); };
+      // PostHog auto-copies UTM / click-id params onto events + person props, so
+      // a crafted /book?utm_campaign=<email> would carry PII. Drop campaign
+      // values that look like PII (email/whitespace/over-long); keep clean ones.
+      const CAMPAIGN_RE = /(^|_)(utm_[a-z]+|gclid|gad_source|gclsrc|dclid|gbraid|wbraid|fbclid|msclkid|twclid|li_fat_id|igshid|ttclid)$/i;
+      const unsafe = (v) => typeof v === 'string' && (v.length > 64 || /[@\s]|%40/i.test(v));
+      const scrub = (bag) => {
+        if (!bag) return;
+        for (const k of URL_KEYS) if (typeof bag[k] === 'string') bag[k] = strip(bag[k]);
+        for (const k of Object.keys(bag)) if (CAMPAIGN_RE.test(k) && unsafe(bag[k])) delete bag[k];
+      };
       const props = event.properties;
       scrub(props);
       if (props) { scrub(props.$set); scrub(props.$set_once); }
