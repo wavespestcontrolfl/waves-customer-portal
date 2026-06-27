@@ -204,65 +204,6 @@ const PEST = {
 };
 
 // ============================================================
-// SMALL-COMMERCIAL PEST PILOT
-// ============================================================
-// Quarterly general-pest-control pricing for small commercial properties,
-// interpolated off building square footage. Gated: the engine only invokes
-// this pricer when a service carries `commercialPricingMode:
-// 'small_commercial_pilot'` AND `enabled` is true here. Otherwise commercial
-// pest falls back to the manual-quote safety gate (commercial-helpers.js).
-//
-// Values owner-confirmed 2026-06-26 (Waves). Every pilot price is still returned
-// with `autoQuoteRequiresAdminApproval: true`, so no quote reaches a customer
-// without operator review. All values below are admin-editable via the
-// `commercial_pest_pilot` pricing_config row (db-bridge.js).
-//
-// `quarterlyBrackets` give the per-visit price at the QUARTERLY cadence by
-// building sqft; prices interpolate linearly between points. Below the first
-// bracket the floor applies; above `ceilingSqFt` the pilot declines to price
-// and the line falls back to manual quote (a true large site needs a walk).
-// Bi-monthly / monthly per-visit rates derive from quarterly via
-// `frequencyMultipliers`. Commercial nonresidential pest is taxable in FL.
-//
-// Per-building model (multi-family / mixed complexes). A property is one or more
-// BUILDINGS, each with its own { sqft, stories, units }; per-building prices are
-// summed. Two callback drivers ride on top of the sqft-driven scheduled-visit
-// base, because resident callbacks (re-services between scheduled treatments)
-// scale with how many residents live there and how vertical the building is:
-//   • `stories.perStoryUplift` — each story above the first multiplies the base
-//     (units stacked vertically = more access + more callbacks). storiesMult =
-//     1 + perStoryUplift × (clamp(stories, 1, maxStories) − 1).
-//   • `perUnitQuarterly` — a flat per-unit/quarter callback reserve added per
-//     occupied unit (apartments/multi-family). Zero units (a plain commercial
-//     building) adds nothing, so single-building commercial pricing is unchanged.
-// buildingQuarterly = max(floor, interpolate(sqft)) × storiesMult
-//                     + perUnitQuarterly × units; property = Σ buildings.
-const COMMERCIAL_PEST_PILOT = {
-  enabled: true,
-  floor: r(95),
-  ceilingSqFt: 15000,
-  quarterlyBrackets: [
-    { sqft: 2000,  price: r(95) },   // floor tier — small storefront / office suite
-    { sqft: 5000,  price: r(165) },
-    { sqft: 10000, price: r(245) },
-    { sqft: 15000, price: r(325) },  // top of pilot band
-  ],
-  // Per-visit multiplier by cadence. Quarterly is the 1.0 reference. Commercial
-  // cadences discount less steeply than residential (monthly commercial still
-  // carries full per-visit labor + documentation), so these sit above the
-  // residential curve. Must stay in (0, 1].
-  frequencyMultipliers: { quarterly: 1.00, bimonthly: 0.92, monthly: 0.85 },
-  frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },
-  // Stories callback/access uplift (owner-confirmed 2026-06-26).
-  stories: { perStoryUplift: 0.12, maxStories: 6 },
-  // Per-unit quarterly callback reserve for multi-family (owner-confirmed 2026-06-26).
-  perUnitQuarterly: r(5),
-  // Total units above this still price, but flag the line for manual review.
-  unitManualReviewThreshold: 60,
-  taxCategory: 'nonresidential_pest_control',
-};
-
-// ============================================================
 // LAWN CARE — 4 Tracks (St. Augustine merged, Bermuda, Zoysia, Bahia)
 // ============================================================
 // Tiers: basic(4x), standard(6x), enhanced(9x), premium(12x) are sold.
@@ -1773,7 +1714,7 @@ const CARD_HOLD = {
 module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
-  PEST, COMMERCIAL_PEST_PILOT, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
+  PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT,
   ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,

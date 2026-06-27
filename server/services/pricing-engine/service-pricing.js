@@ -2,7 +2,7 @@
 // service-pricing.js — All service line pricing calculations
 // ============================================================
 const {
-  GLOBAL, PROPERTY_TYPE_ADJ, PEST, COMMERCIAL_PEST_PILOT, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
+  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
   TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
@@ -1560,194 +1560,6 @@ function pricePestControl(property, options = {}) {
     diagnosticMargin,
     diagnosticMarginFloorOk: diagnosticMargin === null ? null : diagnosticMargin >= GLOBAL.MARGIN_FLOOR,
     diagnosticPricingMode: 'shadow_only',
-  };
-}
-
-// ============================================================
-// SMALL-COMMERCIAL PEST PILOT (recurring, sqft-bracket)
-// ============================================================
-// Quarterly general-pest-control pricing for small commercial properties,
-// interpolated off building square footage. Invoked by estimate-engine ONLY
-// when the requested pest service carries `commercialPricingMode:
-// 'small_commercial_pilot'` and the pilot is enabled in constants
-// (COMMERCIAL_PEST_PILOT.enabled). Returns null when the pilot cannot price
-// (disabled, no usable building sqft, or above the pilot ceiling) so the caller
-// falls back to the manual-quote safety gate.
-//
-// The result mirrors the residential pest line shape enough for the engine's
-// total/recurring machinery to consume it (`annual`/`monthly`/`perApp`/
-// `visitsPerYear`), carries the commercial tax fields, and is flagged
-// `autoQuoteRequiresAdminApproval` — the operator must approve the pilot price
-// before it reaches a customer.
-
-// Resolve the building square footage the commercial pilot prices off. The pilot
-// prices the GROSS building area (total floor area) and applies a separate
-// stories multiplier for callbacks/access, so gross-area fields win and the
-// living-area aliases are used as-is. The property profile's derived
-// `footprint` (homeSqFt ÷ stories) is the LAST resort — preferring it would
-// price a 20,000-sf two-story building as 10,000 sf and wrongly keep it under
-// the pilot ceiling (Codex P2).
-function resolveCommercialBuildingSqFt(source = {}) {
-  const aliases = [
-    ['buildingSqFt', source.buildingSqFt],
-    ['sqft', source.sqft],
-    ['homeSqFt', source.homeSqFt],
-    ['livingAreaSqFt', source.livingAreaSqFt],
-    ['footprintSqFt', source.footprintSqFt],
-    ['footprint', source.footprint],
-  ];
-  for (const [src, value] of aliases) {
-    const parsed = positiveFiniteNumber(value);
-    if (parsed !== null) return { sqft: parsed, source: src };
-  }
-  return { sqft: null, source: null };
-}
-
-function nonNegativeInt(value) {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
-}
-
-function formatUsd(value) {
-  const n = Number(value) || 0;
-  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
-}
-
-// Normalize the list of buildings the pilot prices. Accepts an explicit
-// `options.buildings` array (mixed complexes — e.g. a 2-story + a 1-story
-// building, each with its own sqft/stories/units), or falls back to a single
-// building derived from the property profile plus top-level stories/units.
-function resolveCommercialBuildings(property = {}, options = {}) {
-  const list = Array.isArray(options.buildings) && options.buildings.length
-    ? options.buildings
-    : [{
-        // Gross building area first; derived footprint last (see
-        // resolveCommercialBuildingSqFt). `options.fallbackSqFt` is the gross
-        // area forwarded from the raw estimate input — preferred over the
-        // property profile, which doesn't preserve every gross-area alias.
-        sqft: options.fallbackSqFt ?? property.buildingSqFt ?? property.homeSqFt
-          ?? property.livingAreaSqFt ?? property.footprintSqFt ?? property.footprint,
-        stories: options.stories ?? property.stories,
-        units: options.units ?? property.units ?? property.unitCount,
-      }];
-  return list.map((b) => {
-    const { sqft, source } = resolveCommercialBuildingSqFt(b);
-    return {
-      sqft,
-      sqftSource: source,
-      stories: Math.max(1, nonNegativeInt(b.stories) || 1),
-      units: nonNegativeInt(b.units),
-      name: b.name || null,
-    };
-  });
-}
-
-function priceCommercialPestPilot(property, options = {}) {
-  const cfg = COMMERCIAL_PEST_PILOT || {};
-  if (cfg.enabled !== true) return null;
-
-  const brackets = Array.isArray(cfg.quarterlyBrackets) ? cfg.quarterlyBrackets : [];
-  if (!brackets.length) return null;
-
-  const buildings = resolveCommercialBuildings(property, options);
-  // Every building needs a usable footprint, and none may exceed the pilot
-  // band — a true large structure needs a manual walk. Any miss → decline the
-  // whole property so the caller falls back to the manual-quote safety gate.
-  if (!buildings.length || buildings.some(b => b.sqft === null)) return null;
-  const ceiling = positiveFiniteNumber(cfg.ceilingSqFt);
-  if (ceiling && buildings.some(b => b.sqft > ceiling)) return null;
-
-  const frequencyMeta = normalizePestFrequency(options.frequency || 'quarterly');
-  const frequency = frequencyMeta.frequency;
-  const freqMult = cfg.frequencyMultipliers?.[frequency] || 1.0;
-  const visitsPerYear = cfg.frequencies?.[frequency] || PEST.frequencies[frequency] || 4;
-  const floor = Number(cfg.floor) || 0;
-  const perStoryUplift = Number(cfg.stories?.perStoryUplift) || 0;
-  const maxStories = positiveFiniteNumber(cfg.stories?.maxStories) || Infinity;
-  const perUnitQuarterly = Number(cfg.perUnitQuarterly) || 0;
-
-  let quarterlyTotal = 0;
-  let totalUnits = 0;
-  const buildingBreakdown = buildings.map((b) => {
-    const base = Math.max(floor, interpolate(b.sqft, brackets.map(br => [br.sqft, br.price])));
-    const effectiveStories = Math.min(b.stories, maxStories);
-    const storiesMultiplier = 1 + perStoryUplift * (effectiveStories - 1);
-    const unitsComponent = perUnitQuarterly * b.units;
-    const buildingQuarterly = Math.round((base * storiesMultiplier + unitsComponent) * 100) / 100;
-    quarterlyTotal += buildingQuarterly;
-    totalUnits += b.units;
-    return {
-      name: b.name,
-      sqft: Math.round(b.sqft),
-      sqftSource: b.sqftSource,
-      stories: b.stories,
-      units: b.units,
-      baseQuarterly: Math.round(base * 100) / 100,
-      storiesMultiplier: Math.round(storiesMultiplier * 1000) / 1000,
-      unitsComponentQuarterly: Math.round(unitsComponent * 100) / 100,
-      quarterlyPerVisit: buildingQuarterly,
-    };
-  });
-
-  const quarterlyPerVisit = Math.round(quarterlyTotal * 100) / 100;
-  const suggestedPerApp = Math.round(quarterlyPerVisit * freqMult * 100) / 100;
-  const suggestedAnnual = Math.round(suggestedPerApp * visitsPerYear * 100) / 100;
-  const suggestedMonthly = Math.round(suggestedAnnual / 12 * 100) / 100;
-
-  const unitThreshold = positiveFiniteNumber(cfg.unitManualReviewThreshold);
-  const overUnitThreshold = unitThreshold && totalUnits > unitThreshold;
-
-  const multi = buildingBreakdown.length > 1;
-  const reasonParts = [
-    `Small-commercial pilot — suggested ${formatUsd(suggestedAnnual)}/yr (${formatUsd(suggestedMonthly)}/mo, ${formatUsd(suggestedPerApp)}/visit ${frequency})`,
-    `${buildingBreakdown.length} building${multi ? 's' : ''}`,
-    totalUnits > 0 ? `${totalUnits} unit${totalUnits === 1 ? '' : 's'}` : null,
-    'requires admin approval before sending',
-  ].filter(Boolean);
-
-  // The pilot produces a SUGGESTED price for the operator and the commercial
-  // proposal — it is NOT a self-serve recurring plan. It carries the same
-  // manual-review / quote-required state as the commercial safety gate so the
-  // existing commercial plumbing applies unchanged: no WaveGuard membership
-  // setup fee, no residential auto-scheduling, and the public accept endpoint
-  // refuses online acceptance until an operator sends a formal quote/proposal.
-  // The suggested price + per-building breakdown ride along on `suggested*` /
-  // `buildings` so the admin estimate and the proposal PDF can display them.
-  // Keeping `annual`/`monthly`/`price` null keeps it out of the engine's
-  // recurring/one-time totals (Codex P1, plus the membership-fee misfire).
-  return {
-    service: 'commercial_pest',
-    originalRequestedService: 'pest_control',
-    propertyType: 'commercial',
-    isCommercial: true,
-    commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
-    commercialPricingMode: 'small_commercial_pilot',
-    label: 'Commercial Pest Control',
-    frequency,
-    visitsPerYear,
-    quoteRequired: true,
-    requiresManualReview: true,
-    autoQuoteRequiresAdminApproval: true,
-    manualReviewReasons: [
-      'commercial_pilot_pricing_requires_admin_approval',
-      ...(overUnitThreshold ? ['commercial_pilot_unit_count_over_threshold'] : []),
-    ],
-    reason: reasonParts.join(' · ') + '.',
-    price: null,
-    annual: null,
-    monthly: null,
-    // Suggested (operator-facing / proposal) pilot price — not a committed plan.
-    suggestedPerApp,
-    suggestedAnnual,
-    suggestedMonthly,
-    suggestedQuarterlyPerVisit: quarterlyPerVisit,
-    taxable: true,
-    taxCategory: cfg.taxCategory || 'nonresidential_pest_control',
-    pricingConfidence: 'MEDIUM',
-    buildingSqFt: Math.round(buildingBreakdown.reduce((s, b) => s + b.sqft, 0)),
-    buildingCount: buildingBreakdown.length,
-    totalUnits,
-    buildings: buildingBreakdown,
   };
 }
 
@@ -6960,7 +6772,7 @@ function applyRodentBundle(componentTotal, bundle) {
 }
 
 module.exports = {
-  pricePestControl, priceCommercialPestPilot, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
+  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,
