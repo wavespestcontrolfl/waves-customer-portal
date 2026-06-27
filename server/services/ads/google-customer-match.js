@@ -71,7 +71,12 @@ function getGoogle() {
 function credentialsJson() {
   const raw = process.env.GOOGLE_ADS_DATA_MANAGER_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   if (!raw) return null;
-  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { return null; }
+  if (typeof raw !== 'string') return (raw && typeof raw === 'object') ? raw : null;
+  // Mirror data-manager.credentialsJson: tolerate the env value the conversion uploader
+  // accepts (sometimes stored without its trailing brace) so GCM doesn't silently no-op.
+  let jsonStr = raw.trim();
+  if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) jsonStr += '\n}';
+  try { return JSON.parse(jsonStr); } catch { return null; }
 }
 // Google Ads account ids may arrive as the dashed UI value (339-393-6713); strip to
 // digits like the conversion uploader so live uploads target a valid account.
@@ -337,35 +342,34 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     }
     const safeToDelete = (d) => !((d[0] && currentHashes.has(d[0])) || (d[1] && currentHashes.has(d[1])));
 
-    // Data Manager applies ingest/remove ASYNChronously and possibly out of order, so
-    // we must not issue an op that conflicts with one still in flight: hold a REMOVE for
-    // a hash with a pending ingest, and hold an ADD for a hash with a pending remove,
-    // until that op reaches a terminal status. (stillPending holds PROCESSING ops.)
-    const pendingIngestHashes = new Set();
-    const pendingRemoveHashes = new Set();
+    // Data Manager applies ingest/remove ASYNChronously and possibly out of order, and
+    // matches/removes by ANY identifier — so we hold a conflicting op while one is still
+    // in flight, keyed on INDIVIDUAL identifier hashes (like safeToDelete), NOT the exact
+    // [email,phone] row (the same person can reappear with a changed identifier and a
+    // different row hash, yet a pending remove would still match them by the shared one).
+    const pendingIngestIds = new Set();
+    const pendingRemoveIds = new Set();
     for (const p of stillPending) {
-      const target = p.op === 'ingest' ? pendingIngestHashes : pendingRemoveHashes;
-      for (const e of asEntries(p.members)) target.add(hashId(e.d));
+      const target = p.op === 'ingest' ? pendingIngestIds : pendingRemoveIds;
+      for (const e of asEntries(p.members)) { if (e.d[0]) target.add(e.d[0]); if (e.d[1]) target.add(e.d[1]); }
     }
+    const hasPendingIngest = (d) => !!((d[0] && pendingIngestIds.has(d[0])) || (d[1] && pendingIngestIds.has(d[1])));
+    const hasPendingRemove = (d) => !!((d[0] && pendingRemoveIds.has(d[0])) || (d[1] && pendingRemoveIds.has(d[1])));
 
-    const addEntries = [];   // new members we send this run
-    let heldAdds = 0;        // new members deferred (a remove for the hash is in flight)
+    const addEntries = [];            // new members we send this run
+    const heldAddHashes = new Set();  // new members deferred (a remove for an identifier is in flight)
     for (const [h, e] of currentByHash) {
       if (priorByHash.has(h)) continue;
-      if (pendingRemoveHashes.has(h)) heldAdds++; else addEntries.push(e);
-    }
-    const heldAddHashes = new Set();
-    for (const [h, e] of currentByHash) {
-      if (!priorByHash.has(h) && pendingRemoveHashes.has(h)) heldAddHashes.add(hashId(e.d));
+      if (hasPendingRemove(e.d)) heldAddHashes.add(h); else addEntries.push(e);
     }
 
     const removeEntries = []; // members we remove this run
     const retained = [];      // can't remove: still shares an identifier with a current member
-    const heldRemoves = [];   // can't remove yet: an ingest for the hash is in flight
+    const heldRemoves = [];   // can't remove yet: an ingest for an identifier is in flight
     for (const [h, e] of priorByHash) {
       if (currentByHash.has(h)) continue;
       if (!safeToDelete(e.d)) { retained.push(e); continue; }
-      if (pendingIngestHashes.has(h)) heldRemoves.push(e); else removeEntries.push(e);
+      if (hasPendingIngest(e.d)) heldRemoves.push(e); else removeEntries.push(e);
     }
     // Optimistic state: current members EXCEPT held adds (so they re-add once the remove
     // settles), plus retained orphans, plus held removes (kept so they remove next run).
@@ -387,7 +391,7 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       toAdd: addEntries.length,
       toRemove: removeEntries.length,
       retained: retained.length,
-      heldAdds,
+      heldAdds: heldAddHashes.size,
       heldRemoves: heldRemoves.length,
     };
 

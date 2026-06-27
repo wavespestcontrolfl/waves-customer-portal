@@ -308,6 +308,44 @@ describe('reconcile pending requests', () => {
     const saved = inserts.find((i) => i.table === 'ad_audience_syncs');
     expect(JSON.parse(saved.row.member_keys).some((e) => e.k === 'customer:c1')).toBe(false);
   });
+
+  test('holds a re-add by IDENTIFIER when a pending remove shares an identifier (changed row)', async () => {
+    configure({ allow: true });
+    // reappears with a NEW phone but the SAME email as the in-flight remove
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'c1@x.com', phone: '9412975749' }]);
+    stateRow = {
+      member_keys: [],
+      pending: [{ requestId: 'req-r', op: 'remove', at: recentIso(), members: [{ k: 'customer:c1', d: ['h:c1@x.com', 'h:+19999999999'] }] }],
+    };
+    global.fetch = routedFetch({ 'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'PROCESSING' }] } });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toAdd).toBe(0); // email hash matches the in-flight remove → held (row hashes differ)
+    expect(r.heldAdds).toBe(1);
+    expect(global.fetch.mock.calls.some((c) => /audienceMembers:ingest$/.test(c[0]))).toBe(false);
+  });
+
+  test('holds a removal by IDENTIFIER when a pending ingest shares an identifier (changed row)', async () => {
+    configure({ allow: true });
+    mockCollectCustomers.mockResolvedValue([]); // c1 dropped from the source
+    stateRow = {
+      member_keys: [{ k: 'customer:c1', d: ['h:c1@x.com', 'h:+19412975749'] }],
+      pending: [{ requestId: 'req-i', op: 'ingest', at: recentIso(), members: [{ k: 'customer:c1', d: ['h:c1@x.com', 'h:+19999999999'] }] }],
+    };
+    global.fetch = routedFetch({ 'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'PROCESSING' }] } });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toRemove).toBe(0); // email hash matches the in-flight ingest → held
+    expect(r.heldRemoves).toBe(1);
+    expect(global.fetch.mock.calls.some((c) => /audienceMembers:remove$/.test(c[0]))).toBe(false);
+  });
+});
+
+describe('credentials', () => {
+  test('isConfigured tolerates the service-account JSON missing its closing brace', () => {
+    process.env.GOOGLE_ADS_DATA_MANAGER_CUSTOMER_ID = '3393936713';
+    process.env.GOOGLE_CM_CUSTOMERS_LIST_ID = '111';
+    process.env.GOOGLE_ADS_DATA_MANAGER_SERVICE_ACCOUNT_JSON = '{"client_email":"x@y.iam","private_key":"k"'; // no trailing }
+    expect(GCM.isConfigured()).toBe(true);
+  });
 });
 
 describe('batching', () => {
