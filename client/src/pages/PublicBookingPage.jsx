@@ -764,7 +764,7 @@ export default function PublicBookingPage() {
               <Button
                 variant="primary"
                 onClick={handleConfirm}
-                disabled={loading || (!existingCustomerId && (!contact.firstName || !contact.lastName || !contact.phone))}
+                disabled={loading || (!existingCustomerId && (!contact.firstName || !contact.lastName || contact.phone.replace(/\D/g, '').length !== 10))}
                 style={{ flex: 1 }}
               >
                 {loading ? 'Booking…' : 'Confirm booking'}
