@@ -50,6 +50,13 @@ async function checkSuppression(input, _policy, contactState) {
       reason: 'Recipient was manually added to the do-not-contact list by an operator',
     };
   }
+  if (suppression.reason === 'non_mobile') {
+    return {
+      ok: false,
+      code: 'SUPPRESSED_NON_MOBILE',
+      reason: `Recipient's number is a landline / non-SMS-capable line (learned from a carrier delivery failure, since ${suppression.created_at})`,
+    };
+  }
 
   return {
     ok: false,
@@ -127,6 +134,42 @@ async function recordSuppression({ phone, reason, source, capturedBody }) {
 }
 
 /**
+ * Record a non-mobile (landline) suppression learned from a carrier delivery
+ * failure, WITHOUT clobbering any pre-existing suppression record.
+ *
+ * Unlike recordSuppression (which upserts/merges on conflict — correct for an
+ * explicit STOP/wrong-number signal), this is an automatic signal inferred from
+ * a single bounce, so it must never overwrite a stronger, intentional record
+ * (opt_out, wrong_number, manual_dnc) nor resurrect an admin-cleared row. We
+ * therefore insert-if-absent: a conflict on the phone PK is silently ignored,
+ * leaving any existing row (active or cleared, any reason) exactly as it was.
+ *
+ * Returns { ok, recorded } — recorded=true only when a brand-new row was written.
+ */
+async function recordNonMobileSuppression({ phone, source }) {
+  if (!phone) throw new Error('recordNonMobileSuppression: phone is required');
+  try {
+    const inserted = await db('messaging_suppression')
+      .insert({
+        phone,
+        reason: 'non_mobile',
+        source: source || 'twilio_status_callback',
+        active: true,
+        created_at: db.fn.now(),
+      })
+      .onConflict('phone')
+      .ignore();
+    // Knex returns the inserted rows ([] when the conflict was ignored). Treat a
+    // non-empty result as "newly recorded"; fall back to length-agnostic ok.
+    const recorded = Array.isArray(inserted) ? inserted.length > 0 : !!inserted;
+    return { ok: true, recorded };
+  } catch (err) {
+    logger.warn(`[messaging:suppression] recordNonMobileSuppression failed: ${err.message}`);
+    return { ok: false, recorded: false, error: err.message };
+  }
+}
+
+/**
  * Clear a suppression record (e.g. on inbound START keyword).
  */
 async function clearSuppression({ phone, source }) {
@@ -150,5 +193,6 @@ module.exports = {
   checkSuppression,
   loadSuppressionState,
   recordSuppression,
+  recordNonMobileSuppression,
   clearSuppression,
 };

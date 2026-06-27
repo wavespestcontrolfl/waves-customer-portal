@@ -122,6 +122,7 @@ const LatePaymentService = {
 
     let notified = 0;
     let skipped = 0;
+    let emailedFallback = 0;
     const domain = publicPortalUrl();
 
     for (const inv of invoices) {
@@ -240,9 +241,27 @@ const LatePaymentService = {
           entryPoint: 'late_payment_checker',
           metadata: { original_message_type: 'late_payment' },
         });
-        if (sendResult.blocked || sendResult.sent === false) {
-          throw new Error(`late payment SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+
+        const smsSent = sendResult.sent === true;
+        const smsWillRetry = !smsSent && (sendResult.retryable === true || sendResult.deferred === true);
+
+        // A transient hold (quiet hours, retryable carrier error) re-sends on a
+        // later run — don't email now or the customer gets both when it lands.
+        if (smsWillRetry) {
+          logger.info(`[late-payment] SMS deferred for customer ${customer.id} (${sendResult.code || 'retryable'}); will retry next run`);
+          skipped++;
+          continue;
         }
+
+        // smsSent → primary SMS went; the email is the matching dual-channel notice.
+        // Otherwise the SMS is permanently undeliverable (landline/non-mobile
+        // suppression, wrong-number, opt-out, or a terminal carrier rejection) —
+        // fall back to email so a customer we can't reach by text still gets the
+        // reminder instead of silently getting nothing.
+        if (!smsSent) {
+          logger.info(`[late-payment] SMS undeliverable for customer ${customer.id} (${sendResult.code || 'unknown'}) — sending email reminder instead`);
+        }
+
         try {
           const BalanceReminder = require('./workflows/balance-reminder');
           if (typeof BalanceReminder.sendLatePaymentEmail === 'function') {
@@ -262,14 +281,19 @@ const LatePaymentService = {
         } catch (emailErr) {
           logger.error(`[late-payment] Email sidecar failed for invoice ${inv.id}: ${emailErr.message}`);
         }
-        notified++;
-        logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
+
+        if (smsSent) {
+          notified++;
+          logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
+        } else {
+          emailedFallback++;
+        }
 
         await db('activity_log').insert({
           customer_id: customer.id,
           action: 'late_payment_reminder',
           description: `${tierDays}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
-          metadata: JSON.stringify({ invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince }),
+          metadata: JSON.stringify({ invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince, channel: smsSent ? 'sms+email' : 'email_only' }),
         }).catch(() => {});
       } catch (smsErr) {
         logger.error(`[late-payment] SMS failed for customer ${customer.id}: ${smsErr.message}`);
@@ -277,7 +301,7 @@ const LatePaymentService = {
       }
     }
 
-    return { notified, skipped, totalUnpaid: invoices.length };
+    return { notified, skipped, emailedFallback, totalUnpaid: invoices.length };
   },
 };
 
