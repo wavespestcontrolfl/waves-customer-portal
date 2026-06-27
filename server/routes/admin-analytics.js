@@ -6,6 +6,7 @@ const GA4 = require('../services/analytics/google-analytics');
 const LocalPerformance = require('../services/analytics/local-performance');
 const DataManager = require('../services/ads/data-manager');
 const MetaCapi = require('../services/ads/meta-data-manager');
+const MetaAudiences = require('../services/ads/meta-audiences');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -100,6 +101,26 @@ router.post('/meta-capi/upload', requireAdmin, async (req, res, next) => {
       validateOnly: req.body?.validateOnly !== false,
       force: req.body?.force === true,
     });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/analytics/meta-audiences/readiness — suppression + retargeting list candidates
+router.get('/meta-audiences/readiness', async (req, res, next) => {
+  try {
+    res.json(await MetaAudiences.buildReadiness());
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/analytics/meta-audiences/sync — defaults to a DRY RUN (computes the
+// add/remove delta without uploading). Body: { audience?: 'customers'|'unbooked_leads', validateOnly?: boolean }
+router.post('/meta-audiences/sync', requireAdmin, async (req, res, next) => {
+  try {
+    const validateOnly = req.body?.validateOnly !== false;
+    const audience = req.body?.audience;
+    const result = audience
+      ? await MetaAudiences.syncAudience(audience, { validateOnly })
+      : await MetaAudiences.syncAll({ validateOnly });
     res.json(result);
   } catch (err) { next(err); }
 });
