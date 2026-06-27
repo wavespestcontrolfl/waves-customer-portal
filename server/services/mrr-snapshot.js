@@ -30,6 +30,60 @@ async function tierBreakdown(conn) {
   }));
 }
 
+// Per-customer monthly_rate over the SAME population the aggregate snapshot uses
+// (active, not-deleted, monthly_rate > 0, internal/test excluded), so a month's
+// per-customer rows sum to that month's total_mrr. Feeds true point-in-time MRR
+// retention: "what each customer was paying in month X" instead of applying
+// today's rate retroactively. db is lazy-required so this module loads without knex.
+async function customerRateRows(conn) {
+  conn = conn || require('../models/db');
+  const rows = await conn('customers as c')
+    .where('c.active', true)
+    .whereNull('c.deleted_at')
+    .where('c.monthly_rate', '>', 0)
+    .modify((qb) => {
+      if (INTERNAL_TEST_CUSTOMERS.length) {
+        qb.whereNotIn(
+          conn.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+          INTERNAL_TEST_CUSTOMERS,
+        );
+      }
+    })
+    .select('c.id as customer_id', 'c.monthly_rate as monthly_rate', 'c.waveguard_tier as waveguard_tier');
+  return rows.map((r) => ({
+    customer_id: r.customer_id,
+    monthly_rate: parseFloat(r.monthly_rate || 0),
+    waveguard_tier: r.waveguard_tier || null,
+  }));
+}
+
+/**
+ * Upsert the CURRENT per-customer monthly rate into customer_mrr_snapshots for
+ * `periodMonth`. One row per (period_month, customer_id); merge refreshes the
+ * rate/tier so a mid-month change is captured and the month freezes at its last
+ * value once it rolls over. Returns how many rows were written.
+ *
+ * @param {string} periodMonth  YYYY-MM-01
+ * @param {import('knex')} [conn]
+ */
+async function recordCustomerMrrSnapshots(periodMonth, conn) {
+  conn = conn || require('../models/db');
+  const rows = await customerRateRows(conn);
+  if (!rows.length) return { period_month: periodMonth, count: 0 };
+  const records = rows.map((r) => ({
+    period_month: periodMonth,
+    customer_id: r.customer_id,
+    monthly_rate: r.monthly_rate,
+    waveguard_tier: r.waveguard_tier,
+    captured_at: new Date(),
+  }));
+  await conn('customer_mrr_snapshots')
+    .insert(records)
+    .onConflict(['period_month', 'customer_id'])
+    .merge(); // refresh monthly_rate/waveguard_tier/captured_at for the in-progress month
+  return { period_month: periodMonth, count: records.length };
+}
+
 /**
  * Capture the CURRENT MRR (total / committed / at-risk + by-tier) as the
  * snapshot for `periodMonth` (a YYYY-MM-01 date, default this ET month). Upsert
@@ -60,7 +114,19 @@ async function recordMrrSnapshot(periodMonth = etMonthStart(), conn) {
   logger.info(
     `[mrr-snapshot] ${periodMonth}: total=${breakdown.total} committed=${breakdown.committed} atRisk=${breakdown.atRisk} count=${breakdown.totalCount}`,
   );
-  return { period_month: periodMonth, ...breakdown, by_tier };
+
+  // Per-customer rate snapshot (Phase 0 — forward-only data accrual for
+  // point-in-time MRR retention). Isolated: a failure here must not regress the
+  // live aggregate trend, which is already committed above.
+  let customerSnapshot = null;
+  try {
+    customerSnapshot = await recordCustomerMrrSnapshots(periodMonth, conn);
+    logger.info(`[mrr-snapshot] ${periodMonth}: per-customer rows=${customerSnapshot.count}`);
+  } catch (err) {
+    logger.error(`[mrr-snapshot] per-customer snapshot failed for ${periodMonth}: ${err.message}`);
+  }
+
+  return { period_month: periodMonth, ...breakdown, by_tier, customerSnapshot };
 }
 
-module.exports = { recordMrrSnapshot, tierBreakdown };
+module.exports = { recordMrrSnapshot, recordCustomerMrrSnapshots, customerRateRows, tierBreakdown };
