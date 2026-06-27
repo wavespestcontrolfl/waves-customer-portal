@@ -79,8 +79,11 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
   const paid = channels.filter((c) => c.ltvCac != null); // ltvCac null ⇒ no paid spend
   const paidLifetime = paid.reduce((t, c) => t + (Number(c.lifetimeValue) || 0), 0);
   const paidSpend = paid.reduce((t, c) => t + (Number(c.adSpend) || 0), 0);
-  const blendedLtvCac = paidSpend > 0 ? round1(paidLifetime / paidSpend) : null;
-  const blendedBand = bandFor(blendedLtvCac);
+  // Band off the EXACT blended ratio (round only for display) — same threshold-drift
+  // guard as the per-channel bands, so a 2.96 blend isn't promoted to "Healthy".
+  const blendedExact = paidSpend > 0 ? paidLifetime / paidSpend : null;
+  const blendedLtvCac = blendedExact == null ? null : round1(blendedExact);
+  const blendedBand = bandFor(blendedExact);
 
   // Opportunity (the optimistic "pour cash in" call) requires CONFIDENCE — don't
   // bet on a sky-high ratio off a handful of customers. Highest-ratio scale/

@@ -4,7 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { buildChannelAttribution } = require('../services/channel-attribution');
+const { buildChannelAttribution, splitFacebookByPaid } = require('../services/channel-attribution');
 const { rankCapitalAllocation } = require('../services/capital-allocation');
 
 // Lazy-load heavy Google Ads modules (~87MB) — only loaded on first request
@@ -430,10 +430,13 @@ router.get('/capacity-heatmap', async (req, res, next) => {
 // zero tracked leads still surfaces, with no cent-rounding drift). Platform values
 // equal the paid lead_source keys (google_ads / google_lsa / facebook).
 async function fetchChannelAttribution(since) {
-  const completed = await db('ad_service_attribution')
+  const completedRaw = await db('ad_service_attribution')
     .where('lead_date', '>=', since)
     .where('funnel_stage', 'completed')
-    .select('lead_source', 'completed_revenue', 'gross_profit', 'projected_ltv_12mo', 'is_recurring', 'customer_id');
+    .select('lead_source', 'completed_revenue', 'gross_profit', 'projected_ltv_12mo', 'is_recurring', 'customer_id', 'fbclid', 'fbc');
+  // Split organic Facebook off the paid Meta bucket so organic-social completions
+  // don't inflate the paid ratio (organic facebook still shows as its own channel).
+  const completed = splitFacebookByPaid(completedRaw);
 
   const spendRows = await db('ad_performance_daily as apd')
     .join('ad_campaigns as ac', 'ac.id', 'apd.campaign_id')
@@ -461,12 +464,11 @@ router.get('/revenue-attribution', async (req, res, next) => {
 
 // GET /api/admin/ads/capital-allocation?period=quarter
 // Channels banded by LTV:CAC into a "where to dump cash" decision surface.
-// KNOWN LIMITATION (shared with revenue-attribution; deferred): fetchChannelAttribution
-// buckets all lead_source='facebook' rows together, so once Meta spend is synced,
-// organic-social Facebook completions could inflate the paid Meta ratio. The fix is
-// a paid/organic channel dimension on ad_service_attribution (see ad-cost-allocation
-// applyPaidFilter) — fixing it in the shared helper covers both surfaces. No live
-// impact today: Meta Ads ship dark (META_ADS_* unprovisioned) so facebook has no spend.
+// Paid/organic Facebook is split in fetchChannelAttribution (splitFacebookByPaid)
+// so organic-social completions don't inflate the paid Meta ratio. Residual: a paid
+// Meta click whose fbclid/_fbc was stripped but that carried utm_medium=cpc is the
+// one case still missed (utm_medium isn't persisted) — minor + no live impact while
+// Meta is dark (META_ADS_* unprovisioned).
 router.get('/capital-allocation', async (req, res, next) => {
   try {
     const attribution = await fetchChannelAttribution(sinceForPeriod(req.query.period));
@@ -535,6 +537,7 @@ function formatSourceName(key) {
     waves_website: 'Waves Website',
     google_business: 'Google Business',
     facebook: 'Facebook',
+    facebook_organic: 'Facebook (organic)',
     nextdoor: 'Nextdoor',
   };
   return names[key] || formatServiceName(key);
