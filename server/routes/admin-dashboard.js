@@ -1002,6 +1002,7 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
         'active',
         'deleted_at',
         'pipeline_stage',
+        'monthly_rate',
         db.raw("to_char(churned_at, 'YYYY-MM') as churned_month"),
         db.raw("to_char((pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM') as stage_changed_month"),
         db.raw("to_char((deleted_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM') as deleted_month"),
@@ -1012,8 +1013,11 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
     }
 
     const LEFT_STAGES = new Set(['churned', 'dormant']);
-    // Bucket members by cohort month, precomputing a churn month index.
-    const byCohort = new Map(); // 'YYYY-MM' -> [{ churnIdx }]
+    // Bucket members by cohort month, precomputing a churn month index + the
+    // member's current monthly_rate (for MRR-weighted retention — revenue
+    // retained, not headcount; current rate is used since no per-month rate
+    // history is stored, mirroring how the cohort reconstructs from entry/exit).
+    const byCohort = new Map(); // 'YYYY-MM' -> [{ churnIdx, mrr }]
     for (const r of rows) {
       const cohort = r.cohort_month;
       if (!cohort) continue;
@@ -1037,7 +1041,7 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
         churnIdx = Math.max(cIdx, monthIndexOf(exitMonth));
       }
       if (!byCohort.has(cohort)) byCohort.set(cohort, []);
-      byCohort.get(cohort).push({ churnIdx });
+      byCohort.get(cohort).push({ churnIdx, mrr: Number(r.monthly_rate) || 0 });
     }
 
     const cohorts = [];
@@ -1045,17 +1049,29 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
       const ym = `${String(Math.floor(idx / 12)).padStart(4, '0')}-${String((idx % 12) + 1).padStart(2, '0')}`;
       const members = byCohort.get(ym) || [];
       const size = members.length;
+      const baseMrr = members.reduce((s, mem) => s + mem.mrr, 0); // cohort MRR at signup
       const elapsed = nowIdx - idx; // number of offset columns available (0..elapsed)
-      const retention = [];
+      const retention = [];     // headcount-weighted
+      const retentionMrr = [];  // MRR-weighted (null when the cohort has no MRR)
       for (let m = 0; m <= elapsed; m += 1) {
-        if (size === 0) { retention.push(null); continue; }
-        if (m === 0) { retention.push(100); continue; } // signup month = base
+        if (size === 0) { retention.push(null); retentionMrr.push(null); continue; }
+        if (m === 0) { // signup month = base
+          retention.push(100);
+          retentionMrr.push(baseMrr > 0 ? 100 : null);
+          continue;
+        }
         // Active through the END of month (idx + m): still live, or churned strictly later.
         const k = idx + m;
-        const alive = members.filter((mem) => mem.churnIdx > k).length;
-        retention.push(Math.round((alive / size) * 1000) / 10);
+        const aliveMembers = members.filter((mem) => mem.churnIdx > k);
+        retention.push(Math.round((aliveMembers.length / size) * 1000) / 10);
+        if (baseMrr > 0) {
+          const aliveMrr = aliveMembers.reduce((s, mem) => s + mem.mrr, 0);
+          retentionMrr.push(Math.round((aliveMrr / baseMrr) * 1000) / 10);
+        } else {
+          retentionMrr.push(null);
+        }
       }
-      cohorts.push({ month: ym, label: monthLabelOf(ym), size, retention });
+      cohorts.push({ month: ym, label: monthLabelOf(ym), size, baseMrr: Math.round(baseMrr), retention, retentionMrr });
     }
 
     res.json({ cohorts, maxOffset: months - 1, months });
