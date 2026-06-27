@@ -179,23 +179,26 @@ function AiChart({ chartType, spec, rows, fields }) {
   // bar (and donut → rendered as a share/bar breakdown).
   // Scale by absolute magnitude so negative metrics (net change, churn deltas)
   // get a valid, proportional width; the signed value stays in the label.
+  // NULL buckets (num → NaN) render as "—" with no bar — never a false zero —
+  // while a genuine 0 shows a zero-width bar labelled 0.
   const barKeys = [...yCols].length ? [...yCols] : [yKey];
   const cats = rows.slice(0, 12);
-  const absMax = Math.max(...cats.flatMap((r) => barKeys.map((k) => Math.abs(Number(r[k]) || 0))), 1);
+  const absMax = Math.max(...cats.flatMap((r) => barKeys.map((k) => num(r[k]))).filter(Number.isFinite).map(Math.abs), 1);
 
   if (barKeys.length <= 1) {
     return (
       <ul className="space-y-2">
         {cats.map((r, i) => {
-          const value = Number(r[yKey]) || 0;
+          const value = num(r[yKey]);
+          const missing = !Number.isFinite(value);
           return (
             <li key={i}>
               <div className="flex items-baseline justify-between text-12 mb-1">
                 <span className="text-ink-secondary truncate pr-2">{String(r[xKey] ?? "—")}</span>
-                <span className="u-nums text-ink-primary">{fmtVal(value, fmt)}</span>
+                <span className="u-nums text-ink-primary">{missing ? "—" : fmtVal(value, fmt)}</span>
               </div>
               <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
-                <div className="h-full" style={{ width: `${Math.min(100, (Math.abs(value) / absMax) * 100)}%`, background: CHART_PRIMARY, opacity: value < 0 ? 0.5 : 1 }} />
+                {!missing && <div className="h-full" style={{ width: `${Math.min(100, (Math.abs(value) / absMax) * 100)}%`, background: CHART_PRIMARY, opacity: value < 0 ? 0.5 : 1 }} />}
               </div>
             </li>
           );
@@ -213,13 +216,14 @@ function AiChart({ chartType, spec, rows, fields }) {
           <li key={i}>
             <div className="text-12 text-ink-secondary truncate mb-1">{String(r[xKey] ?? "—")}</div>
             {barKeys.map((k, ki) => {
-              const v = Number(r[k]) || 0;
+              const v = num(r[k]);
+              const missing = !Number.isFinite(v);
               return (
                 <div key={k} className="flex items-center gap-2 mb-1">
                   <div className="h-2 flex-1 bg-surface-sunken rounded-sm overflow-hidden">
-                    <div className="h-full" style={{ width: `${Math.min(100, (Math.abs(v) / absMax) * 100)}%`, background: shade(ki), opacity: v < 0 ? 0.5 : 1 }} />
+                    {!missing && <div className="h-full" style={{ width: `${Math.min(100, (Math.abs(v) / absMax) * 100)}%`, background: shade(ki), opacity: v < 0 ? 0.5 : 1 }} />}
                   </div>
-                  <span className="u-nums text-ink-primary text-11" style={{ minWidth: 56, textAlign: "right" }}>{fmtVal(v, fmt)}</span>
+                  <span className="u-nums text-ink-primary text-11" style={{ minWidth: 56, textAlign: "right" }}>{missing ? "—" : fmtVal(v, fmt)}</span>
                 </div>
               );
             })}
