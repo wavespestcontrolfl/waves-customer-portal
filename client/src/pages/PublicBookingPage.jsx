@@ -314,6 +314,11 @@ export default function PublicBookingPage() {
     || (browseDays || []).find((d) => d.date === selectedDate)
     || (searchResult?.days || []).find((d) => d.date === selectedDate)
   )?.fullDate;
+  // Slot length follows the service (60 → "1-hour", else "<n>-minute").
+  const slotLenLabel = service.duration === 60 ? '1-hour' : `${service.duration}-minute`;
+  // Only advance when the open day matches the selected slot — a stale selection
+  // from another day must not advance while a different day is being viewed.
+  const continueDisabled = !selectedSlot || (openDay !== null && openDay !== selectedDate);
 
   const SoftRouteBanner = () => (
     <div style={{
@@ -525,7 +530,7 @@ export default function PublicBookingPage() {
                     {day.fullDate}
                   </h2>
                   <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 16, lineHeight: 1.5 }}>
-                    Choose a time — each is a 1-hour window.
+                    Choose a time — each is a {slotLenLabel} window.
                   </p>
                   {!day.nearby && <SoftRouteBanner />}
                   <div style={{ display: 'grid', gap: 8 }}>
@@ -618,7 +623,7 @@ export default function PublicBookingPage() {
               <Button
                 variant="primary"
                 onClick={() => setStep(3)}
-                disabled={!selectedSlot}
+                disabled={continueDisabled}
                 style={{ flex: 1 }}
               >
                 Continue →
