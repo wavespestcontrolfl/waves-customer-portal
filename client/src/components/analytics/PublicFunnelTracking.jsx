@@ -5,6 +5,7 @@ import {
   hasConsent,
   grantConsent,
   bootPostHog,
+  setFunnelActive,
   POSTHOG_ENABLED,
 } from '../../lib/analytics/posthog';
 
@@ -24,12 +25,17 @@ export default function PublicFunnelTracking() {
   const [needConsent, setNeedConsent] = useState(false);
 
   useEffect(() => {
-    if (!POSTHOG_ENABLED || !onFunnel) {
+    if (!POSTHOG_ENABLED) return;
+    if (!onFunnel) {
       setNeedConsent(false);
+      // A consented visitor may have navigated from /book into /admin or the
+      // authed portal within the same SPA session — stop recording them.
+      setFunnelActive(false);
       return;
     }
     if (hasConsent()) {
       bootPostHog();
+      setFunnelActive(true);
       setNeedConsent(false);
     } else {
       setNeedConsent(true);
@@ -41,6 +47,7 @@ export default function PublicFunnelTracking() {
   function accept() {
     grantConsent();
     bootPostHog();
+    setFunnelActive(true);
     setNeedConsent(false);
   }
 

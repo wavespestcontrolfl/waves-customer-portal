@@ -25,7 +25,12 @@ let booted = false;
  *  /tech, authed customer portal) is excluded. */
 export function isPublicFunnelPath(pathname) {
   const p = pathname || (typeof window !== 'undefined' ? window.location.pathname : '');
-  return /^\/(book|estimate|pay)(\/|$)/.test(p);
+  // BARE acquisition routes only. Tokenized customer pages (/pay/:token,
+  // /estimate/:token, /book/:token) render customer PII — name, address,
+  // invoice/estimate detail — so they must NEVER boot PostHog. Disallowing a
+  // trailing path segment excludes every token page while still matching
+  // /book?service=… (query string is not part of the pathname).
+  return /^\/(book|estimate)\/?$/.test(p);
 }
 
 /** True once the visitor has accepted cookies (set here or on the marketing
@@ -58,12 +63,32 @@ export function bootPostHog() {
     api_host: HOST,
     person_profiles: 'identified_only',
     capture_pageview: true,
-    autocapture: true,
-    // Replay: mask every input value; sample rate set in the PostHog UI. Tag PII
-    // text nodes with class "ph-mask"; un-mask safe controls with "ph-no-mask".
-    session_recording: { maskAllInputs: true, maskTextSelector: '.ph-mask' },
+    // The booking flow is PII-dense (name/phone/address text + Google Places
+    // address suggestions). Autocapture records clicked-element text, so it is
+    // OFF here — the explicit funnel events carry the signal we need.
+    autocapture: false,
+    // Replay: mask every input value AND every rendered text node ('*'), so no
+    // customer PII text (rendered name/phone/address, Places suggestions) can
+    // reach replay on these pages. Recording sample rate is set in the UI.
+    session_recording: { maskAllInputs: true, maskTextSelector: '*' },
     cross_subdomain_cookie: true,
+    // Hard gate: drop EVERY event (incl. replay $snapshot) whenever the current
+    // route is not a funnel route. Protects against a client-side navigation
+    // into /admin, /tech, or the authed portal after consenting on /book.
+    before_send: (event) => (isPublicFunnelPath() ? event : null),
   });
+  window.dispatchEvent(new Event('posthog-ready'));
+}
+
+/** Start/stop session replay as the SPA enters/leaves funnel routes. Pairs with
+ *  before_send (which drops off-funnel events) so a consented visitor who
+ *  navigates from /book into /admin or the authed portal stops being recorded. */
+export function setFunnelActive(active) {
+  if (!booted || typeof window === 'undefined' || !window.posthog) return;
+  try {
+    if (active) window.posthog.startSessionRecording();
+    else window.posthog.stopSessionRecording();
+  } catch { /* recorder controls unavailable until array.js loads — safe no-op */ }
 }
 
 /** Convenience: boot immediately if consent already exists. Returns whether it

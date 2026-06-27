@@ -46,16 +46,42 @@ export const FUNNEL_EVENTS = {
  * `window.posthog` only on public funnel pages after consent + key). Callers
  * never need to guard — undefined/null/'' props are dropped before send.
  */
+const PENDING = [];
+const MAX_PENDING = 25;
+
+function cleanProps(props) {
+  if (!props) return undefined;
+  const clean = {};
+  for (const [k, v] of Object.entries(props)) {
+    if (v !== undefined && v !== null && v !== '') clean[k] = v;
+  }
+  return clean;
+}
+
 export function track(event, props) {
   if (typeof window === 'undefined') return;
+  const clean = cleanProps(props);
+  const ph = window.posthog;
+  if (ph && typeof ph.capture === 'function') {
+    ph.capture(event, clean);
+    return;
+  }
+  // PostHog not booted yet — e.g. a direct /book visitor who hasn't accepted the
+  // cookie notice, so booking_viewed fires before consent. Queue it so the
+  // top-of-funnel event isn't lost; flushPending() replays it once PostHog boots
+  // on consent (the loader fires 'posthog-ready' after init).
+  if (PENDING.length < MAX_PENDING) PENDING.push({ event, props: clean });
+}
+
+function flushPending() {
   const ph = window.posthog;
   if (!ph || typeof ph.capture !== 'function') return;
-  let clean;
-  if (props) {
-    clean = {};
-    for (const [k, v] of Object.entries(props)) {
-      if (v !== undefined && v !== null && v !== '') clean[k] = v;
-    }
+  while (PENDING.length) {
+    const { event, props } = PENDING.shift();
+    ph.capture(event, props);
   }
-  ph.capture(event, clean);
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('posthog-ready', flushPending);
 }
