@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { buildChannelAttribution } = require('../services/channel-attribution');
 
 // Lazy-load heavy Google Ads modules (~87MB) — only loaded on first request
 let _BudgetManager, _CampaignAdvisor, _googleAds;
@@ -432,54 +433,26 @@ router.get('/revenue-attribution', async (req, res, next) => {
     // Revenue + gross profit + customers come from COMPLETED leads.
     const completed = await db('ad_service_attribution')
       .where('lead_date', '>=', since)
-      .where('funnel_stage', 'completed');
-    // Spend comes from ALL leads in the period, not just the ones that closed —
-    // true CAC must include money spent on leads that never converted. (ad_cost
-    // is allocated per lead by ad-cost-allocation; free channels stay null.)
-    const allLeads = await db('ad_service_attribution')
-      .where('lead_date', '>=', since)
-      .select('lead_source', 'ad_cost');
+      .where('funnel_stage', 'completed')
+      .select('lead_source', 'completed_revenue', 'gross_profit', 'customer_id');
 
-    const bySource = {};
-    const ensure = (src) => {
-      if (!bySource[src]) bySource[src] = { source: src, revenue: 0, grossProfit: 0, adSpend: 0, customers: new Set() };
-      return bySource[src];
-    };
-    for (const a of completed) {
-      const s = ensure(a.lead_source || 'unknown');
-      s.revenue += parseFloat(a.completed_revenue || 0);
-      s.grossProfit += parseFloat(a.gross_profit || 0);
-      if (a.customer_id) s.customers.add(a.customer_id);
-    }
-    for (const a of allLeads) {
-      ensure(a.lead_source || 'unknown').adSpend += parseFloat(a.ad_cost || 0);
-    }
+    // Spend per channel = TRUE platform spend (ad_performance_daily by platform),
+    // not summed per-lead ad_cost — so a paid channel-month with spend but zero
+    // tracked leads still surfaces (and there's no cent-rounding drift). Platform
+    // values equal the paid lead_source keys (google_ads / google_lsa / facebook).
+    const spendRows = await db('ad_performance_daily as apd')
+      .join('ad_campaigns as ac', 'ac.id', 'apd.campaign_id')
+      .where('apd.date', '>=', since)
+      .groupBy('ac.platform')
+      .select('ac.platform', db.raw('SUM(apd.cost) as spend'));
+    const platformSpendBySource = {};
+    for (const r of spendRows) platformSpendBySource[r.platform] = parseFloat(r.spend) || 0;
 
-    const sources = Object.values(bySource).map(s => ({
-      source: formatSourceName(s.source),
-      sourceKey: s.source,
-      revenue: round(s.revenue, 2),
-      grossProfit: round(s.grossProfit, 2),
-      adSpend: round(s.adSpend, 2),
-      roas: s.adSpend > 0 ? round(s.revenue / s.adSpend, 1) : null,
-      // Gross-profit LTV:CAC at the channel level: realized gross profit per ad
-      // dollar. (Per-customer normalization cancels, so this is grossProfit/adSpend.)
-      ltvCac: s.adSpend > 0 ? round(s.grossProfit / s.adSpend, 1) : null,
-      customers: s.customers.size,
-      cac: s.customers.size > 0 && s.adSpend > 0 ? round(s.adSpend / s.customers.size, 0) : 0,
-    })).sort((a, b) => b.revenue - a.revenue);
-
-    const totalRevenue = sources.reduce((s, r) => s + r.revenue, 0);
-    const totalGrossProfit = sources.reduce((s, r) => s + r.grossProfit, 0);
-    const totalSpend = sources.reduce((s, r) => s + r.adSpend, 0);
+    const { sources, ...totals } = buildChannelAttribution(completed, platformSpendBySource);
 
     res.json({
-      sources,
-      totalRevenue: round(totalRevenue, 2),
-      totalGrossProfit: round(totalGrossProfit, 2),
-      totalAdSpend: round(totalSpend, 2),
-      blendedROAS: totalSpend > 0 ? round(totalRevenue / totalSpend, 1) : null,
-      blendedLtvCac: totalSpend > 0 ? round(totalGrossProfit / totalSpend, 1) : null,
+      sources: sources.map((s) => ({ source: formatSourceName(s.sourceKey), ...s })),
+      ...totals,
     });
   } catch (err) { next(err); }
 });

@@ -23,10 +23,26 @@
 const logger = require('./logger');
 
 // lead_source values that map 1:1 to an ad_campaigns.platform carrying spend.
-const PAID_PLATFORMS = ['google_ads', 'google_lsa', 'facebook'];
+// `facebook` is paidOnly: utm_source=facebook also lands ORGANIC social leads as
+// lead_source='facebook' (determineLeadSource), so allocation must restrict to
+// genuine paid clicks (fbclid/_fbc present) or Meta ad spend would smear onto
+// organic leads. Google paid leads already use a distinct lead_source.
+const PAID_CHANNELS = [
+  { source: 'google_ads' },
+  { source: 'google_lsa' },
+  { source: 'facebook', paidOnly: true },
+];
 
 function resolveDb(db) {
   return db || require('../models/db');
+}
+
+// Restrict a query to genuine paid clicks for paidOnly channels (Meta: fbclid/_fbc).
+function applyPaidFilter(q, channel) {
+  if (channel.paidOnly) {
+    q.where((b) => b.whereNotNull('fbclid').orWhereNotNull('fbc'));
+  }
+  return q;
 }
 
 function round2(n) {
@@ -65,24 +81,32 @@ async function allocateAdCosts(db, { sinceDate = null } = {}) {
     return { updatedRows: 0, monthsTouched: 0 };
   }
 
+  // Normalize to the FIRST of the month. The cron passes today-90d, which lands
+  // mid-month; without this the spend/lead queries would see only that partial
+  // month while the per-month UPDATE rewrites the WHOLE month — overwriting an
+  // earlier full-month allocation with a partial-month rate.
+  const since = sinceDate ? `${String(sinceDate).slice(0, 7)}-01` : null;
+
   let updatedRows = 0;
   let monthsTouched = 0;
 
-  for (const platform of PAID_PLATFORMS) {
+  for (const channel of PAID_CHANNELS) {
+    const platform = channel.source; // lead_source == ad_campaigns.platform for paid channels
     // Spend by month for this platform.
     const spendRows = await db('ad_performance_daily as apd')
       .join('ad_campaigns as ac', 'ac.id', 'apd.campaign_id')
       .where('ac.platform', platform)
-      .modify((q) => { if (sinceDate) q.where('apd.date', '>=', sinceDate); })
+      .modify((q) => { if (since) q.where('apd.date', '>=', since); })
       .groupByRaw("to_char(apd.date, 'YYYY-MM')")
       .select(db.raw("to_char(apd.date, 'YYYY-MM') as ym"), db.raw('SUM(apd.cost) as spend'));
     const spendByMonth = new Map(spendRows.map((r) => [r.ym, Number(r.spend) || 0]));
 
-    // Leads by month for this channel.
+    // Leads by month for this channel (paid clicks only, for paidOnly channels).
     const leadRows = await db('ad_service_attribution')
-      .where('lead_source', platform)
+      .where('lead_source', channel.source)
       .whereNotNull('lead_date')
-      .modify((q) => { if (sinceDate) q.where('lead_date', '>=', sinceDate); })
+      .modify((q) => { if (since) q.where('lead_date', '>=', since); })
+      .modify((q) => applyPaidFilter(q, channel))
       .groupByRaw("to_char(lead_date, 'YYYY-MM')")
       .select(db.raw("to_char(lead_date, 'YYYY-MM') as ym"), db.raw('COUNT(*) as leads'));
 
@@ -92,16 +116,17 @@ async function allocateAdCosts(db, { sinceDate = null } = {}) {
       const perLead = perLeadCost(spendByMonth.get(lr.ym) || 0, leads);
       const { start, end } = monthBounds(lr.ym);
       const n = await db('ad_service_attribution')
-        .where('lead_source', platform)
+        .where('lead_source', channel.source)
         .where('lead_date', '>=', start)
         .where('lead_date', '<', end)
+        .modify((q) => applyPaidFilter(q, channel))
         .update({ ad_cost: perLead, updated_at: new Date() });
       updatedRows += n;
       monthsTouched += 1;
     }
   }
 
-  logger.info(`[ad-cost-allocation] allocated — rows ${updatedRows}, channel-months ${monthsTouched}${sinceDate ? ` (since ${sinceDate})` : ' (all)'}`);
+  logger.info(`[ad-cost-allocation] allocated — rows ${updatedRows}, channel-months ${monthsTouched}${since ? ` (since ${since})` : ' (all)'}`);
   return { updatedRows, monthsTouched };
 }
 
@@ -110,5 +135,5 @@ module.exports = {
   // exported for unit tests
   perLeadCost,
   monthBounds,
-  PAID_PLATFORMS,
+  PAID_CHANNELS,
 };

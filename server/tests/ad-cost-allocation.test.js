@@ -2,7 +2,7 @@ const {
   allocateAdCosts,
   perLeadCost,
   monthBounds,
-  PAID_PLATFORMS,
+  PAID_CHANNELS,
 } = require('../services/ad-cost-allocation');
 
 // ---------------------------------------------------------------------------
@@ -40,7 +40,11 @@ function makeDb(state) {
     let platform = null;
     const b = {
       join: () => b,
-      where: (a, op) => { if (a === 'ac.platform') platform = op; return b; },
+      where: (a, op, val) => {
+        if (a === 'ac.platform') platform = op;
+        if (a === 'apd.date' && op === '>=') captured.apdSince = val;
+        return b;
+      },
       modify: (fn) => { fn(b); return b; },
       groupByRaw: () => b,
       select: () => Promise.resolve(state.spendByPlatform?.[platform] || []),
@@ -53,6 +57,7 @@ function makeDb(state) {
     const range = {};
     const b = {
       where: (a, op, val) => {
+        if (typeof a === 'function') { captured.paidFilterApplied = (captured.paidFilterApplied || 0) + 1; return b; }
         if (a === 'lead_source') platform = op;
         if (a === 'lead_date' && op === '>=') range.start = val;
         if (a === 'lead_date' && op === '<') range.end = val;
@@ -108,11 +113,11 @@ describe('allocateAdCosts', () => {
     expect(fb.patch.ad_cost).toBe(0);
   });
 
-  test('only paid platforms are processed', async () => {
+  test('only paid channels are processed', async () => {
     const state = {
       leadsByPlatform: {
         google_ads: [{ ym: '2026-06', leads: '2' }],
-        organic: [{ ym: '2026-06', leads: '9' }], // not a paid platform → never queried
+        organic: [{ ym: '2026-06', leads: '9' }], // not a paid channel → never queried
       },
       spendByPlatform: { google_ads: [{ ym: '2026-06', spend: '50' }] },
     };
@@ -120,7 +125,27 @@ describe('allocateAdCosts', () => {
     const platforms = state.captured.updates.map((u) => u.platform);
     expect(platforms).toContain('google_ads');
     expect(platforms).not.toContain('organic');
-    expect(PAID_PLATFORMS).toEqual(['google_ads', 'google_lsa', 'facebook']);
+    expect(PAID_CHANNELS.map((c) => c.source)).toEqual(['google_ads', 'google_lsa', 'facebook']);
+  });
+
+  test('normalizes a mid-month sinceDate to the month start (no partial-month corruption)', async () => {
+    const state = {
+      spendByPlatform: { google_ads: [{ ym: '2026-03', spend: '90' }] },
+      leadsByPlatform: { google_ads: [{ ym: '2026-03', leads: '3' }] },
+    };
+    await allocateAdCosts(makeDb(state), { sinceDate: '2026-03-29' });
+    expect(state.captured.apdSince).toBe('2026-03-01'); // floored to month start, not 03-29
+    const gads = state.captured.updates.find((u) => u.platform === 'google_ads');
+    expect(gads.patch.ad_cost).toBe(30); // 90 / 3 over the FULL month
+  });
+
+  test('facebook allocation applies a paid-click filter (excludes organic social)', async () => {
+    const state = {
+      spendByPlatform: { facebook: [{ ym: '2026-06', spend: '200' }] },
+      leadsByPlatform: { facebook: [{ ym: '2026-06', leads: '4' }] },
+    };
+    await allocateAdCosts(makeDb(state));
+    expect(state.captured.paidFilterApplied).toBeGreaterThan(0); // fbclid/_fbc filter ran
   });
 
   test('no-op when the tables are absent', async () => {
