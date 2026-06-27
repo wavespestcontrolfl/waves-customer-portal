@@ -32,12 +32,19 @@ Every inbound webhook below is already signature-verified in the app, so skippin
 at the edge loses no security — it only prevents a challenge from black-holing
 automated callers.
 
-**Cloudflare expression** (scoped to the portal host so it never loosens the
-marketing site):
+**Cloudflare expression** — enumerate the server-to-server webhook prefixes
+**explicitly**. Do **not** use a blanket `starts_with(…, "/api/webhooks/")`: the
+browser-origin `/api/webhooks/lead` intake route lives under that same tree and must
+stay protected (see the warning below). Scoped to the portal host so it never loosens
+the marketing site:
 
 ```
 (http.host eq "portal.wavespestcontrol.com" and (
-  starts_with(http.request.uri.path, "/api/webhooks/") or
+  starts_with(http.request.uri.path, "/api/webhooks/twilio/") or
+  starts_with(http.request.uri.path, "/api/webhooks/sendgrid/") or
+  starts_with(http.request.uri.path, "/api/webhooks/resend/") or
+  starts_with(http.request.uri.path, "/api/webhooks/bouncie") or
+  starts_with(http.request.uri.path, "/api/webhooks/voice-agent/") or
   http.request.uri.path eq "/api/stripe/webhook" or
   starts_with(http.request.uri.path, "/api/stripe/terminal/") or
   http.request.uri.path eq "/api/bouncie" or
@@ -45,25 +52,29 @@ marketing site):
 ))
 ```
 
-| Path | Method | Provider | Auth in app |
+| Path (prefix) | Method | Provider | Auth in app |
 |---|---|---|---|
 | `/api/stripe/webhook` | POST | Stripe | `Stripe-Signature` (raw body, `constructEvent`) |
 | `/api/stripe/terminal/*` | POST | WavesPay iOS (Tap-to-Pay, first-party) | bearer / handoff token |
-| `/api/webhooks/sendgrid/events` | POST | SendGrid event webhook | ECDSA sig over raw body |
-| `/api/webhooks/resend/events` | POST | Resend (dormant until secret set) | Svix HMAC |
-| `/api/webhooks/twilio/sms` | POST | Twilio inbound SMS | `X-Twilio-Signature` |
-| `/api/webhooks/twilio/status` | POST | Twilio SMS status callback | `X-Twilio-Signature` |
-| `/api/webhooks/twilio/voice` + voice/call/recording/transcription callbacks | POST | Twilio voice | `X-Twilio-Signature` |
-| `/api/webhooks/bouncie` + `/bouncie/ping` | POST/GET | Bouncie GPS telematics | shared secret header |
-| `/api/bouncie` | POST | Bouncie mileage webhook | shared secret header |
+| `/api/webhooks/sendgrid/*` | POST | SendGrid event webhook | ECDSA sig over raw body |
+| `/api/webhooks/resend/*` | POST | Resend (dormant until secret set) | Svix HMAC |
+| `/api/webhooks/twilio/*` | POST | Twilio SMS + voice (sms/status/voice/call/recording/transcription) | `X-Twilio-Signature` |
+| `/api/webhooks/bouncie*` | POST/GET | Bouncie GPS (`/bouncie`, `/bouncie/ping`) | shared secret header |
+| `/api/webhooks/voice-agent/*` | POST | Voice-AI agent callback (gated off today — pre-added) | provider sig |
+| `/api/bouncie` | POST | Bouncie mileage webhook — **exact match**, leaves the `/api/bouncie/callback` OAuth redirect protected | shared secret header |
 | `/api/health` | GET | Railway healthcheck probe | none (public) |
 
-**Deliberately NOT skipped — `/api/webhooks/lead` and `/api/leads`** (website lead-form
-intake). These are browser-originated and should *keep* bot protection (they're a spam
-target). **Caveat:** the Astro forms post cross-subdomain (apex → portal host), so after
+> **⚠️ Why explicit prefixes, not the whole `/api/webhooks/` tree:** `/api/webhooks/lead`
+> and `/api/leads` (website lead-form intake — `server/index.js:355-356`) live under that
+> path but are **browser-originated** and must **keep** bot protection — they're a spam
+> target and accept PII. A blanket `starts_with(…, "/api/webhooks/")` skip would silently
+> expose them. When a new server-to-server webhook provider is onboarded, add its prefix
+> to the expression **deliberately**.
+
+**Lead-form caveat:** the Astro forms post cross-subdomain (apex → portal host), so after
 enabling any bot rule, **submit a real test lead** — if legitimate submissions get
-challenged, protect those two paths with **Cloudflare Turnstile** rather than adding
-them to this skip-list.
+challenged, protect `/api/webhooks/lead` + `/api/leads` with **Cloudflare Turnstile**
+rather than adding them to this skip-list.
 
 ---
 
