@@ -152,19 +152,28 @@ function toUserData(d) {
   return { userIdentifiers };
 }
 
-// POST a batch to ingest/remove. Returns { count, requestId }. termsOfService is only
-// valid on :ingest — the :remove schema rejects it, so we omit it there.
-async function pushMembers(listId, rows, op, { fetchImpl = global.fetch, token } = {}) {
+function batchSize() {
+  const n = Number(process.env.GOOGLE_CM_MAX_MEMBERS_PER_CALL);
+  return n > 0 && n <= MAX_MEMBERS_PER_CALL ? n : MAX_MEMBERS_PER_CALL;
+}
+
+// POST member ENTRIES ({k,d}) to ingest/remove in batches. Returns { count, batches }
+// where each batch is { requestId, members } — one per Data Manager request, so the
+// caller persists a pending entry PER batch (a later batch's success can't mask an
+// earlier batch's failure). termsOfService is valid only on :ingest (the :remove
+// schema rejects it), so we omit it there.
+async function pushMembers(listId, entries, op, { fetchImpl = global.fetch, token } = {}) {
   const url = op === 'remove' ? REMOVE_URL : INGEST_URL;
   const dest = destination(listId);
   const accessToken = token || await getAccessToken();
+  const size = batchSize();
   let count = 0;
-  let requestId = null;
-  for (let i = 0; i < rows.length; i += MAX_MEMBERS_PER_CALL) {
-    const batch = rows.slice(i, i + MAX_MEMBERS_PER_CALL);
+  const batches = [];
+  for (let i = 0; i < entries.length; i += size) {
+    const batch = entries.slice(i, i + size);
     const body = {
       destinations: [dest],
-      audienceMembers: batch.map((d) => ({ userData: toUserData(d) })),
+      audienceMembers: batch.map((e) => ({ userData: toUserData(e.d) })),
       validateOnly: false,
       encoding: 'HEX',
     };
@@ -180,10 +189,10 @@ async function pushMembers(listId, rows, op, { fetchImpl = global.fetch, token }
       const e = (json && json.error) || {};
       throw new Error(`Data Manager audienceMembers:${op} ${resp.status}: ${e.message || 'request failed'}`);
     }
-    if (json && json.requestId) requestId = json.requestId;
     count += batch.length;
+    batches.push({ requestId: (json && json.requestId) || null, members: batch });
   }
-  return { count, requestId };
+  return { count, batches };
 }
 
 // Map a requestStatus:retrieve response to a coarse status (mirrors data-manager's
@@ -328,16 +337,43 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     }
     const safeToDelete = (d) => !((d[0] && currentHashes.has(d[0])) || (d[1] && currentHashes.has(d[1])));
 
-    const addEntries = [];
-    for (const [h, e] of currentByHash) if (!priorByHash.has(h)) addEntries.push(e);
+    // Data Manager applies ingest/remove ASYNChronously and possibly out of order, so
+    // we must not issue an op that conflicts with one still in flight: hold a REMOVE for
+    // a hash with a pending ingest, and hold an ADD for a hash with a pending remove,
+    // until that op reaches a terminal status. (stillPending holds PROCESSING ops.)
+    const pendingIngestHashes = new Set();
+    const pendingRemoveHashes = new Set();
+    for (const p of stillPending) {
+      const target = p.op === 'ingest' ? pendingIngestHashes : pendingRemoveHashes;
+      for (const e of asEntries(p.members)) target.add(hashId(e.d));
+    }
 
-    const removeEntries = [];
-    const retained = [];
+    const addEntries = [];   // new members we send this run
+    let heldAdds = 0;        // new members deferred (a remove for the hash is in flight)
+    for (const [h, e] of currentByHash) {
+      if (priorByHash.has(h)) continue;
+      if (pendingRemoveHashes.has(h)) heldAdds++; else addEntries.push(e);
+    }
+    const heldAddHashes = new Set();
+    for (const [h, e] of currentByHash) {
+      if (!priorByHash.has(h) && pendingRemoveHashes.has(h)) heldAddHashes.add(hashId(e.d));
+    }
+
+    const removeEntries = []; // members we remove this run
+    const retained = [];      // can't remove: still shares an identifier with a current member
+    const heldRemoves = [];   // can't remove yet: an ingest for the hash is in flight
     for (const [h, e] of priorByHash) {
       if (currentByHash.has(h)) continue;
-      if (safeToDelete(e.d)) removeEntries.push(e); else retained.push(e);
+      if (!safeToDelete(e.d)) { retained.push(e); continue; }
+      if (pendingIngestHashes.has(h)) heldRemoves.push(e); else removeEntries.push(e);
     }
-    const persisted = [...currentByHash.values(), ...retained];
+    // Optimistic state: current members EXCEPT held adds (so they re-add once the remove
+    // settles), plus retained orphans, plus held removes (kept so they remove next run).
+    const persisted = [
+      ...[...currentByHash.values()].filter((e) => !heldAddHashes.has(hashId(e.d))),
+      ...retained,
+      ...heldRemoves,
+    ];
 
     const summary = {
       audienceKey,
@@ -351,6 +387,8 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       toAdd: addEntries.length,
       toRemove: removeEntries.length,
       retained: retained.length,
+      heldAdds,
+      heldRemoves: heldRemoves.length,
     };
 
     if (dryRun) {
@@ -358,24 +396,26 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     }
 
     const addRes = addEntries.length
-      ? await pushMembers(listId, addEntries.map((e) => e.d), 'ingest', { token })
-      : { count: 0, requestId: null };
+      ? await pushMembers(listId, addEntries, 'ingest', { token })
+      : { count: 0, batches: [] };
     const removeRes = removeEntries.length
-      ? await pushMembers(listId, removeEntries.map((e) => e.d), 'remove', { token })
-      : { count: 0, requestId: null };
+      ? await pushMembers(listId, removeEntries, 'remove', { token })
+      : { count: 0, batches: [] };
 
-    // Carry forward still-processing ops + the ones we just submitted. They stay
-    // OPTIMISTICALLY in member_keys; next run's reconcile reverts any that Google fails.
+    // Carry forward still-processing ops + one entry PER submitted batch (so a single
+    // failed batch is reconciled independently). They stay OPTIMISTICALLY in member_keys;
+    // next run's reconcile reverts any batch Google reports failed.
     const nowIso = new Date().toISOString();
     const newPending = [...stillPending];
-    if (addRes.requestId) newPending.push({ requestId: addRes.requestId, op: 'ingest', at: nowIso, members: addEntries });
-    if (removeRes.requestId) newPending.push({ requestId: removeRes.requestId, op: 'remove', at: nowIso, members: removeEntries });
+    for (const b of addRes.batches) if (b.requestId) newPending.push({ requestId: b.requestId, op: 'ingest', at: nowIso, members: b.members });
+    for (const b of removeRes.batches) if (b.requestId) newPending.push({ requestId: b.requestId, op: 'remove', at: nowIso, members: b.members });
+    const lastBatchId = (arr) => (arr.length && arr[arr.length - 1].requestId) || null;
 
     await saveState(audienceKey, {
       member_keys: JSON.stringify(persisted),
       member_count: currentByHash.size,
       pending: JSON.stringify(newPending),
-      last_request_id: removeRes.requestId || addRes.requestId || null,
+      last_request_id: lastBatchId(removeRes.batches) || lastBatchId(addRes.batches) || null,
       last_synced_at: db.fn.now(),
       last_status: newPending.length ? 'pending' : 'synced',
     });

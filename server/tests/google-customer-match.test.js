@@ -67,7 +67,7 @@ beforeEach(() => {
   for (const k of ['GOOGLE_ADS_DATA_MANAGER_SERVICE_ACCOUNT_JSON', 'GOOGLE_SERVICE_ACCOUNT_JSON',
     'GOOGLE_ADS_DATA_MANAGER_CUSTOMER_ID', 'GOOGLE_ADS_CUSTOMER_ID', 'GOOGLE_ADS_DATA_MANAGER_LOGIN_CUSTOMER_ID',
     'GOOGLE_ADS_LOGIN_CUSTOMER_ID', 'GOOGLE_CM_CUSTOMERS_LIST_ID', 'GOOGLE_CM_UNBOOKED_LEADS_LIST_ID',
-    'GOOGLE_CUSTOMER_MATCH_ALLOW_UPLOADS']) {
+    'GOOGLE_CUSTOMER_MATCH_ALLOW_UPLOADS', 'GOOGLE_CM_MAX_MEMBERS_PER_CALL']) {
     delete process.env[k];
   }
   global.fetch = jest.fn();
@@ -269,6 +269,66 @@ describe('reconcile pending requests', () => {
     expect(r.toAdd).toBe(0); // optimistic state stands
     const saved = inserts.find((i) => i.table === 'ad_audience_syncs');
     expect(JSON.parse(saved.row.pending).some((p) => p.requestId === 'req-1')).toBe(true);
+  });
+
+  test('HOLDS a removal while that hash still has a pending ingest (async ordering)', async () => {
+    configure({ allow: true });
+    mockCollectCustomers.mockResolvedValue([]); // c1 dropped from the source
+    stateRow = {
+      member_keys: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }],
+      pending: [{ requestId: 'req-i', op: 'ingest', at: recentIso(), members: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }] }],
+    };
+    global.fetch = routedFetch({
+      'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'PROCESSING' }] },
+    });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toRemove).toBe(0);
+    expect(r.heldRemoves).toBe(1);
+    expect(global.fetch.mock.calls.some((c) => /audienceMembers:remove$/.test(c[0]))).toBe(false);
+    // kept in state so it removes once the ingest is terminal
+    const saved = inserts.find((i) => i.table === 'ad_audience_syncs');
+    expect(JSON.parse(saved.row.member_keys).some((e) => e.k === 'customer:c1')).toBe(true);
+  });
+
+  test('HOLDS a re-add while that hash still has a pending removal (async ordering)', async () => {
+    configure({ allow: true });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'c1@x.com', phone: null }]); // reappeared
+    stateRow = {
+      member_keys: [],
+      pending: [{ requestId: 'req-r', op: 'remove', at: recentIso(), members: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }] }],
+    };
+    global.fetch = routedFetch({
+      'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'PROCESSING' }] },
+    });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toAdd).toBe(0);
+    expect(r.heldAdds).toBe(1);
+    expect(global.fetch.mock.calls.some((c) => /audienceMembers:ingest$/.test(c[0]))).toBe(false);
+    // NOT persisted as present, so it re-adds once the removal is terminal
+    const saved = inserts.find((i) => i.table === 'ad_audience_syncs');
+    expect(JSON.parse(saved.row.member_keys).some((e) => e.k === 'customer:c1')).toBe(false);
+  });
+});
+
+describe('batching', () => {
+  test('persists one pending entry per batch/requestId (no overwrite)', async () => {
+    configure({ allow: true });
+    process.env.GOOGLE_CM_MAX_MEMBERS_PER_CALL = '1'; // force 1 member per request
+    mockCollectCustomers.mockResolvedValue([
+      { key: 'customer:a', email: 'a@x.com', phone: null },
+      { key: 'customer:b', email: 'b@x.com', phone: null },
+    ]);
+    let n = 0;
+    global.fetch = jest.fn((url) => {
+      if (/audienceMembers:ingest$/.test(url)) { n += 1; return Promise.resolve({ ok: true, json: () => Promise.resolve({ requestId: `req-${n}` }) }); }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.added).toBe(2);
+    expect(global.fetch.mock.calls.filter((c) => /audienceMembers:ingest$/.test(c[0])).length).toBe(2);
+    const saved = inserts.find((i) => i.table === 'ad_audience_syncs');
+    const ids = JSON.parse(saved.row.pending).filter((p) => p.op === 'ingest').map((p) => p.requestId).sort();
+    expect(ids).toEqual(['req-1', 'req-2']); // both batches tracked, not just the last
   });
 });
 
