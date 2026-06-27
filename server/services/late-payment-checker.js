@@ -253,19 +253,16 @@ const LatePaymentService = {
           continue;
         }
 
-        // smsSent → primary SMS went; the email is the matching dual-channel notice.
-        // Otherwise the SMS is permanently undeliverable (landline/non-mobile
-        // suppression, wrong-number, opt-out, or a terminal carrier rejection) —
-        // fall back to email so a customer we can't reach by text still gets the
-        // reminder instead of silently getting nothing.
-        if (!smsSent) {
-          logger.info(`[late-payment] SMS undeliverable for customer ${customer.id} (${sendResult.code || 'unknown'}) — sending email reminder instead`);
-        }
-
+        // smsSent → primary SMS went; the email is the matching dual-channel
+        // sidecar. Otherwise the SMS is permanently undeliverable (landline/
+        // non-mobile suppression, wrong-number, opt-out, or a terminal carrier
+        // rejection) and the email is the only channel left — so a customer we
+        // can't reach by text still gets the reminder instead of nothing.
+        let emailResult = null;
         try {
           const BalanceReminder = require('./workflows/balance-reminder');
           if (typeof BalanceReminder.sendLatePaymentEmail === 'function') {
-            await BalanceReminder.sendLatePaymentEmail({
+            emailResult = await BalanceReminder.sendLatePaymentEmail({
               customer,
               invoice: inv,
               balance: {
@@ -282,18 +279,31 @@ const LatePaymentService = {
           logger.error(`[late-payment] Email sidecar failed for invoice ${inv.id}: ${emailErr.message}`);
         }
 
+        const emailDelivered = emailResult?.ok === true;
+
         if (smsSent) {
+          // SMS reached the customer; the email is a bonus. The reminder landed,
+          // so recording the dedupe row below is justified regardless of the email.
           notified++;
           logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
-        } else {
+        } else if (emailDelivered) {
+          // SMS was undeliverable but the email fallback reached them.
           emailedFallback++;
+          logger.info(`[late-payment] SMS undeliverable for customer ${customer.id} (${sendResult.code || 'unknown'}) — sent email reminder instead`);
+        } else {
+          // Neither channel reached the customer (SMS undeliverable AND no email
+          // sent — no billing email, blocked, ineligible, …). Do NOT write the
+          // dedupe row, so a later run retries instead of silently giving up.
+          logger.warn(`[late-payment] No reachable channel for customer ${customer.id} (sms=${sendResult.code || 'unknown'}, email=${emailResult?.reason || emailResult?.error || 'not_sent'}) — will retry next run`);
+          skipped++;
+          continue;
         }
 
         await db('activity_log').insert({
           customer_id: customer.id,
           action: 'late_payment_reminder',
           description: `${tierDays}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
-          metadata: JSON.stringify({ invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince, channel: smsSent ? 'sms+email' : 'email_only' }),
+          metadata: JSON.stringify({ invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince, channel: smsSent ? (emailDelivered ? 'sms+email' : 'sms') : 'email_only' }),
         }).catch(() => {});
       } catch (smsErr) {
         logger.error(`[late-payment] SMS failed for customer ${customer.id}: ${smsErr.message}`);

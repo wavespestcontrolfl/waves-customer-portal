@@ -163,6 +163,48 @@ describe('late-payment checker email sidecar', () => {
     expect(result.emailedFallback).toBe(1);
   });
 
+  test('does not dedupe the tier when the SMS is undeliverable AND the email fallback also fails to send', async () => {
+    const invoice = {
+      id: 'inv-1',
+      customer_id: 'cust-1',
+      token: 'token-1',
+      invoice_number: 'WPC-2026-1042',
+      status: 'sent',
+      title: 'Quarterly Pest Control',
+      total: '129.00',
+      due_date: '2026-05-10',
+      service_date: '2026-05-01',
+      created_at: '2026-05-01T12:00:00.000Z',
+    };
+    const customer = { id: 'cust-1', first_name: 'Taylor', phone: '+18777175476' };
+
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, code: 'SUPPRESSED_NON_MOBILE', retryable: false,
+    });
+    // No billing email on file → the fallback email does not send.
+    BalanceReminder.sendLatePaymentEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'missing_email' });
+
+    // Second activity_log chain carries a spy on .insert — a regression that writes
+    // the dedupe row would request it and trip the assertion below.
+    const dedupeInsertSpy = jest.fn(async () => undefined);
+    const insertChain = chain();
+    insertChain.insert = dedupeInsertSpy;
+
+    setDbQueues({
+      invoices: [chain({ result: [invoice] })],
+      activity_log: [chain({ first: null }), insertChain],
+      customers: [chain({ first: customer })],
+    });
+
+    const result = await LatePaymentChecker.checkAndNotify();
+
+    expect(BalanceReminder.sendLatePaymentEmail).toHaveBeenCalled();
+    expect(dedupeInsertSpy).not.toHaveBeenCalled(); // tier left un-deduped → retried next run
+    expect(result.notified).toBe(0);
+    expect(result.emailedFallback).toBe(0);
+    expect(result.skipped).toBe(1);
+  });
+
   test('defers (no email) when the SMS is only transiently held so a later run can retry', async () => {
     const invoice = {
       id: 'inv-1',
