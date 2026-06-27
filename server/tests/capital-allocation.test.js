@@ -78,11 +78,22 @@ describe('rankCapitalAllocation', () => {
     expect(out.headline.topOpportunity).toBeNull(); // not eligible to be "pour cash in"
   });
 
-  test('biggest leak requires a confident, money-spending losing channel', () => {
-    const lowN = rankCapitalAllocation({ sources: [src('facebook', 'Facebook', 0.4, 200, 2, 80)] });
-    expect(lowN.headline.biggestLeak).toBeNull(); // low-N → not headlined
-    const real = rankCapitalAllocation({ sources: [src('facebook', 'Facebook', 0.4, 200, 9, 80)] });
-    expect(real.headline.biggestLeak.sourceKey).toBe('facebook');
+  test('zero-conversion spend is the biggest leak (leak path ignores the small-N guard)', () => {
+    const out = rankCapitalAllocation({
+      sources: [
+        src('google_ads', 'Google Ads', 0, 800, 0, 0), // spent $800, ZERO customers → clearest waste
+        src('facebook', 'Facebook', 0.5, 300, 9, 150), // losing but returned something
+      ],
+    });
+    // the 0-customer channel has 0 customers (low confidence) but is still flagged
+    expect(out.headline.biggestLeak.sourceKey).toBe('google_ads');
+    expect(out.channels.find((c) => c.sourceKey === 'google_ads').band).toBe('losing');
+  });
+
+  test('bands off the EXACT ratio, not the display-rounded value', () => {
+    // displayed ltvCac rounds to 3.0, but the true ratio (296/100) is 2.96 → below 3:1
+    const out = rankCapitalAllocation({ sources: [src('google_ads', 'Google Ads', 3.0, 100, 10, 296)] });
+    expect(out.channels[0].band).toBe('below_target'); // not 'healthy'
   });
 
   test('empty attribution → no channels, null headline calls', () => {

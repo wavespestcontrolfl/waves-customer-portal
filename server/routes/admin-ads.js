@@ -461,6 +461,12 @@ router.get('/revenue-attribution', async (req, res, next) => {
 
 // GET /api/admin/ads/capital-allocation?period=quarter
 // Channels banded by LTV:CAC into a "where to dump cash" decision surface.
+// KNOWN LIMITATION (shared with revenue-attribution; deferred): fetchChannelAttribution
+// buckets all lead_source='facebook' rows together, so once Meta spend is synced,
+// organic-social Facebook completions could inflate the paid Meta ratio. The fix is
+// a paid/organic channel dimension on ad_service_attribution (see ad-cost-allocation
+// applyPaidFilter) — fixing it in the shared helper covers both surfaces. No live
+// impact today: Meta Ads ship dark (META_ADS_* unprovisioned) so facebook has no spend.
 router.get('/capital-allocation', async (req, res, next) => {
   try {
     const attribution = await fetchChannelAttribution(sinceForPeriod(req.query.period));

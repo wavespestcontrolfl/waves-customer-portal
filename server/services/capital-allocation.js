@@ -48,7 +48,11 @@ function bandFor(ltvCac) {
  */
 function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_CONFIDENT_CUSTOMERS } = {}) {
   const channels = (attribution.sources || []).map((s) => {
-    const band = bandFor(s.ltvCac);
+    // Band off the EXACT ratio (lifetimeValue / adSpend), not the display-rounded
+    // ltvCac — otherwise a 2.96:1 rounds to 3.0 and crosses the 3:1 floor into
+    // "Healthy". The rounded ltvCac is still carried through (spread) for display.
+    const exactRatio = Number(s.adSpend) > 0 ? (Number(s.lifetimeValue) || 0) / Number(s.adSpend) : null;
+    const band = bandFor(exactRatio);
     const meta = BAND_META[band];
     return {
       ...s,
@@ -78,16 +82,19 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
   const blendedLtvCac = paidSpend > 0 ? round1(paidLifetime / paidSpend) : null;
   const blendedBand = bandFor(blendedLtvCac);
 
-  // Headline calls — only from CONFIDENT channels (don't headline a noisy ratio).
-  // Opportunity: the highest-ratio scale/pour-in channel (channels are already
-  // sorted by LTV:CAC desc). Leak: the channel wasting the MOST cash
-  // (adSpend − lifetime value), not merely the least-bad ratio.
+  // Opportunity (the optimistic "pour cash in" call) requires CONFIDENCE — don't
+  // bet on a sky-high ratio off a handful of customers. Highest-ratio scale/
+  // pour-in channel (channels already sorted by LTV:CAC desc).
   const opp = channels.find(
     (c) => c.confidence === 'ok' && (c.band === 'scale' || c.band === 'pour_in'),
   );
+  // Leak (the warning call) does NOT require confidence: a channel that spent
+  // money and returned almost nothing is the clearest waste — and a zero-customer
+  // channel (0 customers ⇒ low confidence by definition) is exactly the case to
+  // flag. Pick the one wasting the MOST cash (adSpend − lifetime value).
   const wasted = (c) => (Number(c.adSpend) || 0) - (Number(c.lifetimeValue) || 0);
   const [leak] = channels
-    .filter((c) => c.confidence === 'ok' && c.band === 'losing' && c.adSpend > 0)
+    .filter((c) => c.band === 'losing' && c.adSpend > 0)
     .sort((a, b) => wasted(b) - wasted(a));
 
   return {
