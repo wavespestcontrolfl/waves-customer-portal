@@ -270,16 +270,16 @@ function AdAttributionSection({ period }) {
                     ...tdStyle,
                     textAlign: "right",
                     fontFamily: MONO,
-                    color: s.roas
-                      ? s.roas >= 4
+                    color: s.roas == null
+                      ? D.muted
+                      : s.roas >= 4
                         ? D.green
                         : s.roas >= 2
                           ? D.amber
-                          : D.red
-                      : D.muted,
+                          : D.red,
                   }}
                 >
-                  {s.roas ? s.roas + "x" : "N/A"}
+                  {s.roas == null ? "—" : s.roas + "x"}
                 </td>{" "}
                 <td
                   style={{ ...tdStyle, textAlign: "right", fontFamily: MONO }}
@@ -287,9 +287,15 @@ function AdAttributionSection({ period }) {
                   {s.customers}
                 </td>{" "}
                 <td
-                  style={{ ...tdStyle, textAlign: "right", fontFamily: MONO }}
+                  style={{
+                    ...tdStyle,
+                    textAlign: "right",
+                    fontFamily: MONO,
+                    // spend but no acquisitions = money-losing, flag it (not "$0")
+                    color: s.cac == null ? D.red : undefined,
+                  }}
                 >
-                  {s.cac > 0 ? fmt(s.cac) : "$0"}
+                  {s.cac == null ? "No conv." : fmt(s.cac)}
                 </td>{" "}
               </tr>
             ))}

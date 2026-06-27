@@ -38,6 +38,12 @@ function resolveDb(db) {
 }
 
 // Restrict a query to genuine paid clicks for paidOnly channels (Meta: fbclid/_fbc).
+// LIMITATION (deferred): a paid Meta click whose fbclid/_fbc was stripped (ad-block
+// / consent) but that carries utm_medium=cpc is classified paid at ingestion, yet
+// utm_medium isn't persisted on the row, so it's missed here. Fully separating paid
+// vs organic Facebook needs a paid/organic channel dimension on ad_service_attribution
+// (a focused follow-up). Currently no live impact — Meta Ads ship dark (META_ADS_*
+// unprovisioned), so there is no Facebook spend to mis-allocate yet.
 function applyPaidFilter(q, channel) {
   if (channel.paidOnly) {
     q.where((b) => b.whereNotNull('fbclid').orWhereNotNull('fbc'));

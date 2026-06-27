@@ -434,7 +434,7 @@ router.get('/revenue-attribution', async (req, res, next) => {
     const completed = await db('ad_service_attribution')
       .where('lead_date', '>=', since)
       .where('funnel_stage', 'completed')
-      .select('lead_source', 'completed_revenue', 'gross_profit', 'customer_id');
+      .select('lead_source', 'completed_revenue', 'gross_profit', 'projected_ltv_12mo', 'is_recurring', 'customer_id');
 
     // Spend per channel = TRUE platform spend (ad_performance_daily by platform),
     // not summed per-lead ad_cost — so a paid channel-month with spend but zero

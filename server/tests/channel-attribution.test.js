@@ -18,8 +18,30 @@ describe('buildChannelAttribution', () => {
     expect(g.customers).toBe(2);
     expect(g.cac).toBe(250); // 500 / 2
     expect(g.roas).toBe(2); // 1000 / 500
+    expect(g.lifetimeValue).toBe(600); // one-time rows → realized GP
     expect(g.ltvCac).toBe(1.2); // 600 / 500
     expect(out.blendedLtvCac).toBe(1.2);
+  });
+
+  test('recurring channels use projected 12-mo LTV (not just realized GP) for LTV:CAC', () => {
+    const completed = [
+      { lead_source: 'google_ads', completed_revenue: 100, gross_profit: 60, projected_ltv_12mo: 720, is_recurring: true, customer_id: 'c1' },
+    ];
+    const out = buildChannelAttribution(completed, { google_ads: 200 });
+    const g = out.sources.find((s) => s.sourceKey === 'google_ads');
+    expect(g.grossProfit).toBe(60); // realized still reported separately
+    expect(g.lifetimeValue).toBe(720); // projected drives LTV
+    expect(g.ltvCac).toBe(3.6); // 720 / 200, not 60/200
+  });
+
+  test('recurring row with no projection falls back to realized GP', () => {
+    const completed = [
+      { lead_source: 'facebook', completed_revenue: 100, gross_profit: 60, projected_ltv_12mo: null, is_recurring: true, customer_id: 'c1' },
+    ];
+    const out = buildChannelAttribution(completed, { facebook: 60 });
+    const fb = out.sources.find((s) => s.sourceKey === 'facebook');
+    expect(fb.lifetimeValue).toBe(60);
+    expect(fb.ltvCac).toBe(1); // 60 / 60
   });
 
   test('spend with no completed customers surfaces with cac=null (not 0)', () => {
