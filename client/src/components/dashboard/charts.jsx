@@ -1056,7 +1056,11 @@ export function CapitalAllocationCard({ data }) {
       <div className="mt-3 space-y-2">
         {channels.map((c) => {
           const color = CAP_TONE_COLOR[c.tone] || CAP_TONE_COLOR.neutral;
-          const title = `${c.bandLabel}: ${c.verdict}\nCAC ${c.cac == null ? '—' : fmtMoney(c.cac)} · spend ${fmtMoney(c.adSpend)} · ${fmtInt(c.customers)} customers`;
+          const spend = c.allInSpend != null ? c.allInSpend : c.adSpend;
+          const spendStr = c.fixedCost > 0
+            ? `${fmtMoney(spend)} (ad ${fmtMoney(c.adSpend)} + fixed ${fmtMoney(c.fixedCost)})`
+            : fmtMoney(spend);
+          const title = `${c.bandLabel}: ${c.verdict}\nCAC ${c.cac == null ? '—' : fmtMoney(c.cac)} · spend ${spendStr} · ${fmtInt(c.customers)} customers`;
           return (
             <div
               key={c.sourceKey}

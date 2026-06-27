@@ -18,11 +18,15 @@
  * @param {Array} completedRows  ad_service_attribution rows, funnel_stage=completed
  *   (each: { lead_source, completed_revenue, gross_profit, projected_ltv_12mo, is_recurring, customer_id })
  * @param {Object} platformSpendBySource  { '<lead_source>': spend } from ad_performance_daily
+ * @param {Object} fixedCostBySource  { '<lead_source>': fixed cost over the period }
+ *   (SEO retainer, ad-management fees, etc. — the non-ad-platform side of all-in CAC).
+ *   adSpend stays platform-only for display; ratios (roas/cac/ltvCac) divide by the
+ *   ALL-IN spend (adSpend + fixedCost).
  */
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function round1(n) { return Math.round((Number(n) || 0) * 10) / 10; }
 
-function buildChannelAttribution(completedRows = [], platformSpendBySource = {}) {
+function buildChannelAttribution(completedRows = [], platformSpendBySource = {}, fixedCostBySource = {}) {
   const bySource = {};
   const ensure = (src) => {
     if (!bySource[src]) bySource[src] = { revenue: 0, grossProfit: 0, lifetimeValue: 0, customers: new Set() };
@@ -39,12 +43,15 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {})
     s.lifetimeValue += (a.is_recurring && proj > 0) ? proj : gp;
     if (a.customer_id) s.customers.add(a.customer_id);
   }
-  // Seed channels that had spend but no completed leads, so a money-losing month
-  // (spend, no acquisitions) shows up instead of vanishing.
+  // Seed channels that had spend (ad OR fixed) but no completed leads, so a
+  // money-losing channel shows up instead of vanishing.
   for (const src of Object.keys(platformSpendBySource)) ensure(src);
+  for (const src of Object.keys(fixedCostBySource)) ensure(src);
 
   const sources = Object.entries(bySource).map(([sourceKey, s]) => {
-    const adSpend = round2(platformSpendBySource[sourceKey] || 0);
+    const adSpend = round2(platformSpendBySource[sourceKey] || 0); // platform ad spend (display)
+    const fixedCost = round2(fixedCostBySource[sourceKey] || 0); // SEO retainer / mgmt fees etc.
+    const allInSpend = round2(adSpend + fixedCost); // true cost to acquire — ratios divide by this
     const revenue = round2(s.revenue);
     const grossProfit = round2(s.grossProfit);
     const lifetimeValue = round2(s.lifetimeValue);
@@ -55,12 +62,14 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {})
       grossProfit,
       lifetimeValue, // projected LTV for recurring + realized GP for one-time
       adSpend,
+      fixedCost,
+      allInSpend,
       customers,
-      roas: adSpend > 0 ? round1(revenue / adSpend) : null,
-      // Lifetime gross-profit LTV:CAC at the channel level.
-      ltvCac: adSpend > 0 ? round1(lifetimeValue / adSpend) : null,
+      roas: allInSpend > 0 ? round1(revenue / allInSpend) : null,
+      // Lifetime gross-profit LTV:CAC at the channel level (all-in cost).
+      ltvCac: allInSpend > 0 ? round1(lifetimeValue / allInSpend) : null,
       // null (not 0) when spend bought no customers — 0 would read as "free acquisition".
-      cac: customers > 0 ? Math.round(adSpend / customers) : (adSpend > 0 ? null : 0),
+      cac: customers > 0 ? Math.round(allInSpend / customers) : (allInSpend > 0 ? null : 0),
     };
   }).sort((a, b) => b.revenue - a.revenue);
 
@@ -68,6 +77,8 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {})
   const totalGrossProfit = round2(sources.reduce((t, r) => t + r.grossProfit, 0));
   const totalLifetimeValue = round2(sources.reduce((t, r) => t + r.lifetimeValue, 0));
   const totalAdSpend = round2(sources.reduce((t, r) => t + r.adSpend, 0));
+  const totalFixedCost = round2(sources.reduce((t, r) => t + r.fixedCost, 0));
+  const totalAllInSpend = round2(sources.reduce((t, r) => t + r.allInSpend, 0));
 
   return {
     sources,
@@ -75,8 +86,10 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {})
     totalGrossProfit,
     totalLifetimeValue,
     totalAdSpend,
-    blendedROAS: totalAdSpend > 0 ? round1(totalRevenue / totalAdSpend) : null,
-    blendedLtvCac: totalAdSpend > 0 ? round1(totalLifetimeValue / totalAdSpend) : null,
+    totalFixedCost,
+    totalAllInSpend,
+    blendedROAS: totalAllInSpend > 0 ? round1(totalRevenue / totalAllInSpend) : null,
+    blendedLtvCac: totalAllInSpend > 0 ? round1(totalLifetimeValue / totalAllInSpend) : null,
   };
 }
 

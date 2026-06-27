@@ -239,7 +239,7 @@ function AdAttributionSection({ period }) {
               {" "}
               <th style={thStyle}>Source</th>{" "}
               <th style={{ ...thStyle, textAlign: "right" }}>Revenue</th>{" "}
-              <th style={{ ...thStyle, textAlign: "right" }}>Ad Spend</th>{" "}
+              <th style={{ ...thStyle, textAlign: "right" }}>Spend</th>{" "}
               <th style={{ ...thStyle, textAlign: "right" }}>ROAS</th>{" "}
               <th style={{ ...thStyle, textAlign: "right" }}>Customers</th>{" "}
               <th style={{ ...thStyle, textAlign: "right" }}>CAC</th>{" "}
@@ -262,8 +262,14 @@ function AdAttributionSection({ period }) {
                 </td>{" "}
                 <td
                   style={{ ...tdStyle, textAlign: "right", fontFamily: MONO }}
+                  title={
+                    s.fixedCost > 0
+                      ? `Ad ${fmt(s.adSpend)} + fixed ${fmt(s.fixedCost)} (SEO retainer / mgmt fees)`
+                      : undefined
+                  }
                 >
-                  {s.adSpend > 0 ? fmt(s.adSpend) : "—"}
+                  {/* all-in spend (ad + fixed) so it reconciles with ROAS/CAC, which divide by it */}
+                  {s.allInSpend > 0 ? fmt(s.allInSpend) : "—"}
                 </td>{" "}
                 <td
                   style={{
@@ -318,10 +324,17 @@ function AdAttributionSection({ period }) {
             {fmt(attr.totalRevenue)}
           </span>
         </span>{" "}
-        <span>
-          Total ad spend:{" "}
+        <span
+          title={
+            attr.totalFixedCost > 0
+              ? `Ad ${fmt(attr.totalAdSpend)} + fixed ${fmt(attr.totalFixedCost)} (SEO retainer / mgmt fees)`
+              : undefined
+          }
+        >
+          {/* all-in (ad + fixed) so it reconciles with the all-in ROAS/CAC */}
+          Total spend:{" "}
           <span style={{ color: D.amber, fontFamily: MONO }}>
-            {fmt(attr.totalAdSpend)}
+            {fmt(attr.totalAllInSpend != null ? attr.totalAllInSpend : attr.totalAdSpend)}
           </span>
         </span>{" "}
       </div>{" "}

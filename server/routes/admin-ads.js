@@ -429,7 +429,7 @@ router.get('/capacity-heatmap', async (req, res, next) => {
 // spend (ad_performance_daily by platform, so a paid channel-month with spend but
 // zero tracked leads still surfaces, with no cent-rounding drift). Platform values
 // equal the paid lead_source keys (google_ads / google_lsa / facebook).
-async function fetchChannelAttribution(since) {
+async function fetchChannelAttribution(since, months = 1) {
   const completedRaw = await db('ad_service_attribution')
     .where('lead_date', '>=', since)
     .where('funnel_stage', 'completed')
@@ -446,19 +446,79 @@ async function fetchChannelAttribution(since) {
   const platformSpendBySource = {};
   for (const r of spendRows) platformSpendBySource[r.platform] = parseFloat(r.spend) || 0;
 
-  const { sources, ...totals } = buildChannelAttribution(completed, platformSpendBySource);
+  // Fixed per-channel costs (SEO retainer, ad-management fees) over the window =
+  // monthly_amount × months. The non-ad-platform side of all-in CAC. Guarded so a
+  // missing table (pre-migration) is a no-op.
+  const fixedCostBySource = {};
+  try {
+    const fixedRows = await db('channel_fixed_costs').select('channel', 'monthly_amount');
+    for (const r of fixedRows) {
+      const amt = round((parseFloat(r.monthly_amount) || 0) * months, 2);
+      if (amt > 0) fixedCostBySource[r.channel] = amt;
+    }
+  } catch { /* channel_fixed_costs not present yet */ }
+
+  const { sources, ...totals } = buildChannelAttribution(completed, platformSpendBySource, fixedCostBySource);
   return { sources: sources.map((s) => ({ source: formatSourceName(s.sourceKey), ...s })), ...totals };
 }
 
-function sinceForPeriod(period) {
+function periodWindow(period) {
   const periodDays = period === 'quarter' ? 90 : period === 'ytd' ? 365 : 30;
-  return etDateString(addETDays(new Date(), -periodDays));
+  // months = the actual span of THIS window (avg month = 30.44 days), so fixed
+  // costs (monthly_amount × months) are prorated to exactly the window the ad
+  // spend covers — never a full year on a shorter window. ('ytd' here is a
+  // trailing-365 window, matching the rest of this endpoint's period handling.)
+  return {
+    since: etDateString(addETDays(new Date(), -periodDays)),
+    months: periodDays / 30.44,
+  };
 }
 
 // GET /api/admin/ads/revenue-attribution?period=month
 router.get('/revenue-attribution', async (req, res, next) => {
   try {
-    res.json(await fetchChannelAttribution(sinceForPeriod(req.query.period)));
+    const { since, months } = periodWindow(req.query.period);
+    res.json(await fetchChannelAttribution(since, months));
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/ads/fixed-costs — per-channel monthly fixed acquisition costs.
+router.get('/fixed-costs', async (req, res, next) => {
+  try {
+    const rows = await db('channel_fixed_costs').orderBy('channel')
+      .select('channel', 'monthly_amount', 'note', 'updated_at')
+      .catch(() => []);
+    res.json({
+      fixedCosts: rows.map((r) => ({
+        channel: r.channel,
+        source: formatSourceName(r.channel),
+        monthlyAmount: parseFloat(r.monthly_amount) || 0,
+        note: r.note || null,
+        updatedAt: r.updated_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/fixed-costs — upsert a channel's monthly fixed cost.
+// { channel, monthlyAmount, note } — channel is the lead_source key (organic / google_ads / …).
+router.post('/fixed-costs', async (req, res, next) => {
+  try {
+    const channel = String(req.body.channel || '').trim();
+    if (!channel) return res.status(400).json({ error: 'channel is required' });
+    // Require a finite amount ≥ 0. Don't coerce a missing/NaN value to 0 — that
+    // would silently wipe a configured retainer/fee (0 IS valid for clearing one).
+    const raw = req.body.monthlyAmount;
+    const monthly_amount = typeof raw === 'number' ? raw : parseFloat(raw);
+    if (!Number.isFinite(monthly_amount) || monthly_amount < 0) {
+      return res.status(400).json({ error: 'monthlyAmount must be a number ≥ 0' });
+    }
+    const note = req.body.note != null ? String(req.body.note).slice(0, 500) : null;
+    await db('channel_fixed_costs')
+      .insert({ channel, monthly_amount, note, created_at: new Date(), updated_at: new Date() })
+      .onConflict('channel')
+      .merge({ monthly_amount, note, updated_at: new Date() });
+    res.json({ success: true, channel, monthlyAmount: monthly_amount });
   } catch (err) { next(err); }
 });
 
@@ -471,7 +531,8 @@ router.get('/revenue-attribution', async (req, res, next) => {
 // Meta is dark (META_ADS_* unprovisioned).
 router.get('/capital-allocation', async (req, res, next) => {
   try {
-    const attribution = await fetchChannelAttribution(sinceForPeriod(req.query.period));
+    const { since, months } = periodWindow(req.query.period);
+    const attribution = await fetchChannelAttribution(since, months);
     res.json(rankCapitalAllocation(attribution));
   } catch (err) { next(err); }
 });

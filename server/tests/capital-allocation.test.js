@@ -96,6 +96,18 @@ describe('rankCapitalAllocation', () => {
     expect(out.channels[0].band).toBe('below_target'); // not 'healthy'
   });
 
+  test('uses all-in spend (ad + fixed) for the band — a retainer-only channel still ranks', () => {
+    const out = rankCapitalAllocation({
+      sources: [
+        // organic: $0 ad spend but a $200 SEO retainer (allInSpend), LV 600 → 3:1
+        { sourceKey: 'organic', source: 'Organic', ltvCac: 3, adSpend: 0, fixedCost: 200, allInSpend: 200, lifetimeValue: 600, customers: 9 },
+      ],
+    });
+    const o = out.channels[0];
+    expect(o.band).toBe('healthy'); // 600/200 = 3 → healthy (would be 'no_spend' off adSpend alone)
+    expect(out.headline.blendedBand).toBe('healthy');
+  });
+
   test('empty attribution → no channels, null headline calls', () => {
     const out = rankCapitalAllocation({ sources: [] });
     expect(out.channels).toEqual([]);
