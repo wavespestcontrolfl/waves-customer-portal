@@ -52,7 +52,6 @@ export default function PublicBookingPage() {
   const [address, setAddress] = useState({ line1: '', formatted: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
   const [availability, setAvailability] = useState([]);
-  const [curatedSlots, setCuratedSlots] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
   const [selectedSlot, setSelectedSlot] = useState(null);
   const [contact, setContact] = useState({ firstName: '', lastName: '', phone: '', email: '' });
@@ -67,6 +66,8 @@ export default function PublicBookingPage() {
   const [browseDays, setBrowseDays] = useState(null);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [pickedDate, setPickedDate] = useState(null);
+  // Day the customer has drilled into to see its 1-hour openings (null = day list)
+  const [openDay, setOpenDay] = useState(null);
   const latestPickedDateRef = useRef(null);
 
   const updateAddress = useCallback((updater) => {
@@ -75,7 +76,6 @@ export default function PublicBookingPage() {
       return next;
     });
     setAvailability([]);
-    setCuratedSlots([]);
     setSelectedDate(null);
     setSelectedSlot(null);
     setExistingCustomerId(null);
@@ -85,6 +85,7 @@ export default function PublicBookingPage() {
     setSearchResult(null);
     setBrowseDays(null);
     setPickedDate(null);
+    setOpenDay(null);
   }, []);
 
   // Step 2 → load availability whenever we enter it
@@ -98,6 +99,9 @@ export default function PublicBookingPage() {
         address: fullAddress,
         service_type: service.id,
         duration_minutes: String(service.duration),
+        // Expand each open day into its full block of 1-hour windows so the
+        // day → time picker can show real per-day openings, not a single slot.
+        expand: 'open',
       });
       if (coords?.lat && coords?.lng) {
         params.set('lat', String(coords.lat));
@@ -107,7 +111,6 @@ export default function PublicBookingPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not load availability');
       setAvailability(data.days || []);
-      setCuratedSlots(data.slots || []);
       if (data.lat && data.lng) {
         setCoords(current => (
           current?.lat === data.lat && current?.lng === data.lng
@@ -121,7 +124,6 @@ export default function PublicBookingPage() {
     } catch (err) {
       setError(err.message);
       setAvailability([]);
-      setCuratedSlots([]);
     }
     setLoading(false);
   }, [service, address, coords]);
@@ -237,17 +239,6 @@ export default function PublicBookingPage() {
     fontSize: 14, fontWeight: 500, color: COLORS.slate600,
     display: 'block', marginBottom: 6,
   };
-  const stepTwoSlots = curatedSlots.length > 0
-    ? curatedSlots
-    : availability.flatMap(day => (day.slots || []).map(slot => ({
-      ...slot,
-      date: day.date,
-      fullDate: day.fullDate,
-      dayOfWeek: day.dayOfWeek,
-      dayNum: day.dayNum,
-      month: day.month,
-    }))).slice(0, 4);
-
   // ── custom date/time finder helpers ──
   const pad2 = (n) => String(n).padStart(2, '0');
   const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
@@ -315,6 +306,19 @@ export default function PublicBookingPage() {
 
   const pickedDayObj = pickedDate && browseDays ? browseDays.find((d) => d.date === pickedDate) : null;
   const pickedDateHasNoOpenTimes = pickedDate && browseDays && !browseLoading && !pickedDayObj;
+
+  // Label for the selected day's recap — resilient to selections made via the
+  // day list, the 90-day date picker, or the Waves AI search.
+  const selectedDayLabel = (
+    availability.find((d) => d.date === selectedDate)
+    || (browseDays || []).find((d) => d.date === selectedDate)
+    || (searchResult?.days || []).find((d) => d.date === selectedDate)
+  )?.fullDate;
+  // Slot length follows the service (60 → "1-hour", else "<n>-minute").
+  const slotLenLabel = service.duration === 60 ? '1-hour' : `${service.duration}-minute`;
+  // Only advance when the open day matches the selected slot — a stale selection
+  // from another day must not advance while a different day is being viewed.
+  const continueDisabled = !selectedSlot || (openDay !== null && openDay !== selectedDate);
 
   const SoftRouteBanner = () => (
     <div style={{
@@ -422,12 +426,26 @@ export default function PublicBookingPage() {
         {/* STEP 2 — Times */}
         {step === 2 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
-              {stepTwoSlots.length > 0 && stepTwoSlots.length < 4 ? 'Your best times' : 'Your best 4 times'}
-            </h2>
-            <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
-              These are the best open service windows we can offer. Nearby route days are prioritized when available.
-            </p>
+            {!openDay ? (
+              <>
+                <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+                  Pick a day
+                </h2>
+                <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
+                  Choose a day and we'll show the open 1-hour windows. Days where a tech is already working nearby are marked.
+                </p>
+              </>
+            ) : (
+              <button
+                onClick={() => setOpenDay(null)}
+                style={{
+                  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                  color: COLORS.wavesBlue, fontSize: 15, fontWeight: 600, marginBottom: 14,
+                }}
+              >
+                ← Pick a different day
+              </button>
+            )}
 
             {loading && (
               <div style={{ textAlign: 'center', padding: 40, color: COLORS.slate600 }}>
@@ -442,43 +460,53 @@ export default function PublicBookingPage() {
               }}>{error}</div>
             )}
 
-            {!loading && stepTwoSlots.length > 0 && (
+            {/* Selected-time recap — keeps the choice visible after drilling back to the day list */}
+            {!loading && !openDay && selectedSlot && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
+                background: COLORS.blueLight, border: `1px solid ${COLORS.wavesBlue}`,
+                borderRadius: 10, padding: '10px 12px', fontSize: 14, color: COLORS.blueDeeper,
+              }}>
+                <span style={{ fontWeight: 700 }}>✓ Selected</span>
+                <span>{selectedDayLabel ? `${selectedDayLabel} · ` : ''}{selectedSlot.start_label}</span>
+              </div>
+            )}
+
+            {/* STEP 2a — day list */}
+            {!loading && !openDay && availability.length > 0 && (
               <div style={{ display: 'grid', gap: 10 }}>
-                {stepTwoSlots.map((slot, i) => {
-                  const isSelected = selectedDate === slot.date && selectedSlot?.start_time === slot.start_time;
+                {availability.map((day) => {
+                  const isSelectedDay = selectedDate === day.date;
+                  const count = (day.slots || []).length;
                   return (
                     <button
-                      key={`${slot.date}-${slot.start_time}-${i}`}
-                      onClick={() => { setSelectedDate(slot.date); setSelectedSlot(slot); }}
+                      key={day.date}
+                      onClick={() => setOpenDay(day.date)}
                       style={{
-                        width: '100%',
-                        padding: '14px 16px',
-                        borderRadius: 12,
-                        cursor: 'pointer',
-                        background: isSelected ? COLORS.wavesBlue : COLORS.white,
-                        color: isSelected ? '#fff' : COLORS.blueDeeper,
-                        border: `1.5px solid ${isSelected ? COLORS.wavesBlue : COLORS.slate200}`,
-                        textAlign: 'left',
-                        transition: 'background-color 0.15s, border-color 0.15s, color 0.15s',
+                        width: '100%', padding: '14px 16px', borderRadius: 12, cursor: 'pointer',
+                        background: COLORS.white,
+                        border: `1.5px solid ${isSelectedDay ? COLORS.wavesBlue : COLORS.slate200}`,
+                        textAlign: 'left', display: 'flex', alignItems: 'center',
+                        justifyContent: 'space-between', gap: 12,
+                        transition: 'border-color 0.15s',
                       }}
                     >
-                      <div style={{
-                        fontSize: 14,
-                        fontWeight: 600,
-                        color: isSelected ? 'rgba(255,255,255,0.82)' : COLORS.slate600,
-                        marginBottom: 5,
-                      }}>
-                        {slot.fullDate}
+                      <div>
+                        <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper }}>{day.fullDate}</div>
+                        <div style={{ fontSize: 13, color: COLORS.slate600, marginTop: 2 }}>
+                          {count} {count === 1 ? 'opening' : 'openings'}
+                        </div>
                       </div>
-                      <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>
-                        {slot.start_label}
-                      </div>
-                      <div style={{
-                        fontSize: 14,
-                        color: isSelected ? 'rgba(255,255,255,0.86)' : COLORS.slate600,
-                        lineHeight: 1.35,
-                      }}>
-                        {slot.reason}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                        {day.nearby && (
+                          <span style={{
+                            fontSize: 12, fontWeight: 600, color: '#047857', background: '#ECFDF5',
+                            border: '1px solid #A7F3D0', borderRadius: 999, padding: '3px 9px', whiteSpace: 'nowrap',
+                          }}>
+                            tech nearby
+                          </span>
+                        )}
+                        <span style={{ fontSize: 22, color: COLORS.slate600, lineHeight: 1 }}>›</span>
                       </div>
                     </button>
                   );
@@ -486,59 +514,108 @@ export default function PublicBookingPage() {
               </div>
             )}
 
-            {!loading && (
-              <div style={{ background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
-                <label style={{ ...labelStyle, color: COLORS.blueDeeper, fontWeight: 700 }}>
-                  Can't find a date? Pick one that works for you.
-                </label>
-                <input
-                  type="date"
-                  min={browseMin}
-                  max={browseMax}
-                  placeholder="mm/dd/yyyy"
-                  value={pickedDate || ''}
-                  onChange={(e) => onPickDate(e.target.value)}
-                  style={inputStyle}
-                />
-                <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 8 }}>
-                  We'll check open windows up to 90 days out.
+            {/* STEP 2b — the chosen day's 1-hour openings */}
+            {!loading && openDay && (() => {
+              const day = availability.find((d) => d.date === openDay);
+              if (!day) {
+                return (
+                  <div style={{ fontSize: 14, color: COLORS.slate600, lineHeight: 1.45 }}>
+                    That day is no longer open. Pick another day above.
+                  </div>
+                );
+              }
+              return (
+                <div>
+                  <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+                    {day.fullDate}
+                  </h2>
+                  <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 16, lineHeight: 1.5 }}>
+                    Choose a time — each is a {slotLenLabel} window.
+                  </p>
+                  {!day.nearby && <SoftRouteBanner />}
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    {(day.slots || []).map((slot, i) => {
+                      const sel = isSlotSelected(day.date, slot);
+                      return (
+                        <button
+                          key={`${day.date}-${slot.start_time}-${i}`}
+                          onClick={() => selectSlot(day.date, slot)}
+                          style={{
+                            width: '100%', padding: '14px 16px', borderRadius: 12, cursor: 'pointer',
+                            background: sel ? COLORS.wavesBlue : COLORS.white,
+                            color: sel ? '#fff' : COLORS.blueDeeper,
+                            border: `1.5px solid ${sel ? COLORS.wavesBlue : COLORS.slate200}`,
+                            textAlign: 'left', transition: 'background-color .15s, border-color .15s, color .15s',
+                          }}
+                        >
+                          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 3 }}>{slot.start_label}</div>
+                          <div style={{ fontSize: 14, color: sel ? 'rgba(255,255,255,0.86)' : COLORS.slate600, lineHeight: 1.35 }}>
+                            {slot.reason}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
-            {browseLoading && (
-              <div style={{ textAlign: 'center', padding: 20, color: COLORS.slate600, fontSize: 14 }}>Loading times…</div>
-            )}
-            {pickedDayObj && (
-              <div style={{ marginTop: 14 }}>
-                {!pickedDayObj.nearby && <SoftRouteBanner />}
-                {renderDayGroups([pickedDayObj])}
-              </div>
-            )}
-            {pickedDateHasNoOpenTimes && (
-              <div style={{ marginTop: 14, fontSize: 14, color: COLORS.slate600, lineHeight: 1.45 }}>
-                No open times on that date. Try another day, or call (941) 297-5749 and we'll fit you in.
-              </div>
-            )}
+            {/* Secondary finders — only on the day list */}
+            {!loading && !openDay && (
+              <>
+                <div style={{ background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
+                  <label style={{ ...labelStyle, color: COLORS.blueDeeper, fontWeight: 700 }}>
+                    Need a date further out? Pick any day that works.
+                  </label>
+                  <input
+                    type="date"
+                    min={browseMin}
+                    max={browseMax}
+                    placeholder="mm/dd/yyyy"
+                    value={pickedDate || ''}
+                    onChange={(e) => onPickDate(e.target.value)}
+                    style={inputStyle}
+                  />
+                  <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 8 }}>
+                    We'll check open windows up to 90 days out.
+                  </div>
+                </div>
 
-            {/* Waves AI date/time search */}
-            <div style={{ marginTop: 20 }}>
-              <WavesAIScheduleSearch
-                theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.blueDeeper, muted: COLORS.slate600, border: '#CFE7F5', surface: COLORS.white, inputBg: '#F8FCFE' }}
-                onSearch={runAiSearch}
-              />
-            </div>
+                {browseLoading && (
+                  <div style={{ textAlign: 'center', padding: 20, color: COLORS.slate600, fontSize: 14 }}>Loading times…</div>
+                )}
+                {pickedDayObj && (
+                  <div style={{ marginTop: 14 }}>
+                    {!pickedDayObj.nearby && <SoftRouteBanner />}
+                    {renderDayGroups([pickedDayObj])}
+                  </div>
+                )}
+                {pickedDateHasNoOpenTimes && (
+                  <div style={{ marginTop: 14, fontSize: 14, color: COLORS.slate600, lineHeight: 1.45 }}>
+                    No open times on that date. Try another day, or call (941) 297-5749 and we'll fit you in.
+                  </div>
+                )}
 
-            {searchResult && searchResult.days.length > 0 && (
-              <div style={{ marginTop: 16 }}>
-                {!searchResult.nearby && <SoftRouteBanner />}
-                {renderDayGroups(searchResult.days)}
-              </div>
-            )}
-            {searchResult && searchResult.days.length === 0 && (
-              <div style={{ marginTop: 12, fontSize: 14, color: COLORS.slate600 }}>
-                Nothing open for that search. Try another day, or call (941) 297-5749.
-              </div>
+                {/* Waves AI date/time search */}
+                <div style={{ marginTop: 20 }}>
+                  <WavesAIScheduleSearch
+                    theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.blueDeeper, muted: COLORS.slate600, border: '#CFE7F5', surface: COLORS.white, inputBg: '#F8FCFE' }}
+                    onSearch={runAiSearch}
+                  />
+                </div>
+
+                {searchResult && searchResult.days.length > 0 && (
+                  <div style={{ marginTop: 16 }}>
+                    {!searchResult.nearby && <SoftRouteBanner />}
+                    {renderDayGroups(searchResult.days)}
+                  </div>
+                )}
+                {searchResult && searchResult.days.length === 0 && (
+                  <div style={{ marginTop: 12, fontSize: 14, color: COLORS.slate600 }}>
+                    Nothing open for that search. Try another day, or call (941) 297-5749.
+                  </div>
+                )}
+              </>
             )}
 
             <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
@@ -546,7 +623,7 @@ export default function PublicBookingPage() {
               <Button
                 variant="primary"
                 onClick={() => setStep(3)}
-                disabled={!selectedSlot}
+                disabled={continueDisabled}
                 style={{ flex: 1 }}
               >
                 Continue →
