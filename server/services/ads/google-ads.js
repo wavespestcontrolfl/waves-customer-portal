@@ -140,6 +140,16 @@ async function syncCampaigns() {
 // ---------------------------------------------------------------------------
 // syncDailyPerformance — pull per-campaign metrics for the last N days
 // ---------------------------------------------------------------------------
+// GAQL date range for the trailing `days` window. Google Ads requires a FINITE
+// range on segments.date (query_error 55 otherwise) AND 'YYYY-MM-DD' literals —
+// the old code used an open-ended `>= 'YYYYMMDD'`, which threw on every run, so
+// no performance/search-term rows were ever stored. Returns dashed start/end.
+function gaqlDateRange(days, now = new Date()) {
+  const fmt = (d) => d.toISOString().split('T')[0]; // YYYY-MM-DD
+  const since = new Date(now.getTime() - days * 86400000);
+  return { since: fmt(since), until: fmt(now) };
+}
+
 async function syncDailyPerformance(days = 7) {
   const customer = getCustomer();
   if (!customer) return [];
@@ -147,8 +157,7 @@ async function syncDailyPerformance(days = 7) {
   try {
     logger.info(`[google-ads] Syncing daily performance (last ${days} days)`);
 
-    const since = new Date(Date.now() - days * 86400000);
-    const sinceStr = since.toISOString().split('T')[0].replace(/-/g, '');
+    const { since: sinceStr, until: untilStr } = gaqlDateRange(days);
 
     const rows = await customer.query(`
       SELECT
@@ -162,7 +171,7 @@ async function syncDailyPerformance(days = 7) {
         metrics.ctr,
         metrics.average_cpc
       FROM campaign
-      WHERE segments.date >= '${sinceStr}'
+      WHERE segments.date BETWEEN '${sinceStr}' AND '${untilStr}'
         AND campaign.status != 'REMOVED'
     `);
 
@@ -233,8 +242,7 @@ async function syncSearchTerms(days = 30) {
   try {
     logger.info(`[google-ads] Syncing search terms (last ${days} days)`);
 
-    const since = new Date(Date.now() - days * 86400000);
-    const sinceStr = since.toISOString().split('T')[0].replace(/-/g, '');
+    const { since: sinceStr, until: untilStr } = gaqlDateRange(days);
 
     const rows = await customer.query(`
       SELECT
@@ -247,7 +255,7 @@ async function syncSearchTerms(days = 30) {
         metrics.conversions,
         metrics.conversions_value
       FROM search_term_view
-      WHERE segments.date >= '${sinceStr}'
+      WHERE segments.date BETWEEN '${sinceStr}' AND '${untilStr}'
         AND campaign.status != 'REMOVED'
     `);
 
@@ -456,5 +464,6 @@ module.exports = {
   updateBudget,
   _private: {
     buildCallViewQuery,
+    gaqlDateRange,
   },
 };

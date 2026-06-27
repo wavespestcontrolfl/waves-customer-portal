@@ -161,4 +161,29 @@ describe('Google Ads campaign sync', () => {
       },
     }]);
   });
+
+  test('gaqlDateRange returns a finite, dashed YYYY-MM-DD range', () => {
+    const { since, until } = GoogleAds._private.gaqlDateRange(7, new Date('2026-06-27T12:00:00Z'));
+    expect(since).toBe('2026-06-20');
+    expect(until).toBe('2026-06-27');
+    // dashed literals, NOT the old 'YYYYMMDD' that Google rejects
+    expect(since).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test('syncDailyPerformance uses a bounded segments.date BETWEEN range (not open-ended >=)', async () => {
+    mockCustomerQuery.mockResolvedValue([]); // no rows → no db work; we only inspect the query
+    await GoogleAds.syncDailyPerformance(7);
+    const gaql = mockCustomerQuery.mock.calls[0][0];
+    // Google Ads rejects an open-ended segments.date filter (query_error 55).
+    expect(gaql).toMatch(/segments\.date BETWEEN '\d{4}-\d{2}-\d{2}' AND '\d{4}-\d{2}-\d{2}'/);
+    expect(gaql).not.toMatch(/segments\.date >=/);
+  });
+
+  test('syncSearchTerms also uses a bounded BETWEEN range', async () => {
+    mockCustomerQuery.mockResolvedValue([]);
+    await GoogleAds.syncSearchTerms(30);
+    const gaql = mockCustomerQuery.mock.calls[0][0];
+    expect(gaql).toMatch(/segments\.date BETWEEN '\d{4}-\d{2}-\d{2}' AND '\d{4}-\d{2}-\d{2}'/);
+    expect(gaql).not.toMatch(/segments\.date >=/);
+  });
 });
