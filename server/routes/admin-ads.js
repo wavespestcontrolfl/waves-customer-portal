@@ -429,37 +429,57 @@ router.get('/revenue-attribution', async (req, res, next) => {
     const periodDays = req.query.period === 'quarter' ? 90 : req.query.period === 'ytd' ? 365 : 30;
     const since = etDateString(addETDays(new Date(), -periodDays));
 
-    const attributions = await db('ad_service_attribution')
+    // Revenue + gross profit + customers come from COMPLETED leads.
+    const completed = await db('ad_service_attribution')
       .where('lead_date', '>=', since)
       .where('funnel_stage', 'completed');
+    // Spend comes from ALL leads in the period, not just the ones that closed —
+    // true CAC must include money spent on leads that never converted. (ad_cost
+    // is allocated per lead by ad-cost-allocation; free channels stay null.)
+    const allLeads = await db('ad_service_attribution')
+      .where('lead_date', '>=', since)
+      .select('lead_source', 'ad_cost');
 
     const bySource = {};
-    for (const a of attributions) {
-      const src = a.lead_source || 'unknown';
-      if (!bySource[src]) bySource[src] = { source: src, revenue: 0, adSpend: 0, customers: new Set() };
-      bySource[src].revenue += parseFloat(a.completed_revenue || 0);
-      bySource[src].adSpend += parseFloat(a.ad_cost || 0);
-      if (a.customer_id) bySource[src].customers.add(a.customer_id);
+    const ensure = (src) => {
+      if (!bySource[src]) bySource[src] = { source: src, revenue: 0, grossProfit: 0, adSpend: 0, customers: new Set() };
+      return bySource[src];
+    };
+    for (const a of completed) {
+      const s = ensure(a.lead_source || 'unknown');
+      s.revenue += parseFloat(a.completed_revenue || 0);
+      s.grossProfit += parseFloat(a.gross_profit || 0);
+      if (a.customer_id) s.customers.add(a.customer_id);
+    }
+    for (const a of allLeads) {
+      ensure(a.lead_source || 'unknown').adSpend += parseFloat(a.ad_cost || 0);
     }
 
     const sources = Object.values(bySource).map(s => ({
       source: formatSourceName(s.source),
       sourceKey: s.source,
       revenue: round(s.revenue, 2),
+      grossProfit: round(s.grossProfit, 2),
       adSpend: round(s.adSpend, 2),
       roas: s.adSpend > 0 ? round(s.revenue / s.adSpend, 1) : null,
+      // Gross-profit LTV:CAC at the channel level: realized gross profit per ad
+      // dollar. (Per-customer normalization cancels, so this is grossProfit/adSpend.)
+      ltvCac: s.adSpend > 0 ? round(s.grossProfit / s.adSpend, 1) : null,
       customers: s.customers.size,
       cac: s.customers.size > 0 && s.adSpend > 0 ? round(s.adSpend / s.customers.size, 0) : 0,
     })).sort((a, b) => b.revenue - a.revenue);
 
     const totalRevenue = sources.reduce((s, r) => s + r.revenue, 0);
+    const totalGrossProfit = sources.reduce((s, r) => s + r.grossProfit, 0);
     const totalSpend = sources.reduce((s, r) => s + r.adSpend, 0);
 
     res.json({
       sources,
       totalRevenue: round(totalRevenue, 2),
+      totalGrossProfit: round(totalGrossProfit, 2),
       totalAdSpend: round(totalSpend, 2),
       blendedROAS: totalSpend > 0 ? round(totalRevenue / totalSpend, 1) : null,
+      blendedLtvCac: totalSpend > 0 ? round(totalGrossProfit / totalSpend, 1) : null,
     });
   } catch (err) { next(err); }
 });

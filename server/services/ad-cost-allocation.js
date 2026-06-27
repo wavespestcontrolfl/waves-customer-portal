@@ -1,0 +1,114 @@
+/**
+ * Ad Cost Allocation — the spend (denominator) side of LTV:CAC / ROAS.
+ *
+ * ad_service_attribution.ad_cost was never populated, so every /admin/ads ratio
+ * that divides by spend (CAC, ROAS, LTV:CAC) read 0/null. Spend lives in
+ * ad_performance_daily (cost per campaign per day), rolled up to a platform via
+ * ad_campaigns.platform. Web leads don't carry a campaign_id (only gclid/utm), so
+ * the reliable link is CHANNEL-level: lead_source maps 1:1 to the paid platforms.
+ *
+ * For each paid channel and calendar month we spread that month's platform spend
+ * evenly across that channel's leads:
+ *     ad_cost(lead) = platform spend in the month / leads from the channel in the month
+ * Spend is allocated to ALL the channel's leads (converted or not) — true CAC must
+ * include money spent on leads that didn't close. The per-month totals are exact
+ * (the sum of allocated ad_cost over a channel-month equals that month's spend);
+ * only the split WITHIN a month is an even approximation. Free/organic channels
+ * have no platform spend, so their rows keep ad_cost NULL (shown as free).
+ *
+ * Idempotent: recompute overwrites ad_cost from the current spend + lead counts,
+ * so the daily cron (after the ad syncs) and the one-time backfill converge.
+ */
+
+const logger = require('./logger');
+
+// lead_source values that map 1:1 to an ad_campaigns.platform carrying spend.
+const PAID_PLATFORMS = ['google_ads', 'google_lsa', 'facebook'];
+
+function resolveDb(db) {
+  return db || require('../models/db');
+}
+
+function round2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+// Even per-lead share of a month's channel spend. 0 when there are no leads
+// (no one to attribute the spend to) — avoids divide-by-zero. Pure.
+function perLeadCost(spend, leads) {
+  const l = Number(leads) || 0;
+  if (l <= 0) return 0;
+  return round2((Number(spend) || 0) / l);
+}
+
+// 'YYYY-MM' → { start: 'YYYY-MM-01', end: 'YYYY-(MM+1)-01' } (half-open range).
+// Pure string math so it never depends on the host timezone / current date.
+function monthBounds(ym) {
+  const [y, m] = String(ym).split('-').map(Number);
+  const start = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-01`;
+  const nextM = m === 12 ? 1 : m + 1;
+  const nextY = m === 12 ? y + 1 : y;
+  const end = `${String(nextY).padStart(4, '0')}-${String(nextM).padStart(2, '0')}-01`;
+  return { start, end };
+}
+
+/**
+ * allocateAdCosts(db?, opts?)
+ * Recompute ad_service_attribution.ad_cost for paid-channel leads from
+ * ad_performance_daily spend. `sinceDate` ('YYYY-MM-DD') bounds the work to recent
+ * months (daily cron); omit it for an all-time backfill. Returns counts.
+ */
+async function allocateAdCosts(db, { sinceDate = null } = {}) {
+  db = resolveDb(db);
+  // No-op if either side is missing in this environment.
+  if (!(await db.schema.hasTable('ad_service_attribution')) || !(await db.schema.hasTable('ad_performance_daily'))) {
+    return { updatedRows: 0, monthsTouched: 0 };
+  }
+
+  let updatedRows = 0;
+  let monthsTouched = 0;
+
+  for (const platform of PAID_PLATFORMS) {
+    // Spend by month for this platform.
+    const spendRows = await db('ad_performance_daily as apd')
+      .join('ad_campaigns as ac', 'ac.id', 'apd.campaign_id')
+      .where('ac.platform', platform)
+      .modify((q) => { if (sinceDate) q.where('apd.date', '>=', sinceDate); })
+      .groupByRaw("to_char(apd.date, 'YYYY-MM')")
+      .select(db.raw("to_char(apd.date, 'YYYY-MM') as ym"), db.raw('SUM(apd.cost) as spend'));
+    const spendByMonth = new Map(spendRows.map((r) => [r.ym, Number(r.spend) || 0]));
+
+    // Leads by month for this channel.
+    const leadRows = await db('ad_service_attribution')
+      .where('lead_source', platform)
+      .whereNotNull('lead_date')
+      .modify((q) => { if (sinceDate) q.where('lead_date', '>=', sinceDate); })
+      .groupByRaw("to_char(lead_date, 'YYYY-MM')")
+      .select(db.raw("to_char(lead_date, 'YYYY-MM') as ym"), db.raw('COUNT(*) as leads'));
+
+    for (const lr of leadRows) {
+      const leads = Number(lr.leads) || 0;
+      if (!leads) continue;
+      const perLead = perLeadCost(spendByMonth.get(lr.ym) || 0, leads);
+      const { start, end } = monthBounds(lr.ym);
+      const n = await db('ad_service_attribution')
+        .where('lead_source', platform)
+        .where('lead_date', '>=', start)
+        .where('lead_date', '<', end)
+        .update({ ad_cost: perLead, updated_at: new Date() });
+      updatedRows += n;
+      monthsTouched += 1;
+    }
+  }
+
+  logger.info(`[ad-cost-allocation] allocated — rows ${updatedRows}, channel-months ${monthsTouched}${sinceDate ? ` (since ${sinceDate})` : ' (all)'}`);
+  return { updatedRows, monthsTouched };
+}
+
+module.exports = {
+  allocateAdCosts,
+  // exported for unit tests
+  perLeadCost,
+  monthBounds,
+  PAID_PLATFORMS,
+};
