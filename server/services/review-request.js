@@ -14,6 +14,7 @@ const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const { toE164 } = require("../utils/phone");
+const { runExclusive } = require("../utils/cron-lock");
 
 // GBP review links per location
 const REVIEW_LINKS = {
@@ -929,7 +930,13 @@ const ReviewService = {
 
     let sent = 0;
     for (const request of pending) {
-      await this.sendSMS(request.id);
+      // Serialize each send under the SAME per-customer lock the manual send and
+      // cadence-start paths take. Without this, a cadence start can suppress this
+      // queued row + fire its Day-0 touch in the window between this row being
+      // batched and sendSMS reading its status — delivering BOTH. The lock is
+      // non-blocking: if a manual/cadence send for this customer holds it, we
+      // skip the row this tick (it's picked up next tick, or was superseded).
+      await runExclusive(`review-send:${request.customer_id}`, () => this.sendSMS(request.id));
       sent++;
     }
     if (sent > 0)
@@ -1237,12 +1244,17 @@ const ReviewService = {
     } catch {
       prefsLookupFailed = true;
     }
-    // If we can't read the channel preferences, DEFER rather than resolve a
-    // channel: the downstream SMS wrapper doesn't enforce review_request_channel,
-    // so falling back to SMS here could text an email-only customer. Retry when
-    // prefs are readable. (No row created yet, so nothing to clean up.)
+    // If we can't read the channel preferences, DON'T resolve a channel: the
+    // downstream SMS wrapper doesn't enforce review_request_channel, so a
+    // fallback to SMS could text an email-only customer. No row exists yet, so:
+    //  • sequence → retryable: _runSequenceStep reschedules the step.
+    //  • manual one-off → terminal: there's NO row for processScheduled to
+    //    retry, so report a real failure rather than a false "queued" (the route
+    //    maps retryable→202 queued, which would lie to the operator).
     if (prefsLookupFailed) {
-      return { ok: false, retryable: true, reason: "prefs_unavailable" };
+      return manageRetryVia === "sequence"
+        ? { ok: false, retryable: true, reason: "prefs_unavailable" }
+        : { ok: false, terminal: true, reason: "prefs_unavailable" };
     }
     const reviewBlocked = !!prefs && prefs.review_request === false;
     const smsBlocked = reviewBlocked || (!!prefs && prefs.sms_enabled === false);
@@ -1419,9 +1431,13 @@ const ReviewService = {
       logger.error(
         `[review] post-send bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`,
       );
+      // Only a SENT result must avoid retry (would double-send). A not-sent
+      // result (quiet-hours hold / rate-limit / transient provider failure) has
+      // NO duplicate-send risk, so keep it retryable — don't drop the manual
+      // retry or stop the cadence over a bookkeeping blip.
       return result?.sent
         ? { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: result.auditLogId }
-        : { ok: false, terminal: true, channel: "sms", requestId: request.id, reason: "bookkeeping_failed" };
+        : { ok: false, retryable: true, channel: "sms", requestId: request.id, reason: "bookkeeping_failed" };
     }
   },
 
@@ -1524,9 +1540,11 @@ const ReviewService = {
       return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: result?.reason || "email_blocked" };
     } catch (bookErr) {
       logger.error(`[review] post-send email bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`);
+      // Only a SENT result avoids retry. A not-sent result keeps retryability so
+      // the cadence step isn't stopped over a bookkeeping blip.
       return result?.sent
         ? { ok: true, sent: true, channel: "email", requestId: request.id }
-        : { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "bookkeeping_failed" };
+        : { ok: false, retryable: true, channel: "email", requestId: request.id, reason: "bookkeeping_failed" };
     }
   },
 

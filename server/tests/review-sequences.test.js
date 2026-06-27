@@ -392,6 +392,23 @@ describe('review sequences — cadence engine', () => {
     expect(out.retryable).toBeFalsy();
   });
 
+  test('a NOT-sent result whose bookkeeping fails stays retryable (no false terminal)', async () => {
+    // Provider returned a transient non-send (not delivered), and the post-send
+    // status update throws → must remain retryable, not become terminal.
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_FAILURE' });
+    const mock = makeMock(
+      { customers: [{ id: 'bk2', first_name: 'Bea', last_name: 'K', phone: '+19410000051', nearest_location_id: 'venice' }] },
+      { throwUpdateFor: ['review_requests'] },
+    );
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'sequence' });
+
+    expect(out.sent).toBeFalsy();
+    expect(out.retryable).toBe(true);
+    expect(out.terminal).toBeFalsy();
+  });
+
   test('a terminal SMS failure (invalid number) is suppressed, not retried forever', async () => {
     mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, retryable: false, code: 'INVALID_NUMBER' });
     const mock = makeMock({ customers: [{ id: 't1', first_name: 'Bad', last_name: 'N', phone: '+10000000000', nearest_location_id: 'bradenton' }] });
