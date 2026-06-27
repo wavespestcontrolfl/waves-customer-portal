@@ -27,14 +27,27 @@ jest.mock('../services/ads/meta-audiences', () => ({
   _private: {
     collectCustomerMembers: (...a) => mockCollectCustomers(...a),
     collectUnbookedLeadMembers: (...a) => mockCollectLeads(...a),
-    hashMember: (m) => {
-      const email = m && m.email && String(m.email).includes('@') ? String(m.email).trim().toLowerCase() : null;
-      const digits = String((m && m.phone) || '').replace(/\D/g, '');
-      const phone = digits.length === 10 ? `1${digits}` : (digits.length === 11 && digits[0] === '1' ? digits : null);
-      const e = email ? `h:${email}` : '';
-      const p = phone ? `h:${phone}` : '';
-      return (e || p) ? [e, p] : null;
+  },
+}));
+// Faithful Google-formatting helpers so the hashing assertions are meaningful:
+// sha256Hex echoes its input ("h:<value>") so the test can read the normalized string,
+// and normalize* mirror data-manager (phone keeps '+', email lowercases/trims).
+jest.mock('../services/ads/data-manager', () => ({
+  _private: {
+    sha256Hex: (v) => `h:${v}`,
+    normalizeEmail: (v) => {
+      const e = String(v || '').trim().replace(/\s+/g, '').toLowerCase();
+      return e && e.includes('@') ? e : null;
     },
+    normalizePhone: (v) => {
+      const raw = String(v || '').trim();
+      const digits = raw.replace(/\D/g, '');
+      if (raw.startsWith('+') && digits.length >= 8 && digits.length <= 15) return `+${digits}`;
+      if (digits.length === 10) return `+1${digits}`;
+      if (digits.length === 11 && digits[0] === '1') return `+${digits}`;
+      return null;
+    },
+    cleanNumericId: (v) => String(v || '').trim().replace(/[^\d]/g, ''),
   },
 }));
 jest.mock('googleapis', () => ({
@@ -42,7 +55,7 @@ jest.mock('googleapis', () => ({
 }));
 
 const GCM = require('../services/ads/google-customer-match');
-const { toUserData, destination } = GCM._private;
+const { toUserData, destination, hashMember, canonicalEmail, customerId, requestStatusOf } = GCM._private;
 
 const ENV = { ...process.env };
 beforeEach(() => {
@@ -53,7 +66,8 @@ beforeEach(() => {
   process.env = { ...ENV };
   for (const k of ['GOOGLE_ADS_DATA_MANAGER_SERVICE_ACCOUNT_JSON', 'GOOGLE_SERVICE_ACCOUNT_JSON',
     'GOOGLE_ADS_DATA_MANAGER_CUSTOMER_ID', 'GOOGLE_ADS_CUSTOMER_ID', 'GOOGLE_ADS_DATA_MANAGER_LOGIN_CUSTOMER_ID',
-    'GOOGLE_CM_CUSTOMERS_LIST_ID', 'GOOGLE_CM_UNBOOKED_LEADS_LIST_ID', 'GOOGLE_CUSTOMER_MATCH_ALLOW_UPLOADS']) {
+    'GOOGLE_ADS_LOGIN_CUSTOMER_ID', 'GOOGLE_CM_CUSTOMERS_LIST_ID', 'GOOGLE_CM_UNBOOKED_LEADS_LIST_ID',
+    'GOOGLE_CUSTOMER_MATCH_ALLOW_UPLOADS']) {
     delete process.env[k];
   }
   global.fetch = jest.fn();
@@ -67,6 +81,16 @@ function configure({ allow = false, lists = true } = {}) {
   if (allow) process.env.GOOGLE_CUSTOMER_MATCH_ALLOW_UPLOADS = 'true';
 }
 const okFetch = (json = {}) => jest.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(json) }));
+// Route fetch by URL substring -> { ok, json }.
+function routedFetch(routes) {
+  return jest.fn((url) => {
+    for (const [needle, json] of Object.entries(routes)) {
+      if (String(url).includes(needle)) return Promise.resolve({ ok: true, json: () => Promise.resolve(json) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  });
+}
+const recentIso = () => new Date(Date.now() - 60 * 1000).toISOString();
 
 describe('config', () => {
   test('isConfigured needs service account + customer id + a list id', () => {
@@ -78,19 +102,47 @@ describe('config', () => {
   });
 });
 
+describe('Google-correct hashing', () => {
+  test('phone is hashed in E.164 WITH the leading "+"', () => {
+    expect(hashMember({ key: 'k', email: null, phone: '(941) 297-5749' })).toEqual(['', 'h:+19412975749']);
+    expect(hashMember({ key: 'k', email: null, phone: '+44 7700 900123' })).toEqual(['', 'h:+447700900123']);
+  });
+  test('gmail/googlemail addresses drop dots + strip the "+tag"; other domains keep them', () => {
+    expect(canonicalEmail('First.Last+promo@Gmail.com')).toBe('firstlast@gmail.com');
+    expect(canonicalEmail('a.b.c@googlemail.com')).toBe('abc@googlemail.com');
+    expect(canonicalEmail('User.Name+NYC@Example.com')).toBe('user.name+nyc@example.com');
+  });
+  test('email + phone produce both hashes', () => {
+    expect(hashMember({ key: 'k', email: 'c1@x.com', phone: '9412975749' }))
+      .toEqual(['h:c1@x.com', 'h:+19412975749']);
+  });
+});
+
 describe('payload builders', () => {
   test('toUserData maps the hash row to userIdentifiers', () => {
     expect(toUserData(['h:e', 'h:p'])).toEqual({ userIdentifiers: [{ emailAddress: 'h:e' }, { phoneNumber: 'h:p' }] });
     expect(toUserData(['h:e', ''])).toEqual({ userIdentifiers: [{ emailAddress: 'h:e' }] });
   });
-  test('destination targets the user list on the operating account', () => {
-    configure();
-    process.env.GOOGLE_ADS_DATA_MANAGER_LOGIN_CUSTOMER_ID = '999';
+  test('destination normalizes dashed account ids to digits', () => {
+    process.env.GOOGLE_ADS_DATA_MANAGER_SERVICE_ACCOUNT_JSON = '{}';
+    process.env.GOOGLE_ADS_DATA_MANAGER_CUSTOMER_ID = '339-393-6713';
+    process.env.GOOGLE_ADS_DATA_MANAGER_LOGIN_CUSTOMER_ID = '850-769-4331';
+    expect(customerId()).toBe('3393936713');
     expect(destination('111')).toEqual({
       operatingAccount: { accountType: 'GOOGLE_ADS', accountId: '3393936713' },
       productDestinationId: '111',
-      loginAccount: { accountType: 'GOOGLE_ADS', accountId: '999' },
+      loginAccount: { accountType: 'GOOGLE_ADS', accountId: '8507694331' },
     });
+  });
+});
+
+describe('requestStatusOf', () => {
+  test('maps per-destination statuses to a coarse status', () => {
+    expect(requestStatusOf({ requestStatusPerDestination: [{ requestStatus: 'SUCCESS' }] })).toBe('SUCCESS');
+    expect(requestStatusOf({ requestStatusPerDestination: [{ requestStatus: 'PROCESSING' }] })).toBe('PROCESSING');
+    expect(requestStatusOf({ requestStatusPerDestination: [{ requestStatus: 'FAILED' }] })).toBe('FAILED');
+    expect(requestStatusOf({ requestStatusPerDestination: [{ requestStatus: 'PARTIAL_SUCCESS' }] })).toBe('PARTIAL');
+    expect(requestStatusOf({})).toBe('UNKNOWN');
   });
 });
 
@@ -109,7 +161,7 @@ describe('syncAudience', () => {
     ]);
     stateRow = { member_keys: [
       { k: 'customer:OLD', d: ['h:old@x.com', ''] },
-      { k: 'customer:KEEP', d: ['h:keep@x.com', 'h:19412975749'] },
+      { k: 'customer:KEEP', d: ['h:keep@x.com', 'h:+19412975749'] },
     ] };
     const r = await GCM.syncAudience('customers', {});
     expect(r.dryRun).toBe(true);
@@ -121,7 +173,7 @@ describe('syncAudience', () => {
 
   test('live run ingests hashed members to the right list with ToS + HEX', async () => {
     configure({ allow: true });
-    global.fetch = okFetch({});
+    global.fetch = okFetch({ requestId: 'req-add' });
     mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'c1@x.com', phone: '9412975749' }]);
     const r = await GCM.syncAudience('customers', {});
     expect(r.dryRun).toBe(false);
@@ -134,32 +186,89 @@ describe('syncAudience', () => {
     expect(body.termsOfService).toEqual({ customerMatchTermsOfServiceStatus: 'ACCEPTED' });
     expect(body.destinations[0].productDestinationId).toBe('111');
     expect(body.audienceMembers[0].userData.userIdentifiers).toEqual(
-      [{ emailAddress: 'h:c1@x.com' }, { phoneNumber: 'h:19412975749' }],
+      [{ emailAddress: 'h:c1@x.com' }, { phoneNumber: 'h:+19412975749' }],
     );
+    // requestId tracked as pending until Google confirms it.
+    expect(r.status).toBe('pending');
+    const saved = inserts.find((i) => i.table === 'ad_audience_syncs');
+    expect(JSON.parse(saved.row.pending)[0]).toMatchObject({ requestId: 'req-add', op: 'ingest' });
+    expect(saved.row.last_status).toBe('pending');
   });
 
-  test('dropped member is removed via audienceMembers:remove (stored hash)', async () => {
+  test('dropped member is removed via audienceMembers:remove WITHOUT termsOfService', async () => {
     configure({ allow: true });
-    global.fetch = okFetch({});
+    global.fetch = okFetch({ requestId: 'req-rm' });
     mockCollectCustomers.mockResolvedValue([]); // c1 gone
-    stateRow = { member_keys: [{ k: 'customer:c1', d: ['h:gone@x.com', ''] }] };
+    stateRow = { member_keys: [{ k: 'customer:c1', d: ['h:gone@x.com', ''] }], pending: [] };
     const r = await GCM.syncAudience('customers', {});
     expect(r.removed).toBe(1);
     const del = global.fetch.mock.calls.find((c) => /audienceMembers:remove$/.test(c[0]));
     expect(del).toBeTruthy();
-    expect(JSON.parse(del[1].body).audienceMembers[0].userData.userIdentifiers).toEqual([{ emailAddress: 'h:gone@x.com' }]);
+    const body = JSON.parse(del[1].body);
+    expect(body.audienceMembers[0].userData.userIdentifiers).toEqual([{ emailAddress: 'h:gone@x.com' }]);
+    expect(body.termsOfService).toBeUndefined(); // remove schema rejects it
   });
 
   test('partial change keeps the still-current member (no remove, orphan retained)', async () => {
     configure({ allow: true });
-    global.fetch = okFetch({});
+    global.fetch = okFetch({ requestId: 'req-add' });
     mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'a@x.com', phone: '9412975749' }]);
-    stateRow = { member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', 'h:OLD'] }] };
+    stateRow = { member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', 'h:OLD'] }], pending: [] };
     const r = await GCM.syncAudience('customers', {});
     expect(r.toAdd).toBe(1);
     expect(r.toRemove).toBe(0);
     expect(r.retained).toBe(1);
     expect(global.fetch.mock.calls.some((c) => /audienceMembers:remove$/.test(c[0]))).toBe(false);
+  });
+});
+
+describe('reconcile pending requests', () => {
+  test('a FAILED prior ingest is reverted so the member re-uploads', async () => {
+    configure({ allow: true });
+    // c1 is still a current member; the prior ingest of c1 is marked FAILED.
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'c1@x.com', phone: null }]);
+    stateRow = {
+      member_keys: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }],
+      pending: [{ requestId: 'req-1', op: 'ingest', at: recentIso(), members: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }] }],
+    };
+    global.fetch = routedFetch({
+      'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'FAILED' }] },
+      'audienceMembers:ingest': { requestId: 'req-2' },
+    });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toAdd).toBe(1); // reverted -> re-sent
+    expect(global.fetch.mock.calls.some((c) => /audienceMembers:ingest$/.test(c[0]))).toBe(true);
+  });
+
+  test('a SUCCESS prior ingest is NOT re-sent', async () => {
+    configure({ allow: true });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'c1@x.com', phone: null }]);
+    stateRow = {
+      member_keys: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }],
+      pending: [{ requestId: 'req-1', op: 'ingest', at: recentIso(), members: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }] }],
+    };
+    global.fetch = routedFetch({
+      'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'SUCCESS' }] },
+    });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toAdd).toBe(0);
+    expect(global.fetch.mock.calls.some((c) => /audienceMembers:ingest$/.test(c[0]))).toBe(false);
+  });
+
+  test('a still-PROCESSING op stays pending and is carried forward', async () => {
+    configure({ allow: true });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'c1@x.com', phone: null }]);
+    stateRow = {
+      member_keys: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }],
+      pending: [{ requestId: 'req-1', op: 'ingest', at: recentIso(), members: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }] }],
+    };
+    global.fetch = routedFetch({
+      'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'PROCESSING' }] },
+    });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toAdd).toBe(0); // optimistic state stands
+    const saved = inserts.find((i) => i.table === 'ad_audience_syncs');
+    expect(JSON.parse(saved.row.pending).some((p) => p.requestId === 'req-1')).toBe(true);
   });
 });
 
