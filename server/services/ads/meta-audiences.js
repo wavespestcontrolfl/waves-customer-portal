@@ -191,44 +191,44 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       const data = hashMember(m);
       if (data) current.push({ k: m.key, d: data }); else skippedNoKeys++;
     }
-    const currentByKey = new Map(current.map((e) => [e.k, e]));
+    const hashId = (d) => `${d[0]}|${d[1]}`;
+
+    // Track membership by HASH ROW (Meta matches/removes by the hashes themselves),
+    // not by entity key. `current` = desired rows now; `prior` = rows we previously
+    // uploaded, including retained orphans we couldn't safely delete yet.
+    const currentByHash = new Map();
+    for (const e of current) if (!currentByHash.has(hashId(e.d))) currentByHash.set(hashId(e.d), e);
 
     const state = await loadState(audienceKey);
     const prior = (Array.isArray(state && state.member_keys) ? state.member_keys : [])
-      .filter((e) => e && e.k && Array.isArray(e.d));
-    const priorByKey = new Map(prior.map((e) => [e.k, e]));
+      .filter((e) => e && Array.isArray(e.d) && e.d.length === 2);
+    const priorByHash = new Map();
+    for (const e of prior) if (!priorByHash.has(hashId(e.d))) priorByHash.set(hashId(e.d), e);
 
-    const sameHash = (a, b) => a[0] === b[0] && a[1] === b[1];
-
-    // Every identifier hash held by a current member. Meta's audience DELETE removes a
-    // person if ANY identifier in the row matches, so we must never DELETE a row whose
-    // email or phone is still current — that would drop a person we mean to keep
-    // (e.g. a member who changed only their phone but kept their email).
+    // Identifiers held by any current member. Meta's audience DELETE removes a person
+    // if ANY identifier in the row matches, so a stale row that still shares a current
+    // identifier must NOT be deleted (it would drop a person we keep) — we retain it
+    // and retry once that identifier leaves the audience.
     const currentHashes = new Set();
-    for (const e of current) {
+    for (const e of currentByHash.values()) {
       if (e.d[0]) currentHashes.add(e.d[0]);
       if (e.d[1]) currentHashes.add(e.d[1]);
     }
     const safeToDelete = (d) => !((d[0] && currentHashes.has(d[0])) || (d[1] && currentHashes.has(d[1])));
 
-    // Diff by entity key AND hash. A member whose identifier changed gets its NEW row
-    // POSTed; the stale row is DELETEd only if none of its identifiers are still current.
     const addRows = [];
+    for (const [h, e] of currentByHash) if (!priorByHash.has(h)) addRows.push(e.d);
+
     const removeRows = [];
-    let changed = 0;
-    for (const e of current) {
-      const prev = priorByKey.get(e.k);
-      if (!prev) {
-        addRows.push(e.d); // new member
-      } else if (!sameHash(prev.d, e.d)) {
-        addRows.push(e.d); // corrected/changed identifier
-        changed += 1;
-        if (safeToDelete(prev.d)) removeRows.push(prev.d);
-      }
+    const retained = []; // uploaded rows no longer current but unsafe to delete now
+    for (const [h, e] of priorByHash) {
+      if (currentByHash.has(h)) continue; // still a current member
+      if (safeToDelete(e.d)) removeRows.push(e.d); else retained.push(e);
     }
-    for (const e of prior) {
-      if (!currentByKey.has(e.k) && safeToDelete(e.d)) removeRows.push(e.d); // dropped member
-    }
+
+    // Persist current rows + retained orphans, so a future sync deletes each orphan
+    // once its shared identifier leaves the audience (self-healing, no orphan leak).
+    const persisted = [...currentByHash.values(), ...retained];
 
     const summary = {
       audienceKey,
@@ -236,11 +236,11 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       dryRun,
       name: def.name,
       eligible: members.length,
-      withMatchKeys: current.length,
+      withMatchKeys: currentByHash.size,
       skippedNoKeys,
       toAdd: addRows.length,
       toRemove: removeRows.length,
-      changed,
+      retained: retained.length,
     };
 
     if (dryRun) {
@@ -253,13 +253,13 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
 
     await saveState(audienceKey, {
       meta_audience_id: audienceId,
-      member_keys: JSON.stringify(current),
-      member_count: current.length,
+      member_keys: JSON.stringify(persisted),
+      member_count: currentByHash.size,
       last_synced_at: db.fn.now(),
       last_status: 'synced',
     });
 
-    return { ...summary, audienceId, added, removed, memberCount: current.length };
+    return { ...summary, audienceId, added, removed, memberCount: currentByHash.size };
   });
 }
 

@@ -156,9 +156,9 @@ describe('syncAudience', () => {
     tableData.customers = [{ id: 'c1', email: 'new@x.com', phone: null }];
     stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:old@x.com', ''] }] };
     const r = await MetaAudiences.syncAudience('customers', {});
-    expect(r.changed).toBe(1);
     expect(r.toAdd).toBe(1);
     expect(r.toRemove).toBe(1);
+    expect(r.retained).toBe(0);
     expect(r.added).toBe(1);
     expect(r.removed).toBe(1);
     const post = global.fetch.mock.calls.find((c) => c[1].method === 'POST' && /\/users$/.test(c[0]));
@@ -174,11 +174,32 @@ describe('syncAudience', () => {
     tableData.customers = [{ id: 'c1', email: 'a@x.com', phone: '9412975749' }]; // -> ['h:a@x.com','h:19412975749']
     stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', 'h:OLD'] }] };
     const r = await MetaAudiences.syncAudience('customers', {});
-    expect(r.changed).toBe(1);
     expect(r.toAdd).toBe(1);
     expect(r.toRemove).toBe(0); // must NOT delete — would remove the person by their unchanged email
     expect(r.removed).toBe(0);
+    expect(r.retained).toBe(1);
     expect(global.fetch.mock.calls.some((c) => c[1] && c[1].method === 'DELETE')).toBe(false);
+    // the stale orphan row is carried forward in state so a later sync can clean it up
+    const saved = inserts.filter((x) => x.table === 'ad_audience_syncs').pop();
+    const persisted = JSON.parse(saved.row.member_keys);
+    expect(persisted).toEqual(expect.arrayContaining([
+      { k: 'customer:c1', d: ['h:a@x.com', 'h:19412975749'] },
+      { k: 'customer:c1', d: ['h:a@x.com', 'h:OLD'] },
+    ]));
+  });
+
+  test('retained orphan is deleted once the member drops out (self-heals)', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({});
+    tableData.customers = []; // c1 no longer a customer
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [
+      { k: 'customer:c1', d: ['h:a@x.com', 'h:NEW'] },
+      { k: 'customer:c1', d: ['h:a@x.com', 'h:OLD'] }, // retained orphan from a past partial change
+    ] };
+    const r = await MetaAudiences.syncAudience('customers', {});
+    expect(r.toRemove).toBe(2); // nothing current shares these now → both safe to delete
+    expect(r.removed).toBe(2);
+    expect(r.retained).toBe(0);
   });
 
   test('live run creates the audience and adds hashed users', async () => {
