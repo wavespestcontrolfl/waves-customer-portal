@@ -198,8 +198,27 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       .filter((e) => e && e.k && Array.isArray(e.d));
     const priorByKey = new Map(prior.map((e) => [e.k, e]));
 
-    const toAdd = current.filter((e) => !priorByKey.has(e.k));
-    const toRemove = prior.filter((e) => !currentByKey.has(e.k));
+    const sameHash = (a, b) => a[0] === b[0] && a[1] === b[1];
+
+    // Diff by entity key AND hash. Meta keys users by the hash itself, so a member
+    // whose email/phone changed (same entity key, different hash) must have its NEW
+    // hash POSTed and its STALE hash DELETEd — otherwise the old identifier lingers.
+    const addRows = [];
+    const removeRows = [];
+    let changed = 0;
+    for (const e of current) {
+      const prev = priorByKey.get(e.k);
+      if (!prev) {
+        addRows.push(e.d); // new member
+      } else if (!sameHash(prev.d, e.d)) {
+        addRows.push(e.d); // corrected/changed identifier
+        removeRows.push(prev.d);
+        changed += 1;
+      }
+    }
+    for (const e of prior) {
+      if (!currentByKey.has(e.k)) removeRows.push(e.d); // dropped member
+    }
 
     const summary = {
       audienceKey,
@@ -209,8 +228,9 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       eligible: members.length,
       withMatchKeys: current.length,
       skippedNoKeys,
-      toAdd: toAdd.length,
-      toRemove: toRemove.length,
+      toAdd: addRows.length,
+      toRemove: removeRows.length,
+      changed,
     };
 
     if (dryRun) {
@@ -218,8 +238,8 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     }
 
     const audienceId = await ensureAudience(audienceKey, def);
-    const added = toAdd.length ? await pushUsers(audienceId, toAdd.map((e) => e.d), 'POST') : 0;
-    const removed = toRemove.length ? await pushUsers(audienceId, toRemove.map((e) => e.d), 'DELETE') : 0;
+    const added = addRows.length ? await pushUsers(audienceId, addRows, 'POST') : 0;
+    const removed = removeRows.length ? await pushUsers(audienceId, removeRows, 'DELETE') : 0;
 
     await saveState(audienceKey, {
       meta_audience_id: audienceId,

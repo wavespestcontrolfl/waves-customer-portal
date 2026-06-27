@@ -150,6 +150,23 @@ describe('syncAudience', () => {
     expect(JSON.parse(del[1].body).payload.data).toEqual([['h:gone@x.com', '']]);
   });
 
+  test('re-syncs a changed identifier (same key, new hash): adds new + removes stale', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUDX' });
+    tableData.customers = [{ id: 'c1', email: 'new@x.com', phone: null }];
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:old@x.com', ''] }] };
+    const r = await MetaAudiences.syncAudience('customers', {});
+    expect(r.changed).toBe(1);
+    expect(r.toAdd).toBe(1);
+    expect(r.toRemove).toBe(1);
+    expect(r.added).toBe(1);
+    expect(r.removed).toBe(1);
+    const post = global.fetch.mock.calls.find((c) => c[1].method === 'POST' && /\/users$/.test(c[0]));
+    const del = global.fetch.mock.calls.find((c) => c[1] && c[1].method === 'DELETE');
+    expect(JSON.parse(post[1].body).payload.data).toEqual([['h:new@x.com', '']]);
+    expect(JSON.parse(del[1].body).payload.data).toEqual([['h:old@x.com', '']]);
+  });
+
   test('live run creates the audience and adds hashed users', async () => {
     configure({ allow: true });
     global.fetch = okFetch({ id: 'AUD123' });
