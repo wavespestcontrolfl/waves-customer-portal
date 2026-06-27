@@ -8699,7 +8699,10 @@ export function CompletionPanel({
       const body = {
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
-        customerRecap,
+        // customerRecap is intentionally NOT sent: the report summary is generated
+        // server-side from the technician notes (there's no recap editor here).
+        // Sending a hidden/restored stale draft would bypass that and become
+        // unreviewed customer-facing copy (Codex P1).
         visitOutcome,
         reviewSuppression: reviewSuppressionReason,
         equipmentSystemId: equipmentSystemId || null,
