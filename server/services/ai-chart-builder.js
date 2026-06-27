@@ -49,15 +49,6 @@ const HERO_METRICS = {
       explanation: 'Latest monthly MRR snapshot (total_mrr).',
     },
   },
-  mrr_trend: {
-    label: 'MRR Trend',
-    desc: 'monthly recurring revenue over time (a trend line)',
-    spec: {
-      sql: "SELECT period_month AS month, total_mrr AS mrr FROM ai_mrr_snapshots WHERE period_month >= CURRENT_DATE - INTERVAL '12 months' ORDER BY period_month ASC LIMIT 100",
-      chartType: 'line', x: 'month', y: ['mrr'], yFormat: 'currency',
-      explanation: 'Total MRR by month from the snapshot series, last 12 months.',
-    },
-  },
   active_customers: {
     label: 'Active Customers',
     desc: 'current count of active / live customers (a single number)',
@@ -67,22 +58,16 @@ const HERO_METRICS = {
       explanation: 'Customers currently live (is_live_customer = true).',
     },
   },
-  monthly_churn_rate: {
-    label: 'Monthly Churn Rate',
-    desc: 'customer churn rate by month (departures ÷ that month’s active base)',
-    spec: {
-      sql: "SELECT s.period_month AS month, (SELECT COUNT(*) FROM ai_customers c WHERE c.churned_at >= s.period_month AND c.churned_at < (s.period_month + INTERVAL '1 month'))::numeric / NULLIF(s.customer_count, 0) AS churn_rate FROM ai_mrr_snapshots s WHERE s.period_month >= CURRENT_DATE - INTERVAL '12 months' ORDER BY s.period_month ASC LIMIT 100",
-      chartType: 'line', x: 'month', y: ['churn_rate'], yFormat: 'percent',
-      explanation: 'Customers who churned each month ÷ that month’s active base (snapshot), last 12 months.',
-    },
-  },
   lead_conversion_rate: {
     label: 'Lead Conversion Rate (90d)',
     desc: 'lead-to-won conversion rate over the last 90 days (a single number)',
     spec: {
-      sql: "SELECT COALESCE(COUNT(*) FILTER (WHERE status = 'won'), 0)::numeric / NULLIF(COUNT(*), 0) AS conversion FROM ai_leads WHERE first_contact_at >= CURRENT_DATE - INTERVAL '90 days'",
+      // Matches the dashboard's canonical conversion tile (admin-dashboard.js):
+      // booked (won) ÷ engaged leads, excluding cancelled/spam/duplicate. The
+      // ai_leads view already excludes internal/test leads.
+      sql: "SELECT COALESCE(COUNT(*) FILTER (WHERE status = 'won'), 0)::numeric / NULLIF(COUNT(*), 0) AS conversion FROM ai_leads WHERE first_contact_at >= CURRENT_DATE - INTERVAL '90 days' AND status NOT IN ('cancelled', 'spam', 'duplicate')",
       chartType: 'kpi', x: null, y: ['conversion'], yFormat: 'percent',
-      explanation: 'Won leads ÷ all leads first contacted in the last 90 days.',
+      explanation: 'Won leads ÷ engaged leads (excludes cancelled/spam/duplicate) first contacted in the last 90 days.',
     },
   },
 };
@@ -97,9 +82,7 @@ If the question cannot be answered from the schema below, return { "error": "<sh
 
 Canonical metric shortcuts — if the request is CLEARLY one of these, set "heroMetric" to its key (still write your best sql/spec as a fallback; the server uses a vetted query for these). If it's a variation (different window, breakdown, or filter), do NOT set heroMetric — write the SQL yourself.
 - current_mrr — current total monthly recurring revenue (single number)
-- mrr_trend — monthly recurring revenue over time
 - active_customers — current count of active / live customers
-- monthly_churn_rate — customer churn rate by month
 - lead_conversion_rate — lead-to-won conversion rate, last 90 days
 
 Hard rules for "sql" (queries that break these are rejected):
