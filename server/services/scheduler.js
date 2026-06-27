@@ -1319,7 +1319,7 @@ function initScheduledJobs() {
       await runExclusive('late-payment-check', async () => {
         const LatePaymentService = require('./late-payment-checker');
         const result = await LatePaymentService.checkAndNotify();
-        logger.info(`Late payment check done: ${result.notified} reminder(s) sent, ${result.skipped} skipped`);
+        logger.info(`Late payment check done: ${result.notified} reminder(s) sent, ${result.emailedFallback || 0} email-only (SMS undeliverable), ${result.skipped} skipped`);
       });
     } catch (err) {
       logger.error(`Late payment check failed: ${err.message}`);

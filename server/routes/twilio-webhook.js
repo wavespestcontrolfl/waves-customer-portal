@@ -811,6 +811,23 @@ router.post('/status', async (req, res) => {
         } catch (e) {
           logger.error(`[twilio-status] appointment email fallback dispatch failed: ${e.message}`);
         }
+
+        // Channel-agnostic landline learning: a carrier 30006 ("landline or
+        // unreachable carrier") means this number can't receive ANY SMS. Suppress
+        // it so every automated path (invoice dunning, review requests, …) stops
+        // texting it — not just the appointment path's line_type cache. Best-effort,
+        // off the 200 response path; never throws.
+        try {
+          const { suppressNonMobileOnBounce } = require('../services/messaging/landline-suppression');
+          void suppressNonMobileOnBounce({
+            sid: MessageSid,
+            status: MessageStatus,
+            errorCode: ErrorCode,
+            to: To,
+          }).catch((e) => logger.error(`[twilio-status] landline suppression failed: ${e.message}`));
+        } catch (e) {
+          logger.error(`[twilio-status] landline suppression dispatch failed: ${e.message}`);
+        }
       }
     }
   } catch (err) {
