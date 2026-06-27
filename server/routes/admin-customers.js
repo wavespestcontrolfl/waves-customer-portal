@@ -25,6 +25,7 @@ const {
   normalizeContactCity,
   normalizeContactZip,
   normalizeContactRecord,
+  clearLineTypeOnPhoneChange,
 } = require('../utils/intake-normalize');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -2152,6 +2153,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       Object.assign(updates, stageLifecycleStamps(before.pipeline_stage, updates.pipeline_stage, before, { today: etDateString(), churnReason: req.body.churnReason }));
     }
     compactServiceContactSlots(updates, before);
+    // If the primary phone is changing, drop the stale line_type cache so the
+    // SMS landline guard re-evaluates the new number instead of acting on the
+    // old number's marker.
+    clearLineTypeOnPhoneChange(updates, before);
     if (Object.keys(updates).length) {
       const contactConflict = await findCrossAccountContactConflict(
         req.params.id,

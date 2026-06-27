@@ -20,6 +20,7 @@ const {
   normalizeContactStateField,
   normalizeContactZip,
   normalizeContactRecord,
+  clearLineTypeOnPhoneChange,
 } = require('../../utils/intake-normalize');
 
 // ─── TOOL DEFINITIONS (Anthropic format) ────────────────────────
@@ -949,6 +950,9 @@ async function updateCustomer(customerId, updates) {
   const before = await db('customers').where('id', customerId).first();
   if (!before) return { error: 'Customer not found' };
 
+  // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
+  clearLineTypeOnPhoneChange(clean, before);
+
   // Moving into a customer stage → stamp member_since so the metrics count them.
   // Matches the route lifecycle: a pre-sale lead gets the conversion date
   // (overwriting its intake date); a current/former customer keeps its real
@@ -988,6 +992,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
+
+  // A bulk phone change re-points every row's primary number → drop their
+  // line_type caches (no per-row before-state here, so clear unconditionally
+  // when phone is part of the update).
+  if (clean.phone !== undefined) clean.line_type = null;
 
   // Moving rows into a customer stage in bulk → set member_since per row from
   // the OLD pipeline_stage (a CASE, since there's no per-row before-state),

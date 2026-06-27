@@ -67,6 +67,30 @@ function normalizeZip(value) {
   return match ? match[0].slice(0, 5) : null;
 }
 
+/**
+ * Clear the cached customers.line_type when a customer's primary phone is being
+ * changed to a different number. line_type is a phone-specific cache (landline /
+ * mobile / voip) read by the SMS landline guard (appointment-reminders
+ * isLandline); if the phone changes but the cache doesn't, a stale 'landline'
+ * marker would wrongly skip SMS to the new number. Mutates `updates` in place,
+ * adding `line_type: null` only when the phone actually changed.
+ *
+ * The phone-keyed phone_line_types cache is intentionally left alone — it is
+ * keyed by the number itself, so it is never stale for this customer's edit.
+ *
+ * @param {Object} updates - pending update object (phone already normalized)
+ * @param {Object} before  - existing customer row (needs phone + line_type)
+ */
+function clearLineTypeOnPhoneChange(updates, before) {
+  if (!updates || updates.phone === undefined || !before || !before.line_type) return;
+  // Compare last-10 digits (matches isLandline's own slice(-10)), so a 10-digit
+  // legacy value and its +1 E.164 form aren't seen as a change.
+  const last10 = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10);
+  if (last10(updates.phone) !== last10(before.phone)) {
+    updates.line_type = null;
+  }
+}
+
 function normalizeCallState(value) {
   const raw = cleanText(value);
   if (!raw) return null;
@@ -201,6 +225,7 @@ module.exports = {
   normalizeCallExtraction,
   normalizeContactRecord,
   applyContactNormalization,
+  clearLineTypeOnPhoneChange,
   CONTACT_FIELD_NORMALIZERS,
   normalizeContactName,
   normalizeContactEmail,
