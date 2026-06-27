@@ -2407,6 +2407,11 @@ function initScheduledJobs() {
     try {
       const MetaAudiences = require('./ads/meta-audiences');
       const r = await MetaAudiences.syncAll({ validateOnly: false });
+      // syncAll catches per-audience errors and returns them in the result, so surface
+      // any at error level — otherwise an expired token / rejected upload fails silently.
+      for (const [audience, res] of Object.entries(r)) {
+        if (res && res.error) logger.error(`[meta-audiences cron] ${audience} failed: ${res.error}`);
+      }
       logger.info(`[meta-audiences cron] ${JSON.stringify(r)}`);
     } catch (err) {
       logger.error(`Meta Custom Audiences sync failed: ${err.message}`);
