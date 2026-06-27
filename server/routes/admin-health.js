@@ -5,6 +5,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const healthService = require('../services/customer-health');
 const alertService = require('../services/health-alerts');
+const { LAST_TOUCH_SQL, resolveQuietDays, mapQuietRow } = require('../services/customer-intelligence/quiet-customers');
 
 router.use(adminAuthenticate);
 
@@ -423,6 +424,53 @@ router.post('/alerts/:id/action', async (req, res) => {
     res.json(result);
   } catch (err) {
     logger.error(`[health-api] Action execution error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================================================
+// GET /quiet — Healthy-but-quiet customers (no recent meaningful touch).
+// These DON'T show up in the at-risk views (their score is fine), but a long
+// silence is exactly how customers start to feel neglected. Surface them for a
+// proactive personal check-in before they drift. Read-only — no messages sent.
+// =========================================================================
+router.get('/quiet', async (req, res) => {
+  try {
+    const quietDays = resolveQuietDays();
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit || '50', 10) || 50));
+    const cutoff = new Date(Date.now() - quietDays * 86400000);
+
+    let rows = [];
+    try {
+      rows = await db('customer_health_scores as h')
+        .join('customers as c', 'h.customer_id', 'c.id')
+        .where('c.active', true)
+        .whereNull('c.deleted_at')                                          // archived customers set deleted_at without clearing active
+        .whereIn('c.pipeline_stage', ['active_customer', 'won', 'at_risk']) // real customers, not leads
+        .whereIn('h.churn_risk', ['low', 'moderate'])                       // healthy band — not already at-risk
+        .whereRaw('COALESCE(c.member_since, c.created_at) < ?', [cutoff])   // exclude brand-new customers awaiting a first visit
+        .whereRaw(`${LAST_TOUCH_SQL} < ?`, [cutoff])
+        .select(
+          'c.id', 'c.first_name', 'c.last_name', 'c.waveguard_tier',
+          'c.phone', 'c.city', 'c.monthly_rate',
+          'h.overall_score', 'h.score_grade', 'h.churn_risk',
+          db.raw(`(SELECT MAX(sr.service_date) FROM service_records sr WHERE sr.customer_id = c.id AND sr.status = 'completed') as last_service_at`),
+          db.raw(`(SELECT MAX(sl.created_at) FROM sms_log sl WHERE sl.customer_id = c.id AND sl.direction = 'inbound') as last_inbound_at`),
+          db.raw(`${LAST_TOUCH_SQL} as last_touch_at`)
+        )
+        .orderByRaw(`${LAST_TOUCH_SQL} ASC`)
+        .limit(limit);
+    } catch (e) {
+      logger.error(`[health-api] Quiet query failed: ${e.message}`);
+      rows = [];
+    }
+
+    const now = Date.now();
+    const customers = rows.map((r) => mapQuietRow(r, now));
+
+    res.json({ quietDays, count: customers.length, customers });
+  } catch (err) {
+    logger.error(`[health-api] Quiet error: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });

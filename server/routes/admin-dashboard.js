@@ -13,7 +13,7 @@ const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
 const { autopayActivePredicate } = require('../services/autopay-eligibility');
-const { generateChartSpec } = require('../services/ai-chart-builder');
+const { generateChartSpec, extractImageIntent } = require('../services/ai-chart-builder');
 const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const rateLimit = require('express-rate-limit');
@@ -384,13 +384,15 @@ router.get('/', dashboardCache, async (req, res, next) => {
 
 // GET /api/admin/dashboard/core-kpis?period=today|wtd|mtd|ytd
 // ServiceTitan-style operational KPIs: completion, CSAT, callback, RPJ, efficiency, retention, AR days, lead conv
-async function computeCoreKpis(period = 'mtd') {
+async function computeCoreKpis(period = 'mtd', range = null) {
     const now = new Date();
     const todayStr = etDateString(now);
 
     // Shared period resolver (periodStartDate) — same windows the attribution
-    // panels use; every window ends today.
-    const start = periodStartDate(period);
+    // panels use; every window ends today. A custom range overrides only the
+    // START (a custom lookback through today), so every metric's "as of now"
+    // numerator stays valid — no historical reconstruction needed.
+    const start = (range && range.from) || periodStartDate(period);
 
     // Service completion rate — scheduled_services in window
     const svcAgg = await db('scheduled_services')
@@ -845,8 +847,8 @@ async function computeCoreKpis(period = 'mtd') {
     } catch (err) { logger.error(`[admin-dashboard] call-to-booking query failed: ${err.message}`); }
 
     return {
-      period,
-      periodLabel: periodLabel(period),
+      period: range ? 'custom' : period,
+      periodLabel: range ? `Since ${start}` : periodLabel(period),
       service: {
         completionRate,
         scheduled: svcDenom, // non-cancelled, so the tile's "completed/scheduled" matches the rate
@@ -899,7 +901,7 @@ async function computeCoreKpis(period = 'mtd') {
 // cron calls, so the live tiles and the recorded trend never diverge.
 router.get('/core-kpis', dashboardCache, async (req, res, next) => {
   try {
-    res.json(await computeCoreKpis(String(req.query.period || 'mtd').toLowerCase()));
+    res.json(await computeCoreKpis(String(req.query.period || "mtd").toLowerCase(), parseCustomRange(req.query)));
   } catch (err) {
     logger.error(`[admin-dashboard] /core-kpis failed: ${err.message}`);
     next(err);
@@ -1434,7 +1436,20 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
 // Periods accepted: today | wtd | mtd | ytd. Defaults to mtd.
 // ─────────────────────────────────────────────────────────────────────
 
-function resolveAttributionWindow(period) {
+// Custom lookback: an operator-chosen START date through today (?from=YYYY-MM-DD).
+// Window end is always today, so every "as of now" metric stays valid — no
+// historical end. Null unless `from` is a valid ET date not in the future.
+function parseCustomRange(query) {
+  const from = typeof query.from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(query.from) ? query.from : null;
+  if (!from) return null;
+  const today = etDateString();
+  return { from: from > today ? today : from };
+}
+
+function resolveAttributionWindow(period, range) {
+  if (range && range.from) {
+    return { from: range.from, to: etDateString(), label: `Since ${range.from}` };
+  }
   return { from: periodStartDate(period), to: etDateString(), label: periodLabel(period) };
 }
 
@@ -1445,7 +1460,7 @@ function resolveAttributionWindow(period) {
 // under "Unmapped" so a missing seed row is visible, not invisible.
 router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
   try {
-    const win = resolveAttributionWindow(req.query.period);
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     // Direct equality match — the 20260428000003 backfill normalized
     // every call_log.to_phone to E.164, and admin-import-sheets.js +
     // the Twilio webhooks both write E.164 going forward, so the
@@ -1501,7 +1516,7 @@ router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
 // before customer conversion). Joined to lead_sources for the human label.
 router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
   try {
-    const win = resolveAttributionWindow(req.query.period);
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     const rows = await excludeInternalLeads(
       applyETTimestampWindow(
         db('leads as l')
@@ -1618,7 +1633,7 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
 // shop or has the web caught up?". Reads leads.first_contact_channel.
 router.get('/channel-mix', dashboardCache, async (req, res, next) => {
   try {
-    const win = resolveAttributionWindow(req.query.period);
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     const rows = await excludeInternalLeads(
       applyETTimestampWindow(db('leads'), 'first_contact_at', win.from, win.to)
     ).select(
@@ -1677,11 +1692,65 @@ router.get('/alerts', dashboardCache, async (req, res, next) => {
 // Generate + safely run a chart from a natural-language prompt (no persistence).
 // One repair round: if the first SQL fails to validate/run, the error is fed
 // back to the model for a corrected query.
+// Bounded image acceptance for the vision path: a few small reference images,
+// validated to known raster types and a sane size, passed to the model (Gemini
+// 3.5 Flash) — never persisted.
+const ALLOWED_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const MAX_IMAGES = 3;
+const MAX_IMAGE_B64 = 7 * 1024 * 1024; // ~5 MB decoded
+const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+function isValidBase64(s) {
+  return typeof s === 'string' && s.length > 0 && s.length % 4 === 0 && B64_RE.test(s);
+}
+function sanitizeChartImages(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    // Reject malformed/oversized data up front so a stale client or direct
+    // request can't burn a Gemini+Claude call on garbage before it fails.
+    .filter((im) => im && ALLOWED_IMAGE_MIME.has(im.mimeType)
+      && isValidBase64(im.data) && im.data.length <= MAX_IMAGE_B64)
+    .slice(0, MAX_IMAGES)
+    .map((im) => ({ data: im.data, mimeType: im.mimeType }));
+}
+
+// Validate the chart spec against the ACTUAL returned column names (not by
+// parsing the SQL — fragile and CTEs break it). Every x/y must be a real output
+// column or the chart renders empty/wrong. Returns the missing refs.
+function chartSpecFieldErrors(spec, fields) {
+  const set = new Set(fields || []);
+  return [spec.x, ...(spec.y || [])].filter((r) => r && !set.has(r));
+}
+// Last-resort: snap x/y to real columns so a rendered chart always matches the
+// data even if the model's last attempt still mislabels them.
+function coerceChartSpecToFields(spec, fields) {
+  if (!Array.isArray(fields) || !fields.length) return spec;
+  const set = new Set(fields);
+  const x = spec.x && set.has(spec.x) ? spec.x : fields[0];
+  let y = (spec.y || []).filter((c) => set.has(c));
+  if (!y.length) { const alt = fields.find((c) => c !== x); y = [alt || fields[0]]; }
+  return { ...spec, x, y };
+}
+
 router.post('/ai-chart/preview', requireAiChartsEnabled, aiChartLimiter, async (req, res) => {
   const prompt = String(req.body?.prompt || '').trim();
-  if (!prompt) return res.status(400).json({ error: 'A prompt is required.' });
+  const images = sanitizeChartImages(req.body?.images);
+  if (!prompt && !images.length) return res.status(400).json({ error: 'A prompt or an image is required.' });
 
-  let gen = await generateChartSpec(prompt);
+  // Two-step image path: the vision model extracts INTENT only (no schema, no
+  // SQL); FLAGSHIP then writes the SQL from that intent + the schema, exactly like
+  // the text path — so the SQL is always written by the strongest SQL model.
+  let intent = null;
+  if (images.length) {
+    intent = await extractImageIntent(images);
+    if (!intent && !prompt) {
+      return res.status(422).json({ error: "Couldn't read a chart from that image — describe the metric you want instead." });
+    }
+    if (intent && intent.confidence === 'low' && !prompt) {
+      return res.status(422).json({ error: `The image was ambiguous (read it as "${intent.metric || 'unclear'}"). Add a short description of the metric you want.` });
+    }
+  }
+
+  let gen = await generateChartSpec(prompt, { intent });
   if (!gen.ok) {
     return res.status(422).json({ error: gen.message || `Could not build a chart (${gen.reason}).` });
   }
@@ -1689,12 +1758,24 @@ router.post('/ai-chart/preview', requireAiChartsEnabled, aiChartLimiter, async (
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const { rows, fields } = await runReadOnlyAnalyticsQuery(gen.spec.sql);
-      return res.json({ spec: gen.spec, rows, fields });
+      // Spec↔result validation: if the chart references a column the query didn't
+      // output, repair once (feeding the mismatch back like a DB error).
+      const missing = chartSpecFieldErrors(gen.spec, fields);
+      if (missing.length && attempt === 0) {
+        logger.warn(`[admin-dashboard] ai-chart spec references non-output column(s): ${missing.join(', ')}`);
+        const repaired = await generateChartSpec(prompt, {
+          intent,
+          errorContext: `The chart references column(s) [${missing.join(', ')}] that your SELECT did not output (it returned: ${fields.join(', ')}). Alias the SELECT columns so x/y match, or fix x/y.`,
+        });
+        if (repaired.ok) { gen = repaired; continue; }
+      }
+      // Snap any residual mismatch to real columns so the chart always matches.
+      return res.json({ spec: coerceChartSpecToFields(gen.spec, fields), rows, fields });
     } catch (err) {
       const guard = err instanceof SqlGuardError;
       logger.warn(`[admin-dashboard] ai-chart preview attempt ${attempt + 1} failed (${guard ? 'guard' : 'exec'}): ${err.message}`);
       if (attempt === 0) {
-        const repaired = await generateChartSpec(prompt, { errorContext: err.message });
+        const repaired = await generateChartSpec(prompt, { intent, errorContext: err.message });
         if (repaired.ok) { gen = repaired; continue; }
       }
       return res.status(422).json({ error: 'The generated query was rejected or failed to run. Try rephrasing.' });

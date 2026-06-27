@@ -67,7 +67,11 @@ function validateAnalyticsSql(rawSql) {
 
   const lower = sql.toLowerCase();
 
-  if (!/^select\b/.test(lower)) throw new SqlGuardError('Only a single SELECT is allowed (no WITH/CTEs).');
+  // Allow a single SELECT, optionally led by a read-only WITH/CTE. Writes inside a
+  // CTE (e.g. WITH x AS (DELETE ...)) are still impossible: the READ ONLY
+  // transaction rejects them and the aichart_readonly role has no write
+  // privilege. The role — not this prefix check — is the security boundary.
+  if (!/^(select|with)\b/.test(lower)) throw new SqlGuardError('Only a single SELECT (optionally with a leading read-only WITH) is allowed.');
   if (sql.includes(';')) throw new SqlGuardError('Multiple statements are not allowed.');
   if (sql.includes('--') || sql.includes('/*') || sql.includes('*/')) {
     throw new SqlGuardError('SQL comments are not allowed.');
