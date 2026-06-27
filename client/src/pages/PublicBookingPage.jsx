@@ -170,7 +170,7 @@ export default function PublicBookingPage() {
   useEffect(() => {
     // `source` comes from the public query string — map to a known enum so a
     // crafted /book?source=<email-or-token> can't send raw PII as a property.
-    const KNOWN_SOURCES = new Set(['direct', 'marketing-site', 'estimate-accept', 'quote-wizard-onetime', 'newsletter-quiz']);
+    const KNOWN_SOURCES = new Set(['direct', 'marketing-site', 'estimate-accept', 'quote-wizard', 'quote-wizard-onetime', 'newsletter-quiz']);
     const safeSource = KNOWN_SOURCES.has(source) ? source : 'other';
     track(FUNNEL_EVENTS.BOOKING_VIEWED, { source: safeSource, service: service.id });
     // eslint-disable-next-line react-hooks/exhaustive-deps
