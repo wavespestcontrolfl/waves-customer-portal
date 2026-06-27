@@ -2397,6 +2397,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:10AM ET — Meta Custom Audiences sync (suppression + retargeting).
+  // Opt-in via META_AUDIENCES_CRON_ENABLED; no-ops unless configured + uploads
+  // allowed. Reuses the conversion path's PII hashing; ships dark.
+  // =========================================================================
+  cron.schedule('10 7 * * *', async () => {
+    if (process.env.META_AUDIENCES_CRON_ENABLED !== 'true') return;
+    logger.info('Running: Meta Custom Audiences sync');
+    try {
+      const MetaAudiences = require('./ads/meta-audiences');
+      const r = await MetaAudiences.syncAll({ validateOnly: false });
+      // syncAll catches per-audience errors and returns them in the result, so surface
+      // any at error level — otherwise an expired token / rejected upload fails silently.
+      for (const [audience, res] of Object.entries(r)) {
+        if (res && res.error) logger.error(`[meta-audiences cron] ${audience} failed: ${res.error}`);
+      }
+      logger.info(`[meta-audiences cron] ${JSON.stringify(r)}`);
+    } catch (err) {
+      logger.error(`Meta Custom Audiences sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6AM — Sync Google Search Console data (hub + all spoke domains)
   //
   // syncAllDomains walks NETWORK_DOMAINS in order (hub first) and catches
