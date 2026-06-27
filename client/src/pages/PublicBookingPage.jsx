@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import { Button } from '../components/Button';
+import Icon from '../components/Icon';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
@@ -467,7 +468,9 @@ export default function PublicBookingPage() {
                 background: COLORS.blueLight, border: `1px solid ${COLORS.wavesBlue}`,
                 borderRadius: 10, padding: '10px 12px', fontSize: 14, color: COLORS.blueDeeper,
               }}>
-                <span style={{ fontWeight: 700 }}>✓ Selected</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 700 }}>
+                  <Icon name="check" size={14} strokeWidth={3} /> Selected
+                </span>
                 <span>{selectedDayLabel ? `${selectedDayLabel} · ` : ''}{selectedSlot.start_label}</span>
               </div>
             )}
@@ -493,7 +496,7 @@ export default function PublicBookingPage() {
                     >
                       <div>
                         <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper }}>{day.fullDate}</div>
-                        <div style={{ fontSize: 13, color: COLORS.slate600, marginTop: 2 }}>
+                        <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 2 }}>
                           {count} {count === 1 ? 'opening' : 'openings'}
                         </div>
                       </div>
