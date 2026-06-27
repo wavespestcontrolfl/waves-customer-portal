@@ -9,16 +9,19 @@
  *
  * Meanwhile job-costing already computes REAL per-visit gross profit into the
  * job_costs ledger (labor from time entries, materials from inventory FIFO, drive
- * cost). This module rolls a customer's completed, costed visits up to their
- * acquisition funnel row, so the existing dashboards read true numbers. Revenue
- * is summed from job_costs — NOT service_records — because job_costs is only ever
- * written by calculateJobCost (never the synthetic seed migration 20260401000027)
- * and exists even for legacy rows the service_records write-through skips.
+ * cost). This module rolls a customer's COMPLETED costed visits up to their
+ * acquisition funnel row, so the existing dashboards read true numbers. Revenue is
+ * summed from job_costs joined to completed scheduled_services — NOT from
+ * service_records (which the seed migration 20260401000027 populated with random
+ * numbers) and NOT from raw job_costs (whose manual/equipment rows carry no
+ * scheduled_service_id and would double-count a backfilled visit).
  *
  * A lead is only credited with revenue from visits ON/AFTER its lead_date, so a
  * reactivated/existing customer's pre-lead history isn't attributed to a new ad
  * source. Recurring status uses the canonical membership classifier (tier-aware),
- * not monthly_rate alone.
+ * not monthly_rate alone. The read+write runs in a transaction with the primary
+ * row locked, so concurrent completions for one customer can't last-write-wins a
+ * stale partial total over a fresh one.
  *
  * NOTE (scope): this populates the LTV/revenue/profit (numerator) side only.
  * The LTV:CAC and ROAS *ratios* additionally need ad_cost (spend) on the rows,
@@ -44,6 +47,22 @@ const ADVANCEABLE_STAGES = new Set([
 
 function resolveDb(db) {
   return db || require('../models/db');
+}
+
+// node-postgres returns DATE columns as JS Date objects at UTC midnight, so
+// String(date) yields "Wed Apr 01 2026 ..." which sorts/compares by weekday text,
+// not chronologically. Normalize a DATE to a 'YYYY-MM-DD' string (Date or string
+// input). Mirrors the recovery in reschedule-sms.js.
+function toDateStr(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v.toISOString().split('T')[0];
+  return String(v).split('T')[0];
+}
+
+// Comparable key for a TIMESTAMP (created_at) tiebreak — full precision.
+function tsKey(v) {
+  if (!v) return '';
+  return v instanceof Date ? v.toISOString() : String(v);
 }
 
 function round2(n) {
@@ -77,11 +96,13 @@ function pickPrimaryAttributionRow(rows = []) {
   const advanceable = rows.filter((r) => ADVANCEABLE_STAGES.has(r.funnel_stage));
   if (!advanceable.length) return null;
   return advanceable.slice().sort((a, b) => {
-    const ad = String(a.lead_date || '');
-    const bd = String(b.lead_date || '');
+    // Normalize DATE → 'YYYY-MM-DD' so the compare is chronological, not by the
+    // weekday text of a stringified Date. Undated rows sort last.
+    const ad = toDateStr(a.lead_date) || '9999-99-99';
+    const bd = toDateStr(b.lead_date) || '9999-99-99';
     if (ad !== bd) return ad < bd ? -1 : 1;
-    const ac = String(a.created_at || '');
-    const bc = String(b.created_at || '');
+    const ac = tsKey(a.created_at);
+    const bc = tsKey(b.created_at);
     return ac < bc ? -1 : ac > bc ? 1 : 0;
   })[0];
 }
@@ -115,19 +136,30 @@ function buildAttributionPatch({ realized, isRecurring = false, monthlyRate, tar
   return patch;
 }
 
-// Realized revenue + gross profit from a customer's costed visits, summed from
-// the authoritative job_costs ledger (only ever written by calculateJobCost, so
-// never the synthetic seed data in service_records). `since` (the acquisition
-// lead_date) bounds it to visits ON/AFTER the lead, so pre-lead history isn't
-// credited to the ad source. Returns null only if job_costs is absent.
+// Realized revenue + gross profit from a customer's COMPLETED costed visits,
+// summed from the authoritative job_costs ledger (only ever written by
+// calculateJobCost, so never the synthetic seed data in service_records).
+//
+// Inner-joined to scheduled_services for the completed-status gate (job_costs has
+// no status column), which does double duty: it also drops manual/equipment
+// job_costs rows — those carry no scheduled_service_id (admin-equipment) — so a
+// visit that has BOTH a manual row and a backfill-created scheduled-service row
+// is counted once, not twice.
+//
+// `since` (the acquisition lead_date, normalized) bounds it to visits ON/AFTER
+// the lead, so pre-lead history isn't credited to the ad source. Returns null
+// only if job_costs (or its scheduled_service_id link) is absent.
 async function customerRealized(db, customerId, since = null) {
   const jcCols = await db('job_costs').columnInfo().catch(() => null);
-  if (!jcCols) return null;
-  const q = db('job_costs').where({ customer_id: customerId });
-  if (since && jcCols.service_date) q.where('service_date', '>=', since);
+  if (!jcCols || !jcCols.scheduled_service_id) return null;
+  const q = db('job_costs as jc')
+    .join('scheduled_services as ss', 'ss.id', 'jc.scheduled_service_id')
+    .where('jc.customer_id', customerId)
+    .where('ss.status', 'completed');
+  if (since && jcCols.service_date) q.where('jc.service_date', '>=', since);
   const agg = await q.first(
-    db.raw('COALESCE(SUM(revenue), 0) as revenue'),
-    db.raw('COALESCE(SUM(gross_profit), 0) as gross_profit'),
+    db.raw('COALESCE(SUM(jc.revenue), 0) as revenue'),
+    db.raw('COALESCE(SUM(jc.gross_profit), 0) as gross_profit'),
     db.raw('COUNT(*) as visits'),
   );
   return {
@@ -166,42 +198,54 @@ async function syncCustomerAdAttribution(customerId, db, { targetMarginPct } = {
 
   const primary = pickPrimaryAttributionRow(rows);
   if (!primary) return { updated: 0, reason: 'no_advanceable_rows' };
+  const since = toDateStr(primary.lead_date);
 
-  // Credit only revenue from visits on/after the acquisition lead.
-  const realized = await customerRealized(db, customerId, primary.lead_date);
-  if (!realized) return { updated: 0, reason: 'no_financials' };
-  if (realized.visits === 0) return { updated: 0, reason: 'no_completed_visits' };
+  // Serialize concurrent syncs for the same customer: two fire-and-forget
+  // completions costing at once could each read the aggregate then write, and a
+  // stale read could overwrite a fresh total (last-write-wins). Lock the primary
+  // row, then read the aggregate INSIDE the lock so the later writer always reads
+  // the newest job_costs state.
+  return db.transaction(async (trx) => {
+    await trx('ad_service_attribution').where({ id: primary.id }).forUpdate().first();
 
-  const customer = await db('customers').where({ id: customerId }).first();
-  const isRecurring = isMembershipCustomerRow(customer || {});
-  const tm = targetMarginPct != null ? targetMarginPct : await getTargetMarginPct(db);
-  const patch = buildAttributionPatch({
-    realized, isRecurring, monthlyRate: customer?.monthly_rate, targetMarginPct: tm, asaCols,
-  });
+    // Credit only revenue from visits on/after the acquisition lead.
+    const realized = await customerRealized(trx, customerId, since);
+    if (!realized) return { updated: 0, reason: 'no_financials' };
+    if (realized.visits === 0) return { updated: 0, reason: 'no_completed_visits' };
 
-  await db('ad_service_attribution').where({ id: primary.id }).update(patch);
+    const customer = await trx('customers').where({ id: customerId }).first();
+    const isRecurring = isMembershipCustomerRow(customer || {});
+    const tm = targetMarginPct != null ? targetMarginPct : await getTargetMarginPct(trx);
+    const patch = buildAttributionPatch({
+      realized, isRecurring, monthlyRate: customer?.monthly_rate, targetMarginPct: tm, asaCols,
+    });
 
-  // Clear money columns on the customer's OTHER rows so a row that was the primary
-  // on a prior run (before a later/backfilled earlier-dated row appeared) can't
-  // keep stale totals — the read side SUMs these across rows, so two credited rows
-  // = double-count. Only touches rows that actually carry a credit.
-  const otherIds = rows.filter((r) => r.id !== primary.id).map((r) => r.id);
-  if (otherIds.length) {
-    const clear = { completed_revenue: null, gross_profit: null, updated_at: new Date() };
-    if (asaCols.gross_margin_pct) clear.gross_margin_pct = null;
-    if (asaCols.projected_ltv_12mo) clear.projected_ltv_12mo = null;
-    const cleared = await db('ad_service_attribution')
-      .whereIn('id', otherIds)
-      .whereNotNull('completed_revenue')
-      .update(clear);
-    if (cleared) {
-      logger.warn(
-        `[ad-attribution-sync] customer ${customerId}: cleared stale totals from ${cleared} `
-        + `non-primary row(s); credited primary ${primary.id} only`,
-      );
+    await trx('ad_service_attribution').where({ id: primary.id }).update(patch);
+
+    // Clear AND demote the customer's OTHER rows so a row that was the primary on a
+    // prior run (before a later/backfilled earlier-dated row appeared) can't keep
+    // stale totals OR stay funnel_stage='completed'. The read side SUMs money and
+    // counts completions by stage across rows, so a lingering credited/completed
+    // row double-counts. Only touches rows that actually carry a credit; demoting
+    // to 'lead' reverses a prior sync (which only ever sets 'completed').
+    const otherIds = rows.filter((r) => r.id !== primary.id).map((r) => r.id);
+    if (otherIds.length) {
+      const clear = { funnel_stage: 'lead', completed_revenue: null, gross_profit: null, updated_at: new Date() };
+      if (asaCols.gross_margin_pct) clear.gross_margin_pct = null;
+      if (asaCols.projected_ltv_12mo) clear.projected_ltv_12mo = null;
+      const cleared = await trx('ad_service_attribution')
+        .whereIn('id', otherIds)
+        .whereNotNull('completed_revenue')
+        .update(clear);
+      if (cleared) {
+        logger.warn(
+          `[ad-attribution-sync] customer ${customerId}: cleared+demoted ${cleared} stale `
+          + `non-primary row(s); credited primary ${primary.id} only`,
+        );
+      }
     }
-  }
-  return { updated: 1, customerId, primaryId: primary.id, ...patch };
+    return { updated: 1, customerId, primaryId: primary.id, ...patch };
+  });
 }
 
 /**

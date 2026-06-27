@@ -37,6 +37,15 @@ describe('pickPrimaryAttributionRow', () => {
     expect(pickPrimaryAttributionRow(rows).id).toBe('a');
   });
 
+  test('sorts chronologically when lead_date is a JS Date (pg DATE), not by weekday text', () => {
+    // String(Date) would put "Wed Apr 01" before "Mon Feb..." etc.; must be chronological.
+    const rows = [
+      { id: 'apr', funnel_stage: 'lead', lead_date: new Date('2026-04-01') },
+      { id: 'feb', funnel_stage: 'lead', lead_date: new Date('2026-02-15') },
+    ];
+    expect(pickPrimaryAttributionRow(rows).id).toBe('feb');
+  });
+
   test('breaks lead_date ties by created_at', () => {
     const rows = [
       { id: 'late', funnel_stage: 'lead', lead_date: '2026-01-10', created_at: '2026-01-10T12:00' },
@@ -111,6 +120,7 @@ function makeDb(state) {
     where: (cond) => {
       const b = {
         update: (patch) => { captured.update = { where: cond, patch }; return Promise.resolve(1); },
+        forUpdate: () => ({ first: () => Promise.resolve(null) }), // row lock no-op
         then: (res, rej) => Promise.resolve(state.asaRows || []).then(res, rej),
       };
       return b;
@@ -122,11 +132,15 @@ function makeDb(state) {
       }),
     }),
   });
-  // job_costs: .columnInfo(); .where({customer_id}).where('service_date','>=',since).first(...)
+  // job_costs: .columnInfo(); .join(ss).where('jc.customer_id',id).where('ss.status','completed')
+  //   [.where('jc.service_date','>=',since)] .first(...)
   const jc = () => {
     const b = {
-      columnInfo: () => Promise.resolve(state.jcCols === undefined ? { service_date: 1, revenue: 1, gross_profit: 1 } : state.jcCols),
-      where: (a, op, val) => { if (a === 'service_date') captured.jcSince = val; return b; },
+      columnInfo: () => Promise.resolve(
+        state.jcCols === undefined ? { scheduled_service_id: 1, service_date: 1, revenue: 1, gross_profit: 1 } : state.jcCols,
+      ),
+      join: () => b,
+      where: (a, op, val) => { if (a === 'jc.service_date') captured.jcSince = val; return b; },
       first: () => Promise.resolve(state.agg || { revenue: 0, gross_profit: 0, visits: 0 }),
     };
     return b;
@@ -136,12 +150,13 @@ function makeDb(state) {
   const db = (table) => {
     const t = String(table);
     if (t === 'ad_service_attribution') return asa();
-    if (t === 'job_costs') return jc();
+    if (t.startsWith('job_costs')) return jc(); // matches 'job_costs' and 'job_costs as jc'
     if (t === 'customers') return cust();
     if (t === 'company_financials') return fin();
     throw new Error(`unexpected table ${t}`);
   };
   db.raw = (sql) => ({ sql });
+  db.transaction = (cb) => cb(db); // run the callback with this same fake as the trx
   return db;
 }
 
@@ -189,6 +204,7 @@ describe('syncCustomerAdAttribution', () => {
     expect(state.captured.update.where).toEqual({ id: 'new' });
     expect(state.captured.clear.ids).toEqual(['old']);
     expect(state.captured.clear.patch).toMatchObject({
+      funnel_stage: 'lead', // demoted so it stops counting as a completion
       completed_revenue: null, gross_profit: null, gross_margin_pct: null, projected_ltv_12mo: null,
     });
   });
