@@ -15,6 +15,8 @@
 // PUBLIC_POSTHOG_KEY gating) and until consent is present.
 // =============================================================================
 
+import { SERVICE_ESTIMATE_SLUGS } from '../serviceEstimateSlugs';
+
 const KEY = import.meta.env.VITE_POSTHOG_KEY || '';
 const HOST = import.meta.env.VITE_POSTHOG_HOST || 'https://us.i.posthog.com';
 const CONSENT_COOKIE = 'waves_cookies_accepted';
@@ -25,12 +27,15 @@ let booted = false;
  *  /tech, authed customer portal) is excluded. */
 export function isPublicFunnelPath(pathname) {
   const p = pathname || (typeof window !== 'undefined' ? window.location.pathname : '');
-  // BARE acquisition routes only. Tokenized customer pages (/pay/:token,
-  // /estimate/:token, /book/:token) render customer PII — name, address,
-  // invoice/estimate detail — so they must NEVER boot PostHog. Disallowing a
-  // trailing path segment excludes every token page while still matching
-  // /book?service=… (query string is not part of the pathname).
-  return /^\/(book|estimate)\/?$/.test(p);
+  // Bare acquisition routes (/book, /estimate). /book?service=… still matches —
+  // the query string is not part of the pathname.
+  if (/^\/(book|estimate)\/?$/.test(p)) return true;
+  // Public marketing quote pages: /estimate/<service-slug> renders the public
+  // QuotePage (see EstimatePublicGateway). A /estimate/<x> whose segment is NOT
+  // a known slug is a tokenized customer estimate (PII) and stays excluded — as
+  // do /pay/:token and /book/:token.
+  const m = p.match(/^\/estimate\/([^/]+)\/?$/);
+  return !!(m && SERVICE_ESTIMATE_SLUGS.has(decodeURIComponent(m[1]).toLowerCase()));
 }
 
 /** True once the visitor has accepted cookies (set here or on the marketing
@@ -72,10 +77,21 @@ export function bootPostHog() {
     // reach replay on these pages. Recording sample rate is set in the UI.
     session_recording: { maskAllInputs: true, maskTextSelector: '*' },
     cross_subdomain_cookie: true,
-    // Hard gate: drop EVERY event (incl. replay $snapshot) whenever the current
-    // route is not a funnel route. Protects against a client-side navigation
-    // into /admin, /tech, or the authed portal after consenting on /book.
-    before_send: (event) => (isPublicFunnelPath() ? event : null),
+    // Hard gate + PII scrub: drop EVERY event (incl. replay $snapshot) whenever
+    // the route isn't a funnel route (protects against a client-side nav into
+    // /admin or the authed portal after consenting on /book), AND strip the
+    // query string / hash from the URL + referrer so a lead id or token carried
+    // in /book?…&lead=… never reaches PostHog's automatic $pageview.
+    before_send: (event) => {
+      if (!isPublicFunnelPath()) return null;
+      const props = event && event.properties;
+      if (props) {
+        const strip = (u) => (typeof u === 'string' ? u.split('?')[0].split('#')[0] : u);
+        if (props.$current_url) props.$current_url = strip(props.$current_url);
+        if (props.$referrer) props.$referrer = strip(props.$referrer);
+      }
+      return event;
+    },
   });
   window.dispatchEvent(new Event('posthog-ready'));
 }

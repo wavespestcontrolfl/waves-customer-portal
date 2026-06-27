@@ -15,12 +15,16 @@ server-side env booleans. PostHog flags are reserved for *new* funnel A/B tests.
 | astro | `src/components/PostHogAnalytics.astro` (loader, consent-gated), `src/lib/analytics/events.ts` (taxonomy + `track()`), `src/components/CookieBanner.tsx` (now drops a `.wavespestcontrol.com` consent cookie), `BaseLayout.astro` (mounts loader), instrumentation in `EstimateForm/LeadForm/QuoteForm/SliderForm` |
 | portal | `client/src/lib/analytics/posthog.js` (loader, path-scoped), `client/src/lib/analytics/events.js` (taxonomy + `track()`), `client/src/components/analytics/PublicFunnelTracking.jsx` (self-gating consent + boot, mounted in `App.jsx`), instrumentation in `PublicBookingPage.jsx`, CSP opened in `server/index.js` |
 
-Scope guard: PostHog initializes **only** on the *bare* acquisition routes
-`/book` and `/estimate` (`isPublicFunnelPath`). It never loads on `/admin`,
-`/tech`, the authenticated customer portal, or any **tokenized** customer page
-(`/pay/:token`, `/estimate/:token`, `/book/:token`) — those render customer PII.
-A `before_send` hard-gate also drops any event/replay snapshot fired off-funnel
-after a client-side navigation, and the recorder is stopped on funnel exit.
+Scope guard: PostHog initializes **only** on the public acquisition routes —
+`/book`, `/estimate`, and the public service-slug quote pages `/estimate/<slug>`
+(slugs in `lib/serviceEstimateSlugs.js`, mirrored from
+`server/config/service-estimate-slugs.js`). It never loads on `/admin`, `/tech`,
+the authenticated customer portal, or any **tokenized** customer page
+(`/pay/:token`, a customer `/estimate/:token`, `/book/:token`) — those render
+customer PII. A `before_send` hard-gate drops any event/replay snapshot fired
+off-funnel after a client-side navigation **and** strips the query/hash from the
+URL + referrer so a lead id never lands in an automatic pageview; the recorder
+is also stopped on funnel exit.
 
 Replay masks **all** input values AND **all** rendered text
 (`maskTextSelector: '*'`) on **both** the marketing site and the portal funnel,

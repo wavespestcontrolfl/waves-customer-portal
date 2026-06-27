@@ -69,6 +69,9 @@ export default function PublicBookingPage() {
   const [browseLoading, setBrowseLoading] = useState(false);
   const [pickedDate, setPickedDate] = useState(null);
   const latestPickedDateRef = useRef(null);
+  // Guards booking_availability_loaded against double-firing when a manually
+  // typed address is geocoded server-side (setCoords re-runs loadAvailability).
+  const availTrackedForRef = useRef(null);
 
   const updateAddress = useCallback((updater) => {
     setAddress((current) => {
@@ -109,9 +112,16 @@ export default function PublicBookingPage() {
       if (!res.ok) throw new Error(data.error || 'Could not load availability');
       setAvailability(data.days || []);
       setCuratedSlots(data.slots || []);
-      track(FUNNEL_EVENTS.BOOKING_AVAILABILITY_LOADED, {
-        has_slots: (data.slots?.length || 0) > 0 || (data.days?.length || 0) > 0,
-      });
+      // Fire once per resolved address: loadAvailability re-runs when the server
+      // returns coords for a manually typed address (setCoords → new callback
+      // identity → step-2 effect re-fetches), which would otherwise double-count
+      // this step for manual-entry users.
+      if (availTrackedForRef.current !== fullAddress) {
+        availTrackedForRef.current = fullAddress;
+        track(FUNNEL_EVENTS.BOOKING_AVAILABILITY_LOADED, {
+          has_slots: (data.slots?.length || 0) > 0 || (data.days?.length || 0) > 0,
+        });
+      }
       if (data.lat && data.lng) {
         setCoords(current => (
           current?.lat === data.lat && current?.lng === data.lng

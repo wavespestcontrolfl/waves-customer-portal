@@ -82,18 +82,7 @@ function FleetRedirect() {
   return <Navigate to={`/admin/equipment?${params.toString()}`} replace />;
 }
 
-const SERVICE_ESTIMATE_SLUGS = new Set([
-  'mosquito',
-  'termite',
-  'lawn',
-  'flea',
-  'cockroach',
-  'bed-bug',
-  'dethatching',
-  'dehatching',
-  'top-dressing',
-  'overseeding',
-]);
+import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
 import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
 import AdminLoginPage from './pages/AdminLoginPage';
