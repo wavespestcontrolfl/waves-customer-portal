@@ -82,18 +82,7 @@ function FleetRedirect() {
   return <Navigate to={`/admin/equipment?${params.toString()}`} replace />;
 }
 
-const SERVICE_ESTIMATE_SLUGS = new Set([
-  'mosquito',
-  'termite',
-  'lawn',
-  'flea',
-  'cockroach',
-  'bed-bug',
-  'dethatching',
-  'dehatching',
-  'top-dressing',
-  'overseeding',
-]);
+import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
 import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
 import AdminLoginPage from './pages/AdminLoginPage';
@@ -101,6 +90,7 @@ import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
 import BiometricGate from './components/BiometricGate';
+import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
 import { isNativeApp } from './native/platform';
 import AdminReviewsPage from './pages/admin/ReviewsPage';
 import AdminDispatchPage from './pages/admin/AdminDispatchPage';
@@ -281,6 +271,7 @@ export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <PublicFunnelTracking />
         <InstallPrompt />
         <BiometricGate>
         <Routes>

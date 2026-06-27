@@ -6,6 +6,7 @@ import Icon from '../components/Icon';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
+import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -70,6 +71,9 @@ export default function PublicBookingPage() {
   // Day the customer has drilled into to see its 1-hour openings (null = day list)
   const [openDay, setOpenDay] = useState(null);
   const latestPickedDateRef = useRef(null);
+  // Guards booking_availability_loaded against double-firing when a manually
+  // typed address is geocoded server-side (setCoords re-runs loadAvailability).
+  const availTrackedForRef = useRef(null);
 
   const updateAddress = useCallback((updater) => {
     setAddress((current) => {
@@ -112,6 +116,16 @@ export default function PublicBookingPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not load availability');
       setAvailability(data.days || []);
+      // Fire once per resolved address: loadAvailability re-runs when the server
+      // returns coords for a manually typed address (setCoords → new callback
+      // identity → step-2 effect re-fetches), which would otherwise double-count
+      // this step for manual-entry users.
+      if (availTrackedForRef.current !== fullAddress) {
+        availTrackedForRef.current = fullAddress;
+        track(FUNNEL_EVENTS.BOOKING_AVAILABILITY_LOADED, {
+          has_slots: (data.slots?.length || 0) > 0 || (data.days?.length || 0) > 0,
+        });
+      }
       if (data.lat && data.lng) {
         setCoords(current => (
           current?.lat === data.lat && current?.lng === data.lng
@@ -154,6 +168,16 @@ export default function PublicBookingPage() {
       if (data.customer) applyCustomer(data.customer);
     } catch { /* best-effort */ }
   }, [applyCustomer]);
+
+  // Top of the booking funnel — fires once on mount.
+  useEffect(() => {
+    // `source` comes from the public query string — map to a known enum so a
+    // crafted /book?source=<email-or-token> can't send raw PII as a property.
+    const KNOWN_SOURCES = new Set(['direct', 'marketing-site', 'estimate-accept', 'quote-wizard', 'quote-wizard-onetime', 'newsletter-quiz']);
+    const safeSource = KNOWN_SOURCES.has(source) ? source : 'other';
+    track(FUNNEL_EVENTS.BOOKING_VIEWED, { source: safeSource, service: service.id });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (step === 2) loadAvailability();
@@ -221,6 +245,11 @@ export default function PublicBookingPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Booking failed');
       setConfCode(data.confirmationCode || 'WPC-????');
+      track(FUNNEL_EVENTS.BOOKING_CONFIRMED, {
+        service: service.id,
+        is_existing_customer: !!existingCustomerId,
+        recurring: !!recurringPattern,
+      });
       setStep(4);
     } catch (err) {
       setError(err.message);
@@ -246,7 +275,7 @@ export default function PublicBookingPage() {
   const browseMin = toYmd(new Date());
   const browseMax = (() => { const d = new Date(); d.setDate(d.getDate() + 90); return toYmd(d); })();
 
-  const selectSlot = (date, slot) => { setSelectedDate(date); setSelectedSlot({ ...slot, date }); };
+  const selectSlot = (date, slot) => { setSelectedDate(date); setSelectedSlot({ ...slot, date }); track(FUNNEL_EVENTS.BOOKING_SLOT_SELECTED, { date }); };
   const isSlotSelected = (date, slot) => selectedDate === date && selectedSlot?.start_time === slot.start_time;
 
   const slotSearchBody = () => ({
@@ -268,6 +297,7 @@ export default function PublicBookingPage() {
     setSelectedDate(null);
     setSelectedSlot(null);
     setSearchResult({ summary: data.summary, nearby: data.nearby, days: data.days || [] });
+    track(FUNNEL_EVENTS.BOOKING_AI_SEARCH_USED);
     return { summary: data.summary };
   };
 
@@ -414,7 +444,7 @@ export default function PublicBookingPage() {
             <div style={{ display: 'flex', gap: 10 }}>
               <Button
                 variant="primary"
-                onClick={() => setStep(2)}
+                onClick={() => { track(FUNNEL_EVENTS.BOOKING_SERVICE_SELECTED, { service: service.id }); setStep(2); }}
                 disabled={!address.line1}
                 style={{ width: '100%' }}
               >
@@ -625,7 +655,7 @@ export default function PublicBookingPage() {
               <Button variant="tertiary" onClick={() => setStep(1)}>← Back</Button>
               <Button
                 variant="primary"
-                onClick={() => setStep(3)}
+                onClick={() => { track(FUNNEL_EVENTS.BOOKING_CONTACT_STARTED, { is_existing_customer: !!existingCustomerId }); setStep(3); }}
                 disabled={continueDisabled}
                 style={{ flex: 1 }}
               >
@@ -689,10 +719,10 @@ export default function PublicBookingPage() {
                 <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 5 }}>
                   Customer found
                 </div>
-                <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper }}>
+                <div className="ph-mask" style={{ fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper }}>
                   {[contact.firstName, contact.lastName].filter(Boolean).join(' ') || 'Customer on file'}
                 </div>
-                <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 4, lineHeight: 1.35 }}>
+                <div className="ph-mask" style={{ fontSize: 14, color: COLORS.slate600, marginTop: 4, lineHeight: 1.35 }}>
                   {address.line1}
                 </div>
               </div>

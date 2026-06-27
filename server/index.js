@@ -106,13 +106,18 @@ app.set('trust proxy', 1);
 // so it gets permissive frame-ancestors via a scoped middleware.
 const cspDirectives = {
   defaultSrc: ["'self'"],
-  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com"],
+  // PostHog (*.posthog.com) is loaded only on the public funnel pages
+  // (/book, /estimate, /pay) and only after consent — see the client's
+  // PublicFunnelTracking. Listing the host here is harmless when no key is set.
+  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com"],
   styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
   fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
   imgSrc: ["'self'", "https:", "data:", "blob:"],
-  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com"],
+  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com"],
   frameSrc: ["'self'", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com"],
   mediaSrc: ["'self'", "https:"],
+  // PostHog session replay records via a web worker created from a blob URL.
+  workerSrc: ["'self'", "blob:"],
 };
 
 const strictHelmet = helmet({ contentSecurityPolicy: { directives: cspDirectives } });
