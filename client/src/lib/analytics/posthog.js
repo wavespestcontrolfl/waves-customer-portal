@@ -128,7 +128,9 @@ export function bootPostHog() {
       // PostHog auto-copies UTM / click-id params onto events + person props, so
       // a crafted /book?utm_campaign=<email> would carry PII. Drop campaign
       // values that look like PII (email/whitespace/over-long); keep clean ones.
-      const CAMPAIGN_RE = /(^|_)(utm_[a-z]+|gclid|gad_source|gclsrc|dclid|gbraid|wbraid|fbclid|msclkid|twclid|li_fat_id|igshid|ttclid)$/i;
+      // Match the bare key, the $initial_/$session_entry_ person props, AND
+      // PostHog's $-prefixed current-event campaign props ($utm_campaign, $gclid).
+      const CAMPAIGN_RE = /(^|_|\$)(utm_[a-z]+|gclid|gad_source|gclsrc|dclid|gbraid|wbraid|fbclid|msclkid|twclid|li_fat_id|igshid|ttclid)$/i;
       // Unsafe = looks like PII: email, %40, phone-shaped (>=7 digits), or
       // over-long. Whitespace alone is fine ("Spring Promo" / "Google Ads").
       const unsafe = (v) => typeof v === 'string' && (v.length > 64 || /@|%40/i.test(v) || v.replace(/\D/g, '').length >= 7);
