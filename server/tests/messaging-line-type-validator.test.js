@@ -20,13 +20,16 @@ const { isEnabled } = require('../config/feature-gates');
 const { recordNonMobileSuppression } = require('../services/messaging/validators/suppression');
 const { checkLineType } = require('../services/messaging/validators/line-type');
 
-function wireDb(cacheRow) {
+function wireDb(cacheRow, { readThrows = false } = {}) {
   const insertChain = {};
   insertChain.onConflict = jest.fn(() => insertChain);
   insertChain.merge = jest.fn(async () => [1]);
   const q = {};
   q.where = jest.fn(() => q);
-  q.first = jest.fn(async () => cacheRow);
+  q.first = jest.fn(async () => {
+    if (readThrows) throw new Error('phone_line_types read failed');
+    return cacheRow;
+  });
   q.insert = jest.fn(() => insertChain);
   db.mockImplementation(() => q);
   return { q, insertChain };
@@ -126,5 +129,13 @@ describe('checkLineType — cache miss → one-time lookup', () => {
     const res = await checkLineType(SMS);
     expect(res).toEqual({ ok: true });
     expect(recordNonMobileSuppression).not.toHaveBeenCalled();
+  });
+
+  test('fails OPEN without a paid lookup when the cache READ errors (table missing/unreadable)', async () => {
+    const { q } = wireDb(undefined, { readThrows: true });
+    const res = await checkLineType(SMS);
+    expect(res).toEqual({ ok: true });
+    expect(mockFetch).not.toHaveBeenCalled(); // never pay for a lookup we can't cache
+    expect(q.insert).not.toHaveBeenCalled();
   });
 });

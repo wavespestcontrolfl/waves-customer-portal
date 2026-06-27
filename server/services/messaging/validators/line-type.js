@@ -36,16 +36,20 @@ function maskPhone(p) {
   return d ? `***${d.slice(-4)}` : 'unknown';
 }
 
+// Returns a discriminated result: { state: 'hit', lineType } | { state: 'miss' }
+// | { state: 'error' }. A read ERROR must NOT be treated as a miss — proceeding
+// to a paid Lookup we then can't cache would make EVERY send incur a lookup if
+// the table is missing/unreadable (e.g. migration not yet landed, or access
+// breaks after the gate is enabled).
 async function readCachedLineType(phone) {
   try {
     const row = await db('phone_line_types').where({ phone }).first('line_type');
-    return row ? row.line_type : null;
+    return row ? { state: 'hit', lineType: row.line_type } : { state: 'miss' };
   } catch (err) {
-    // Migration not yet applied → behave as a cache miss (and the insert below
-    // will also no-op-fail safely until it lands).
-    if (err && /relation .* does not exist|phone_line_types/i.test(err.message)) return null;
-    logger.warn(`[line-type] cache read failed: ${err.message}`);
-    return null;
+    if (!/relation .* does not exist|phone_line_types/i.test(err.message)) {
+      logger.warn(`[line-type] cache read failed: ${err.message}`);
+    }
+    return { state: 'error' };
   }
 }
 
@@ -93,13 +97,15 @@ async function checkLineType(input, _policy, _contactState) {
   const phone = input.to;
   if (!phone) return { ok: true };
 
-  // Cache hit — no lookup, no cost.
+  // Cache read. An error fails OPEN without a paid lookup — we couldn't cache the
+  // result anyway, so looking up would just burn money on every send.
   const cached = await readCachedLineType(phone);
-  if (cached) {
-    return NON_SMS_LINE_TYPES.has(cached) ? blockResult() : { ok: true };
+  if (cached.state === 'error') return { ok: true };
+  if (cached.state === 'hit') {
+    return NON_SMS_LINE_TYPES.has(cached.lineType) ? blockResult() : { ok: true };
   }
 
-  // Cache miss — the one-time Twilio Lookup.
+  // Confirmed cache miss — the one-time Twilio Lookup.
   const lineType = await lookupLineType(phone);
   if (!lineType) return { ok: true }; // fail open — never block on a lookup failure
 
