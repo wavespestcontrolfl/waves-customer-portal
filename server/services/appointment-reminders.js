@@ -14,6 +14,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
@@ -420,8 +421,27 @@ async function isLandline(customerId, phone) {
     const checkedDigits = String(phone || '').replace(/\D/g, '').slice(-10);
     const isPrimaryPhone = primaryDigits && checkedDigits && primaryDigits === checkedDigits;
 
-    // customer.line_type is a customer-primary-phone cache. Service-contact
-    // phones must not poison or inherit it.
+    // Shared phone-keyed cache first — the SAME phone_line_types cache the send
+    // pipeline's check_line_type validator uses. Covers primary AND service-
+    // contact numbers, so a number is looked up at most once across both paths
+    // (a 'hit' here means no second Twilio Lookup, even for service contacts that
+    // the legacy customers.line_type primary cache never covered).
+    const cached = await readCachedLineType(phone);
+    if (cached.state === 'hit') {
+      if (cached.lineType === 'landline') {
+        logger.info(`[appt-remind] Skipping SMS — cached landline for ${maskPhone(phone)}`);
+        return true;
+      }
+      return false;
+    }
+
+    // Legacy customers.line_type primary-phone cache (other readers still use it).
+    // Deliberately NOT promoted into the shared phone_line_types cache: the admin
+    // phone-edit path changes customers.phone WITHOUT clearing line_type, so this
+    // value can describe a PREVIOUS number — seeding it could brand a newly-entered
+    // mobile (and anyone sharing it) as a landline and block it globally once the
+    // gate is on. Only fresh Twilio lookups (below) seed the shared cache, which
+    // also re-validates a stale legacy entry on the next send.
     if (isPrimaryPhone && customer.line_type) {
       if (customer.line_type === 'landline') {
         logger.info(`[appt-remind] Skipping SMS — cached landline for customer ${customerId}`);
@@ -440,8 +460,9 @@ async function isLandline(customerId, phone) {
       const lookup = await client.lookups.v2.phoneNumbers(phone).fetch({ fields: 'line_type_intelligence' });
       const lineType = lookup.lineTypeIntelligence?.type || 'unknown';
 
-      // Cache only for the customer's primary phone. Service-contact numbers
-      // can differ per property and need a phone-specific cache before reuse.
+      // Seed the shared phone-keyed cache (all phones) so neither path looks this
+      // number up again, then keep the legacy primary-phone cache for its readers.
+      await cacheLineType(phone, lineType);
       if (isPrimaryPhone) {
         await db('customers').where({ id: customerId }).update({ line_type: lineType });
       }
@@ -1658,5 +1679,8 @@ AppointmentReminders._test = {
   sendAppointmentNoticeEmail,
   getReminderPrefs,
 };
+
+// Exposed for unit tests (e.g. the shared line-type cache consolidation).
+AppointmentReminders._internals = { isLandline };
 
 module.exports = AppointmentReminders;

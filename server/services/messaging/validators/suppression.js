@@ -182,6 +182,19 @@ async function clearSuppression({ phone, source }) {
         cleared_at: db.fn.now(),
         source: source ? `cleared_by:${source}` : null,
       });
+    // Also drop any cached line-type so a START/admin clear fully un-blocks the
+    // number. The proactive line-type guard (phone_line_types, gated) blocks
+    // cached landlines on its own authority, independent of this suppression row;
+    // without clearing it a false positive or a number ported landline->mobile
+    // would stay blocked forever despite the clear. Next send re-evaluates fresh.
+    // Best-effort: the table may not exist yet, and a cache miss is harmless.
+    try {
+      await db('phone_line_types').where({ phone }).del();
+    } catch (cacheErr) {
+      if (!/relation .* does not exist|phone_line_types/i.test(cacheErr.message)) {
+        logger.warn(`[messaging:suppression] line-type cache clear failed: ${cacheErr.message}`);
+      }
+    }
     return { ok: true };
   } catch (err) {
     logger.warn(`[messaging:suppression] clearSuppression failed: ${err.message}`);
