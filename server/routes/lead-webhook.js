@@ -901,6 +901,9 @@ function buildLeadWebhookIntake(body = {}) {
     attribution.utmContent,
     attribution.fbclid,
     attribution.fbc,
+    attribution.gclid,
+    attribution.wbraid,
+    attribution.gbraid,
   );
 
   return {
@@ -1073,7 +1076,7 @@ function cleanPhone(value) {
   return String(value).replace(/\D/g, '').replace(/^1(\d{10})$/, '$1');
 }
 
-function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc) {
+function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc, gclid, wbraid, gbraid) {
   const url = landingUrl || pageUrl || '';
   const source = String(utmSource || '').trim().toLowerCase();
   const medium = String(utmMedium || '').trim().toLowerCase();
@@ -1092,6 +1095,14 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
   if (utmSource === 'google' && utmMedium === 'cpc') return { source: 'google_ads', detail: `Campaign: ${utmCampaign}`, channel: 'paid', area: utmContent };
   if (utmSource === 'facebook' || utmSource === 'fb') return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: utmMedium === 'cpc' ? 'paid' : 'organic' };
   if (utmSource === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
+  // Google auto-tagging (the default) appends gclid — or wbraid/gbraid for
+  // iOS/web-to-app — to ad-click landing URLs WITHOUT utm_source/medium, so an
+  // auto-tagged paid click would otherwise fall through to the organic/referrer
+  // default and never count as Google Ads. The Google analog of the Meta fbclid
+  // branch below. (Explicit utm_source=google&cpc above still wins, with richer detail.)
+  if (gclid || wbraid || gbraid) {
+    return { source: 'google_ads', detail: utmCampaign ? `Campaign: ${utmCampaign}` : 'Google Ads click (gclid)', channel: 'paid', area: utmContent };
+  }
   // Meta auto-appends fbclid to ad-click landing URLs even without explicit UTMs;
   // _fbc is its cookie form (survives navigation when the URL fbclid is lost). A
   // lead carrying either, with no clearer source above, is a paid Meta click.
