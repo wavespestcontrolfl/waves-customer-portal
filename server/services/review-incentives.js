@@ -685,6 +685,23 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   const technician = await conn('technicians').where({ id: technicianId }).first();
   if (!technician) throw operationalError('Technician not found', 404, 'technician_not_found');
 
+  // If a PAID payout already binds this review, payroll is closed and the
+  // payout can't move — so DON'T relink google_reviews.customer_id either, or
+  // the review would point at a new customer while the bonus stays on the old
+  // one. Reject the correction up front, before any mutation.
+  const priorPayout = await conn('review_incentive_payouts').where({ google_review_id: review.id }).first();
+  if (priorPayout && priorPayout.status === 'paid') {
+    return {
+      payout: priorPayout,
+      created: false,
+      reattributed: false,
+      alreadyPaid: true,
+      reviewId: review.id,
+      customer: serializeCustomer(customer),
+      technician: { id: technician.id, name: technician.name || 'Technician' },
+    };
+  }
+
   await conn('google_reviews')
     .where({ id: review.id })
     .update({
@@ -692,7 +709,18 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       updated_at: new Date(),
     });
 
-  const result = await insertPayout({
+  const attributionSnapshot = {
+    method: 'manual_admin_match',
+    adminId: attrs.adminId || null,
+    customerId,
+    technicianId,
+    serviceRecordId,
+    locationId: review.location_id || null,
+    starRating: review.star_rating || null,
+    googleReviewId: review.google_review_id || null,
+  };
+
+  let result = await insertPayout({
     technicianId,
     customerId,
     serviceRecordId,
@@ -702,17 +730,44 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     amountCents: policy.amountCents,
     currency: policy.currency,
     earnedAt: review.review_created_at || review.created_at || new Date(),
-    attributionSnapshot: {
-      method: 'manual_admin_match',
-      adminId: attrs.adminId || null,
-      customerId,
-      technicianId,
-      serviceRecordId,
-      locationId: review.location_id || null,
-      starRating: review.star_rating || null,
-      googleReviewId: review.google_review_id || null,
-    },
+    attributionSnapshot,
   }, conn);
+
+  // Re-attribution: a payout already existed for this review (the partial
+  // unique index on google_review_id dedups it), so insertPayout no-ops with
+  // reason:'duplicate'. Previously the endpoint reported success while leaving
+  // the WRONG technician on the bonus — there was no way to correct a
+  // mis-attributed payout from the UI. If the existing row is still unpaid and
+  // any of the attribution fields changed, update it in place and flag the
+  // response so the caller can tell a correction from a no-op. Paid rows are
+  // immutable (payroll already closed) — surface that explicitly.
+  if (result && result.created === false && result.payout) {
+    const existing = result.payout;
+    if (existing.status === 'paid') {
+      result = { ...result, reattributed: false, alreadyPaid: true };
+    } else {
+      const changed =
+        existing.technician_id !== technicianId ||
+        existing.customer_id !== customerId ||
+        (existing.service_record_id || null) !== (serviceRecordId || null);
+      if (changed) {
+        const [updated] = await conn('review_incentive_payouts')
+          .where({ id: existing.id })
+          .whereNot('status', 'paid')
+          .update({
+            technician_id: technicianId,
+            customer_id: customerId,
+            service_record_id: serviceRecordId || null,
+            attribution_snapshot: JSON.stringify({ ...attributionSnapshot, reattributedFrom: existing.technician_id || null }),
+            updated_at: new Date(),
+          })
+          .returning('*');
+        result = { payout: updated || existing, created: false, reattributed: !!updated, reason: 'reattributed' };
+      } else {
+        result = { ...result, reattributed: false };
+      }
+    }
+  }
 
   try {
     await conn('activity_log').insert({
@@ -814,16 +869,16 @@ async function getDashboard(options = {}) {
       .where('star_rating', '>=', minRating)
       .count('* as count')
       .first();
-    const unattributedRow = await conn('google_reviews')
-      .where('reviewer_name', '!=', '_stats')
-      .where('review_created_at', '>=', effectivePeriodStart.toISOString())
-      .where('review_created_at', '<=', periodEnd.toISOString())
-      .where('star_rating', '>=', minRating)
-      .whereNull('customer_id')
-      .count('* as count')
-      .first();
     confirmedGoogleReviews = toInt(confirmedRow?.count, 0);
-    unattributedGoogleReviews = toInt(unattributedRow?.count, 0);
+    // "Needs attribution" must match the attribution QUEUE, which surfaces any
+    // in-window confirmed review WITHOUT a payout — whether it's missing a
+    // customer or has a customer but no resolvable technician. The old query
+    // counted only missing-customer, under-reporting the queue. Every confirmed
+    // review that isn't yet a payout still needs attention, so subtract the
+    // attributed reviews (each payout = one google review) from the confirmed
+    // total. Derived from `payouts` (already in window) — no extra query, and
+    // it tracks the queue rather than just the null-customer subset.
+    unattributedGoogleReviews = Math.max(0, confirmedGoogleReviews - payouts.length);
   } catch {
     confirmedGoogleReviews = 0;
     unattributedGoogleReviews = 0;
@@ -891,7 +946,17 @@ function toCsv(rows = []) {
     'Pay Period Start',
     'Pay Period End',
   ];
-  const escape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  // Neutralize spreadsheet formula injection: a cell beginning with = + - @
+  // (or a leading tab/CR that Excel trims back to one of those) executes as a
+  // formula when the payroll CSV is opened in Excel/Sheets. Customer and
+  // technician names are user-influenced, so prefix risky cells with a single
+  // quote. Wrapped in the quoted CSV field, the leading ' is inert on re-parse.
+  const neutralizeFormula = (str) =>
+    /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+  const escape = (value) => {
+    const str = neutralizeFormula(String(value ?? ''));
+    return `"${str.replace(/"/g, '""')}"`;
+  };
   const body = rows.map(row => [
     row.technicianName,
     row.customerName,

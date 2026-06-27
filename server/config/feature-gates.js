@@ -54,6 +54,14 @@ const gates = {
   // en-route SMS is unaffected. Still subject to twilioSms + per-customer pref.
   techArrivedSms: process.env.GATE_TECH_ARRIVED_SMS === 'true',
 
+  // Multi-touch review-request cadence (Review Outreach tab). When on, the
+  // processReviewSequences cron advances operator-started Day 0/3/7 SMS+email
+  // sequences. Customer-facing auto-send → explicit opt-in in EVERY env (off in
+  // dev/preview too) so a preview env with real Twilio/SendGrid creds can't
+  // text/email real customers. Still subject to twilioSms + per-customer pref.
+  // One-off manual sends from the same tab are NOT gated by this.
+  reviewSequences: process.env.GATE_REVIEW_SEQUENCES === 'true',
+
   // Twilio — handles real inbound voice calls
   twilioVoice: isProd ? process.env.GATE_TWILIO_VOICE === 'true' : true,
 

@@ -11,6 +11,10 @@ const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
 const { publicPortalUrl } = require("../utils/portal-url");
+const OUTREACH = require("./review-outreach-templates");
+const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
+const { toE164 } = require("../utils/phone");
+const { runExclusive } = require("../utils/cron-lock");
 
 // GBP review links per location
 const REVIEW_LINKS = {
@@ -314,6 +318,12 @@ const ReviewService = {
       .where({ id: requestId })
       .first();
     if (!request || request.sms_sent_at) return;
+    // Don't send a row that was taken out of the pending queue after this id was
+    // batched by processScheduled — e.g. a cadence start that superseded this
+    // queued ask (sets status='suppressed'), or a failed/deferred row. Re-reading
+    // status here closes the race so the customer doesn't get the old ask AND the
+    // cadence's Day-0 touch.
+    if (["suppressed", "failed", "deferred"].includes(request.status)) return;
 
     const customer = await db("customers")
       .where({ id: request.customer_id })
@@ -356,18 +366,58 @@ const ReviewService = {
     });
     const techName = request.tech_name || "Our team";
 
-    // Body sourced from sms_templates.review_request. If the row is
-    // missing/disabled, requeue instead of falling back to inline copy.
+    // Body source priority so a deferred/retried send keeps the operator's
+    // approved copy instead of reverting:
+    //   1. custom_body — the operator's edited message (persisted on the row).
+    //   2. template_key — the chosen outreach template (manual or cadence touch).
+    //   3. canonical sms_templates.review_request.
+    // If none resolves, requeue.
     let body = null;
-    try {
-      const tpl = require("../routes/admin-sms-templates");
-      body = await tpl.getTemplate("review_request", {
-        first_name: contact.name || customer.first_name || "",
-        review_url: reviewUrl,
-        tech_name: techName,
-      });
-    } catch {
-      /* template lookup failed → null */
+    const outreachTpl = request.template_key
+      ? OUTREACH.getOutreachTemplate(request.template_key)
+      : null;
+    if (request.custom_body) {
+      // Whether to guarantee the /rate link is based on the STORED template, not
+      // "custom body ⇒ ask" — otherwise an edited no-link check-in (e.g.
+      // resolution_check / satisfaction_confirm) would retry as a review ask
+      // with a Google link appended. A pure custom body with no known template
+      // is treated as an ask. For a no-link template, review_url is forced empty
+      // so any {review_url} the operator left in the edited copy renders to
+      // nothing (the cap was skipped for this template).
+      const customIsNoLink = !!(outreachTpl && !outreachTpl.body.includes("{review_url}"));
+      const customRequiresLink = !customIsNoLink && (outreachTpl ? outreachTpl.body.includes("{review_url}") : true);
+      body = OUTREACH.renderOutreachBody(
+        request.custom_body,
+        {
+          first: contact.name || customer.first_name || "",
+          tech: techName,
+          service_type: request.service_type || "service",
+          review_url: customIsNoLink ? "" : reviewUrl,
+        },
+        { requireLink: customRequiresLink },
+      );
+    } else if (outreachTpl) {
+      body = OUTREACH.renderOutreachBody(
+        outreachTpl.body,
+        {
+          first: contact.name || customer.first_name || "",
+          tech: techName,
+          service_type: request.service_type || "service",
+          review_url: reviewUrl,
+        },
+        { requireLink: outreachTpl.body.includes("{review_url}") },
+      );
+    } else {
+      try {
+        const tpl = require("../routes/admin-sms-templates");
+        body = await tpl.getTemplate("review_request", {
+          first_name: contact.name || customer.first_name || "",
+          review_url: reviewUrl,
+          tech_name: techName,
+        });
+      } catch {
+        /* template lookup failed → null */
+      }
     }
     if (!body) {
       const retryAt = await retryReviewRequestAfterTemplateMiss(requestId);
@@ -864,6 +914,12 @@ const ReviewService = {
       .whereNotNull("scheduled_for")
       .where("scheduled_for", "<=", new Date())
       .whereNull("sms_sent_at")
+      // Never SMS-send an email-channel cadence touch. Email touches are
+      // re-driven by processReviewSequences via review_sequences.next_run_at,
+      // not this SMS scheduler.
+      .where(function () {
+        this.where("channel", "sms").orWhereNull("channel");
+      })
       .whereNotExists(function () {
         this.select(1)
           .from("customers")
@@ -874,7 +930,13 @@ const ReviewService = {
 
     let sent = 0;
     for (const request of pending) {
-      await this.sendSMS(request.id);
+      // Serialize each send under the SAME per-customer lock the manual send and
+      // cadence-start paths take. Without this, a cadence start can suppress this
+      // queued row + fire its Day-0 touch in the window between this row being
+      // batched and sendSMS reading its status — delivering BOTH. The lock is
+      // non-blocking: if a manual/cadence send for this customer holds it, we
+      // skip the row this tick (it's picked up next tick, or was superseded).
+      await runExclusive(`review-send:${request.customer_id}`, () => this.sendSMS(request.id));
       sent++;
     }
     if (sent > 0)
@@ -1127,6 +1189,907 @@ const ReviewService = {
       );
     }
     return { sent, suppressed, internalFollowups };
+  },
+
+  // ════════════════════════════════════════════════════════════════
+  // OUTREACH — manual sends + multi-touch cadence (Review Outreach tab)
+  // ════════════════════════════════════════════════════════════════
+
+  /**
+   * Send a single review-ask "touch" on SMS or email, recording it in
+   * review_requests with channel + template + sequence linkage so it flows
+   * through the same NPS rate page, suppression, and analytics as every other
+   * ask. Used by the manual Review Outreach send AND by each cadence step.
+   *
+   * The chosen template/body actually sends (audit O2): the {review_url}
+   * placeholder always resolves to the tokenized /rate page, preserving the
+   * happy→Google / issue→private gate on both channels.
+   *
+   * @returns {{ ok, sent?, deferred?, blocked?, terminal?, retryable?,
+   *   reason?, code?, channel?, requestId?, nextAllowedAt? }}
+   */
+  async sendOutreachTouch({
+    customer,
+    channel = "sms",
+    templateId = null,
+    body: customBody = null,
+    locationId,
+    techName,
+    serviceType,
+    serviceDate,
+    serviceRecordId = null,
+    sequenceId = null,
+    sequenceStep = null,
+    triggeredBy = "admin",
+    expiresAt,
+    manageRetryVia = "cron",
+  }) {
+    if (!customer || !customer.id) return { ok: false, reason: "no_customer", terminal: true };
+    if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
+    if (customer.has_left_google_review) {
+      return { ok: false, reason: "already_reviewed", terminal: true };
+    }
+
+    const { getServiceContact } = require("./customer-contact");
+    const contact = getServiceContact(customer);
+
+    // Load consent prefs once. Channel resolution is OPT-OUT-AWARE and honors
+    // the per-type review_request_channel preference ('sms' | 'email' | 'both'):
+    // a customer who opted out of SMS (or set review requests to email) but
+    // allows email gets the email touch instead of stalling as "opted out".
+    let prefs = null;
+    let prefsLookupFailed = false;
+    try {
+      prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
+    } catch {
+      prefsLookupFailed = true;
+    }
+    // If we can't read the channel preferences, DON'T resolve a channel: the
+    // downstream SMS wrapper doesn't enforce review_request_channel, so a
+    // fallback to SMS could text an email-only customer. No row exists yet, so:
+    //  • sequence → retryable: _runSequenceStep reschedules the step.
+    //  • manual one-off → terminal: there's NO row for processScheduled to
+    //    retry, so report a real failure rather than a false "queued" (the route
+    //    maps retryable→202 queued, which would lie to the operator).
+    if (prefsLookupFailed) {
+      return manageRetryVia === "sequence"
+        ? { ok: false, retryable: true, reason: "prefs_unavailable" }
+        : { ok: false, terminal: true, reason: "prefs_unavailable" };
+    }
+    const reviewBlocked = !!prefs && prefs.review_request === false;
+    const smsBlocked = reviewBlocked || (!!prefs && prefs.sms_enabled === false);
+    const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false);
+    // Hard suppression (DNC / wrong-number) on the phone — if the SMS block is
+    // suppression-only, the cadence should fall back to email rather than stall.
+    // sendCustomerMessage would also block it, but checking here lets the channel
+    // resolver pick email (matching the candidate list's sms_suppressed → email).
+    let phoneSuppressed = false;
+    if (contact.phone) {
+      try {
+        // messaging_suppression.phone is E.164 (written by the Twilio path), so
+        // normalize before matching or a formatted "(941)…" number misses the
+        // DNC row and the cadence stalls instead of falling back to email.
+        const e164 = toE164(contact.phone) || contact.phone;
+        const sup = await db("messaging_suppression").where({ phone: e164, active: true }).first();
+        phoneSuppressed = !!sup;
+      } catch {
+        /* table may not exist → treat as not suppressed */
+      }
+    }
+    // SMS consent is re-checked downstream in sendCustomerMessage (fails closed
+    // there), so a prefs-read blip can still attempt SMS. Email has NO downstream
+    // consent gate, so it fails CLOSED: it requires an existing prefs row with
+    // review + email enabled (parity with SMS's NO_CONSENT_RECORD on a missing
+    // row) and a clean prefs read.
+    const canSms = !!contact.phone && !smsBlocked && !phoneSuppressed;
+    const canEmail = !!contact.email && !!prefs && !emailBlocked && !prefsLookupFailed;
+
+    // A no-link private check-in (resolution_check / satisfaction_confirm) must
+    // NEVER route to email — the only email template is review_request_email,
+    // which carries a /rate link, so an email fallback would turn a recovery
+    // message into a review ask (and bypass the cap, since send-request didn't
+    // count it). Keep these SMS-only, ignoring the email channel preference.
+    const noLinkSend = !!(templateId && OUTREACH.NO_LINK_TEMPLATE_KEYS.includes(templateId));
+
+    // Per-type channel preference. Only 'email' is treated as an EXCLUSIVE
+    // choice (it is never the column default, so it's deliberate): an 'email'
+    // preference must not fall back to SMS. 'sms' is the backfill DEFAULT, so it
+    // is NOT a deliberate opt-out — it must keep the email fallback / Day-7 email
+    // step working. 'both' / unset allow either with fallback.
+    const prefChannel = prefs && prefs.review_request_channel;
+    const allowSms = canSms && (noLinkSend || prefChannel !== "email");
+    const allowEmail = canEmail && !noLinkSend;
+    let intended = noLinkSend ? "sms" : channel === "email" ? "email" : "sms";
+    if (!noLinkSend && prefChannel === "email") intended = "email";
+
+    let actualChannel = intended;
+    if (actualChannel === "sms" && !allowSms) actualChannel = allowEmail ? "email" : null;
+    if (actualChannel === "email" && !allowEmail) actualChannel = allowSms ? "sms" : null;
+    if (!actualChannel) {
+      const optedOut = reviewBlocked || (intended === "email" ? emailBlocked : smsBlocked);
+      return { ok: false, reason: optedOut ? "opted_out" : "no_contact", blocked: optedOut, terminal: true };
+    }
+
+    // Effective template + what we RECORD for analytics. A manual send with no
+    // chosen template defaults to the standard friendly ask (audit P1). Email
+    // touches always render the review_request_email DB template, so we record
+    // THAT for honest per-template attribution. An edited SMS body is persisted
+    // (custom_body) so a quiet-hours/provider retry re-sends the operator's copy
+    // rather than reverting to the template.
+    const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
+    const recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
+    const persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
+
+    // A no-link template (resolution_check / satisfaction_confirm) is a PRIVATE
+    // check-in, not a review ask — so it must NOT trigger the legacy Day-3
+    // straight-to-Google follow-up (processFollowups), which would turn the
+    // recovery message into a public review request.
+    const smsTpl = actualChannel === "sms" && smsTemplateId ? OUTREACH.getOutreachTemplate(smsTemplateId) : null;
+    const isNoLinkSms = !!smsTpl && !smsTpl.body.includes("{review_url}");
+
+    const token = generateToken();
+    const [request] = await db("review_requests")
+      .insert({
+        token,
+        customer_id: customer.id,
+        service_record_id: serviceRecordId,
+        location_id: locationId || resolveLocation(customer),
+        tech_name: techName || null,
+        service_type: serviceType || null,
+        service_date: serviceDate || null,
+        triggered_by: triggeredBy,
+        channel: actualChannel,
+        template_key: recordedTemplateKey,
+        custom_body: persistedBody,
+        sequence_id: sequenceId,
+        sequence_step: sequenceStep,
+        status: "pending",
+        // Sequence touches AND no-link check-ins skip the legacy Day-3 followup.
+        followup_sent: sequenceId || isNoLinkSms ? true : false,
+        expires_at: expiresAt || new Date(Date.now() + 14 * 86400000).toISOString(),
+      })
+      .returning("*");
+
+    const domain = publicPortalUrl();
+    const longUrl = `${domain}/rate/${token}`;
+    const reviewUrl = await shortenOrPassthrough(longUrl, {
+      kind: "review",
+      entityType: "review_requests",
+      entityId: request.id,
+      customerId: customer.id,
+    });
+
+    const vars = {
+      first: contact.name || customer.first_name || "",
+      tech: techName || "Adam",
+      service_type: serviceType || "service",
+      review_url: reviewUrl,
+    };
+
+    if (actualChannel === "email") {
+      return this._sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia });
+    }
+    return this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody, manageRetryVia });
+  },
+
+  async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {
+    const tpl = templateId ? OUTREACH.getOutreachTemplate(templateId) : null;
+    const rawBody =
+      typeof customBody === "string" && customBody.trim() ? customBody : tpl ? tpl.body : null;
+    if (!rawBody) {
+      await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+      return { ok: false, reason: "no_template", terminal: true, requestId: request.id };
+    }
+    // Whether a /rate link is required is determined by the SELECTED TEMPLATE,
+    // not the (possibly edited) body — so an operator who edits {review_url} out
+    // of an ask template still gets the link appended rather than sending an ask
+    // with no way to act on it. A pure custom body with no template is treated
+    // as an ask (require the link); the issue/check-in templates carry no link.
+    const isNoLink = !!(tpl && !tpl.body.includes("{review_url}"));
+    const requiresLink = !isNoLink && (tpl ? tpl.body.includes("{review_url}") : true);
+    // For a no-link check-in, force review_url empty so ANY {review_url} the
+    // operator left/added in the edited body renders to nothing — send-request
+    // skipped cap/cooldown for this template, so it must never carry a review link.
+    const renderVars = isNoLink ? { ...vars, review_url: "" } : vars;
+    const body = OUTREACH.renderOutreachBody(rawBody, renderVars, { requireLink: requiresLink });
+
+    // ONLY the send attempt is in the retry-on-throw path. If sendCustomerMessage
+    // itself throws (network/provider), it's safe to retry — Twilio never
+    // accepted it. If it RETURNS and then post-send bookkeeping throws (a
+    // transient Postgres error after Twilio accepted), we must NOT retry, or the
+    // customer gets the SMS twice (audit P1).
+    let result;
+    try {
+      result = await sendCustomerMessage({
+        to: contact.phone,
+        body,
+        channel: "sms",
+        audience: "customer",
+        purpose: "review_request",
+        customerId: customer.id,
+        entryPoint: "review_outreach_touch",
+        metadata: request.sequence_id ? { review_sequence_id: request.sequence_id } : {},
+      });
+    } catch (err) {
+      if (manageRetryVia === "cron") {
+        await db("review_requests")
+          .where({ id: request.id })
+          .update({ status: "pending", scheduled_for: new Date(Date.now() + 5 * 60 * 1000) })
+          .catch(() => {});
+      } else {
+        await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+      }
+      logger.error(`[review] outreach SMS send threw (requestId=${request.id} errType=${err?.name || "Error"})`);
+      return { ok: false, retryable: true, channel: "sms", requestId: request.id };
+    }
+
+    try {
+      return await this._applyOutreachSendResult(request, result, manageRetryVia, "sms");
+    } catch (bookErr) {
+      // The send already happened — do NOT requeue. Report based on what the
+      // provider did; the audit log holds the full record for reconciliation.
+      logger.error(
+        `[review] post-send bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`,
+      );
+      // Only a SENT result must avoid retry (would double-send). A not-sent
+      // result (quiet-hours hold / rate-limit / transient provider failure) has
+      // NO duplicate-send risk, so keep it retryable — don't drop the manual
+      // retry or stop the cadence over a bookkeeping blip.
+      return result?.sent
+        ? { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: result.auditLogId }
+        : { ok: false, retryable: true, channel: "sms", requestId: request.id, reason: "bookkeeping_failed" };
+    }
+  },
+
+  async _applyOutreachSendResult(request, result, manageRetryVia, channel) {
+    if (result && result.sent) {
+      await db("review_requests").where({ id: request.id }).update({
+        sms_sent_at: new Date(),
+        sent_at: new Date(),
+        status: "sent",
+      });
+      return { ok: true, sent: true, channel, requestId: request.id, auditLogId: result.auditLogId };
+    }
+    const deferredRetryAt = retryAtForDeferredSend(result);
+    if (deferredRetryAt) {
+      if (manageRetryVia === "cron") {
+        await db("review_requests").where({ id: request.id }).update({
+          status: "pending",
+          scheduled_for: deferredRetryAt,
+        });
+      } else {
+        // The sequence cron owns retries — keep this row out of processScheduled.
+        await db("review_requests").where({ id: request.id }).update({ status: "deferred" });
+      }
+      return { ok: false, deferred: true, nextAllowedAt: deferredRetryAt, channel, requestId: request.id, code: result?.code };
+    }
+    // Terminal: a policy block (opt-out/suppression) OR a non-retryable provider
+    // failure (invalid / non-SMS-capable number). Suppress so a manual send
+    // isn't rescheduled every 5 min and a cadence stops on an unfixable contact,
+    // rather than retrying forever. CONSENT_LOOKUP_FAILED is a transient DB blip,
+    // not terminal.
+    const terminalBlock =
+      result &&
+      result.code !== "CONSENT_LOOKUP_FAILED" &&
+      (result.terminal === true || (result.blocked && result.retryable !== true && !result.deferred));
+    if (terminalBlock) {
+      await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
+      return { ok: false, blocked: true, terminal: true, channel, requestId: request.id, code: result?.code };
+    }
+    // Transient (provider failure / consent lookup blip).
+    if (manageRetryVia === "cron") {
+      await db("review_requests").where({ id: request.id }).update({
+        status: "pending",
+        scheduled_for: new Date(Date.now() + 5 * 60 * 1000),
+      });
+    } else {
+      await db("review_requests").where({ id: request.id }).update({ status: "failed" });
+    }
+    return { ok: false, retryable: true, channel, requestId: request.id, code: result?.code };
+  },
+
+  async _sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia }) {
+    // Same split as SMS (audit P1): only the SEND is in the retry-on-throw path.
+    let result;
+    try {
+      const EmailLib = require("./email-template-library");
+      result = await EmailLib.sendTemplate({
+        templateKey: "review_request_email",
+        to: contact.email,
+        payload: {
+          first_name: contact.name || customer.first_name || "",
+          review_url: reviewUrl,
+          tech_name: techName || "Adam",
+        },
+        recipientType: "customer",
+        recipientId: customer.id,
+        // Stable per sequence STEP (not per touch row): a sequence retry inserts
+        // a fresh review_requests row, so a request.id-based key would change
+        // each retry and bypass the email library's dedupe — re-sending the same
+        // Day-7 email if a prior attempt was accepted but then threw.
+        idempotencyKey:
+          request.sequence_id != null && request.sequence_step != null
+            ? `review_seq:${request.sequence_id}:${request.sequence_step}`
+            : `review_touch:${request.id}`,
+        suppressionGroupKey: "service_operational",
+        categories: ["review_request"],
+      });
+    } catch (err) {
+      logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"})`);
+      // There is NO standalone email retry driver — processScheduled only
+      // re-sends SMS (it excludes channel='email'). So:
+      //  • sequence touch → the sequence cron re-runs this step; mark 'failed'
+      //    and report retryable so _runSequenceStep reschedules next_run_at.
+      //  • one-off (cron) → nothing would ever retry it; mark 'failed' and report
+      //    a hard failure so the caller doesn't tell the operator it's "queued".
+      await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+      if (manageRetryVia === "sequence") {
+        return { ok: false, retryable: true, channel: "email", requestId: request.id };
+      }
+      return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_send_failed" };
+    }
+
+    // Send returned — bookkeeping failures here must NOT requeue (the email
+    // library already deduped/sent). Report based on the result.
+    try {
+      if (result && result.sent) {
+        await db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() });
+        return { ok: true, sent: true, channel: "email", requestId: request.id };
+      }
+      await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
+      return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: result?.reason || "email_blocked" };
+    } catch (bookErr) {
+      logger.error(`[review] post-send email bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`);
+      // Only a SENT result avoids retry. A not-sent result keeps retryability so
+      // the cadence step isn't stopped over a bookkeeping blip.
+      return result?.sent
+        ? { ok: true, sent: true, channel: "email", requestId: request.id }
+        : { ok: false, retryable: true, channel: "email", requestId: request.id, reason: "bookkeeping_failed" };
+    }
+  },
+
+  /**
+   * Start a multi-touch review cadence for one customer. Idempotent: a customer
+   * with an active sequence returns that one instead of starting a second
+   * (also enforced by the partial unique index). Fires step 0 immediately.
+   */
+  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId }) {
+    const customer = await db("customers").where({ id: customerId }).first();
+    if (!customer) throw new Error("Customer not found");
+    if (customer.deleted_at) throw new Error("Customer is archived");
+    if (customer.has_left_google_review) return { started: false, reason: "already_reviewed" };
+
+    const active = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
+    if (active) return { started: false, reason: "already_active", sequence: active };
+
+    // The first touch is an immediate ask, so enforce the same lifetime cap +
+    // 30-day cooldown as a one-off send (the candidate list already filters on
+    // these, but this endpoint can be hit directly / in bulk / racing a recent
+    // send). Counts asks across BOTH channels. Fail CLOSED — a DB blip must not
+    // let an at-cap / in-cooldown customer through (no .catch → it throws and
+    // the route records the customer as not-started). Day 3/7 still bypass cooldown.
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
+    const stats = await this.getDeliveredAskStats(customerId);
+    if (stats.count >= 3) return { started: false, reason: "at_cap" };
+    if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo.getTime()) {
+      return { started: false, reason: "cooldown" };
+    }
+
+    // Supersede any already-queued ASK (post-service auto, or a quiet-hours
+    // deferral): otherwise processScheduled() would fire it AND the cadence's
+    // Day-0 touch → a duplicate review request. Only ASKS are superseded — a
+    // queued private no-link check-in (ASK_TOUCH_SQL excludes it) is left alone.
+    // Fail CLOSED — if this can't run, abort the start (no .catch → it throws and
+    // the route records not-started) rather than risk a stranded duplicate ask.
+    await db("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotNull("scheduled_for")
+      .whereRaw(ASK_TOUCH_SQL)
+      .update({ status: "suppressed" });
+
+    const usePlan = Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN;
+    let svcType = serviceType;
+    let tName = techName;
+    if (!svcType || !tName) {
+      const lastSvc = await db("scheduled_services")
+        .where({ customer_id: customerId, status: "completed" })
+        .orderBy("scheduled_date", "desc")
+        .first()
+        .catch(() => null);
+      svcType = svcType || lastSvc?.service_type || null;
+      tName = tName || lastSvc?.tech_name || "Adam";
+    }
+    const locId = locationId || customer.nearest_location_id || resolveLocation(customer);
+
+    let sequence;
+    try {
+      [sequence] = await db("review_sequences")
+        .insert({
+          customer_id: customerId,
+          location_id: locId,
+          status: "active",
+          plan: JSON.stringify(usePlan),
+          current_step: 0,
+          touches_sent: 0,
+          // Insert with next_run_at NULL so the cron (which only picks rows with
+          // a non-null next_run_at <= now) can't grab this row and fire step 0
+          // in parallel with the inline _runSequenceStep below — the cron lock
+          // serializes cron workers, not this admin path. _runSequenceStep sets
+          // next_run_at when it advances/retries.
+          next_run_at: null,
+          service_record_id: serviceRecordId || null,
+          tech_name: tName,
+          service_type: svcType,
+          started_by: startedBy || null,
+          started_at: new Date(),
+        })
+        .returning("*");
+    } catch (err) {
+      if (err?.code === "23505") {
+        const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
+        return { started: false, reason: "already_active", sequence: existing };
+      }
+      throw err;
+    }
+
+    let firstTouch;
+    try {
+      firstTouch = await this._runSequenceStep(sequence.id);
+    } catch (err) {
+      // The Day-0 touch threw during setup (insert / short-link / send). The
+      // step's own catch restored next_run_at for a CRON retry, but for a
+      // START the operator is told it failed — so DON'T leave an active row the
+      // cron would fire later. Stop it and report not-started.
+      await db("review_sequences")
+        .where({ id: sequence.id, status: "active" })
+        .update({ status: "stopped", stop_reason: "start_failed", next_run_at: null, completed_at: new Date(), updated_at: new Date() })
+        .catch(() => {});
+      return { started: false, reason: "send_failed" };
+    }
+    const refreshed = await db("review_sequences").where({ id: sequence.id }).first();
+    // If the immediate first touch stopped the cadence (no contact, just opted
+    // out, already reviewed), report it as NOT started so the route doesn't
+    // count a phantom "started" — the row is already stopped and nothing runs.
+    if (refreshed && refreshed.status === "stopped") {
+      return { started: false, reason: refreshed.stop_reason || "stopped", sequence: refreshed, firstTouch };
+    }
+    return { started: true, sequence: refreshed, firstTouch };
+  },
+
+  /** Run the current step of one sequence (send + advance, or stop). */
+  async _runSequenceStep(sequenceId) {
+    const seq = await db("review_sequences").where({ id: sequenceId }).first();
+    if (!seq || seq.status !== "active") return { ran: false, reason: "not_active" };
+    const plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
+    const customer = await db("customers").where({ id: seq.customer_id }).first();
+
+    const stop = async (reason) => {
+      await db("review_sequences").where({ id: seq.id }).update({
+        status: reason === "completed" ? "completed" : "stopped",
+        stop_reason: reason,
+        next_run_at: null,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+      return { ran: false, stopped: true, reason };
+    };
+
+    if (!customer || customer.deleted_at) return stop("deleted");
+    if (customer.has_left_google_review) return stop("reviewed");
+    try {
+      const gr = await db("google_reviews").where({ customer_id: seq.customer_id }).first();
+      if (gr) return stop("reviewed");
+    } catch {
+      /* google_reviews may not exist */
+    }
+    // Stop once the customer has ENGAGED with any touch in this cadence — the
+    // /rate flow marks the row submitted/rated (score/category) WITHOUT setting
+    // has_left_google_review or a google_reviews row, so a passive/detractor who
+    // gave private feedback must not keep getting Day-3/7 review asks.
+    const submitted = await db("review_requests")
+      .where({ sequence_id: seq.id })
+      .whereNotNull("submitted_at")
+      .first()
+      .catch(() => null);
+    const rated = submitted
+      ? null
+      : await db("review_requests")
+          .where({ sequence_id: seq.id })
+          .whereNotNull("rated_at")
+          .first()
+          .catch(() => null);
+    // Also catch a NON-PROMOTER draft score tap — /rate/:token/score stores
+    // score + category WITHOUT submitted_at, and the touch is followup_sent=true
+    // so the legacy low-score path won't catch it either. A detractor/passive
+    // who tapped a low score must not keep getting Day-3/7 review asks.
+    const lowDraft = submitted || rated
+      ? null
+      : await db("review_requests")
+          .where({ sequence_id: seq.id })
+          .whereNotNull("score")
+          .whereNot("category", "promoter")
+          .first()
+          .catch(() => null);
+    if (submitted || rated || lowDraft) return stop("responded");
+    if (seq.current_step >= plan.length) return stop("completed");
+    // Keep the whole cadence within the lifetime 3-ask cap: a customer who had
+    // 1-2 prior asks must not reach 4-5 via the cadence. Delivered ask touches
+    // (incl. this cadence's own) are counted, so the sequence stops once 3 is hit.
+    let askStats;
+    try {
+      askStats = await this.getDeliveredAskStats(seq.customer_id);
+    } catch {
+      // Fail CLOSED: sendOutreachTouch does NOT enforce the lifetime cap, so a
+      // stats blip must defer the step (retry next tick), not send a 4th ask.
+      await db("review_sequences")
+        .where({ id: seq.id, status: "active" })
+        .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+        .catch(() => {});
+      return { ran: false, deferred: true, reason: "cap_stats_unavailable" };
+    }
+    if (askStats.count >= 3) return stop("capped");
+    try {
+      const prefs = await db("notification_prefs").where({ customer_id: seq.customer_id }).first();
+      if (prefs && prefs.review_request === false) return stop("opted_out");
+      if (prefs && prefs.sms_enabled === false && prefs.email_enabled === false) return stop("opted_out");
+    } catch {
+      /* ignore */
+    }
+
+    const step = plan[seq.current_step] || {};
+
+    // Final atomic claim right before sending: an admin Stop (or a completing
+    // touch on a sibling row) can land between the reads above and here. Flip
+    // next_run_at to NULL only if the row is STILL active — if 0 rows update,
+    // it was stopped/completed concurrently, so bail without sending. (The
+    // value is restored to the real schedule on success/retry below.)
+    const claimed = await db("review_sequences")
+      .where({ id: seq.id, status: "active" })
+      .update({ next_run_at: null, updated_at: new Date() });
+    if (!claimed) return { ran: false, reason: "not_active" };
+
+    let outcome;
+    try {
+      outcome = await this.sendOutreachTouch({
+        customer,
+        channel: step.channel || "sms",
+        templateId: step.templateKey || null,
+        locationId: seq.location_id,
+        techName: seq.tech_name,
+        serviceType: seq.service_type,
+        serviceRecordId: seq.service_record_id,
+        sequenceId: seq.id,
+        sequenceStep: seq.current_step,
+        triggeredBy: "sequence",
+        manageRetryVia: "sequence",
+      });
+    } catch (err) {
+      // The claim above cleared next_run_at; if the touch throws BEFORE handling
+      // its own outcome (e.g. the review_requests insert or short-link fails),
+      // restore a retry time so the cron picks the sequence up again instead of
+      // stranding it with next_run_at = null.
+      await db("review_sequences")
+        .where({ id: seq.id, status: "active" })
+        .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+        .catch(() => {});
+      throw err;
+    }
+
+    if (outcome.ok && outcome.sent) {
+      const nextStep = seq.current_step + 1;
+      // The post-send advance/complete is conditional on status='active': if an
+      // admin Stop landed WHILE sendOutreachTouch was awaiting Twilio/SendGrid,
+      // status is now 'stopped' and these update 0 rows — so a stop during the
+      // send window is honored (the next touch won't be scheduled) rather than
+      // silently undone by re-activating the row.
+      if (nextStep >= plan.length) {
+        await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+          status: "completed",
+          stop_reason: "completed",
+          current_step: nextStep,
+          touches_sent: seq.touches_sent + 1,
+          last_touch_at: new Date(),
+          next_run_at: null,
+          completed_at: new Date(),
+          updated_at: new Date(),
+        });
+        return { ran: true, sent: true, completed: true, step: seq.current_step };
+      }
+      const plannedAt = new Date(new Date(seq.started_at).getTime() + (Number(plan[nextStep].day) || 0) * 86400000);
+      const next_run_at = plannedAt > new Date() ? plannedAt : new Date(Date.now() + 60000);
+      await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+        current_step: nextStep,
+        touches_sent: seq.touches_sent + 1,
+        last_touch_at: new Date(),
+        next_run_at,
+        updated_at: new Date(),
+      });
+      return { ran: true, sent: true, step: seq.current_step };
+    }
+
+    if (outcome.terminal || outcome.blocked) {
+      if (outcome.reason === "no_contact") return stop("no_contact");
+      if (outcome.reason === "already_reviewed") return stop("reviewed");
+      return stop("opted_out");
+    }
+
+    // Deferred / transient → retry this step later without advancing.
+    const retryAt = outcome.nextAllowedAt ? new Date(outcome.nextAllowedAt) : new Date(Date.now() + 30 * 60 * 1000);
+    await db("review_sequences").where({ id: seq.id }).update({ next_run_at: retryAt, updated_at: new Date() });
+    return { ran: false, deferred: true, retryAt };
+  },
+
+  /** Cron: advance all due review sequences. Gated by GATE_REVIEW_SEQUENCES. */
+  async processReviewSequences() {
+    const due = await db("review_sequences")
+      .where({ status: "active" })
+      .whereNotNull("next_run_at")
+      .where("next_run_at", "<=", new Date())
+      .orderBy("next_run_at", "asc")
+      .limit(25);
+    let sent = 0;
+    let stopped = 0;
+    let completed = 0;
+    let deferred = 0;
+    for (const seq of due) {
+      try {
+        const r = await this._runSequenceStep(seq.id);
+        if (r.sent) sent++;
+        if (r.completed) completed++;
+        else if (r.stopped) stopped++;
+        if (r.deferred) deferred++;
+      } catch (err) {
+        logger.error(`[review] sequence step failed (sequenceId=${seq.id} errType=${err?.name || "Error"})`);
+      }
+    }
+    if (sent || stopped || completed || deferred) {
+      logger.info(`[review] Sequences: ${sent} sent, ${completed} completed, ${stopped} stopped, ${deferred} deferred`);
+    }
+    return { sent, stopped, completed, deferred };
+  },
+
+  async stopReviewSequence(sequenceId, reason = "manual") {
+    const updated = await db("review_sequences")
+      .where({ id: sequenceId, status: "active" })
+      .update({
+        status: "stopped",
+        stop_reason: reason,
+        next_run_at: null,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+    return { stopped: updated > 0 };
+  },
+
+  /**
+   * Channel-complete "review asks delivered" stats for one customer — counts
+   * every review_requests row actually sent on SMS OR email (audit: the old
+   * sms_log-only count missed email asks, so a customer could exceed the cap /
+   * dodge the cooldown via email). Used by the cap + 30-day cooldown guards.
+   */
+  async getDeliveredAskStats(customerId) {
+    const countRow = await db("review_requests")
+      .where({ customer_id: customerId })
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .whereRaw(ASK_TOUCH_SQL)
+      .count("* as count")
+      .first();
+    const recent = await db("review_requests")
+      .where({ customer_id: customerId })
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .whereRaw(ASK_TOUCH_SQL)
+      .orderByRaw("COALESCE(sms_sent_at, sent_at) DESC")
+      .first();
+    return {
+      count: Number(countRow?.count) || 0,
+      lastAt: recent ? recent.sms_sent_at || recent.sent_at : null,
+    };
+  },
+
+  /** Batched getDeliveredAskStats for the candidate list. */
+  async getDeliveredAskStatsBatch(ids = []) {
+    if (!ids.length) return {};
+    const rows = await db("review_requests")
+      .whereIn("customer_id", ids)
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .whereRaw(ASK_TOUCH_SQL)
+      .groupBy("customer_id")
+      .select(
+        "customer_id",
+        db.raw("COUNT(*) AS count"),
+        db.raw("MAX(COALESCE(sms_sent_at, sent_at)) AS last_at"),
+      );
+    const map = {};
+    rows.forEach((r) => {
+      map[r.customer_id] = { askCount: Number(r.count) || 0, lastAsked: r.last_at };
+    });
+    return map;
+  },
+
+  /** Map of customerId → active sequence summary (for candidate annotation). */
+  async getActiveSequencesForCustomers(ids = []) {
+    if (!ids.length) return {};
+    const rows = await db("review_sequences").whereIn("customer_id", ids).where("status", "active");
+    const map = {};
+    rows.forEach((r) => {
+      const plan = Array.isArray(r.plan) ? r.plan : JSON.parse(r.plan || "[]");
+      map[r.customer_id] = {
+        id: r.id,
+        currentStep: r.current_step,
+        totalSteps: plan.length,
+        nextRunAt: r.next_run_at,
+      };
+    });
+    return map;
+  },
+
+  /**
+   * Real conversion funnel + velocity for the Review Outreach dashboard
+   * (audit O1). Conversion is the share of sent asks that clicked through to
+   * Google (redirected_to_google); velocity is actual Google reviews landed.
+   */
+  async getOutreachAnalytics({ days = 90 } = {}) {
+    const window = Math.max(1, Math.min(365, Number(days) || 90));
+    const since = new Date(Date.now() - window * 86400000);
+
+    // The live /rate/<token> flow (review-gate.js) records score / category /
+    // submitted_at — NOT the legacy rating / rated_at / redirected_to_google
+    // (those belong to the older review-public.js submitRating path). Count
+    // BOTH families so the funnel reflects real conversions on either flow.
+    // "Directed to Google" = a promoter (score 8-10 → Google redirect) or the
+    // legacy redirect flag.
+    // A bare 8-10 score TAP stores category='promoter' with no submitted_at and
+    // no Google redirect (review-gate.js /score). Those drafts must NOT count as
+    // rated/promoter/Google-directed, or the dashboard overstates conversions —
+    // so the live-flow promoter is gated on submitted_at.
+    const SENT_SQL = "(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)";
+    const RATED_SQL = "(submitted_at IS NOT NULL OR rated_at IS NOT NULL)";
+    const OPENED_SQL = "(opened_at IS NOT NULL OR submitted_at IS NOT NULL OR rated_at IS NOT NULL)";
+    const PROMOTER_SQL = "((category = 'promoter' AND submitted_at IS NOT NULL) OR rating >= 7)";
+    const REVIEWED_SQL = "(redirected_to_google = true OR (category = 'promoter' AND submitted_at IS NOT NULL))";
+
+    // The funnel measures review ASKS, so exclude no-link private check-ins
+    // (same predicate as the cap stats) — otherwise recovery/check-in sends
+    // inflate the "sent" denominator and skew the conversion rate + template
+    // breakdown with messages that had no review CTA.
+    const [funnel] = await db("review_requests")
+      .where("created_at", ">=", since)
+      .whereRaw(ASK_TOUCH_SQL)
+      .select(
+        db.raw(`COUNT(*) FILTER (WHERE ${SENT_SQL}) AS sent`),
+        db.raw(`COUNT(*) FILTER (WHERE ${OPENED_SQL}) AS opened`),
+        db.raw(`COUNT(*) FILTER (WHERE ${RATED_SQL}) AS rated`),
+        db.raw(`COUNT(*) FILTER (WHERE ${PROMOTER_SQL}) AS promoters`),
+        db.raw(`COUNT(*) FILTER (WHERE ${REVIEWED_SQL}) AS reviewed`),
+        db.raw("COUNT(*) FILTER (WHERE channel = 'email') AS email_touches"),
+      );
+
+    const breakdown = (col) =>
+      db("review_requests")
+        .where("created_at", ">=", since)
+        .whereRaw(SENT_SQL)
+        .whereRaw(ASK_TOUCH_SQL)
+        .groupBy(col)
+        .select(
+          col,
+          db.raw("COUNT(*) AS sent"),
+          db.raw(`COUNT(*) FILTER (WHERE ${REVIEWED_SQL}) AS reviewed`),
+        );
+
+    const byLocation = await breakdown("location_id");
+    const byTemplate = await breakdown("template_key");
+    const byChannel = await breakdown("channel");
+
+    // Actual Google reviews landed in window — the real outcome + velocity.
+    let googleByLocation = [];
+    let velocity = [];
+    try {
+      googleByLocation = await db("google_reviews")
+        .where("reviewer_name", "!=", "_stats")
+        .where("review_created_at", ">=", since)
+        .groupBy("location_id")
+        .select("location_id", db.raw("COUNT(*) AS reviews"), db.raw("ROUND(AVG(star_rating)::numeric, 2) AS avg_rating"));
+      velocity = await db("google_reviews")
+        .where("reviewer_name", "!=", "_stats")
+        .where("review_created_at", ">=", since)
+        .select(db.raw("date_trunc('week', review_created_at) AS week"), db.raw("COUNT(*) AS reviews"))
+        .groupByRaw("date_trunc('week', review_created_at)")
+        .orderByRaw("date_trunc('week', review_created_at) ASC");
+    } catch {
+      /* google_reviews may not exist */
+    }
+
+    const num = (v) => Number(v) || 0;
+    const sent = num(funnel?.sent);
+    const reviewed = num(funnel?.reviewed);
+    const activeSequences = num(
+      (await db("review_sequences").where("status", "active").count("* as c").first().catch(() => ({ c: 0 })))?.c,
+    );
+
+    return {
+      window,
+      funnel: {
+        sent,
+        opened: num(funnel?.opened),
+        rated: num(funnel?.rated),
+        promoters: num(funnel?.promoters),
+        reviewed,
+        emailTouches: num(funnel?.email_touches),
+        conversionRate: sent > 0 ? Math.round((reviewed / sent) * 100) : 0,
+        openRate: sent > 0 ? Math.round((num(funnel?.opened) / sent) * 100) : 0,
+      },
+      byLocation: byLocation.map((r) => ({ locationId: r.location_id, sent: num(r.sent), reviewed: num(r.reviewed) })),
+      byTemplate: byTemplate.map((r) => ({ templateKey: r.template_key || "canonical", sent: num(r.sent), reviewed: num(r.reviewed) })),
+      byChannel: byChannel.map((r) => ({ channel: r.channel || "sms", sent: num(r.sent), reviewed: num(r.reviewed) })),
+      googleByLocation: googleByLocation.map((r) => ({ locationId: r.location_id, reviews: num(r.reviews), avgRating: Number(r.avg_rating) || 0 })),
+      velocity: velocity.map((r) => ({ week: r.week, reviews: num(r.reviews) })),
+      activeSequences,
+    };
+  },
+
+  /** Server-backed activity feed (audit O3 — replaces the localStorage log). */
+  async getOutreachActivity({ limit = 50 } = {}) {
+    const lim = Math.max(1, Math.min(200, Number(limit) || 50));
+    const rows = await db("review_requests as rr")
+      .leftJoin("customers as c", "c.id", "rr.customer_id")
+      .whereRaw("COALESCE(rr.sms_sent_at, rr.sent_at, rr.submitted_at, rr.rated_at, rr.opened_at) IS NOT NULL")
+      .select(
+        "rr.id",
+        "rr.status",
+        "rr.channel",
+        "rr.template_key",
+        "rr.location_id",
+        "rr.sms_sent_at",
+        "rr.sent_at",
+        "rr.opened_at",
+        "rr.submitted_at",
+        "rr.rated_at",
+        "rr.rating",
+        "rr.score",
+        "rr.category",
+        "rr.redirected_to_google",
+        "rr.sequence_id",
+        "rr.triggered_by",
+        "c.first_name",
+        "c.last_name",
+      )
+      .orderByRaw("COALESCE(rr.submitted_at, rr.rated_at, rr.opened_at, rr.sms_sent_at, rr.sent_at, rr.created_at) DESC")
+      .limit(lim);
+
+    return rows.map((r) => {
+      const name = `${r.first_name || ""} ${r.last_name || ""}`.trim() || "Customer";
+      // Score (live /rate flow) and rating (legacy) both express NPS; promoters
+      // (score 8-10 / category 'promoter' / rating ≥7) are the ones directed to
+      // Google.
+      const nps = r.score ?? r.rating ?? null;
+      const isRated = r.submitted_at != null || r.rated_at != null;
+      // Same submitted-gate as the funnel: a score-tap draft isn't a promoter.
+      const isPromoter =
+        r.redirected_to_google === true ||
+        (r.category === "promoter" && r.submitted_at != null) ||
+        (r.rating != null && r.rating >= 7);
+      let type = "sent";
+      let msg;
+      if (isPromoter) {
+        type = "reviewed";
+        msg = `${name} was sent to Google (promoter)`;
+      } else if (isRated) {
+        type = "rated";
+        msg = `${name} rated ${nps ?? "?"}/10`;
+      } else {
+        const via = r.sequence_id ? "cadence" : r.triggered_by === "auto" ? "auto" : "manual";
+        msg = `Review request sent to ${name} (${r.channel || "sms"}, ${via})`;
+      }
+      return {
+        id: r.id,
+        type,
+        channel: r.channel || "sms",
+        locationId: r.location_id,
+        message: msg,
+        at: r.submitted_at || r.rated_at || r.opened_at || r.sms_sent_at || r.sent_at,
+      };
+    });
   },
 
   // ── Stats ──

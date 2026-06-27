@@ -47,6 +47,19 @@ router.get('/:token', async (req, res, next) => {
       return res.status(410).json({ error: 'This review link has expired' });
     }
 
+    // Stamp the first open so the Review Outreach funnel's open-rate reflects
+    // real link engagement, not just final submissions. Non-blocking.
+    try {
+      const updates = { open_count: (request.open_count || 0) + 1 };
+      if (!request.opened_at) {
+        updates.opened_at = new Date();
+        if (request.status === 'sent') updates.status = 'opened';
+      }
+      await db('review_requests').where({ id: request.id }).update(updates);
+    } catch (err) {
+      logger.warn(`[review-gate] open stamp failed: ${err.message}`);
+    }
+
     // Already submitted
     if (request.status === 'submitted') {
       return res.status(200).json({ alreadySubmitted: true, message: 'You already submitted feedback — thank you!' });
@@ -174,6 +187,17 @@ router.post('/:token/submit', async (req, res, next) => {
       status: 'submitted',
       submitted_at: db.fn.now(),
     });
+
+    // If this came from a multi-touch cadence, stop it now — the customer has
+    // engaged, so no further Day-3/7 review asks should go out. (The cadence
+    // runner also re-checks this before each send; this just stops it sooner.)
+    if (request.sequence_id) {
+      try {
+        await require('../services/review-request').stopReviewSequence(request.sequence_id, 'responded');
+      } catch (err) {
+        logger.warn(`[review-gate] cadence stop-on-submit failed: ${err.message}`);
+      }
+    }
 
     // Create activity log entry
     await db('activity_log').insert({

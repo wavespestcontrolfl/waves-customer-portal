@@ -10,6 +10,10 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays, startOfETMonth } = require('../utils/datetime-et');
 const { getServiceContact } = require('../services/customer-contact');
+const { runExclusive } = require('../utils/cron-lock');
+const OUTREACH = require('../services/review-outreach-templates');
+const { isEnabled } = require('../config/feature-gates');
+const { toE164 } = require('../utils/phone');
 
 const DRAFT_REPLY_PREFIX = '[DRAFT]';
 
@@ -418,7 +422,10 @@ Generate the reply now.`;
 });
 
 // GET /api/admin/reviews/outreach-candidates — customers eligible for review request
-router.get('/outreach-candidates', async (req, res, next) => {
+// requireAdmin: this returns full customer PII (name/phone/address/lifetime
+// revenue) and drives outbound SMS. The /incentives/* endpoints are already
+// admin-only; the PII-and-send surface must be at least as locked down.
+router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
   try {
     const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 90));
     const windowStart = etDateString(addETDays(new Date(), -days));
@@ -426,6 +433,7 @@ router.get('/outreach-candidates', async (req, res, next) => {
     // Active customers with completed services inside window who haven't left a review
     const customers = await db('customers')
       .where('customers.active', true)
+      .whereNull('customers.deleted_at')
       .where(function () {
         this.where('customers.has_left_google_review', false).orWhereNull('customers.has_left_google_review');
       })
@@ -473,42 +481,105 @@ router.get('/outreach-candidates', async (req, res, next) => {
       if (!lastSvcMap[s.customer_id]) lastSvcMap[s.customer_id] = s;
     });
 
-    // Aggregate review_request SMS history (count + most recent) per customer
-    const askStats = customerIds.length > 0
-      ? await db('sms_log')
-          .whereIn('customer_id', customerIds)
-          .where('message_type', 'review_request')
-          .groupBy('customer_id')
-          .select('customer_id')
-          .count({ askCount: '*' })
-          .max({ lastAsked: 'created_at' })
+    // Channel-complete review-ask history (count + most recent) per customer —
+    // counts delivered review_requests on BOTH SMS and email so the cooldown /
+    // 3-cap eligibility matches the send-time guards (audit: an sms_log-only
+    // count missed email asks).
+    const askMap = customerIds.length > 0
+      ? await ReviewService.getDeliveredAskStatsBatch(customerIds).catch(() => ({}))
+      : {};
+
+    // ── Eligibility inputs (batched) ──────────────────────────────
+    // Annotate each candidate with WHY it may not be sendable instead of
+    // silently over-listing customers who fail at send time (audit O8):
+    // consent prefs, hard suppression (DNC), an active cadence, plus a
+    // sentiment signal from the customer's last NPS rating (audit O4).
+    const prefsRows = customerIds.length
+      ? await db('notification_prefs').whereIn('customer_id', customerIds)
+          .select('customer_id', 'sms_enabled', 'email_enabled', 'review_request', 'review_request_channel')
+          .catch(() => [])
       : [];
-    const askMap = {};
-    askStats.forEach(a => {
-      askMap[a.customer_id] = { askCount: Number(a.askCount) || 0, lastAsked: a.lastAsked };
+    const prefsMap = {};
+    prefsRows.forEach(p => { prefsMap[p.customer_id] = p; });
+
+    const phones = customers
+      .map(c => getServiceContact(c).phone || c.phone)
+      .filter(Boolean)
+      // messaging_suppression.phone is E.164 — normalize before matching.
+      .map(p => toE164(p) || p);
+    const suppressedRows = phones.length
+      ? await db('messaging_suppression').whereIn('phone', phones).where('active', true).select('phone').catch(() => [])
+      : [];
+    const suppressedSet = new Set(suppressedRows.map(r => r.phone));
+
+    const sequenceMap = await ReviewService.getActiveSequencesForCustomers(customerIds).catch(() => ({}));
+
+    const satRows = customerIds.length
+      ? await db('satisfaction_responses').whereIn('customer_id', customerIds)
+          .orderBy('created_at', 'desc').select('customer_id', 'rating')
+          .catch(() => [])
+      : [];
+    const sentimentMap = {};
+    satRows.forEach(r => {
+      if (sentimentMap[r.customer_id]) return;
+      const rt = Number(r.rating);
+      sentimentMap[r.customer_id] = rt >= 7 ? 'happy' : rt <= 4 ? 'issue' : 'neutral';
     });
 
-    const candidatePayload = await Promise.all(customers.map(async c => {
-      const contact = getServiceContact(c);
-      const displayPhone = contact.phone || c.phone || null;
-      return {
-        customer: c,
-        phone: displayPhone,
-        phoneSource: contact.phone && contact.phone !== c.phone ? 'service_contact' : 'customer',
-      };
-    }));
+    const thirtyDaysAgo = Date.now() - 30 * 86400000;
 
     res.json({
-      customers: candidatePayload.map(({ customer: c, phone, phoneSource }) => {
+      customers: customers.map(c => {
+        const contact = getServiceContact(c);
+        const phone = contact.phone || c.phone || null;
+        const email = contact.email || c.email || null;
         const ls = lastSvcMap[c.id];
         const ask = askMap[c.id] || { askCount: 0, lastAsked: null };
+        const prefs = prefsMap[c.id];
+        const reviewOptedOut = !!prefs && prefs.review_request === false; // review-wide opt-out
+        const smsPrefOff = !!prefs && prefs.sms_enabled === false;
+        const emailPrefOff = !!prefs && prefs.email_enabled === false;
+        // Mirror the sender's channel-preference exclusivity (round-4/6): an
+        // explicit 'email' preference disables the SMS-only manual Send; 'sms'
+        // (the backfill default) does NOT disable email.
+        const emailPreferred = !!prefs && prefs.review_request_channel === 'email';
+        const suppressed = phone ? suppressedSet.has(toE164(phone) || phone) : false;
+        const inCooldown = ask.lastAsked ? (new Date(ask.lastAsked).getTime() >= thirtyDaysAgo) : false;
+        const atCap = ask.askCount >= 3;
+        const smsable = !!phone && !reviewOptedOut && !smsPrefOff && !suppressed && !emailPreferred;
+        // Email fails closed like the sender: requires an existing prefs row
+        // (parity with SMS's NO_CONSENT_RECORD on a missing row).
+        const emailable = !!email && !!prefs && !reviewOptedOut && !emailPrefOff;
+        const sequence = sequenceMap[c.id] || null;
+        // `sendable` gates the SMS-only manual Send; `cadenceable` gates
+        // Start-Cadence (can use email). A customer who turned OFF review SMS but
+        // still allows email must STAY visible for the email cadence — so only
+        // the row-hiding reasons (opted_out / suppressed) are emitted when NO
+        // review channel remains; an SMS-only block uses a soft `sms_*` reason.
+        const baseBlocked = atCap || inCooldown || !!sequence;
+        const sendable = smsable && !baseBlocked;
+        const cadenceable = (smsable || emailable) && !baseBlocked;
+        const eligibilityReasons = [];
+        if (!smsable && !emailable) {
+          if (reviewOptedOut) eligibilityReasons.push('opted_out');
+          else if (suppressed) eligibilityReasons.push('suppressed');
+          else eligibilityReasons.push('no_contact');
+        } else if (!smsable && emailable) {
+          eligibilityReasons.push(
+            emailPreferred ? 'email_preferred' : suppressed ? 'sms_suppressed' : smsPrefOff ? 'sms_opted_out' : 'no_phone',
+          );
+        }
+        if (atCap) eligibilityReasons.push('at_cap');
+        if (inCooldown) eligibilityReasons.push('cooldown');
+        if (sequence) eligibilityReasons.push('in_sequence');
         return {
           id: c.id,
           name: `${c.first_name} ${c.last_name}`,
           firstName: c.first_name,
           lastName: c.last_name,
           phone,
-          phoneSource,
+          phoneSource: contact.phone && contact.phone !== c.phone ? 'service_contact' : 'customer',
+          hasEmail: !!email,
           addressLine1: c.address_line1,
           city: c.city,
           zip: c.zip,
@@ -520,20 +591,32 @@ router.get('/outreach-candidates', async (req, res, next) => {
           askCount: ask.askCount,
           lastAsked: ask.lastAsked,
           requestSent: ask.askCount > 0,
+          sentiment: sentimentMap[c.id] || 'unknown',
+          sendable,
+          cadenceable,
+          eligibilityReasons,
+          sequence,
         };
       }),
     });
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/reviews/send-request — send review request SMS with NPS gate
-router.post('/send-request', async (req, res, next) => {
+// POST /api/admin/reviews/send-request — send a single review-request SMS.
+// Sends the chosen outreach template/body (audit O2) through the tokenized NPS
+// rate page; serialized per-customer against double-sends and returns an
+// accurate status (sent / deferred / blocked) rather than a misleading 422.
+router.post('/send-request', requireAdmin, async (req, res, next) => {
   try {
-    const { customerId, serviceType, techName } = req.body;
+    const { customerId, serviceType, techName, templateId, body } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    if (templateId && !OUTREACH.getOutreachTemplate(templateId)) {
+      return res.status(400).json({ error: 'Unknown templateId' });
+    }
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    if (customer.deleted_at) return res.status(409).json({ error: 'Customer is archived' });
     if (customer.has_left_google_review) {
       return res.status(409).json({ error: 'Customer is marked as already having left a Google review' });
     }
@@ -541,58 +624,188 @@ router.post('/send-request', async (req, res, next) => {
     const contact = getServiceContact(customer);
     if (!contact.phone) return res.status(400).json({ error: 'No SMS-capable phone on file' });
 
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
-    const [askCountRow, recentAsk] = await Promise.all([
-      db('sms_log')
-        .where({ customer_id: customer.id, message_type: 'review_request' })
-        .count('* as count')
-        .first()
-        .catch(() => ({ count: 0 })),
-      db('sms_log')
-        .where({ customer_id: customer.id, message_type: 'review_request' })
-        .where('created_at', '>=', thirtyDaysAgo)
-        .first()
-        .catch(() => null),
-    ]);
-    const askCount = Number(askCountRow?.count) || 0;
-    if (askCount >= 3) {
-      return res.status(409).json({ error: 'Customer has already received 3 review requests' });
-    }
-    if (recentAsk) {
-      return res.status(409).json({ error: 'Customer received a review request in the last 30 days' });
-    }
+    // Serialize concurrent sends to the same customer so a double-click / retry
+    // can't slip two messages past the cap + cooldown (audit O7). The lock is
+    // non-blocking — a second in-flight send to the same customer is rejected.
+    const result = await runExclusive(`review-send:${customerId}`, async () => {
+      // Private no-link check-ins (resolution_check / satisfaction_confirm) are
+      // NOT review asks, so they bypass the review 3-cap / 30-day cooldown, the
+      // queued-ask reuse, AND the active-cadence block below (a recovery message
+      // is intentionally non-ask outreach). getDeliveredAskStats doesn't count them.
+      const isAsk = OUTREACH.isAskTemplate(templateId);
 
-    const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
-    // Get last completed service for context
-    const lastSvc = await db('scheduled_services')
-      .where({ customer_id: customerId, status: 'completed' })
-      .orderBy('scheduled_date', 'desc').first();
+      // An active cadence already owns this customer's review ASKS (and its
+      // touches can sit 'deferred' where the queued-row check can't see them), so
+      // a one-off ASK here would double-contact. Check-ins are allowed through.
+      if (isAsk) {
+        const activeSeq = await db('review_sequences')
+          .where({ customer_id: customer.id, status: 'active' }).first().catch(() => null);
+        if (activeSeq) {
+          return { status: 409, payload: { error: 'Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.' } };
+        }
+      }
 
-    // Create a review_requests record with a unique token
-    const reviewReq = await createReviewRequest({
-      customerId: customer.id,
-      locationId: loc.id,
-      techName: techName || lastSvc?.tech_name || null,
-      serviceType: serviceType || lastSvc?.service_type || 'pest control',
-      serviceDate: lastSvc?.scheduled_date || null,
+      const thirtyDaysAgo = Date.now() - 30 * 86400000;
+      // Channel-complete cap/cooldown across SMS + email (audit). Fail CLOSED:
+      // a DB error here must NOT let an at-cap / in-cooldown customer through —
+      // it throws to next(err) rather than the old silent catch→0.
+      if (isAsk) {
+        const stats = await ReviewService.getDeliveredAskStats(customer.id);
+        if (stats.count >= 3) return { status: 409, payload: { error: 'Customer has already received 3 review requests' } };
+        if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
+          return { status: 409, payload: { error: 'Customer received a review request in the last 30 days' } };
+        }
+        // A previous send may have DEFERRED (quiet hours) or hit a transient
+        // failure, leaving a pending row scheduled for processScheduled() with no
+        // sent timestamp. The cap counts only delivered asks, so a second click on
+        // the 202 response would queue ANOTHER pending row and processScheduled
+        // would send both → duplicate texts. Reuse the existing queued row instead.
+        const queued = await db('review_requests')
+          .where({ customer_id: customer.id, status: 'pending' })
+          .whereNull('sms_sent_at')
+          .whereNotNull('scheduled_for')
+          // Only a queued ASK should block another ask — a deferred no-link
+          // check-in must not make a real review request return alreadyQueued.
+          .whereRaw(OUTREACH.ASK_TOUCH_SQL)
+          .orderBy('scheduled_for', 'asc')
+          .first();
+        if (queued) {
+          return { status: 202, payload: {
+            success: false, deferred: true, alreadyQueued: true,
+            nextAllowedAt: queued.scheduled_for,
+            message: 'A review request to this customer is already queued and will send automatically.',
+          } };
+        }
+      }
+
+      const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
+      const lastSvc = await db('scheduled_services')
+        .where({ customer_id: customerId, status: 'completed' })
+        .orderBy('scheduled_date', 'desc').first();
+
+      const outcome = await ReviewService.sendOutreachTouch({
+        customer,
+        channel: 'sms',
+        templateId: templateId || null,
+        body: typeof body === 'string' ? body : null,
+        locationId: loc.id,
+        techName: techName || lastSvc?.tech_name || null,
+        serviceType: serviceType || lastSvc?.service_type || 'pest control',
+        serviceDate: lastSvc?.scheduled_date || null,
+        triggeredBy: 'admin',
+        manageRetryVia: 'cron',
+      });
+
+      if (outcome.ok && outcome.sent) {
+        await db('activity_log').insert({
+          customer_id: customer.id, action: 'review_requested',
+          description: `Review request sent to ${customer.first_name} ${customer.last_name} (${loc.name})`,
+        }).catch(() => {});
+        return { status: 200, payload: { success: true, requestId: outcome.requestId } };
+      }
+      if (outcome.deferred) {
+        return { status: 202, payload: {
+          success: false, deferred: true,
+          nextAllowedAt: outcome.nextAllowedAt,
+          message: 'Outside the review-send window (quiet hours). Queued — it will send automatically when the window opens.',
+        } };
+      }
+      if (outcome.blocked || outcome.terminal) {
+        return { status: 409, payload: {
+          error: `Review request was not sent (${outcome.code || outcome.reason || 'blocked'}). Check the customer's messaging consent / suppression.`,
+        } };
+      }
+      return { status: 202, payload: {
+        success: false, queued: true,
+        message: 'Send failed transiently and was queued for automatic retry.',
+      } };
     });
 
-    const sentReq = await db('review_requests').where({ id: reviewReq.id }).first();
-    if (!sentReq?.sms_sent_at) {
-      return res.status(422).json({ error: 'Review request SMS was blocked, deferred, or failed. Check the request status and messaging audit log.' });
+    if (result && result.skipped) {
+      return res.status(409).json({ error: 'A review request to this customer is already being sent.' });
     }
+    return res.status(result.status).json(result.payload);
+  } catch (err) { next(err); }
+});
 
-    await db('review_requests').where({ id: reviewReq.id }).update({
-      status: 'sent',
-      sent_at: db.fn.now(),
-    }).catch(() => {});
+// ── Review Outreach: analytics, activity, and cadence control ──────────────
 
-    await db('activity_log').insert({
-      customer_id: customer.id, action: 'review_requested',
-      description: `Review request sent to ${customer.first_name} ${customer.last_name} (${loc.name}) — token: ${reviewReq.token.slice(0, 8)}...`,
-    });
+// GET /api/admin/reviews/outreach-analytics — real Sent→Reviewed funnel +
+// per-location/template/channel conversion + Google-review velocity (audit O1).
+router.get('/outreach-analytics', requireAdmin, async (req, res, next) => {
+  try {
+    const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 90));
+    const analytics = await ReviewService.getOutreachAnalytics({ days });
+    // Tell the client whether automated cadences are live so it can hide the
+    // Start-Cadence affordance when the gate is off (one-off sends still work).
+    res.json({ ...analytics, reviewSequencesEnabled: isEnabled('reviewSequences') });
+  } catch (err) { next(err); }
+});
 
-    res.json({ success: true, token: reviewReq.token });
+// GET /api/admin/reviews/outreach-activity — server-backed activity feed (audit O3).
+router.get('/outreach-activity', requireAdmin, async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 50));
+    const items = await ReviewService.getOutreachActivity({ limit });
+    res.json({ items });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/reviews/outreach-templates — template registry for the composer.
+router.get('/outreach-templates', requireAdmin, (req, res) => {
+  res.json({
+    templates: OUTREACH.OUTREACH_TEMPLATES,
+    defaultPlan: OUTREACH.DEFAULT_SEQUENCE_PLAN,
+  });
+});
+
+// POST /api/admin/reviews/outreach/start-sequence — start a cadence for one
+// customer (or many, when body.customerIds is provided). The cadence itself
+// only advances when GATE_REVIEW_SEQUENCES is on; the first touch fires now.
+router.post('/outreach/start-sequence', requireAdmin, async (req, res, next) => {
+  try {
+    // Don't start cadences while the gate is off: the cron won't advance them,
+    // so the row would sit 'active' forever — firing Day 0 then blocking the
+    // customer from one-off sends without ever delivering Day 3/7.
+    if (!isEnabled('reviewSequences')) {
+      return res.status(409).json({ error: 'Review cadences are disabled (GATE_REVIEW_SEQUENCES is off). Use a one-off send instead.' });
+    }
+    const ids = Array.isArray(req.body?.customerIds)
+      ? req.body.customerIds
+      : (req.body?.customerId ? [req.body.customerId] : []);
+    if (!ids.length) return res.status(400).json({ error: 'customerId or customerIds required' });
+    const plan = Array.isArray(req.body?.plan) && req.body.plan.length ? req.body.plan : null;
+
+    const results = [];
+    for (const customerId of ids) {
+      try {
+        // Take the SAME per-customer lock as /send-request so a Send + Cadence
+        // double-click (or a batch overlapping a manual send) can't both read
+        // the cap/cooldown before either Twilio log lands and double-ask.
+        const r = await runExclusive(`review-send:${customerId}`, () =>
+          ReviewService.startReviewSequence({ customerId, plan, startedBy: req.technicianId }),
+        );
+        if (r && r.skipped) {
+          results.push({ customerId, started: false, reason: 'send_in_progress' });
+        } else {
+          results.push({ customerId, ...r });
+        }
+      } catch (err) {
+        results.push({ customerId, started: false, reason: err.message });
+      }
+    }
+    const started = results.filter(r => r.started).length;
+    res.json({ success: true, started, total: ids.length, results });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/reviews/outreach/stop-sequence — stop an active cadence.
+router.post('/outreach/stop-sequence', requireAdmin, async (req, res, next) => {
+  try {
+    const { sequenceId } = req.body || {};
+    if (!sequenceId) return res.status(400).json({ error: 'sequenceId required' });
+    const result = await ReviewService.stopReviewSequence(sequenceId, 'manual');
+    res.json({ success: true, ...result });
   } catch (err) { next(err); }
 });
 
@@ -663,8 +876,17 @@ router.patch('/incentives/policy', requireAdmin, async (req, res, next) => {
 // POST /api/admin/reviews/incentives/mark-paid — close payroll loop manually
 router.post('/incentives/mark-paid', requireAdmin, async (req, res, next) => {
   try {
-    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
-    if (!ids.length) return res.status(400).json({ error: 'ids required' });
+    const raw = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    if (!raw.length) return res.status(400).json({ error: 'ids required (valid payout UUIDs)' });
+    // Validate UUID shape before the query. A non-UUID string reaches a uuid
+    // column and throws Postgres 22P02 → an unhandled 500. Reject the WHOLE
+    // request if any id is malformed rather than silently dropping it and
+    // reporting success on a partial set.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const ids = raw;
+    if (!ids.every((id) => typeof id === 'string' && UUID_RE.test(id))) {
+      return res.status(400).json({ error: 'All ids must be valid payout UUIDs' });
+    }
     const result = await ReviewIncentives.markPaid(ids, { paidBy: req.technicianId });
     res.json({ success: true, ...result });
   } catch (err) { next(err); }

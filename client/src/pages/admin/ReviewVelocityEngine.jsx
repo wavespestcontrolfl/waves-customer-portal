@@ -168,13 +168,6 @@ const GBP_LOCATIONS = [
   },
 ];
 
-// Mirrors the source-of-truth in server/config/twilio-numbers.js. Server
-// defaults to Lakewood Ranch when fromNumber is omitted, so an unknown
-// gbpId safely falls through to that default rather than to a hardcoded
-// tracking line.
-function getOutboundNumberForGbp(gbpId) {
-  return GBP_LOCATIONS.find((l) => l.id === gbpId)?.outboundNumber;
-}
 
 const STAGES = {
   not_contacted: { label: "Not Contacted", color: C.t3, tag: "acc" },
@@ -331,9 +324,18 @@ function apiToCustomer(row) {
     ? Math.max(0, Math.floor((Date.now() - svcDate.getTime()) / 86400000))
     : 999;
   const askCount = Number(row.askCount) || 0;
-  const stage =
-    askCount >= 2 ? "reminded" : askCount === 1 ? "sms_sent" : "not_contacted";
-  const sentiment = "happy"; // PR 1: default. Sentiment signal wiring is a later PR.
+  const seq = row.sequence || null;
+  // Stage prefers live cadence state, then ask history.
+  const stage = seq
+    ? "reminded"
+    : askCount >= 2
+      ? "reminded"
+      : askCount === 1
+        ? "sms_sent"
+        : "not_contacted";
+  // Real sentiment now flows from the server (last NPS rating); 'unknown' when
+  // the customer has never rated. No longer hardcoded "happy" (audit O4).
+  const sentiment = row.sentiment || "unknown";
   const revenue = Number(row.lifetimeRevenue) || 0;
   const svc = row.lastService || "General Pest Control";
   const score = calcScore(sentiment, daysAgo, revenue, stage, askCount, svc);
@@ -367,12 +369,45 @@ function apiToCustomer(row) {
     sms: [],
     calls: [],
     askCount,
+    hasEmail: !!row.hasEmail,
     lastAsked: row.lastAsked ? fmtDate(new Date(row.lastAsked)) : null,
-    seqStep: stage === "reminded" ? 2 : stage === "sms_sent" ? 1 : 0,
-    seqId: null,
-    suppressed: false,
-    suppressReason: null,
+    seqStep: seq ? seq.currentStep : stage === "reminded" ? 2 : stage === "sms_sent" ? 1 : 0,
+    seqTotal: seq ? seq.totalSteps : 3,
+    seqId: seq ? seq.id : null,
+    sequence: seq,
+    // Real send-eligibility from the server (audit O8). `sendable` gates the
+    // SMS-only manual Send; `cadenceable` gates Start-Cadence (can use email).
+    sendable: row.sendable !== false,
+    cadenceable: row.cadenceable !== false,
+    eligibilityReasons: row.eligibilityReasons || [],
+    suppressed: Array.isArray(row.eligibilityReasons)
+      ? row.eligibilityReasons.includes("suppressed") || row.eligibilityReasons.includes("opted_out")
+      : false,
+    suppressReason: (row.eligibilityReasons || [])[0] || null,
   };
+}
+
+// Human-readable label for an eligibility blocker.
+const ELIGIBILITY_LABELS = {
+  no_contact: "No phone or email on file",
+  no_phone: "No SMS phone (email only — use a cadence)",
+  sms_opted_out: "Opted out of review texts (email cadence still OK)",
+  sms_suppressed: "Phone on do-not-contact (email cadence still OK)",
+  email_preferred: "Customer prefers email — use a cadence",
+  opted_out: "Opted out of review texts",
+  suppressed: "On the do-not-contact list",
+  at_cap: "Already asked 3 times",
+  cooldown: "Asked within the last 30 days",
+  in_sequence: "Already in an active cadence",
+  already_active: "Already in an active cadence",
+  already_reviewed: "Already left a review",
+  reviewed: "Already left a review",
+  stopped: "Cadence stopped immediately (no reachable contact)",
+  send_in_progress: "Another send to this customer is in progress",
+};
+function eligibilityLabel(reasons = []) {
+  if (!reasons.length) return "";
+  return reasons.map((r) => ELIGIBILITY_LABELS[r] || r).join(" · ");
 }
 
 // ── Shared styles ──
@@ -469,18 +504,44 @@ export default function ReviewVelocityEngine() {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [currentFilter, setCurrentFilter] = useState("all");
   const [pipeSearch, setPipeSearch] = useState("");
-  const [activityLog, setActivityLog] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("wrev_activity_log") || "[]");
-    } catch {
-      return [];
-    }
-  });
+  // Server-backed activity feed + funnel analytics (audit O1/O3). The old
+  // localStorage "wrev_activity_log" was per-browser and never reflected real
+  // sends from other sessions; it's replaced by /outreach-activity.
+  const [activityLog, setActivityLog] = useState([]);
+  const [analytics, setAnalytics] = useState(null);
   const [drawerCust, setDrawerCust] = useState(null);
   const [toast, setToast] = useState("");
   const [batchModal, setBatchModal] = useState(false);
 
-  // Load real outreach candidates from the API — no demo fallback.
+  const loadActivity = useCallback(() => {
+    adminFetch("/admin/reviews/outreach-activity?limit=100")
+      .then((d) => {
+        setActivityLog(
+          (d.items || []).map((it) => ({
+            type: it.type,
+            msg: it.message,
+            channel: it.channel,
+            time: it.at
+              ? new Date(it.at).toLocaleString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit",
+                })
+              : "",
+          })),
+        );
+      })
+      .catch(() => {});
+  }, []);
+
+  const loadAnalytics = useCallback(() => {
+    adminFetch("/admin/reviews/outreach-analytics?days=90")
+      .then((d) => setAnalytics(d))
+      .catch(() => {});
+  }, []);
+
+  // Load real outreach candidates + analytics + activity from the API.
   const loadCandidates = useCallback(() => {
     setLoading(true);
     setLoadError(null);
@@ -493,27 +554,22 @@ export default function ReviewVelocityEngine() {
         setLoadError(err?.message || "Failed to load outreach candidates");
         setLoading(false);
       });
-  }, []);
+    loadAnalytics();
+    loadActivity();
+  }, [loadAnalytics, loadActivity]);
 
   useEffect(() => {
     loadCandidates();
   }, [loadCandidates]);
 
-  // Activity log persists locally for now (server-side log is PR 2).
-  const saveState = useCallback(
-    (_custs, log) => {
-      try {
-        localStorage.setItem(
-          "wrev_activity_log",
-          JSON.stringify((log || activityLog).slice(0, 200)),
-        );
-      } catch (e) {
-        /* ignore */
-      }
-    },
-    [activityLog],
-  );
+  // saveState is retained for the Activity tab's "Refresh" action — it now
+  // re-pulls the server feed instead of writing localStorage.
+  const saveState = useCallback(() => {
+    loadActivity();
+  }, [loadActivity]);
 
+  // Optimistic local prepend for instant feedback; the authoritative feed is
+  // re-pulled from the server after each action.
   const addLog = useCallback((type, msg) => {
     const entry = {
       type,
@@ -525,15 +581,7 @@ export default function ReviewVelocityEngine() {
         minute: "2-digit",
       }),
     };
-    setActivityLog((prev) => {
-      const next = [entry, ...prev].slice(0, 200);
-      try {
-        localStorage.setItem("wrev_activity_log", JSON.stringify(next));
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
+    setActivityLog((prev) => [entry, ...prev].slice(0, 200));
   }, []);
 
   const showToast = useCallback((text) => {
@@ -547,9 +595,12 @@ export default function ReviewVelocityEngine() {
     );
   }, []);
 
-  // Send a real review request SMS via the server. Optimistic UI update on success.
+  // Send a real review request via the server, using the chosen template/body
+  // (audit O2). Handles the accurate send-status responses (sent / deferred
+  // during quiet hours / queued on a transient failure) instead of treating a
+  // non-200 as a hard failure (audit O7).
   const sendReviewRequest = useCallback(
-    async (customer) => {
+    async (customer, opts = {}) => {
       const svcType = customer.lastSvc;
       try {
         const res = await adminFetch("/admin/reviews/send-request", {
@@ -558,36 +609,63 @@ export default function ReviewVelocityEngine() {
             customerId: customer.id,
             serviceType: svcType,
             techName: customer.lastTech,
+            ...(opts.templateId ? { templateId: opts.templateId } : {}),
+            ...(opts.body ? { body: opts.body } : {}),
           }),
         });
-        if (!res?.success) throw new Error(res?.error || "Send failed");
-        const newAsk = (customer.askCount || 0) + 1;
-        const newStage = newAsk >= 2 ? "reminded" : "sms_sent";
-        updateCustomer(customer.id, {
-          askCount: newAsk,
-          lastAsked: fmtDate(new Date()),
-          stage: newStage,
-          seqStep: Math.min((customer.seqStep || 0) + 1, 3),
-        });
+        // Only mark the customer asked on an ACTUAL delivery. Deferred (quiet
+        // hours), queued (transient retry), and alreadyQueued responses did NOT
+        // deliver a new ask, so don't optimistically inflate askCount/stage —
+        // the row reflects reality on the next candidate reload.
+        if (res?.success) {
+          const newAsk = (customer.askCount || 0) + 1;
+          const newStage = newAsk >= 2 ? "reminded" : "sms_sent";
+          updateCustomer(customer.id, {
+            askCount: newAsk,
+            lastAsked: fmtDate(new Date()),
+            stage: newStage,
+            seqStep: Math.min((customer.seqStep || 0) + 1, 3),
+          });
+        }
+        // Re-pull the authoritative funnel + feed.
+        loadAnalytics();
+        loadActivity();
+        if (res?.success) return { ok: true };
+        if (res?.deferred) return { ok: true, deferred: true, message: res.message };
+        if (res?.queued) return { ok: true, queued: true, message: res.message };
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err?.message || "Send failed" };
       }
     },
-    [updateCustomer],
+    [updateCustomer, loadAnalytics, loadActivity],
+  );
+
+  // Start a multi-touch cadence (Day 0/3/7) for one customer.
+  const startSequence = useCallback(
+    async (customer) => {
+      try {
+        const res = await adminFetch("/admin/reviews/outreach/start-sequence", {
+          method: "POST",
+          body: JSON.stringify({ customerId: customer.id }),
+        });
+        const r = (res?.results || [])[0] || {};
+        loadCandidates();
+        if (res?.started > 0 || r.started) return { ok: true };
+        return { ok: false, error: ELIGIBILITY_LABELS[r.reason] || r.reason || "Could not start cadence" };
+      } catch (err) {
+        return { ok: false, error: err?.message || "Could not start cadence" };
+      }
+    },
+    [loadCandidates],
   );
 
   // ── KPI calculations ──
+  // Sent/reviewed/conversion now come from /outreach-analytics (audit O1), not
+  // the candidate pool — converted customers leave the pool, so deriving them
+  // here always produced zero. The pool still drives pipeline-shaped counts.
   const eligible = useMemo(
     () => customers.filter((c) => !c.suppressed && c.stage !== "reviewed"),
-    [customers],
-  );
-  const sent = useMemo(
-    () => customers.filter((c) => c.askCount > 0),
-    [customers],
-  );
-  const reviewed = useMemo(
-    () => customers.filter((c) => c.stage === "reviewed"),
     [customers],
   );
   const winback = useMemo(
@@ -637,18 +715,39 @@ export default function ReviewVelocityEngine() {
   const quickSend = async (id) => {
     const c = customers.find((x) => x.id === id);
     if (!c) return;
-    if (!c.phone) {
-      showToast(`No phone on file for ${c.name}`);
+    if (!c.sendable) {
+      showToast(`Can't send to ${c.name}: ${eligibilityLabel(c.eligibilityReasons) || "not eligible"}`);
       return;
     }
     showToast(`Sending to ${c.name}...`);
     const result = await sendReviewRequest(c);
     if (result.ok) {
-      addLog("sms", `Review request sent to ${c.name} → ${c.gbpName}`);
-      showToast(`SMS sent to ${c.name}`);
+      if (result.deferred) {
+        addLog("stage", `Queued for ${c.name} (quiet hours) → ${c.gbpName}`);
+        showToast(result.message || `Queued for ${c.name} — sends when the window opens`);
+      } else if (result.queued) {
+        addLog("stage", `Queued for retry: ${c.name}`);
+        showToast(result.message || `Queued for retry: ${c.name}`);
+      } else {
+        addLog("sms", `Review request sent to ${c.name} → ${c.gbpName}`);
+        showToast(`SMS sent to ${c.name}`);
+      }
     } else {
       addLog("stage", `Failed to send to ${c.name}: ${result.error}`);
       showToast(`Failed: ${result.error}`);
+    }
+  };
+
+  const quickStartSequence = async (id) => {
+    const c = customers.find((x) => x.id === id);
+    if (!c) return;
+    showToast(`Starting cadence for ${c.name}...`);
+    const result = await startSequence(c);
+    if (result.ok) {
+      addLog("batch", `Started review cadence for ${c.name}`);
+      showToast(`Cadence started for ${c.name}`);
+    } else {
+      showToast(`Couldn't start: ${result.error}`);
     }
   };
 
@@ -755,11 +854,10 @@ export default function ReviewVelocityEngine() {
         <Dashboard
           customers={customers}
           eligible={eligible}
-          sent={sent}
-          reviewed={reviewed}
           winback={winback}
           queue={queue}
           activityLog={activityLog}
+          analytics={analytics}
           setPage={setPage}
         />
       )}
@@ -773,6 +871,8 @@ export default function ReviewVelocityEngine() {
           pipeSearch={pipeSearch}
           setPipeSearch={setPipeSearch}
           quickSend={quickSend}
+          quickStartSequence={quickStartSequence}
+          sequencesEnabled={analytics?.reviewSequencesEnabled}
           setDrawerCust={setDrawerCust}
           setBatchModal={setBatchModal}
           addLog={addLog}
@@ -794,6 +894,8 @@ export default function ReviewVelocityEngine() {
           addLog={addLog}
           showToast={showToast}
           sendReviewRequest={sendReviewRequest}
+          startSequence={startSequence}
+          sequencesEnabled={analytics?.reviewSequencesEnabled}
         />
       )}
       {/* Batch Modal */}
@@ -832,7 +934,16 @@ export default function ReviewVelocityEngine() {
         }}
       >
         {" "}
-        <span style={{ color: C.grn }}></span> <span>{toast}</span>{" "}
+        <span
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: "50%",
+            background: C.grn,
+            flexShrink: 0,
+          }}
+        />{" "}
+        <span>{toast}</span>{" "}
       </div>{" "}
     </div>
   );
@@ -843,14 +954,20 @@ export default function ReviewVelocityEngine() {
 // ══════════════════════════════════════════════════════════════
 function Dashboard({
   customers,
-  eligible,
-  sent,
-  reviewed,
   winback,
   queue,
   activityLog,
+  analytics,
   setPage,
 }) {
+  // Real funnel from /outreach-analytics (audit O1) — no longer derived from the
+  // candidate pool (which structurally never contains a reviewed customer, so
+  // the old "Reviewed" / "Conversion" tiles were permanently zero).
+  const f = analytics?.funnel || {};
+  const reviewsLanded = (analytics?.googleByLocation || []).reduce(
+    (s, r) => s + (Number(r.reviews) || 0),
+    0,
+  );
   const kpis = [
     {
       label: "In Pipeline",
@@ -860,25 +977,36 @@ function Dashboard({
     },
     {
       label: "Requests Sent",
-      value: sent.length,
-      desc: `${customers.length > 0 ? Math.round((sent.length / customers.length) * 100) : 0}% of pipeline asked`,
+      value: f.sent ?? "—",
+      desc: "review asks sent (90d)",
       accent: C.grn,
     },
     {
-      label: "In Queue",
-      value: queue.length,
-      desc: `${eligible.length} total eligible`,
-      accent: C.org,
+      label: "Reviews Landed",
+      value: reviewsLanded,
+      desc: "Google reviews in last 90d",
+      accent: C.blu,
     },
     {
-      label: "Win-Back Pool",
-      value: winback.length,
-      desc: "Customers 60+ days, never asked",
-      accent: C.blu,
+      label: "Click→Google",
+      value: f.conversionRate != null ? `${f.conversionRate}%` : "—",
+      desc: `${f.reviewed ?? 0} of ${f.sent ?? 0} asks converted`,
+      accent: C.org,
     },
   ];
 
-  const svcTypes = [...new Set(customers.map((c) => c.lastSvc))];
+  // Conversion funnel stages + channel split for the reporting strip.
+  const funnelStages = [
+    { label: "Sent", value: f.sent ?? 0 },
+    { label: "Opened", value: f.opened ?? 0, rate: f.openRate },
+    { label: "Rated", value: f.rated ?? 0 },
+    { label: "Click→Google", value: f.reviewed ?? 0, rate: f.conversionRate },
+  ];
+  const byChannel = analytics?.byChannel || [];
+  const byTemplate = (analytics?.byTemplate || [])
+    .slice()
+    .sort((a, b) => b.sent - a.sent)
+    .slice(0, 5);
 
   return (
     <div>
@@ -947,6 +1075,127 @@ function Dashboard({
           ))}
         </div>{" "}
       </div>
+      {/* Conversion Funnel + channel/template performance */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
+          Conversion Funnel
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: isMobile ? "1fr" : "1.4fr 1fr",
+            gap: 12,
+          }}
+        >
+          {/* Funnel bars */}
+          <div
+            style={{
+              background: C.surface,
+              border: `1px solid ${C.bdr}`,
+              borderRadius: 12,
+              padding: 16,
+            }}
+          >
+            {funnelStages.map((s, i) => {
+              const top = funnelStages[0].value || 0;
+              const pct = top > 0 ? Math.round((s.value / top) * 100) : 0;
+              return (
+                <div key={s.label} style={{ marginBottom: i === funnelStages.length - 1 ? 0 : 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: C.t2 }}>{s.label}</span>
+                    <span style={{ fontSize: 12, fontWeight: 700 }}>
+                      {s.value}
+                      {s.rate != null && (
+                        <span style={{ color: C.t3, fontWeight: 500 }}> · {s.rate}%</span>
+                      )}
+                    </span>
+                  </div>
+                  <div style={{ height: 8, background: C.input, borderRadius: 4, overflow: "hidden" }}>
+                    <div
+                      style={{
+                        width: `${pct}%`,
+                        height: "100%",
+                        background: i === funnelStages.length - 1 ? C.grn : C.acc,
+                        borderRadius: 4,
+                        transition: "width .3s",
+                      }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {/* Channel + top templates */}
+          <div
+            style={{
+              background: C.surface,
+              border: `1px solid ${C.bdr}`,
+              borderRadius: 12,
+              padding: 16,
+            }}
+          >
+            <SectionLabel>By Channel</SectionLabel>
+            {byChannel.length === 0 ? (
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 10 }}>No sends yet</div>
+            ) : (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                {byChannel.map((ch) => (
+                  <div
+                    key={ch.channel}
+                    style={{
+                      flex: 1,
+                      minWidth: 90,
+                      padding: "8px 10px",
+                      background: C.input,
+                      borderRadius: 8,
+                    }}
+                  >
+                    <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase" }}>{ch.channel}</div>
+                    <div style={{ fontSize: 15, fontWeight: 700 }}>{ch.sent}</div>
+                    <div style={{ fontSize: 10, color: C.t3 }}>
+                      {ch.sent > 0 ? Math.round((ch.reviewed / ch.sent) * 100) : 0}% converted
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <SectionLabel>Top Templates</SectionLabel>
+            {byTemplate.length === 0 ? (
+              <div style={{ fontSize: 11, color: C.t3 }}>No sends yet</div>
+            ) : (
+              byTemplate.map((t) => (
+                <div
+                  key={t.templateKey}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    fontSize: 11,
+                    padding: "3px 0",
+                    borderBottom: `1px solid ${C.bdr}`,
+                  }}
+                >
+                  <span style={{ color: C.t2 }}>{t.templateKey}</span>
+                  <span style={{ color: C.t3 }}>
+                    {t.sent} sent · {t.sent > 0 ? Math.round((t.reviewed / t.sent) * 100) : 0}%
+                  </span>
+                </div>
+              ))
+            )}
+            <div style={{ display: "flex", gap: 12, marginTop: 10 }}>
+              <div style={{ fontSize: 11, color: C.t3 }}>
+                Active cadences:{" "}
+                <span style={{ fontWeight: 700, color: C.acc }}>{analytics?.activeSequences ?? 0}</span>
+              </div>
+              <div style={{ fontSize: 11, color: C.t3 }}>
+                Win-back pool: <span style={{ fontWeight: 700, color: C.acc }}>{winback.length}</span>
+              </div>
+              <div style={{ fontSize: 11, color: C.t3 }}>
+                In queue: <span style={{ fontWeight: 700, color: C.acc }}>{queue.length}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
       {/* GBP Cards */}
       <div style={{ marginBottom: 20 }}>
         {" "}
@@ -972,10 +1221,14 @@ function Dashboard({
         >
           {GBP_LOCATIONS.map((loc) => {
             const locCusts = customers.filter((c) => c.gbpId === loc.id);
-            const locReviewed = locCusts.filter(
-              (c) => c.stage === "reviewed",
-            ).length;
-            const locSent = locCusts.filter((c) => c.askCount > 0).length;
+            // Reviewed + asked now come from real analytics (audit O1), not the
+            // candidate pool. "Reviewed" = actual Google reviews landed for this
+            // GBP in 90d; "Asked" = review asks sent; Conv = clicked→Google.
+            const gbpRow = (analytics?.googleByLocation || []).find((r) => r.locationId === loc.id);
+            const locRow = (analytics?.byLocation || []).find((r) => r.locationId === loc.id);
+            const locReviewed = gbpRow?.reviews ?? 0;
+            const locSent = locRow?.sent ?? 0;
+            const locConverted = locRow?.reviewed ?? 0;
             const locQueue = locCusts.filter(
               (c) => !c.suppressed && c.stage === "not_contacted",
             ).length;
@@ -1025,7 +1278,7 @@ function Dashboard({
                     { v: locSent, l: "Asked" },
                     { v: locQueue, l: "In Queue" },
                     {
-                      v: `${locSent > 0 ? Math.round((locReviewed / locSent) * 100) : 0}%`,
+                      v: `${locSent > 0 ? Math.round((locConverted / locSent) * 100) : 0}%`,
                       l: "Conv Rate",
                     },
                   ].map((s) => (
@@ -1076,68 +1329,13 @@ function Dashboard({
           })}
         </div>{" "}
       </div>
-      {/* Review Velocity */}
+      {/* Review Velocity — actual Google reviews landed per week (90d) */}
       <div style={{ marginBottom: 20 }}>
         {" "}
         <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
           Review Velocity
         </div>{" "}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(3, 1fr)",
-            gap: isMobile ? 8 : 10,
-          }}
-        >
-          {svcTypes.map((svc) => {
-            const sc = customers.filter((c) => c.lastSvc === svc);
-            const rev = sc.filter((c) => c.stage === "reviewed").length;
-            const asked = sc.filter((c) => c.askCount > 0).length;
-            return (
-              <div
-                key={svc}
-                style={{
-                  background: C.surface,
-                  border: `1px solid ${C.bdr}`,
-                  borderRadius: 12,
-                  padding: 14,
-                }}
-              >
-                {" "}
-                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-                  {svc}
-                </div>{" "}
-                <div style={{ display: "flex", gap: 12 }}>
-                  {" "}
-                  <div>
-                    <span
-                      style={{ fontSize: 16, fontWeight: 700, color: C.acc }}
-                    >
-                      {sc.length}
-                    </span>
-                    <div style={{ fontSize: 10, color: C.t3 }}>Jobs</div>
-                  </div>{" "}
-                  <div>
-                    <span
-                      style={{ fontSize: 16, fontWeight: 700, color: C.grn }}
-                    >
-                      {rev}
-                    </span>
-                    <div style={{ fontSize: 10, color: C.t3 }}>Reviews</div>
-                  </div>{" "}
-                  <div>
-                    <span
-                      style={{ fontSize: 16, fontWeight: 700, color: C.org }}
-                    >
-                      {asked > 0 ? Math.round((rev / asked) * 100) : 0}%
-                    </span>
-                    <div style={{ fontSize: 10, color: C.t3 }}>Conv</div>
-                  </div>{" "}
-                </div>{" "}
-              </div>
-            );
-          })}
-        </div>{" "}
+        <VelocityChart velocity={analytics?.velocity || []} />
       </div>
       {/* Recent Activity */}
       <div>
@@ -1147,6 +1345,78 @@ function Dashboard({
         </div>{" "}
         <ActivityList log={activityLog} max={8} />{" "}
       </div>{" "}
+    </div>
+  );
+}
+
+// Weekly Google-review velocity bars (real data from /outreach-analytics).
+function VelocityChart({ velocity }) {
+  if (!velocity.length) {
+    return (
+      <div
+        style={{
+          background: C.surface,
+          border: `1px solid ${C.bdr}`,
+          borderRadius: 12,
+          padding: 20,
+          fontSize: 12,
+          color: C.t3,
+          textAlign: "center",
+        }}
+      >
+        No Google reviews in the last 90 days yet.
+      </div>
+    );
+  }
+  const max = Math.max(...velocity.map((v) => v.reviews), 1);
+  return (
+    <div
+      style={{
+        background: C.surface,
+        border: `1px solid ${C.bdr}`,
+        borderRadius: 12,
+        padding: 16,
+        display: "flex",
+        alignItems: "flex-end",
+        gap: 6,
+        height: 150,
+      }}
+    >
+      {velocity.map((v, i) => {
+        const h = Math.round((v.reviews / max) * 100);
+        const wk = v.week ? new Date(v.week) : null;
+        return (
+          <div
+            key={i}
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "flex-end",
+              height: "100%",
+            }}
+          >
+            <div style={{ fontSize: 10, fontWeight: 700, color: C.t2, marginBottom: 2 }}>
+              {v.reviews}
+            </div>
+            <div
+              style={{
+                width: "100%",
+                maxWidth: 28,
+                height: `${h}%`,
+                minHeight: 3,
+                background: C.grn,
+                borderRadius: 4,
+                transition: "height .3s",
+              }}
+            />
+            <div style={{ fontSize: 9, color: C.t3, marginTop: 4 }}>
+              {wk ? `${wk.getMonth() + 1}/${wk.getDate()}` : ""}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1163,6 +1433,8 @@ function Pipeline({
   pipeSearch,
   setPipeSearch,
   quickSend,
+  quickStartSequence,
+  sequencesEnabled,
   setDrawerCust,
   setBatchModal,
 }) {
@@ -1371,7 +1643,9 @@ function Pipeline({
                           ? "grn"
                           : c.sentiment === "issue"
                             ? "red"
-                            : "org"
+                            : c.sentiment === "neutral"
+                              ? "org"
+                              : "acc"
                       }
                     >
                       {c.sentiment}
@@ -1392,8 +1666,14 @@ function Pipeline({
                     </div>{" "}
                   </td>{" "}
                   <td style={tdStyle}>
-                    {c.seqStep > 0 ? (
-                      <Tag type="blu">Step {c.seqStep}/3</Tag>
+                    {c.sequence ? (
+                      <Tag type="blu">
+                        Cadence {c.seqStep}/{c.seqTotal}
+                      </Tag>
+                    ) : c.seqStep > 0 ? (
+                      <Tag type="acc">
+                        Asked {c.askCount}×
+                      </Tag>
                     ) : (
                       <span style={{ color: C.t3, fontSize: 11 }}>—</span>
                     )}
@@ -1419,17 +1699,14 @@ function Pipeline({
                             )
                               return;
                             try {
-                              const fromNumber = getOutboundNumberForGbp(
-                                c.gbpId,
-                              );
+                              // Let the server resolve the From line from its
+                              // own TWILIO_NUMBERS source of truth — a stale
+                              // client-side GBP number would 400.
                               const r = await adminFetch(
                                 "/admin/communications/call",
                                 {
                                   method: "POST",
-                                  body: JSON.stringify({
-                                    to: c.phone,
-                                    ...(fromNumber ? { fromNumber } : {}),
-                                  }),
+                                  body: JSON.stringify({ to: c.phone }),
                                 },
                               );
                               if (!r?.success)
@@ -1482,6 +1759,67 @@ function Pipeline({
                           {" "}
                           <MessageSquare size={12} strokeWidth={1.75} />{" "}
                         </a>
+                      )}
+                      {/* Send review now — disabled with the reason when the
+                          customer isn't eligible (opted out, at cap, cooldown,
+                          suppressed, already in a cadence). */}
+                      <button
+                        type="button"
+                        disabled={!c.sendable}
+                        title={
+                          c.sendable
+                            ? "Send a review request now"
+                            : eligibilityLabel(c.eligibilityReasons)
+                        }
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          quickSend(c.id);
+                        }}
+                        style={{
+                          height: 24,
+                          padding: "0 8px",
+                          border: `1px solid ${c.sendable ? C.acc : C.inputBorder}`,
+                          borderRadius: 4,
+                          color: c.sendable ? "#fff" : C.t3,
+                          background: c.sendable ? C.acc : "#fff",
+                          cursor: c.sendable ? "pointer" : "not-allowed",
+                          opacity: c.sendable ? 1 : 0.6,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          fontFamily: C.sans,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.04em",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        Send
+                      </button>
+                      {sequencesEnabled && c.cadenceable && !c.sequence && (
+                        <button
+                          type="button"
+                          title="Start a Day 0/3/7 review cadence"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            quickStartSequence(c.id);
+                          }}
+                          style={{
+                            height: 24,
+                            padding: "0 8px",
+                            border: `1px solid ${C.inputBorder}`,
+                            borderRadius: 4,
+                            color: C.t2,
+                            background: "#fff",
+                            cursor: "pointer",
+                            fontSize: 11,
+                            fontWeight: 500,
+                            fontFamily: C.sans,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.04em",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          Cadence
+                        </button>
                       )}
                       <button
                         type="button"
@@ -1566,14 +1904,7 @@ function ActivityLogPage({ activityLog, setActivityLog, saveState }) {
       >
         {" "}
         <div style={{ fontSize: 15, fontWeight: 700 }}>Activity Log</div>{" "}
-        <Btn
-          onClick={() => {
-            setActivityLog([]);
-            saveState(undefined, []);
-          }}
-        >
-          Clear
-        </Btn>{" "}
+        <Btn onClick={() => saveState()}>Refresh</Btn>{" "}
       </div>{" "}
       <ActivityList log={activityLog} max={100} />{" "}
     </div>
@@ -1591,10 +1922,13 @@ function ActivityList({ log, max }) {
     );
 
   const iconMap = {
-    sms: { bg: C.grnG, color: C.grn, icon: "" },
-    call: { bg: C.bluG, color: C.blu, icon: "" },
-    batch: { bg: C.purG, color: C.pur, icon: "" },
-    stage: { bg: C.orgG, color: C.org, icon: "" },
+    sent: { bg: C.grnG, color: C.grn, glyph: "→" },
+    sms: { bg: C.grnG, color: C.grn, glyph: "→" },
+    reviewed: { bg: C.grnG, color: C.grn, glyph: "★" },
+    rated: { bg: C.orgG, color: C.org, glyph: "#" },
+    call: { bg: C.bluG, color: C.blu, glyph: "☎" },
+    batch: { bg: C.purG, color: C.pur, glyph: "≡" },
+    stage: { bg: C.orgG, color: C.org, glyph: "!" },
   };
 
   return (
@@ -1623,9 +1957,10 @@ function ActivityList({ log, max }) {
                 flexShrink: 0,
                 background: ic.bg,
                 color: ic.color,
+                fontWeight: 700,
               }}
             >
-              {ic.icon}
+              {ic.glyph}
             </div>{" "}
             <div style={{ flex: 1, minWidth: 0 }}>
               {" "}
@@ -1650,50 +1985,87 @@ function CustomerDrawer({
   addLog,
   showToast,
   sendReviewRequest,
+  startSequence: startSequenceFn,
+  sequencesEnabled,
 }) {
   const [msg, setMsg] = useState("");
   const [selectedTpl, setSelectedTpl] = useState("");
   const [sending, setSending] = useState(false);
+  const [seqStarting, setSeqStarting] = useState(false);
   const c = customer;
 
   const applyTpl = (tplId) => {
     setSelectedTpl(tplId);
     const tpl = TEMPLATES.find((t) => t.id === tplId);
-    if (tpl) setMsg(hydrate(tpl.body, c));
+    // Hydrate name/tech/etc. for preview, but KEEP the {review_url} token so the
+    // server swaps in the tokenized /rate link. Hydrating it client-side to the
+    // raw GBP URL would bypass the NPS gate (sends issues straight to Google).
+    if (tpl) setMsg(hydrate(tpl.body, { ...c, reviewUrl: "{review_url}" }));
   };
 
-  // Fires the server's canonical review-request flow (NPS gate + rate page link).
-  // Composed message is ignored by the server for PR 1 — it always sends the
-  // canonical template. Custom message body ships in PR 3 with templates table.
+  // A no-link private check-in (resolution_check / satisfaction_confirm) bypasses
+  // the review ask cap/cooldown on the server, so the client must allow it even
+  // when c.sendable is false (those are review-ask-only blockers) — it just needs
+  // an SMS-reachable phone.
+  const selectedTplObj = TEMPLATES.find((t) => t.id === selectedTpl);
+  const selectedIsNoLink = !!(selectedTplObj && !selectedTplObj.body.includes("{review_url}"));
+  const canSendSelected = selectedIsNoLink ? !!c.phone : c.sendable;
+
+  // Sends the chosen template / edited body through the server's NPS rate-page
+  // flow (audit O2). The server resolves {review_url} to the tokenized /rate
+  // link, so the happy→Google / issue→private gate is preserved.
   const sendSms = async () => {
-    if (!c.phone) {
-      showToast("No phone on file");
+    if (!canSendSelected) {
+      showToast(
+        selectedIsNoLink
+          ? "No phone on file for a check-in"
+          : eligibilityLabel(c.eligibilityReasons) || "Not eligible to send",
+      );
       return;
     }
     setSending(true);
-    const result = await sendReviewRequest(c);
+    const result = await sendReviewRequest(c, {
+      templateId: selectedTpl || undefined,
+      body: msg.trim() || undefined,
+    });
     setSending(false);
     if (result.ok) {
-      addLog("sms", `Review request sent to ${c.name} → ${c.gbpName}`);
-      showToast(`SMS sent to ${c.name}`);
+      if (result.deferred || result.queued) {
+        showToast(result.message || `Queued for ${c.name}`);
+      } else {
+        addLog("sms", `Review request sent to ${c.name} → ${c.gbpName}`);
+        showToast(`Sent to ${c.name}`);
+      }
       setMsg("");
     } else {
       showToast(`Failed: ${result.error}`);
     }
   };
 
-  const startSequence = () => {
-    showToast("Sequences ship in a later PR — send manually for now");
+  const startSequence = async () => {
+    if (c.sequence) {
+      showToast("Already in an active cadence");
+      return;
+    }
+    setSeqStarting(true);
+    const result = await startSequenceFn(c);
+    setSeqStarting(false);
+    if (result.ok) {
+      addLog("batch", `Started review cadence for ${c.name}`);
+      showToast(`Cadence started for ${c.name}`);
+    } else {
+      showToast(`Couldn't start: ${result.error}`);
+    }
   };
 
   const scoreColor = c.score >= 70 ? C.grn : c.score >= 40 ? C.org : C.red;
   const gbp = GBP_LOCATIONS.find((l) => l.id === c.gbpId);
-  const filteredTpls = TEMPLATES.filter(
-    (t) =>
-      t.sentiment === c.sentiment ||
-      t.sentiment === "neutral" ||
-      c.sentiment === "neutral",
-  );
+  // With a known sentiment, surface matching + neutral templates; when it's
+  // unknown (no NPS rating yet), show the full set.
+  const sentimentKnown = c.sentiment === "happy" || c.sentiment === "issue";
+  const filteredTpls = sentimentKnown
+    ? TEMPLATES.filter((t) => t.sentiment === c.sentiment || t.sentiment === "neutral")
+    : TEMPLATES;
 
   return (
     <div
@@ -1994,29 +2366,77 @@ function CustomerDrawer({
                 lineHeight: 1.5,
               }}
             >
-              Template is preview-only for now. The send uses the canonical
-              review-request flow with a rating link that routes happy customers
-              to Google and issues to a recovery inbox.
+              The selected template (with your edits) is what sends. The
+              {" {review_url}"} resolves to a rating link that routes happy
+              customers to Google and issues to a private recovery inbox.
             </div>{" "}
-            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            {!c.sendable && !selectedIsNoLink && (
+              <div
+                style={{
+                  fontSize: 11,
+                  color: C.org,
+                  marginTop: 6,
+                  fontWeight: 600,
+                }}
+              >
+                Not sendable: {eligibilityLabel(c.eligibilityReasons)}
+              </div>
+            )}
+            {!c.sendable && selectedIsNoLink && (
+              <div style={{ fontSize: 11, color: C.t2, marginTop: 6 }}>
+                Private check-in — bypasses the review ask cap/cooldown.
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
               {" "}
               <Btn
                 variant="success"
                 onClick={sendSms}
-                disabled={sending || !c.phone}
+                disabled={sending || !canSendSelected}
               >
-                {sending ? "Sending…" : " Send Review Request"}
+                {sending
+                  ? "Sending…"
+                  : selectedIsNoLink
+                    ? "Send Check-In"
+                    : "Send Review Request"}
               </Btn>{" "}
               <Btn
                 variant="primary"
-                onClick={() => {
-                  addLog("call", `Call initiated to ${c.name} at ${c.phoneF}`);
-                  showToast(`Calling ${c.name}...`);
+                disabled={!c.phone}
+                onClick={async () => {
+                  if (
+                    !window.confirm(
+                      `Call ${c.name} at ${c.phoneF || c.phone}?\n\nWaves will call your phone first — press 1 to connect.`,
+                    )
+                  )
+                    return;
+                  try {
+                    // Server resolves the From line (TWILIO_NUMBERS) — a stale
+                    // client-side GBP number would 400.
+                    const r = await adminFetch("/admin/communications/call", {
+                      method: "POST",
+                      body: JSON.stringify({ to: c.phone }),
+                    });
+                    if (!r?.success) {
+                      showToast("Call failed: " + (r?.error || "unknown error"));
+                    } else {
+                      addLog("call", `Calling ${c.name} at ${c.phoneF}`);
+                      showToast(`Calling ${c.name}…`);
+                    }
+                  } catch (err) {
+                    showToast("Call failed: " + err.message);
+                  }
                 }}
               >
                 Call
               </Btn>{" "}
-              <Btn onClick={startSequence}>Start Sequence</Btn>{" "}
+              {c.sequence ? (
+                <Btn disabled>In cadence ({c.seqStep}/{c.seqTotal})</Btn>
+              ) : sequencesEnabled ? (
+                <Btn onClick={startSequence} disabled={seqStarting || !c.cadenceable}>
+                  {seqStarting ? "Starting…" : "Start Cadence"}
+                </Btn>
+              ) : null}{" "}
             </div>{" "}
           </div>{" "}
         </DrawerSection>{" "}
