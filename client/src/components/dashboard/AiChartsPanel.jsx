@@ -121,7 +121,11 @@ function AiChart({ chartType, spec, rows, fields }) {
     const yKeys = [...yCols].length ? [...yCols] : [yKey];
     const series = yKeys.map((k) => rows.map((r) => Number(r[k])));
     const allVals = series.flat().filter((n) => Number.isFinite(n));
-    if (allVals.length < 2) return <AiChart chartType="bar" spec={spec} rows={rows} fields={fields} />;
+    // A line needs ≥2 x-positions that carry data. Count x-positions where SOME
+    // series is finite — a single bucket (even multi-series) falls back to bars
+    // rather than drawing invisible one-point polylines.
+    const finiteX = rows.filter((_, i) => series.some((s) => Number.isFinite(s[i]))).length;
+    if (finiteX < 2) return <AiChart chartType="bar" spec={spec} rows={rows} fields={fields} />;
     const max = Math.max(...allVals), min = Math.min(...allVals, 0);
     const W = 600, H = 180, padL = 56, padR = 8, padT = 10, padB = 22;
     const span = max - min || 1;
@@ -130,6 +134,18 @@ function AiChart({ chartType, spec, rows, fields }) {
     const yAt = (v) => padT + (1 - (v - min) / span) * (H - padT - padB);
     const ticks = [max, (max + min) / 2, min];
     const xIdx = n > 2 ? [0, Math.floor((n - 1) / 2), n - 1] : [0, n - 1];
+    // Split each series into contiguous runs of finite points, so a NULL bucket
+    // (e.g. a NULLIF rate with no leads that month) reads as a GAP — not a drop
+    // to the floor. Isolated finite points render as a dot rather than vanishing.
+    const segmentsOf = (s) => {
+      const segs = []; let cur = [];
+      s.forEach((v, i) => {
+        if (Number.isFinite(v)) cur.push([xAt(i), yAt(v)]);
+        else if (cur.length) { segs.push(cur); cur = []; }
+      });
+      if (cur.length) segs.push(cur);
+      return segs;
+    };
     return (
       <div className="overflow-x-auto">
         {yKeys.length > 1 && <Legend keys={yKeys} />}
@@ -140,9 +156,14 @@ function AiChart({ chartType, spec, rows, fields }) {
               <text x={padL - 6} y={yAt(t) + 3} textAnchor="end" fontSize="10" fill="#A1A1AA">{fmtVal(t, fmt)}</text>
             </g>
           ))}
-          {series.map((s, si) => (
-            <polyline key={`s${si}`} points={s.map((v, i) => `${xAt(i)},${yAt(Number.isFinite(v) ? v : min)}`).join(" ")} fill="none" stroke={yKeys.length > 1 ? shade(si) : CHART_PRIMARY} strokeWidth="2" />
-          ))}
+          {series.map((s, si) => {
+            const color = yKeys.length > 1 ? shade(si) : CHART_PRIMARY;
+            return segmentsOf(s).map((seg, gi) => (
+              seg.length > 1
+                ? <polyline key={`s${si}-${gi}`} points={seg.map((p) => p.join(",")).join(" ")} fill="none" stroke={color} strokeWidth="2" />
+                : <circle key={`s${si}-${gi}`} cx={seg[0][0]} cy={seg[0][1]} r="2.5" fill={color} />
+            ));
+          })}
           {xIdx.map((idx, j) => (
             <text key={`x${j}`} x={xAt(idx)} y={H - 6} textAnchor={j === 0 ? "start" : j === xIdx.length - 1 ? "end" : "middle"} fontSize="10" fill="#A1A1AA">{String(rows[idx][xKey] ?? "")}</text>
           ))}
