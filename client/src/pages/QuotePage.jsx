@@ -224,10 +224,20 @@ function captureAttribution() {
     const gclid = p.get('gclid') || null;
     const wbraid = p.get('wbraid') || null;
     const gbraid = p.get('gbraid') || null;
+    // Meta click id (URL) + cookies, so quote-wizard leads from Meta ads carry
+    // attribution + Conversions API match keys (mirrors the gclid path).
+    const fbclid = p.get('fbclid') || null;
+    const readCookie = (name) => {
+      try { const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)')); return m ? decodeURIComponent(m[1]) : null; } catch { return null; }
+    };
+    const fbc = readCookie('_fbc');
+    const fbp = readCookie('_fbp');
     const referrer = document.referrer || null;
     const landing_url = window.location.href || null;
-    if (!hasUtm && !gclid && !wbraid && !gbraid && !referrer) return null;
-    return { utm: hasUtm ? utm : null, gclid, wbraid, gbraid, referrer, landing_url };
+    // Keep _fbp too: it's a Conversions API match key even when it's the only
+    // signal (view-through / direct return with no fbclid/_fbc/UTM/referrer).
+    if (!hasUtm && !gclid && !wbraid && !gbraid && !fbclid && !fbc && !fbp && !referrer) return null;
+    return { utm: hasUtm ? utm : null, gclid, wbraid, gbraid, fbclid, fbc, fbp, referrer, landing_url };
   } catch {
     return null;
   }

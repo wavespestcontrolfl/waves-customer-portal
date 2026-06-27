@@ -99,6 +99,9 @@ router.post('/', async (req, res) => {
       gclid,
       wbraid,
       gbraid,
+      fbclid,
+      fbc,
+      fbp,
       firstName,
       lastName,
       serviceInterest,
@@ -597,7 +600,7 @@ router.post('/', async (req, res) => {
               content: utmContent,
               term: utmTerm,
             },
-            clickIds: { gclid: gclid || null, wbraid: wbraid || null, gbraid: gbraid || null },
+            clickIds: { gclid: gclid || null, wbraid: wbraid || null, gbraid: gbraid || null, fbclid: fbclid || null, fbc: fbc || null, fbp: fbp || null },
           },
           address: normalizedAddress,
         }),
@@ -608,6 +611,9 @@ router.post('/', async (req, res) => {
         gclid: gclid || null,
         wbraid: wbraid || null,
         gbraid: gbraid || null,
+        fbclid: fbclid || null,
+        fbc: fbc || null,
+        fbp: fbp || null,
         is_residential: true,
       }).returning('*');
       leadRecord = newLead;
@@ -749,6 +755,9 @@ router.post('/', async (req, res) => {
         gclid: gclid || null,
         wbraid: wbraid || null,
         gbraid: gbraid || null,
+        fbclid: fbclid || null,
+        fbc: fbc || null,
+        fbp: fbp || null,
         utm_campaign: utmCampaign,
         utm_term: utmTerm,
         funnel_stage: 'lead',
@@ -850,6 +859,11 @@ function getLeadWebhookAttribution(body = {}) {
     gclid: truncateClickId(body.gclid || body['Gclid'] || body.GCLID || attr.gclid || ''),
     wbraid: truncateClickId(body.wbraid || body['Wbraid'] || body.WBRAID || attr.wbraid || ''),
     gbraid: truncateClickId(body.gbraid || body['Gbraid'] || body.GBRAID || attr.gbraid || ''),
+    // Meta click id + first-party cookies (the gclid analog), for Meta web-lead
+    // attribution + Conversions API match keys.
+    fbclid: truncateClickId(body.fbclid || body['Fbclid'] || body.FBCLID || attr.fbclid || ''),
+    fbc: truncateClickId(body.fbc || body['Fbc'] || attr.fbc || ''),
+    fbp: truncateClickId(body.fbp || body['Fbp'] || attr.fbp || ''),
   };
 }
 
@@ -885,6 +899,8 @@ function buildLeadWebhookIntake(body = {}) {
     attribution.utmMedium,
     attribution.utmCampaign,
     attribution.utmContent,
+    attribution.fbclid,
+    attribution.fbc,
   );
 
   return {
@@ -1057,7 +1073,7 @@ function cleanPhone(value) {
   return String(value).replace(/\D/g, '').replace(/^1(\d{10})$/, '$1');
 }
 
-function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent) {
+function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc) {
   const url = landingUrl || pageUrl || '';
   const source = String(utmSource || '').trim().toLowerCase();
   const medium = String(utmMedium || '').trim().toLowerCase();
@@ -1076,6 +1092,11 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
   if (utmSource === 'google' && utmMedium === 'cpc') return { source: 'google_ads', detail: `Campaign: ${utmCampaign}`, channel: 'paid', area: utmContent };
   if (utmSource === 'facebook' || utmSource === 'fb') return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: utmMedium === 'cpc' ? 'paid' : 'organic' };
   if (utmSource === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
+  // Meta auto-appends fbclid to ad-click landing URLs even without explicit UTMs;
+  // _fbc is its cookie form (survives navigation when the URL fbclid is lost). A
+  // lead carrying either, with no clearer source above, is a paid Meta click.
+  // (_fbp alone is NOT counted — Meta sets it on every visit, organic included.)
+  if (fbclid || fbc) return { source: 'facebook', detail: fbclid ? 'Meta click (fbclid)' : 'Meta click (_fbc)', channel: 'paid' };
 
   // Domain-based attribution. Must mirror the spoke fleet in
   // wavespestcontrol-astro-/src/data/domains.json — each spoke domain that
@@ -1129,4 +1150,5 @@ module.exports._test = {
   shouldApplyTriageServiceInterest,
   shouldRunLeadAcquisition,
   applyLeadEstimateAutomationGate,
+  determineLeadSource,
 };

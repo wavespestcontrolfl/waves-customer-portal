@@ -2288,6 +2288,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:15AM — Meta (Facebook/Instagram) Ads sync (campaigns + insights)
+  // Pulls Meta ad spend/performance into the same ad_campaigns /
+  // ad_performance_daily tables (platform='facebook'); the PPC dashboard then
+  // shows Meta alongside Google. No-ops unless META_ADS_* creds are set.
+  // =========================================================================
+  cron.schedule('15 6 * * *', async () => {
+    try {
+      const metaAds = require('./ads/meta-ads');
+      if (!metaAds.isConfigured()) return;
+      logger.info('Running: Meta Ads daily sync');
+      await metaAds.syncCampaigns();
+      await metaAds.syncDailyPerformance(7);
+      logger.info('Meta Ads daily sync complete');
+    } catch (err) {
+      logger.error(`Meta Ads sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:40AM — Google Ads offline conversion upload (Data Manager API)
   // Automates the EXISTING DataManager.uploadConversions (qualified leads +
   // completed-job revenue) — previously admin-trigger only. Opt-in via
@@ -2329,6 +2348,33 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Data Manager offline conversion upload failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 6:45AM — Meta Conversions API upload (Lead + Purchase)
+  // Opt-in via META_CAPI_CRON_ENABLED. uploadConversions self-serializes (per
+  // type) and honours META_CAPI_ALLOW_UPLOADS / _TEST_EVENT_CODE, so it sends
+  // real events only when explicitly allowed; otherwise it dry-runs to Test
+  // Events (or no-ops). De-duped per event_id.
+  // =========================================================================
+  cron.schedule('45 6 * * *', async () => {
+    if (process.env.META_CAPI_CRON_ENABLED !== 'true') return;
+    logger.info('Running: Meta Conversions API upload');
+    try {
+      const MetaCapi = require('./ads/meta-data-manager');
+      for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
+        const r = await MetaCapi.uploadConversions({
+          conversionType, periodDays: 7, limit: 500, validateOnly: false,
+        });
+        logger.info(`[meta-capi cron] ${conversionType}: ${JSON.stringify({
+          configured: r.configured, skipped: r.skipped || false, testMode: r.testMode,
+          sent: r.sent, validated: r.validated, eventsReceived: r.eventsReceived,
+          candidates: r.candidates, error: r.error || null,
+        })}`);
+      }
+    } catch (err) {
+      logger.error(`Meta Conversions API upload failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

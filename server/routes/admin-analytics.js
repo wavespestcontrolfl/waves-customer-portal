@@ -5,6 +5,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const GA4 = require('../services/analytics/google-analytics');
 const LocalPerformance = require('../services/analytics/local-performance');
 const DataManager = require('../services/ads/data-manager');
+const MetaCapi = require('../services/ads/meta-data-manager');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -70,6 +71,31 @@ router.post('/data-manager/upload', requireAdmin, async (req, res, next) => {
     const result = await DataManager.uploadConversions({
       conversionType: req.body?.conversionType || req.body?.type || 'completed_job_revenue',
       periodDays: parseInt(req.body?.period || req.body?.days || 30),
+      limit: parseInt(req.body?.limit || 100),
+      validateOnly: req.body?.validateOnly !== false,
+      force: req.body?.force === true,
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/analytics/meta-capi/readiness — Meta Conversions API candidates
+router.get('/meta-capi/readiness', async (req, res, next) => {
+  try {
+    const data = await MetaCapi.buildReadiness({
+      periodDays: parseInt(req.query.period || 7),
+      limit: parseInt(req.query.limit || 250),
+    });
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/analytics/meta-capi/upload — defaults to a Test-Events dry run
+router.post('/meta-capi/upload', requireAdmin, async (req, res, next) => {
+  try {
+    const result = await MetaCapi.uploadConversions({
+      conversionType: req.body?.conversionType || req.body?.type || 'completed_job_revenue',
+      periodDays: parseInt(req.body?.period || req.body?.days || 7),
       limit: parseInt(req.body?.limit || 100),
       validateOnly: req.body?.validateOnly !== false,
       force: req.body?.force === true,

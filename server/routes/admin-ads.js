@@ -10,6 +10,8 @@ let _BudgetManager, _CampaignAdvisor, _googleAds;
 function getBudgetManager() { return _BudgetManager || (_BudgetManager = require('../services/ads/budget-manager')); }
 function getCampaignAdvisor() { return _CampaignAdvisor || (_CampaignAdvisor = require('../services/ads/campaign-advisor')); }
 function getGoogleAds() { return _googleAds || (_googleAds = require('../services/ads/google-ads')); }
+let _metaAds;
+function getMetaAds() { return _metaAds || (_metaAds = require('../services/ads/meta-ads')); }
 let _GoogleCallBridge;
 function getGoogleCallBridge() {
   return _GoogleCallBridge || (_GoogleCallBridge = require('../services/ads/google-call-bridge'));
@@ -68,6 +70,13 @@ router.put('/campaigns/:id', async (req, res, next) => {
 router.post('/campaigns/:id/mode', async (req, res, next) => {
   try {
     const { mode, reason } = req.body;
+    // Mode rewrites budget_mode + daily_budget_current locally; refuse Meta
+    // (read-only) so the dashboard can't drift from Ads Manager.
+    const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.platform !== 'google_ads') {
+      return res.status(400).json({ error: `Budget mode isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
+    }
     const result = await getBudgetManager().setMode(req.params.id, mode, reason || 'manual');
     res.json(result);
   } catch (err) { next(err); }
@@ -77,11 +86,17 @@ router.post('/campaigns/:id/mode', async (req, res, next) => {
 router.post('/campaigns/:id/budget', async (req, res, next) => {
   try {
     const { budget, reason } = req.body;
+    // Only Google campaigns have remote control here — refuse Meta (read-only,
+    // managed in Ads Manager) BEFORE mutating local budget, so the local row
+    // can't drift from the real campaign.
+    const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.platform !== 'google_ads') {
+      return res.status(400).json({ error: `Budget control isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
+    }
     const result = await getBudgetManager().setBudget(req.params.id, budget, reason || 'manual');
 
-    // Also update on Google Ads if campaign is linked
-    const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
-    if (campaign && campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+    if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
       const gResult = await getGoogleAds().updateBudget(campaign.platform_campaign_id, budget);
       if (gResult) result.googleAdsUpdated = true;
     }
@@ -95,6 +110,9 @@ router.post('/campaigns/:id/pause', async (req, res, next) => {
   try {
     const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.platform !== 'google_ads') {
+      return res.status(400).json({ error: `Pause isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
+    }
 
     // Pause on Google Ads if linked
     let googleAdsResult = null;
@@ -117,6 +135,9 @@ router.post('/campaigns/:id/enable', async (req, res, next) => {
   try {
     const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.platform !== 'google_ads') {
+      return res.status(400).json({ error: `Enable isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
+    }
 
     // Enable on Google Ads if linked
     let googleAdsResult = null;
@@ -152,6 +173,22 @@ router.post('/sync', async (req, res, next) => {
         performanceRows: performance.length,
         searchTerms: searchTerms.length,
       },
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/sync/meta — pull Meta (Facebook/Instagram) campaigns +
+// daily insights into ad_campaigns/ad_performance_daily (platform='facebook').
+router.post('/sync/meta', async (req, res, next) => {
+  try {
+    if (!getMetaAds().isConfigured()) {
+      return res.status(400).json({ error: 'Meta Ads API not configured. Set META_ADS_ACCESS_TOKEN + META_ADS_ACCOUNT_ID.' });
+    }
+    const campaigns = await getMetaAds().syncCampaigns();
+    const performance = await getMetaAds().syncDailyPerformance(7);
+    res.json({
+      success: true,
+      synced: { campaigns: campaigns.length, performanceRows: performance.length },
     });
   } catch (err) { next(err); }
 });

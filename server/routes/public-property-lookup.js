@@ -175,6 +175,9 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
     const wbraid = attr?.wbraid ? String(attr.wbraid).slice(0, 255) : null;
     const gbraid = attr?.gbraid ? String(attr.gbraid).slice(0, 255) : null;
+    const fbclid = attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null;
+    const fbc = attr?.fbc ? String(attr.fbc).slice(0, 255) : null;
+    const fbp = attr?.fbp ? String(attr.fbp).slice(0, 255) : null;
     const sourceMeta = await resolveLeadSource(attr);
     const serviceInterest = normalizeServiceInterest(req.body || {});
 
@@ -195,12 +198,15 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       gclid,
       wbraid,
       gbraid,
+      fbclid,
+      fbc,
+      fbp,
       service_interest: serviceInterest || null,
       extracted_data: JSON.stringify({
         stage: 'property_lookup_started',
         service_interest: serviceInterest || null,
         utm: attr?.utm || null,
-        clickIds: { gclid, wbraid, gbraid },
+        clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
         referrer: attr?.referrer || null,
         landing_url: attr?.landing_url || null,
         address: normalizedAddress,
@@ -228,7 +234,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
           ai_sources: result.aiAnalysis?._sources || null,
           service_interest: serviceInterest || null,
           utm: attr?.utm || null,
-          clickIds: { gclid, wbraid, gbraid },
+          clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
           referrer: attr?.referrer || null,
           landing_url: attr?.landing_url || null,
           address: normalizedAddress,
