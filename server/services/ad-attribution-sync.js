@@ -7,22 +7,31 @@
  * projected_ltv_12mo) were never populated. So every /admin/ads ROI view that
  * reads those columns (revenue-attribution, service-lines, funnel) showed 0/null.
  *
- * Meanwhile job-costing already computes REAL per-visit gross profit into
- * service_records (labor from time entries, materials from inventory FIFO, drive
+ * Meanwhile job-costing already computes REAL per-visit gross profit into the
+ * job_costs ledger (labor from time entries, materials from inventory FIFO, drive
  * cost). This module rolls a customer's completed, costed visits up to their
- * acquisition funnel row, so the existing dashboards read true numbers.
+ * acquisition funnel row, so the existing dashboards read true numbers. Revenue
+ * is summed from job_costs — NOT service_records — because job_costs is only ever
+ * written by calculateJobCost (never the synthetic seed migration 20260401000027)
+ * and exists even for legacy rows the service_records write-through skips.
+ *
+ * A lead is only credited with revenue from visits ON/AFTER its lead_date, so a
+ * reactivated/existing customer's pre-lead history isn't attributed to a new ad
+ * source. Recurring status uses the canonical membership classifier (tier-aware),
+ * not monthly_rate alone.
  *
  * NOTE (scope): this populates the LTV/revenue/profit (numerator) side only.
  * The LTV:CAC and ROAS *ratios* additionally need ad_cost (spend) on the rows,
- * which comes from ad-platform data (ad_performance_daily), not service_records —
+ * which comes from ad-platform data (ad_performance_daily), not service records —
  * that is a separate follow-up.
  *
- * Idempotent: re-summing from service_records truth each run, so live completion
- * and the one-time backfill converge to the same values. A db handle may be
- * passed so a migration can run the backfill on its own knex.
+ * Idempotent: re-summing from job_costs truth each run, so live completion and
+ * the one-time backfill converge to the same values. A db handle may be passed so
+ * a migration can run the backfill on its own knex.
  */
 
 const logger = require('./logger');
+const { isMembershipCustomerRow } = require('./waveguard-existing-services');
 
 const DEFAULT_TARGET_MARGIN_PCT = 55; // company default if a customer has no realized margin yet
 
@@ -82,15 +91,18 @@ function pickPrimaryAttributionRow(rows = []) {
  * customer's realized financials. Only includes optional columns the table
  * actually has (asaCols guards an environment missing them). Pure / unit-testable.
  */
-function buildAttributionPatch({ realized, monthlyRate, targetMarginPct, asaCols = {}, now } = {}) {
-  const isRecurring = (Number(monthlyRate) || 0) > 0;
+function buildAttributionPatch({ realized, isRecurring = false, monthlyRate, targetMarginPct, asaCols = {}, now } = {}) {
   const marginPct = realized.revenue > 0 ? round2((realized.grossProfit / realized.revenue) * 100) : null;
-  const projected = projectedLtv12moGP({
-    monthlyRate,
-    realizedRevenue: realized.revenue,
-    realizedGrossProfit: realized.grossProfit,
-    targetMarginPct,
-  });
+  // Only project recurring revenue for actual members — a one-time customer with a
+  // stale positive monthly_rate must not get an LTV.
+  const projected = isRecurring
+    ? projectedLtv12moGP({
+      monthlyRate,
+      realizedRevenue: realized.revenue,
+      realizedGrossProfit: realized.grossProfit,
+      targetMarginPct,
+    })
+    : null;
   const patch = {
     funnel_stage: 'completed',
     completed_revenue: realized.revenue,
@@ -103,12 +115,16 @@ function buildAttributionPatch({ realized, monthlyRate, targetMarginPct, asaCols
   return patch;
 }
 
-// Realized revenue + gross profit from a customer's completed, costed visits.
-async function customerRealized(db, customerId) {
-  const srCols = await db('service_records').columnInfo().catch(() => ({}));
-  if (!srCols.revenue || !srCols.gross_profit) return null;
-  const q = db('service_records').where({ customer_id: customerId }).whereNotNull('revenue');
-  if (srCols.status) q.where('status', 'completed');
+// Realized revenue + gross profit from a customer's costed visits, summed from
+// the authoritative job_costs ledger (only ever written by calculateJobCost, so
+// never the synthetic seed data in service_records). `since` (the acquisition
+// lead_date) bounds it to visits ON/AFTER the lead, so pre-lead history isn't
+// credited to the ad source. Returns null only if job_costs is absent.
+async function customerRealized(db, customerId, since = null) {
+  const jcCols = await db('job_costs').columnInfo().catch(() => null);
+  if (!jcCols) return null;
+  const q = db('job_costs').where({ customer_id: customerId });
+  if (since && jcCols.service_date) q.where('service_date', '>=', since);
   const agg = await q.first(
     db.raw('COALESCE(SUM(revenue), 0) as revenue'),
     db.raw('COALESCE(SUM(gross_profit), 0) as gross_profit'),
@@ -151,24 +167,39 @@ async function syncCustomerAdAttribution(customerId, db, { targetMarginPct } = {
   const primary = pickPrimaryAttributionRow(rows);
   if (!primary) return { updated: 0, reason: 'no_advanceable_rows' };
 
-  const realized = await customerRealized(db, customerId);
+  // Credit only revenue from visits on/after the acquisition lead.
+  const realized = await customerRealized(db, customerId, primary.lead_date);
   if (!realized) return { updated: 0, reason: 'no_financials' };
   if (realized.visits === 0) return { updated: 0, reason: 'no_completed_visits' };
 
   const customer = await db('customers').where({ id: customerId }).first();
+  const isRecurring = isMembershipCustomerRow(customer || {});
   const tm = targetMarginPct != null ? targetMarginPct : await getTargetMarginPct(db);
   const patch = buildAttributionPatch({
-    realized, monthlyRate: customer?.monthly_rate, targetMarginPct: tm, asaCols,
+    realized, isRecurring, monthlyRate: customer?.monthly_rate, targetMarginPct: tm, asaCols,
   });
 
   await db('ad_service_attribution').where({ id: primary.id }).update(patch);
 
-  const advanceableCount = rows.filter((r) => ADVANCEABLE_STAGES.has(r.funnel_stage)).length;
-  if (advanceableCount > 1) {
-    logger.warn(
-      `[ad-attribution-sync] customer ${customerId} has ${advanceableCount} acquisition rows; `
-      + `wrote realized totals to primary ${primary.id} only (no double-count)`,
-    );
+  // Clear money columns on the customer's OTHER rows so a row that was the primary
+  // on a prior run (before a later/backfilled earlier-dated row appeared) can't
+  // keep stale totals — the read side SUMs these across rows, so two credited rows
+  // = double-count. Only touches rows that actually carry a credit.
+  const otherIds = rows.filter((r) => r.id !== primary.id).map((r) => r.id);
+  if (otherIds.length) {
+    const clear = { completed_revenue: null, gross_profit: null, updated_at: new Date() };
+    if (asaCols.gross_margin_pct) clear.gross_margin_pct = null;
+    if (asaCols.projected_ltv_12mo) clear.projected_ltv_12mo = null;
+    const cleared = await db('ad_service_attribution')
+      .whereIn('id', otherIds)
+      .whereNotNull('completed_revenue')
+      .update(clear);
+    if (cleared) {
+      logger.warn(
+        `[ad-attribution-sync] customer ${customerId}: cleared stale totals from ${cleared} `
+        + `non-primary row(s); credited primary ${primary.id} only`,
+      );
+    }
   }
   return { updated: 1, customerId, primaryId: primary.id, ...patch };
 }

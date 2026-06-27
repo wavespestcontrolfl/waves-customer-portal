@@ -64,7 +64,7 @@ describe('buildAttributionPatch', () => {
 
   test('writes funnel/revenue/profit/margin/LTV; recurring true', () => {
     const patch = buildAttributionPatch({
-      realized, monthlyRate: 100, targetMarginPct: 55,
+      realized, isRecurring: true, monthlyRate: 100, targetMarginPct: 55,
       asaCols: { gross_margin_pct: 1, projected_ltv_12mo: 1 }, now: 'T',
     });
     expect(patch).toMatchObject({
@@ -78,17 +78,25 @@ describe('buildAttributionPatch', () => {
   });
 
   test('omits optional columns the table does not have', () => {
-    const patch = buildAttributionPatch({ realized, monthlyRate: 100, asaCols: {}, now: 'T' });
+    const patch = buildAttributionPatch({ realized, isRecurring: true, monthlyRate: 100, asaCols: {}, now: 'T' });
     expect(patch).not.toHaveProperty('gross_margin_pct');
     expect(patch).not.toHaveProperty('projected_ltv_12mo');
     expect(patch.completed_revenue).toBe(400);
   });
 
-  test('non-recurring: is_recurring false and projected LTV null', () => {
+  test('not recurring (caller-classified): is_recurring false and no projected LTV even with a stale rate', () => {
     const patch = buildAttributionPatch({
-      realized, monthlyRate: 0, asaCols: { projected_ltv_12mo: 1 }, now: 'T',
+      realized, isRecurring: false, monthlyRate: 50, asaCols: { projected_ltv_12mo: 1 }, now: 'T',
     });
     expect(patch.is_recurring).toBe(false);
+    expect(patch.projected_ltv_12mo).toBeNull();
+  });
+
+  test('recurring tier-only member (no monthly rate): recurring true but projected LTV null', () => {
+    const patch = buildAttributionPatch({
+      realized, isRecurring: true, monthlyRate: 0, asaCols: { projected_ltv_12mo: 1 }, now: 'T',
+    });
+    expect(patch.is_recurring).toBe(true);
     expect(patch.projected_ltv_12mo).toBeNull();
   });
 });
@@ -107,12 +115,18 @@ function makeDb(state) {
       };
       return b;
     },
+    // non-primary clear chain: .whereIn('id', ids).whereNotNull('completed_revenue').update(clear)
+    whereIn: (col, ids) => ({
+      whereNotNull: () => ({
+        update: (patch) => { captured.clear = { ids, patch }; return Promise.resolve(state.clearedCount ?? 0); },
+      }),
+    }),
   });
-  const sr = () => {
+  // job_costs: .columnInfo(); .where({customer_id}).where('service_date','>=',since).first(...)
+  const jc = () => {
     const b = {
-      columnInfo: () => Promise.resolve(state.srCols || {}),
-      where: () => b,
-      whereNotNull: () => b,
+      columnInfo: () => Promise.resolve(state.jcCols === undefined ? { service_date: 1, revenue: 1, gross_profit: 1 } : state.jcCols),
+      where: (a, op, val) => { if (a === 'service_date') captured.jcSince = val; return b; },
       first: () => Promise.resolve(state.agg || { revenue: 0, gross_profit: 0, visits: 0 }),
     };
     return b;
@@ -122,7 +136,7 @@ function makeDb(state) {
   const db = (table) => {
     const t = String(table);
     if (t === 'ad_service_attribution') return asa();
-    if (t === 'service_records') return sr();
+    if (t === 'job_costs') return jc();
     if (t === 'customers') return cust();
     if (t === 'company_financials') return fin();
     throw new Error(`unexpected table ${t}`);
@@ -135,7 +149,6 @@ describe('syncCustomerAdAttribution', () => {
   test('writes realized totals to the primary row and advances it to completed', async () => {
     const state = {
       asaCols: { completed_revenue: 1, gross_profit: 1, gross_margin_pct: 1, projected_ltv_12mo: 1 },
-      srCols: { revenue: 1, gross_profit: 1, status: 1 },
       asaRows: [{ id: 'a1', customer_id: 'c1', funnel_stage: 'lead', lead_date: '2026-01-10' }],
       agg: { revenue: 400, gross_profit: 240, visits: 4 },
       customer: { id: 'c1', monthly_rate: 100 },
@@ -146,6 +159,7 @@ describe('syncCustomerAdAttribution', () => {
 
     expect(res.updated).toBe(1);
     expect(state.captured.update.where).toEqual({ id: 'a1' });
+    expect(state.captured.jcSince).toBe('2026-01-10'); // revenue scoped to on/after the lead
     expect(state.captured.update.patch).toMatchObject({
       funnel_stage: 'completed',
       completed_revenue: 400,
@@ -154,6 +168,53 @@ describe('syncCustomerAdAttribution', () => {
       projected_ltv_12mo: 720, // 100 × 0.6 × 12
       is_recurring: true,
     });
+  });
+
+  test('credits the first-touch row and CLEARS stale totals from a non-primary row', async () => {
+    const state = {
+      asaCols: { completed_revenue: 1, gross_profit: 1, gross_margin_pct: 1, projected_ltv_12mo: 1 },
+      asaRows: [
+        // a previously-synced row that is no longer first-touch
+        { id: 'old', customer_id: 'c1', funnel_stage: 'completed', lead_date: '2026-03-01', completed_revenue: 300 },
+        // a later-inserted EARLIER-dated row (e.g. backdated call lead) → new primary
+        { id: 'new', customer_id: 'c1', funnel_stage: 'lead', lead_date: '2026-01-05' },
+      ],
+      agg: { revenue: 400, gross_profit: 240, visits: 4 },
+      customer: { id: 'c1', monthly_rate: 100 },
+      financials: { target_gross_margin_pct: 55 },
+      clearedCount: 1,
+    };
+    const res = await syncCustomerAdAttribution('c1', makeDb(state));
+    expect(res.primaryId).toBe('new'); // earliest lead_date wins
+    expect(state.captured.update.where).toEqual({ id: 'new' });
+    expect(state.captured.clear.ids).toEqual(['old']);
+    expect(state.captured.clear.patch).toMatchObject({
+      completed_revenue: null, gross_profit: null, gross_margin_pct: null, projected_ltv_12mo: null,
+    });
+  });
+
+  test('classifies a tier-only member (monthly_rate 0) as recurring; no projected LTV without a rate', async () => {
+    const state = {
+      asaCols: { completed_revenue: 1, projected_ltv_12mo: 1 },
+      asaRows: [{ id: 'a1', customer_id: 'c1', funnel_stage: 'lead', lead_date: '2026-01-10' }],
+      agg: { revenue: 400, gross_profit: 240, visits: 4 },
+      customer: { id: 'c1', waveguard_tier: 'Gold', monthly_rate: 0 },
+    };
+    await syncCustomerAdAttribution('c1', makeDb(state));
+    expect(state.captured.update.patch.is_recurring).toBe(true);
+    expect(state.captured.update.patch.projected_ltv_12mo).toBeNull();
+  });
+
+  test('a one-time customer with a stale monthly_rate is NOT credited recurring LTV', async () => {
+    const state = {
+      asaCols: { completed_revenue: 1, projected_ltv_12mo: 1 },
+      asaRows: [{ id: 'a1', customer_id: 'c1', funnel_stage: 'lead', lead_date: '2026-01-10' }],
+      agg: { revenue: 400, gross_profit: 240, visits: 4 },
+      customer: { id: 'c1', waveguard_tier: 'One-Time', monthly_rate: 50 },
+    };
+    await syncCustomerAdAttribution('c1', makeDb(state));
+    expect(state.captured.update.patch.is_recurring).toBe(false);
+    expect(state.captured.update.patch.projected_ltv_12mo).toBeNull();
   });
 
   test('no-ops with a reason when the customer has no attribution row', async () => {
