@@ -436,9 +436,13 @@ async function isLandline(customerId, phone) {
     }
 
     // Legacy customers.line_type primary-phone cache (other readers still use it).
-    // Seed the shared cache from it so subsequent checks on either path hit.
+    // Deliberately NOT promoted into the shared phone_line_types cache: the admin
+    // phone-edit path changes customers.phone WITHOUT clearing line_type, so this
+    // value can describe a PREVIOUS number — seeding it could brand a newly-entered
+    // mobile (and anyone sharing it) as a landline and block it globally once the
+    // gate is on. Only fresh Twilio lookups (below) seed the shared cache, which
+    // also re-validates a stale legacy entry on the next send.
     if (isPrimaryPhone && customer.line_type) {
-      await cacheLineType(phone, customer.line_type);
       if (customer.line_type === 'landline') {
         logger.info(`[appt-remind] Skipping SMS — cached landline for customer ${customerId}`);
         return true;

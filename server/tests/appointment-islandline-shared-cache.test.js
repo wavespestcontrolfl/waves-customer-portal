@@ -64,6 +64,18 @@ describe('isLandline shares the phone_line_types cache', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  test('does NOT promote the legacy customers.line_type into the shared cache (can be stale after a phone edit)', async () => {
+    // line_type may describe a PREVIOUS number (admin phone edits don't clear it).
+    wireCustomer({ id: 'c1', phone: '+19415550101', line_type: 'landline' });
+    readCachedLineType.mockResolvedValue({ state: 'miss' });
+
+    const res = await isLandline('c1', '+19415550101'); // checked == current primary
+
+    expect(res).toBe(true);                       // still honors the legacy cache for its own decision
+    expect(mockFetch).not.toHaveBeenCalled();     // no lookup — legacy hit
+    expect(cacheLineType).not.toHaveBeenCalled(); // but NEVER promoted to phone_line_types
+  });
+
   test('shared-cache miss → Twilio Lookup once, then seeds the shared cache', async () => {
     wireCustomer({ id: 'c1', phone: '+18135559999', line_type: null }); // checked == primary, but no legacy cache
     readCachedLineType.mockResolvedValue({ state: 'miss' });
