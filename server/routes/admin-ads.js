@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { buildChannelAttribution } = require('../services/channel-attribution');
 
 // Lazy-load heavy Google Ads modules (~87MB) — only loaded on first request
 let _BudgetManager, _CampaignAdvisor, _googleAds;
@@ -429,37 +430,29 @@ router.get('/revenue-attribution', async (req, res, next) => {
     const periodDays = req.query.period === 'quarter' ? 90 : req.query.period === 'ytd' ? 365 : 30;
     const since = etDateString(addETDays(new Date(), -periodDays));
 
-    const attributions = await db('ad_service_attribution')
+    // Revenue + gross profit + customers come from COMPLETED leads.
+    const completed = await db('ad_service_attribution')
       .where('lead_date', '>=', since)
-      .where('funnel_stage', 'completed');
+      .where('funnel_stage', 'completed')
+      .select('lead_source', 'completed_revenue', 'gross_profit', 'projected_ltv_12mo', 'is_recurring', 'customer_id');
 
-    const bySource = {};
-    for (const a of attributions) {
-      const src = a.lead_source || 'unknown';
-      if (!bySource[src]) bySource[src] = { source: src, revenue: 0, adSpend: 0, customers: new Set() };
-      bySource[src].revenue += parseFloat(a.completed_revenue || 0);
-      bySource[src].adSpend += parseFloat(a.ad_cost || 0);
-      if (a.customer_id) bySource[src].customers.add(a.customer_id);
-    }
+    // Spend per channel = TRUE platform spend (ad_performance_daily by platform),
+    // not summed per-lead ad_cost — so a paid channel-month with spend but zero
+    // tracked leads still surfaces (and there's no cent-rounding drift). Platform
+    // values equal the paid lead_source keys (google_ads / google_lsa / facebook).
+    const spendRows = await db('ad_performance_daily as apd')
+      .join('ad_campaigns as ac', 'ac.id', 'apd.campaign_id')
+      .where('apd.date', '>=', since)
+      .groupBy('ac.platform')
+      .select('ac.platform', db.raw('SUM(apd.cost) as spend'));
+    const platformSpendBySource = {};
+    for (const r of spendRows) platformSpendBySource[r.platform] = parseFloat(r.spend) || 0;
 
-    const sources = Object.values(bySource).map(s => ({
-      source: formatSourceName(s.source),
-      sourceKey: s.source,
-      revenue: round(s.revenue, 2),
-      adSpend: round(s.adSpend, 2),
-      roas: s.adSpend > 0 ? round(s.revenue / s.adSpend, 1) : null,
-      customers: s.customers.size,
-      cac: s.customers.size > 0 && s.adSpend > 0 ? round(s.adSpend / s.customers.size, 0) : 0,
-    })).sort((a, b) => b.revenue - a.revenue);
-
-    const totalRevenue = sources.reduce((s, r) => s + r.revenue, 0);
-    const totalSpend = sources.reduce((s, r) => s + r.adSpend, 0);
+    const { sources, ...totals } = buildChannelAttribution(completed, platformSpendBySource);
 
     res.json({
-      sources,
-      totalRevenue: round(totalRevenue, 2),
-      totalAdSpend: round(totalSpend, 2),
-      blendedROAS: totalSpend > 0 ? round(totalRevenue / totalSpend, 1) : null,
+      sources: sources.map((s) => ({ source: formatSourceName(s.sourceKey), ...s })),
+      ...totals,
     });
   } catch (err) { next(err); }
 });

@@ -14,7 +14,7 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
   })),
 }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
-jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn() }));
+jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), revalidatePlacement: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),
@@ -62,6 +62,7 @@ beforeEach(() => {
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: true });
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
   apply.applyAutoDispatchMove.mockResolvedValue({ ok: true, pre_status: 'confirmed', post_status: 'confirmed' });
+  apply.revalidatePlacement.mockResolvedValue({ ok: true });
 });
 
 function lastDecision(action) {
@@ -270,6 +271,29 @@ test('a beyond-cap move that re-evaluation finds superseded is dropped (no_chang
     expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
     expect(apply.applyAutoDispatchMove.mock.calls[0][0].id).toBe('s1');
     expect(lastDecision('no_change').reason_description).toMatch(/No longer qualifies on live re-evaluation/);
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
+test('a planned move the operator locks/cancels mid-run is reported superseded (no_change), not applied or cap-held', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    // The visit qualifies in pass 1, but an operator locks/excludes/moves it during
+    // the run window. revalidatePlacement re-reads the live row and reports it stale
+    // BEFORE re-scoring — so it is no_change (superseded), never applied or cap-held,
+    // and the audit log doesn't claim a move that's no longer pending.
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    apply.revalidatePlacement.mockResolvedValueOnce({ ok: false, reason: 'Visit was locked/excluded from auto-dispatch after scoring' });
+
+    const res = await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 5 });
+
+    expect(res).toMatchObject({ evaluated: 1, changed: 0, recommended: 0 });
+    expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+    const nc = lastDecision('no_change');
+    expect(nc.reason_code).toBe('SUPERSEDED_DURING_RUN');
+    expect(nc.reason_description).toMatch(/Superseded by an operator during the run/);
   } finally {
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
   }

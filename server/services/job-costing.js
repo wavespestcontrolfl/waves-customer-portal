@@ -420,6 +420,23 @@ async function calculateJobCost(scheduledServiceId, db, { recomputeRevenue = fal
     `[job-costing] ${scheduledServiceId} — revenue $${fin.revenue} cost $${fin.total_job_cost} `
     + `profit $${fin.gross_profit} (${fin.gross_margin_pct ?? '—'}%)`,
   );
+
+  // Bridge the customer's realized revenue/profit/LTV onto their ad-attribution
+  // funnel row so /admin/ads ROI views read real numbers. Only on COMPLETION:
+  // calculateJobCost also runs for pending/future visits (expense entry, manual
+  // recalc), and advancing the funnel + booking revenue for those would mark a
+  // lead completed prematurely. Isolated: an attribution failure must never break
+  // costing (the costing writes above are committed). The financials backfill
+  // drives completed services too, so it keeps attribution in sync as well.
+  if (svc.status === 'completed') {
+    try {
+      const { syncCustomerAdAttribution } = require('./ad-attribution-sync');
+      await syncCustomerAdAttribution(svc.customer_id, db);
+    } catch (err) {
+      logger.warn(`[job-costing] ad-attribution sync failed for ${scheduledServiceId}: ${err.message}`);
+    }
+  }
+
   return { ...row, laborHours: fin.labor_hours, serviceRecordId: wroteThrough ? record.id : null };
 }
 

@@ -25,6 +25,18 @@ function tierDaysForOverdue(daysSince) {
   return 90;
 }
 
+// A blocked/failed SMS that should be retried on a later run rather than burning
+// the reminder tier (and rather than firing the email fallback, which would
+// double up once the SMS lands). Covers quiet-hours / retryable-provider holds
+// (flagged on the result) plus CONSENT_LOOKUP_FAILED — a transient consent-prefs
+// DB blip that review-request.js and admin-dispatch.js also treat as retryable.
+function isTransientSmsResult(result) {
+  if (!result) return false;
+  return result.retryable === true
+    || result.deferred === true
+    || result.code === 'CONSENT_LOOKUP_FAILED';
+}
+
 /**
  * When an unpaid invoice's only blocker is an unfinished ACH micro-deposit
  * verification, the customer isn't refusing to pay — they need to confirm two
@@ -122,6 +134,7 @@ const LatePaymentService = {
 
     let notified = 0;
     let skipped = 0;
+    let emailedFallback = 0;
     const domain = publicPortalUrl();
 
     for (const inv of invoices) {
@@ -240,13 +253,29 @@ const LatePaymentService = {
           entryPoint: 'late_payment_checker',
           metadata: { original_message_type: 'late_payment' },
         });
-        if (sendResult.blocked || sendResult.sent === false) {
-          throw new Error(`late payment SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+
+        const smsSent = sendResult.sent === true;
+        const smsWillRetry = !smsSent && isTransientSmsResult(sendResult);
+
+        // A transient hold (quiet hours, retryable carrier error, consent-lookup
+        // DB blip) re-sends on a later run — don't email now or the customer gets
+        // both when it lands, and don't burn the tier.
+        if (smsWillRetry) {
+          logger.info(`[late-payment] SMS deferred for customer ${customer.id} (${sendResult.code || 'retryable'}); will retry next run`);
+          skipped++;
+          continue;
         }
+
+        // smsSent → primary SMS went; the email is the matching dual-channel
+        // sidecar. Otherwise the SMS is permanently undeliverable (landline/
+        // non-mobile suppression, wrong-number, opt-out, or a terminal carrier
+        // rejection) and the email is the only channel left — so a customer we
+        // can't reach by text still gets the reminder instead of nothing.
+        let emailResult = null;
         try {
           const BalanceReminder = require('./workflows/balance-reminder');
           if (typeof BalanceReminder.sendLatePaymentEmail === 'function') {
-            await BalanceReminder.sendLatePaymentEmail({
+            emailResult = await BalanceReminder.sendLatePaymentEmail({
               customer,
               invoice: inv,
               balance: {
@@ -262,14 +291,36 @@ const LatePaymentService = {
         } catch (emailErr) {
           logger.error(`[late-payment] Email sidecar failed for invoice ${inv.id}: ${emailErr.message}`);
         }
-        notified++;
-        logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
+
+        const emailDelivered = emailResult?.ok === true;
+
+        if (smsSent) {
+          // SMS reached the customer; the email is a bonus. The reminder landed,
+          // so recording the dedupe row below is justified regardless of the email.
+          notified++;
+          logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
+        } else if (emailDelivered) {
+          // SMS was undeliverable but the email fallback reached them.
+          emailedFallback++;
+          logger.info(`[late-payment] SMS undeliverable for customer ${customer.id} (${sendResult.code || 'unknown'}) — sent email reminder instead`);
+        } else {
+          // Neither channel reached the customer (SMS undeliverable AND no email
+          // sent — no billing email, blocked, ineligible, …). Do NOT write the
+          // dedupe row, so a later run retries instead of silently giving up.
+          // Log only a bounded reason/status — never emailResult.error, which is
+          // the raw provider message and can contain the recipient's email (PII).
+          // Detailed failure context lives in the email audit rows.
+          const emailStatus = emailResult?.reason || (emailResult?.blocked ? 'blocked' : 'not_sent');
+          logger.warn(`[late-payment] No reachable channel for customer ${customer.id} (sms=${sendResult.code || 'unknown'}, email=${emailStatus}) — will retry next run`);
+          skipped++;
+          continue;
+        }
 
         await db('activity_log').insert({
           customer_id: customer.id,
           action: 'late_payment_reminder',
           description: `${tierDays}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
-          metadata: JSON.stringify({ invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince }),
+          metadata: JSON.stringify({ invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince, channel: smsSent ? (emailDelivered ? 'sms+email' : 'sms') : 'email_only' }),
         }).catch(() => {});
       } catch (smsErr) {
         logger.error(`[late-payment] SMS failed for customer ${customer.id}: ${smsErr.message}`);
@@ -277,7 +328,7 @@ const LatePaymentService = {
       }
     }
 
-    return { notified, skipped, totalUnpaid: invoices.length };
+    return { notified, skipped, emailedFallback, totalUnpaid: invoices.length };
   },
 };
 
