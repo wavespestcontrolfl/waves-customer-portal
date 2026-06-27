@@ -1,3 +1,5 @@
+import { hasConsent } from './posthog';
+
 // =============================================================================
 // Funnel analytics — event taxonomy (portal / booking half)
 // =============================================================================
@@ -64,16 +66,18 @@ function cleanProps(props) {
 
 export function track(event, props) {
   if (typeof window === 'undefined') return;
+  // No-op until the visitor has granted consent — never queue/replay pre-consent
+  // activity (matches GA/Meta on the marketing side and the no-op-until-consent
+  // contract). Portal consent is the shared waves_cookies_accepted cookie (set on
+  // the hub, or by PublicFunnelTracking's own accept).
+  if (!hasConsent()) return;
   const clean = cleanProps(props);
   const ph = window.posthog;
   if (phReady && ph && typeof ph.capture === 'function') {
     ph.capture(event, clean);
     return;
   }
-  // PostHog not booted yet — e.g. a direct /book visitor who hasn't accepted the
-  // cookie notice, so booking_viewed fires before consent. Queue it so the
-  // top-of-funnel event isn't lost; flushPending() replays it once PostHog boots
-  // on consent (the loader fires 'posthog-ready' after init).
+  // Consented but the real SDK is still loading — queue and flush on posthog-ready.
   if (PENDING.length < MAX_PENDING) PENDING.push({ event, props: clean });
 }
 
