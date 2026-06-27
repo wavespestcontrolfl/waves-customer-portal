@@ -2819,20 +2819,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
         // Auto-generate the customer-facing report summary from the tech's notes
         // when the closeout didn't supply one (the manual "Customer recap" box was
-        // removed from the UI). Runs outside the txn; generateRecap has a
-        // deterministic fallback so it never blocks completion.
+        // removed from the UI). Runs outside the txn. A HARD timeout caps the LLM
+        // call so a stalled provider can't keep the already-claimed completion
+        // attempt 'pending' (retries would then 409 until the stale window expires)
+        // — on timeout (or error) we fall back to the deterministic recap.
         let effectiveCustomerRecap = customerRecap;
         if (!String(effectiveCustomerRecap || '').trim() && !isIncompleteVisit) {
+          const recapInput = {
+            notes: technicianNotes,
+            visitOutcome,
+            serviceType: svc.service_type,
+            areasTreated: Array.isArray(areasTreated) ? areasTreated : (areasServiced || []),
+          };
+          const deterministicFallback = () => {
+            try { return CompletionRecap.sanitizeRecap(CompletionRecap.deterministicRecap(recapInput)) || null; }
+            catch { return null; }
+          };
           try {
-            const generatedRecap = await CompletionRecap.generateRecap({
-              notes: technicianNotes,
-              visitOutcome,
-              serviceType: svc.service_type,
-              areasTreated: Array.isArray(areasTreated) ? areasTreated : (areasServiced || []),
-            });
-            effectiveCustomerRecap = generatedRecap?.recap || null;
+            const generatedRecap = await Promise.race([
+              CompletionRecap.generateRecap(recapInput),
+              new Promise((resolve) => setTimeout(
+                () => resolve({ recap: deterministicFallback(), source: 'timeout' }),
+                6000,
+              )),
+            ]);
+            effectiveCustomerRecap = generatedRecap?.recap || deterministicFallback();
           } catch (recapErr) {
             logger.warn(`[completion] auto report-summary generation failed: ${recapErr.message}`);
+            effectiveCustomerRecap = deterministicFallback();
           }
         }
 
@@ -3142,17 +3156,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               logger.warn(`[turf-height] optional lawn-length photo skipped for service=${req.params.serviceId}: ${photoErr.message}`);
             }
           }
-          const turfReading = await createTurfHeightReading(trx, {
-            serviceRecordId: record.id,
-            customerId: svc.customer_id,
-            grassType: turfRow?.grass_type || 'unknown',
-            manualHeightIn,
-            gaugePhotoId,
-            createdBy: req.technicianId,
-          });
-          // Cross-check only when BOTH a gauge photo and a numeric reading exist
-          // (OCR compares the photo against the entered height); runs after commit.
-          if (gaugePhotoId && manualHeightIn != null && turfReading?.id) turfOcrReadingId = turfReading.id;
+          // Only persist a row when there's actually something to store — a numeric
+          // reading or a photo that uploaded. A photo-only visit whose upload failed
+          // (gaugePhotoId stayed null) would otherwise insert an empty row (null
+          // height + null photo) and consume the one-row-per-service slot (Codex P1).
+          if (manualHeightIn != null || gaugePhotoId) {
+            const turfReading = await createTurfHeightReading(trx, {
+              serviceRecordId: record.id,
+              customerId: svc.customer_id,
+              grassType: turfRow?.grass_type || 'unknown',
+              manualHeightIn,
+              gaugePhotoId,
+              createdBy: req.technicianId,
+            });
+            // Cross-check only when BOTH a gauge photo and a numeric reading exist
+            // (OCR compares the photo against the entered height); runs after commit.
+            if (gaugePhotoId && manualHeightIn != null && turfReading?.id) turfOcrReadingId = turfReading.id;
+          }
         }
 
         // Typed activity score — in the same trx as the record so retries
