@@ -5392,17 +5392,20 @@ function LawnAssessmentCompletionBlock({
       {loading && (
         <div style={{ fontSize: 12, color: D.muted }}>Checking existing assessment...</div>
       )}
-      {!hasResult && (
-        <>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            multiple
-            onChange={addPhotos}
-            style={{ display: "none" }}
-          />
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+      {/* Capture row — always visible so the lawn-length photo + gauge reading can be
+          added even after the assessment is analyzed (Codex P1). "Add turf photos" +
+          "Analyze lawn" stay pre-analysis only. */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        multiple
+        onChange={addPhotos}
+        style={{ display: "none" }}
+      />
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        {!hasResult && (
+          <>
             <button
               type="button"
               onClick={() => fileRef.current?.click()}
@@ -5423,6 +5426,8 @@ function LawnAssessmentCompletionBlock({
               Add turf photos
             </button>
             <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/3</span>
+          </>
+        )}
             {showGaugePhoto && (
               <>
                 <input
@@ -5480,6 +5485,8 @@ function LawnAssessmentCompletionBlock({
               </>
             )}
           </div>
+          {!hasResult && (
+            <>
           {photos.length > 0 && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {photos.map((photo, index) => (

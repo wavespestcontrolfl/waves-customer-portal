@@ -616,7 +616,9 @@ export function RainLast7DaysChart({ days = [] }) {
 // ── 5. Mowing height gauge ───────────────────────────────────────────────────────
 export function MowingHeightGauge({ mowing = {} }) {
   if (!mowing) return null; // explicit null bypasses the default — e.g. no turf reading this visit
-  const measured = Number(mowing.measuredHeightInches);
+  // Photo-only rows send measuredHeightInches: null — guard the null BEFORE Number()
+  // (Number(null) === 0 would otherwise render a false 0-inch / "too short" gauge).
+  const measured = mowing.measuredHeightInches == null ? NaN : Number(mowing.measuredHeightInches);
   const lo = Number(mowing.idealMinInches);
   const hi = Number(mowing.idealMaxInches);
   const hasGauge = Number.isFinite(measured) && Number.isFinite(lo) && Number.isFinite(hi);
