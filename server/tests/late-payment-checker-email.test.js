@@ -238,6 +238,40 @@ describe('late-payment checker email sidecar', () => {
     expect(result.skipped).toBe(1);
   });
 
+  test('treats a CONSENT_LOOKUP_FAILED block as transient — defers without emailing or burning the tier', async () => {
+    const invoice = {
+      id: 'inv-1',
+      customer_id: 'cust-1',
+      token: 'token-1',
+      invoice_number: 'WPC-2026-1042',
+      status: 'sent',
+      title: 'Quarterly Pest Control',
+      total: '129.00',
+      due_date: '2026-05-10',
+      service_date: '2026-05-01',
+      created_at: '2026-05-01T12:00:00.000Z',
+    };
+    const customer = { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' };
+
+    // Transient consent-prefs DB blip — no retryable/deferred flag, only the code.
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, code: 'CONSENT_LOOKUP_FAILED',
+    });
+
+    setDbQueues({
+      invoices: [chain({ result: [invoice] })],
+      activity_log: [chain({ first: null })],
+      customers: [chain({ first: customer })],
+    });
+
+    const result = await LatePaymentChecker.checkAndNotify();
+
+    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
+    expect(result.notified).toBe(0);
+    expect(result.emailedFallback).toBe(0);
+    expect(result.skipped).toBe(1);
+  });
+
   test('does not send a late-payment reminder when the per-invoice follow-up sequence was stopped by an admin', async () => {
     const invoice = {
       id: 'inv-1',

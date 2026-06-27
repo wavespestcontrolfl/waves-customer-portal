@@ -25,6 +25,18 @@ function tierDaysForOverdue(daysSince) {
   return 90;
 }
 
+// A blocked/failed SMS that should be retried on a later run rather than burning
+// the reminder tier (and rather than firing the email fallback, which would
+// double up once the SMS lands). Covers quiet-hours / retryable-provider holds
+// (flagged on the result) plus CONSENT_LOOKUP_FAILED — a transient consent-prefs
+// DB blip that review-request.js and admin-dispatch.js also treat as retryable.
+function isTransientSmsResult(result) {
+  if (!result) return false;
+  return result.retryable === true
+    || result.deferred === true
+    || result.code === 'CONSENT_LOOKUP_FAILED';
+}
+
 /**
  * When an unpaid invoice's only blocker is an unfinished ACH micro-deposit
  * verification, the customer isn't refusing to pay — they need to confirm two
@@ -243,10 +255,11 @@ const LatePaymentService = {
         });
 
         const smsSent = sendResult.sent === true;
-        const smsWillRetry = !smsSent && (sendResult.retryable === true || sendResult.deferred === true);
+        const smsWillRetry = !smsSent && isTransientSmsResult(sendResult);
 
-        // A transient hold (quiet hours, retryable carrier error) re-sends on a
-        // later run — don't email now or the customer gets both when it lands.
+        // A transient hold (quiet hours, retryable carrier error, consent-lookup
+        // DB blip) re-sends on a later run — don't email now or the customer gets
+        // both when it lands, and don't burn the tier.
         if (smsWillRetry) {
           logger.info(`[late-payment] SMS deferred for customer ${customer.id} (${sendResult.code || 'retryable'}); will retry next run`);
           skipped++;
@@ -294,7 +307,11 @@ const LatePaymentService = {
           // Neither channel reached the customer (SMS undeliverable AND no email
           // sent — no billing email, blocked, ineligible, …). Do NOT write the
           // dedupe row, so a later run retries instead of silently giving up.
-          logger.warn(`[late-payment] No reachable channel for customer ${customer.id} (sms=${sendResult.code || 'unknown'}, email=${emailResult?.reason || emailResult?.error || 'not_sent'}) — will retry next run`);
+          // Log only a bounded reason/status — never emailResult.error, which is
+          // the raw provider message and can contain the recipient's email (PII).
+          // Detailed failure context lives in the email audit rows.
+          const emailStatus = emailResult?.reason || (emailResult?.blocked ? 'blocked' : 'not_sent');
+          logger.warn(`[late-payment] No reachable channel for customer ${customer.id} (sms=${sendResult.code || 'unknown'}, email=${emailStatus}) — will retry next run`);
           skipped++;
           continue;
         }
