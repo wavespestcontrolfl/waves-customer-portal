@@ -689,7 +689,7 @@ router.post('/confirm', async (req, res, next) => {
     }
 
     const {
-      estimate_id, customer_id,
+      estimate_id, customer_id, lead_id,
       slot_date, slot_start, slot_end,
       technician_id,
       service_type,
@@ -732,6 +732,11 @@ router.post('/confirm', async (req, res, next) => {
       estimate = await db('estimates').where('id', estimate_id).first();
       if (!custId) custId = estimate?.customer_id;
     }
+    // NB: ?lead=<lead_id> is NOT trusted for identity. A lead_id is mintable
+    // from a known phone/email via the public quote flow, so using it to resolve
+    // the customer would bypass the phone-on-file guard. It is used only as a
+    // "this booking came from an estimate deep link" signal for the
+    // customer-derived lead conversion after the booking commits (see below).
 
     const phoneDigits = new_customer?.phone ? String(new_customer.phone).replace(/\D/g, '') : '';
     if (!custId && phoneDigits) {
@@ -1108,12 +1113,21 @@ router.post('/confirm', async (req, res, next) => {
     // contact fallback from winning a later unlinked add-on lead sharing the
     // customer's phone/email; only a lead first contacted on/before the customer
     // signed up converts. Single unambiguous open lead only, idempotent.
-    if (followUpRows.length > 0) {
+    // Also convert when the booking is deep-linked from an accepted estimate
+    // (?lead= present) — this covers one-time estimate-accepts that seed no
+    // recurring series. `lead_id` is only a trigger flag; the conversion is
+    // keyed off the VERIFIED customer, so the forgeable lead_id can never
+    // convert a lead the booker doesn't own.
+    if (followUpRows.length > 0 || lead_id) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        await convertLeadFromEvent({ source: 'recurring_service_booked', customerId: custId, enforceOriginating: true });
+        await convertLeadFromEvent({
+          source: followUpRows.length > 0 ? 'recurring_service_booked' : 'self_booking_estimate',
+          customerId: custId,
+          enforceOriginating: true,
+        });
       } catch (err) {
-        logger.warn(`[lead-trigger] self-booking recurring conversion failed for customer=${custId}: ${err.message}`);
+        logger.warn(`[lead-trigger] self-booking conversion failed for customer=${custId}: ${err.message}`);
       }
     }
 
