@@ -19,6 +19,26 @@
 
 function round1(n) { return Math.round((Number(n) || 0) * 10) / 10; }
 
+/**
+ * A member's MRR for a given month, point-in-time.
+ *  - If the month HAS snapshot data (snapshottedMonths has it): use the customer's
+ *    snapshot rate, or 0 if they have no row — recordCustomerMrrSnapshots only
+ *    writes active customers with monthly_rate > 0, so a missing row means the
+ *    customer was $0 / paused that month, NOT "unknown". Falling back to today's
+ *    rate there would re-apply current price retroactively.
+ *  - If the month has NO snapshot at all (pre-accrual history): fall back to the
+ *    member's current monthly_rate — best available, degrades gracefully.
+ * Pure.
+ */
+function pointInTimeRate(rateByCustomer, snapshottedMonths, customerId, currentRate, ym) {
+  if (snapshottedMonths.has(ym)) {
+    const byMonth = rateByCustomer.get(customerId);
+    const v = byMonth && byMonth.get(ym);
+    return v != null ? v : 0;
+  }
+  return Number(currentRate) || 0;
+}
+
 function buildCohortSeries(members, cohortIdx, elapsed) {
   const size = members.length;
   // Cohort base = every member's MRR in their signup month (point-in-time).
@@ -48,4 +68,4 @@ function buildCohortSeries(members, cohortIdx, elapsed) {
   return { baseMrr, retention, retentionMrr };
 }
 
-module.exports = { buildCohortSeries };
+module.exports = { buildCohortSeries, pointInTimeRate };

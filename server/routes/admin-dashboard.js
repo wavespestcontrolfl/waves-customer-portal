@@ -12,7 +12,7 @@ const {
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
-const { buildCohortSeries } = require('../services/retention-cohort');
+const { buildCohortSeries, pointInTimeRate } = require('../services/retention-cohort');
 const { autopayActivePredicate } = require('../services/autopay-eligibility');
 const { generateChartSpec, extractImageIntent } = require('../services/ai-chart-builder');
 const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
@@ -1026,15 +1026,25 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
     // absent rows fall back to the member's current monthly_rate. Guarded so an
     // environment without the table is a clean no-op (everything falls back).
     const rateByCustomer = new Map(); // customerId -> Map('YYYY-MM' -> rate)
+    const snapshottedMonths = new Set(); // months with ANY snapshot row (vs none yet)
     try {
       const snapRows = await db('customer_mrr_snapshots')
         .where('period_month', '>=', rangeStart)
         .select('customer_id', db.raw("to_char(period_month, 'YYYY-MM') as ym"), 'monthly_rate');
       for (const s of snapRows) {
+        snapshottedMonths.add(s.ym);
         if (!rateByCustomer.has(s.customer_id)) rateByCustomer.set(s.customer_id, new Map());
         rateByCustomer.get(s.customer_id).set(s.ym, Number(s.monthly_rate) || 0);
       }
-    } catch { /* customer_mrr_snapshots not present → all rateAt falls back to current */ }
+    } catch (err) {
+      // Missing table (pre-feature) is expected → silent. Any other failure (bad
+      // migration, permission, timeout) shouldn't silently revert "Net MRR" to the
+      // current-rate fallback unnoticed — log it. Either way the grid degrades to
+      // the current-rate fallback rather than erroring.
+      if (!/relation .*customer_mrr_snapshots.* does not exist/i.test(err.message || '')) {
+        logger.warn(`[admin-dashboard] /retention-cohort snapshot read failed; Net MRR falls back to current rate: ${err.message}`);
+      }
+    }
 
     const LEFT_STAGES = new Set(['churned', 'dormant']);
     // Bucket members by cohort month, precomputing a churn month index + the keys
@@ -1067,13 +1077,12 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
       byCohort.get(cohort).push({ churnIdx, customerId: r.id, currentRate: Number(r.monthly_rate) || 0 });
     }
 
-    // Resolve a member's MRR for an absolute month index: the snapshot for that
-    // month if we have one, else the member's current rate.
-    const rateAtFor = (mem) => (monthIdx) => {
-      const byMonth = rateByCustomer.get(mem.customerId);
-      const snap = byMonth && byMonth.get(ymOf(monthIdx));
-      return snap != null ? snap : mem.currentRate;
-    };
+    // Resolve a member's MRR for an absolute month index. In a snapshotted month a
+    // missing customer row means $0 that month (not "unknown"); only months with no
+    // snapshot at all fall back to the current rate. See pointInTimeRate.
+    const rateAtFor = (mem) => (monthIdx) => pointInTimeRate(
+      rateByCustomer, snapshottedMonths, mem.customerId, mem.currentRate, ymOf(monthIdx),
+    );
 
     const cohorts = [];
     for (let idx = firstIdx; idx <= nowIdx; idx += 1) {

@@ -1,4 +1,4 @@
-const { buildCohortSeries } = require('../services/retention-cohort');
+const { buildCohortSeries, pointInTimeRate } = require('../services/retention-cohort');
 
 // helper: a member with a flat rate every month (the fallback / no-snapshot case)
 const flat = (churnIdx, rate) => ({ churnIdx, rateAt: () => rate });
@@ -60,5 +60,24 @@ describe('buildCohortSeries', () => {
     expect(baseMrr).toBe(0);
     expect(retention).toEqual([null, null, null]);
     expect(retentionMrr).toEqual([null, null, null]);
+  });
+});
+
+describe('pointInTimeRate', () => {
+  const rateByCustomer = new Map([['c1', new Map([['2026-05', 120]])]]);
+  const snapshottedMonths = new Set(['2026-05']); // May has snapshot data; c2 has no row
+
+  test('snapshotted month + customer has a row → that month\'s rate', () => {
+    expect(pointInTimeRate(rateByCustomer, snapshottedMonths, 'c1', 999, '2026-05')).toBe(120);
+  });
+
+  test('snapshotted month + customer MISSING → 0 (was $0/paused that month), NOT current rate', () => {
+    // c2 isn't in May's snapshot → they were below the MRR population then; must be 0,
+    // not their current 999, else today's price leaks into a historical cell.
+    expect(pointInTimeRate(rateByCustomer, snapshottedMonths, 'c2', 999, '2026-05')).toBe(0);
+  });
+
+  test('unsnapshotted month → current-rate fallback', () => {
+    expect(pointInTimeRate(rateByCustomer, snapshottedMonths, 'c1', 80, '2026-03')).toBe(80);
   });
 });
