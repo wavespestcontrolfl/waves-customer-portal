@@ -2209,16 +2209,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       if (gaugeUrl) mowingHeight = { ...mowingHeight, photoUrl: gaugeUrl };
     } catch { /* fail-soft: report still renders the reading without the photo */ }
   }
-  // Only drop the gauge/lawn-length photo from the gallery when the V2 mowing module
-  // will actually render it (lawn + LAWN_REPORT_V2 + an assessment). The legacy report
-  // has no mowing-photo slot and renders the mowing block only for a numeric reading,
-  // so otherwise keep the photo in the gallery rather than losing a photo-only capture
-  // (Codex P1).
-  const mowingPhotoWillRender = serviceLine === 'lawn'
-    && process.env.LAWN_REPORT_V2 === 'true'
-    && !!lawnAssessment;
+  // Build the gallery with ALL photos. The gauge/lawn-length photo is dropped from
+  // the gallery LATER (at the return) and only when Lawn Report V2 actually built and
+  // surfaced it in the mowing module — so a failed/absent V2 build (legacy path,
+  // flag off, no assessment, or a build error) keeps the photo in the gallery instead
+  // of losing it (Codex P1).
   const photoPayload = await Promise.all(photos
-    .filter((photo) => !(gaugePhotoId && mowingPhotoWillRender) || String(photo.id) !== String(gaugePhotoId))
     .map(async (photo) => ({
       id: photo.id,
       url: await photoUrl(photo),
@@ -2622,7 +2618,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     lawnProgramOverview,
     visualServiceMoments: approvedVisualMoments,
     proofMoments: approvedVisualMoments,
-    photos: photoPayload,
+    // Drop the gauge/lawn-length photo from the gallery only when Lawn Report V2
+    // actually built and surfaced it in the mowing module (else it would show
+    // twice). A null/failed V2 build keeps it in the gallery so it is never lost.
+    photos: (gaugePhotoId && reportV2 && mowingHeight && mowingHeight.photoUrl)
+      ? photoPayload.filter((p) => String(p.id) !== String(gaugePhotoId))
+      : photoPayload,
     photoChain,
     pdfUrl: `/api/reports/${token}`,
     legacy: {
