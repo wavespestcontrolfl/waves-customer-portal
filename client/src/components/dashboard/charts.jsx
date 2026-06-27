@@ -879,17 +879,21 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
   const byMrr = weight === "mrr" && mrrAvailable;
   const cols = Array.from({ length: maxOffset + 1 }, (_, i) => i);
   // Zinc-900 wash whose opacity tracks retention; text flips to white once the
-  // wash is dark enough to keep contrast readable.
-  const cellStyle = (pct) => ({
-    backgroundColor: `rgba(24, 24, 27, ${0.06 + (pct / 100) * 0.84})`,
-    color: pct >= 45 ? "#fff" : "#3f3f46",
-  });
+  // wash is dark enough to keep contrast readable. Net MRR retention can exceed
+  // 100% (expansion), so the fill is capped — the number still shows the real value.
+  const cellStyle = (pct) => {
+    const fill = Math.min(Math.max(pct, 0), 100) / 100;
+    return {
+      backgroundColor: `rgba(24, 24, 27, ${0.06 + fill * 0.84})`,
+      color: pct >= 45 ? "#fff" : "#3f3f46",
+    };
+  };
   return (
     <div>
       {mrrAvailable && (
         <div className="flex items-center gap-2 mb-3">
           <div className="inline-flex border-hairline border-zinc-300 rounded-sm overflow-hidden">
-            {[["customers", "Customers"], ["mrr", "MRR"]].map(([k, lbl]) => (
+            {[["customers", "Customers"], ["mrr", "Net MRR"]].map(([k, lbl]) => (
               <button
                 key={k}
                 type="button"
@@ -904,7 +908,7 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
             ))}
           </div>
           <span className="text-11 text-ink-tertiary">
-            {byMrr ? "share of cohort MRR retained" : "share of customers retained"}
+            {byMrr ? "net revenue retained — >100% = expansion" : "share of customers retained"}
           </span>
         </div>
       )}
@@ -927,7 +931,7 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
                   const pct = series?.[m];
                   if (pct == null) return <div key={m} className="w-10 h-7 shrink-0" />;
                   const title = byMrr
-                    ? `${c.label} · month ${m}: ${pct}% of ${fmtMoney(c.baseMrr)} cohort MRR retained`
+                    ? `${c.label} · month ${m}: ${pct}% net revenue retention vs ${fmtMoney(c.baseMrr)} at signup${pct > 100 ? ' (expansion)' : ''}`
                     : `${c.label} · month ${m}: ${pct}% of ${c.size} retained`;
                   return (
                     <div
