@@ -200,9 +200,19 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
 
     const sameHash = (a, b) => a[0] === b[0] && a[1] === b[1];
 
-    // Diff by entity key AND hash. Meta keys users by the hash itself, so a member
-    // whose email/phone changed (same entity key, different hash) must have its NEW
-    // hash POSTed and its STALE hash DELETEd — otherwise the old identifier lingers.
+    // Every identifier hash held by a current member. Meta's audience DELETE removes a
+    // person if ANY identifier in the row matches, so we must never DELETE a row whose
+    // email or phone is still current — that would drop a person we mean to keep
+    // (e.g. a member who changed only their phone but kept their email).
+    const currentHashes = new Set();
+    for (const e of current) {
+      if (e.d[0]) currentHashes.add(e.d[0]);
+      if (e.d[1]) currentHashes.add(e.d[1]);
+    }
+    const safeToDelete = (d) => !((d[0] && currentHashes.has(d[0])) || (d[1] && currentHashes.has(d[1])));
+
+    // Diff by entity key AND hash. A member whose identifier changed gets its NEW row
+    // POSTed; the stale row is DELETEd only if none of its identifiers are still current.
     const addRows = [];
     const removeRows = [];
     let changed = 0;
@@ -212,12 +222,12 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
         addRows.push(e.d); // new member
       } else if (!sameHash(prev.d, e.d)) {
         addRows.push(e.d); // corrected/changed identifier
-        removeRows.push(prev.d);
         changed += 1;
+        if (safeToDelete(prev.d)) removeRows.push(prev.d);
       }
     }
     for (const e of prior) {
-      if (!currentByKey.has(e.k)) removeRows.push(e.d); // dropped member
+      if (!currentByKey.has(e.k) && safeToDelete(e.d)) removeRows.push(e.d); // dropped member
     }
 
     const summary = {

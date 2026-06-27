@@ -167,6 +167,20 @@ describe('syncAudience', () => {
     expect(JSON.parse(del[1].body).payload.data).toEqual([['h:old@x.com', '']]);
   });
 
+  test('partial change (shared email) adds the new row but does NOT delete the still-current one', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUDX' });
+    // email unchanged (a@x.com), phone changed → old row shares the current email hash
+    tableData.customers = [{ id: 'c1', email: 'a@x.com', phone: '9412975749' }]; // -> ['h:a@x.com','h:19412975749']
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', 'h:OLD'] }] };
+    const r = await MetaAudiences.syncAudience('customers', {});
+    expect(r.changed).toBe(1);
+    expect(r.toAdd).toBe(1);
+    expect(r.toRemove).toBe(0); // must NOT delete — would remove the person by their unchanged email
+    expect(r.removed).toBe(0);
+    expect(global.fetch.mock.calls.some((c) => c[1] && c[1].method === 'DELETE')).toBe(false);
+  });
+
   test('live run creates the audience and adds hashed users', async () => {
     configure({ allow: true });
     global.fetch = okFetch({ id: 'AUD123' });
