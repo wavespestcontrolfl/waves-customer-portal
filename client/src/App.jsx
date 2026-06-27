@@ -101,6 +101,7 @@ import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
 import BiometricGate from './components/BiometricGate';
+import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
 import { isNativeApp } from './native/platform';
 import AdminReviewsPage from './pages/admin/ReviewsPage';
 import AdminDispatchPage from './pages/admin/AdminDispatchPage';
@@ -281,6 +282,7 @@ export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <PublicFunnelTracking />
         <InstallPrompt />
         <BiometricGate>
         <Routes>
