@@ -25,7 +25,7 @@ function guardedLineCost(item) {
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
-  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
+  pricePestControl, priceCommercialPestPilot, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
@@ -556,8 +556,19 @@ function generateEstimate(input) {
   const propertyIsCommercial = profileIsCommercial || isCommercialProperty(propertyForCommercialDetection, commercialContext);
   const addCommercialManualQuote = (service) => {
     const result = buildCommercialManualQuoteResult(service, property, { commercialSubtype });
-    if (!lineItems.some((line) => line.service === result.service)) {
+    const existingIdx = lineItems.findIndex((line) => line.service === result.service);
+    if (existingIdx === -1) {
       lineItems.push(result);
+      return;
+    }
+    // A small-commercial pilot GPC line already occupies the commercial_pest
+    // slot, but additional pest-family commercial work (mosquito, termite,
+    // one-time pest, …) was also requested. The pilot only knows GPC, so
+    // downgrade the whole commercial pest bundle to a single manual quote (the
+    // pre-pilot safe behavior) rather than letting the extra work be silently
+    // suppressed behind the GPC suggestion.
+    if (lineItems[existingIdx].commercialPricingMode === 'small_commercial_pilot') {
+      lineItems[existingIdx] = result;
     }
   };
   const useCommercialManualQuote = (selected, service = 'pest_control') => {
@@ -570,9 +581,48 @@ function generateEstimate(input) {
   // Pest Control
   if (services.pest || serviceSelected(services.commercialPest)) {
     if (propertyIsCommercial) {
-      // PR 1 safety gate: commercial pest has no residential fallback. Even
-      // an explicit pilot flag stays manual until the pilot pricer is built.
-      addCommercialManualQuote('pest_control');
+      // Commercial pest has no residential fallback. The small-commercial pilot
+      // pricer auto-prices quarterly GPC off building sqft when the service opts
+      // in via `commercialPricingMode: 'small_commercial_pilot'`; otherwise (or
+      // when the pilot declines — disabled, no sqft, or above its ceiling) the
+      // line falls back to the manual-quote safety gate. The pilot never reaches
+      // a customer unreviewed: every pilot line is autoQuoteRequiresAdminApproval.
+      const pestOpts = serviceOptions(services.pest);
+      const commercialPestOpts = serviceOptions(services.commercialPest);
+      const pilotRequested =
+        pestOpts.commercialPricingMode === 'small_commercial_pilot' ||
+        commercialPestOpts.commercialPricingMode === 'small_commercial_pilot';
+      const pilotResult = pilotRequested
+        ? priceCommercialPestPilot(property, {
+            // Default to quarterly. The admin commercial UI hides the pest
+            // frequency selector, so do NOT inherit the residential `pest.frequency`
+            // (a stale monthly/bimonthly choice from a prior residential estimate
+            // would otherwise leak in). Only an explicit commercial cadence
+            // (services.commercialPest.frequency) overrides the quarterly default.
+            frequency: commercialPestOpts.frequency || 'quarterly',
+            commercialSubtype,
+            // Multi-family / mixed-complex inputs: an explicit per-building list
+            // (each { sqft, stories, units }) wins; otherwise the single-building
+            // fallback derives from the property profile + these top-level values.
+            buildings: pestOpts.buildings || commercialPestOpts.buildings || input.commercialBuildings,
+            units: pestOpts.units ?? commercialPestOpts.units ?? input.units ?? input.unitCount,
+            stories: pestOpts.stories ?? commercialPestOpts.stories ?? input.stories ?? property.stories,
+            // Pass the gross building area straight from the raw input — the
+            // property profile doesn't preserve every gross-area alias
+            // (e.g. livingAreaSqFt). Pick the first POSITIVE value, not the first
+            // non-nullish one: the admin adapter returns homeSqFt as 0 when the
+            // form lacks it, which would otherwise mask a positive livingAreaSqFt.
+            fallbackSqFt: [
+              input.buildingSqFt, input.homeSqFt, input.livingAreaSqFt,
+              input.footprintSqFt, input.footprint,
+            ].find(v => Number(v) > 0),
+          })
+        : null;
+      if (pilotResult) {
+        lineItems.push(pilotResult);
+      } else {
+        addCommercialManualQuote('pest_control');
+      }
     } else {
       const result = pricePestControl(property, {
         frequency: services.pest.frequency || 'quarterly',
