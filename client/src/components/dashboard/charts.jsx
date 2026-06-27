@@ -1003,6 +1003,90 @@ export function EmptyState({ children }) {
   );
 }
 
+// Capital allocation — channels banded by LTV:CAC so the owner can see at a glance
+// where to pour cash and where it's leaking. Traffic-light band colors mirror the
+// documented Customers-surface triage palette (the dashboard's color exception).
+const CAP_TONE_COLOR = {
+  great: '#10B981', // pour_in
+  good: '#10B981', // healthy / scale
+  warn: '#F59E0B', // below 3:1
+  bad: '#C8312F', // losing
+  neutral: '#9CA3AF', // no paid spend
+};
+function fmtRatio(v) {
+  return v == null ? '—' : `${v}:1`;
+}
+
+export function CapitalAllocationCard({ data }) {
+  const channels = data?.channels || [];
+  if (!channels.length) return <EmptyState>No ad spend tracked yet</EmptyState>;
+  const h = data.headline || {};
+  const blendedColor = h.blendedLtvCac == null ? undefined : (CAP_TONE_COLOR[h.blendedTone] || CAP_TONE_COLOR.neutral);
+  return (
+    <div>
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <div className="u-label text-ink-tertiary">Blended LTV:CAC</div>
+          <div className="u-nums text-28 font-medium tracking-tight leading-none" style={{ color: blendedColor }}>
+            {fmtRatio(h.blendedLtvCac)}
+          </div>
+        </div>
+        {h.blendedBandLabel && (
+          <span
+            className="text-11 px-2 py-0.5 rounded-sm shrink-0"
+            style={{ color: blendedColor || '#71717a', border: `1px solid ${blendedColor || '#d4d4d8'}` }}
+          >
+            {h.blendedBandLabel}
+          </span>
+        )}
+      </div>
+
+      {h.topOpportunity && (
+        <div className="text-12 mt-2" style={{ color: CAP_TONE_COLOR.good }}>
+          ▲ <span className="font-medium">{h.topOpportunity.source}</span> {fmtRatio(h.topOpportunity.ltvCac)} —{' '}
+          {h.topOpportunity.band === 'pour_in' ? 'pour cash in' : 'scale up'}
+        </div>
+      )}
+      {h.biggestLeak && (
+        <div className="text-12 mt-1" style={{ color: CAP_TONE_COLOR.bad }}>
+          ▼ <span className="font-medium">{h.biggestLeak.source}</span> {fmtRatio(h.biggestLeak.ltvCac)} — losing money, cut or fix
+        </div>
+      )}
+
+      <div className="mt-3 space-y-2">
+        {channels.map((c) => {
+          const color = CAP_TONE_COLOR[c.tone] || CAP_TONE_COLOR.neutral;
+          const title = `${c.bandLabel}: ${c.verdict}\nCAC ${c.cac == null ? '—' : fmtMoney(c.cac)} · spend ${fmtMoney(c.adSpend)} · ${fmtInt(c.customers)} customers`;
+          return (
+            <div
+              key={c.sourceKey}
+              className="flex items-center gap-2"
+              style={{ opacity: c.confidence === 'low' ? 0.55 : 1 }}
+              title={title}
+            >
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
+              <span className="text-13 text-ink-primary truncate">{c.source}</span>
+              {c.confidence === 'low' && c.ltvCac != null && (
+                <span className="text-11 text-ink-tertiary shrink-0">n={fmtInt(c.customers)}</span>
+              )}
+              <span
+                className="ml-auto u-nums text-13 font-medium"
+                style={{ color: c.ltvCac == null ? undefined : color }}
+              >
+                {fmtRatio(c.ltvCac)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-3 text-11 text-ink-tertiary">
+        Lifetime gross profit ÷ ad spend, by channel. ≥30:1 = pour cash in; under 3:1 = fix or cut. Faded = small sample.
+      </div>
+    </div>
+  );
+}
+
 // ─── Calls / Leads / Channel attribution panels ───────────────────
 //
 // All three live below the existing MRR trend and replace the prior

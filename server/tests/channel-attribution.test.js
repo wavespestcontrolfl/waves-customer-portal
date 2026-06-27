@@ -1,4 +1,4 @@
-const { buildChannelAttribution } = require('../services/channel-attribution');
+const { buildChannelAttribution, splitFacebookByPaid } = require('../services/channel-attribution');
 
 const row = (lead_source, completed_revenue, gross_profit, customer_id) => ({
   lead_source, completed_revenue, gross_profit, customer_id,
@@ -77,5 +77,33 @@ describe('buildChannelAttribution', () => {
     expect(g.revenue).toBe(250);
     expect(out.totalAdSpend).toBe(130);
     expect(out.totalGrossProfit).toBe(270);
+  });
+});
+
+describe('splitFacebookByPaid', () => {
+  test('re-maps organic Facebook (no click id) to facebook_organic; keeps paid', () => {
+    const rows = [
+      { lead_source: 'facebook', fbclid: 'abc', customer_id: 'c1' }, // paid (fbclid)
+      { lead_source: 'facebook', fbc: 'fb.1.x', customer_id: 'c2' }, // paid (_fbc)
+      { lead_source: 'facebook', fbclid: null, fbc: null, customer_id: 'c3' }, // organic
+      { lead_source: 'google_ads', fbclid: null, customer_id: 'c4' }, // untouched
+    ];
+    const out = splitFacebookByPaid(rows);
+    expect(out.map((r) => r.lead_source)).toEqual(['facebook', 'facebook', 'facebook_organic', 'google_ads']);
+  });
+
+  test('organic Facebook completions land in their own no-spend bucket, not paid', () => {
+    const completed = splitFacebookByPaid([
+      { lead_source: 'facebook', fbclid: 'x', completed_revenue: 200, gross_profit: 120, customer_id: 'p1' },
+      { lead_source: 'facebook', fbclid: null, fbc: null, completed_revenue: 500, gross_profit: 300, customer_id: 'o1' },
+    ]);
+    const out = buildChannelAttribution(completed, { facebook: 100 }); // Meta spend only
+    const paid = out.sources.find((s) => s.sourceKey === 'facebook');
+    const organic = out.sources.find((s) => s.sourceKey === 'facebook_organic');
+    expect(paid.grossProfit).toBe(120); // only the paid click counts against Meta spend
+    expect(paid.adSpend).toBe(100);
+    expect(organic.grossProfit).toBe(300);
+    expect(organic.adSpend).toBe(0); // organic has no ad spend → not in paid ratio
+    expect(organic.ltvCac).toBeNull();
   });
 });
