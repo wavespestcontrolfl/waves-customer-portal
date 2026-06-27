@@ -61,7 +61,15 @@ async function customerRateRows(conn) {
  * Upsert the CURRENT per-customer monthly rate into customer_mrr_snapshots for
  * `periodMonth`. One row per (period_month, customer_id); merge refreshes the
  * rate/tier so a mid-month change is captured and the month freezes at its last
- * value once it rolls over. Returns how many rows were written.
+ * value once it rolls over.
+ *
+ * Also DROPS this period's rows for customers who have since fallen out of the
+ * population — deactivated, soft-deleted, or monthly_rate set to 0 mid-month.
+ * The aggregate (mrr_snapshots.total_mrr) is recomputed from the live population
+ * each refresh, so without this prune a dropped customer's stale row would linger
+ * and the period's per-customer rows would stop summing to total_mrr. The cron
+ * only ever refreshes the CURRENT month, so a closed month keeps its final
+ * population. Returns how many rows were written and removed.
  *
  * @param {string} periodMonth  YYYY-MM-01
  * @param {import('knex')} [conn]
@@ -69,7 +77,10 @@ async function customerRateRows(conn) {
 async function recordCustomerMrrSnapshots(periodMonth, conn) {
   conn = conn || require('../models/db');
   const rows = await customerRateRows(conn);
-  if (!rows.length) return { period_month: periodMonth, count: 0 };
+  // Empty result = no qualifying customers (or the population query yielded none);
+  // skip both the insert AND the prune so a transient empty read can't wipe the
+  // month. A real all-churned month is vanishingly rare for a live business.
+  if (!rows.length) return { period_month: periodMonth, count: 0, removed: 0 };
   const records = rows.map((r) => ({
     period_month: periodMonth,
     customer_id: r.customer_id,
@@ -81,7 +92,14 @@ async function recordCustomerMrrSnapshots(periodMonth, conn) {
     .insert(records)
     .onConflict(['period_month', 'customer_id'])
     .merge(); // refresh monthly_rate/waveguard_tier/captured_at for the in-progress month
-  return { period_month: periodMonth, count: records.length };
+  // Prune rows for customers who left the population since an earlier refresh of
+  // this same month, so per-customer rows reconcile to mrr_snapshots.total_mrr.
+  const keepIds = records.map((r) => r.customer_id);
+  const removed = await conn('customer_mrr_snapshots')
+    .where({ period_month: periodMonth })
+    .whereNotIn('customer_id', keepIds)
+    .del();
+  return { period_month: periodMonth, count: records.length, removed };
 }
 
 /**

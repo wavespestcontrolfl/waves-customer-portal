@@ -15,7 +15,7 @@ const {
 //  - mrr_snapshots / customer_mrr_snapshots capture the upsert (insert →
 //    onConflict → merge). `custFail` makes the per-customer merge reject so we
 //    can prove it can't break the aggregate.
-function makeFakeDb({ tierRows = [], customerRows = [], capture = {}, custFail = false } = {}) {
+function makeFakeDb({ tierRows = [], customerRows = [], capture = {}, custFail = false, removedCount = 0 } = {}) {
   function makeCustomers() {
     let grouped = false;
     const b = {
@@ -40,6 +40,17 @@ function makeFakeDb({ tierRows = [], customerRows = [], capture = {}, custFail =
     merge: () => {
       capture.custMerged = true;
       return custFail ? Promise.reject(new Error('boom')) : Promise.resolve();
+    },
+    // prune chain: .where({period_month}).whereNotIn('customer_id', keepIds).del()
+    where: (cond) => {
+      capture.pruneWhere = cond;
+      return {
+        whereNotIn: (col, list) => {
+          capture.pruneCol = col;
+          capture.pruneKeep = list;
+          return { del: () => { capture.pruneDel = true; return Promise.resolve(removedCount); } };
+        },
+      };
     },
   };
   const db = (table) => {
@@ -107,7 +118,7 @@ describe('recordCustomerMrrSnapshots', () => {
     });
     const out = await recordCustomerMrrSnapshots('2026-06-01', db);
 
-    expect(out).toEqual({ period_month: '2026-06-01', count: 2 });
+    expect(out).toEqual({ period_month: '2026-06-01', count: 2, removed: 0 });
     expect(capture.custConflict).toEqual(['period_month', 'customer_id']);
     expect(capture.custMerged).toBe(true);
     expect(capture.custRows).toEqual([
@@ -116,11 +127,28 @@ describe('recordCustomerMrrSnapshots', () => {
     ]);
   });
 
-  test('writes nothing when the population is empty', async () => {
+  test('prunes this month\'s rows for customers who left the population', async () => {
+    const capture = {};
+    const db = makeFakeDb({
+      customerRows: [{ customer_id: 'c1', monthly_rate: '120', waveguard_tier: 'Gold' }],
+      capture,
+      removedCount: 3, // 3 stale rows (deactivated/soft-deleted/rate→0 mid-month) deleted
+    });
+    const out = await recordCustomerMrrSnapshots('2026-06-01', db);
+
+    expect(out).toEqual({ period_month: '2026-06-01', count: 1, removed: 3 });
+    expect(capture.pruneWhere).toEqual({ period_month: '2026-06-01' });
+    expect(capture.pruneCol).toBe('customer_id');
+    expect(capture.pruneKeep).toEqual(['c1']); // only the surviving population is kept
+    expect(capture.pruneDel).toBe(true);
+  });
+
+  test('writes nothing AND prunes nothing when the population is empty', async () => {
     const capture = {};
     const out = await recordCustomerMrrSnapshots('2026-06-01', makeFakeDb({ customerRows: [], capture }));
-    expect(out).toEqual({ period_month: '2026-06-01', count: 0 });
+    expect(out).toEqual({ period_month: '2026-06-01', count: 0, removed: 0 });
     expect(capture.custRows).toBeUndefined();
+    expect(capture.pruneDel).toBeUndefined(); // a transient empty read must not wipe the month
   });
 });
 
