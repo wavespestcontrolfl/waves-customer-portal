@@ -758,13 +758,23 @@ router.post('/voicemail-complete', (req, res) => {
 // caveat as relay-protocol.parsePrompt). Unrecognized → clean hangup (valid
 // TwiML), never dead air.
 // =========================================================================
-router.post('/relay-complete', (req, res) => {
+router.post('/relay-complete', async (req, res) => {
+  const callSid = req.body?.CallSid;
   const errorCode = req.body?.ErrorCode || req.body?.errorCode || '';
   const sessionStatus = String(req.body?.SessionStatus || req.body?.sessionStatus || '').toLowerCase();
   const failed = !!errorCode || ['failed', 'error', 'disconnected'].includes(sessionStatus);
   const twiml = new VoiceResponse();
   if (failed) {
-    logger.warn(`[relay-complete] relay session failed (${errorCode || sessionStatus || 'unknown'}) for ${maskSid(req.body?.CallSid)} — falling back to voicemail`);
+    logger.warn(`[relay-complete] relay session failed (${errorCode || sessionStatus || 'unknown'}) for ${maskSid(callSid)} — falling back to voicemail`);
+    // Undo the ai_agent/ai_handled stamp the relay handoff applied: this call
+    // did NOT reach the agent, it went to voicemail. Reconcile before recording
+    // so reporting doesn't show a failed relay call as AI-handled.
+    if (callSid) {
+      await db('call_log').where('twilio_call_sid', callSid)
+        .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
+        .catch((err) => logger.warn(`[relay-complete] call_log reconcile failed for ${maskSid(callSid)}: ${err.message}`));
+      queueVoiceMessageSync(callSid);
+    }
     appendVoicemailRecording(twiml);
   }
   res.type('text/xml').send(twiml.toString());
