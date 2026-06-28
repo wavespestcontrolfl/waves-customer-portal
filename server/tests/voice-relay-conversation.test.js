@@ -53,22 +53,29 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(ret).toBe(chainBefore); // early-returned the existing chain; no new turn queued
   });
 
-  test('end() reconcile yields to a relay-failure voicemail (whereNot guard, no clobber)', async () => {
+  test('end() reconcile stamps ai_handled but yields to a relay-failure voicemail', async () => {
     // The /relay-complete failure path stamps call_outcome='voicemail'. end()
-    // runs on every WS close and must NOT overwrite that with 'ai_handled' — it
-    // guards the update on call_outcome <> 'voicemail' so the failure path wins.
-    const update = jest.fn().mockResolvedValue(0); // 0 rows = voicemail already set
-    const whereNot = jest.fn().mockReturnValue({ update });
-    const where = jest.fn().mockReturnValue({ whereNot });
-    db.mockReturnValue({ where });
+    // runs on every WS close and must NOT clobber that with 'ai_handled'. But the
+    // handoff clears call_outcome to NULL before a SUCCESSFUL session, so the
+    // guard must match NULL too (NULL <> 'voicemail' is NULL in SQL) — else
+    // successful calls never finalize. Verify the guard is "NULL OR not voicemail".
+    const update = jest.fn().mockResolvedValue(1);
+    const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNot: jest.fn().mockReturnThis() };
+    const builder = {
+      update,
+      where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
+    };
+    db.mockReturnValue(builder);
 
     const convo = new RelayConversation({ callSid: 'CA9', from: '+19415551234', send: jest.fn() });
     convo.leadCaptured = true; // skip the capture-floor lead write
     await convo.end('hangup');
 
     expect(db).toHaveBeenCalledWith('call_log');
-    expect(where).toHaveBeenCalledWith('twilio_call_sid', 'CA9');
-    expect(whereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(builder.where).toHaveBeenCalledWith('twilio_call_sid', 'CA9');
+    // the guard callback ran whereNull('call_outcome') OR orWhereNot(...,'voicemail')
+    expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
+    expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
     expect(update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'completed', answered_by: 'ai_agent', call_outcome: 'ai_handled',
     }));

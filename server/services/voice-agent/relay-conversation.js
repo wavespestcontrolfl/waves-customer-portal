@@ -233,14 +233,18 @@ class RelayConversation {
         // also hits /relay-complete, which stamps call_outcome='voicemail' as the
         // terminal fallback. Those two writes race, and end() can land last —
         // overwriting the voicemail fallback with an optimistic 'ai_handled'.
-        // Guard on `call_outcome <> 'voicemail'` so the failure path always wins:
-        // if /relay-complete already wrote voicemail, this matches 0 rows; in the
-        // reverse ordering /relay-complete's unconditional failure write still
-        // overwrites this ai_handled. (The handoff cleared call_outcome to null
-        // before the relay leg, so 'voicemail' here can only mean a real failure.)
+        // Guard so the failure path always wins: skip the row only when
+        // /relay-complete already wrote call_outcome='voicemail'. The handoff
+        // clears call_outcome to NULL before the relay leg, and a bare
+        // `whereNot('call_outcome','voicemail')` does NOT match NULL in SQL
+        // (NULL <> 'voicemail' is NULL, not true) — which would strand every
+        // SUCCESSFUL call at ringing/null. So match NULL OR not-voicemail. In the
+        // reverse ordering, /relay-complete's unconditional failure write still
+        // overwrites this ai_handled. ('voicemail' here can only mean a real
+        // failure, since the leg started at NULL.)
         await db('call_log')
           .where('twilio_call_sid', this.callSid)
-          .whereNot('call_outcome', 'voicemail')
+          .where((q) => q.whereNull('call_outcome').orWhereNot('call_outcome', 'voicemail'))
           .update({
             status: 'completed',
             answered_by: 'ai_agent',
