@@ -76,4 +76,48 @@ async function runExclusive(jobName, fn) {
   }
 }
 
-module.exports = { runExclusive };
+/**
+ * Non-mutating check of whether a job's advisory lock is currently held (i.e. a
+ * runExclusive('<jobName>') body is executing — possibly on another instance).
+ * Acquires the lock momentarily and releases it: if we got it, nothing holds it.
+ */
+async function isLocked(jobName) {
+  const lockKey = `cron:${jobName}`;
+  let conn;
+  try {
+    conn = await db.client.acquireConnection();
+  } catch (err) {
+    logger.error(`[cron-lock] isLocked(${jobName}): could not acquire DB connection (${err.message})`);
+    return false;
+  }
+  let acquired = false;
+  try {
+    const res = await conn.query({
+      text: 'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
+      values: [lockKey],
+    });
+    acquired = !!res?.rows?.[0]?.locked;
+    return !acquired; // we acquired it → free (nothing running); couldn't → held
+  } catch (err) {
+    logger.warn(`[cron-lock] isLocked(${jobName}) check failed: ${err.message}`);
+    return false;
+  } finally {
+    if (acquired) {
+      try {
+        await conn.query({ text: 'SELECT pg_advisory_unlock(hashtext($1))', values: [lockKey] });
+      } catch (err) {
+        // Same safety as runExclusive: if we can't release, destroy the connection
+        // so the session lock can't linger in the pool and block real runs.
+        conn.__knex__disposed = `cron-lock isLocked unlock failed: ${err.message}`;
+        logger.error(`[cron-lock] isLocked(${jobName}) advisory unlock failed (${err.message}) — connection flagged for destruction`);
+      }
+    }
+    try {
+      db.client.releaseConnection(conn);
+    } catch (err) {
+      logger.error(`[cron-lock] isLocked(${jobName}) connection release failed: ${err.message}`);
+    }
+  }
+}
+
+module.exports = { runExclusive, isLocked };

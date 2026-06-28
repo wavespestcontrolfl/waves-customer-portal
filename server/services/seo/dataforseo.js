@@ -122,12 +122,14 @@ class DataForSEO {
     }]);
   }
 
-  // SERP — Map Pack
-  async serpMaps(keyword, location = 'Bradenton,Florida,United States') {
+  // SERP — Map Pack. `extra` merges extra task params (e.g. { search_places:false }
+  // for coordinate-exact geo-grid pins); existing 2-arg callers are unaffected.
+  async serpMaps(keyword, location = 'Bradenton,Florida,United States', extra = {}) {
     return this.request('/serp/google/maps/live/advanced', [{
       keyword,
       ...serpLocation(location),
       language_name: 'English',
+      ...extra,
     }]);
   }
 

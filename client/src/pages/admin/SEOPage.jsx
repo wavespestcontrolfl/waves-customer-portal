@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import {
   Activity,
   BarChart3,
@@ -874,13 +874,18 @@ function GeoGridTab() {
       .then(setHeat)
       .catch(() => setHeat(null));
   };
+  // Current selection mirror — so an in-flight scan poll doesn't write results
+  // for a selection the user has since changed away from.
+  const selRef = useRef({ office, keyword });
   useEffect(() => {
+    selRef.current = { office, keyword };
     setHeat(null);
     loadHeat();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [office, keyword]);
 
   const runScan = async () => {
+    const scanned = { office, keyword };
     setRunning(true);
     try {
       const r = await adminFetch("/admin/seo/geo-grid/run", {
@@ -898,7 +903,8 @@ function GeoGridTab() {
         if (!s?.scanning || n > 18) {
           clearInterval(t);
           setRunning(false);
-          loadHeat();
+          // Only reload if the user hasn't switched office/keyword since starting.
+          if (selRef.current.office === scanned.office && selRef.current.keyword === scanned.keyword) loadHeat();
         }
       }, 20000);
     } catch {

@@ -6,6 +6,7 @@
 exports.up = async function (knex) {
   await knex.schema.createTable('geo_grid_ranks', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
+    t.string('scan_run_id').notNullable(); // unique per runScan invocation (ISO ts) — separates same-day reruns
     t.date('scan_date').notNullable();
     t.string('office_id').notNullable(); // WAVES_LOCATIONS id (bradenton/parrish/sarasota/venice)
     t.string('keyword').notNullable();
@@ -17,7 +18,8 @@ exports.up = async function (knex) {
     t.boolean('found_in_pack').notNullable().defaultTo(false);
     t.jsonb('top_competitors'); // [{ title, rank }] — top 3 at this pin
     t.timestamp('created_at').defaultTo(knex.fn.now());
-    t.unique(['scan_date', 'office_id', 'keyword', 'pin_row', 'pin_col']);
+    t.unique(['scan_run_id', 'office_id', 'keyword', 'pin_row', 'pin_col']);
+    t.index(['office_id', 'keyword', 'scan_run_id']);
     t.index(['office_id', 'keyword', 'scan_date']);
   });
 };

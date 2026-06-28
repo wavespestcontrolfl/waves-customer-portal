@@ -2,10 +2,10 @@
  * geo-grid-tracker.js — native geo-grid map-pack rank tracking (Pillar 3).
  *
  * For each office we drop an N×N grid of lat/lng pins, query the Google Maps
- * local pack at each pin (DataForSEO serpMaps already accepts a "lat,lng,radius"
- * coordinate via serpLocation), and record where the office's GBP ranks in the
- * pack at that point. The result is a per-office heat map: green where we win
- * the map pack, red where we don't — the measurement layer for local SEO.
+ * local pack at each pin (DataForSEO serpMaps with a "lat,lng,zoom" coordinate
+ * and search_places off), and record where the office's GBP ranks in the pack at
+ * that point. The result is a per-office heat map: green where we win the map
+ * pack, red where we don't — the measurement layer for local SEO.
  *
  * Matching: the office's googlePlaceId vs each map item's place_id (fallback: a
  * "waves pest control" title match). null rank = not in the returned pack there.
@@ -21,7 +21,7 @@ const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { etDateString } = require('../../utils/datetime-et');
-const { runExclusive } = require('../../utils/cron-lock');
+const { runExclusive, isLocked } = require('../../utils/cron-lock');
 
 // ── Config (tune to control DataForSEO spend) ────────────────────────────────
 const GRID_SIZE = 5; // N×N pins per office/keyword (5×5 = 25)
@@ -73,14 +73,16 @@ function findOfficeRank(items, office) {
   return null;
 }
 
-async function scanOfficeKeyword(office, keyword, scanDate) {
+async function scanOfficeKeyword(office, keyword, scanDate, runId) {
   const pins = buildGrid(office);
   let stored = 0;
   let skipped = 0;
   for (const pin of pins) {
     let result = null;
     try {
-      const data = await dataforseo.serpMaps(keyword, `${pin.latitude},${pin.longitude},${GRID_ZOOM}`);
+      // search_places:false — the default mode can return a DIFFERENT location's
+      // pack than the coordinate; each pin must measure the rank at THAT point.
+      const data = await dataforseo.serpMaps(keyword, `${pin.latitude},${pin.longitude},${GRID_ZOOM}`, { search_places: false });
       result = data?.tasks?.[0]?.result?.[0] ?? null;
     } catch (err) {
       logger.warn(`[geo-grid] ${office.id}/${keyword} pin ${pin.row},${pin.col} failed: ${err.message}`);
@@ -99,6 +101,7 @@ async function scanOfficeKeyword(office, keyword, scanDate) {
     const top = items.slice(0, 3).map((m) => ({ title: m.title, rank: m.rank_group || m.rank_absolute || null }));
     await db('geo_grid_ranks')
       .insert({
+        scan_run_id: runId,
         scan_date: scanDate,
         office_id: office.id,
         keyword,
@@ -110,7 +113,7 @@ async function scanOfficeKeyword(office, keyword, scanDate) {
         found_in_pack: rank != null,
         top_competitors: JSON.stringify(top),
       })
-      .onConflict(['scan_date', 'office_id', 'keyword', 'pin_row', 'pin_col'])
+      .onConflict(['scan_run_id', 'office_id', 'keyword', 'pin_row', 'pin_col'])
       .merge();
     stored++;
   }
@@ -137,20 +140,23 @@ async function runScan({ officeId = null, keyword = null } = {}) {
   const result = await runExclusive('geo-grid-scan', async () => {
     scanning = true;
     const scanDate = etDateString();
+    // Unique per invocation so a same-day rerun is a DISTINCT run — a partial
+    // rerun can't leave stale earlier-run pins that make the date look complete.
+    const runId = new Date().toISOString();
     const offices = WAVES_LOCATIONS.filter((o) => !officeId || o.id === officeId);
     const keywords = keyword ? [keyword] : KEYWORDS;
     let pins = 0;
     try {
       for (const office of offices) {
         for (const kw of keywords) {
-          pins += await scanOfficeKeyword(office, kw, scanDate);
+          pins += await scanOfficeKeyword(office, kw, scanDate, runId);
         }
       }
     } finally {
       scanning = false;
     }
-    logger.info(`[geo-grid] scan ${scanDate}: ${offices.length} office(s) × ${keywords.length} keyword(s) = ${pins} pins`);
-    return { scanDate, offices: offices.length, keywords: keywords.length, pins };
+    logger.info(`[geo-grid] scan ${scanDate} (${runId}): ${offices.length} office(s) × ${keywords.length} keyword(s) = ${pins} pins`);
+    return { scanDate, runId, offices: offices.length, keywords: keywords.length, pins };
   });
   if (result && result.skipped) {
     logger.info('[geo-grid] scan lease held elsewhere — skipped');
@@ -161,22 +167,23 @@ async function runScan({ officeId = null, keyword = null } = {}) {
 
 /** Latest grid + stats for one office+keyword (drives the heat map). */
 async function getHeatmap(officeId, keyword) {
-  // Latest scan_date with a COMPLETE grid only — a partial scan (transient
-  // DataForSEO failures skip pins) must NOT replace the last good view with a
-  // misleading partial one. Fall back to the most recent fully-stored scan.
+  // Latest RUN with a COMPLETE grid only — a partial scan (transient DataForSEO
+  // failures skip pins) is its own run and is ignored; the last fully-stored run
+  // still shows. scan_run_id is an ISO timestamp, so desc = most recent.
   const expected = GRID_SIZE * GRID_SIZE;
-  const row = await db('geo_grid_ranks')
+  const run = await db('geo_grid_ranks')
     .where({ office_id: officeId, keyword })
-    .select('scan_date')
-    .groupBy('scan_date')
+    .select('scan_run_id')
+    .groupBy('scan_run_id')
     .havingRaw('count(*) >= ?', [expected])
-    .orderBy('scan_date', 'desc')
+    .orderBy('scan_run_id', 'desc')
     .first();
-  const scanDate = row && row.scan_date;
-  if (!scanDate) return { scanDate: null, gridSize: GRID_SIZE, pins: [], stats: null };
+  const runId = run && run.scan_run_id;
+  if (!runId) return { scanDate: null, gridSize: GRID_SIZE, pins: [], stats: null };
   const pins = await db('geo_grid_ranks')
-    .where({ office_id: officeId, keyword, scan_date: scanDate })
-    .select('pin_row', 'pin_col', 'latitude', 'longitude', 'map_pack_rank', 'found_in_pack', 'top_competitors');
+    .where({ office_id: officeId, keyword, scan_run_id: runId })
+    .select('pin_row', 'pin_col', 'latitude', 'longitude', 'map_pack_rank', 'found_in_pack', 'top_competitors', 'scan_date');
+  const scanDate = pins[0] ? pins[0].scan_date : null;
   const ranked = pins.filter((p) => p.map_pack_rank != null).map((p) => p.map_pack_rank);
   const stats = {
     total: pins.length,
@@ -189,6 +196,17 @@ async function getHeatmap(officeId, keyword) {
       : 0,
   };
   return { scanDate, gridSize: GRID_SIZE, pins, stats };
+}
+
+/** Cross-instance "is a scan running" — a run holds the 'geo-grid-scan' advisory
+ *  lock, so this is true even when the scan is on another Railway instance. Used
+ *  by the status endpoint the UI polls; falls back to the local flag on error. */
+async function isScanRunning() {
+  try {
+    return await isLocked('geo-grid-scan');
+  } catch {
+    return scanning;
+  }
 }
 
 /** Static config for the UI (offices, keywords, grid size). */
@@ -206,4 +224,4 @@ function config() {
   };
 }
 
-module.exports = { runScan, getHeatmap, config, buildGrid, findOfficeRank, isScanning: () => scanning, GRID_SIZE, KEYWORDS };
+module.exports = { runScan, getHeatmap, config, buildGrid, findOfficeRank, isScanning: () => scanning, isScanRunning, GRID_SIZE, KEYWORDS };
