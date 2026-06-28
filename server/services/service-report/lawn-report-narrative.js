@@ -45,7 +45,7 @@ function groundingFacts(v2, ctx) {
     grassLabel: ctx.grassLabel || 'lawn',
     diagnosis: (v2.diagnosis || []).map((d) => ({ key: d.key, label: d.label, score: d.score, status: d.status })),
     water: v2.water ? { status: v2.water.status, rain: v2.water.rainInches, irrigation: v2.water.irrigationInches, total: v2.water.totalInches, target: v2.water.targetInches, confidence: v2.water.confidence } : null,
-    mowing: v2.mowing ? { status: v2.mowing.status, measured: v2.mowing.measuredHeightInches, idealMin: v2.mowing.idealMinInches, idealMax: v2.mowing.idealMaxInches } : null,
+    mowing: v2.mowing && v2.mowing.measuredHeightInches != null ? { status: v2.mowing.status, measured: v2.mowing.measuredHeightInches, idealMin: v2.mowing.idealMinInches, idealMax: v2.mowing.idealMaxInches } : null,
     treatment: v2.treatment ? { focus: v2.treatment.focus, products: (v2.treatment.products || []).map((p) => ({ name: p.name, activeIngredient: p.activeIngredient, kind: p.kind, whatItDoes: p.whatItDoes, targets: p.targets })) } : null,
     trendDirection: trendDirection(v2.trends?.overall),
     insights: (v2.insights || []).map((i) => ({ category: i.category, status: i.status, priority: i.priority })),
@@ -123,7 +123,9 @@ function mergeNarrative(v2, out) {
     return { ...d, explanation: v, customerExplanation: v };
   });
   if (next.water) next.water.explanation = safeText(out.water, next.water.explanation);
-  if (next.mowing) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);
+  // Photo-only rows have no measured height/status — don't let the model fill an
+  // ungrounded mowing recommendation under the photo (Codex P1).
+  if (next.mowing && next.mowing.measuredHeightInches != null) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);
   if (next.treatment && typeof out.treatmentSummary === 'string') {
     next.treatment.summary = safeText(out.treatmentSummary, next.treatment.summary || '');
   }
