@@ -734,7 +734,7 @@ router.post('/qa/:blogPostId/score', requireAdmin, async (req, res, next) => {
 
 router.post('/qa/batch', requireAdmin, async (req, res, next) => {
   try {
-    const results = await ContentQA.batchScore(parseInt(req.body.limit || 50));
+    const results = await ContentQA.batchScore(parseInt(req.body.limit || 50), { publishedOnly: !!(req.body && req.body.publishedOnly) });
     res.json({ results });
   } catch (err) { next(err); }
 });

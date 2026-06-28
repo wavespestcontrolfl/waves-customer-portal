@@ -3755,7 +3755,9 @@ function RefreshAuditTab() {
   const runQaBatch = async () => {
     setBatching(true);
     try {
-      await adminFetch("/admin/seo/qa/batch", { method: "POST", body: { limit: 100 } });
+      // publishedOnly: the audit only ranks published pages — don't spend the
+      // batch on unscored drafts that never appear here.
+      await adminFetch("/admin/seo/qa/batch", { method: "POST", body: { limit: 100, publishedOnly: true } });
       load(); // re-rank with fresh QA scores
     } catch {
       /* non-critical */

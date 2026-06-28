@@ -23,6 +23,10 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+// Reuse the GSC miner's pure URL/query classifiers (exposed for tests, no DB) so
+// a queued refresh derives city + service exactly the way the engine's own
+// decay_refresh rows do — instead of re-deriving them from blog_posts fields.
+const { _internals: miner } = require('./gsc-opportunity-miner');
 
 // Astro/GSC canonical hub origin (used only for DISPLAY + a never-seeded
 // fallback — gsc_pages/decay matching below is path-keyed and domain-scoped).
@@ -126,6 +130,13 @@ const TAG_TO_SERVICE = {
   'tree and shrub care': 'tree-shrub',
   'tree & shrub': 'tree-shrub',
   'tree and shrub': 'tree-shrub',
+  // canonical / underscore / hyphen category values other code paths store
+  'pest-control': 'pest',
+  pest_control: 'pest',
+  'lawn-care': 'lawn',
+  lawn_care: 'lawn',
+  'tree-shrub': 'tree-shrub',
+  tree_shrub: 'tree-shrub',
 };
 
 function pageUrlFor(post) {
@@ -133,9 +144,22 @@ function pageUrlFor(post) {
   return post.slug ? `${HUB}/${post.slug}/` : null;
 }
 
-function serviceFor(post) {
-  const tag = (post.tag || '').trim().toLowerCase();
-  return TAG_TO_SERVICE[tag] || null;
+/** Service (miner category) for a page: prefer the URL/keyword classifier the
+ *  engine itself uses (handles any tag format + city-service URLs), fall back to
+ *  the tag map. Returns null when undeterminable. */
+function serviceForPage(post, url) {
+  return (
+    miner.inferServiceFromUrl(url) ||
+    miner.inferServiceFromQuery(post.keyword) ||
+    TAG_TO_SERVICE[(post.tag || '').trim().toLowerCase()] ||
+    null
+  );
+}
+
+/** Registrable target domain: the live URL's domain, else the post's
+ *  target_domain (multi-site rows that aren't live yet), else the hub. */
+function targetDomainFor(post) {
+  return registrableDomain(post.astro_live_url) || registrableDomain(post.target_domain) || HUB_DOMAIN;
 }
 
 function ageDaysFrom(post, now) {
@@ -202,7 +226,7 @@ class RefreshAudit {
   async getAudit({ limit = 100 } = {}) {
     const posts = await db('blog_posts')
       .where('status', 'published')
-      .select('id', 'slug', 'title', 'tag', 'city', 'keyword', 'publish_date', 'updated_at', 'astro_live_url', 'word_count');
+      .select('id', 'slug', 'title', 'tag', 'city', 'keyword', 'publish_date', 'updated_at', 'astro_live_url', 'target_domain', 'word_count');
 
     // Latest QA score per blog_post_id (rows are append/update; newest wins).
     const qaRows = await db('seo_content_qa_scores').orderBy('created_at', 'desc').orderBy('id', 'desc');
@@ -217,7 +241,7 @@ class RefreshAudit {
     const now = Date.now();
     const candidates = posts.map((p) => {
       const url = pageUrlFor(p);
-      const domain = registrableDomain(p.astro_live_url) || HUB_DOMAIN;
+      const domain = targetDomainFor(p);
       const qa = qaByPost.get(p.id) || null;
       // The blog_post_id link is slug-derived by the producer, so validate its URL
       // is on this post's domain before trusting it; else match by domain|path.
@@ -296,22 +320,24 @@ class RefreshAudit {
       err.code = 'NO_URL';
       throw err;
     }
-    // Fail closed on a city-scoped page whose tag can't map to a service: the
-    // autonomous runner's facts-sufficiency / claims-ledger grounding only applies
-    // when BOTH city and service are present, so queuing city-without-service would
-    // refresh the page WITHOUT facts-bank grounding — exactly what the gate exists
-    // to prevent. (A page with no city is fine: it's not a facts-gated city×service.)
-    const service = serviceFor(post);
-    if (post.city && !service) {
-      const err = new Error(`could not map this page's tag (${post.tag ? `"${post.tag}"` : 'none'}) to a service, which is required to ground a city-scoped refresh`);
+
+    const path = pathFor(post);
+    const targetDomain = targetDomainFor(post);
+    // City + service the way the engine derives them: prefer the URL/keyword
+    // classifiers (so a city-scoped URL with an empty blog_posts.city or an
+    // unmapped tag is still anchored) and fall back to the stored fields.
+    const inferUrl = post.astro_live_url || path;
+    const service = serviceForPage(post, inferUrl);
+    const city = miner.normalizeCity(post.city) || miner.inferCityFromUrl(inferUrl) || null;
+    // Fail closed on a city-scoped page with no determinable service: the runner's
+    // facts-sufficiency / claims-ledger grounding only applies when BOTH city and
+    // service are present, so queuing city-without-service would refresh WITHOUT
+    // facts-bank grounding — exactly what that gate exists to prevent.
+    if (city && !service) {
+      const err = new Error(`could not determine a service for this city-scoped page (tag ${post.tag ? `"${post.tag}"` : 'none'}); a service is required to ground a city refresh`);
       err.code = 'NO_SERVICE';
       throw err;
     }
-
-    const path = pathFor(post);
-    // Registrable domain of the target (blog posts live on the hub unless
-    // astro_live_url says otherwise) — scopes GSC + dedupe to THIS domain.
-    const targetDomain = registrableDomain(post.astro_live_url) || HUB_DOMAIN;
 
     // Don't double-queue: an in-flight refresh for this page may already exist
     // under ANOTHER bucket's dedupe_key (e.g. the GSC miner's decay_refresh), and
@@ -423,7 +449,7 @@ class RefreshAudit {
         null,
         pageUrl,
         service,
-        post.city || null,
+        city,
         score,
         JSON.stringify({ source: 'refresh_audit', priority, reasons }),
         // signal_metadata: snake_case GSC fields the brief-builder reads into

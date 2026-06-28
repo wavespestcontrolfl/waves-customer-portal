@@ -126,13 +126,16 @@ class ContentQA {
     return { ...record, checklist_results: checks };
   }
 
-  async batchScore(limit = 50) {
+  async batchScore(limit = 50, { publishedOnly = false } = {}) {
     // Prioritize never-scored pages so a bounded batch fills coverage instead of
     // re-scoring the same first N (the Refresh Audit surfaces unscored pages for
     // exactly this). count(q.id)=0 → unscored, ordered first; then most-recent.
+    // publishedOnly: the audit ranks only published pages, so its batch must not
+    // spend the budget on unscored DRAFTS that never appear in the audit.
+    const statuses = publishedOnly ? ['published'] : ['published', 'draft'];
     const posts = await db('blog_posts as b')
       .leftJoin('seo_content_qa_scores as q', 'q.blog_post_id', 'b.id')
-      .whereIn('b.status', ['published', 'draft'])
+      .whereIn('b.status', statuses)
       .whereNotNull('b.content')
       .groupBy('b.id')
       .select('b.*')
