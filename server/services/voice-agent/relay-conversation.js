@@ -76,6 +76,7 @@ class RelayConversation {
     this._controller = null;
     this._chain = Promise.resolve(); // serializes overlapping prompts
     this._userTurns = [];
+    this._startedAt = Date.now(); // for the AI-handled leg duration on reconcile
   }
 
   /** Speak a line to the caller (no-op on empty). */
@@ -89,8 +90,15 @@ class RelayConversation {
     const t = String(text || '').trim();
     if (!t || this.ended) return this._chain;
     this._userTurns.push(t);
-    this.messages.push({ role: 'user', content: t });
-    this._chain = this._chain.then(() => this._runLoop()).catch((e) => {
+    // Append the turn to the shared transcript INSIDE the serialized chain —
+    // right before the loop that handles it — so a turn that arrives while a
+    // prior _runLoop is still in flight can't be inserted ahead of that loop's
+    // assistant/tool_result messages and corrupt the conversation order.
+    this._chain = this._chain.then(() => {
+      if (this.ended) return undefined;
+      this.messages.push({ role: 'user', content: t });
+      return this._runLoop();
+    }).catch((e) => {
       logger.error(`[voice-relay] loop error callSid=${this.callSid}: ${e.message}`);
     });
     return this._chain;
@@ -180,15 +188,24 @@ class RelayConversation {
     this.interrupt();
 
     // Reconcile call reporting: this call was handled by the AI agent, not
-    // voicemail. The /voice backstop cleared call_outcome at handoff; stamp the
-    // final outcome here so backstop calls don't linger as no-answer/null and
-    // the unified messages row resyncs. Keyed by CallSid — a no-op (0 rows) for
-    // the TwiML-Bin sandbox path, which has no call_log row.
+    // voicemail. The /voice answers-first and /call-complete backstop paths
+    // leave the row at a non-final status ('ringing' / 'no-answer') with a
+    // stale duration; stamp the FINAL completed status + the AI-handled leg
+    // duration + outcome here (mirroring the /agent-fallback path) so these
+    // calls don't linger as ringing/no-answer/null, then resync the unified
+    // message row. Keyed by CallSid — a no-op (0 rows) for the TwiML-Bin
+    // sandbox path, which has no call_log row.
     if (this.callSid) {
       try {
         await db('call_log')
           .where('twilio_call_sid', this.callSid)
-          .update({ answered_by: 'ai_agent', call_outcome: 'ai_handled', updated_at: new Date() });
+          .update({
+            status: 'completed',
+            answered_by: 'ai_agent',
+            call_outcome: 'ai_handled',
+            duration_seconds: Math.max(0, Math.round((Date.now() - this._startedAt) / 1000)),
+            updated_at: new Date(),
+          });
         syncVoiceMessageForCall(this.callSid);
       } catch (err) {
         logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
