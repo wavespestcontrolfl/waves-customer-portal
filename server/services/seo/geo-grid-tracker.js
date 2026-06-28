@@ -24,9 +24,15 @@ const { etDateString } = require('../../utils/datetime-et');
 const { runExclusive, isLocked } = require('../../utils/cron-lock');
 
 // ── Config (tune to control DataForSEO spend) ────────────────────────────────
-const GRID_SIZE = 5; // N×N pins per office/keyword (5×5 = 25)
+const GRID_SIZE = 5; // DEFAULT N×N pins per office/keyword (5×5 = 25); V2 = per-scan override
+const GRID_SIZE_OPTIONS = [3, 5, 7, 9]; // selectable grid sizes (cost = OFFICES × KW × N²)
 const GRID_SPACING_MILES = 2; // distance between adjacent pins (≈ 8mi × 8mi area)
-const KEYWORDS = ['pest control', 'exterminator', 'termite control'];
+// Default keywords — used until an operator overrides them via system_settings
+// (key 'geo_grid.keywords'). getKeywords()/setKeywords() own the live list.
+const DEFAULT_KEYWORDS = ['pest control', 'exterminator', 'termite control'];
+const KEYWORDS = DEFAULT_KEYWORDS; // back-compat alias for existing importers
+const KEYWORDS_SETTING_KEY = 'geo_grid.keywords';
+const MAX_KEYWORDS = 6; // spend guard — one run is OFFICES × KEYWORDS × N² live calls
 // DataForSEO Maps `location_coordinate` is "lat,lng,ZOOM" (0–21z, default 17z) —
 // NOT a km radius. Lower zoom = wider area, higher = tighter/more local. The grid
 // effect comes from the per-pin lat/lng; this is the viewport. Tunable.
@@ -37,14 +43,67 @@ const MILES_PER_DEG_LAT = 69.0;
 // is many slow live calls). The cron additionally takes a runExclusive lock.
 let scanning = false;
 
+/** Normalize a requested grid size to a supported option (default GRID_SIZE). */
+function normalizeGridSize(n) {
+  const v = Number(n);
+  return GRID_SIZE_OPTIONS.includes(v) ? v : GRID_SIZE;
+}
+
+/** The live keyword list — operator override from system_settings, else the
+ *  defaults. Tolerant of a missing/corrupt row (falls back, never throws). */
+async function getKeywords() {
+  try {
+    const r = await db('system_settings').where({ key: KEYWORDS_SETTING_KEY }).first();
+    if (r && r.value) {
+      const parsed = JSON.parse(r.value);
+      const list = Array.isArray(parsed) ? parsed.filter((k) => typeof k === 'string' && k.trim()) : [];
+      if (list.length) return list.map((k) => k.trim());
+    }
+  } catch (err) {
+    logger.warn(`[geo-grid] getKeywords fell back to defaults: ${err.message}`);
+  }
+  return [...DEFAULT_KEYWORDS];
+}
+
+/** Replace the operator keyword list. Trims, drops blanks, de-dupes
+ *  case-insensitively, caps at MAX_KEYWORDS (spend guard). Returns the saved
+ *  list. Throws on an empty/invalid input so the caller can 400. */
+async function setKeywords(input) {
+  if (!Array.isArray(input)) throw new Error('keywords must be an array');
+  const seen = new Set();
+  const list = [];
+  for (const raw of input) {
+    if (typeof raw !== 'string') continue;
+    const k = raw.trim();
+    if (!k) continue;
+    const key = k.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    list.push(k);
+    if (list.length >= MAX_KEYWORDS) break;
+  }
+  if (!list.length) throw new Error('at least one keyword is required');
+  await db('system_settings')
+    .insert({
+      key: KEYWORDS_SETTING_KEY,
+      value: JSON.stringify(list),
+      category: 'geo_grid',
+      description: 'Geo-grid map-pack tracker keywords (operator-editable)',
+    })
+    .onConflict('key')
+    .merge({ value: JSON.stringify(list), updated_at: db.fn.now() });
+  return list;
+}
+
 /** N×N grid of { row, col, latitude, longitude } centered on the office. Row 0 = north. */
-function buildGrid(office) {
+function buildGrid(office, gridSize = GRID_SIZE) {
+  const size = normalizeGridSize(gridSize);
   const pins = [];
-  const half = (GRID_SIZE - 1) / 2;
+  const half = (size - 1) / 2;
   const dLat = GRID_SPACING_MILES / MILES_PER_DEG_LAT;
   const dLng = GRID_SPACING_MILES / (MILES_PER_DEG_LAT * Math.cos((office.latitude * Math.PI) / 180));
-  for (let row = 0; row < GRID_SIZE; row++) {
-    for (let col = 0; col < GRID_SIZE; col++) {
+  for (let row = 0; row < size; row++) {
+    for (let col = 0; col < size; col++) {
       pins.push({
         row,
         col,
@@ -73,8 +132,9 @@ function findOfficeRank(items, office) {
   return null;
 }
 
-async function scanOfficeKeyword(office, keyword, scanDate, runId) {
-  const pins = buildGrid(office);
+async function scanOfficeKeyword(office, keyword, scanDate, runId, gridSize = GRID_SIZE) {
+  const size = normalizeGridSize(gridSize);
+  const pins = buildGrid(office, size);
   let stored = 0;
   let skipped = 0;
   for (const pin of pins) {
@@ -116,6 +176,7 @@ async function scanOfficeKeyword(office, keyword, scanDate, runId) {
         pin_col: pin.col,
         latitude: pin.latitude,
         longitude: pin.longitude,
+        grid_size: size,
         map_pack_rank: rank,
         found_in_pack: rank != null,
         top_competitors: JSON.stringify(top),
@@ -132,7 +193,7 @@ async function scanOfficeKeyword(office, keyword, scanDate, runId) {
  * Run a geo-grid scan. Pass {officeId, keyword} to scope to one (manual run);
  * omit for the full weekly sweep. Returns a summary.
  */
-async function runScan({ officeId = null, keyword = null } = {}) {
+async function runScan({ officeId = null, keyword = null, gridSize = GRID_SIZE } = {}) {
   if (!dataforseo.configured) {
     logger.warn('[geo-grid] DataForSEO not configured — skipping');
     return { skipped: 'dataforseo_unconfigured' };
@@ -141,6 +202,10 @@ async function runScan({ officeId = null, keyword = null } = {}) {
     logger.warn('[geo-grid] a scan is already in progress (this instance) — skipping');
     return { skipped: 'in_progress' };
   }
+  const size = normalizeGridSize(gridSize);
+  // Resolve the keyword list BEFORE the lock (a DB read) — a single keyword if
+  // scoped, else the operator-configured list from system_settings.
+  const keywords = keyword ? [keyword] : await getKeywords();
   // Cross-instance lock — a manual run + the weekly cron + a Railway deploy
   // overlap must not double-spend live API calls or race the same-day upserts.
   // runExclusive returns { skipped:true } when the lease is held elsewhere.
@@ -151,19 +216,18 @@ async function runScan({ officeId = null, keyword = null } = {}) {
     // rerun can't leave stale earlier-run pins that make the date look complete.
     const runId = new Date().toISOString();
     const offices = WAVES_LOCATIONS.filter((o) => !officeId || o.id === officeId);
-    const keywords = keyword ? [keyword] : KEYWORDS;
     let pins = 0;
     try {
       for (const office of offices) {
         for (const kw of keywords) {
-          pins += await scanOfficeKeyword(office, kw, scanDate, runId);
+          pins += await scanOfficeKeyword(office, kw, scanDate, runId, size);
         }
       }
     } finally {
       scanning = false;
     }
-    logger.info(`[geo-grid] scan ${scanDate} (${runId}): ${offices.length} office(s) × ${keywords.length} keyword(s) = ${pins} pins`);
-    return { scanDate, runId, offices: offices.length, keywords: keywords.length, pins };
+    logger.info(`[geo-grid] scan ${scanDate} (${runId}): ${offices.length} office(s) × ${keywords.length} keyword(s) × ${size}×${size} = ${pins} pins`);
+    return { scanDate, runId, gridSize: size, offices: offices.length, keywords: keywords.length, pins };
   });
   if (result && result.skipped) {
     logger.info('[geo-grid] scan lease held elsewhere — skipped');
@@ -176,17 +240,20 @@ async function runScan({ officeId = null, keyword = null } = {}) {
 async function getHeatmap(officeId, keyword) {
   // Latest RUN with a COMPLETE grid only — a partial scan (transient DataForSEO
   // failures skip pins) is its own run and is ignored; the last fully-stored run
-  // still shows. scan_run_id is an ISO timestamp, so desc = most recent.
-  const expected = GRID_SIZE * GRID_SIZE;
+  // still shows. Completeness is judged against the run's OWN grid_size² (V2 grids
+  // vary in size), so a 3×3 and a 7×7 run are each measured correctly.
+  // scan_run_id is an ISO timestamp, so desc = most recent.
   const run = await db('geo_grid_ranks')
     .where({ office_id: officeId, keyword })
     .select('scan_run_id')
+    .max('grid_size as grid_size')
     .groupBy('scan_run_id')
-    .havingRaw('count(*) >= ?', [expected])
+    .havingRaw('count(*) >= (max(grid_size) * max(grid_size))')
     .orderBy('scan_run_id', 'desc')
     .first();
   const runId = run && run.scan_run_id;
   if (!runId) return { scanDate: null, gridSize: GRID_SIZE, pins: [], stats: null };
+  const gridSize = run.grid_size || GRID_SIZE;
   const pins = await db('geo_grid_ranks')
     .where({ office_id: officeId, keyword, scan_run_id: runId })
     .select('pin_row', 'pin_col', 'latitude', 'longitude', 'map_pack_rank', 'found_in_pack', 'top_competitors', 'scan_date');
@@ -202,7 +269,7 @@ async function getHeatmap(officeId, keyword) {
       ? Math.round((pins.reduce((a, p) => a + (p.map_pack_rank != null ? Math.max(0, 21 - p.map_pack_rank) / 20 : 0), 0) / pins.length) * 100)
       : 0,
   };
-  return { scanDate, gridSize: GRID_SIZE, pins, stats };
+  return { scanDate, gridSize, pins, stats };
 }
 
 /** Cross-instance "is a scan running" — a run holds the 'geo-grid-scan' advisory
@@ -216,12 +283,14 @@ async function isScanRunning() {
   }
 }
 
-/** Static config for the UI (offices, keywords, grid size). */
-function config() {
+/** Config for the UI (offices, live keywords, grid-size options). Async because
+ *  the keyword list now lives in system_settings (operator-editable). */
+async function config() {
   return {
     gridSize: GRID_SIZE,
+    gridSizeOptions: GRID_SIZE_OPTIONS,
     spacingMiles: GRID_SPACING_MILES,
-    keywords: KEYWORDS,
+    keywords: await getKeywords(),
     offices: WAVES_LOCATIONS.map((o) => ({
       id: o.id,
       name: o.name,
@@ -231,4 +300,17 @@ function config() {
   };
 }
 
-module.exports = { runScan, getHeatmap, config, buildGrid, findOfficeRank, isScanning: () => scanning, isScanRunning, GRID_SIZE, KEYWORDS };
+module.exports = {
+  runScan,
+  getHeatmap,
+  config,
+  getKeywords,
+  setKeywords,
+  buildGrid,
+  findOfficeRank,
+  isScanning: () => scanning,
+  isScanRunning,
+  GRID_SIZE,
+  GRID_SIZE_OPTIONS,
+  KEYWORDS,
+};

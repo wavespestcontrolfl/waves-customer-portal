@@ -416,6 +416,7 @@ const CitationAuditor = require('../services/seo/citation-auditor');
 const ConversionFunnel = require('../services/seo/conversion-funnel');
 const SiteRollup = require('../services/seo/site-rollup');
 const GeoGrid = require('../services/seo/geo-grid-tracker');
+const { geoGridToCSV } = require('../services/csv-generators');
 const { isEnabled } = require('../config/feature-gates');
 
 // Geo-grid map-pack tracker (Pillar 3). Needs BOTH the feature gate AND the SEO
@@ -427,7 +428,7 @@ function geoGridGated() {
 
 router.get('/geo-grid', async (req, res, next) => {
   try {
-    const cfg = GeoGrid.config();
+    const cfg = await GeoGrid.config();
     const available = await db('geo_grid_ranks')
       .select('office_id', 'keyword')
       .max('scan_date as scan_date')
@@ -448,13 +449,39 @@ router.post('/geo-grid/run', requireAdmin, async (req, res, next) => {
   try {
     if (geoGridGated()) return res.status(403).json({ error: 'geo-grid tracking is gated off (needs GATE_GEO_GRID=true and GATE_SEO_INTELLIGENCE=true)' });
     if (await GeoGrid.isScanRunning()) return res.json({ started: false, reason: 'in_progress' });
-    const { officeId = null, keyword = null } = req.body || {};
+    const { officeId = null, keyword = null, gridSize = null } = req.body || {};
     // Fire-and-forget — a sweep is many slow live calls; the client polls the heatmap.
-    // runScan() self-serializes cross-instance via runExclusive.
-    void GeoGrid.runScan({ officeId, keyword })
+    // runScan() self-serializes cross-instance via runExclusive and clamps gridSize.
+    void GeoGrid.runScan({ officeId, keyword, gridSize: gridSize || undefined })
       .then((r) => logger.info(`[geo-grid] manual run: ${JSON.stringify(r)}`))
       .catch((e) => logger.error(`[geo-grid] manual run failed: ${e.message}`));
     res.json({ started: true, officeId, keyword });
+  } catch (err) { next(err); }
+});
+
+// Replace the operator keyword list (system_settings). 400 on empty/invalid.
+router.post('/geo-grid/keywords', requireAdmin, async (req, res, next) => {
+  try {
+    const { keywords } = req.body || {};
+    const saved = await GeoGrid.setKeywords(keywords);
+    res.json({ keywords: saved });
+  } catch (err) {
+    if (/array|required/.test(err.message)) return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
+// CSV export of the latest complete heat map for one office + keyword.
+router.get('/geo-grid/export', requireAdmin, async (req, res, next) => {
+  try {
+    const { office, keyword } = req.query;
+    if (!office || !keyword) return res.status(400).json({ error: 'office and keyword are required' });
+    const { pins, scanDate } = await GeoGrid.getHeatmap(office, keyword);
+    const csv = geoGridToCSV(pins, { office, keyword, scanDate });
+    const safe = String(keyword).replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="geo-grid-${office}-${safe}.csv"`);
+    res.send(csv);
   } catch (err) { next(err); }
 });
 

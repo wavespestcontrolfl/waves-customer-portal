@@ -187,6 +187,43 @@ function generateReadme(year, pnlData) {
   return lines.join('\n');
 }
 
+/**
+ * Geo-grid heat-map export (Pillar 3 V2). One row per pin: location, the
+ * office's map-pack rank there, and the top-3 competitors at that point.
+ * `pins` are getHeatmap() rows; `meta` carries the office/keyword/scanDate.
+ */
+function geoGridToCSV(pins, meta = {}) {
+  const headers = [
+    'Office', 'Keyword', 'Scan Date', 'Pin Row', 'Pin Col', 'Latitude', 'Longitude',
+    'Map Pack Rank', 'In Pack', 'Top 1', 'Top 2', 'Top 3',
+  ];
+  const lines = [row(headers)];
+  for (const p of pins || []) {
+    let top = p.top_competitors;
+    if (typeof top === 'string') {
+      try { top = JSON.parse(top); } catch { top = []; }
+    }
+    if (!Array.isArray(top)) top = [];
+    const competitor = (i) =>
+      top[i] ? `${top[i].title || 'Unknown'}${top[i].rank ? ` (#${top[i].rank})` : ''}` : '';
+    lines.push(row([
+      meta.office || p.office_id || '',
+      meta.keyword || p.keyword || '',
+      p.scan_date || meta.scanDate || '',
+      p.pin_row,
+      p.pin_col,
+      p.latitude,
+      p.longitude,
+      p.map_pack_rank == null ? '' : p.map_pack_rank,
+      p.found_in_pack ? 'Yes' : 'No',
+      competitor(0),
+      competitor(1),
+      competitor(2),
+    ]));
+  }
+  return lines.join('\n');
+}
+
 module.exports = {
   transactionsToCSV,
   expensesToCSV,
@@ -195,4 +232,5 @@ module.exports = {
   laborToCSV,
   pnlToCSV,
   generateReadme,
+  geoGridToCSV,
 };
