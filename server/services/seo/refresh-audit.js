@@ -296,6 +296,17 @@ class RefreshAudit {
       err.code = 'NO_URL';
       throw err;
     }
+    // Fail closed on a city-scoped page whose tag can't map to a service: the
+    // autonomous runner's facts-sufficiency / claims-ledger grounding only applies
+    // when BOTH city and service are present, so queuing city-without-service would
+    // refresh the page WITHOUT facts-bank grounding — exactly what the gate exists
+    // to prevent. (A page with no city is fine: it's not a facts-gated city×service.)
+    const service = serviceFor(post);
+    if (post.city && !service) {
+      const err = new Error(`could not map this page's tag (${post.tag ? `"${post.tag}"` : 'none'}) to a service, which is required to ground a city-scoped refresh`);
+      err.code = 'NO_SERVICE';
+      throw err;
+    }
 
     const path = pathFor(post);
     // Registrable domain of the target (blog posts live on the hub unless
@@ -411,7 +422,7 @@ class RefreshAudit {
         'refresh_existing_page',
         null,
         pageUrl,
-        serviceFor(post),
+        service,
         post.city || null,
         score,
         JSON.stringify({ source: 'refresh_audit', priority, reasons }),

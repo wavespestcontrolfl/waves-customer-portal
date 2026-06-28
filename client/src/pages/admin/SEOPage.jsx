@@ -3784,11 +3784,12 @@ function RefreshAuditTab() {
         setEnq((s) => ({ ...s, [c.blogPostId]: "queued" }));
       }
     } catch (e) {
-      // A page with no Search Console signal can't be refreshed by the engine —
-      // surface that distinctly from a transient failure (which offers Retry).
+      // Distinguish permanent blocks (no GSC signal, unmappable service, not
+      // published) from a transient failure (which offers Retry).
       const msg = e?.message || "Enqueue failed";
       const noGsc = /search console|gsc/i.test(msg);
-      setEnq((s) => ({ ...s, [c.blogPostId]: noGsc ? "no_gsc" : "error" }));
+      const blocked = /could not map|not published|no resolvable url/i.test(msg);
+      setEnq((s) => ({ ...s, [c.blogPostId]: noGsc ? "no_gsc" : blocked ? "blocked" : "error" }));
       setEnqErr((s) => ({ ...s, [c.blogPostId]: msg }));
     }
   };
@@ -3896,18 +3897,24 @@ function RefreshAuditTab() {
                       <td style={tdStyle}>
                         <button
                           onClick={() => queueRefresh(c)}
-                          disabled={st === "queuing" || st === "queued" || st === "no_gsc" || st === "already"}
+                          disabled={["queuing", "queued", "no_gsc", "blocked", "already"].includes(st)}
                           title={enqErr[c.blogPostId] || ""}
                           style={{
                             padding: "5px 10px",
                             border: "none",
                             borderRadius: 5,
                             background:
-                              st === "queued" ? D.green : st === "no_gsc" || st === "already" ? D.muted : st === "error" ? D.red : D.heading,
+                              st === "queued"
+                                ? D.green
+                                : st === "no_gsc" || st === "blocked" || st === "already"
+                                  ? D.muted
+                                  : st === "error"
+                                    ? D.red
+                                    : D.heading,
                             color: "#fff",
                             fontSize: 12,
                             fontWeight: 600,
-                            cursor: st === "queuing" || st === "queued" || st === "no_gsc" || st === "already" ? "default" : "pointer",
+                            cursor: ["queuing", "queued", "no_gsc", "blocked", "already"].includes(st) ? "default" : "pointer",
                             opacity: st === "queuing" ? 0.6 : 1,
                             whiteSpace: "nowrap",
                           }}
@@ -3920,9 +3927,11 @@ function RefreshAuditTab() {
                                 ? enqErr[c.blogPostId] || "Already queued"
                                 : st === "no_gsc"
                                   ? "No GSC data"
-                                  : st === "error"
-                                    ? "Retry"
-                                    : "Queue refresh"}
+                                  : st === "blocked"
+                                    ? "Can't queue"
+                                    : st === "error"
+                                      ? "Retry"
+                                      : "Queue refresh"}
                         </button>
                       </td>
                       )}
