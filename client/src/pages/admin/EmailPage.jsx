@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Ban, Inbox, Mail, Plus, Send } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
@@ -154,6 +154,12 @@ export default function EmailPage() {
   });
   const [composeSending, setComposeSending] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  // Customer search for the compose "To" field — type a name (or partial
+  // email) to look up a customer and drop their email into the recipient.
+  const [toResults, setToResults] = useState([]);
+  const [toSearching, setToSearching] = useState(false);
+  const [toDropdownOpen, setToDropdownOpen] = useState(false);
+  const toFieldRef = useRef(null);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -401,6 +407,58 @@ export default function EmailPage() {
     } finally {
       setComposeSending(false);
     }
+  };
+
+  // Debounced customer lookup for the "To" field. Searches by name or
+  // partial email via the customers list endpoint and keeps only matches
+  // that actually have an email on file (the only ones we can send to).
+  useEffect(() => {
+    if (!showCompose) return undefined;
+    const q = composeForm.to.trim();
+    if (q.length < 2) {
+      setToResults([]);
+      setToSearching(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setToSearching(true);
+    const t = setTimeout(async () => {
+      try {
+        const r = await adminFetch(
+          `/api/admin/customers?search=${encodeURIComponent(q)}&limit=8`,
+        );
+        const d = await r.json();
+        if (cancelled) return;
+        setToResults((d.customers || []).filter((c) => c.email));
+        setToSearching(false);
+      } catch {
+        if (cancelled) return;
+        setToResults([]);
+        setToSearching(false);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [composeForm.to, showCompose]);
+
+  // Dismiss the customer dropdown on an outside click/tap.
+  useEffect(() => {
+    if (!toDropdownOpen) return undefined;
+    const handle = (e) => {
+      if (toFieldRef.current && !toFieldRef.current.contains(e.target)) {
+        setToDropdownOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handle, true);
+    return () => document.removeEventListener("pointerdown", handle, true);
+  }, [toDropdownOpen]);
+
+  const handleSelectCustomer = (customer) => {
+    setComposeForm((f) => ({ ...f, to: customer.email }));
+    setToDropdownOpen(false);
+    setToResults([]);
   };
 
   const handleBlock = async () => {
@@ -1543,25 +1601,118 @@ export default function EmailPage() {
                 >
                   To *
                 </label>{" "}
-                <input
-                  type="email"
-                  value={composeForm.to}
-                  onChange={(e) =>
-                    setComposeForm((f) => ({ ...f, to: e.target.value }))
-                  }
-                  placeholder="recipient@example.com"
-                  style={{
-                    width: "100%",
-                    padding: "9px 12px",
-                    background: D.bg,
-                    border: `1px solid ${D.inputBorder}`,
-                    borderRadius: 6,
-                    color: D.text,
-                    fontSize: 13,
-                    outline: "none",
-                    boxSizing: "border-box",
-                  }}
-                />{" "}
+                <div ref={toFieldRef} style={{ position: "relative" }}>
+                  {" "}
+                  <input
+                    type="email"
+                    value={composeForm.to}
+                    onChange={(e) => {
+                      setComposeForm((f) => ({ ...f, to: e.target.value }));
+                      setToDropdownOpen(true);
+                    }}
+                    onFocus={() => setToDropdownOpen(true)}
+                    placeholder="Search a customer or type an email…"
+                    autoComplete="off"
+                    style={{
+                      width: "100%",
+                      padding: "9px 12px",
+                      background: D.bg,
+                      border: `1px solid ${D.inputBorder}`,
+                      borderRadius: 6,
+                      color: D.text,
+                      fontSize: 13,
+                      outline: "none",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                  {toDropdownOpen && composeForm.to.trim().length >= 2 && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        right: 0,
+                        top: "100%",
+                        marginTop: 4,
+                        zIndex: 10,
+                        background: D.card,
+                        border: `1px solid ${D.border}`,
+                        borderRadius: 8,
+                        boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
+                        maxHeight: 240,
+                        overflowY: "auto",
+                      }}
+                    >
+                      {toSearching && toResults.length === 0 ? (
+                        <div
+                          style={{
+                            padding: "10px 12px",
+                            fontSize: 12,
+                            color: D.muted,
+                          }}
+                        >
+                          Searching…
+                        </div>
+                      ) : toResults.length === 0 ? (
+                        <div
+                          style={{
+                            padding: "10px 12px",
+                            fontSize: 12,
+                            color: D.muted,
+                          }}
+                        >
+                          No matching customers with an email
+                        </div>
+                      ) : (
+                        toResults.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => handleSelectCustomer(c)}
+                            style={{
+                              display: "block",
+                              width: "100%",
+                              textAlign: "left",
+                              padding: "8px 12px",
+                              background: "transparent",
+                              border: "none",
+                              borderBottom: `1px solid ${D.border}`,
+                              cursor: "pointer",
+                            }}
+                          >
+                            {" "}
+                            <div
+                              style={{
+                                fontSize: 13,
+                                fontWeight: 600,
+                                color: D.heading,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {[c.firstName, c.lastName]
+                                .filter(Boolean)
+                                .join(" ") ||
+                                c.companyName ||
+                                "Customer"}
+                            </div>{" "}
+                            <div
+                              style={{
+                                fontSize: 12,
+                                color: D.muted,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {c.email}
+                            </div>{" "}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}{" "}
+                </div>{" "}
               </div>{" "}
               <div>
                 {" "}
