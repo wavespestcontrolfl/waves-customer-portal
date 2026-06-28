@@ -3764,11 +3764,21 @@ function RefreshAuditTab() {
   const queueRefresh = async (c) => {
     setEnq((s) => ({ ...s, [c.blogPostId]: "queuing" }));
     try {
-      await adminFetch("/admin/seo/refresh-audit/enqueue", {
+      const r = await adminFetch("/admin/seo/refresh-audit/enqueue", {
         method: "POST",
         body: { blogPostId: c.blogPostId },
       });
-      setEnq((s) => ({ ...s, [c.blogPostId]: "queued" }));
+      if (r && r.queued === false) {
+        // Page already has a claimed/done/in-review opportunity — the upsert
+        // preserved it, so this wasn't (re)queued. Show the real state.
+        const label =
+          { claimed: "Running", done: "Already done", pending_review: "In review" }[r.status] ||
+          `Already ${r.status}`;
+        setEnq((s) => ({ ...s, [c.blogPostId]: "already" }));
+        setEnqErr((s) => ({ ...s, [c.blogPostId]: label }));
+      } else {
+        setEnq((s) => ({ ...s, [c.blogPostId]: "queued" }));
+      }
     } catch (e) {
       // A page with no Search Console signal can't be refreshed by the engine —
       // surface that distinctly from a transient failure (which offers Retry).
@@ -3879,22 +3889,33 @@ function RefreshAuditTab() {
                       <td style={tdStyle}>
                         <button
                           onClick={() => queueRefresh(c)}
-                          disabled={st === "queuing" || st === "queued" || st === "no_gsc"}
+                          disabled={st === "queuing" || st === "queued" || st === "no_gsc" || st === "already"}
                           title={enqErr[c.blogPostId] || ""}
                           style={{
                             padding: "5px 10px",
                             border: "none",
                             borderRadius: 5,
-                            background: st === "queued" ? D.green : st === "no_gsc" ? D.muted : st === "error" ? D.red : D.heading,
+                            background:
+                              st === "queued" ? D.green : st === "no_gsc" || st === "already" ? D.muted : st === "error" ? D.red : D.heading,
                             color: "#fff",
                             fontSize: 12,
                             fontWeight: 600,
-                            cursor: st === "queuing" || st === "queued" || st === "no_gsc" ? "default" : "pointer",
+                            cursor: st === "queuing" || st === "queued" || st === "no_gsc" || st === "already" ? "default" : "pointer",
                             opacity: st === "queuing" ? 0.6 : 1,
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {st === "queued" ? "Queued ✓" : st === "queuing" ? "Queuing…" : st === "no_gsc" ? "No GSC data" : st === "error" ? "Retry" : "Queue refresh"}
+                          {st === "queued"
+                            ? "Queued ✓"
+                            : st === "queuing"
+                              ? "Queuing…"
+                              : st === "already"
+                                ? enqErr[c.blogPostId] || "Already queued"
+                                : st === "no_gsc"
+                                  ? "No GSC data"
+                                  : st === "error"
+                                    ? "Retry"
+                                    : "Queue refresh"}
                         </button>
                       </td>
                     </tr>

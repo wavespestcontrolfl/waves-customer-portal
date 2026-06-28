@@ -346,9 +346,15 @@ class RefreshAudit {
       ]
     );
 
-    const queued = result.rows && result.rows[0];
-    logger.info(`[refresh-audit] queued refresh ${pageUrl} (score ${score}, status ${queued ? queued.status : 'pending'})`);
-    return { queued: true, url: pageUrl, score, status: queued ? queued.status : 'pending', dedupeKey };
+    const row = result.rows && result.rows[0];
+    const status = row ? row.status : 'pending';
+    // The upsert preserves an existing claimed/done/pending_review row (it does
+    // NOT reset it to pending), and the runner's claimNext only picks 'pending'.
+    // So only a 'pending' result is actually (re)queued — report the real state so
+    // the UI doesn't show "Queued" for a no-op on an already-handled page.
+    const queued = status === 'pending';
+    logger.info(`[refresh-audit] enqueue refresh ${pageUrl} (score ${score}) → status ${status}, queued=${queued}`);
+    return { queued, status, url: pageUrl, score, dedupeKey };
   }
 }
 
