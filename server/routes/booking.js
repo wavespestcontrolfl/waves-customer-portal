@@ -1039,7 +1039,16 @@ async function createSelfBooking(payload = {}) {
     // SMS block (deliverConfirmationByChannel) below can see it. It was previously
     // declared inside the reminder try, so the sibling SMS block threw a swallowed
     // ReferenceError — silently skipping the customer confirmation and owner alert.
-    const AppointmentReminders = require('../services/appointment-reminders');
+    // Best-effort require: the booking + scheduled_services are ALREADY committed
+    // above, so a module-load failure here must not 500 a successful booking (the
+    // global error middleware would also log req.body with booking PII). Both
+    // usages below are inside try/catch, so a null AppointmentReminders is safe.
+    let AppointmentReminders = null;
+    try {
+      AppointmentReminders = require('../services/appointment-reminders');
+    } catch (err) {
+      logger.error(`[booking:confirm] appointment-reminders module load failed (booking already committed; continuing best-effort): ${err.message}`);
+    }
 
     try {
       for (const row of [serviceRow, ...followUpRows].filter(r => r?.id)) {

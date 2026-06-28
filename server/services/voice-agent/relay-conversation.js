@@ -216,7 +216,7 @@ class RelayConversation {
             duration_seconds: Math.max(0, Math.round((Date.now() - this._startedAt) / 1000)),
             updated_at: new Date(),
           });
-        syncVoiceMessageForCall(this.callSid);
+        await syncVoiceMessageForCall(this.callSid); // awaited so a rejection is caught here, not floated
       } catch (err) {
         logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
       }
