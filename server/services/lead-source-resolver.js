@@ -93,7 +93,10 @@ async function resolveLeadSource(attribution) {
   let row = null;
   try {
     row = metaPaid
-      ? await db('lead_sources').whereRaw("LOWER(name) LIKE '%facebook%'").first()
+      // Exclude phone-keyed call-tracking rows (e.g. the Facebook Ads paid
+      // call number) — a web / quote-wizard Meta lead must resolve to a web
+      // source, not a call-tracking source (mirrors lead-webhook.js).
+      ? await db('lead_sources').whereRaw("LOWER(name) LIKE '%facebook%'").whereNull('twilio_phone_number').first()
       : await db('lead_sources').where({ name: targetName }).first();
   } catch { /* swallow — caller still gets meta strings even if FK lookup fails */ }
 
