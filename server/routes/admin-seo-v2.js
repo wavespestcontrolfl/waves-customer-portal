@@ -451,7 +451,7 @@ router.post('/geo-grid/run', requireAdmin, async (req, res, next) => {
     const { officeId = null, keyword = null } = req.body || {};
     // Fire-and-forget — a sweep is many slow live calls; the client polls the heatmap.
     // runScan() self-serializes cross-instance via runExclusive.
-    GeoGrid.runScan({ officeId, keyword })
+    void GeoGrid.runScan({ officeId, keyword })
       .then((r) => logger.info(`[geo-grid] manual run: ${JSON.stringify(r)}`))
       .catch((e) => logger.error(`[geo-grid] manual run failed: ${e.message}`));
     res.json({ started: true, officeId, keyword });

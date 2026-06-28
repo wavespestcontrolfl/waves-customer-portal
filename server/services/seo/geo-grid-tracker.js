@@ -78,25 +78,32 @@ async function scanOfficeKeyword(office, keyword, scanDate, runId) {
   let stored = 0;
   let skipped = 0;
   for (const pin of pins) {
-    let result = null;
+    let succeeded = false;
+    let items = [];
     try {
       // search_places:false — the default mode can return a DIFFERENT location's
       // pack than the coordinate; each pin must measure the rank at THAT point.
       const data = await dataforseo.serpMaps(keyword, `${pin.latitude},${pin.longitude},${GRID_ZOOM}`, { search_places: false });
-      result = data?.tasks?.[0]?.result?.[0] ?? null;
+      const task = data?.tasks?.[0];
+      // A successful Maps task returns `result` as an array — possibly EMPTY (no
+      // listings shown at this coordinate). That's a real "no pack here" answer,
+      // NOT a failure: treat it as success and store a null-rank miss below. Only
+      // a missing/non-array result (null data, gate off, API/task error) is
+      // skipped, so a transient failure can't overwrite a valid cell or make a
+      // partial run look complete.
+      if (task && Array.isArray(task.result)) {
+        succeeded = true;
+        // Organic local-pack entries only — exclude ads (maps_paid_item). rank_group
+        // is position WITHIN the organic pack (rank_absolute counts across ad items).
+        items = (task.result[0]?.items || []).filter((m) => m.type === 'maps_search');
+      }
     } catch (err) {
       logger.warn(`[geo-grid] ${office.id}/${keyword} pin ${pin.row},${pin.col} failed: ${err.message}`);
     }
-    // No real SERP result (gate off, API error, transient null) → DON'T upsert a
-    // fake miss over a previously-valid cell; leave the pin's prior data intact.
-    // Only a real response (the office genuinely absent from the pack) stores null.
-    if (!result) {
+    if (!succeeded) {
       skipped++;
       continue;
     }
-    // Organic local-pack entries only — exclude ads (maps_paid_item). rank_group
-    // is position WITHIN the organic pack (rank_absolute counts across ad items).
-    const items = (result.items || []).filter((m) => m.type === 'maps_search');
     const rank = findOfficeRank(items, office);
     const top = items.slice(0, 3).map((m) => ({ title: m.title, rank: m.rank_group || m.rank_absolute || null }));
     await db('geo_grid_ranks')
