@@ -51,12 +51,23 @@ const TWILIO_NUMBERS = {
   tollFree: { number: '+18559260203', formatted: '(855) 926-0203', label: 'Customer Chat' },
 
   // ── Paid Campaign Tracking ───────────────────────────────────
+  // `source` is the canonical lead source (matches lead_sources.source_type
+  // + determineLeadSource), so each paid number is attributed to its own
+  // platform — not lumped together as google_ads.
   paidTracking: {
     googleAdsPest: {
       number: '+19412691697',
       formatted: '(941) 269-1697',
       label: 'Google Ads — Pest',
       location: 'bradenton',
+      source: 'google_ads',
+    },
+    facebookAdsPest: {
+      number: '+19418775491',
+      formatted: '(941) 877-5491',
+      label: 'Facebook Ads — Pest',
+      location: 'bradenton',
+      source: 'facebook',
     },
   },
 
@@ -95,7 +106,7 @@ const TWILIO_NUMBERS = {
       ...Object.entries(this.locations).map(([id, l]) => ({ ...l, type: 'location', locationId: id })),
       ...this.domainTracking.map(d => ({ ...d, type: 'pest_domain' })),
       ...this.lawnDomainTracking.map(d => ({ ...d, type: 'lawn_domain' })),
-      ...Object.entries(this.paidTracking).map(([id, p]) => ({ ...p, type: 'google_ads', trackingId: id })),
+      ...Object.entries(this.paidTracking).map(([id, p]) => ({ ...p, type: p.source, trackingId: id })),
       ...Object.entries(this.gbpTracking).map(([id, g]) => ({ ...g, type: 'gbp_tracking', locationId: g.location, gbpProfileId: id })),
       { ...this.tracking.vanWrap, type: 'van_tracking' },
       { ...this.tollFree, type: 'customer_chat' },
@@ -116,7 +127,7 @@ const TWILIO_NUMBERS = {
     if (lawn) return { ...lawn, type: 'domain_tracking', locationId: lawn.location };
     // Paid campaign tracking
     for (const [id, paid] of Object.entries(this.paidTracking)) {
-      if (paid.number === phoneNumber) return { ...paid, type: 'google_ads', trackingId: id, locationId: paid.location };
+      if (paid.number === phoneNumber) return { ...paid, type: paid.source, trackingId: id, locationId: paid.location };
     }
     // GBP call tracking
     for (const [id, gbp] of Object.entries(this.gbpTracking)) {
@@ -142,7 +153,7 @@ const TWILIO_NUMBERS = {
     const lawn = this.lawnDomainTracking.find(d => d.number === phoneNumber);
     if (lawn) return { source: 'domain_website', domain: lawn.domain, area: lawn.area };
     for (const [, paid] of Object.entries(this.paidTracking)) {
-      if (paid.number === phoneNumber) return { source: 'google_ads', domain: null, area: paid.label };
+      if (paid.number === phoneNumber) return { source: paid.source, domain: null, area: paid.label };
     }
     for (const [, gbp] of Object.entries(this.gbpTracking)) {
       if (gbp.number === phoneNumber) return { source: 'google_business_profile', domain: null, area: gbp.area };
