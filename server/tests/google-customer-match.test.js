@@ -339,6 +339,36 @@ describe('reconcile pending requests', () => {
   });
 });
 
+describe('destination scoping', () => {
+  test('resets state when the configured destination changed → full re-upload', async () => {
+    configure({ allow: true }); // customer 3393936713, list 111 → sig "3393936713:111"
+    global.fetch = okFetch({ requestId: 'req-add' });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'c1@x.com', phone: null }]);
+    stateRow = {
+      member_keys: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }], // uploaded to the OLD list
+      pending: [],
+      destination_sig: '3393936713:999', // OLD list id 999 ≠ current 111
+    };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toAdd).toBe(1); // prior ignored → re-add to the new list
+    const saved = inserts.find((i) => i.table === 'ad_audience_syncs');
+    expect(saved.row.destination_sig).toBe('3393936713:111');
+  });
+
+  test('does NOT reset when the destination is unchanged', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({});
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'c1@x.com', phone: null }]);
+    stateRow = {
+      member_keys: [{ k: 'customer:c1', d: ['h:c1@x.com', ''] }],
+      pending: [],
+      destination_sig: '3393936713:111', // matches configure()
+    };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toAdd).toBe(0); // already present, no re-upload
+  });
+});
+
 describe('credentials', () => {
   test('isConfigured tolerates the service-account JSON missing its closing brace', () => {
     process.env.GOOGLE_ADS_DATA_MANAGER_CUSTOMER_ID = '3393936713';

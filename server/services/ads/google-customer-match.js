@@ -311,7 +311,16 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     for (const e of current) if (!currentByHash.has(hashId(e.d))) currentByHash.set(hashId(e.d), e);
 
     const state = await loadState(audienceKey);
-    const priorMembers = asEntries(state && state.member_keys);
+    // Scope state to the destination: if the configured Customer Match list / customer
+    // id changed since the last sync, the prior member_keys belong to a DIFFERENT (now
+    // empty) list — ignore them so the new list gets a full re-upload, not just deltas.
+    const destSig = `${customerId() || ''}:${listId}`;
+    const destChanged = !!(state && state.destination_sig && state.destination_sig !== destSig);
+    if (destChanged) {
+      logger.warn('[google-customer-match] destination changed, resetting sync state', { audienceKey, from: state.destination_sig, to: destSig });
+    }
+    const priorMembers = destChanged ? [] : asEntries(state && state.member_keys);
+    const priorPending = destChanged ? null : (state && state.pending);
 
     // On a dry run we don't poll/persist — report the delta against the stored
     // optimistic state. The live path reconciles first (below).
@@ -322,7 +331,7 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       token = await getAccessToken();
       const rec = await reconcilePending({
         members: priorMembers,
-        pending: state && state.pending,
+        pending: priorPending,
         token,
         nowMs: Date.now(),
       });
@@ -420,6 +429,7 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       member_count: currentByHash.size,
       pending: JSON.stringify(newPending),
       last_request_id: lastBatchId(removeRes.batches) || lastBatchId(addRes.batches) || null,
+      destination_sig: destSig,
       last_synced_at: db.fn.now(),
       last_status: newPending.length ? 'pending' : 'synced',
     });

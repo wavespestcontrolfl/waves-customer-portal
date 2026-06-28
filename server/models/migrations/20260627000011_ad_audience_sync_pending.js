@@ -16,6 +16,9 @@ exports.up = async function up(knex) {
   await knex.schema.alterTable('ad_audience_syncs', (t) => {
     t.jsonb('pending').notNullable().defaultTo('[]'); // [{ requestId, op, at, members:[{k,d}] }]
     t.string('last_request_id', 120);
+    // customerId:listId the member_keys were uploaded to — if the configured
+    // destination changes, state is reset so the new list gets a full re-upload.
+    t.string('destination_sig', 80);
   });
 };
 
@@ -23,5 +26,6 @@ exports.down = async function down(knex) {
   await knex.schema.alterTable('ad_audience_syncs', (t) => {
     t.dropColumn('pending');
     t.dropColumn('last_request_id');
+    t.dropColumn('destination_sig');
   });
 };
