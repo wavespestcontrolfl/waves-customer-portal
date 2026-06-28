@@ -3922,32 +3922,54 @@ export default function EstimateToolViewV2({
             operator can switch frequency in front of the customer. */}
         {presentMode && E && (
           <div className="fixed inset-0 z-50 bg-[#FAF8F3] overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-[#E7E2D7] bg-white/95 px-4 py-2.5 backdrop-blur">
-              <span className="text-11 font-medium uppercase tracking-[0.1em] text-[#6B7280]">
-                Presenting to customer · pricing only
-              </span>
-              <Button
-                variant="secondary"
-                size="sm"
-                className="gap-1.5"
-                onClick={() => setPresentMode(false)}
-              >
-                <X size={14} strokeWidth={1.8} aria-hidden />
-                Exit
-              </Button>
+            <div className="sticky top-0 z-10 border-b border-[#E7E2D7] bg-white/95 backdrop-blur">
+              <div className="flex items-center justify-between gap-4 px-4 py-2.5">
+                <span className="text-11 font-medium uppercase tracking-[0.1em] text-[#6B7280]">
+                  Presenting to customer · pricing only
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={() => setPresentMode(false)}
+                >
+                  <X size={14} strokeWidth={1.8} aria-hidden />
+                  Exit
+                </Button>
+              </div>
+              {/* Operator-facing: if the price was server-recomputed on save, the
+                  in-memory preview can be stale — warn before quoting it aloud. */}
+              {priceRecomputeNotice && (
+                <div className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-12 text-ink-secondary">
+                  Final price was server-recomputed on save
+                  {priceRecomputeNotice.serverMonthly != null && (
+                    <> — bills ${priceRecomputeNotice.serverMonthly.toFixed(2)}/mo (preview shows ${Number(priceRecomputeNotice.clientMonthly || 0).toFixed(2)})</>
+                  )}
+                  {priceRecomputeNotice.serverOnetime != null && (
+                    <> — ${priceRecomputeNotice.serverOnetime.toFixed(2)} one-time</>
+                  )}
+                  . Re-generate before quoting this price.
+                </div>
+              )}
             </div>
             <div className="mx-auto max-w-[760px] px-3 py-5 md:px-5">
-              <CustomerEstimatePreviewV2
-                E={E}
-                R={R}
-                form={form}
-                satelliteUrl={satelliteData?.imageUrl || null}
-                presentMode
-                onSelectPestFreq={(apps) => {
-                  set("pestFreq", String(apps));
-                  doGenerate({ pestFreq: apps });
-                }}
-              />
+              <EstimateErrorBoundary key={JSON.stringify(estimate).slice(0, 100)}>
+                <CustomerEstimatePreviewV2
+                  E={E}
+                  R={R}
+                  form={form}
+                  satelliteUrl={satelliteData?.imageUrl || null}
+                  presentMode
+                  onSelectPestFreq={(apps) => {
+                    // Update cadence + regenerate WITHOUT routing through set(),
+                    // which nulls `estimate` and would unmount this overlay
+                    // (presentMode && E) mid-presentation. doGenerate replaces the
+                    // estimate in place when it resolves.
+                    setForm((f) => ({ ...f, pestFreq: String(apps) }));
+                    doGenerate({ pestFreq: apps });
+                  }}
+                />
+              </EstimateErrorBoundary>
             </div>
           </div>
         )}
