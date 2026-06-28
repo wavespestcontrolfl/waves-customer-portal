@@ -363,19 +363,35 @@ async function ensureBridgeLeadSource() {
     .first();
   if (existing) return existing;
 
-  const [source] = await db('lead_sources')
-    .insert({
-      name: GOOGLE_ADS_BRIDGE_SOURCE_NAME,
-      source_type: 'google_ads',
-      channel: 'paid',
-      cost_type: 'paid',
-      is_active: true,
-      notes: 'Google Ads call reporting bridge for main-line call assets. No phone number is stored here so ordinary 7612 calls do not auto-map to paid.',
-      created_at: new Date(),
-      updated_at: new Date(),
-    })
-    .returning('*');
-  return source;
+  // lead_sources.name has no unique index, so the select-then-insert above is a
+  // race: concurrent callers — the daily 6:20 cron and a manual admin "apply",
+  // or two instances during a Railway deploy overlap — could each miss the row
+  // and both insert, creating duplicate "Google Ads - Call Reporting Bridge"
+  // sources that split lead attribution across IDs. Serialize creation with a
+  // transaction-scoped Postgres advisory lock keyed to the source name and
+  // re-check inside the lock; the lock auto-releases on commit/rollback. Every
+  // caller funnels through here, so this is the single place the race is closed.
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lead_source:${GOOGLE_ADS_BRIDGE_SOURCE_NAME}`]);
+    const again = await trx('lead_sources')
+      .where({ name: GOOGLE_ADS_BRIDGE_SOURCE_NAME })
+      .first();
+    if (again) return again;
+
+    const [source] = await trx('lead_sources')
+      .insert({
+        name: GOOGLE_ADS_BRIDGE_SOURCE_NAME,
+        source_type: 'google_ads',
+        channel: 'paid',
+        cost_type: 'paid',
+        is_active: true,
+        notes: 'Google Ads call reporting bridge for main-line call assets. No phone number is stored here so ordinary 7612 calls do not auto-map to paid.',
+        created_at: new Date(),
+        updated_at: new Date(),
+      })
+      .returning('*');
+    return source;
+  });
 }
 
 async function findLeadForCall(callLog) {
