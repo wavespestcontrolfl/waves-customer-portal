@@ -112,7 +112,7 @@ const CHIP_OBSERVATIONS_PEST = [
   "Property access issue",
   "Customer concern discussed",
 ];
-const CHIP_OBSERVATIONS_HORTICULTURAL = [
+const CHIP_OBSERVATIONS_LAWN = [
   "Pest activity noted",
   "Standing water found",
   "Irrigation issue",
@@ -131,6 +131,20 @@ const CHIP_OBSERVATIONS_HORTICULTURAL = [
   "Entry points identified",
   "Conducive vegetation against structure",
 ];
+const CHIP_OBSERVATIONS_TREE_SHRUB = [
+  "Scale insects present",
+  "Whitefly activity",
+  "Aphids/mealybugs",
+  "Lace bug damage",
+  "Spider mites",
+  "Sooty mold present",
+  "Fungal leaf spot/blight",
+  "Nutrient deficiency (chlorosis)",
+  "Dieback/declining branches",
+  "Caterpillar/defoliation",
+  "Property access issue",
+  "Customer concern discussed",
+];
 const CHIP_RECOMMENDATIONS_PEST = [
   "Callback recommended",
   "Follow-up in 2 weeks",
@@ -138,12 +152,21 @@ const CHIP_RECOMMENDATIONS_PEST = [
   "Bait station replacement",
   "Customer wants estimate",
 ];
-const CHIP_RECOMMENDATIONS_HORTICULTURAL = [
+const CHIP_RECOMMENDATIONS_LAWN = [
   "Callback recommended",
   "Irrigation adjustment needed",
   "Follow-up in 2 weeks",
   "Schedule interior next visit",
   "Bait station replacement",
+  "Customer wants estimate",
+];
+const CHIP_RECOMMENDATIONS_TREE_SHRUB = [
+  "Callback recommended",
+  "Systemic soil drench next visit",
+  "Horticultural oil / insecticidal soap",
+  "Prune deadwood/affected growth",
+  "Fertilize / nutritional supplement",
+  "Follow-up in 2 weeks",
   "Customer wants estimate",
 ];
 const CHIP_OBSERVATIONS_MOSQUITO = [
@@ -219,11 +242,11 @@ const CHIP_RECOMMENDATIONS_PALM = [
 ];
 // Closeout observation/recommendation chips are scoped to the service LINE
 // (serviceLineFromType: pest · palm · lawn · tree_shrub · mosquito · termite ·
-// rodent). lawn + tree_shrub share the horticultural set; mosquito/termite/
-// rodent/palm each have their own; everything else falls back to the pest set.
+// rodent). lawn / tree_shrub / mosquito / termite / rodent / palm each have
+// their own set; everything else falls back to the pest set.
 const CHIP_OBSERVATIONS_BY_LINE = {
-  lawn: CHIP_OBSERVATIONS_HORTICULTURAL,
-  tree_shrub: CHIP_OBSERVATIONS_HORTICULTURAL,
+  lawn: CHIP_OBSERVATIONS_LAWN,
+  tree_shrub: CHIP_OBSERVATIONS_TREE_SHRUB,
   palm: CHIP_OBSERVATIONS_PALM,
   mosquito: CHIP_OBSERVATIONS_MOSQUITO,
   termite: CHIP_OBSERVATIONS_TERMITE,
@@ -231,8 +254,8 @@ const CHIP_OBSERVATIONS_BY_LINE = {
   pest: CHIP_OBSERVATIONS_PEST,
 };
 const CHIP_RECOMMENDATIONS_BY_LINE = {
-  lawn: CHIP_RECOMMENDATIONS_HORTICULTURAL,
-  tree_shrub: CHIP_RECOMMENDATIONS_HORTICULTURAL,
+  lawn: CHIP_RECOMMENDATIONS_LAWN,
+  tree_shrub: CHIP_RECOMMENDATIONS_TREE_SHRUB,
   palm: CHIP_RECOMMENDATIONS_PALM,
   mosquito: CHIP_RECOMMENDATIONS_MOSQUITO,
   termite: CHIP_RECOMMENDATIONS_TERMITE,
