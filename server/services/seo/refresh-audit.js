@@ -219,7 +219,13 @@ class RefreshAudit {
       const url = pageUrlFor(p);
       const domain = registrableDomain(p.astro_live_url) || HUB_DOMAIN;
       const qa = qaByPost.get(p.id) || null;
-      const decay = decayByPost.get(p.id) || decayByDomainPath.get(`${domain}|${pathFor(p)}`) || null;
+      // The blog_post_id link is slug-derived by the producer, so validate its URL
+      // is on this post's domain before trusting it; else match by domain|path.
+      const dPost = decayByPost.get(p.id);
+      const decay =
+        (dPost && registrableDomain(dPost.url) === domain ? dPost : null) ||
+        decayByDomainPath.get(`${domain}|${pathFor(p)}`) ||
+        null;
       const ageDays = ageDaysFrom(p, now);
       const { priority, reasons } = scorePriority({ ageDays, qa, decay });
       return {
@@ -265,8 +271,16 @@ class RefreshAudit {
     if (blogPostId) {
       post = await db('blog_posts').where({ id: blogPostId }).first();
     } else if (url) {
-      const slug = String(url).replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/^\/|\/$/g, '');
-      post = await db('blog_posts').where({ slug }).first();
+      // Match the requested URL's canonical path against EITHER blog_posts.slug OR
+      // the live astro_live_url path — the two diverge for imports / edited slugs,
+      // and a slug-only lookup would 404 a valid live URL.
+      const reqPath = urlToPath(url);
+      const slug = String(reqPath || '').replace(/^\/+/, '');
+      post = await db('blog_posts')
+        .where(function () {
+          this.where({ slug }).orWhereRaw(`${canonPathSql('astro_live_url')} = ?`, [reqPath]);
+        })
+        .first();
     }
     if (!post) {
       const err = new Error('page not found for refresh enqueue');
@@ -313,12 +327,13 @@ class RefreshAudit {
       .first();
     const decay = await db('seo_content_decay_alerts')
       .where({ status: 'open' })
+      // Domain is a REQUIRED outer condition — content-decay links blog_post_id by
+      // slug only, so a same-path spoke alert can carry a hub post's id. Scoping
+      // the whole match to the target domain validates the blog_post_id shortcut
+      // too (the network shares paths across hub + spokes).
+      .whereRaw(`${hostRegistrableSql('url')} = ?`, [targetDomain])
       .andWhere(function () {
-        // blog_post_id is the reliable key; the path fallback must also be
-        // domain-scoped (the network shares paths across hub + spokes).
-        this.where({ blog_post_id: post.id }).orWhere(function () {
-          this.whereRaw(`${canonPathSql('url')} = ?`, [path]).whereRaw(`${hostRegistrableSql('url')} = ?`, [targetDomain]);
-        });
+        this.where({ blog_post_id: post.id }).orWhereRaw(`${canonPathSql('url')} = ?`, [path]);
       })
       .orderByRaw('abs(change_pct) desc')
       .first();
