@@ -28,11 +28,15 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 // fallback — all gsc_pages/decay matching below is host-agnostic by path).
 const HUB = 'https://www.wavespestcontrol.com';
 const GSC_LOOKBACK_DAYS = 90;
-// Host-agnostic path of a gsc_pages/decay url, trailing slash trimmed: GSC may
-// report www vs non-www and ?utm tracking variants, so we match on path only.
-// SQL mirror (CANON_PATH_SQL) uses chr(63) for '?' — a literal '?' in knex raw
-// collides with bind placeholders (same trick as gsc-opportunity-miner).
-const CANON_PATH_SQL = "regexp_replace(regexp_replace(split_part(page_url, chr(63), 1), '^[a-z]+://[^/]+', ''), '/+$', '')";
+// Host-agnostic path of a url column, trailing slash trimmed: GSC may report
+// www vs non-www and ?utm tracking variants, so we match on path only. The
+// column differs per table (gsc_pages.page_url vs seo_content_decay_alerts.url),
+// so it's parameterized. chr(63) is '?' — a literal '?' in knex raw collides with
+// bind placeholders (same trick as gsc-opportunity-miner). `col` is an internal
+// literal, never user input.
+function canonPathSql(col) {
+  return `regexp_replace(regexp_replace(split_part(${col}, chr(63), 1), '^[a-z]+://[^/]+', ''), '/+$', '')`;
+}
 
 function slugPath(slug) {
   return `/${String(slug || '').replace(/^\/+|\/+$/g, '')}`;
@@ -60,8 +64,10 @@ const DECAY_MAX = 25;
 // this", so a seeded row always clears the floor while still ordering by priority.
 const ENQUEUE_FLOOR = 78;
 
-// blog_posts.tag → autonomous engine `service` hint (best-effort; null is fine,
-// the brief builder drives off page_url for a refresh).
+// blog_posts.tag → autonomous engine `service` MINER CATEGORY (best-effort; null
+// is fine, the brief builder drives off page_url for a refresh). Values must be
+// the miner categories facts-sufficiency.js maps (pest/termite/rodent/mosquito/
+// lawn/tree-shrub) — a wrong id fails a city-scoped refresh as facts_unmappable.
 const TAG_TO_SERVICE = {
   'pest control': 'pest',
   rodents: 'rodent',
@@ -72,7 +78,9 @@ const TAG_TO_SERVICE = {
   termites: 'termite',
   'lawn care': 'lawn',
   lawn: 'lawn',
-  'tree and shrub': 'tree_shrub',
+  'tree and shrub': 'tree-shrub',
+  'tree and shrub care': 'tree-shrub',
+  'tree & shrub': 'tree-shrub',
 };
 
 function pageUrlFor(post) {
@@ -240,7 +248,7 @@ class RefreshAudit {
     const decay = await db('seo_content_decay_alerts')
       .where({ status: 'open' })
       .andWhere(function () {
-        this.where({ blog_post_id: post.id }).orWhereRaw(`${CANON_PATH_SQL} = ?`, [path]);
+        this.where({ blog_post_id: post.id }).orWhereRaw(`${canonPathSql('url')} = ?`, [path]);
       })
       .orderByRaw('abs(change_pct) desc')
       .first();
@@ -258,7 +266,7 @@ class RefreshAudit {
     const since = etDateString(addETDays(new Date(), -GSC_LOOKBACK_DAYS));
     const gsc = await db('gsc_pages')
       .where('date', '>=', since)
-      .whereRaw(`${CANON_PATH_SQL} = ?`, [path])
+      .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
       .select(db.raw('min(split_part(page_url, chr(63), 1)) as gsc_url'))
       .sum('clicks as clicks')
       .sum('impressions as impressions')
