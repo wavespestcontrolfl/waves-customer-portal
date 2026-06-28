@@ -322,6 +322,23 @@ const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
 // classifies as 'relay_disabled' — never 'dial' (can't dial a ws URL) and never
 // 'relay' — so a misconfigured endpoint falls through to voicemail rather than
 // emitting <Connect><ConversationRelay> to a dead/insecure socket.
+// Hostnames the relay is allowed to live on. The DB-configured `agentEndpoint`
+// is operator-supplied, and buildRelayTwiML appends VOICE_RELAY_WS_SECRET to it
+// — so a typo'd or malicious host (e.g. wss://attacker.example/ws/voice-agent)
+// must NOT be trusted, or it would leak the secret and hand the call off-site.
+// Trust only this portal's own public origin (PUBLIC_PORTAL_URL / PORTAL_URL /
+// RAILWAY_PUBLIC_DOMAIN) plus loopback for local dev.
+function trustedRelayHostnames() {
+  const set = new Set(['localhost', '127.0.0.1']);
+  for (const env of [process.env.PUBLIC_PORTAL_URL, process.env.PORTAL_URL, process.env.RAILWAY_PUBLIC_DOMAIN]) {
+    if (!env) continue;
+    try {
+      const h = new URL(/^[a-z]+:\/\//i.test(env) ? env : `https://${env}`).hostname;
+      if (h) set.add(h);
+    } catch { /* ignore unparseable env */ }
+  }
+  return set;
+}
 function isRelayEndpoint(endpoint) {
   let url;
   try {
@@ -331,7 +348,9 @@ function isRelayEndpoint(endpoint) {
   }
   const secureWs = url.protocol === 'wss:';
   const localDevWs = url.protocol === 'ws:' && /^(localhost|127\.0\.0\.1)$/.test(url.hostname);
-  return (secureWs || localDevWs) && url.pathname === RELAY_WS_PATH;
+  if (!(secureWs || localDevWs)) return false;
+  if (url.pathname !== RELAY_WS_PATH) return false;
+  return trustedRelayHostnames().has(url.hostname); // host must be OUR portal origin
 }
 function agentHandoffKind(config) {
   const endpoint = String(config?.agentEndpoint || '').trim();

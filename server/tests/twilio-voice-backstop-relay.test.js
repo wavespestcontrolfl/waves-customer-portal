@@ -45,7 +45,16 @@ const { agentHandoffKind, appendAgentHandoff } = voiceRouter._test;
 const RELAY_URL = 'wss://portal.example.com/ws/voice-agent';
 
 describe('agentHandoffKind — reachability reflects ACTUAL relay attach', () => {
-  afterEach(() => isRelayAttached.mockReset());
+  let savedPortalUrl;
+  beforeEach(() => {
+    savedPortalUrl = process.env.PUBLIC_PORTAL_URL;
+    process.env.PUBLIC_PORTAL_URL = 'https://portal.example.com'; // trusts RELAY_URL's host
+  });
+  afterEach(() => {
+    isRelayAttached.mockReset();
+    if (savedPortalUrl === undefined) delete process.env.PUBLIC_PORTAL_URL;
+    else process.env.PUBLIC_PORTAL_URL = savedPortalUrl;
+  });
 
   test('no endpoint → none', () => {
     isRelayAttached.mockReturnValue(true);
@@ -65,9 +74,10 @@ describe('agentHandoffKind — reachability reflects ACTUAL relay attach', () =>
     expect(agentHandoffKind({ agentEndpoint: RELAY_URL })).toBe('relay_disabled');
   });
 
-  test('malformed ws/wss endpoint → relay_disabled (never relay, never dialed)', () => {
+  test('malformed or untrusted-host ws/wss endpoint → relay_disabled (never relay, never dialed)', () => {
     isRelayAttached.mockReturnValue(true); // even when the server is up
-    expect(agentHandoffKind({ agentEndpoint: 'wss://portal.example.com/wrong-path' })).toBe('relay_disabled');
+    expect(agentHandoffKind({ agentEndpoint: 'wss://portal.example.com/wrong-path' })).toBe('relay_disabled'); // wrong path
+    expect(agentHandoffKind({ agentEndpoint: 'wss://attacker.example/ws/voice-agent' })).toBe('relay_disabled'); // untrusted host — would leak the secret
     expect(agentHandoffKind({ agentEndpoint: 'ws://evil.example.com/ws/voice-agent' })).toBe('relay_disabled'); // ws:// only allowed on localhost
     expect(agentHandoffKind({ agentEndpoint: 'wss://not a url' })).toBe('relay_disabled');
   });

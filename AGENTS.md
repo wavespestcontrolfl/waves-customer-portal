@@ -408,7 +408,10 @@ finding and warns on P1. Reviewers must return JSON matching
   connect. Caller PII is masked in logs; lead writes require a valid E.164
   caller number (`capture_lead` tool + the capture-floor on session close).
   The live `/voice` backstop only routes a call here when the relay actually
-  attached (`isRelayAttached`). Any change to this endpoint, its auth, or its
+  attached (`isRelayAttached`) AND the configured endpoint's scheme/host/path are
+  trusted (`wss://` + this portal's own origin from `PUBLIC_PORTAL_URL` + the
+  exact `/ws/voice-agent` path; `ws://localhost` for dev) — so the WS secret is
+  never appended to a foreign host. Any change to this endpoint, its auth, or its
   frame handling is security-critical).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
