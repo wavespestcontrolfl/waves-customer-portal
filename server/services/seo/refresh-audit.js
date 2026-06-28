@@ -85,19 +85,23 @@ const ENQUEUE_FLOOR = 78;
 // is fine, the brief builder drives off page_url for a refresh). Values must be
 // the miner categories facts-sufficiency.js maps (pest/termite/rodent/mosquito/
 // lawn/tree-shrub) — a wrong id fails a city-scoped refresh as facts_unmappable.
+// Keys are lowercased blog_posts.tag values. The canonical labels come from
+// blog-seo-contract.js CATEGORY labels ('Pest Control', 'Lawn Care', 'Termites',
+// 'Mosquito Control', 'Tree & Shrub Care'); aliases cover legacy/import variants.
 const TAG_TO_SERVICE = {
   'pest control': 'pest',
-  rodents: 'rodent',
-  rodent: 'rodent',
-  mosquito: 'mosquito',
-  'mosquito control': 'mosquito',
-  termite: 'termite',
-  termites: 'termite',
   'lawn care': 'lawn',
   lawn: 'lawn',
-  'tree and shrub': 'tree-shrub',
+  termites: 'termite',
+  termite: 'termite',
+  'mosquito control': 'mosquito',
+  mosquito: 'mosquito',
+  rodents: 'rodent',
+  rodent: 'rodent',
+  'tree & shrub care': 'tree-shrub',
   'tree and shrub care': 'tree-shrub',
   'tree & shrub': 'tree-shrub',
+  'tree and shrub': 'tree-shrub',
 };
 
 function pageUrlFor(post) {
@@ -147,10 +151,11 @@ function scorePriority({ ageDays, qa, decay }) {
 }
 
 /** Most-severe open decay alert per page (by abs change_pct), keyed by
- *  blog_post_id and by host-agnostic path. */
+ *  blog_post_id and by "registrable-domain|path" (the network shares paths across
+ *  hub + spokes, so a path-only key could attach a spoke's alert to a hub page). */
 function indexDecay(rows) {
   const byPost = new Map();
-  const byPath = new Map();
+  const byDomainPath = new Map();
   const keep = (map, key, row) => {
     if (key == null) return;
     const cur = map.get(key);
@@ -158,9 +163,11 @@ function indexDecay(rows) {
   };
   for (const r of rows) {
     if (r.blog_post_id) keep(byPost, r.blog_post_id, r);
-    keep(byPath, urlToPath(r.url), r);
+    const dom = registrableDomain(r.url);
+    const p = urlToPath(r.url);
+    if (dom && p) keep(byDomainPath, `${dom}|${p}`, r);
   }
-  return { byPost, byPath };
+  return { byPost, byDomainPath };
 }
 
 class RefreshAudit {
@@ -181,13 +188,14 @@ class RefreshAudit {
     }
 
     const decayRows = await db('seo_content_decay_alerts').where('status', 'open');
-    const { byPost: decayByPost, byPath: decayByPath } = indexDecay(decayRows);
+    const { byPost: decayByPost, byDomainPath: decayByDomainPath } = indexDecay(decayRows);
 
     const now = Date.now();
     const candidates = posts.map((p) => {
       const url = pageUrlFor(p);
+      const domain = registrableDomain(p.astro_live_url) || HUB_DOMAIN;
       const qa = qaByPost.get(p.id) || null;
-      const decay = decayByPost.get(p.id) || decayByPath.get(slugPath(p.slug)) || null;
+      const decay = decayByPost.get(p.id) || decayByDomainPath.get(`${domain}|${slugPath(p.slug)}`) || null;
       const ageDays = ageDaysFrom(p, now);
       const { priority, reasons } = scorePriority({ ageDays, qa, decay });
       return {

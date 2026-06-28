@@ -127,7 +127,18 @@ class ContentQA {
   }
 
   async batchScore(limit = 50) {
-    const posts = await db('blog_posts').whereIn('status', ['published', 'draft']).whereNotNull('content').limit(limit);
+    // Prioritize never-scored pages so a bounded batch fills coverage instead of
+    // re-scoring the same first N (the Refresh Audit surfaces unscored pages for
+    // exactly this). count(q.id)=0 → unscored, ordered first; then most-recent.
+    const posts = await db('blog_posts as b')
+      .leftJoin('seo_content_qa_scores as q', 'q.blog_post_id', 'b.id')
+      .whereIn('b.status', ['published', 'draft'])
+      .whereNotNull('b.content')
+      .groupBy('b.id')
+      .select('b.*')
+      .orderByRaw('count(q.id) asc')
+      .orderBy('b.updated_at', 'desc')
+      .limit(limit);
     const results = [];
     for (const post of posts) {
       try {

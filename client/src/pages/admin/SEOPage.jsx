@@ -3737,6 +3737,9 @@ function RefreshAuditTab() {
   const [batching, setBatching] = useState(false);
   const [enq, setEnq] = useState({}); // blogPostId -> 'queuing'|'queued'|'error'|'no_gsc'
   const [enqErr, setEnqErr] = useState({}); // blogPostId -> error message (button title)
+  // Queue refresh + Run QA batch POST to requireAdmin routes — non-admins (tech/
+  // CSR) can VIEW the ranking but would only get a 403, so hide the actions.
+  const isAdmin = isAdminUser();
 
   const load = () => {
     setLoading(true);
@@ -3814,25 +3817,27 @@ function RefreshAuditTab() {
           Ranks published pages by refresh priority — age since update, QA helpfulness gap, and traffic decay.
           “Queue refresh” hands a page to the autonomous engine (safe: shadow mode unless activated).
         </div>
-        <button
-          onClick={runQaBatch}
-          disabled={batching}
-          style={{
-            padding: "8px 14px",
-            border: `1px solid ${D.inputBorder}`,
-            borderRadius: 6,
-            background: D.white,
-            color: D.text,
-            fontSize: 13,
-            fontWeight: 600,
-            cursor: batching ? "default" : "pointer",
-            opacity: batching ? 0.6 : 1,
-            whiteSpace: "nowrap",
-          }}
-          title="Score up to 100 pages with the Content QA gate, then re-rank"
-        >
-          {batching ? "Scoring…" : "Run QA batch"}
-        </button>
+        {isAdmin && (
+          <button
+            onClick={runQaBatch}
+            disabled={batching}
+            style={{
+              padding: "8px 14px",
+              border: `1px solid ${D.inputBorder}`,
+              borderRadius: 6,
+              background: D.white,
+              color: D.text,
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: batching ? "default" : "pointer",
+              opacity: batching ? 0.6 : 1,
+              whiteSpace: "nowrap",
+            }}
+            title="Score up to 100 unscored pages with the Content QA gate, then re-rank"
+          >
+            {batching ? "Scoring…" : "Run QA batch"}
+          </button>
+        )}
       </div>
 
       <div className="seo-kpi-grid-5" style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
@@ -3862,7 +3867,7 @@ function RefreshAuditTab() {
                   <th style={thStyle}>QA</th>
                   <th style={thR}>Decay</th>
                   <th style={thStyle}>Why</th>
-                  <th style={thStyle}>Action</th>
+                  {isAdmin && <th style={thStyle}>Action</th>}
                 </tr>
               </thead>
               <tbody>
@@ -3887,6 +3892,7 @@ function RefreshAuditTab() {
                       <td style={{ ...tdStyle, fontFamily: "inherit", fontSize: 12, color: D.muted, maxWidth: 240 }}>
                         {(c.reasons || []).join(" · ") || "—"}
                       </td>
+                      {isAdmin && (
                       <td style={tdStyle}>
                         <button
                           onClick={() => queueRefresh(c)}
@@ -3919,6 +3925,7 @@ function RefreshAuditTab() {
                                     : "Queue refresh"}
                         </button>
                       </td>
+                      )}
                     </tr>
                   );
                 })}
