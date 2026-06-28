@@ -12,14 +12,18 @@ const { startOfETMonth, etDateString } = require('../utils/datetime-et');
 // ---------------------------------------------------------------------------
 // 1. attributeInboundContact
 // ---------------------------------------------------------------------------
-async function attributeInboundContact({ from, to, type, callSid, messageSid, callDuration, recordingUrl }) {
+// Optional `{ trx }` runs every query on the caller's transaction so the
+// claim + lead write commit atomically (see twilio-voice-webhook.js DNI path).
+// Callers that pass no second arg (e.g. the SMS path) keep using `db` unchanged.
+async function attributeInboundContact({ from, to, type, callSid, messageSid, callDuration, recordingUrl }, { trx } = {}) {
+  const dbx = trx || db;
   const normalizedFrom = normalizePhone(from);
   const normalizedTo = normalizePhone(to);
 
   // Look up lead source by the Twilio number that received the call/sms
   let leadSource = null;
   if (normalizedTo) {
-    leadSource = await db('lead_sources')
+    leadSource = await dbx('lead_sources')
       .where('twilio_phone_number', normalizedTo)
       .where('is_active', true)
       .first();
@@ -27,14 +31,14 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 
   // Check if caller is already a customer
   const existingCustomer = normalizedFrom
-    ? await db('customers').where('phone', normalizedFrom).first()
+    ? await dbx('customers').where('phone', normalizedFrom).first()
     : null;
 
   if (existingCustomer) {
     // Log touch for existing customer rather than creating a lead
     logger.info(`[LeadAttribution] Existing customer touch: ${existingCustomer.id} via source ${leadSource?.id || 'unknown'}`);
     try {
-      await db('customer_interactions').insert({
+      await dbx('customer_interactions').insert({
         customer_id: existingCustomer.id,
         interaction_type: type === 'call' ? 'inbound_call' : 'inbound_sms',
         subject: `Inbound ${type} via ${leadSource?.name || normalizedTo || 'unknown'}`,
@@ -49,7 +53,7 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 
   // Check if we already have a lead with this phone
   const existingLead = normalizedFrom
-    ? await db('leads').where('phone', normalizedFrom).orderBy('created_at', 'desc').first()
+    ? await dbx('leads').where('phone', normalizedFrom).orderBy('created_at', 'desc').first()
     : null;
 
   if (existingLead) {
@@ -64,10 +68,10 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
     updates.updated_at = new Date();
 
     if (Object.keys(updates).length > 1) {
-      await db('leads').where('id', existingLead.id).update(updates);
+      await dbx('leads').where('id', existingLead.id).update(updates);
     }
 
-    await db('lead_activities').insert({
+    await dbx('lead_activities').insert({
       lead_id: existingLead.id,
       activity_type: type === 'call' ? 'inbound_call' : 'inbound_sms',
       description: `Follow-up ${type} via ${leadSource?.name || normalizedTo || 'unknown'}`,
@@ -81,7 +85,7 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 
   // Create new lead
   const leadType = type === 'call' ? 'inbound_call' : 'inbound_sms';
-  const [newLead] = await db('leads').insert({
+  const [newLead] = await dbx('leads').insert({
     lead_source_id: leadSource?.id || null,
     phone: normalizedFrom,
     lead_type: leadType,
@@ -94,7 +98,7 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
     status: 'new',
   }).returning('*');
 
-  await db('lead_activities').insert({
+  await dbx('lead_activities').insert({
     lead_id: newLead.id,
     activity_type: 'created',
     description: `New lead from ${leadType} via ${leadSource?.name || normalizedTo || 'unknown'}`,

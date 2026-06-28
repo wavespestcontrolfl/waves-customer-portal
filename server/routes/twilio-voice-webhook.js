@@ -404,22 +404,29 @@ function appendAgentHandoff(twiml, config, opts = {}) {
 // =========================================================================
 // DNI Phase B2 — paid ad-call lead attribution
 //
-// When an inbound call to a PAID ad-tracking number (Google Ads / Facebook
-// Ads) actually CONNECTS, create/touch a source-tagged lead via the shared
-// lead-attribution service, so the call flows into the same lead funnel as web
-// leads (and, once it qualifies/books, the Google offline-conversion upload).
+// When an inbound call to the Google Ads paid call-tracking number actually
+// CONNECTS, create/touch a source-tagged lead via the shared lead-attribution
+// service, so the call flows into the same lead funnel as web leads (and, once
+// it qualifies/books, the Google offline-conversion upload).
+//
+// SCOPE: the Google Ads paid call number ONLY. The Facebook Ads number is still
+// LABELED 'facebook' on call_log (via twilio-numbers.js), but is NOT attributed
+// here — Facebook call attribution + its PPC funnel are a separate follow-up.
 //
 // Spam-prudent by design — only a HUMAN-ACCEPTED call to a paid # becomes a
 // lead, exactly once:
-//   • strictly gated to the paid tracking numbers (numberConfig.type),
+//   • strictly gated to the Google Ads paid tracking number (numberConfig.type),
 //   • only when a staff member pressed 1 to accept the forwarded leg
 //     (forwardAccepted) AND the call did NOT fall to voicemail
 //     (!shouldRecordVoicemail) — a carrier/staff voicemail pickup has
 //     duration>0 but forwardAccepted=false, so it is skipped, and so are
 //     rings / no-answers / hangups / wrong-numbers / spam,
 //   • anonymous / blocked / malformed callers are skipped (no real # = no lead),
-//   • idempotent per CallSid via an atomic call_log claim, so Twilio retries of
-//     /call-complete (which has no dedupe of its own) never double-attribute.
+//   • the call_log claim + lead write are atomic in one transaction →
+//     exactly-once and retryable on failure: if attribution throws, the txn
+//     rolls back so the marker (paid_lead_attributed_at) is cleared and a Twilio
+//     retry of /call-complete re-attempts; a concurrent retry blocks on the row
+//     lock, then sees claimed=0 and skips. /call-complete has no dedupe of its own.
 //
 // attributeInboundContact is also idempotent per caller phone and never marks
 // the lead qualified (conversion fires later when it books). Best-effort +
@@ -428,7 +435,7 @@ function appendAgentHandoff(twiml, config, opts = {}) {
 // Ships DARK behind GATE_PAID_CALL_LEAD_ATTRIBUTION — fail-closed, so paid
 // calls only create leads once the owner flips the env var to exactly 'true'.
 // =========================================================================
-const PAID_TRACKING_TYPES = new Set(['google_ads', 'facebook']);
+const PAID_TRACKING_TYPES = new Set(['google_ads']);
 
 async function maybeAttributePaidInboundCall({ from, to, callSid, callDuration, forwardAccepted, shouldRecordVoicemail }) {
   // Guards ordered cheap → expensive so the common (non-paid) call bails first.
@@ -438,26 +445,31 @@ async function maybeAttributePaidInboundCall({ from, to, callSid, callDuration, 
   //    like 'anonymous', so gate on isLikelyE164 before creating any lead.
   if (!isLikelyE164(from)) return;
   try {
-    // 3. Strictly gated to the paid ad-tracking numbers.
+    // 3. Strictly gated to the Google Ads paid tracking number.
     const numberConfig = TWILIO_NUMBERS.findByNumber(toE164(to) || to);
     if (!numberConfig || !PAID_TRACKING_TYPES.has(numberConfig.type)) return;
     // 4. Connected = a human accepted the forwarded leg (pressed 1) and the
     //    call did not drop to voicemail. Excludes carrier voicemail pickups.
     if (!(forwardAccepted === true && !shouldRecordVoicemail)) return;
-    // 5. Idempotent per CallSid — atomically claim the call_log row (written by
-    //    /voice with twilio_call_sid = parent CallSid) before attributing.
-    //    claimed===0 ⇒ already attributed OR no row yet ⇒ skip (Twilio retry-safe).
-    const claimed = await db('call_log')
-      .where({ twilio_call_sid: callSid })
-      .whereNull('paid_lead_attributed_at')
-      .update({ paid_lead_attributed_at: db.fn.now() });
-    if (claimed !== 1) return;
-    // 6. Create / touch the source-tagged lead.
+    // 5. Claim + lead write are atomic in one transaction (exactly-once,
+    //    retryable). The marker is set and the lead written together; if
+    //    attribution throws, the whole txn rolls back so the marker clears and a
+    //    retry re-attempts. A concurrent retry blocks on the row lock, then sees
+    //    claimed=0 and skips. (call_log row was written by /voice keyed on the
+    //    parent CallSid.)
     const { attributeInboundContact } = require('../services/lead-attribution');
-    const res = await attributeInboundContact({
-      from, to, type: 'call', callSid, callDuration: Number(callDuration) || null,
+    await db.transaction(async (trx) => {
+      const claimed = await trx('call_log')
+        .where({ twilio_call_sid: callSid })
+        .whereNull('paid_lead_attributed_at')
+        .update({ paid_lead_attributed_at: db.fn.now() });
+      if (claimed !== 1) return; // already attributed OR no row yet → skip
+      const res = await attributeInboundContact(
+        { from, to, type: 'call', callSid, callDuration: Number(callDuration) || null },
+        { trx },
+      );
+      if (res) logger.info(`[voice][dni] paid-call attribution (${numberConfig.type}) ${maskSid(callSid)} → ${res.type}`);
     });
-    if (res) logger.info(`[voice][dni] paid-call attribution (${numberConfig.type}) ${maskSid(callSid)} → ${res.type}`);
   } catch (err) {
     logger.error(`[voice][dni] paid-call attribution failed for ${maskSid(callSid)}: ${err.message}`);
   }

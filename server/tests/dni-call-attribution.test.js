@@ -5,8 +5,9 @@
 //     maps to 'facebook' across findByNumber / getLeadSourceFromNumber / allNumbers.
 // (2) twilio-voice-webhook.js: maybeAttributePaidInboundCall calls the shared
 //     lead-attribution service ONLY for a HUMAN-ACCEPTED call (forwardAccepted &&
-//     !shouldRecordVoicemail) to a paid tracking number, from a real caller #,
-//     exactly once per CallSid (atomic call_log claim) — and only when the
+//     !shouldRecordVoicemail) to the GOOGLE ADS paid number (Facebook is labeled
+//     but NOT attributed in B2), from a real caller #, exactly once per CallSid
+//     (atomic claim + lead write in one transaction) — and only when the
 //     fail-closed gate is on.
 
 const GOOGLE_ADS_NUMBER = '+19412691697';
@@ -68,6 +69,7 @@ jest.mock('../services/lead-attribution', () => ({
 }));
 
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { attributeInboundContact } = require('../services/lead-attribution');
 const voiceRouter = require('../routes/twilio-voice-webhook');
 const { maybeAttributePaidInboundCall } = voiceRouter._test;
@@ -79,9 +81,12 @@ const CONNECTED = {
   forwardAccepted: true, shouldRecordVoicemail: false,
 };
 
-// call_log claim mock: db('call_log').where(...).whereNull(...).update(...) →
-// rows affected. Each update() shifts the next value off `claimResults`, or
-// defaults to 1 (claim won) when the queue is empty.
+// db.transaction(cb) mock: invokes cb with a `trx` whose
+// trx('call_log').where(...).whereNull(...).update(...) resolves to the rows
+// affected by the atomic claim. Each update() shifts the next value off
+// `claimResults`, or defaults to 1 (claim won) when the queue is empty. If cb
+// throws/rejects, db.transaction rejects too (real knex rolls back + re-throws),
+// so the helper's try/catch can log and a later call re-attempts.
 let claimResults;
 function setupDbMock() {
   db.mockReset();
@@ -90,7 +95,8 @@ function setupDbMock() {
   const update = jest.fn(() => Promise.resolve(claimResults.length ? claimResults.shift() : 1));
   const whereNull = jest.fn(() => ({ update }));
   const where = jest.fn(() => ({ whereNull }));
-  db.mockReturnValue({ where });
+  const trx = jest.fn(() => ({ where }));
+  db.transaction = jest.fn((cb) => cb(trx));
 }
 
 describe('maybeAttributePaidInboundCall (twilio-voice-webhook.js)', () => {
@@ -108,18 +114,19 @@ describe('maybeAttributePaidInboundCall (twilio-voice-webhook.js)', () => {
     else process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION = savedGate;
   });
 
-  test('attributes a human-accepted call to the Google Ads number', async () => {
+  test('attributes a human-accepted call to the Google Ads number (on the txn)', async () => {
     await maybeAttributePaidInboundCall({ ...CONNECTED });
     expect(attributeInboundContact).toHaveBeenCalledTimes(1);
-    expect(attributeInboundContact).toHaveBeenCalledWith({
-      from: '+19415550123', to: GOOGLE_ADS_NUMBER, type: 'call', callSid: 'CA1', callDuration: 42,
-    });
+    // The lead write runs on the claim transaction (second arg { trx }).
+    expect(attributeInboundContact).toHaveBeenCalledWith(
+      { from: '+19415550123', to: GOOGLE_ADS_NUMBER, type: 'call', callSid: 'CA1', callDuration: 42 },
+      { trx: expect.any(Function) },
+    );
   });
 
-  test('attributes a human-accepted call to the Facebook Ads number', async () => {
+  test('does NOT attribute the Facebook Ads number (out of scope for B2 — google_ads only)', async () => {
     await maybeAttributePaidInboundCall({ ...CONNECTED, to: FACEBOOK_ADS_NUMBER, callSid: 'CA2', callDuration: 30 });
-    expect(attributeInboundContact).toHaveBeenCalledTimes(1);
-    expect(attributeInboundContact.mock.calls[0][0]).toMatchObject({ to: FACEBOOK_ADS_NUMBER, type: 'call' });
+    expect(attributeInboundContact).not.toHaveBeenCalled();
   });
 
   test('forwards the connected duration as a value (not a guard)', async () => {
@@ -169,6 +176,21 @@ describe('maybeAttributePaidInboundCall (twilio-voice-webhook.js)', () => {
     await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-dup' });
     expect(attributeInboundContact).toHaveBeenCalledTimes(1);
   });
+
+  test('rolls back on attribution failure so a later retry re-attempts', async () => {
+    // Real knex: a throw inside the txn rolls back the claim marker (so the next
+    // delivery re-claims) and re-throws. We model that with claim 1 then 1.
+    claimResults = [1, 1];
+    attributeInboundContact
+      .mockRejectedValueOnce(new Error('boom'))                       // first attempt fails
+      .mockResolvedValueOnce({ type: 'new_lead', leadId: 'L1' });     // retry succeeds
+    // First delivery: txn throws → helper try/catch logs (does not propagate).
+    await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-retry' });
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    // Retry: marker was rolled back → claim wins again → attribution succeeds.
+    await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-retry' });
+    expect(attributeInboundContact).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('GATE_PAID_CALL_LEAD_ATTRIBUTION (fail-closed gate)', () => {
@@ -191,7 +213,7 @@ describe('GATE_PAID_CALL_LEAD_ATTRIBUTION (fail-closed gate)', () => {
 
   test("gate ='false': does NOT attribute a human-accepted paid call", async () => {
     process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION = 'false';
-    await maybeAttributePaidInboundCall({ ...CONNECTED, to: FACEBOOK_ADS_NUMBER, callSid: 'CA7' });
+    await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA7' });
     expect(attributeInboundContact).not.toHaveBeenCalled();
   });
 
