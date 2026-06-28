@@ -148,6 +148,15 @@ const gates = {
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
 
+  // Backlink profile → astro sameAs sync — weekly job that opens a PR adding
+  // verifier-confirmed (status live/indexed) directory/citation/social profile
+  // URLs from seo_link_prospects to the marketing site's entity-profiles.auto.json
+  // (Organization sameAs). This job WRITES to an external repo, so it is opt-in in
+  // EVERY env (not default-on in dev) — a dev/preview box with real
+  // DATABASE_URL/GITHUB_TOKEN must not open Astro PRs without an explicit flag.
+  // Even when on, it only opens a PR for human review (never auto-merges).
+  backlinkProfileSync: process.env.GATE_BACKLINK_PROFILE_SYNC === 'true',
+
   // Hermes Worker — machine-to-machine claim/report contract for the Hermes
   // (Docker) acquisition agent. Off in prod until the worker is deployed and
   // HERMES_SERVICE_TOKEN is set; the auth middleware also fails closed without it.
