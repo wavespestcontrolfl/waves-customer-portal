@@ -4,8 +4,10 @@
 //     so the Google Ads number maps to 'google_ads' and the Facebook Ads number
 //     maps to 'facebook' across findByNumber / getLeadSourceFromNumber / allNumbers.
 // (2) twilio-voice-webhook.js: maybeAttributePaidInboundCall calls the shared
-//     lead-attribution service ONLY for paid tracking numbers on a connected
-//     call (duration > 0), never for unmapped numbers or zero-duration calls.
+//     lead-attribution service ONLY for a HUMAN-ACCEPTED call (forwardAccepted &&
+//     !shouldRecordVoicemail) to a paid tracking number, from a real caller #,
+//     exactly once per CallSid (atomic call_log claim) — and only when the
+//     fail-closed gate is on.
 
 const GOOGLE_ADS_NUMBER = '+19412691697';
 const FACEBOOK_ADS_NUMBER = '+19418775491';
@@ -65,16 +67,39 @@ jest.mock('../services/lead-attribution', () => ({
   attributeInboundContact: jest.fn(() => Promise.resolve({ type: 'new_lead', leadId: 'L1' })),
 }));
 
+const db = require('../models/db');
 const { attributeInboundContact } = require('../services/lead-attribution');
 const voiceRouter = require('../routes/twilio-voice-webhook');
 const { maybeAttributePaidInboundCall } = voiceRouter._test;
 
+// A human-accepted paid call — the baseline every "should attribute" case starts
+// from. Spread + override per test.
+const CONNECTED = {
+  from: '+19415550123', to: GOOGLE_ADS_NUMBER, callSid: 'CA1', callDuration: 42,
+  forwardAccepted: true, shouldRecordVoicemail: false,
+};
+
+// call_log claim mock: db('call_log').where(...).whereNull(...).update(...) →
+// rows affected. Each update() shifts the next value off `claimResults`, or
+// defaults to 1 (claim won) when the queue is empty.
+let claimResults;
+function setupDbMock() {
+  db.mockReset();
+  db.fn = { now: jest.fn(() => 'NOW()') };
+  claimResults = [];
+  const update = jest.fn(() => Promise.resolve(claimResults.length ? claimResults.shift() : 1));
+  const whereNull = jest.fn(() => ({ update }));
+  const where = jest.fn(() => ({ whereNull }));
+  db.mockReturnValue({ where });
+}
+
 describe('maybeAttributePaidInboundCall (twilio-voice-webhook.js)', () => {
-  // The behavior below assumes the fail-closed gate is ON. Set/restore it per
-  // test so it never leaks to the gate suite (or any other test file).
+  // Behavior below assumes the fail-closed gate is ON. Set/restore it per test
+  // so it never leaks to the gate suite (or any other test file).
   let savedGate;
   beforeEach(() => {
     jest.clearAllMocks();
+    setupDbMock();
     savedGate = process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION;
     process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION = 'true';
   });
@@ -83,43 +108,66 @@ describe('maybeAttributePaidInboundCall (twilio-voice-webhook.js)', () => {
     else process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION = savedGate;
   });
 
-  test('attributes a connected call to the Google Ads number', () => {
-    maybeAttributePaidInboundCall({
-      from: '+19415550123', to: GOOGLE_ADS_NUMBER, callSid: 'CA1', callDuration: 42,
-    });
+  test('attributes a human-accepted call to the Google Ads number', async () => {
+    await maybeAttributePaidInboundCall({ ...CONNECTED });
     expect(attributeInboundContact).toHaveBeenCalledTimes(1);
     expect(attributeInboundContact).toHaveBeenCalledWith({
       from: '+19415550123', to: GOOGLE_ADS_NUMBER, type: 'call', callSid: 'CA1', callDuration: 42,
     });
   });
 
-  test('attributes a connected call to the Facebook Ads number', () => {
-    maybeAttributePaidInboundCall({
-      from: '+19415550123', to: FACEBOOK_ADS_NUMBER, callSid: 'CA2', callDuration: 30,
-    });
+  test('attributes a human-accepted call to the Facebook Ads number', async () => {
+    await maybeAttributePaidInboundCall({ ...CONNECTED, to: FACEBOOK_ADS_NUMBER, callSid: 'CA2', callDuration: 30 });
     expect(attributeInboundContact).toHaveBeenCalledTimes(1);
     expect(attributeInboundContact.mock.calls[0][0]).toMatchObject({ to: FACEBOOK_ADS_NUMBER, type: 'call' });
   });
 
-  test('does NOT attribute a zero-duration (ring/no-answer/hangup) call', () => {
-    maybeAttributePaidInboundCall({
-      from: '+19415550123', to: GOOGLE_ADS_NUMBER, callSid: 'CA3', callDuration: 0,
+  test('forwards the connected duration as a value (not a guard)', async () => {
+    await maybeAttributePaidInboundCall({ ...CONNECTED, callDuration: 75 });
+    expect(attributeInboundContact.mock.calls[0][0].callDuration).toBe(75);
+  });
+
+  test('does NOT attribute when the forwarded leg was not human-accepted', async () => {
+    await maybeAttributePaidInboundCall({
+      ...CONNECTED, callSid: 'CA3', forwardAccepted: false, shouldRecordVoicemail: true, callDuration: 0,
     });
     expect(attributeInboundContact).not.toHaveBeenCalled();
   });
 
-  test('does NOT attribute a connected call to a non-paid (location) number', () => {
-    maybeAttributePaidInboundCall({
-      from: '+19415550123', to: '+19413187612', callSid: 'CA4', callDuration: 60,
+  test('does NOT attribute a carrier/staff voicemail pickup (duration>0 but not accepted)', async () => {
+    await maybeAttributePaidInboundCall({
+      ...CONNECTED, callSid: 'CA3b', forwardAccepted: false, shouldRecordVoicemail: true, callDuration: 14,
     });
     expect(attributeInboundContact).not.toHaveBeenCalled();
   });
 
-  test('does NOT attribute an unknown number', () => {
-    maybeAttributePaidInboundCall({
-      from: '+19415550123', to: '+10000000000', callSid: 'CA5', callDuration: 60,
+  test('does NOT attribute when an accepted call still dropped to voicemail', async () => {
+    await maybeAttributePaidInboundCall({
+      ...CONNECTED, callSid: 'CA3c', forwardAccepted: true, shouldRecordVoicemail: true,
     });
     expect(attributeInboundContact).not.toHaveBeenCalled();
+  });
+
+  test('does NOT attribute a human-accepted call to a non-paid (location) number', async () => {
+    await maybeAttributePaidInboundCall({ ...CONNECTED, to: '+19413187612', callSid: 'CA4' });
+    expect(attributeInboundContact).not.toHaveBeenCalled();
+  });
+
+  test('does NOT attribute an unknown number', async () => {
+    await maybeAttributePaidInboundCall({ ...CONNECTED, to: '+10000000000', callSid: 'CA5' });
+    expect(attributeInboundContact).not.toHaveBeenCalled();
+  });
+
+  test('does NOT attribute an anonymous / blocked caller', async () => {
+    await maybeAttributePaidInboundCall({ ...CONNECTED, from: 'anonymous', callSid: 'CA5b' });
+    expect(attributeInboundContact).not.toHaveBeenCalled();
+  });
+
+  test('is idempotent per CallSid — a retry whose claim returns 0 does not re-attribute', async () => {
+    claimResults = [1, 0]; // first delivery wins the claim, the Twilio retry loses
+    await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-dup' });
+    await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-dup' });
+    expect(attributeInboundContact).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -127,6 +175,7 @@ describe('GATE_PAID_CALL_LEAD_ATTRIBUTION (fail-closed gate)', () => {
   let savedGate;
   beforeEach(() => {
     jest.clearAllMocks();
+    setupDbMock();
     savedGate = process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION;
   });
   afterEach(() => {
@@ -134,40 +183,32 @@ describe('GATE_PAID_CALL_LEAD_ATTRIBUTION (fail-closed gate)', () => {
     else process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION = savedGate;
   });
 
-  test('gate UNSET: does NOT attribute a paid connected call', () => {
+  test('gate UNSET: does NOT attribute a human-accepted paid call', async () => {
     delete process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION;
-    maybeAttributePaidInboundCall({
-      from: '+19415550123', to: GOOGLE_ADS_NUMBER, callSid: 'CA6', callDuration: 42,
-    });
+    await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA6' });
     expect(attributeInboundContact).not.toHaveBeenCalled();
   });
 
-  test("gate ='false': does NOT attribute a paid connected call", () => {
+  test("gate ='false': does NOT attribute a human-accepted paid call", async () => {
     process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION = 'false';
-    maybeAttributePaidInboundCall({
-      from: '+19415550123', to: FACEBOOK_ADS_NUMBER, callSid: 'CA7', callDuration: 30,
-    });
+    await maybeAttributePaidInboundCall({ ...CONNECTED, to: FACEBOOK_ADS_NUMBER, callSid: 'CA7' });
     expect(attributeInboundContact).not.toHaveBeenCalled();
   });
 
-  test("gate ='true': DOES attribute a paid connected call", () => {
+  test("gate ='true': DOES attribute a human-accepted paid call", async () => {
     process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION = 'true';
-    maybeAttributePaidInboundCall({
-      from: '+19415550123', to: GOOGLE_ADS_NUMBER, callSid: 'CA8', callDuration: 42,
-    });
+    await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA8' });
     expect(attributeInboundContact).toHaveBeenCalledTimes(1);
   });
 
-  test("gate ='true' still respects the paid-# and duration guards", () => {
+  test("gate ='true' still respects the paid-# and connected guards", async () => {
     process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION = 'true';
-    // zero-duration paid call → no
-    maybeAttributePaidInboundCall({
-      from: '+19415550123', to: GOOGLE_ADS_NUMBER, callSid: 'CA9', callDuration: 0,
+    // not human-accepted → no
+    await maybeAttributePaidInboundCall({
+      ...CONNECTED, callSid: 'CA9', forwardAccepted: false, shouldRecordVoicemail: true,
     });
     // connected non-paid call → no
-    maybeAttributePaidInboundCall({
-      from: '+19415550123', to: '+19413187612', callSid: 'CA10', callDuration: 60,
-    });
+    await maybeAttributePaidInboundCall({ ...CONNECTED, to: '+19413187612', callSid: 'CA10' });
     expect(attributeInboundContact).not.toHaveBeenCalled();
   });
 });

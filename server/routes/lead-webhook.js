@@ -178,6 +178,10 @@ router.post('/', async (req, res) => {
       if (!sourceRecord && leadSource.source === 'facebook') {
         sourceRecord = await db('lead_sources')
           .whereRaw("LOWER(name) LIKE '%facebook%'")
+          // A web/form Facebook lead must never resolve to a phone-keyed
+          // call-tracking source (e.g. the Facebook Ads paid call number) —
+          // exclude any source bound to a Twilio number.
+          .whereNull('twilio_phone_number')
           .where('is_active', true)
           .first();
       }

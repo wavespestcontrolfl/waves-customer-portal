@@ -409,43 +409,57 @@ function appendAgentHandoff(twiml, config, opts = {}) {
 // lead-attribution service, so the call flows into the same lead funnel as web
 // leads (and, once it qualifies/books, the Google offline-conversion upload).
 //
-// Spam-prudent by design:
-//   • strictly gated to the paid tracking numbers (numberConfig.type), and
-//   • fired at call COMPLETION with a real connected duration — a ring,
-//     no-answer, instant hangup, wrong number, or spam call that never bridges
-//     has duration 0 and is intentionally ignored, so those don't all become
-//     leads. (More conservative than the "fire at receipt" fallback; a pure
-//     no-answer→voicemail ad call is not lead-created here — the recording
-//     processor still ingests its voicemail.)
+// Spam-prudent by design — only a HUMAN-ACCEPTED call to a paid # becomes a
+// lead, exactly once:
+//   • strictly gated to the paid tracking numbers (numberConfig.type),
+//   • only when a staff member pressed 1 to accept the forwarded leg
+//     (forwardAccepted) AND the call did NOT fall to voicemail
+//     (!shouldRecordVoicemail) — a carrier/staff voicemail pickup has
+//     duration>0 but forwardAccepted=false, so it is skipped, and so are
+//     rings / no-answers / hangups / wrong-numbers / spam,
+//   • anonymous / blocked / malformed callers are skipped (no real # = no lead),
+//   • idempotent per CallSid via an atomic call_log claim, so Twilio retries of
+//     /call-complete (which has no dedupe of its own) never double-attribute.
 //
-// attributeInboundContact is idempotent per caller phone, so a Twilio
-// redelivery / repeat call is safe, and it never marks the lead qualified
-// (conversion fires later when it books). Best-effort + non-blocking: any
-// failure is logged and never affects the voice flow / TwiML response.
+// attributeInboundContact is also idempotent per caller phone and never marks
+// the lead qualified (conversion fires later when it books). Best-effort +
+// non-blocking: any failure is logged and never affects the voice flow / TwiML.
 //
 // Ships DARK behind GATE_PAID_CALL_LEAD_ATTRIBUTION — fail-closed, so paid
 // calls only create leads once the owner flips the env var to exactly 'true'.
 // =========================================================================
 const PAID_TRACKING_TYPES = new Set(['google_ads', 'facebook']);
 
-function maybeAttributePaidInboundCall({ from, to, callSid, callDuration }) {
-  // Fail-closed gate: do nothing unless explicitly activated.
+async function maybeAttributePaidInboundCall({ from, to, callSid, callDuration, forwardAccepted, shouldRecordVoicemail }) {
+  // Guards ordered cheap → expensive so the common (non-paid) call bails first.
+  // 1. Fail-closed gate: do nothing unless explicitly activated.
   if (process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION !== 'true') return;
+  // 2. Skip anonymous / blocked / malformed callers — toE164 preserves garbage
+  //    like 'anonymous', so gate on isLikelyE164 before creating any lead.
+  if (!isLikelyE164(from)) return;
   try {
+    // 3. Strictly gated to the paid ad-tracking numbers.
     const numberConfig = TWILIO_NUMBERS.findByNumber(toE164(to) || to);
     if (!numberConfig || !PAID_TRACKING_TYPES.has(numberConfig.type)) return;
-    if (!(Number(callDuration) > 0)) return; // connected calls only
+    // 4. Connected = a human accepted the forwarded leg (pressed 1) and the
+    //    call did not drop to voicemail. Excludes carrier voicemail pickups.
+    if (!(forwardAccepted === true && !shouldRecordVoicemail)) return;
+    // 5. Idempotent per CallSid — atomically claim the call_log row (written by
+    //    /voice with twilio_call_sid = parent CallSid) before attributing.
+    //    claimed===0 ⇒ already attributed OR no row yet ⇒ skip (Twilio retry-safe).
+    const claimed = await db('call_log')
+      .where({ twilio_call_sid: callSid })
+      .whereNull('paid_lead_attributed_at')
+      .update({ paid_lead_attributed_at: db.fn.now() });
+    if (claimed !== 1) return;
+    // 6. Create / touch the source-tagged lead.
     const { attributeInboundContact } = require('../services/lead-attribution');
-    // Fire-and-forget — never block or break the TwiML response.
-    Promise.resolve(
-      attributeInboundContact({ from, to, type: 'call', callSid, callDuration: Number(callDuration) })
-    )
-      .then((res) => {
-        if (res) logger.info(`[voice][dni] paid-call attribution (${numberConfig.type}) ${maskSid(callSid)} → ${res.type}`);
-      })
-      .catch((err) => logger.error(`[voice][dni] paid-call attribution failed for ${maskSid(callSid)}: ${err.message}`));
+    const res = await attributeInboundContact({
+      from, to, type: 'call', callSid, callDuration: Number(callDuration) || null,
+    });
+    if (res) logger.info(`[voice][dni] paid-call attribution (${numberConfig.type}) ${maskSid(callSid)} → ${res.type}`);
   } catch (err) {
-    logger.error(`[voice][dni] paid-call attribution setup failed: ${err.message}`);
+    logger.error(`[voice][dni] paid-call attribution failed for ${maskSid(callSid)}: ${err.message}`);
   }
 }
 
@@ -718,16 +732,18 @@ router.post('/call-complete', async (req, res) => {
 
     logger.info(`Call complete: ${CallSid} status=${status} duration=${duration}s`);
 
-    // DNI Phase B2 — source-tag a lead for connected inbound calls to a PAID
-    // ad-tracking number. Gated to paid #s + the connected dial-leg duration
-    // (DialCallDuration), so no-answer / hangup / spam calls are skipped.
-    // Non-blocking, best-effort (see maybeAttributePaidInboundCall).
-    maybeAttributePaidInboundCall({
+    // DNI Phase B2 — source-tag a lead for HUMAN-ACCEPTED inbound calls to a
+    // PAID ad-tracking number (forwardAccepted && !shouldRecordVoicemail).
+    // Idempotent per CallSid, anonymous-caller-skipping, paid-#-gated. Fire-and-
+    // forget — never block or break the TwiML response (helper awaits internally).
+    void maybeAttributePaidInboundCall({
       from: From,
       to: To,
       callSid: CallSid,
       callDuration: parseInt(DialCallDuration || 0, 10),
-    });
+      forwardAccepted,
+      shouldRecordVoicemail,
+    }).catch((err) => logger.error(`[voice][dni] paid-call attribution dispatch failed: ${err.message}`));
 
     // If no answer, play Waves custom voicemail greeting + record.
     //
