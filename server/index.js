@@ -630,6 +630,17 @@ const httpServer = http.createServer(app);
 const { attachSockets } = require('./sockets');
 const io = attachSockets(httpServer);
 
+// Voice-AI relay (Twilio ConversationRelay → Claude), Phase 0. Fail-closed:
+// a no-op unless VOICE_RELAY_ENABLED=true, in which case it registers a
+// path-scoped ws upgrade handler (/ws/voice-agent) that coexists with the
+// Socket.io dispatch server above without touching its upgrade path. Wrapped so
+// any failure here can never block API boot.
+try {
+  require('./services/voice-agent/relay-server').attachVoiceRelay(httpServer);
+} catch (e) {
+  logger.error(`[voice-relay] attach failed (continuing without it): ${e.message}`);
+}
+
 // Migrations are NOT run from this process. They run as Railway's
 // pre-deploy command (railway.toml:
 //   preDeployCommand = ["npm run db:migrate"]

@@ -393,6 +393,18 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   return { lat: resolvedLat, lng: resolvedLng };
 }
 
+// Load the singleton booking_config row, falling back to the same defaults the
+// public routes use. Exported so non-route callers (e.g. the voice agent's
+// read-only quoting tools) share one source of truth for the config window.
+async function loadBookingConfig() {
+  return (await db('booking_config').first()) || {
+    advance_days_min: 1, advance_days_max: 14,
+    slot_duration_minutes: 60,
+    day_start: '08:00', day_end: '17:00',
+    max_self_books_per_day: 3,
+  };
+}
+
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
@@ -681,13 +693,13 @@ router.post('/find-slots', async (req, res, next) => {
 });
 
 // POST /api/booking/confirm
-router.post('/confirm', async (req, res, next) => {
-  try {
-    const { isEnabled } = require('../config/feature-gates');
-    if (!isEnabled('selfBooking')) {
-      return res.status(503).json({ error: 'Self-scheduling coming soon' });
-    }
-
+// createSelfBooking — the booking-commit operation behind POST /api/booking/confirm,
+// extracted so non-HTTP callers (e.g. the voice agent's confirm_booking tool) run the
+// EXACT same path: customer resolution, advisory-locked conflict re-check, the two-row
+// transaction, and post-commit seeding/reminders/SMS/lead-conversion. Does NOT check
+// the selfBooking gate (the caller decides). Returns a discriminated result
+// { ok:true, body } | { ok:false, status, error }; throws on unexpected errors.
+async function createSelfBooking(payload = {}) {
     const {
       estimate_id, customer_id, lead_id,
       slot_date, slot_start, slot_end,
@@ -700,10 +712,10 @@ router.post('/confirm', async (req, res, next) => {
       source,
       referrer_url,
       new_customer,
-    } = req.body;
+    } = payload;
 
     if (!slot_date || !slot_start) {
-      return res.status(400).json({ error: 'slot_date and slot_start required' });
+      return { ok: false, status: 400, error: 'slot_date and slot_start required' };
     }
 
     // Normalize the calendar day ONCE and use it for the advisory locks,
@@ -712,16 +724,16 @@ router.post('/confirm', async (req, res, next) => {
     // a different lock key and bypass serialization entirely.
     const slotDateStr = String(slot_date).split('T')[0];
     if (!/^\d{4}-\d{2}-\d{2}$/.test(slotDateStr)) {
-      return res.status(400).json({ error: 'Invalid slot_date' });
+      return { ok: false, status: 400, error: 'Invalid slot_date' };
     }
     const todayEtStr = etDateString();
     if (slotDateStr < todayEtStr) {
-      return res.status(400).json({ error: 'That date has already passed — please pick another day.' });
+      return { ok: false, status: 400, error: 'That date has already passed — please pick another day.' };
     }
     if (slotDateStr === todayEtStr) {
       const nowEt = etParts(new Date());
       if (timeToMin(slot_start) <= nowEt.hour * 60 + nowEt.minute) {
-        return res.status(409).json({ error: 'That time has already passed today — please pick another slot.' });
+        return { ok: false, status: 409, error: 'That time has already passed today — please pick another slot.' };
       }
     }
 
@@ -759,10 +771,10 @@ router.post('/confirm', async (req, res, next) => {
           // customer's phone number probe slots and harvest booking
           // details. The in-transaction replay guard still covers callers
           // that proved identity (customer_id / estimate token).
-          return res.status(409).json({ error: 'This phone number is already on file. Please verify the customer profile before booking.' });
+          return { ok: false, status: 409, error: 'This phone number is already on file. Please verify the customer profile before booking.' };
         }
         if (String(existing.id) !== String(customer_id)) {
-          return res.status(400).json({ error: 'Customer lookup mismatch' });
+          return { ok: false, status: 400, error: 'Customer lookup mismatch' };
         }
         custId = existing.id;
       }
@@ -781,7 +793,7 @@ router.post('/confirm', async (req, res, next) => {
         || !new_customer
         || !addressMatchesCustomer(addressVerifiedCustomer, new_customer.address_line1, new_customer.zip)
       ) {
-        return res.status(400).json({ error: 'Address verification required for existing customer booking' });
+        return { ok: false, status: 400, error: 'Address verification required for existing customer booking' };
       }
       custId = addressVerifiedCustomer.id;
     }
@@ -809,10 +821,10 @@ router.post('/confirm', async (req, res, next) => {
         .ignore();
     }
 
-    if (!custId) return res.status(400).json({ error: 'customer_id, estimate_id, or new_customer required' });
+    if (!custId) return { ok: false, status: 400, error: 'customer_id, estimate_id, or new_customer required' };
 
     const customer = await db('customers').where('id', custId).first();
-    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    if (!customer) return { ok: false, status: 404, error: 'Customer not found' };
     await db('notification_prefs')
       .insert({ customer_id: custId })
       .onConflict('customer_id')
@@ -937,7 +949,7 @@ router.post('/confirm', async (req, res, next) => {
         customer_notes: customer_notes || null,
         confirmation_code: confCode,
         source: source || 'direct',
-        referrer_url: referrer_url || req.get('referer') || null,
+        referrer_url: referrer_url || null,
         service_type: resolvedServiceType,
       }).returning('*');
 
@@ -975,18 +987,18 @@ router.post('/confirm', async (req, res, next) => {
             logger.warn(`[booking:confirm] Could not roll back just-created customer ${createdCustomerId}: ${delErr.message}`);
           });
         }
-        return res.status(409).json({ error: txErr.message });
+        return { ok: false, status: 409, error: txErr.message };
       }
       throw txErr;
     }
 
     if (txResult.existing) {
       logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slotDateStr} ${slot_start} — returning existing booking ${txResult.existing.id}`);
-      return res.json({
+      return { ok: true, body: {
         booking: txResult.existing,
         confirmationCode: txResult.existing.confirmation_code,
         replayed: true,
-      });
+      } };
     }
 
     const { booking, serviceRow } = txResult;
@@ -1023,8 +1035,22 @@ router.post('/confirm', async (req, res, next) => {
 
     // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 
+    // Declared at function scope so BOTH the reminder-registration block and the
+    // SMS block (deliverConfirmationByChannel) below can see it. It was previously
+    // declared inside the reminder try, so the sibling SMS block threw a swallowed
+    // ReferenceError — silently skipping the customer confirmation and owner alert.
+    // Best-effort require: the booking + scheduled_services are ALREADY committed
+    // above, so a module-load failure here must not 500 a successful booking (the
+    // global error middleware would also log req.body with booking PII). Both
+    // usages below are inside try/catch, so a null AppointmentReminders is safe.
+    let AppointmentReminders = null;
     try {
-      const AppointmentReminders = require('../services/appointment-reminders');
+      AppointmentReminders = require('../services/appointment-reminders');
+    } catch (err) {
+      logger.error(`[booking:confirm] appointment-reminders module load failed (booking already committed; continuing best-effort): ${err.message}`);
+    }
+
+    try {
       for (const row of [serviceRow, ...followUpRows].filter(r => r?.id)) {
         const scheduledDate = row.id === serviceRow.id
           ? slotDateStr
@@ -1131,7 +1157,23 @@ router.post('/confirm', async (req, res, next) => {
       }
     }
 
-    res.json({ booking, confirmationCode: confCode });
+    return { ok: true, body: { booking, confirmationCode: confCode } };
+}
+
+// POST /api/booking/confirm — thin HTTP adapter over createSelfBooking. The
+// selfBooking gate lives here (a caller concern); the service is gate-agnostic.
+router.post('/confirm', async (req, res, next) => {
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('selfBooking')) {
+      return res.status(503).json({ error: 'Self-scheduling coming soon' });
+    }
+    const result = await createSelfBooking({
+      ...req.body,
+      referrer_url: req.body?.referrer_url || req.get('referer') || null,
+    });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    return res.json(result.body);
   } catch (err) {
     logger.error('[booking:confirm] failed:', err);
     next(err);
@@ -1203,4 +1245,12 @@ module.exports = router;
 module.exports._internals = {
   isOneTimeBookingSource,
   cleanBookingServiceLabel,
+  // Read-only engine surface reused by the voice agent's quoting tools so a
+  // phoned-in availability check runs the exact same route-aware slot finder as
+  // the web /book funnel (no duplicated scheduling logic).
+  resolveBookingCoords,
+  buildBookingAvailability,
+  loadBookingConfig,
+  createSelfBooking,
+  MAX_BOOKING_HORIZON_DAYS,
 };

@@ -10,6 +10,8 @@ const { recordTouchpoint, syncVoiceMessageForCall } = require('../services/conve
 const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 const { getCallRoutingConfig } = require('../services/call-routing-config');
 const { decideVoiceRoute } = require('../services/voice-route-decision');
+const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
+const { isRelayAttached } = require('../services/voice-agent/relay-server');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
@@ -298,19 +300,86 @@ function appendVoicemailRecording(twiml) {
 
 function queueVoiceMessageSync(callSid) {
   if (!callSid) return;
-  void syncVoiceMessageForCall(callSid);
+  // Intentional fire-and-forget, but catch/log so a sync failure never becomes an
+  // unhandled rejection (AGENTS.md floating-promise rule). Promise.resolve()
+  // tolerates a sync/void return from the helper (e.g. in tests).
+  Promise.resolve(syncVoiceMessageForCall(callSid)).catch((err) =>
+    logger.warn(`[voice] voice message sync failed for ${maskSid(callSid)}: ${err.message}`));
 }
 
 const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
+const RELAY_COMPLETE_ACTION = '/api/webhooks/twilio/relay-complete';
 
-// Hand the live call to the configured bilingual AI voice agent.
+// Classify how the configured agent endpoint is reachable, so the live-routing
+// paths emit the right TwiML and never strand a call:
+//   'relay'          → our ConversationRelay WebSocket agent (agentEndpoint is a
+//                      wss:// URL) AND the relay ws server ACTUALLY attached
+//                      (isRelayAttached — reflects VOICE_RELAY_ENABLED +
+//                      ANTHROPIC_API_KEY + VOICE_RELAY_WS_SECRET + deps loaded).
+//                      Handed off via <Connect><ConversationRelay>, NOT <Dial>.
+//   'relay_disabled' → a wss:// endpoint is configured but the relay ws server
+//                      did NOT attach → treat as no reachable agent (caller stays
+//                      on the normal human/voicemail flow; never dial a wss URL).
+//   'dial'           → a PSTN number or SIP URI agent → <Dial> handoff.
+//   'none'           → no endpoint configured.
+//
+// A ws/wss endpoint that isn't a VALID relay target (wrong scheme, wrong path)
+// classifies as 'relay_disabled' — never 'dial' (can't dial a ws URL) and never
+// 'relay' — so a misconfigured endpoint falls through to voicemail rather than
+// emitting <Connect><ConversationRelay> to a dead/insecure socket.
+// Hostnames the relay is allowed to live on. The DB-configured `agentEndpoint`
+// is operator-supplied, and buildRelayTwiML appends VOICE_RELAY_WS_SECRET to it
+// — so a typo'd or malicious host (e.g. wss://attacker.example/ws/voice-agent)
+// must NOT be trusted, or it would leak the secret and hand the call off-site.
+// Trust only this portal's own public origin (PUBLIC_PORTAL_URL / PORTAL_URL /
+// RAILWAY_PUBLIC_DOMAIN) plus loopback for local dev.
+function trustedRelayHostnames() {
+  const set = new Set(['localhost', '127.0.0.1']);
+  for (const env of [process.env.PUBLIC_PORTAL_URL, process.env.PORTAL_URL, process.env.RAILWAY_PUBLIC_DOMAIN]) {
+    if (!env) continue;
+    try {
+      const h = new URL(/^[a-z]+:\/\//i.test(env) ? env : `https://${env}`).hostname;
+      if (h) set.add(h);
+    } catch { /* ignore unparseable env */ }
+  }
+  return set;
+}
+function isRelayEndpoint(endpoint) {
+  let url;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  const secureWs = url.protocol === 'wss:';
+  const localDevWs = url.protocol === 'ws:' && /^(localhost|127\.0\.0\.1)$/.test(url.hostname);
+  if (!(secureWs || localDevWs)) return false;
+  if (url.pathname !== RELAY_WS_PATH) return false;
+  return trustedRelayHostnames().has(url.hostname); // host must be OUR portal origin
+}
+function agentHandoffKind(config) {
+  const endpoint = String(config?.agentEndpoint || '').trim();
+  if (!endpoint) return 'none';
+  if (/^wss?:\/\//i.test(endpoint)) {
+    return (isRelayEndpoint(endpoint) && isRelayAttached()) ? 'relay' : 'relay_disabled';
+  }
+  return 'dial';
+}
+
+// Hand the live call to a DIAL-reachable AI voice agent (PSTN number or SIP
+// URI). ConversationRelay (wss://) agents are handed off at the call site via
+// buildRelayTwiML — never here — so this guards against ever dialing a wss URL
+// as a phone number. Returns true when a <Dial> handoff was appended.
 //
 // FAIL-OPEN BY CONSTRUCTION: the <Dial> carries a short `timeout` and an
 // `action` callback (/agent-fallback). If the agent endpoint does not answer
 // (no-answer/busy/failed), Twilio invokes the action and the caller drops to
-// the Waves voicemail — never dead air, never a trapped call. Only called once
-// decideVoiceRoute has confirmed a non-empty agentEndpoint.
+// the Waves voicemail — never dead air, never a trapped call.
 function appendAgentHandoff(twiml, config, opts = {}) {
+  const endpoint = String(config?.agentEndpoint || '').trim();
+  // A wss:// (ConversationRelay) endpoint cannot be dialed; the call site emits
+  // <Connect><ConversationRelay> instead. Guard so a stray call never tries.
+  if (!endpoint || /^wss?:\/\//i.test(endpoint)) return false;
   const dialOpts = {
     answerOnBridge: true,
     timeout: Math.max(5, Number(config?.agentTimeoutSec) || 10),
@@ -327,9 +396,9 @@ function appendAgentHandoff(twiml, config, opts = {}) {
   const callerId = toE164(opts.callerId || '');
   if (isLikelyE164(callerId)) dialOpts.callerId = callerId;
   const dial = twiml.dial(dialOpts);
-  const endpoint = String(config?.agentEndpoint || '').trim();
   if (/^sips?:/i.test(endpoint)) dial.sip(endpoint);
   else dial.number(endpoint);
+  return true;
 }
 
 // =========================================================================
@@ -473,17 +542,27 @@ router.post('/voice', async (req, res) => {
         // AI can actually back the call up afterward (endpoint set + backstop
         // enabled). Otherwise keep the normal 30s — never cut staff off early
         // for an AI that can't answer.
-        const backstopActive = !!routingConfig.agentEndpoint && routingConfig.noAnswerBackstopEnabled !== false;
+        const handoffKind = agentHandoffKind(routingConfig);
+        // Only shorten the staff ring when the AI can ACTUALLY back the call up
+        // (a reachable agent + backstop enabled). A wss endpoint with the relay
+        // server off is NOT reachable → keep the full 30s staff ring.
+        const agentReachable = handoffKind === 'relay' || handoffKind === 'dial';
+        const backstopActive = agentReachable && routingConfig.noAnswerBackstopEnabled !== false;
         if (backstopActive) ringTimeoutSec = routingConfig.ringTimeoutSec || 30;
         const decision = decideVoiceRoute({ phase: 'initial', gateEnabled: true, config: routingConfig, now: new Date() });
-        if (decision.action === 'agent') {
-          logger.info(`[voice] AI answers-first (${decision.reason}) for ${maskSid(CallSid)}`);
-          const agentTwiml = new VoiceResponse();
-          agentTwiml.play(greetingUrl); // FL §934.03 disclosure before the agent leg
-          appendAgentHandoff(agentTwiml, routingConfig, { callerId: From });
+        if (decision.action === 'agent' && agentReachable) {
+          logger.info(`[voice] AI answers-first (${decision.reason}, ${handoffKind}) for ${maskSid(CallSid)}`);
           await db('call_log').where('twilio_call_sid', CallSid)
             .update({ answered_by: 'ai_agent', updated_at: new Date() })
             .catch(() => {});
+          if (handoffKind === 'relay') {
+            // ConversationRelay's welcomeGreeting carries the FL §934.03 +
+            // automated-assistant disclosure, so no separate greeting MP3 here.
+            return res.type('text/xml').send(buildRelayTwiML({ wsUrl: routingConfig.agentEndpoint.trim(), action: RELAY_COMPLETE_ACTION }));
+          }
+          const agentTwiml = new VoiceResponse();
+          agentTwiml.play(greetingUrl); // FL §934.03 disclosure before the agent leg
+          appendAgentHandoff(agentTwiml, routingConfig, { callerId: From });
           return res.type('text/xml').send(agentTwiml.toString());
         }
       }
@@ -620,9 +699,21 @@ router.post('/call-complete', async (req, res) => {
             now: new Date(),
           });
           if (decision.action === 'agent') {
-            logger.info(`[call-complete] AI backstop (${decision.reason}) for ${maskSid(CallSid)}`);
-            appendAgentHandoff(twiml, routingConfig, { callerId: req.body?.From });
-            handedToAgent = true;
+            const handoffKind = agentHandoffKind(routingConfig);
+            if (handoffKind === 'relay') {
+              logger.info(`[call-complete] AI backstop relay (${decision.reason}) for ${maskSid(CallSid)}`);
+              // Handed to the agent — correct the voicemail outcome stamped above
+              // (the final outcome resolves when the relay session ends).
+              await db('call_log').where('twilio_call_sid', CallSid)
+                .update({ answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
+                .catch(() => {});
+              return res.type('text/xml').send(buildRelayTwiML({ wsUrl: routingConfig.agentEndpoint.trim(), action: RELAY_COMPLETE_ACTION }));
+            }
+            if (handoffKind === 'dial') {
+              logger.info(`[call-complete] AI backstop dial (${decision.reason}) for ${maskSid(CallSid)}`);
+              handedToAgent = appendAgentHandoff(twiml, routingConfig, { callerId: req.body?.From });
+            }
+            // 'relay_disabled' / 'none' → fall through to Waves voicemail below.
           }
         }
       } catch (agentErr) {
@@ -655,6 +746,42 @@ router.post('/call-complete', async (req, res) => {
 // =========================================================================
 router.post('/voicemail-complete', (req, res) => {
   res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+});
+
+// =========================================================================
+// POST /api/webhooks/twilio/relay-complete — <Connect action> for the AI relay
+//
+// Twilio requests this when a <Connect><ConversationRelay> session ends. On a
+// relay/WS FAILURE (the session-ending errors Twilio documents, e.g. 64102 /
+// 64105, a rejected upgrade, or a transient disconnect) we fall OPEN to the
+// Waves voicemail so a no-answer-backstop call is never stranded; on a normal
+// end (agent finished, or the caller hung up) we just complete the call.
+//
+// NOTE: ConversationRelay result param names vary by version — verify
+// ErrorCode/SessionStatus against the live account on the first call (same
+// caveat as relay-protocol.parsePrompt). Unrecognized → clean hangup (valid
+// TwiML), never dead air.
+// =========================================================================
+router.post('/relay-complete', async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const errorCode = req.body?.ErrorCode || req.body?.errorCode || '';
+  const sessionStatus = String(req.body?.SessionStatus || req.body?.sessionStatus || '').toLowerCase();
+  const failed = !!errorCode || ['failed', 'error', 'disconnected'].includes(sessionStatus);
+  const twiml = new VoiceResponse();
+  if (failed) {
+    logger.warn(`[relay-complete] relay session failed (${errorCode || sessionStatus || 'unknown'}) for ${maskSid(callSid)} — falling back to voicemail`);
+    // Undo the ai_agent/ai_handled stamp the relay handoff applied: this call
+    // did NOT reach the agent, it went to voicemail. Reconcile before recording
+    // so reporting doesn't show a failed relay call as AI-handled.
+    if (callSid) {
+      await db('call_log').where('twilio_call_sid', callSid)
+        .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
+        .catch((err) => logger.warn(`[relay-complete] call_log reconcile failed for ${maskSid(callSid)}: ${err.message}`));
+      queueVoiceMessageSync(callSid);
+    }
+    appendVoicemailRecording(twiml);
+  }
+  res.type('text/xml').send(twiml.toString());
 });
 
 // =========================================================================
@@ -1243,6 +1370,8 @@ router.post('/call-status', async (req, res) => {
 });
 
 router._test = {
+  agentHandoffKind,
+  appendAgentHandoff,
   connectingAnnouncement,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
