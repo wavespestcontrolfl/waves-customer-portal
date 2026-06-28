@@ -1651,18 +1651,45 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
+    let linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
     let linkedEstimate = null;
+    let estimateAutoAccepted = false;
+    const bookingWarnings = [];
     if (linkedEstimateId) {
       linkedEstimate = await db('estimates')
         .where({ id: linkedEstimateId })
         .first('id', 'customer_id', 'status', 'estimate_data');
       if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
-      if (linkedEstimate.status !== 'accepted') {
-        return res.status(400).json({ error: 'Only accepted estimates can be linked to new appointments' });
-      }
       if (String(linkedEstimate.customer_id || '') !== String(customerId)) {
         return res.status(400).json({ error: 'Linked estimate belongs to a different customer' });
+      }
+      if (linkedEstimate.status !== 'accepted') {
+        // Booking from a phone "yes" → record the win. Reuse the canonical
+        // manual-accept flow so funnel reporting, the linked-lead conversion,
+        // and (for recurring quotes) customer conversion all run exactly as a
+        // desk "Mark Won" would — scheduling stays with this booking
+        // (skipAutoSchedule). Best-effort: the estimate shapes the manual flow
+        // intentionally guards (a one-time/recurring choice, invoice-mode,
+        // expired, pending manager approval) can't be auto-accepted here, so we
+        // still book the appointment — just without the formal estimate link,
+        // since the deposit / actuals / invoicing paths that read
+        // source_estimate_id assume a recorded win.
+        try {
+          const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+          await markEstimateManuallyAccepted({
+            estimateId: linkedEstimateId,
+            adminUserId: req.technicianId || null,
+            source: 'verbal_yes_booking',
+          });
+          linkedEstimate.status = 'accepted';
+          estimateAutoAccepted = true;
+        } catch (err) {
+          logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
+          bookingWarnings.push(`Appointment booked, but the estimate could not be marked accepted automatically (${err.message}). Mark it accepted from the Estimates page to record the win.`);
+          // Don't carry a non-accepted estimate into source_estimate_id.
+          linkedEstimateId = null;
+          linkedEstimate = null;
+        }
       }
     }
     const zone = getZone(customer?.city, customer?.zip);
@@ -2022,7 +2049,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
       recurringCreated: isRecurring ? (recurringCount || 4) : 1,
       appointments: createdAppointments,
       waveguardPlanSync,
-      warnings: [],
+      estimateAccepted: estimateAutoAccepted,
+      warnings: bookingWarnings,
     });
 
     // ── Post-commit side-effects (fire-and-forget; never fail the request) ──

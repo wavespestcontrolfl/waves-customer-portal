@@ -1014,13 +1014,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // (windowStart..windowEnd) instead of just the primary line's
           // catalog default — capacity / dispatch math depends on this.
           estimatedDuration: groupDuration > 0 ? groupDuration : undefined,
-          // Only formally link ACCEPTED estimates — the server rejects a
-          // sourceEstimateId whose estimate isn't accepted (and the deposit /
-          // actuals / invoicing paths that read source_estimate_id assume a
-          // recorded win). A sent/viewed quote that the customer accepted by
-          // phone still fills the service lines + prices above; it just books
-          // as a normal appointment until someone marks the estimate accepted.
-          sourceEstimateId: linkedEstimate?.status === 'accepted' ? linkedEstimate.id : undefined,
+          // Always pass the linked estimate id. The server links accepted
+          // estimates directly; for a sent/viewed quote the customer accepted
+          // by phone it records the acceptance first (canonical Mark-Won flow)
+          // and then links, or — for estimate shapes that can't be auto-
+          // accepted — books without the link and returns a warning.
+          sourceEstimateId: linkedEstimate?.id || undefined,
           urgency: 'routine',
           notes: customerNotes || undefined,
           internalNotes: internalNotes || undefined,
@@ -1081,10 +1080,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       return;
     }
     const apptCount = results.length || createdGroupKeysRef.current.size;
-    const message = apptCount === 1
+    const estimateAccepted = results.some((r) => r?.estimateAccepted);
+    const apptWarnings = results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : []));
+    const baseMessage = apptCount === 1
       ? 'Appointment created — invoice will send with service report'
       : `${apptCount} appointment series created — invoices will send with each service report`;
-    setToast(message);
+    setToast(estimateAccepted ? `Estimate marked accepted. ${baseMessage}` : baseMessage);
+    // A guarded estimate (one-time/recurring choice, invoice-mode, expired,
+    // pending manager approval) books fine but couldn't be auto-accepted — tell
+    // the operator so they can record the win from the Estimates page.
+    if (apptWarnings.length) alert(apptWarnings.join('\n\n'));
     setTimeout(() => {
       createdGroupKeysRef.current = new Set();
       onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
@@ -1446,7 +1451,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                             <span style={{ fontWeight: 400, color: D.muted }}>
                               {accepted
                                 ? 'Customer accepted this estimate.'
-                                : 'Quote filled in from the estimate — mark it accepted to record the win.'}
+                                : 'Saving this appointment will mark the estimate accepted and record the win.'}
                             </span>
                           </div>
                         );
@@ -1469,7 +1474,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         <span style={{ minWidth: 0 }}>
                           {linkedEstimate.status === 'accepted'
                             ? `Linked to estimate #${String(linkedEstimate.id).slice(0, 8)}. Service lines and prices can still be edited before saving.`
-                            : `Quoted from estimate #${String(linkedEstimate.id).slice(0, 8)}. Prices filled from the quote — edit before saving as needed.`}
+                            : `From estimate #${String(linkedEstimate.id).slice(0, 8)} — saving marks it accepted and links it. Prices filled from the quote; edit before saving as needed.`}
                         </span>
                         <button
                           type="button"

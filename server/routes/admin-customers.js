@@ -1512,7 +1512,6 @@ router.get('/:id/comms', async (req, res, next) => {
 // `status` so the UI can show whether it's accepted yet. This keeps the UI
 // from guessing at estimate_data shapes and returns service-library ids when
 // we can match the quoted line to a schedulable service.
-const SCHEDULE_ESTIMATE_STATUSES = ['accepted', 'viewed', 'sent'];
 router.get('/:id/schedule-estimates', async (req, res, next) => {
   try {
     const customer = await db('customers')
@@ -1524,8 +1523,18 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
     const [estimates, serviceRows] = await Promise.all([
       db('estimates')
         .where({ customer_id: customer.id })
-        .whereIn('status', SCHEDULE_ESTIMATE_STATUSES)
         .whereNull('archived_at')
+        // Accepted estimates always qualify. Open quotes (sent / viewed)
+        // qualify too — that's the phone-acceptance case — but only while
+        // they're still live, so an expired quote's stale price doesn't show
+        // up as bookable (and can't hit the doomed auto-accept path).
+        .where((qb) => qb
+          .where('status', 'accepted')
+          .orWhere((open) => open
+            .whereIn('status', ['sent', 'viewed'])
+            .andWhere((live) => live
+              .whereNull('expires_at')
+              .orWhere('expires_at', '>=', db.fn.now()))))
         // Accepted estimates float to the top; open quotes follow, each set
         // newest-first (accepted_at is null for sent/viewed, so those fall
         // through to created_at).
