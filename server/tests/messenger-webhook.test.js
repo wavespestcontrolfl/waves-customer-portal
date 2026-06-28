@@ -9,9 +9,11 @@ describe('messenger webhook channel mapping', () => {
     expect(router.channelForAddress('instagram:17841400000000000')).toBe('instagram');
   });
 
-  test('unknown / empty address defaults to facebook_messenger', () => {
-    expect(router.channelForAddress('')).toBe('facebook_messenger');
-    expect(router.channelForAddress(undefined)).toBe('facebook_messenger');
-    expect(router.channelForAddress(null)).toBe('facebook_messenger');
+  test('non-social / unknown addresses return null (ignored, never mis-tagged)', () => {
+    expect(router.channelForAddress('')).toBeNull();
+    expect(router.channelForAddress(undefined)).toBeNull();
+    expect(router.channelForAddress(null)).toBeNull();
+    expect(router.channelForAddress('+19415551234')).toBeNull();
+    expect(router.channelForAddress('whatsapp:+19415551234')).toBeNull();
   });
 });

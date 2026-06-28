@@ -6,10 +6,15 @@ const logger = require('../services/logger');
 const { recordTouchpoint } = require('../services/conversations');
 
 // Map an inbound `To` address to a unified-inbox channel. Facebook Messenger
-// and Instagram both arrive through Twilio's Programmable-Messaging channel
-// senders with `messenger:` / `instagram:` prefixed addresses.
+// and Instagram arrive through Twilio's Programmable-Messaging channel senders
+// with `messenger:` / `instagram:` prefixed addresses. Returns null for any
+// other shape (SMS/WhatsApp/empty/misroute) so we never mis-tag a non-social
+// address as Facebook.
 function channelForAddress(address) {
-  return String(address || '').startsWith('instagram:') ? 'instagram' : 'facebook_messenger';
+  const a = String(address || '');
+  if (a.startsWith('messenger:')) return 'facebook_messenger';
+  if (a.startsWith('instagram:')) return 'instagram';
+  return null;
 }
 
 /**
@@ -41,7 +46,20 @@ router.post('/messenger', async (req, res) => {
       return res.type('text/xml').send('<Response></Response>');
     }
 
+    // Only persist genuine messenger:/instagram: shapes. Ignore (ACK without
+    // storing) anything else — a signed Twilio misroute or malformed sender
+    // request must never create a bogus social conversation.
     const channel = channelForAddress(To);
+    if (!channel) {
+      logger.warn(`[messenger] ignoring unrecognized To address shape: ${To}`);
+      return res.type('text/xml').send('<Response></Response>');
+    }
+    const expectedPrefix = channel === 'instagram' ? 'instagram:' : 'messenger:';
+    if (!String(From).startsWith(expectedPrefix)) {
+      logger.warn(`[messenger] ignoring From/To channel-family mismatch (from=${From} to=${To})`);
+      return res.type('text/xml').send('<Response></Response>');
+    }
+
     // FB/IG senders include the contact's display name as ProfileName.
     const contactLabel = req.body.ProfileName || null;
 
