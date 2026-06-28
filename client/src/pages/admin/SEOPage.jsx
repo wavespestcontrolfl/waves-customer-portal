@@ -858,6 +858,11 @@ function GeoGridTab() {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [view, setView] = useState("grid"); // "grid" | "map"
+  const [scanGridSize, setScanGridSize] = useState(5); // N for the NEXT scan
+  const [editingKw, setEditingKw] = useState(false);
+  const [kwDraft, setKwDraft] = useState("");
+  const [kwSaving, setKwSaving] = useState(false);
+  const [kwErr, setKwErr] = useState("");
 
   useEffect(() => {
     adminFetch("/admin/seo/geo-grid")
@@ -865,6 +870,7 @@ function GeoGridTab() {
         setCfg(d);
         if (d?.offices?.length) setOffice(d.offices[0].id);
         if (d?.keywords?.length) setKeyword(d.keywords[0]);
+        if (d?.gridSize) setScanGridSize(d.gridSize);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -894,7 +900,7 @@ function GeoGridTab() {
     try {
       const r = await adminFetch("/admin/seo/geo-grid/run", {
         method: "POST",
-        body: { officeId: office, keyword },
+        body: { officeId: office, keyword, gridSize: scanGridSize },
       });
       if (r?.started === false) {
         setRunning(false);
@@ -913,6 +919,59 @@ function GeoGridTab() {
       }, 20000);
     } catch {
       setRunning(false);
+    }
+  };
+
+  // CSV of the current office+keyword heat map. Plain fetch (not adminFetch,
+  // which JSON-parses) → blob → download, carrying the admin bearer token.
+  const downloadCsv = async () => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/admin/seo/geo-grid/export?office=${encodeURIComponent(office)}&keyword=${encodeURIComponent(keyword)}`,
+        { headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` } },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `geo-grid-${office}-${keyword.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      /* surfaced via the disabled-state; a failed export is non-critical */
+    }
+  };
+
+  const openKwEditor = () => {
+    setKwDraft((cfg?.keywords || []).join(", "));
+    setKwErr("");
+    setEditingKw(true);
+  };
+
+  const saveKeywords = async () => {
+    const list = kwDraft.split(",").map((k) => k.trim()).filter(Boolean);
+    if (!list.length) {
+      setKwErr("Enter at least one keyword.");
+      return;
+    }
+    setKwSaving(true);
+    setKwErr("");
+    try {
+      const r = await adminFetch("/admin/seo/geo-grid/keywords", {
+        method: "POST",
+        body: { keywords: list },
+      });
+      const saved = r?.keywords || list;
+      setCfg((c) => ({ ...c, keywords: saved }));
+      if (!saved.includes(keyword)) setKeyword(saved[0]);
+      setEditingKw(false);
+    } catch (e) {
+      setKwErr(e.message || "Save failed.");
+    } finally {
+      setKwSaving(false);
     }
   };
 
@@ -955,6 +1014,31 @@ function GeoGridTab() {
           ))}
         </select>
         <button
+          onClick={openKwEditor}
+          style={{
+            padding: "8px 10px",
+            border: `1px solid ${D.inputBorder}`,
+            borderRadius: 6,
+            background: D.white,
+            color: D.text,
+            fontSize: 13,
+            cursor: "pointer",
+          }}
+          title="Edit the tracked keywords"
+        >
+          Edit keywords
+        </button>
+        <select
+          value={scanGridSize}
+          onChange={(e) => setScanGridSize(Number(e.target.value))}
+          style={selStyle}
+          title="Grid size for the next scan (N×N pins per office)"
+        >
+          {(cfg.gridSizeOptions || [cfg.gridSize]).map((n) => (
+            <option key={n} value={n}>{n}×{n}</option>
+          ))}
+        </select>
+        <button
           onClick={runScan}
           disabled={running || cfg.gated}
           style={{
@@ -970,6 +1054,24 @@ function GeoGridTab() {
           }}
         >
           {running ? "Scanning…" : "Run scan"}
+        </button>
+        <button
+          onClick={downloadCsv}
+          disabled={!heat?.pins?.length}
+          style={{
+            padding: "8px 12px",
+            border: `1px solid ${D.inputBorder}`,
+            borderRadius: 6,
+            background: D.white,
+            color: D.text,
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: heat?.pins?.length ? "pointer" : "default",
+            opacity: heat?.pins?.length ? 1 : 0.5,
+          }}
+          title="Export this heat map to CSV"
+        >
+          Export CSV
         </button>
         {cfg.gated && (
           <span style={{ color: D.amber, fontSize: 12 }}>
@@ -1005,6 +1107,54 @@ function GeoGridTab() {
           ))}
         </div>
       </div>
+
+      {editingKw && (
+        <Card style={{ padding: 14, marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>
+            Tracked keywords (comma-separated, up to 6). Fewer keywords = lower DataForSEO spend per scan.
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              value={kwDraft}
+              onChange={(e) => setKwDraft(e.target.value)}
+              placeholder="pest control, exterminator, termite control"
+              style={{ ...selStyle, flex: 1, minWidth: 280 }}
+            />
+            <button
+              onClick={saveKeywords}
+              disabled={kwSaving}
+              style={{
+                padding: "8px 14px",
+                border: "none",
+                borderRadius: 6,
+                background: D.heading,
+                color: "#fff",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: kwSaving ? "default" : "pointer",
+                opacity: kwSaving ? 0.55 : 1,
+              }}
+            >
+              {kwSaving ? "Saving…" : "Save"}
+            </button>
+            <button
+              onClick={() => setEditingKw(false)}
+              style={{
+                padding: "8px 12px",
+                border: `1px solid ${D.inputBorder}`,
+                borderRadius: 6,
+                background: D.white,
+                color: D.text,
+                fontSize: 13,
+                cursor: "pointer",
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+          {kwErr && <div style={{ color: D.red, fontSize: 12, marginTop: 8 }}>{kwErr}</div>}
+        </Card>
+      )}
 
       {stats && (
         <div style={{ display: "flex", gap: 28, marginBottom: 16, flexWrap: "wrap" }}>
