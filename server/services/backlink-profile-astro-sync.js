@@ -59,16 +59,17 @@ const VERIFIED_LIVE_STATUSES = ['live', 'indexed'];
  * from a worker self-report), so only independently-confirmed listings ship.
  */
 async function getVerifiedCorporateProfileUrls() {
-  // CORPORATE scope only — exclude per-LOCATION listings. The signup runner picks
-  // a GBP location per prospect; per-office listings stamp quality_signals.location
-  // (one listing per office per directory), while a default/brand-level listing
-  // leaves it unset. Per-office profiles are hand-curated in entity-profiles.ts, so
-  // only unscoped (location-null) rows feed the corporate Organization sameAs.
+  // CORPORATE scope only — exclude per-OFFICE listings. The signup runner stamps
+  // quality_signals.location on EVERY row: a real GBP location id for an office
+  // listing, or the string 'default' for a brand-level one (signup-runner.js:248,
+  // `String(loc.id || 'default')`). So corporate = location 'default' (or NULL for
+  // any non-runner row); a real location id is per-office and stays hand-curated
+  // in entity-profiles.ts. (Filtering on NULL alone would drop every runner row.)
   const rows = await db('seo_link_prospects')
     .whereIn('status', VERIFIED_LIVE_STATUSES)
     .whereIn('link_type', PROFILE_LINK_TYPES)
     .whereNotNull('live_url')
-    .whereRaw("(quality_signals->>'location') IS NULL")
+    .whereRaw("((quality_signals->>'location') IS NULL OR (quality_signals->>'location') = 'default')")
     .select('live_url');
 
   const seen = new Set();
@@ -134,7 +135,12 @@ async function syncProfilesToAstro({ dryRun = false } = {}) {
   }
 
   // The target file is created by the astro PR; don't fork the source of truth.
+  // null = a GitHub 404 — but a wrong GITHUB_ASTRO_REPO/owner or a token that
+  // can't see the private repo also 404s. verifyAccess() throws on those, so a
+  // misconfig fails the run loudly instead of silently going dark as
+  // target_missing; only a genuinely-absent file reaches the skip below.
   if (!existing) {
+    await gh.verifyAccess();
     logger.error(`[backlink-sync] ${ASTRO_FILE} missing on default branch (astro PR not merged) — skipping`);
     return { wrote: false, reason: 'target_missing', changed: true, count: urls.length };
   }
@@ -155,16 +161,26 @@ async function syncProfilesToAstro({ dryRun = false } = {}) {
   // take longer than the weekly interval, and the default branch keeps the old
   // list until merge, so a fresh branch each run would stack duplicate PRs with
   // the same URLs. Update the open PR's branch in place instead.
-  const openPrs = await gh
-    .ghFetchPaginated(`/repos/${owner}/${repo}/pulls?state=open`)
-    .catch(() => []);
+  // Live path (dry-run/gate-off already returned) — do NOT swallow a failed
+  // lookup: if it errors we can't tell whether a sync PR is already open, and
+  // falling through would stack a duplicate. Let it throw so the next run reconciles.
+  const openPrs = await gh.ghFetchPaginated(`/repos/${owner}/${repo}/pulls?state=open`);
   const openSyncPr = (openPrs || []).find(
     (p) => p && p.head && typeof p.head.ref === 'string' && p.head.ref.startsWith(SYNC_BRANCH_PREFIX),
   );
 
   if (openSyncPr) {
     const branch = openSyncPr.head.ref;
-    const onBranch = await gh.getFile(ASTRO_FILE, branch).catch(() => null);
+    const onBranch = await gh.getFile(ASTRO_FILE, branch); // null on 404, throws on auth/network
+    // Skip if the open PR's branch already carries this exact set — `changed` was
+    // computed against the default branch, so a still-open PR keeps landing here;
+    // re-writing would churn a no-op commit (generatedAt differs), rerun CI, and
+    // invalidate an already-approved diff.
+    const branchCurrent = parseCurrentCorporate(onBranch);
+    if (branchCurrent.slice().sort().join('\n') === urls.join('\n')) {
+      logger.info(`[backlink-sync] open PR ${openSyncPr.html_url} already current (${urls.length} profiles) — no update`);
+      return { wrote: false, reason: 'pr_already_current', count: urls.length, pr: openSyncPr.html_url, branch };
+    }
     await gh.putFile({ path: ASTRO_FILE, content, message, branch, sha: onBranch ? onBranch.sha : existing.sha });
     // Refresh title/body too — the diff now reflects a different set, so stale
     // count/URL review instructions would otherwise mislead the reviewer.
