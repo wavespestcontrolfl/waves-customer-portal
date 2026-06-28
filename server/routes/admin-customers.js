@@ -36,7 +36,7 @@ function dateOnlyForApi(value) {
   return String(value).split('T')[0].slice(0, 10);
 }
 
-const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset']);
+const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 
 function membershipTierKey(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -1045,6 +1045,11 @@ router.post('/fix-tiers', requireAdmin, async (req, res, next) => {
 
     let updated = 0;
     for (const c of customers) {
+      // Never rewrite an explicit non-member tier (e.g. the flat-commercial
+      // 'Commercial' sentinel, or 'One-Time') from scheduled-service count —
+      // doing so would re-enable WaveGuard membership/discount behavior on a
+      // customer that was intentionally marked non-member.
+      if (NON_MEMBERSHIP_TIER_KEYS.has(membershipTierKey(c.waveguard_tier))) continue;
       const services = await db('scheduled_services')
         .where({ customer_id: c.id })
         .whereIn('status', ['scheduled', 'confirmed', 'completed'])

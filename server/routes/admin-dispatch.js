@@ -440,7 +440,11 @@ function normalizeCustomerInteractionValue(value) {
 }
 
 function isWaveGuardLawnCompletion(svc) {
-  return !!svc?.cust_waveguard_tier && detectServiceLine(svc?.service_type) === 'lawn';
+  // Real WaveGuard member tiers only — a flat-commercial lawn job ('Commercial'
+  // tier) is excluded from WaveGuard protocol-readiness prep, so it must not
+  // enter the WaveGuard fertilizer/N/inventory/manager completion lockouts here.
+  return ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(svc?.cust_waveguard_tier)
+    && detectServiceLine(svc?.service_type) === 'lawn';
 }
 
 function calibrationLockoutBlocks(plan) {

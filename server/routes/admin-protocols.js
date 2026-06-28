@@ -386,7 +386,8 @@ async function buildReadinessQueue(knex, { days = 14, limit = 50 } = {}) {
     .leftJoin('technicians as t', 'ss.technician_id', 't.id')
     .whereBetween('ss.scheduled_date', [today, endDate])
     .whereNotIn('ss.status', ['completed', 'cancelled', 'canceled', 'void'])
-    .whereNotNull('c.waveguard_tier')
+    // Real WaveGuard members only — exclude the flat non-member 'Commercial' tier.
+    .whereIn('c.waveguard_tier', ['Bronze', 'Silver', 'Gold', 'Platinum'])
     .where(function lawnService() {
       this.whereILike('ss.service_type', '%lawn%')
         .orWhereILike('ss.service_type', '%fertiliz%')
@@ -483,7 +484,8 @@ async function getUpcomingWaveGuardLawnServices(knex, { days = 14, limit = 75 } 
     .leftJoin('technicians as t', 'ss.technician_id', 't.id')
     .whereBetween('ss.scheduled_date', [today, endDate])
     .whereNotIn('ss.status', ['completed', 'cancelled', 'canceled', 'void'])
-    .whereNotNull('c.waveguard_tier')
+    // Real WaveGuard members only — exclude the flat non-member 'Commercial' tier.
+    .whereIn('c.waveguard_tier', ['Bronze', 'Silver', 'Gold', 'Platinum'])
     .where(function lawnService() {
       this.whereILike('ss.service_type', '%lawn%')
         .orWhereILike('ss.service_type', '%fertiliz%')

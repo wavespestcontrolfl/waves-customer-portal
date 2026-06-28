@@ -68,9 +68,17 @@ function numberOrNull(...values) {
 }
 
 function isManualQuoteLine(line = {}) {
-  return line?.quoteRequired === true ||
-    line?.requiresManualReview === true ||
-    String(line?.service || '').startsWith('commercial_');
+  if (line?.quoteRequired === true || line?.requiresManualReview === true) return true;
+  // Priced commercial programs (commercial_lawn / commercial_tree_shrub
+  // auto_estimate, owner directive 2026-06-28) carry an annual and flow as
+  // normal priced recurring lines shown to the lead. Only a commercial line
+  // with NO auto price (e.g. commercial pest, which stays manual) is a manual
+  // quote line.
+  if (String(line?.service || '').startsWith('commercial_')) {
+    const hasAutoPrice = Number(line?.annual) > 0 || Number(line?.monthly) > 0 || Number(line?.price) > 0;
+    return !hasAutoPrice;
+  }
+  return false;
 }
 
 function pricedRecurringServicesFromLineItems(lineItems = []) {
@@ -375,8 +383,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Select at least one service.' });
     }
 
-    const sqft = Math.max(500, Math.min(20000, Number(homeSqFt) || 2000));
-    const lot = Math.max(500, Math.min(200000, Number(lotSqFt) || sqft * 4));
     const ep = (enriched && typeof enriched === 'object') ? enriched : {};
     const commercialDetected = isPublicCommercialQuote({
       propertyType,
@@ -384,6 +390,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       isCommercial,
       commercialSubtype,
     }, ep);
+    // Commercial auto-pricing is no-size-cap (owner directive 2026-06-28), so a
+    // large commercial building/lot must NOT be clamped to the residential
+    // 20k/200k ceilings before pricing — that would underquote it. Keep a sane
+    // floor + a high overflow guard for commercial; residential is unchanged.
+    const HOME_CAP = commercialDetected ? 5_000_000 : 20000;
+    const LOT_CAP = commercialDetected ? 50_000_000 : 200000;
+    const sqft = Math.max(500, Math.min(HOME_CAP, Number(homeSqFt) || 2000));
+    const lot = Math.max(500, Math.min(LOT_CAP, Number(lotSqFt) || sqft * 4));
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
     // density, landscape complexity, near-water, large-driveway) flow into the
@@ -416,6 +430,33 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       },
       services: {},
     };
+    if (commercialDetected) {
+      // The commercial auto-pricers price directly from measured turf / bed /
+      // tree dimensions. Pass the property-lookup measurements through so the
+      // profile doesn't fall back to lot-derived estimates and mis-quote (then
+      // persist/book/invoice the wrong commercial price). Residential public
+      // quotes intentionally keep their lot-derived turf basis, so this is
+      // commercial-only and doesn't shift any existing residential price.
+      // Only accept non-empty numeric values. Number(null)/Number('') are 0
+      // (finite), so a missing measuredTurfSf would otherwise coerce to an
+      // authoritative measured turf of 0 and suppress the estimatedTurfSf.
+      const num = (v) => {
+        if (v === null || v === undefined || v === '') return undefined;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : undefined;
+      };
+      engineInput.measuredTurfSf = num(ep.measuredTurfSf);
+      engineInput.estimatedTurfSf = num(ep.estimatedTurfSf);
+      engineInput.imperviousSurfacePercent = num(ep.imperviousSurfacePercent ?? ep.imperviosSurfacePercent);
+      engineInput.estimatedBedAreaSf = num(ep.estimatedBedAreaSf);
+      engineInput.estimatedBedAreaPercent = num(ep.estimatedBedAreaPercent);
+      if (ep.bedAreaSource) engineInput.bedAreaSource = ep.bedAreaSource;
+      engineInput.treeDensity = (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined;
+      engineInput.shrubDensity = (ep.shrubDensity || ep.shrubs || '').toString().toLowerCase() || undefined;
+      engineInput.landscapeComplexity = (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined;
+      const palms = num(ep.palmCount);
+      if (palms !== undefined) engineInput.palmCount = palms;
+    }
     if (services.pest) {
       engineInput.services.pest = { frequency: services.pest.frequency || 'quarterly' };
     }
@@ -530,6 +571,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       isManualQuoteLine(line)
     );
     const manualQuoteLine = manualQuoteLines[0] || null;
+    // If ANY line still needs a manual quote (e.g. commercial pest, which is not
+    // auto-priced), the whole public quote stays manual. The customer flow has
+    // no partial-quote contract — setup fees, booking links, and delivery gates
+    // all assume the quote is wholly priced or wholly manual. A lawn-only or
+    // tree-only commercial quote has no manual line, so it prices instantly.
     const quoteRequired = !!manualQuoteLine;
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
@@ -542,6 +588,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       logger.error('[public-quote] Engine returned zero price', { engineInput, estimate });
       return res.status(500).json({ error: 'Unable to calculate a price right now.' });
     }
+
+    // Commercial auto-priced lines (lawn / tree & shrub) carry an "estimated,
+    // confirmed on site" disclaimer — the agreed mitigation for showing a
+    // satellite-derived price instantly. Surface it on the response + persisted
+    // data so the lead and the admin/accept views always see it.
+    const commercialEstimatedLines = (estimate?.lineItems || []).filter(
+      (line) => line && line.estimatedPricing === true && String(line.service || '').startsWith('commercial_')
+    );
+    const commercialDisclaimer = commercialEstimatedLines.length
+      ? (commercialEstimatedLines[0].disclaimer || 'Estimated from property data — final price confirmed on site.')
+      : null;
 
     const serviceInterest = buildPublicQuoteServiceInterest(services);
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
@@ -570,6 +627,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       quoteRequiredReason: manualQuoteLine?.reason || null,
       quoteRequiredService: manualQuoteLine?.service || null,
       manualQuoteLines,
+      commercialEstimatedPricing: !!commercialDisclaimer,
+      commercialDisclaimer: commercialDisclaimer || null,
       utm: attr?.utm || null,
       clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
       referrer: attr?.referrer || null,
@@ -767,9 +826,24 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // sold cadence and reserve a long-enough slot (not quarterly/45-90min).
             cadence: item.cadence ?? null,
             estimatedDurationMinutes: item.estimatedDurationMinutes ?? null,
+            // Commercial auto-priced lines: keep the estimated-pricing metadata
+            // (disclaimer/confidence/tax) so the accept/render path shows it.
+            estimatedPricing: item.estimatedPricing === true ? true : undefined,
+            disclaimer: item.disclaimer ?? undefined,
+            commercialPricingMode: item.commercialPricingMode ?? undefined,
+            isCommercial: item.isCommercial === true ? true : undefined,
+            pricingConfidence: item.pricingConfidence ?? undefined,
+            taxable: typeof item.taxable === 'boolean' ? item.taxable : undefined,
+            taxCategory: item.taxCategory ?? undefined,
+            // Flat commercial pricing — keep the exclusion so the accept path
+            // never applies a WaveGuard/% discount to it.
+            discountable: item.discountable === false ? false : undefined,
+            excludeFromPctDiscount: item.excludeFromPctDiscount === true ? true : undefined,
           })),
           waveGuard: estimate?.waveGuard || null,
         },
+        commercialEstimatedPricing: !!commercialDisclaimer,
+        commercialDisclaimer: commercialDisclaimer || undefined,
       };
       if (quoteRequired) {
         estimateDataObj.result = buildQuoteRequiredEstimateResult(estimate, manualQuoteLines);
@@ -842,7 +916,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     let bookingUrl = null;
     let bookingServiceLabel = null;
-    if (!quoteRequired) {
+    // Commercial auto-priced quotes do NOT get a generic self-booking link: the
+    // /book flow defaults a missing duration to ~60 min, so a no-size-cap
+    // commercial job (priced from tens of thousands of sqft) could self-book a
+    // residential-length slot. The price still shows instantly; a team member
+    // schedules the (longer, route-sensitive) commercial visit.
+    if (!quoteRequired && !commercialDetected) {
       try {
         let bookingServiceId;
         if (isOneTimeOnly) {
@@ -851,10 +930,33 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           bookingServiceId = bookingService.id;
           bookingServiceLabel = serviceInterest || bookingService.label;
         } else {
-          const wantsPest = !!services?.pest;
-          const wantsLawn = !!services?.lawn;
-          bookingServiceId = wantsPest ? 'pest_control' : 'lawn_care';
-          bookingServiceLabel = wantsPest && wantsLawn ? 'Pest Control & Lawn Care' : wantsPest ? 'Pest Control' : 'Lawn Care';
+          // Derive the booking service from the PRICED lines, not the raw
+          // service selection — in a mixed commercial quote the pest line is
+          // manual (not bookable) while lawn/tree are priced, so booking must
+          // point at what the lead can actually book.
+          const pricedServiceKeys = new Set(
+            (estimate?.lineItems || [])
+              .filter((l) => l && !isManualQuoteLine(l) && (Number(l.annual) > 0 || Number(l.price) > 0))
+              .map((l) => l.service)
+          );
+          const wantsPest = pricedServiceKeys.has('pest_control');
+          const wantsLawn = pricedServiceKeys.has('lawn_care') || pricedServiceKeys.has('commercial_lawn');
+          const wantsTreeShrub = pricedServiceKeys.has('tree_shrub') || pricedServiceKeys.has('commercial_tree_shrub');
+          if (wantsPest) {
+            bookingServiceId = 'pest_control';
+            bookingServiceLabel = wantsLawn ? 'Pest Control & Lawn Care' : 'Pest Control';
+          } else if (wantsLawn) {
+            bookingServiceId = 'lawn_care';
+            bookingServiceLabel = 'Lawn Care';
+          } else if (wantsTreeShrub) {
+            // Tree/shrub-only (incl. commercial_tree_shrub auto-priced) must not
+            // fall back to the Lawn Care booking link.
+            bookingServiceId = 'tree_shrub';
+            bookingServiceLabel = 'Tree & Shrub';
+          } else {
+            bookingServiceId = 'lawn_care';
+            bookingServiceLabel = 'Lawn Care';
+          }
         }
         const bookingSource = isOneTimeOnly ? 'quote-wizard-onetime' : 'quote-wizard';
         const bookingParams = new URLSearchParams({ service: bookingServiceId, source: bookingSource });
@@ -875,7 +977,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         : `$${Math.round(monthly)}/mo`;
     const nextStepSummary = quoteRequired
       ? 'A Waves team member will review the property details and follow up with the right quote.'
-      : 'You can book online now, or reply here if anything needs to be adjusted first.';
+      : commercialDetected
+        ? 'This is an estimated price based on your property details — a Waves team member will confirm it on site and schedule your service.'
+        : 'You can book online now, or reply here if anything needs to be adjusted first.';
 
     await sendQuoteRequestEmail({
       lead,
@@ -1026,6 +1130,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (perApplication) {
       response.per_application = perApplication.amount;
       response.visits_per_year = perApplication.visitsPerYear;
+    }
+    if (commercialDisclaimer) {
+      response.estimated_pricing = true;
+      response.disclaimer = commercialDisclaimer;
     }
     res.json(response);
   } catch (err) {

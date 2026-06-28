@@ -2123,10 +2123,12 @@ export default function EstimateToolViewV2({
       "svcTermiteBait",
     ];
     const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
+    // Commercial LAWN now auto-prices (a priced recurring line); only commercial
+    // PEST stays a manual quote. So lawn counts toward recurring, not manual.
     const commercialManualQuoteCount =
-      commercialDetected ? ["svcLawn", "svcPest"].filter((k) => form[k]).length : 0;
+      commercialDetected ? ["svcPest"].filter((k) => form[k]).length : 0;
     const recurringCount = qualifyingRecurringKeys
-      .filter((k) => form[k] && !(commercialDetected && (k === "svcLawn" || k === "svcPest")))
+      .filter((k) => form[k] && !(commercialDetected && k === "svcPest"))
       .length;
     const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
@@ -2748,8 +2750,10 @@ export default function EstimateToolViewV2({
           );
           if (match) {
             setExistingCustomerMatch(match);
+            // 'Commercial' is a flat non-member tier — exclude it so a commercial
+            // customer doesn't unlock recurring-customer loyalty discounts.
             const hasActivePlan =
-              match.tier && match.tier !== "null" && match.monthlyRate > 0;
+              match.tier && match.tier !== "null" && match.tier !== "Commercial" && match.monthlyRate > 0;
             setForm((f) => ({
               ...f,
               customerId: match.id || f.customerId || "",
@@ -3937,8 +3941,10 @@ export default function EstimateToolViewV2({
                         key={c.id}
                         type="button"
                         onClick={() => {
+                          // 'Commercial' is a flat non-member tier — exclude it
+                          // so a commercial customer doesn't unlock loyalty discounts.
                           const hasActivePlan =
-                            c.tier && c.tier !== "null" && c.monthlyRate > 0;
+                            c.tier && c.tier !== "null" && c.tier !== "Commercial" && c.monthlyRate > 0;
                           setForm((f) => ({
                             ...f,
                             customerId: c.id || "",
@@ -4518,8 +4524,8 @@ export default function EstimateToolViewV2({
               <SubGroupLabel>Recurring Programs</SubGroupLabel>{" "}
               <CheckboxV2 k="svcLawn" label="Lawn Care" />
               {form.svcLawn && commercialDetected && (
-                <div className="ml-7 mb-2 p-3 bg-alert-bg rounded-xs border-hairline border-alert-fg text-12 text-alert-fg">
-                  Commercial lawn treatment is set to manual quote. Residential lawn pricing is suppressed.
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-12 text-zinc-600">
+                  Commercial lawn treatment is auto-priced (estimated — confirmed on site). Residential lawn pricing is suppressed.
                 </div>
               )}
               {form.svcLawn && !commercialDetected && (

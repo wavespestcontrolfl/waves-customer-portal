@@ -401,6 +401,54 @@ const TREE_SHRUB = {
 };
 
 // ============================================================
+// COMMERCIAL AUTO-PRICING (lawn + tree/shrub)
+// ============================================================
+// Cost-buildup commercial pricers — owner directive 2026-06-28: commercial
+// lawn + tree/shrub auto-price for ALL commercial properties (no size cap) and
+// the estimate is shown to the lead instantly with an "estimated, confirmed on
+// site" disclaimer. These reuse the shared lawn cost-floor / T&S material
+// arithmetic with COMMERCIAL knobs (program intensity, premium product cost,
+// at-scale labor, commercial margin/admin). Program shape derived from a real
+// commercial agronomic contract (Bloomings HOA proposal): turf = 4 fert @ 1 lb
+// N/1000 sqft + 2 pre-emergent + ~4 broadleaf post-emergent + chinch/fire-ant;
+// ornamental = 2 shrub/palm fert @ 1 lb N/100 sqft + 2 shrub insect + bed
+// pre/post-emergent weed control. Every value here is a STARTING assumption to
+// be tuned against real Waves commercial quotes — they are deliberately named
+// and isolated so the owner can adjust without touching pricer logic.
+const COMMERCIAL_LAWN = {
+  programVisits: 8,            // annual agronomic trips (fert + weed + insect, some combined)
+  materialAnnualPerK: 45,     // $/1000 sqft turf/yr — premium commercial chemistry (Celsius/Barricade/Talstar/slow-release N + micros)
+  laborMinutesBase: 20,       // mobilization per trip (larger commercial equipment)
+  laborMinutesPerK: 1.5,      // ride-on broadcast app economy of scale (vs 2.5 residential walk-behind)
+  routeDriveMinutes: 15,      // commercial accounts more spread out than dense residential routes
+  callbackReservePerVisit: 3,
+  equipmentReservePerVisit: 0,
+  adminAnnual: 120,           // COI tracking, net-terms invoicing, account management overhead
+  targetGrossMargin: 0.45,    // commercial target margin (tunable)
+  minAnnual: 1200,            // commercial account annual minimum
+  lowConfidenceTurfSf: 60000, // above this the satellite turf estimate is flagged LOW confidence (still prices)
+  taxable: false,
+  taxCategory: 'lawn_spraying_or_treatment',
+};
+const COMMERCIAL_TREE_SHRUB = {
+  programVisits: 6,           // ornamental fert (2) + shrub insect (2) + bed weed control trips
+  materialFixedAnnual: 40,    // base commercial ornamental program material/yr
+  materialPerSqFtAnnual: 0.12, // $/bed sqft/yr — premium ornamental fert + Snapshot/Ranger Pro bed weed control
+  materialPerTreeAnnual: 6,   // $/tree/yr ornamental treatment
+  laborMinutesBase: 25,
+  laborMinutesPerHundredSqFt: 0.9, // bed work is denser than turf → keyed per 100 sqft of bed
+  laborMinutesPerTree: 1.5,
+  routeDriveMinutes: 15,
+  laborOverheadMinutesPerVisit: 10,
+  adminAnnual: 120,
+  targetGrossMargin: 0.45,
+  minAnnual: 900,             // commercial ornamental account annual minimum
+  lowConfidenceBedSf: 20000,  // above this the bed-area estimate is flagged LOW confidence
+  taxable: false,
+  taxCategory: 'lawn_spraying_or_treatment',
+};
+
+// ============================================================
 // PALM INJECTION - protocol-based pricing
 // ============================================================
 const PALM_TREATMENTS = {
@@ -1716,7 +1764,7 @@ module.exports = {
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
   PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
-  TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT,
+  TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT,
   ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD,
   PROCESSING_ADJUSTMENT,

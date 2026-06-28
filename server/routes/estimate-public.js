@@ -1828,6 +1828,15 @@ function recurringServiceKey(svc = {}) {
     || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
   ) return 'rodent_bait';
   if (/\brodent\b|\brat\b|\bmouse\b|\bmice\b/.test(words)) return 'rodent';
+  // Commercial auto-priced lines must keep a DISTINCT key — otherwise the
+  // residential lawn/tree special-cases below normalize them to lawn_care /
+  // tree_shrub, which are WaveGuard-qualifying, and an existing commercial
+  // customer's flat commercial price gets discounted on accept (money bug).
+  if (raw.includes('commercial')) {
+    if (raw.includes('lawn') || raw.includes('turf')) return 'commercial_lawn';
+    if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'commercial_tree_shrub';
+    if (raw.includes('pest')) return 'commercial_pest';
+  }
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
@@ -1883,6 +1892,8 @@ function recurringServiceDisplayName(key) {
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
+    case 'commercial_lawn': return 'Commercial Lawn Treatment';
+    case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
     default: return null;
   }
 }
@@ -2165,7 +2176,7 @@ function recurringServicesWithSupplements(estResult = {}) {
     indexByKey.set(key, services.length - 1);
   };
 
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub']);
   if (Array.isArray(estResult.lineItems)) {
     estResult.lineItems.forEach((item) => {
       const key = recurringServiceKey(item);
@@ -2188,6 +2199,11 @@ function recurringServicesWithSupplements(estResult = {}) {
         // recurrence pattern inferred on accept matches the sold cadence.
         name: item.displayName || item.label || item.name || recurringServiceDisplayName(key),
         displayName: item.displayName || item.label || item.name || recurringServiceDisplayName(key),
+        // Carry the commercial "estimated — confirmed on site" disclaimer through
+        // to the rendered/accepted row so a saved quote-wizard commercial draft
+        // never renders/sends the auto-priced line without it.
+        detail: item.detail || item.disclaimer || null,
+        disclaimer: item.disclaimer || null,
         mo: monthly || null,
         monthly: monthly || null,
         annual: annual || (monthly ? Math.round(monthly * 12 * 100) / 100 : null),
@@ -3305,6 +3321,21 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : '';
   const locked = est.status === 'accepted' || quoteRequired;
 
+  // Commercial auto-priced lawn/tree estimates are approval-only: no booking
+  // form, no billing/payment-setup card, no slots. The customer approves and a
+  // Waves account manager confirms scope on-site, schedules the visits, and
+  // invoices manually (owner directive — commercial can't be self-scheduled or
+  // billed like a residential WaveGuard plan). Detected off the priced
+  // commercial recurring line; pest-only commercial is quoteRequired (manual
+  // proposal) and handled by the commercialProposal copy above.
+  const commercialManualAccept = !locked && (
+    estData?.commercialEstimatedPricing === true
+    || recurring.some((s) => {
+      const k = String(recurringServiceKey(s) || s.service || s.name || '').toLowerCase();
+      return k.includes('commercial_lawn') || k.includes('commercial_tree');
+    })
+  );
+
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeDiscounts) * 100) / 100);
   // Per-day figure is a true daily rate: annual cost / 365 (monthly * 12 / 365).
   const dayPrice = Math.round((monthlyTotal * 12 / 365) * 100) / 100;
@@ -3510,7 +3541,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         anchorPrice,
         basePrice,
         price,
-        tierLabel: svc?.tierLabel || `WaveGuard ${tier}`,
+        tierLabel: svc?.tierLabel || (String(serviceKey || '').startsWith('commercial_') ? 'Commercial' : `WaveGuard ${tier}`),
       };
     });
   const allBillingRowsHaveVisitPrice = billingServiceRows.length > 0
@@ -3591,7 +3622,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const prepayButtonSubCopy = annualPrepayWaivesMembership || prepayDiscountAmount <= 0
     ? pageCopy.prepayButtonSub
     : `Approve annual prepay and save ${prepayDiscountPctLabel} on the recurring annual.`;
-  const showBillingCard = !quoteRequired && !locked && billingRecurring.length > 0;
+  const showBillingCard = !quoteRequired && !locked && !commercialManualAccept && billingRecurring.length > 0;
   const requirePaymentSetupBeforeSlots = showBillingCard;
   const standardInvoiceLede = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
     ? 'Pay per application with a setup + first application invoice after confirmation.'
@@ -3697,7 +3728,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
             <span class="per">application</span>
             <span class="tier-lbl">${escapeHtml(row.tierLabel)}</span>
           </div>
-          ${savings > 0 ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
+          ${savings > 0 && !commercialManualAccept ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
           ${day != null ? `<div class="day-price">${dayPriceCopy}</div>` : ''}
         </section>`;
     })
@@ -3746,7 +3777,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           <span class="per">application</span>
           <span class="tier-lbl">${escapeHtml(row.tierLabel)}</span>
         </div>
-        ${savings > 0 ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
+        ${savings > 0 && !commercialManualAccept ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
         ${day != null ? `<div class="day-price">That\u2019s just ${dayPriceHtml}/day for ${escapeHtml(row.name.toLowerCase())}.</div>` : ''}
       </div>`;
   })();
@@ -3775,9 +3806,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
         <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
         <span class="per">${escapeHtml(recurringPricePeriodWord)}</span>
-        <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
+        <span class="tier-lbl">${commercialManualAccept ? 'Commercial' : `WaveGuard ${escapeHtml(tier)}`}</span>
       </div>
-      ${savingsPerMo > 0 ? `<div class="save-row" data-mode-only="recurring" data-aggregate-save-row><span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
+      ${savingsPerMo > 0 && !commercialManualAccept ? `<div class="save-row" data-mode-only="recurring" data-aggregate-save-row><span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
       ${manualDiscountHtml}
       <div class="day-price" data-mode-only="recurring">${hasOnlyLawnCareServices ? `That\u2019s just ${fmtMoney(dayPrice)}/day to stop lawn pests before they turn green grass brown.` : `That\u2019s just ${fmtMoney(dayPrice)}/day for ${escapeHtml(pageCopy.aggregateDayLabel)}.`}</div>
       ${supplementalServiceSummaryHtml}
@@ -4396,7 +4427,24 @@ ${shellTopBar()}
     <span id="upsell-request-status-copy">Got it. We are reviewing this service for your property and will follow up with a revised estimate shortly.</span>
   </div>` : ''}
 
-  ${locked ? '' : `
+  ${locked ? '' : commercialManualAccept ? `
+  <section class="card booking-card" id="commercial-accept-card">
+    <h2 id="booking-title">Approve your commercial service</h2>
+    <p class="card-sub">This is a commercial service plan. Approve your estimate and a Waves account manager will schedule your visits and send your invoice &mdash; no card or deposit needed now.</p>
+    <p class="card-sub" style="font-style:italic">Pricing is estimated from your property details and confirmed on site before your first visit.</p>
+    <div class="pay-pref-grid options">
+      <div class="pay-pref-choice">
+        <button type="button" class="pay-pref-btn primary" id="commercial-approve-btn" data-commercial-mode="monthly"><span class="pay-pref-title">Approve &amp; pay monthly</span></button>
+        <div class="pay-pref-note">We&rsquo;ll invoice you each month &mdash; no card needed now.</div>
+      </div>
+      ${showAnnualPrepayOption ? `<div class="pay-pref-choice">
+        <button type="button" class="pay-pref-btn prepay" id="commercial-prepay-btn" data-commercial-mode="prepay"><span class="pay-pref-title">Prepay the year &mdash; save 5%</span></button>
+        <div class="pay-pref-note">${escapeHtml(prepayButtonSubCopy)}</div>
+      </div>` : ''}
+    </div>
+    <div class="pay-pref-note" id="commercial-approve-note" style="display:none" aria-live="polite"></div>
+  </section>
+  ` : `
   <section class="card booking-card" id="booking-card"${existingAppointment ? '' : (requirePaymentSetupBeforeSlots && !isOneTimeOnly ? ' style="display:none"' : '')}>
     <h2 id="booking-title">${escapeHtml(pageCopy.bookingTitle)}</h2>
     ${existingAppointment ? `
@@ -4458,7 +4506,7 @@ ${shellTopBar()}
   </section>
   `}
 
-  ${quoteRequired || isOneTimeOnly ? '' : `<div class="card" data-mode-only="recurring">
+  ${quoteRequired || isOneTimeOnly || commercialManualAccept ? '' : `<div class="card" data-mode-only="recurring">
     <h2>${escapeHtml(pageCopy.perksHeading)}</h2>
     <p class="ai-blurb">${escapeHtml(pageCopy.perksBody)}</p>
     <ul class="perks-list">${perksHtml}</ul>
@@ -4542,7 +4590,7 @@ ${shellTopBar()}
     ${pageCopy.finalSubhead && !isOneTimeOnly ? `<div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>` : ''}
     ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves! Wave Goodbye to Pests!</h2>` : ''}
     ${pageCopy.finalBody ? `<p>${escapeHtml(pageCopy.finalBody)}</p>` : ''}
-    ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
+    ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">${commercialManualAccept ? 'Approve estimate' : 'Pick a time and book'}</button>`}
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
     </div>
@@ -4926,10 +4974,12 @@ ${shellQuestionsBar()}
   }
 
   function ensureBookingCardVisible() {
-    const target = document.getElementById('booking-card');
+    // Commercial estimates render an approval card (no slots) in place of the
+    // booking card — fall back to it so the hero CTA still scrolls somewhere.
+    const target = document.getElementById('booking-card') || document.getElementById('commercial-accept-card');
     if (!target) return null;
     target.style.display = '';
-    if (target.dataset.slotsLoaded !== 'true') {
+    if (target.id === 'booking-card' && target.dataset.slotsLoaded !== 'true') {
       target.dataset.slotsLoaded = 'true';
       loadSlots();
     }
@@ -5118,6 +5168,45 @@ ${shellQuestionsBar()}
     slots.forEach((s) => html.push(renderSlot(s)));
     html.push('</div>');
     return html.join('');
+  }
+
+  // Commercial estimates have no bookable slot — approve directly (no slot, no
+  // card, no deposit). The server marks it accepted, writes the non-member
+  // 'Commercial' tier, skips auto-scheduling, and notifies the team to schedule
+  // + invoice manually. 'prepay' bills the year upfront at the 5% prepay
+  // discount (the server creates the prepay invoice; no setup fee on commercial).
+  async function approveCommercialManual(mode) {
+    const isPrepay = mode === 'prepay';
+    const btns = [document.getElementById('commercial-approve-btn'), document.getElementById('commercial-prepay-btn')];
+    const note = document.getElementById('commercial-approve-note');
+    btns.forEach((b) => { if (b) b.disabled = true; });
+    try {
+      const payload = { serviceMode: 'recurring' };
+      if (isPrepay) payload.paymentMethodPreference = 'prepay_annual';
+      const r = await fetch(API + '/accept', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 409) {
+        toast('This estimate is no longer active.');
+        setTimeout(() => location.reload(), 900);
+        return;
+      }
+      if (!r.ok) throw new Error((data && data.error) || 'approve failed');
+      toast('Approved! A Waves account manager will reach out to schedule your commercial service.');
+      if (note) {
+        note.style.display = '';
+        note.textContent = isPrepay
+          ? 'Approved \\u2014 your annual prepay invoice is on its way, and we\\'ll be in touch to schedule.'
+          : 'Approved \\u2014 we\\'ll be in touch shortly to schedule and invoice.';
+      }
+      setTimeout(() => location.reload(), 1400);
+    } catch (e) {
+      toast('Could not approve right now. Call ${COMPANY.phone} and we will get you set up.');
+      btns.forEach((b) => { if (b) b.disabled = false; });
+    }
   }
 
   async function loadSlots() {
@@ -5770,6 +5859,10 @@ ${shellQuestionsBar()}
   if (confirmBookBtn) {
     confirmBookBtn.addEventListener('click', confirmBooking);
   }
+  // Commercial approval card (no slots) — approve monthly-invoice or prepay.
+  document.querySelectorAll('[data-commercial-mode]').forEach((b) => {
+    b.addEventListener('click', () => approveCommercialManual(b.dataset.commercialMode));
+  });
   const changeBookingPickBtn = document.getElementById('change-booking-pick-btn');
   if (changeBookingPickBtn) {
     changeBookingPickBtn.addEventListener('click', cancelReservation);
@@ -6207,6 +6300,29 @@ async function handleEstimateView(req, res, next) {
 // GET /api/estimates/:token — customer views estimate (no auth) — server-rendered HTML
 router.get('/:token', handleEstimateView);
 
+// Auto-priced commercial lawn/tree estimates are approval-only: no bookable
+// slot, no booking deposit/card, and no auto-scheduling — the team confirms
+// scope on-site, schedules, and invoices. They CAN prepay the year at the
+// standard 5% discount (there is no WaveGuard setup fee on commercial). Mirrors
+// estimate-slots-public's isCommercialAutoEstimate — keep both in sync.
+function isCommercialAutoAcceptEstimate(estimate = {}) {
+  let data = estimate.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
+  data = data || {};
+  if (data.commercialEstimatedPricing === true) return true;
+  const isCommercialSvc = (s) => {
+    const k = String(s?.service || s?.serviceKey || s?.name || '').toLowerCase();
+    return k.includes('commercial_lawn') || k.includes('commercial_tree');
+  };
+  const lineItems = Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems : [];
+  if (lineItems.some((li) => li && li.estimatedPricing === true && isCommercialSvc(li) && Number(li.annual) > 0)) return true;
+  const recurringRows = [
+    ...(Array.isArray(data.result?.recurring?.services) ? data.result.recurring.services : []),
+    ...(Array.isArray(data.recurring?.services) ? data.recurring.services : []),
+  ];
+  return recurringRows.some(isCommercialSvc);
+}
+
 // PUT /api/estimates/:token/accept — customer accepts
 // Body (backward compatible — both optional):
 //   { slotId?: string, paymentMethodPreference?: 'card_on_file' | 'deposit_now' | 'pay_at_visit' | 'prepay_annual' }
@@ -6227,6 +6343,14 @@ router.put('/:token/accept', async (req, res, next) => {
     }
 
     const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
+
+    // Commercial auto-priced lawn/tree: approval-only manual-billing workflow.
+    // No booking deposit/card, no auto-schedule, no auto-invoice; the converter
+    // writes the non-member 'Commercial' tier and notifies the team to schedule
+    // + invoice. The customer may still prepay the year (standard 5% off) with
+    // NO slot — the prepay path already skips scheduling and waives the (absent)
+    // setup fee.
+    const isCommercialAccept = isCommercialAutoAcceptEstimate(estimate);
 
     // Slot commit inputs. Validate early so we can reject before opening
     // a transaction if the payload is malformed.
@@ -6266,7 +6390,7 @@ router.put('/:token/accept', async (req, res, next) => {
     if (annualPrepaySelected && billByInvoice) {
       return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
     }
-    if (annualPrepaySelected && !slotId && !existingAppointmentId) {
+    if (annualPrepaySelected && !slotId && !existingAppointmentId && !isCommercialAccept) {
       return res.status(400).json({ error: 'annual prepay requires selecting a service appointment first' });
     }
     if (billByInvoice && !estimate.customer_id && !estimate.customer_phone) {
@@ -6404,6 +6528,15 @@ router.put('/:token/accept', async (req, res, next) => {
       // resolver re-derive an unrelated linked appointment when this is null.
       useLinkedFallback: false,
     });
+    if (isCommercialAccept) {
+      // Commercial bills by manual invoice after on-site confirmation, not a
+      // booking deposit/card — and nothing is auto-scheduled, so there is no
+      // first-visit invoice to credit a deposit against. Exempt the commitment
+      // deposit (and its slot requirement) so the customer can approve online.
+      depositPolicy.required = false;
+      depositPolicy.slotRequired = false;
+      depositPolicy.exemptReason = 'commercial_manual_billing';
+    }
     // Card hold supersedes the one-time deposit: a required card hold means NO
     // money is taken at booking, so don't ALSO require/charge a deposit when
     // both rollout flags happen to be on (ONE_TIME_CARD_HOLD + the deposit).
@@ -7283,11 +7416,15 @@ router.put('/:token/accept', async (req, res, next) => {
         // duplicates.
         const conversion = await EstimateConverter.convertEstimate(estimate.id, {
           billingTerm,
-          skipSetupInvoice: billByInvoice,
+          // Commercial schedules + invoices manually (owner directive): never
+          // auto-schedule a wrong-length visit and never auto-create/send an
+          // invoice before the on-site scope confirmation.
+          skipSetupInvoice: billByInvoice || isCommercialAccept,
+          skipAutoSchedule: isCommercialAccept,
           prepayInvoiceAmount: annualPrepayInvoiceAmount,
           firstApplicationAmount: firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
-          autoSendInvoice: true,
+          autoSendInvoice: !isCommercialAccept,
         });
         if (conversion?.draftInvoiceId) {
           invoiceMode = true;
@@ -7394,9 +7531,26 @@ router.put('/:token/accept', async (req, res, next) => {
     // invoice creation/send failed or was skipped for a zero amount.
     try {
       const NotificationService = require('../services/notification-service');
+      // Detect an all-commercial recurring accept so the copy says "Commercial
+      // service plan", not a WaveGuard tier. Public-quote commercial drafts
+      // don't set estimate.waveguard_tier, so it would otherwise default Bronze.
+      let acceptTierLabel = estimate.waveguard_tier || 'Bronze';
+      try {
+        const EstimateConverter = require('../services/estimate-converter');
+        const acceptRecurring = EstimateConverter.recurringServicesFromEstimateData(parseEstimateDataSafe(estimate) || {});
+        // Mirror the converter's commercialOnlyRecurring predicate: a commercial
+        // recurring line with NO WaveGuard-qualifying service is a Commercial
+        // non-member plan — even alongside a non-qualifying add-on (e.g. foam).
+        const hasCommercial = acceptRecurring.some((svc) =>
+          String(svc.service || svc.name || '').toLowerCase().includes('commercial'));
+        const qualifyingCount = EstimateConverter.countTierQualifyingRecurringServices(acceptRecurring);
+        if (hasCommercial && qualifyingCount === 0) {
+          acceptTierLabel = 'Commercial';
+        }
+      } catch { /* fall back to the estimate tier */ }
       const notificationPayload = buildAcceptNotificationPayload({
         customerName: estimate.customer_name,
-        waveguardTier: estimate.waveguard_tier || 'Bronze',
+        waveguardTier: acceptTierLabel,
         monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
         serviceLabel: invoiceServiceLabel || acceptedOneTimeServiceLabel || oneTimeList[0]?.name || 'One-time service',
         treatAsOneTime,
@@ -7890,7 +8044,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   // (mosquito uses `visits`, T&S uses `frequency`; palm and rodent bait
   // are separate recurring lines that do not receive WaveGuard percentage
   // discounts).
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub']);
   const labelForRecurring = (svc) => {
     switch (svc) {
       case 'pest_control': return 'Pest Control';
@@ -9098,6 +9252,20 @@ function buildAcceptNotificationPayload({
     };
   }
 
+  // Commercial recurring accepts are a flat service plan, NOT a WaveGuard
+  // membership — use service-plan copy instead of the "{tier} WaveGuard"
+  // fallback (which would otherwise read "Bronze WaveGuard plan approved").
+  if (!treatAsOneTime && String(waveguardTier || '').trim().toLowerCase() === 'commercial') {
+    const planLabel = `Commercial service plan ($${monthlyTotal}/mo)`;
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${planLabel} approved.${invoicePayUrl ? ' Invoice pay link sent.' : ' Office to confirm details + schedule the recurring visits.'}`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${planLabel} is approved. A Waves team member will confirm the details and schedule your service.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
   if (billByInvoice) {
     if (treatAsOneTime) {
       if (!invoiceMode || !invoiceLinkDelivered) {
@@ -9325,6 +9493,12 @@ function categoryForRecurringServiceKey(key) {
     case 'rodent_bait': return 'rodent';
     case 'termite_trenching': return 'termite_trenching';
     case 'palm_injection': return 'tree_shrub';
+    // Commercial auto-priced lines render with the lawn / tree-shrub section
+    // copy (display only — discount eligibility is handled separately and stays
+    // off). Without these, deriveServiceCategory falls through and renders pest
+    // copy/ask chips for a commercial lawn or tree quote.
+    case 'commercial_lawn': return 'lawn_care';
+    case 'commercial_tree_shrub': return 'tree_shrub';
     default: return null;
   }
 }
@@ -11611,3 +11785,6 @@ module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEsti
 module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.sectionTierEligibleFromKeys = sectionTierEligibleFromKeys;
 module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;
+module.exports.recurringServiceKey = recurringServiceKey;
+module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTierDiscount;
+module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;

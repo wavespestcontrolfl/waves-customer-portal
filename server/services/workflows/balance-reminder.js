@@ -107,6 +107,8 @@ class BalanceReminder {
       .leftJoin("customers", "scheduled_services.customer_id", "customers.id")
       .where("customers.active", true)
       .whereNull("customers.deleted_at")
+      // AR / balance reminders are about money owed, NOT WaveGuard membership —
+      // keep flat commercial accounts (they carry balances too).
       .whereNotNull("customers.waveguard_tier")
       .select(
         "scheduled_services.*",
@@ -429,6 +431,9 @@ class BalanceReminder {
     const customers = await db("customers")
       .where({ active: true })
       .whereNull("deleted_at")
+      // AR / late-payment reminders are about a billable balance, NOT WaveGuard
+      // membership — keep flat commercial accounts (they owe money too). The
+      // template branches on tier for any WaveGuard-specific wording.
       .whereNotNull("waveguard_tier");
 
     let sent = 0;

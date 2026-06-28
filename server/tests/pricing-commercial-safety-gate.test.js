@@ -287,7 +287,7 @@ describe('commercial safety gate in generateEstimate', () => {
     });
   });
 
-  test('commercial property plus pest and lawn returns manual quote lines instead of residential pricing', () => {
+  test('commercial property auto-prices lawn and routes pest to a manual quote', () => {
     const estimate = generateEstimate(baseInput({ propertyType: 'commercial' }));
 
     expect(estimate.lineItems.map((line) => line.service)).toEqual([
@@ -296,22 +296,32 @@ describe('commercial safety gate in generateEstimate', () => {
     ]);
     expect(estimate.lineItems).not.toContainEqual(expect.objectContaining({ service: 'pest_control' }));
     expect(estimate.lineItems).not.toContainEqual(expect.objectContaining({ service: 'lawn_care' }));
+    // Commercial pest still requires a manual quote (unchanged).
     expect(estimate.lineItems[0]).toMatchObject({
+      service: 'commercial_pest',
       quoteRequired: true,
       requiresManualReview: true,
       taxable: true,
       taxCategory: 'nonresidential_pest_control',
       manualReviewReasons: expect.arrayContaining(['commercial_property_manual_quote_required']),
     });
+    // Commercial lawn now auto-prices and is shown to the lead instantly.
     expect(estimate.lineItems[1]).toMatchObject({
-      quoteRequired: true,
-      requiresManualReview: true,
+      service: 'commercial_lawn',
+      quoteRequired: false,
+      requiresManualReview: false,
+      commercialPricingMode: 'auto_estimate',
+      estimatedPricing: true,
       taxable: false,
       taxCategory: 'lawn_spraying_or_treatment',
-      manualReviewReasons: expect.arrayContaining(['commercial_property_manual_quote_required']),
     });
-    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(0);
-    expect(estimate.waveGuard.activeServices).toEqual([]);
+    expect(estimate.lineItems[1].annual).toBeGreaterThan(0);
+    expect(estimate.lineItems[1].monthly).toBeGreaterThan(0);
+    // The priced commercial lawn rolls into the recurring total; manual pest does not.
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBeGreaterThan(0);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBeCloseTo(estimate.lineItems[1].annual, 1);
+    // Commercial lawn is not a WaveGuard-qualifying service (no tier discount).
+    expect(estimate.waveGuard.activeServices).toEqual(['commercial_lawn']);
   });
 
   test('commercial manual pest does not unlock recurring pest add-on inclusions', () => {
@@ -483,9 +493,63 @@ describe('commercial safety gate in generateEstimate', () => {
     }
   });
 
-  test('commercial out-of-scope lawn-adjacent services return manual quote instead of residential pricing', () => {
+  test('commercial tree & shrub auto-prices as a standalone ornamental program', () => {
+    const estimate = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { treeShrub: true },
+    }));
+
+    expect(estimate.lineItems).toEqual([
+      expect.objectContaining({
+        service: 'commercial_tree_shrub',
+        quoteRequired: false,
+        requiresManualReview: false,
+        commercialPricingMode: 'auto_estimate',
+        taxable: false,
+        taxCategory: 'lawn_spraying_or_treatment',
+      }),
+    ]);
+    expect(estimate.lineItems[0].annual).toBeGreaterThan(0);
+    expect(estimate.lineItems).not.toContainEqual(expect.objectContaining({ service: 'tree_shrub' }));
+    expect(estimate.lineItems).not.toContainEqual(expect.objectContaining({ service: 'commercial_lawn' }));
+  });
+
+  test('manual commercial lawn-adjacent add-ons survive the legacy mapper as spec items', () => {
+    // Commercial palm / top-dressing / etc route to a manual commercial_lawn
+    // quote (annual:null). Adding commercial_lawn to RECURRING_SERVICES must NOT
+    // make the mapper drop these unpriced manual lines. (Regression for Codex P1.)
+    const estimate = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { palm: true },
+    }));
+    const mapped = mapV1ToLegacyShape(estimate);
+
+    expect(mapped.recurring.services.some((s) => s.service === 'commercial_lawn')).toBe(false);
+    expect(mapped.specItems).toContainEqual(expect.objectContaining({
+      service: 'commercial_lawn',
+      quoteRequired: true,
+    }));
+  });
+
+  test('priced commercial lawn and a manual lawn-adjacent add-on coexist (add-on not dropped)', () => {
+    // lawn auto-prices (commercial_lawn priced); palm is out of scope and routes
+    // to a manual commercial_lawn quote. The two share a service key but must
+    // both survive — the manual add-on must not be silently deduped away.
+    // (Regression for Codex R2 P1-A.)
+    const estimate = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { lawn: { track: 'st_augustine' }, palm: true },
+    }));
+    const lawnLines = estimate.lineItems.filter((l) => l.service === 'commercial_lawn');
+    expect(lawnLines).toHaveLength(2);
+    expect(lawnLines.some((l) => l.quoteRequired === false && l.annual > 0)).toBe(true);
+    expect(lawnLines.some((l) => l.quoteRequired === true)).toBe(true);
+  });
+
+  test('commercial out-of-scope lawn-adjacent one-time services still return a manual quote', () => {
+    // Palm / top-dressing / dethatching / plugging are one-time lawn-adjacent
+    // add-ons — not in scope for the commercial auto-pricer, so they stay manual.
     const lawnRequests = [
-      { treeShrub: true },
       { palm: true },
       { topDressing: true },
       { dethatching: true },
@@ -508,7 +572,7 @@ describe('commercial safety gate in generateEstimate', () => {
     }
   });
 
-  test('commercialPest and commercialLawn selected payload style returns manual quote lines', () => {
+  test('commercialPest selected stays manual while commercialLawn selected auto-prices', () => {
     const estimate = generateEstimate(baseInput({
       services: {
         commercialPest: { selected: true },
@@ -520,15 +584,21 @@ describe('commercial safety gate in generateEstimate', () => {
       'commercial_pest',
       'commercial_lawn',
     ]);
-    expect(estimate.lineItems.every((line) => line.quoteRequired)).toBe(true);
+    const pest = estimate.lineItems.find((line) => line.service === 'commercial_pest');
+    const lawn = estimate.lineItems.find((line) => line.service === 'commercial_lawn');
+    expect(pest.quoteRequired).toBe(true);
+    expect(lawn.quoteRequired).toBe(false);
+    expect(lawn.annual).toBeGreaterThan(0);
   });
 
-  test('small-commercial pilot flag still does not fall through to residential pricing in PR1', () => {
+  test('commercial lawn auto-prices regardless of any commercialPricingMode flag', () => {
+    // The old small_commercial_pilot gate is retired — all commercial lawn
+    // auto-prices now; pest still routes to a manual quote.
     const estimate = generateEstimate(baseInput({
       propertyType: 'commercial',
       services: {
-        pest: { frequency: 'monthly', commercialPricingMode: 'small_commercial_pilot' },
-        lawn: { track: 'bermuda', tier: 'premium', commercialPricingMode: 'small_commercial_pilot' },
+        pest: { frequency: 'monthly' },
+        lawn: { track: 'bermuda', tier: 'premium' },
       },
     }));
 
@@ -538,6 +608,9 @@ describe('commercial safety gate in generateEstimate', () => {
     ]);
     expect(estimate.lineItems).not.toContainEqual(expect.objectContaining({ service: 'pest_control' }));
     expect(estimate.lineItems).not.toContainEqual(expect.objectContaining({ service: 'lawn_care' }));
+    const lawn = estimate.lineItems.find((line) => line.service === 'commercial_lawn');
+    expect(lawn.quoteRequired).toBe(false);
+    expect(lawn.annual).toBeGreaterThan(0);
   });
 
   test('commercial property type casing keeps commercial property profile for manual-quoted services', () => {
@@ -635,7 +708,7 @@ describe('commercial safety gate in generateEstimate', () => {
 });
 
 describe('commercial safety metadata survives the admin v2 adapter', () => {
-  test('commercial v2 payload maps to legacy manual quote spec items', () => {
+  test('commercial v2 payload prices lawn (recurring) and keeps pest as a manual spec item', () => {
     const input = translateV2CallToV1Input(
       {
         propertyType: 'Commercial',
@@ -652,7 +725,7 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
         nearWater: 'NO',
       },
       ['PEST', 'LAWN'],
-      { commercialPricingMode: 'small_commercial_pilot' }
+      {}
     );
 
     expect(input).toMatchObject({
@@ -663,7 +736,14 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
 
     const mapped = mapV1ToLegacyShape(generateEstimate(input));
 
-    expect(mapped.recurring.services).toEqual([]);
+    // Commercial lawn auto-prices → surfaces as a recurring service, not a manual line.
+    const recurringLawn = mapped.recurring.services.find((s) => s.service === 'commercial_lawn');
+    expect(recurringLawn).toBeTruthy();
+    expect(recurringLawn.name).toBe('Commercial Lawn Treatment');
+    expect(recurringLawn.mo).toBeGreaterThan(0);
+    expect(mapped.specItems).not.toContainEqual(expect.objectContaining({ service: 'commercial_lawn' }));
+
+    // Commercial pest stays a manual quote → spec item only.
     expect(mapped.specItems).toContainEqual(expect.objectContaining({
       service: 'commercial_pest',
       name: 'Commercial Pest Control',
@@ -672,16 +752,6 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
       isCommercial: true,
       taxable: true,
       taxCategory: 'nonresidential_pest_control',
-      manualReviewReasons: expect.arrayContaining(['commercial_property_manual_quote_required']),
-    }));
-    expect(mapped.specItems).toContainEqual(expect.objectContaining({
-      service: 'commercial_lawn',
-      name: 'Commercial Lawn Treatment',
-      quoteRequired: true,
-      requiresManualReview: true,
-      isCommercial: true,
-      taxable: false,
-      taxCategory: 'lawn_spraying_or_treatment',
       manualReviewReasons: expect.arrayContaining(['commercial_property_manual_quote_required']),
     }));
     expect(mapped.oneTime.specItems).toContainEqual(expect.objectContaining({
@@ -882,6 +952,28 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
     expect(mapped.recurring.grandTotal).toBe(0);
     expect(mapped.recurring.monthlyTotal).toBe(0);
     expect(mapped.totals.year2mo).toBe(0);
+  });
+
+  test('legacy mapper preserves priced recurring totals when a manual line coexists', () => {
+    // Mixed: commercial pest (manual) + commercial lawn (auto-priced). The
+    // priced lawn total must survive — only the pest row is quote-required.
+    // (Regression for Codex R5 — mixed quotes were zeroing priced totals.)
+    const estimate = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      turfSf: 20000,
+      services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine' } },
+    }));
+    const mapped = mapV1ToLegacyShape(estimate);
+
+    expect(mapped.recurring.services.some((s) => s.service === 'commercial_lawn')).toBe(true);
+    expect(mapped.recurring.monthlyTotal).toBeGreaterThan(0);
+    expect(mapped.totals.year2mo).toBeGreaterThan(0);
+    // Pest still surfaces as a manual quote-required spec item.
+    expect(mapped.quoteRequired).toBe(true);
+    expect(mapped.specItems).toContainEqual(expect.objectContaining({
+      service: 'commercial_pest',
+      quoteRequired: true,
+    }));
   });
 
   test('v2 adapter preserves compound residential property labels', () => {

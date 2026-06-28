@@ -49,7 +49,9 @@ async function maybeSendOnEnRoute(svc) {
       return { sent: false, skipped: true, reason: 'not_recurring' };
     }
     const customer = await db('customers').where({ id: svc.customer_id }).first('waveguard_tier');
-    if (!customer?.waveguard_tier) {
+    // Real WaveGuard members only — the flat non-member 'Commercial' tier (and
+    // 'One-Time'/'none') must not receive the WaveGuard app-intro email.
+    if (!['Bronze', 'Silver', 'Gold', 'Platinum'].includes(customer?.waveguard_tier)) {
       return { sent: false, skipped: true, reason: 'not_member' };
     }
     if (!(await isFirstVisit(svc.customer_id))) {

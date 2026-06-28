@@ -16,6 +16,11 @@ const { priceTopDressing, priceTreeShrub } = require('./service-pricing');
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
   'mosquito', 'termite_bait', 'rodent_bait', 'foam_recurring',
+  // Commercial auto-priced recurring programs (cost-buildup pricers). A manual
+  // commercial_lawn line (quoteRequired, no annual) is still possible for
+  // lawn-adjacent one-time services, so the recurring svcAdd below guards on
+  // .annual to only pick up the priced line.
+  'commercial_lawn', 'commercial_tree_shrub',
 ]);
 
 const ONE_TIME_SERVICES = new Set([
@@ -123,6 +128,7 @@ function treeShrubLegacyTierRows(v1Result = {}, tsLI = {}) {
 const SERVICE_LABEL = {
   commercial_pest: 'Commercial Pest Control',
   commercial_lawn: 'Commercial Lawn Treatment',
+  commercial_tree_shrub: 'Commercial Tree & Shrub',
   one_time_pest: 'One-Time Pest',
   one_time_lawn: 'One-Time Lawn',
   one_time_mosquito: 'One-Time Mosquito',
@@ -378,6 +384,10 @@ function mapV1ToLegacyShape(v1Result) {
   const tbLI = lineItems.find(l => l.service === 'termite_bait');
   const rbLI = lineItems.find(l => l.service === 'rodent_bait');
   const foamRecLI = lineItems.find(l => l.service === 'foam_recurring');
+  // Commercial auto-priced recurring lines (guard on .annual so a manual
+  // commercial_lawn quote line is never mistaken for the priced program).
+  const commLawnLI = lineItems.find(l => l.service === 'commercial_lawn' && l.annual);
+  const commTsLI = lineItems.find(l => l.service === 'commercial_tree_shrub' && l.annual);
 
   // Pest → R.pest, R.pestTiers
   if (pestLI) {
@@ -626,12 +636,44 @@ function mapV1ToLegacyShape(v1Result) {
       countsTowardWaveGuardTier: false,
     });
   }
+  // Commercial auto-priced programs — standalone recurring lines. Counted in
+  // summary.recurringAnnual* (so they're in the monthly/year totals) but flat
+  // (no WaveGuard tier, not bundle-discountable). Carry the engine's annual and
+  // the "estimated, confirmed on site" disclaimer through to the estimate UI.
+  const commAdd = (name, li, service) => {
+    if (!li) return;
+    svcAdd(name, li, {
+      service,
+      annual: Number(li.annual) || null,
+      detail: li.detail || li.disclaimer || null,
+      disclaimer: li.disclaimer || null,
+      estimatedPricing: true,
+      commercialSubtype: li.commercialSubtype || null,
+      pricingConfidence: li.pricingConfidence || null,
+      taxable: li.taxable === true,
+      taxCategory: li.taxCategory || null,
+      discountable: false,
+      discountEligible: false,
+      waveGuardDiscountEligible: false,
+      countsTowardWaveGuardTier: false,
+      excludeFromPctDiscount: true,
+    });
+  };
+  commAdd('Commercial Lawn Treatment', commLawnLI, 'commercial_lawn');
+  commAdd('Commercial Tree & Shrub', commTsLI, 'commercial_tree_shrub');
 
   // One-time + specialty split
   const v1OtItems = [];
   const v1SpecItems = [];
+  // A commercial line with no annual price is a manual quote add-on (e.g.
+  // commercial palm/top-dressing/dethatching/plugging routed to commercial_lawn)
+  // — it is NOT the priced recurring program mapped above, so it must still
+  // flow through the specialty/manual path below. Only skip the priced
+  // (annual > 0) commercial recurring line here.
+  const isUnpricedCommercialManual = (li) =>
+    String(li.service || '').startsWith('commercial_') && !(Number(li.annual) > 0);
   lineItems.forEach(li => {
-    if (RECURRING_SERVICES.has(li.service)) return;
+    if (RECURRING_SERVICES.has(li.service) && !isUnpricedCommercialManual(li)) return;
     // Prefer the engine's own label when present (e.g. pest_initial_roach
     // emits 'Initial Native Roach Knockdown' vs 'Initial German Roach
     // Knockdown' — SERVICE_LABEL flattens both to a generic name and would
@@ -814,6 +856,13 @@ function mapV1ToLegacyShape(v1Result) {
   const year1 = Math.round((recurringAnnual + rodentBaitAnnual + palmInjectionAnnual + oneTimeTotal) * 100) / 100;
   const year2 = Math.round((recurringAnnual + rodentBaitAnnual + palmInjectionAnnual) * 100) / 100;
   const year2Monthly = Math.round((year2 / 12) * 100) / 100;
+  // A mixed estimate can have BOTH manual quote-required rows (e.g. commercial
+  // pest) AND priced recurring rows (auto-priced commercial lawn/tree, or any
+  // residential recurring line). Only suppress the recurring totals when there
+  // is nothing priced to show — otherwise the priced rows render with a $0
+  // total and break the admin/accept view.
+  const hasPricedRecurring = services.length > 0 || rodentBaitMonthly > 0 || palmInjectionMonthly > 0;
+  const suppressRecurringTotals = quoteRequired && !hasPricedRecurring;
 
   // Project v1 features back onto flat v2-shape keys so EstimatePage's
   // client-side modifiers fallback (which predates Session 11a and reads
@@ -853,10 +902,10 @@ function mapV1ToLegacyShape(v1Result) {
       tier: waveGuardTier,
       waveGuardTier,
       discount: wg.discount || 0,
-      annualBeforeDiscount: quoteRequired ? 0 : recurringAnnualBefore,
-      grandTotal: quoteRequired ? 0 : year2Monthly,
-      monthlyTotal: quoteRequired ? 0 : recurringMonthly,
-      annualAfterDiscount: quoteRequired ? 0 : recurringAnnual,
+      annualBeforeDiscount: suppressRecurringTotals ? 0 : recurringAnnualBefore,
+      grandTotal: suppressRecurringTotals ? 0 : year2Monthly,
+      monthlyTotal: suppressRecurringTotals ? 0 : recurringMonthly,
+      annualAfterDiscount: suppressRecurringTotals ? 0 : recurringAnnual,
       savings: roundMoney((summary.waveGuardSavings || 0) - palmFlatCreditAnnual),
       rodentBaitMo: rodentBaitMonthly,
       palmInjectionMo: palmInjectionMonthly,
@@ -923,9 +972,9 @@ function mapV1ToLegacyShape(v1Result) {
       otSubtotal: oneTimeTotal - tmInstall,
     },
     totals: {
-      year1: quoteRequired ? 0 : year1,
-      year2: quoteRequired ? 0 : year2,
-      year2mo: quoteRequired ? 0 : year2Monthly,
+      year1: suppressRecurringTotals ? 0 : year1,
+      year2: suppressRecurringTotals ? 0 : year2,
+      year2mo: suppressRecurringTotals ? 0 : year2Monthly,
       manualDiscount: summary.manualDiscount || null,
       serviceSpecificDiscounts: summary.serviceSpecificDiscounts || [],
     },

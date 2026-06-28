@@ -21,7 +21,7 @@ const TERMINAL_STATUSES = ['cancelled', 'completed', 'no_show', 'skipped', 'resc
 // Mirrors hasMembership() in routes/admin-customers.js (the same logic the
 // admin "No Plan" badge reads) so the estimate flow and the admin UI agree on
 // who counts as a member.
-const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset']);
+const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 
 function membershipTierKey(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -65,6 +65,10 @@ function toQualifyingKey(raw) {
   if (!s) return null;
   if (s.includes('rodent') || s.includes('palm')) return null;
   if (/one[\s_-]?time|onetime/.test(s)) return null;
+  // Commercial auto-priced plans are FLAT and never count toward a WaveGuard
+  // tier — otherwise an accepted "Commercial Lawn Treatment" would feed
+  // priorQualifyingServices and unlock WaveGuard discounts on future estimates.
+  if (s.includes('commercial')) return null;
   if (s.includes('pest')) return 'pest_control';
   if (s.includes('lawn') || s.includes('turf')) return 'lawn_care';
   if (s.includes('tree') || s.includes('shrub') || s.includes('ornamental')) return 'tree_shrub';
