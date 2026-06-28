@@ -129,6 +129,12 @@ function buildRelayTwiML({
   const attrs = [
     `url="${escapeXmlAttr(authedUrl)}"`,
     `welcomeGreeting="${escapeXmlAttr(welcomeGreeting)}"`,
+    // The welcomeGreeting IS the FL §934.03 recorded-line + automated-assistant
+    // disclosure. ConversationRelay defaults welcomeGreetingInterruptible to
+    // "any", so a caller who speaks immediately would cut the disclosure off
+    // before consent — force it to play in full. Agent turns stay interruptible
+    // (governed separately; not set here).
+    'welcomeGreetingInterruptible="none"',
     `ttsProvider="${escapeXmlAttr(ttsProvider)}"`,
     `language="${escapeXmlAttr(language)}"`,
   ];

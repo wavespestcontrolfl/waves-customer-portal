@@ -140,6 +140,8 @@ describe('buildRelayTwiML — authenticates the upgrade + disclosure greeting', 
     expect(xml).toContain('url="wss://portal.example.com/ws/voice-agent?key=shh-secret-123"');
     expect(xml).toContain('welcomeGreeting=');
     expect(DEFAULT_WELCOME_GREETING.toLowerCase()).toContain('automated assistant');
+    // The disclosure greeting must play in full — non-interruptible (FL §934.03).
+    expect(xml).toContain('welcomeGreetingInterruptible="none"');
     expect(xml).not.toContain('<Dial');
   });
 

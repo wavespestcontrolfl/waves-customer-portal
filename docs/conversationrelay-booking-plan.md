@@ -67,6 +67,7 @@ Socket.io registers its own `upgrade` handler and only acts on `/socket.io/`. We
    <Response><Connect>
      <ConversationRelay url="wss://<host>/ws/voice-agent?key=<secret>"
        welcomeGreeting="Thanks for calling Waves Pest Control. Just so you know, this call may be recorded, and you're speaking with our automated assistant. How can I help you today?"
+       welcomeGreetingInterruptible="none"
        ttsProvider="ElevenLabs" language="en-US" />
    </Connect></Response>
    ```
