@@ -142,6 +142,12 @@ const gates = {
   // SEO Intelligence — DataForSEO API calls, rank tracking, backlink scans
   seoIntelligence: isProd ? process.env.GATE_SEO_INTELLIGENCE === 'true' : true,
 
+  // Geo-grid map-pack rank tracking (Pillar 3) — weekly DataForSEO sweep of an
+  // N×N grid of pins per office. PAY-PER-CALL (offices × keywords × grid² live
+  // calls), so opt-in in EVERY env (not default-on in dev) to avoid surprise
+  // spend; the underlying serpMaps also needs seoIntelligence on.
+  geoGridTracking: process.env.GATE_GEO_GRID === 'true',
+
   // Self-Booking — customer self-scheduling after estimate acceptance
   selfBooking: isProd ? process.env.GATE_SELF_BOOKING === 'true' : true,
 
