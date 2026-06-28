@@ -94,6 +94,10 @@ rather than adding them to this skip-list.
 
 ## 2. Dashboard steps
 
+> **Applied 2026-06-27:** the §1 webhook Skip rule is **deployed and live** on the Pro zone,
+> and SSL was verified secure (A below). Bot protection (B) and HTML edge-caching (C) were
+> **deliberately not applied** — see the decision note in each.
+
 ### A. Confirm SSL mode is `Full (strict)` — the one dangerous misconfig to rule out
 
 `wavespestcontrol.com` → **SSL/TLS → Overview**. Mode must be **Full (strict)**. Both
@@ -105,6 +109,18 @@ Then **SSL/TLS → Edge Certificates**: Always Use HTTPS = On, Minimum TLS = 1.2
 Automatic HTTPS Rewrites = On. (HSTS is already live — confirmed via response header.)
 
 ### B. Bot protection (Super Bot Fight Mode — Pro zone)
+
+> **Decision (2026-06-27): NOT enabled.** No evidence of bot load on the portal; SBFM is
+> zone-wide, so it would also bot-fight the hub marketing site (an SEO/GEO property), and it
+> risks friction on live booking/lead/payment flows. The portal is already hardened in-app
+> (signature-verified webhooks, rate limits) and the §1 Skip rule is staged, so this stays a
+> fast, reversible turn-on *if* portal bot load ever appears. The steps below are the "when
+> you want it" playbook — **not currently applied.**
+>
+> **If you do enable it:** also add a second Skip rule matching
+> `(http.host eq "wavespestcontrol.com" or http.host eq "www.wavespestcontrol.com")` → Skip →
+> *All Super Bot Fight Mode Rules*, so SBFM applies only to `portal.` and leaves the hub SEO
+> site fully crawlable (same reasoning as the city-zone decision below).
 
 SBFM on `wavespestcontrol.com` applies to the **whole zone** (apex marketing site **and**
 portal). Order matters:
@@ -118,8 +134,12 @@ portal). Order matters:
    confirm nothing legitimate is challenged.
 
 The 17 city domains are separate **Free** zones, each with its own simpler "Bot Fight
-Mode" toggle. No portal traffic on them → lower risk → a good place to be more
-aggressive against scrapers.
+Mode" toggle. **Decision (2026-06-27): deliberately left OFF.** These are SEO/GEO
+marketing sites that *want* to be crawled — `Content-Signal: ai-train=yes`, the
+autonomous-blog and GEO-listicle strategy. Free Bot Fight Mode is blunt (no verified-bot
+allowlist like SBFM) and would challenge AI/SEO crawlers that aren't on Cloudflare's
+verified list — working *against* GEO visibility, for ~zero protection value on public
+static content with no forms, API, or data. Keep them open.
 
 ### C. (Optional, low priority) Edge-cache HTML
 
