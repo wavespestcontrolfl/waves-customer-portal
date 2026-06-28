@@ -2322,15 +2322,31 @@ function initScheduledJobs() {
     try {
       const googleAds = require('./ads/google-ads');
       if (!googleAds.isConfigured()) return;
-      logger.info('Running: Google Ads call→campaign bridge');
-      const callBridge = require('./ads/google-call-bridge');
-      const r = await callBridge.applyBridge({ days: 30, limit: 200 });
-      logger.info(`[google-call-bridge cron] ${JSON.stringify({
-        configured: r.configured,
-        applied: r.appliedCount,
-        skipped: r.skippedCount,
-        matches: Array.isArray(r.matches) ? r.matches.length : undefined,
-      })}`);
+      // runExclusive: the bridge's ensureBridgeLeadSource() is a non-atomic
+      // select-then-insert and lead_sources.name has no unique index, so two
+      // overlapping ticks (Railway deploy overlap / multiple dynos) could each
+      // create a "Google Ads - Call Reporting Bridge" row and split lead
+      // attribution across source IDs. Serialize the tick across the fleet.
+      await runExclusive('google-call-bridge', async () => {
+        logger.info('Running: Google Ads call→campaign bridge');
+        const callBridge = require('./ads/google-call-bridge');
+        // 500 = the existing CRM-side cap in fetchCrmCalls(); keep the Google
+        // scan symmetric (was 200) so the cron isn't the narrower side. Both
+        // sides are bounded by design, so warn if either hits the cap — older
+        // calls in the 30-day window would go unbridged and need pagination
+        // (a wider refactor; unwarranted today at ~0 Google-Ads-driven calls).
+        const r = await callBridge.applyBridge({ days: 30, limit: 500 });
+        if ((r.summary?.googleCalls || 0) >= 500 || (r.summary?.crmMainLineCalls || 0) >= 500) {
+          logger.warn('[google-call-bridge cron] 30-day scan hit the 500-row cap — older calls may be unbridged; add pagination if call volume grows');
+        }
+        logger.info(`[google-call-bridge cron] ${JSON.stringify({
+          configured: r.configured,
+          applied: r.appliedCount,
+          skipped: r.skippedCount,
+          googleCalls: r.summary?.googleCalls,
+          crmMainLineCalls: r.summary?.crmMainLineCalls,
+        })}`);
+      });
     } catch (err) {
       logger.error(`Google Ads call bridge failed: ${err.message}`);
     }
