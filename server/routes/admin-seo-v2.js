@@ -438,7 +438,7 @@ router.get('/geo-grid/heatmap', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/geo-grid/run', async (req, res, next) => {
+router.post('/geo-grid/run', requireAdmin, async (req, res, next) => {
   try {
     if (!isEnabled('geoGridTracking')) return res.status(403).json({ error: 'geo-grid tracking is gated off (set GATE_GEO_GRID=true)' });
     if (GeoGrid.isScanning()) return res.json({ started: false, reason: 'in_progress' });

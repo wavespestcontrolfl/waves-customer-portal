@@ -27,7 +27,10 @@ const { runExclusive } = require('../../utils/cron-lock');
 const GRID_SIZE = 5; // N×N pins per office/keyword (5×5 = 25)
 const GRID_SPACING_MILES = 2; // distance between adjacent pins (≈ 8mi × 8mi area)
 const KEYWORDS = ['pest control', 'exterminator', 'termite control'];
-const COORDINATE_RADIUS_KM = 5; // DataForSEO location_coordinate search radius
+// DataForSEO Maps `location_coordinate` is "lat,lng,ZOOM" (0–21z, default 17z) —
+// NOT a km radius. Lower zoom = wider area, higher = tighter/more local. The grid
+// effect comes from the per-pin lat/lng; this is the viewport. Tunable.
+const GRID_ZOOM = 14;
 const MILES_PER_DEG_LAT = 69.0;
 
 // Simple in-process guard so a manual run + the cron can't overlap (a full run
@@ -60,7 +63,7 @@ function buildGrid(office) {
 function findOfficeRank(items, office) {
   for (const m of items) {
     const pid = m.place_id || '';
-    const rank = m.rank_absolute || m.rank_group || null;
+    const rank = m.rank_group || m.rank_absolute || null; // rank within the organic pack
     if (office.googlePlaceId && pid) {
       if (pid === office.googlePlaceId) return rank;
       continue; // a known, different place_id — not this office
@@ -77,7 +80,7 @@ async function scanOfficeKeyword(office, keyword, scanDate) {
   for (const pin of pins) {
     let result = null;
     try {
-      const data = await dataforseo.serpMaps(keyword, `${pin.latitude},${pin.longitude},${COORDINATE_RADIUS_KM}`);
+      const data = await dataforseo.serpMaps(keyword, `${pin.latitude},${pin.longitude},${GRID_ZOOM}`);
       result = data?.tasks?.[0]?.result?.[0] ?? null;
     } catch (err) {
       logger.warn(`[geo-grid] ${office.id}/${keyword} pin ${pin.row},${pin.col} failed: ${err.message}`);
@@ -89,9 +92,11 @@ async function scanOfficeKeyword(office, keyword, scanDate) {
       skipped++;
       continue;
     }
-    const items = result.items || [];
+    // Organic local-pack entries only — exclude ads (maps_paid_item). rank_group
+    // is position WITHIN the organic pack (rank_absolute counts across ad items).
+    const items = (result.items || []).filter((m) => m.type === 'maps_search');
     const rank = findOfficeRank(items, office);
-    const top = items.slice(0, 3).map((m) => ({ title: m.title, rank: m.rank_absolute || m.rank_group || null }));
+    const top = items.slice(0, 3).map((m) => ({ title: m.title, rank: m.rank_group || m.rank_absolute || null }));
     await db('geo_grid_ranks')
       .insert({
         scan_date: scanDate,
@@ -156,8 +161,18 @@ async function runScan({ officeId = null, keyword = null } = {}) {
 
 /** Latest grid + stats for one office+keyword (drives the heat map). */
 async function getHeatmap(officeId, keyword) {
-  const latest = await db('geo_grid_ranks').where({ office_id: officeId, keyword }).max('scan_date as d').first();
-  const scanDate = latest && latest.d;
+  // Latest scan_date with a COMPLETE grid only — a partial scan (transient
+  // DataForSEO failures skip pins) must NOT replace the last good view with a
+  // misleading partial one. Fall back to the most recent fully-stored scan.
+  const expected = GRID_SIZE * GRID_SIZE;
+  const row = await db('geo_grid_ranks')
+    .where({ office_id: officeId, keyword })
+    .select('scan_date')
+    .groupBy('scan_date')
+    .havingRaw('count(*) >= ?', [expected])
+    .orderBy('scan_date', 'desc')
+    .first();
+  const scanDate = row && row.scan_date;
   if (!scanDate) return { scanDate: null, gridSize: GRID_SIZE, pins: [], stats: null };
   const pins = await db('geo_grid_ranks')
     .where({ office_id: officeId, keyword, scan_date: scanDate })
