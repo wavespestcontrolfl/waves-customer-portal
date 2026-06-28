@@ -3735,7 +3735,8 @@ function RefreshAuditTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [batching, setBatching] = useState(false);
-  const [enq, setEnq] = useState({}); // blogPostId -> 'queuing'|'queued'|'error'
+  const [enq, setEnq] = useState({}); // blogPostId -> 'queuing'|'queued'|'error'|'no_gsc'
+  const [enqErr, setEnqErr] = useState({}); // blogPostId -> error message (button title)
 
   const load = () => {
     setLoading(true);
@@ -3768,8 +3769,13 @@ function RefreshAuditTab() {
         body: { blogPostId: c.blogPostId },
       });
       setEnq((s) => ({ ...s, [c.blogPostId]: "queued" }));
-    } catch {
-      setEnq((s) => ({ ...s, [c.blogPostId]: "error" }));
+    } catch (e) {
+      // A page with no Search Console signal can't be refreshed by the engine —
+      // surface that distinctly from a transient failure (which offers Retry).
+      const msg = e?.message || "Enqueue failed";
+      const noGsc = /search console|gsc/i.test(msg);
+      setEnq((s) => ({ ...s, [c.blogPostId]: noGsc ? "no_gsc" : "error" }));
+      setEnqErr((s) => ({ ...s, [c.blogPostId]: msg }));
     }
   };
 
@@ -3873,21 +3879,22 @@ function RefreshAuditTab() {
                       <td style={tdStyle}>
                         <button
                           onClick={() => queueRefresh(c)}
-                          disabled={st === "queuing" || st === "queued"}
+                          disabled={st === "queuing" || st === "queued" || st === "no_gsc"}
+                          title={enqErr[c.blogPostId] || ""}
                           style={{
                             padding: "5px 10px",
                             border: "none",
                             borderRadius: 5,
-                            background: st === "queued" ? D.green : st === "error" ? D.red : D.heading,
+                            background: st === "queued" ? D.green : st === "no_gsc" ? D.muted : st === "error" ? D.red : D.heading,
                             color: "#fff",
                             fontSize: 12,
                             fontWeight: 600,
-                            cursor: st === "queuing" || st === "queued" ? "default" : "pointer",
+                            cursor: st === "queuing" || st === "queued" || st === "no_gsc" ? "default" : "pointer",
                             opacity: st === "queuing" ? 0.6 : 1,
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {st === "queued" ? "Queued ✓" : st === "queuing" ? "Queuing…" : st === "error" ? "Retry" : "Queue refresh"}
+                          {st === "queued" ? "Queued ✓" : st === "queuing" ? "Queuing…" : st === "no_gsc" ? "No GSC data" : st === "error" ? "Retry" : "Queue refresh"}
                         </button>
                       </td>
                     </tr>

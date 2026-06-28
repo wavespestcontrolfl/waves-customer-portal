@@ -772,7 +772,7 @@ router.post('/refresh-audit/enqueue', requireAdmin, async (req, res, next) => {
     res.json(result);
   } catch (err) {
     if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
-    if (err.code === 'NO_URL') return res.status(422).json({ error: err.message });
+    if (err.code === 'NO_URL' || err.code === 'NO_GSC_SIGNAL') return res.status(422).json({ error: err.message, code: err.code });
     next(err);
   }
 });

@@ -22,8 +22,10 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const HUB = 'https://wavespestcontrol.com';
+const GSC_LOOKBACK_DAYS = 90;
 
 // Staleness ramp: nothing below FRESH_DAYS, full weight at/above STALE_FULL_DAYS.
 const FRESH_DAYS = 90;
@@ -211,6 +213,34 @@ class RefreshAudit {
       })
       .orderByRaw('abs(change_pct) desc')
       .first();
+
+    // The autonomous refresh path is GSC-evidence-gated: content-brief-builder
+    // maps signal_metadata.{impressions,avg_position,ctr,decay_pct} → brief.gsc_signal,
+    // and content-quality-gate hard-fails a non-operator refresh when
+    // gsc_signal.impressions is missing (and `impressions || null` makes 0 → null).
+    // So a queued refresh MUST carry the page's real Search Console signal — same
+    // contract as a gsc-opportunity-miner decay_refresh row. A page with no GSC
+    // impressions can't be meaningfully refreshed by this engine; fail fast with a
+    // clear reason instead of seeding a run doomed to no_gsc_signal.
+    const since = etDateString(addETDays(new Date(), -GSC_LOOKBACK_DAYS));
+    const gsc = await db('gsc_pages')
+      .where('page_url', pageUrl)
+      .where('date', '>=', since)
+      .sum('clicks as clicks')
+      .sum('impressions as impressions')
+      .avg('position as avg_position')
+      .first();
+    const impressions = gsc && gsc.impressions != null ? Math.round(Number(gsc.impressions)) : 0;
+    if (!impressions) {
+      const err = new Error(`no Search Console impressions for ${pageUrl} in the last ${GSC_LOOKBACK_DAYS} days — the refresh engine needs GSC signal to refresh against`);
+      err.code = 'NO_GSC_SIGNAL';
+      throw err;
+    }
+    const clicks = gsc && gsc.clicks != null ? Math.round(Number(gsc.clicks)) : 0;
+    const avgPosition = gsc && gsc.avg_position != null ? Number(Number(gsc.avg_position).toFixed(1)) : null;
+    const ctr = Number((clicks / impressions).toFixed(4));
+    const decayPct = decay ? Math.round(Number(decay.change_pct) || 0) : null;
+
     const ageDays = ageDaysFrom(post, Date.now());
     const { priority, reasons } = scorePriority({ ageDays, qa: qa || null, decay: decay || null });
     const score = Math.max(ENQUEUE_FLOOR, priority);
@@ -249,7 +279,19 @@ class RefreshAudit {
         post.city || null,
         score,
         JSON.stringify({ source: 'refresh_audit', priority, reasons }),
-        JSON.stringify({ qaScore: qa ? qa.total_score : null, decayPct: decay ? Math.round(Number(decay.change_pct) || 0) : null, ageDays }),
+        // signal_metadata: snake_case GSC fields the brief-builder reads into
+        // gsc_signal (impressions/avg_position/ctr/decay_pct), plus audit context.
+        JSON.stringify({
+          impressions,
+          avg_position: avgPosition,
+          ctr,
+          decay_pct: decayPct,
+          clicks,
+          source: 'refresh_audit',
+          qa_score: qa ? qa.total_score : null,
+          age_days: ageDays,
+          priority,
+        }),
         'pending',
         expiresAt,
         dedupeKey,
