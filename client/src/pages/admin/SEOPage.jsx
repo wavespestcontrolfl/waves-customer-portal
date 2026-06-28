@@ -179,6 +179,7 @@ const WORKSPACES = [
     sections: [
       { key: "actions", label: "Actions" },
       { key: "content-qa", label: "Content QA" },
+      { key: "refresh-audit", label: "Refresh Audit" },
     ],
   },
   {
@@ -3721,6 +3722,233 @@ function ContentQATab() {
   );
 }
 
+// Pillar 4 — Refresh Audit. Ranks published pages by refresh priority (age + QA
+// gap + decay) and queues a chosen page into the existing autonomous refresh
+// engine (opportunity_queue). Reuses content-qa + content-decay signals.
+function priorityColor(p) {
+  if (p >= 60) return D.red;
+  if (p >= 40) return D.amber;
+  if (p >= 20) return D.teal;
+  return D.muted;
+}
+function RefreshAuditTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [batching, setBatching] = useState(false);
+  const [enq, setEnq] = useState({}); // blogPostId -> 'queuing'|'queued'|'error'|'no_gsc'
+  const [enqErr, setEnqErr] = useState({}); // blogPostId -> error message (button title)
+  // Queue refresh + Run QA batch POST to requireAdmin routes — non-admins (tech/
+  // CSR) can VIEW the ranking but would only get a 403, so hide the actions.
+  const isAdmin = isAdminUser();
+
+  const load = () => {
+    setLoading(true);
+    adminFetch("/admin/seo/refresh-audit?limit=200")
+      .then((d) => {
+        setData(d);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  };
+  useEffect(load, []);
+
+  const runQaBatch = async () => {
+    setBatching(true);
+    try {
+      // publishedOnly: the audit only ranks published pages — don't spend the
+      // batch on unscored drafts that never appear here.
+      await adminFetch("/admin/seo/qa/batch", { method: "POST", body: { limit: 100, publishedOnly: true } });
+      load(); // re-rank with fresh QA scores
+    } catch {
+      /* non-critical */
+    } finally {
+      setBatching(false);
+    }
+  };
+
+  const queueRefresh = async (c) => {
+    setEnq((s) => ({ ...s, [c.blogPostId]: "queuing" }));
+    try {
+      const r = await adminFetch("/admin/seo/refresh-audit/enqueue", {
+        method: "POST",
+        body: { blogPostId: c.blogPostId },
+      });
+      if (r && r.queued === false) {
+        // Page already has a claimed/done/in-review opportunity — the upsert
+        // preserved it, so this wasn't (re)queued. Show the real state.
+        const label =
+          { pending: "Already queued", claimed: "Running", done: "Already done", pending_review: "In review" }[
+            r.status
+          ] || `Already ${r.status}`;
+        setEnq((s) => ({ ...s, [c.blogPostId]: "already" }));
+        setEnqErr((s) => ({ ...s, [c.blogPostId]: label }));
+      } else {
+        setEnq((s) => ({ ...s, [c.blogPostId]: "queued" }));
+      }
+    } catch (e) {
+      // Distinguish permanent blocks (no GSC signal, unmappable service, not
+      // published) from a transient failure (which offers Retry).
+      const msg = e?.message || "Enqueue failed";
+      const noGsc = /search console|gsc/i.test(msg);
+      const blocked = /could not (map|determine)|not published|no resolvable url/i.test(msg);
+      setEnq((s) => ({ ...s, [c.blogPostId]: noGsc ? "no_gsc" : blocked ? "blocked" : "error" }));
+      setEnqErr((s) => ({ ...s, [c.blogPostId]: msg }));
+    }
+  };
+
+  if (loading)
+    return (
+      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+        Loading refresh audit…
+      </div>
+    );
+  if (!data || !data.summary)
+    return (
+      <Card style={{ padding: 40, textAlign: "center" }}>
+        <div style={{ color: D.muted }}>Refresh audit unavailable.</div>
+      </Card>
+    );
+
+  const s = data.summary;
+  const candidates = data.candidates || [];
+  const gradeColor = { A: D.green, B: D.teal, C: D.amber, D: D.orange, F: D.red };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div style={{ fontSize: 13, color: D.muted }}>
+          Ranks published pages by refresh priority — age since update, QA helpfulness gap, and traffic decay.
+          “Queue refresh” hands a page to the autonomous engine (safe: shadow mode unless activated).
+        </div>
+        {isAdmin && (
+          <button
+            onClick={runQaBatch}
+            disabled={batching}
+            style={{
+              padding: "8px 14px",
+              border: `1px solid ${D.inputBorder}`,
+              borderRadius: 6,
+              background: D.white,
+              color: D.text,
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: batching ? "default" : "pointer",
+              opacity: batching ? 0.6 : 1,
+              whiteSpace: "nowrap",
+            }}
+            title="Score up to 100 unscored pages with the Content QA gate, then re-rank"
+          >
+            {batching ? "Scoring…" : "Run QA batch"}
+          </button>
+        )}
+      </div>
+
+      <div className="seo-kpi-grid-5" style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
+        <KpiCard label="Published" value={fmt(s.totalPublished)} />
+        <KpiCard label="High priority" value={fmt(s.highPriority)} color={s.highPriority ? D.red : D.green} />
+        <KpiCard label="Stale 180d+" value={fmt(s.stale)} color={s.stale ? D.amber : D.green} />
+        <KpiCard label="Traffic decay" value={fmt(s.withDecay)} color={s.withDecay ? D.red : D.green} />
+        <KpiCard label="Not QA-scored" value={fmt(s.unscored)} color={s.unscored ? D.amber : D.green} />
+      </div>
+
+      <Card>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
+          Refresh candidates
+        </div>
+        {candidates.length === 0 ? (
+          <div style={{ color: D.muted, padding: 20, textAlign: "center" }}>
+            No published pages found.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={thR}>Priority</th>
+                  <th style={thStyle}>Page</th>
+                  <th style={thR}>Age</th>
+                  <th style={thStyle}>QA</th>
+                  <th style={thR}>Decay</th>
+                  <th style={thStyle}>Why</th>
+                  {isAdmin && <th style={thStyle}>Action</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {candidates.map((c) => {
+                  const st = enq[c.blogPostId];
+                  return (
+                    <tr key={c.blogPostId}>
+                      <td style={{ ...tdR, color: priorityColor(c.priority), fontWeight: 700 }}>{c.priority}</td>
+                      <td
+                        style={{ ...tdStyle, fontFamily: "inherit", maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        title={c.url || c.title}
+                      >
+                        {c.title || c.url || c.slug}
+                      </td>
+                      <td style={tdR}>{c.ageDays != null ? `${c.ageDays}d` : "—"}</td>
+                      <td style={{ ...tdStyle, color: gradeColor[c.qaGrade] || D.muted }}>
+                        {c.qaGrade ? `${c.qaGrade} (${c.qaScore})` : "—"}
+                      </td>
+                      <td style={{ ...tdR, color: c.decayPct != null ? D.red : D.muted }}>
+                        {c.decayPct != null ? `${c.decayPct}%` : "—"}
+                      </td>
+                      <td style={{ ...tdStyle, fontFamily: "inherit", fontSize: 12, color: D.muted, maxWidth: 240 }}>
+                        {(c.reasons || []).join(" · ") || "—"}
+                      </td>
+                      {isAdmin && (
+                      <td style={tdStyle}>
+                        <button
+                          onClick={() => queueRefresh(c)}
+                          disabled={["queuing", "queued", "no_gsc", "blocked", "already"].includes(st)}
+                          title={enqErr[c.blogPostId] || ""}
+                          style={{
+                            padding: "5px 10px",
+                            border: "none",
+                            borderRadius: 5,
+                            background:
+                              st === "queued"
+                                ? D.green
+                                : st === "no_gsc" || st === "blocked" || st === "already"
+                                  ? D.muted
+                                  : st === "error"
+                                    ? D.red
+                                    : D.heading,
+                            color: "#fff",
+                            fontSize: 12,
+                            fontWeight: 600,
+                            cursor: ["queuing", "queued", "no_gsc", "blocked", "already"].includes(st) ? "default" : "pointer",
+                            opacity: st === "queuing" ? 0.6 : 1,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {st === "queued"
+                            ? "Queued ✓"
+                            : st === "queuing"
+                              ? "Queuing…"
+                              : st === "already"
+                                ? enqErr[c.blogPostId] || "Already queued"
+                                : st === "no_gsc"
+                                  ? "No GSC data"
+                                  : st === "blocked"
+                                    ? "Can't queue"
+                                    : st === "error"
+                                      ? "Retry"
+                                      : "Queue refresh"}
+                        </button>
+                      </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 function AIOverviewTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -6762,6 +6990,7 @@ export default function SEOPage() {
       {activeView === "rankings-monitor" && <RankingsMonitorTab />}
       {activeView === "backlinks" && <BacklinksTab />}
       {activeView === "content-qa" && <ContentQATab />}
+      {activeView === "refresh-audit" && <RefreshAuditTab />}
       {activeView === "ai-overview" && <AIOverviewTab />}
       {activeView === "funnel" && <FunnelTab />}
       {activeView === "geo-grid" && <GeoGridTab />}

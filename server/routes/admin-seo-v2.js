@@ -412,6 +412,7 @@ const AIOverviewTracker = require('../services/seo/ai-overview-tracker');
 const ContentQA = require('../services/seo/content-qa');
 const CannibalizationDetector = require('../services/seo/cannibalization');
 const ContentDecayDetector = require('../services/seo/content-decay');
+const RefreshAudit = require('../services/seo/refresh-audit');
 const CitationAuditor = require('../services/seo/citation-auditor');
 const ConversionFunnel = require('../services/seo/conversion-funnel');
 const SiteRollup = require('../services/seo/site-rollup');
@@ -733,7 +734,7 @@ router.post('/qa/:blogPostId/score', requireAdmin, async (req, res, next) => {
 
 router.post('/qa/batch', requireAdmin, async (req, res, next) => {
   try {
-    const results = await ContentQA.batchScore(parseInt(req.body.limit || 50));
+    const results = await ContentQA.batchScore(parseInt(req.body.limit || 50), { publishedOnly: !!(req.body && req.body.publishedOnly) });
     res.json({ results });
   } catch (err) { next(err); }
 });
@@ -752,6 +753,31 @@ router.get('/decay', async (req, res, next) => {
     const data = await ContentDecayDetector.getDashboard();
     res.json(data);
   } catch (err) { next(err); }
+});
+
+// Refresh Audit (Pillar 4) — ranks published pages by refresh priority (age +
+// QA gap + decay) and hands a chosen page to the existing autonomous engine.
+router.get('/refresh-audit', async (req, res, next) => {
+  try {
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
+    res.json(await RefreshAudit.getAudit({ limit }));
+  } catch (err) { next(err); }
+});
+
+router.post('/refresh-audit/enqueue', requireAdmin, async (req, res, next) => {
+  try {
+    const { blogPostId = null } = req.body || {};
+    if (!blogPostId) return res.status(400).json({ error: 'blogPostId is required' });
+    const result = await RefreshAudit.enqueueRefresh({ blogPostId });
+    res.json(result);
+  } catch (err) {
+    if (err.code === 'BAD_REQUEST') return res.status(400).json({ error: err.message });
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+    if (['NOT_PUBLISHED', 'NO_URL', 'NO_GSC_SIGNAL', 'NO_SERVICE'].includes(err.code)) {
+      return res.status(422).json({ error: err.message, code: err.code });
+    }
+    next(err);
+  }
 });
 
 // Citations
