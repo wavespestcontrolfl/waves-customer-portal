@@ -65,19 +65,39 @@ const SYSTEM_PROMPT = [
 ].join('\n');
 
 class RelayConversation {
-  constructor({ callSid, from, to, language, send }) {
+  constructor({ callSid, from, to, language, send, endSession }) {
     this.callSid = callSid || null;
     this.from = from || null;
     this.to = to || null;
     this.language = language || null;
     this._send = typeof send === 'function' ? send : () => {};
+    this._endSession = typeof endSession === 'function' ? endSession : null;
     this.messages = [];
     this.ended = false;
     this.leadCaptured = false;
+    this._ending = false; // set once we've decided to end the relay session
     this._controller = null;
     this._chain = Promise.resolve(); // serializes overlapping prompts
     this._userTurns = [];
     this._startedAt = Date.now(); // for the AI-handled leg duration on reconcile
+  }
+
+  /**
+   * After the model finishes a turn: if the lead is already captured, the agent
+   * has delivered its closing line, so proactively end the ConversationRelay
+   * session (send the end frame) instead of leaving the caller in silence until
+   * they hang up. Idempotent. NOTE: whether the end frame lets the final goodbye
+   * TTS finish first is version-dependent — verify on the first live call (same
+   * caveat as relay-protocol.parsePrompt).
+   */
+  _maybeEndAfterTurn() {
+    if (!this.leadCaptured || !this._endSession || this._ending) return;
+    this._ending = true;
+    try {
+      this._endSession({ reason: 'agent_complete', captured: true });
+    } catch (e) {
+      logger.error(`[voice-relay] endSession failed callSid=${this.callSid}: ${e.message}`);
+    }
   }
 
   /** Speak a line to the caller (no-op on empty). */
@@ -89,7 +109,7 @@ class RelayConversation {
   /** Handle one transcribed caller turn. Serialized so turns never interleave. */
   handlePrompt(text) {
     const t = String(text || '').trim();
-    if (!t || this.ended) return this._chain;
+    if (!t || this.ended || this._ending) return this._chain;
     this._userTurns.push(t);
     // Append the turn to the shared transcript INSIDE the serialized chain —
     // right before the loop that handles it — so a turn that arrives while a
@@ -172,6 +192,7 @@ class RelayConversation {
         this.messages.push({ role: 'user', content: results });
         continue; // let the model respond to the tool result
       }
+      this._maybeEndAfterTurn(); // lead captured + agent done → end the call
       return; // end_turn
     }
     logger.warn(`[voice-relay] hit MAX_TOOL_ROUNDS callSid=${this.callSid}`);

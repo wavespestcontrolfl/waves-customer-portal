@@ -300,7 +300,11 @@ function appendVoicemailRecording(twiml) {
 
 function queueVoiceMessageSync(callSid) {
   if (!callSid) return;
-  void syncVoiceMessageForCall(callSid);
+  // Intentional fire-and-forget, but catch/log so a sync failure never becomes an
+  // unhandled rejection (AGENTS.md floating-promise rule). Promise.resolve()
+  // tolerates a sync/void return from the helper (e.g. in tests).
+  Promise.resolve(syncVoiceMessageForCall(callSid)).catch((err) =>
+    logger.warn(`[voice] voice message sync failed for ${maskSid(callSid)}: ${err.message}`));
 }
 
 const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';

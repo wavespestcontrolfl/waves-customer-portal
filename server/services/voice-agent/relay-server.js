@@ -70,10 +70,11 @@ function attachVoiceRelay(httpServer) {
   let WebSocketServer;
   let RelayConversation;
   let textFrame;
+  let endFrame;
   try {
     ({ WebSocketServer } = require('ws'));
     ({ RelayConversation } = require('./relay-conversation'));
-    ({ textFrame } = require('./relay-protocol'));
+    ({ textFrame, endFrame } = require('./relay-protocol'));
   } catch (e) {
     logger.error(`[voice-relay] dependency load failed — not attaching: ${e.message}`);
     return null;
@@ -117,6 +118,18 @@ function attachVoiceRelay(httpServer) {
       }
     };
 
+    // End the ConversationRelay session (agent finished + lead captured) so the
+    // caller isn't left in silence. Twilio closes the call after the end frame.
+    const endSession = (handoffData) => {
+      if (ws.readyState === ws.OPEN) {
+        try {
+          ws.send(endFrame(handoffData));
+        } catch (e) {
+          logger.error(`[voice-relay] end frame send failed: ${e.message}`);
+        }
+      }
+    };
+
     ws.on('message', (raw) => {
       let msg;
       try {
@@ -133,6 +146,7 @@ function attachVoiceRelay(httpServer) {
             to: msg.to || p.to || null,
             language: msg.lang || p.lang || null,
             send,
+            endSession,
           });
           logger.info(`[voice-relay] session setup callSid=${convo.callSid} from=${convo.from ? maskPhone(convo.from) : 'n/a'}`);
           break;
