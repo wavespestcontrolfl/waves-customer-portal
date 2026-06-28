@@ -415,6 +415,48 @@ const ContentDecayDetector = require('../services/seo/content-decay');
 const CitationAuditor = require('../services/seo/citation-auditor');
 const ConversionFunnel = require('../services/seo/conversion-funnel');
 const SiteRollup = require('../services/seo/site-rollup');
+const GeoGrid = require('../services/seo/geo-grid-tracker');
+const { isEnabled } = require('../config/feature-gates');
+
+// Geo-grid map-pack tracker (Pillar 3). Needs BOTH the feature gate AND the SEO
+// master gate (DataForSEO calls are blocked by seoIntelligence) — report ungated
+// only when both are on, else a "scan" would silently record nothing.
+function geoGridGated() {
+  return !isEnabled('geoGridTracking') || !isEnabled('seoIntelligence');
+}
+
+router.get('/geo-grid', async (req, res, next) => {
+  try {
+    const cfg = GeoGrid.config();
+    const available = await db('geo_grid_ranks')
+      .select('office_id', 'keyword')
+      .max('scan_date as scan_date')
+      .groupBy('office_id', 'keyword');
+    res.json({ ...cfg, gated: geoGridGated(), scanning: await GeoGrid.isScanRunning(), available });
+  } catch (err) { next(err); }
+});
+
+router.get('/geo-grid/heatmap', async (req, res, next) => {
+  try {
+    const { office, keyword } = req.query;
+    if (!office || !keyword) return res.status(400).json({ error: 'office and keyword are required' });
+    res.json(await GeoGrid.getHeatmap(office, keyword));
+  } catch (err) { next(err); }
+});
+
+router.post('/geo-grid/run', requireAdmin, async (req, res, next) => {
+  try {
+    if (geoGridGated()) return res.status(403).json({ error: 'geo-grid tracking is gated off (needs GATE_GEO_GRID=true and GATE_SEO_INTELLIGENCE=true)' });
+    if (await GeoGrid.isScanRunning()) return res.json({ started: false, reason: 'in_progress' });
+    const { officeId = null, keyword = null } = req.body || {};
+    // Fire-and-forget — a sweep is many slow live calls; the client polls the heatmap.
+    // runScan() self-serializes cross-instance via runExclusive.
+    void GeoGrid.runScan({ officeId, keyword })
+      .then((r) => logger.info(`[geo-grid] manual run: ${JSON.stringify(r)}`))
+      .catch((e) => logger.error(`[geo-grid] manual run failed: ${e.message}`));
+    res.json({ started: true, officeId, keyword });
+  } catch (err) { next(err); }
+});
 
 // Auto-seed SEO keywords if table is empty
 const CITIES = ['Bradenton', 'Sarasota', 'Lakewood Ranch', 'Venice', 'Parrish', 'North Port', 'Port Charlotte'];

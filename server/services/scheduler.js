@@ -496,6 +496,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY GEO-GRID MAP-PACK SCAN (gated: cronJobs AND geoGridTracking)
+  // Sweeps an N×N grid of pins per office for the map-pack rank of core keywords.
+  // PAY-PER-CALL DataForSEO — opt-in via GATE_GEO_GRID. Sunday 4:00am ET.
+  // =========================================================================
+  cron.schedule('0 4 * * 0', async () => {
+    if (!isEnabled('geoGridTracking')) return;
+    logger.info('Running: Weekly geo-grid map-pack scan');
+    try {
+      // runScan() self-serializes via runExclusive('geo-grid-scan') — covers the
+      // cron, the manual /run trigger, and deploy overlaps in one place.
+      const { runScan } = require('./seo/geo-grid-tracker');
+      const result = await runScan();
+      logger.info(`[geo-grid] cron run: ${JSON.stringify(result)}`);
+    } catch (err) {
+      logger.error(`Geo-grid scan failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // SEO COMMAND CENTER CRONS (gated behind GATE_SEO_INTELLIGENCE)
   // =========================================================================
 

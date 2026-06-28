@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import {
   Activity,
   BarChart3,
@@ -186,6 +186,7 @@ const WORKSPACES = [
       { key: "rankings", label: "Rankings" },
       { key: "rankings-monitor", label: "Monitor" },
       { key: "funnel", label: "Funnel" },
+      { key: "geo-grid", label: "Geo-Grid" },
     ],
   },
   {
@@ -814,6 +815,236 @@ function SimpleTableTab({ endpoint, title, columns, emptyMsg }) {
           Data loaded from {endpoint}
         </div>
       </Card>{" "}
+    </div>
+  );
+}
+
+function GeoStat({ label, value }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 600, color: D.heading, fontFamily: MONO }}>{value}</div>
+    </div>
+  );
+}
+
+function GeoLegend({ color, text }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+      <span style={{ width: 12, height: 12, borderRadius: 3, background: color, display: "inline-block" }} />
+      {text}
+    </span>
+  );
+}
+
+function geoRankColor(rank) {
+  if (rank == null) return { bg: "#E4E4E7", fg: D.muted, label: "—" };
+  if (rank <= 3) return { bg: D.green, fg: "#fff", label: String(rank) };
+  if (rank <= 10) return { bg: D.amber, fg: "#fff", label: String(rank) };
+  if (rank <= 20) return { bg: D.red, fg: "#fff", label: String(rank) };
+  return { bg: "#52525B", fg: "#fff", label: "20+" };
+}
+
+// Pillar 3 — geo-grid map-pack tracker. Pick an office + keyword, see a heat map
+// of where the office ranks in the local pack block-by-block across the market.
+function GeoGridTab() {
+  const [cfg, setCfg] = useState(null);
+  const [office, setOffice] = useState("");
+  const [keyword, setKeyword] = useState("");
+  const [heat, setHeat] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+
+  useEffect(() => {
+    adminFetch("/admin/seo/geo-grid")
+      .then((d) => {
+        setCfg(d);
+        if (d?.offices?.length) setOffice(d.offices[0].id);
+        if (d?.keywords?.length) setKeyword(d.keywords[0]);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const loadHeat = () => {
+    if (!office || !keyword) return;
+    adminFetch(
+      `/admin/seo/geo-grid/heatmap?office=${encodeURIComponent(office)}&keyword=${encodeURIComponent(keyword)}`,
+    )
+      .then(setHeat)
+      .catch(() => setHeat(null));
+  };
+  // Current selection mirror — so an in-flight scan poll doesn't write results
+  // for a selection the user has since changed away from.
+  const selRef = useRef({ office, keyword });
+  useEffect(() => {
+    selRef.current = { office, keyword };
+    setHeat(null);
+    loadHeat();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [office, keyword]);
+
+  const runScan = async () => {
+    const scanned = { office, keyword };
+    setRunning(true);
+    try {
+      const r = await adminFetch("/admin/seo/geo-grid/run", {
+        method: "POST",
+        body: { officeId: office, keyword },
+      });
+      if (r?.started === false) {
+        setRunning(false);
+        return;
+      }
+      let n = 0;
+      const t = setInterval(async () => {
+        n += 1;
+        const s = await adminFetch("/admin/seo/geo-grid").catch(() => null);
+        if (!s?.scanning || n > 18) {
+          clearInterval(t);
+          setRunning(false);
+          // Only reload if the user hasn't switched office/keyword since starting.
+          if (selRef.current.office === scanned.office && selRef.current.keyword === scanned.keyword) loadHeat();
+        }
+      }, 20000);
+    } catch {
+      setRunning(false);
+    }
+  };
+
+  if (loading)
+    return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading geo-grid…</div>;
+  if (!cfg)
+    return (
+      <Card style={{ padding: 40, textAlign: "center" }}>
+        <div style={{ color: D.muted }}>Geo-grid unavailable.</div>
+      </Card>
+    );
+
+  const size = heat?.gridSize || cfg.gridSize;
+  const byCell = {};
+  (heat?.pins || []).forEach((p) => {
+    byCell[`${p.pin_row}-${p.pin_col}`] = p;
+  });
+  const stats = heat?.stats;
+  const selStyle = {
+    padding: "8px 10px",
+    border: `1px solid ${D.inputBorder}`,
+    borderRadius: 6,
+    background: D.white,
+    color: D.text,
+    fontSize: 13,
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
+        <select value={office} onChange={(e) => setOffice(e.target.value)} style={selStyle}>
+          {cfg.offices.map((o) => (
+            <option key={o.id} value={o.id}>{o.name}</option>
+          ))}
+        </select>
+        <select value={keyword} onChange={(e) => setKeyword(e.target.value)} style={selStyle}>
+          {cfg.keywords.map((k) => (
+            <option key={k} value={k}>{k}</option>
+          ))}
+        </select>
+        <button
+          onClick={runScan}
+          disabled={running || cfg.gated}
+          style={{
+            padding: "8px 14px",
+            border: "none",
+            borderRadius: 6,
+            background: D.heading,
+            color: "#fff",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: running || cfg.gated ? "default" : "pointer",
+            opacity: running || cfg.gated ? 0.55 : 1,
+          }}
+        >
+          {running ? "Scanning…" : "Run scan"}
+        </button>
+        {cfg.gated && (
+          <span style={{ color: D.amber, fontSize: 12 }}>
+            Gated off — set GATE_GEO_GRID=true to run.
+          </span>
+        )}
+      </div>
+
+      {stats && (
+        <div style={{ display: "flex", gap: 28, marginBottom: 16, flexWrap: "wrap" }}>
+          <GeoStat label="In top 3" value={`${stats.top3Pct}%`} />
+          <GeoStat label="Avg rank" value={stats.avgRank ?? "—"} />
+          <GeoStat label="Share of voice" value={`${stats.solv}%`} />
+          <GeoStat label="Found / pins" value={`${stats.found}/${stats.total}`} />
+          <GeoStat label="Last scan" value={heat.scanDate} />
+        </div>
+      )}
+
+      <Card>
+        {!heat?.pins?.length ? (
+          <div style={{ color: D.muted, padding: 30, textAlign: "center" }}>
+            No scan yet for this office + keyword.{" "}
+            {cfg.gated ? "Enable GATE_GEO_GRID (and seoIntelligence), then " : ""}click “Run scan”.
+          </div>
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: `repeat(${size}, 1fr)`,
+              gap: 4,
+              maxWidth: 360,
+              margin: "0 auto",
+            }}
+          >
+            {Array.from({ length: size * size }).map((_, i) => {
+              const row = Math.floor(i / size);
+              const col = i % size;
+              const p = byCell[`${row}-${col}`];
+              const c = geoRankColor(p ? p.map_pack_rank : null);
+              return (
+                <div
+                  key={i}
+                  title={p ? `(${p.latitude}, ${p.longitude}) — rank ${c.label}` : ""}
+                  style={{
+                    aspectRatio: "1",
+                    background: c.bg,
+                    color: c.fg,
+                    borderRadius: 6,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontFamily: MONO,
+                    fontSize: 13,
+                    fontWeight: 600,
+                  }}
+                >
+                  {c.label}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div
+          style={{
+            display: "flex",
+            gap: 14,
+            justifyContent: "center",
+            marginTop: 14,
+            fontSize: 11,
+            color: D.muted,
+            flexWrap: "wrap",
+          }}
+        >
+          <GeoLegend color={D.green} text="1–3" />
+          <GeoLegend color={D.amber} text="4–10" />
+          <GeoLegend color={D.red} text="11–20" />
+          <GeoLegend color="#52525B" text="20+" />
+          <GeoLegend color="#E4E4E7" text="not in pack" />
+        </div>
+      </Card>
     </div>
   );
 }
@@ -6337,6 +6568,7 @@ export default function SEOPage() {
       {activeView === "content-qa" && <ContentQATab />}
       {activeView === "ai-overview" && <AIOverviewTab />}
       {activeView === "funnel" && <FunnelTab />}
+      {activeView === "geo-grid" && <GeoGridTab />}
       {activeView === "analytics" && <AnalyticsTab />}
       {activeView === "by-site" && <BySiteTab />}
       {activeView === "url-intel" && <UrlIntelTab domain={PRIMARY_DOMAIN} />}
