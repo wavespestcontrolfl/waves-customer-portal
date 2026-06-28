@@ -402,6 +402,54 @@ function appendAgentHandoff(twiml, config, opts = {}) {
 }
 
 // =========================================================================
+// DNI Phase B2 — paid ad-call lead attribution
+//
+// When an inbound call to a PAID ad-tracking number (Google Ads / Facebook
+// Ads) actually CONNECTS, create/touch a source-tagged lead via the shared
+// lead-attribution service, so the call flows into the same lead funnel as web
+// leads (and, once it qualifies/books, the Google offline-conversion upload).
+//
+// Spam-prudent by design:
+//   • strictly gated to the paid tracking numbers (numberConfig.type), and
+//   • fired at call COMPLETION with a real connected duration — a ring,
+//     no-answer, instant hangup, wrong number, or spam call that never bridges
+//     has duration 0 and is intentionally ignored, so those don't all become
+//     leads. (More conservative than the "fire at receipt" fallback; a pure
+//     no-answer→voicemail ad call is not lead-created here — the recording
+//     processor still ingests its voicemail.)
+//
+// attributeInboundContact is idempotent per caller phone, so a Twilio
+// redelivery / repeat call is safe, and it never marks the lead qualified
+// (conversion fires later when it books). Best-effort + non-blocking: any
+// failure is logged and never affects the voice flow / TwiML response.
+//
+// Ships DARK behind GATE_PAID_CALL_LEAD_ATTRIBUTION — fail-closed, so paid
+// calls only create leads once the owner flips the env var to exactly 'true'.
+// =========================================================================
+const PAID_TRACKING_TYPES = new Set(['google_ads', 'facebook']);
+
+function maybeAttributePaidInboundCall({ from, to, callSid, callDuration }) {
+  // Fail-closed gate: do nothing unless explicitly activated.
+  if (process.env.GATE_PAID_CALL_LEAD_ATTRIBUTION !== 'true') return;
+  try {
+    const numberConfig = TWILIO_NUMBERS.findByNumber(toE164(to) || to);
+    if (!numberConfig || !PAID_TRACKING_TYPES.has(numberConfig.type)) return;
+    if (!(Number(callDuration) > 0)) return; // connected calls only
+    const { attributeInboundContact } = require('../services/lead-attribution');
+    // Fire-and-forget — never block or break the TwiML response.
+    Promise.resolve(
+      attributeInboundContact({ from, to, type: 'call', callSid, callDuration: Number(callDuration) })
+    )
+      .then((res) => {
+        if (res) logger.info(`[voice][dni] paid-call attribution (${numberConfig.type}) ${maskSid(callSid)} → ${res.type}`);
+      })
+      .catch((err) => logger.error(`[voice][dni] paid-call attribution failed for ${maskSid(callSid)}: ${err.message}`));
+  } catch (err) {
+    logger.error(`[voice][dni] paid-call attribution setup failed: ${err.message}`);
+  }
+}
+
+// =========================================================================
 // POST /api/webhooks/twilio/voice — Inbound voice call webhook
 //
 // Twilio hits this when a call comes in to any Waves number.
@@ -633,7 +681,7 @@ router.post('/voice', async (req, res) => {
 // =========================================================================
 router.post('/call-complete', async (req, res) => {
   try {
-    const { CallSid, CallDuration, DialCallSid, DialCallStatus, DialCallDuration } = req.body;
+    const { CallSid, CallDuration, DialCallSid, DialCallStatus, DialCallDuration, From, To } = req.body;
 
     const duration = parseInt(DialCallDuration || CallDuration || 0);
     const status = DialCallStatus || 'completed';
@@ -669,6 +717,17 @@ router.post('/call-complete', async (req, res) => {
     }
 
     logger.info(`Call complete: ${CallSid} status=${status} duration=${duration}s`);
+
+    // DNI Phase B2 — source-tag a lead for connected inbound calls to a PAID
+    // ad-tracking number. Gated to paid #s + the connected dial-leg duration
+    // (DialCallDuration), so no-answer / hangup / spam calls are skipped.
+    // Non-blocking, best-effort (see maybeAttributePaidInboundCall).
+    maybeAttributePaidInboundCall({
+      from: From,
+      to: To,
+      callSid: CallSid,
+      callDuration: parseInt(DialCallDuration || 0, 10),
+    });
 
     // If no answer, play Waves custom voicemail greeting + record.
     //
@@ -1375,6 +1434,7 @@ router._test = {
   connectingAnnouncement,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
+  maybeAttributePaidInboundCall,
   maskPhone,
   maskSid,
   metadataHasForwardAcceptance,
