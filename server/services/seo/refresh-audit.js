@@ -68,6 +68,12 @@ function urlToPath(u) {
       .replace(/\/+$/, '') || '/'
   );
 }
+// The path GSC/decay actually key on: prefer the live URL's path (it's
+// authoritative and may diverge from slug for imports or an edited slug).
+function pathFor(post) {
+  if (post.astro_live_url) return urlToPath(post.astro_live_url);
+  return post.slug ? slugPath(post.slug) : null;
+}
 
 // Staleness ramp: nothing below FRESH_DAYS, full weight at/above STALE_FULL_DAYS.
 const FRESH_DAYS = 90;
@@ -85,17 +91,35 @@ const ENQUEUE_FLOOR = 78;
 // is fine, the brief builder drives off page_url for a refresh). Values must be
 // the miner categories facts-sufficiency.js maps (pest/termite/rodent/mosquito/
 // lawn/tree-shrub) — a wrong id fails a city-scoped refresh as facts_unmappable.
-// Keys are lowercased blog_posts.tag values. The canonical labels come from
-// blog-seo-contract.js CATEGORY labels ('Pest Control', 'Lawn Care', 'Termites',
-// 'Mosquito Control', 'Tree & Shrub Care'); aliases cover legacy/import variants.
+// Keys are lowercased blog_posts.tag values → autonomous-engine miner category.
+// Covers both the blog-seo-contract.js CATEGORY labels ('Pest Control', 'Lawn
+// Care', 'Termites', 'Mosquito Control', 'Tree & Shrub Care') AND the granular
+// tag dropdown in BlogPage.jsx ('Ants', 'Cockroaches', 'Mosquitoes', …). The
+// pest sub-topics roll up to the 'pest' category (→ pest-control facts); null is
+// still safe (facts gate is skipped) — we just map what we can confidently.
 const TAG_TO_SERVICE = {
+  // categories / umbrella
   'pest control': 'pest',
+  insects: 'pest',
+  'flying insects': 'pest',
+  // pest sub-topics
+  ants: 'pest',
+  'bed bugs': 'pest',
+  cockroaches: 'pest',
+  roaches: 'pest',
+  fleas: 'pest',
+  ticks: 'pest',
+  spiders: 'pest',
+  // lawn
   'lawn care': 'lawn',
   lawn: 'lawn',
-  termites: 'termite',
-  termite: 'termite',
+  'lawn pests': 'lawn',
+  // dedicated services
   'mosquito control': 'mosquito',
   mosquito: 'mosquito',
+  mosquitoes: 'mosquito',
+  termites: 'termite',
+  termite: 'termite',
   rodents: 'rodent',
   rodent: 'rodent',
   'tree & shrub care': 'tree-shrub',
@@ -195,7 +219,7 @@ class RefreshAudit {
       const url = pageUrlFor(p);
       const domain = registrableDomain(p.astro_live_url) || HUB_DOMAIN;
       const qa = qaByPost.get(p.id) || null;
-      const decay = decayByPost.get(p.id) || decayByDomainPath.get(`${domain}|${slugPath(p.slug)}`) || null;
+      const decay = decayByPost.get(p.id) || decayByDomainPath.get(`${domain}|${pathFor(p)}`) || null;
       const ageDays = ageDaysFrom(p, now);
       const { priority, reasons } = scorePriority({ ageDays, qa, decay });
       return {
@@ -263,7 +287,7 @@ class RefreshAudit {
       throw err;
     }
 
-    const path = post.slug ? slugPath(post.slug) : urlToPath(post.astro_live_url);
+    const path = pathFor(post);
     // Registrable domain of the target (blog posts live on the hub unless
     // astro_live_url says otherwise) — scopes GSC + dedupe to THIS domain.
     const targetDomain = registrableDomain(post.astro_live_url) || HUB_DOMAIN;
@@ -290,7 +314,11 @@ class RefreshAudit {
     const decay = await db('seo_content_decay_alerts')
       .where({ status: 'open' })
       .andWhere(function () {
-        this.where({ blog_post_id: post.id }).orWhereRaw(`${canonPathSql('url')} = ?`, [path]);
+        // blog_post_id is the reliable key; the path fallback must also be
+        // domain-scoped (the network shares paths across hub + spokes).
+        this.where({ blog_post_id: post.id }).orWhere(function () {
+          this.whereRaw(`${canonPathSql('url')} = ?`, [path]).whereRaw(`${hostRegistrableSql('url')} = ?`, [targetDomain]);
+        });
       })
       .orderByRaw('abs(change_pct) desc')
       .first();
@@ -325,7 +353,10 @@ class RefreshAudit {
     const clicks = gsc && gsc.clicks != null ? Math.round(Number(gsc.clicks)) : 0;
     const avgPosition = gsc && gsc.avg_position != null ? Number(Number(gsc.avg_position).toFixed(1)) : null;
     const ctr = Number((clicks / impressions).toFixed(4));
-    const decayPct = decay ? Math.round(Number(decay.change_pct) || 0) : null;
+    // Match the gsc-opportunity-miner decay_refresh contract: decay_pct is a
+    // POSITIVE FRACTION of the click drop (e.g. 0.52 for a -52% change), not a
+    // signed percentage — downstream consumers read it on that scale.
+    const decayPct = decay ? Number((Math.abs(Number(decay.change_pct) || 0) / 100).toFixed(4)) : null;
 
     // Target URL the runner/publisher will load: the authoritative live URL if
     // known, else the real GSC-reported host (not a guessed origin), else the
@@ -336,7 +367,9 @@ class RefreshAudit {
     const ageDays = ageDaysFrom(post, Date.now());
     const { priority, reasons } = scorePriority({ ageDays, qa: qa || null, decay: decay || null });
     const score = Math.max(ENQUEUE_FLOOR, priority);
-    const dedupeKey = `refresh-audit:${post.slug || post.id}`.slice(0, 200);
+    // Domain in the key: hub + spoke pages can share a slug/path, and a
+    // domain-less key would conflate them under ON CONFLICT.
+    const dedupeKey = `refresh-audit:${targetDomain}:${post.slug || post.id}`.slice(0, 200);
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     // Mirror intercept-brief-seeder's upsert: never reset a claimed/done/in-review
