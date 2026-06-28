@@ -3772,8 +3772,9 @@ function RefreshAuditTab() {
         // Page already has a claimed/done/in-review opportunity — the upsert
         // preserved it, so this wasn't (re)queued. Show the real state.
         const label =
-          { claimed: "Running", done: "Already done", pending_review: "In review" }[r.status] ||
-          `Already ${r.status}`;
+          { pending: "Already queued", claimed: "Running", done: "Already done", pending_review: "In review" }[
+            r.status
+          ] || `Already ${r.status}`;
         setEnq((s) => ({ ...s, [c.blogPostId]: "already" }));
         setEnqErr((s) => ({ ...s, [c.blogPostId]: label }));
       } else {

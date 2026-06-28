@@ -25,9 +25,26 @@ const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 // Astro/GSC canonical hub origin (used only for DISPLAY + a never-seeded
-// fallback — all gsc_pages/decay matching below is host-agnostic by path).
+// fallback — gsc_pages/decay matching below is path-keyed and domain-scoped).
 const HUB = 'https://www.wavespestcontrol.com';
+const HUB_DOMAIN = 'wavespestcontrol.com';
 const GSC_LOOKBACK_DAYS = 90;
+
+// gsc_pages is synced for the WHOLE network (hub + city spokes share paths like
+// /pest-control-sarasota-fl/), so impressions must be scoped to the target's
+// registrable domain — else a spoke's traffic satisfies a hub page's gate.
+function registrableDomain(url) {
+  if (!url) return null;
+  const host = String(url).replace(/^[a-z]+:\/\//i, '').split('/')[0].split(':')[0];
+  return host.replace(/^www\./i, '').toLowerCase() || null;
+}
+// SQL: registrable domain of a gsc_pages.domain value (drops a leading www.).
+const REGISTRABLE_DOMAIN_SQL = "regexp_replace(lower(domain), '^www[.]', '')";
+// SQL: registrable host extracted from a full-URL column (no literal '?' — that
+// collides with knex bind placeholders; '/' and '//' are safe). `col` is internal.
+function hostRegistrableSql(col) {
+  return `regexp_replace(regexp_replace(split_part(split_part(lower(${col}), '//', 2), '/', 1), '^www[.]', ''), ':.*$', '')`;
+}
 // Host-agnostic path of a url column, trailing slash trimmed: GSC may report
 // www vs non-www and ?utm tracking variants, so we match on path only. The
 // column differs per table (gsc_pages.page_url vs seo_content_decay_alerts.url),
@@ -239,6 +256,23 @@ class RefreshAudit {
     }
 
     const path = post.slug ? slugPath(post.slug) : urlToPath(post.astro_live_url);
+    // Registrable domain of the target (blog posts live on the hub unless
+    // astro_live_url says otherwise) — scopes GSC + dedupe to THIS domain.
+    const targetDomain = registrableDomain(post.astro_live_url) || HUB_DOMAIN;
+
+    // Don't double-queue: an in-flight refresh for this page may already exist
+    // under ANOTHER bucket's dedupe_key (e.g. the GSC miner's decay_refresh), and
+    // our refresh-audit key won't collide with it. claimNext only acts on one
+    // pending row, so a second pending refresh for the same target is wasted work.
+    const inflight = await db('opportunity_queue')
+      .where('action_type', 'refresh_existing_page')
+      .whereIn('status', ['pending', 'claimed', 'pending_review'])
+      .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
+      .whereRaw(`${hostRegistrableSql('page_url')} = ?`, [targetDomain])
+      .first();
+    if (inflight) {
+      return { queued: false, status: inflight.status, url: inflight.page_url, dedupeKey: inflight.dedupe_key };
+    }
 
     const qa = await db('seo_content_qa_scores')
       .where({ blog_post_id: post.id })
@@ -259,13 +293,15 @@ class RefreshAudit {
     // gsc_signal.impressions is missing (and `impressions || null` makes 0 → null).
     // So a queued refresh MUST carry the page's real Search Console signal — same
     // contract as a gsc-opportunity-miner decay_refresh row. Match gsc_pages by
-    // host-agnostic PATH (GSC may report www vs non-www and ?utm variants), and
-    // also recover the real GSC-reported URL to seed as the target. A page with no
+    // canonical PATH (GSC reports www vs non-www and ?utm variants) SCOPED to the
+    // target's registrable domain (the network shares paths across hub + spokes),
+    // and recover the real GSC-reported URL to seed as the target. A page with no
     // GSC impressions can't be meaningfully refreshed by this engine; fail fast
     // with a clear reason instead of seeding a run doomed to no_gsc_signal.
     const since = etDateString(addETDays(new Date(), -GSC_LOOKBACK_DAYS));
     const gsc = await db('gsc_pages')
       .where('date', '>=', since)
+      .whereRaw(`${REGISTRABLE_DOMAIN_SQL} = ?`, [targetDomain])
       .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
       .select(db.raw('min(split_part(page_url, chr(63), 1)) as gsc_url'))
       .sum('clicks as clicks')
