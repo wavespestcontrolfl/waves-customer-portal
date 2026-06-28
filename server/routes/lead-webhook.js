@@ -176,10 +176,17 @@ router.post('/', async (req, res) => {
           .first();
       }
       if (!sourceRecord && leadSource.source === 'facebook') {
-        sourceRecord = await db('lead_sources')
+        // Match the Facebook row for the right channel: paid ad clicks
+        // (fbclid/_fbc or utm cpc → channel 'paid') resolve to the paid
+        // call-extension / ads row; organic social (channel 'organic')
+        // resolves to an organic Facebook row. Without the channel filter a
+        // paid call-extension row would also swallow organic social form
+        // leads and mislabel them in lead-source reports.
+        const fbQuery = db('lead_sources')
           .whereRaw("LOWER(name) LIKE '%facebook%'")
-          .where('is_active', true)
-          .first();
+          .where('is_active', true);
+        if (leadSource.channel) fbQuery.where('channel', leadSource.channel);
+        sourceRecord = await fbQuery.first();
       }
       if (sourceRecord) leadSourceId = sourceRecord.id;
     } catch (e) {
