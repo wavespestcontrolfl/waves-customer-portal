@@ -9854,7 +9854,7 @@ export function CompletionPanel({
                       <strong style={{ color: M.ink }}>Assignment:</strong>{" "}
                       {treatmentPlanAppointmentAssignment?.assignedAt
                         ? "linked"
-                        : "plan preview"}
+                        : "current window"}
                     </div>
                     <div>
                       <strong style={{ color: M.ink }}>Inventory:</strong>{" "}
@@ -11757,7 +11757,7 @@ export function CompletionPanel({
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10, fontSize: 12, color: D.muted }}>
                   <div>
                     <strong style={{ color: D.text }}>Assignment:</strong>{" "}
-                    {treatmentPlanAppointmentAssignment?.assignedAt ? "linked" : "plan preview"}
+                    {treatmentPlanAppointmentAssignment?.assignedAt ? "linked" : "current window"}
                   </div>
                   <div>
                     <strong style={{ color: D.text }}>Inventory:</strong>{" "}
