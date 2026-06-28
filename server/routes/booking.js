@@ -1035,8 +1035,13 @@ async function createSelfBooking(payload = {}) {
 
     // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 
+    // Declared at function scope so BOTH the reminder-registration block and the
+    // SMS block (deliverConfirmationByChannel) below can see it. It was previously
+    // declared inside the reminder try, so the sibling SMS block threw a swallowed
+    // ReferenceError — silently skipping the customer confirmation and owner alert.
+    const AppointmentReminders = require('../services/appointment-reminders');
+
     try {
-      const AppointmentReminders = require('../services/appointment-reminders');
       for (const row of [serviceRow, ...followUpRows].filter(r => r?.id)) {
         const scheduledDate = row.id === serviceRow.id
           ? slotDateStr
