@@ -11,6 +11,9 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 const SEODashboardPage = lazy(() => import("./SEODashboardPage"));
+// Pillar 3 V2 — real Google-map heat map overlay. Lazy so the Maps SDK only
+// loads when a user opens the Geo-Grid tab's Map view (not on every SEO page).
+const GeoGridMap = lazy(() => import("../../components/admin/GeoGridMap"));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` folded to zinc-900, `purple` folded to zinc-900.
@@ -854,6 +857,7 @@ function GeoGridTab() {
   const [heat, setHeat] = useState(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [view, setView] = useState("grid"); // "grid" | "map"
 
   useEffect(() => {
     adminFetch("/admin/seo/geo-grid")
@@ -927,6 +931,7 @@ function GeoGridTab() {
     byCell[`${p.pin_row}-${p.pin_col}`] = p;
   });
   const stats = heat?.stats;
+  const officeCenter = cfg.offices.find((o) => o.id === office);
   const selStyle = {
     padding: "8px 10px",
     border: `1px solid ${D.inputBorder}`,
@@ -971,6 +976,34 @@ function GeoGridTab() {
             Gated off — set GATE_GEO_GRID=true to run.
           </span>
         )}
+        <div
+          style={{
+            marginLeft: "auto",
+            display: "inline-flex",
+            border: `1px solid ${D.inputBorder}`,
+            borderRadius: 6,
+            overflow: "hidden",
+          }}
+        >
+          {["grid", "map"].map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              style={{
+                padding: "7px 14px",
+                border: "none",
+                background: view === v ? D.heading : D.white,
+                color: view === v ? "#fff" : D.text,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+                textTransform: "capitalize",
+              }}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
       </div>
 
       {stats && (
@@ -989,6 +1022,19 @@ function GeoGridTab() {
             No scan yet for this office + keyword.{" "}
             {cfg.gated ? "Enable GATE_GEO_GRID (and seoIntelligence), then " : ""}click “Run scan”.
           </div>
+        ) : view === "map" ? (
+          <Suspense
+            fallback={<div style={{ color: D.muted, padding: 30, textAlign: "center" }}>Loading map…</div>}
+          >
+            <GeoGridMap
+              pins={heat.pins}
+              center={
+                officeCenter && officeCenter.latitude != null
+                  ? { lat: Number(officeCenter.latitude), lng: Number(officeCenter.longitude) }
+                  : null
+              }
+            />
+          </Suspense>
         ) : (
           <div
             style={{
