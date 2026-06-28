@@ -146,6 +146,105 @@ const CHIP_RECOMMENDATIONS_HORTICULTURAL = [
   "Bait station replacement",
   "Customer wants estimate",
 ];
+const CHIP_OBSERVATIONS_MOSQUITO = [
+  "Heavy adult activity",
+  "Larvae present (containers/bromeliads)",
+  "Standing water found",
+  "Bromeliads/plant axils holding water",
+  "Dense vegetation/harborage",
+  "Breeding source identified",
+  "Property access issue",
+  "Customer concern discussed",
+];
+const CHIP_RECOMMENDATIONS_MOSQUITO = [
+  "Callback recommended",
+  "Eliminate standing water (customer)",
+  "Treat bromeliads next visit",
+  "Increase frequency",
+  "In2Care/larvicide station service",
+  "Customer wants estimate",
+];
+const CHIP_OBSERVATIONS_TERMITE = [
+  "Active mud tubes found",
+  "Swarmers/wings observed",
+  "Wood damage noted",
+  "Station hit / bait consumed",
+  "Wood-to-ground contact",
+  "Conducive moisture",
+  "Property access issue",
+  "Customer concern discussed",
+];
+const CHIP_RECOMMENDATIONS_TERMITE = [
+  "Callback recommended",
+  "Schedule re-treatment",
+  "Add/replace bait station",
+  "Recommend WDO inspection",
+  "Customer wants estimate",
+];
+const CHIP_OBSERVATIONS_RODENT = [
+  "Fresh droppings found",
+  "Gnaw marks/damage",
+  "Burrows/runways noted",
+  "Station hit / bait consumed",
+  "Entry points identified",
+  "Harborage/clutter present",
+  "Property access issue",
+  "Customer concern discussed",
+];
+const CHIP_RECOMMENDATIONS_RODENT = [
+  "Callback recommended",
+  "Replace/add bait station",
+  "Exclusion work recommended",
+  "Follow-up in 2 weeks",
+  "Customer wants estimate",
+];
+const CHIP_OBSERVATIONS_PALM = [
+  "Frizzle top / nutrient deficiency",
+  "Yellowing/necrotic fronds",
+  "Mn/Mg/boron deficiency signs",
+  "Palm weevil activity",
+  "Ganoderma conk present",
+  "Declining canopy",
+  "Injection sites treated",
+  "Property access issue",
+  "Customer concern discussed",
+];
+const CHIP_RECOMMENDATIONS_PALM = [
+  "Callback recommended",
+  "Re-inject next cycle",
+  "Soil nutrient supplement",
+  "Remove declining palm",
+  "Follow-up in 2 weeks",
+  "Customer wants estimate",
+];
+// Closeout observation/recommendation chips are scoped to the service LINE
+// (serviceLineFromType: pest · palm · lawn · tree_shrub · mosquito · termite ·
+// rodent). lawn + tree_shrub share the horticultural set; mosquito/termite/
+// rodent/palm each have their own; everything else falls back to the pest set.
+const CHIP_OBSERVATIONS_BY_LINE = {
+  lawn: CHIP_OBSERVATIONS_HORTICULTURAL,
+  tree_shrub: CHIP_OBSERVATIONS_HORTICULTURAL,
+  palm: CHIP_OBSERVATIONS_PALM,
+  mosquito: CHIP_OBSERVATIONS_MOSQUITO,
+  termite: CHIP_OBSERVATIONS_TERMITE,
+  rodent: CHIP_OBSERVATIONS_RODENT,
+  pest: CHIP_OBSERVATIONS_PEST,
+};
+const CHIP_RECOMMENDATIONS_BY_LINE = {
+  lawn: CHIP_RECOMMENDATIONS_HORTICULTURAL,
+  tree_shrub: CHIP_RECOMMENDATIONS_HORTICULTURAL,
+  palm: CHIP_RECOMMENDATIONS_PALM,
+  mosquito: CHIP_RECOMMENDATIONS_MOSQUITO,
+  termite: CHIP_RECOMMENDATIONS_TERMITE,
+  rodent: CHIP_RECOMMENDATIONS_RODENT,
+  pest: CHIP_RECOMMENDATIONS_PEST,
+};
+function observationChipsForLine(serviceLine) {
+  return CHIP_OBSERVATIONS_BY_LINE[serviceLine] || CHIP_OBSERVATIONS_PEST;
+}
+function recommendationChipsForLine(serviceLine) {
+  return CHIP_RECOMMENDATIONS_BY_LINE[serviceLine] || CHIP_RECOMMENDATIONS_PEST;
+}
 const VISIT_OUTCOME_OPTIONS = [
   { value: "completed", label: "Completed" },
   { value: "inspection_only", label: "Inspection only" },
@@ -7014,11 +7113,12 @@ export function CompletionPanel({
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
-  // Plant-health services (lawn, tree/shrub) keep the broad observation list;
-  // pest-line services get the pest-focused list.
-  const usesPlantHealthChips =
-    serviceCategory === "lawn" || serviceCategory === "tree_shrub";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  // Closeout observation/recommendation chips are scoped to the service line:
+  // lawn + tree/shrub share the horticultural set; mosquito/termite/rodent/palm
+  // each get their own; everything else falls back to the pest set.
+  const observationChips = observationChipsForLine(serviceLineForCloseout);
+  const recommendationChips = recommendationChipsForLine(serviceLineForCloseout);
   const recapEligible = pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest";
   const treeShrubCloseoutOn =
     treeShrubCloseoutReady && treeShrubCloseoutFlag && serviceLineForCloseout === "tree_shrub";
@@ -10376,10 +10476,7 @@ export function CompletionPanel({
                 style={mSelect}
               >
                 <option value="">Add observation...</option>
-                {(usesPlantHealthChips
-                  ? CHIP_OBSERVATIONS_HORTICULTURAL
-                  : CHIP_OBSERVATIONS_PEST
-                ).map((chip) => (
+                {observationChips.map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -10395,10 +10492,7 @@ export function CompletionPanel({
                 style={mSelect}
               >
                 <option value="">Add recommendation...</option>
-                {(usesPlantHealthChips
-                  ? CHIP_RECOMMENDATIONS_HORTICULTURAL
-                  : CHIP_RECOMMENDATIONS_PEST
-                ).map((chip) => (
+                {recommendationChips.map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -12343,10 +12437,7 @@ export function CompletionPanel({
                 style={inputStyle}
               >
                 <option value="">Add observation...</option>
-                {(usesPlantHealthChips
-                  ? CHIP_OBSERVATIONS_HORTICULTURAL
-                  : CHIP_OBSERVATIONS_PEST
-                ).map((chip) => (
+                {observationChips.map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
@@ -12364,10 +12455,7 @@ export function CompletionPanel({
                 style={inputStyle}
               >
                 <option value="">Add recommendation...</option>
-                {(usesPlantHealthChips
-                  ? CHIP_RECOMMENDATIONS_HORTICULTURAL
-                  : CHIP_RECOMMENDATIONS_PEST
-                ).map((chip) => (
+                {recommendationChips.map((chip) => (
                   <option key={chip} value={chip}>
                     {chip}
                   </option>
