@@ -111,6 +111,7 @@ async function findOrCreateThreadWith(conn, {
   ourEndpointId,
   contactPhone,
   contactEmail,
+  contactExternalId,
   contactLabel,
 }) {
   if (!channel) throw new Error('findOrCreateThread: channel is required');
@@ -185,7 +186,25 @@ async function findOrCreateThreadWith(conn, {
     return row;
   }
 
-  throw new Error('findOrCreateThread: requires customerId, contactPhone, or contactEmail');
+  // External-id contact (no phone/email) — e.g. Facebook Messenger / Instagram,
+  // keyed by the page-scoped address. Mirrors the email branch.
+  if (contactExternalId) {
+    const existing = await conn('conversations')
+      .where({ contact_external_id: contactExternalId, channel, our_endpoint_id: ourEndpointId || null })
+      .whereNull('customer_id')
+      .first();
+    if (existing) return existing;
+    const [row] = await conn('conversations').insert({
+      channel,
+      our_endpoint_id: ourEndpointId || null,
+      contact_external_id: contactExternalId,
+      contact_label: contactLabel || null,
+      unknown_contact: true,
+    }).returning('*');
+    return row;
+  }
+
+  throw new Error('findOrCreateThread: requires customerId, contactPhone, contactEmail, or contactExternalId');
 }
 
 async function findOrCreateThread(opts) {
@@ -448,6 +467,7 @@ async function recordTouchpoint(opts) {
       ourEndpointId: opts.ourEndpointId,
       contactPhone: opts.contactPhone,
       contactEmail: opts.contactEmail,
+      contactExternalId: opts.contactExternalId,
       contactLabel: opts.contactLabel,
     });
     const message = await appendMessage({

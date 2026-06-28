@@ -381,6 +381,9 @@ app.use('/api/knowledge', require('./middleware/admin-auth').adminAuthenticate, 
 app.use('/api/booking', require('./routes/booking'));
 app.use('/api/ai', aiAssistantRoutes);
 app.use('/api/webhooks/twilio', validateTwilioSignature, twilioVoiceWebhookRoutes);
+// Facebook Messenger / Instagram channel-sender inbound (POST /messenger) —
+// same mount + signature validation as the SMS/voice webhooks; no path conflict.
+app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/twilio-messenger-webhook'));
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));
