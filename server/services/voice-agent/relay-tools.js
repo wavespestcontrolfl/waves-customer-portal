@@ -126,10 +126,17 @@ async function resolveAvailability({ address_line1, city, zip, when }) {
   const booking = require('../../routes/booking')._internals;
   const config = await booking.loadBookingConfig();
 
-  const addrStr = [address_line1, city, zip].map((s) => String(s || '').trim()).filter(Boolean).join(', ');
+  const street = String(address_line1 || '').trim();
+  const cityStr = String(city || '').trim();
+  const zipStr = String(zip || '').trim();
+  const addrParts = [street, cityStr, zipStr].filter(Boolean);
+  // Only send a geocodable `address` when there's a street or ZIP. For a
+  // city-only caller, pass just `city` so resolveBookingCoords uses its
+  // service_zones fallback instead of throwing on a city-only geocode (which
+  // would skip the fallback the public /book route relies on).
   const coords = await booking.resolveBookingCoords({
-    address: addrStr ? `${addrStr}, FL` : null,
-    city: city ? String(city).trim() : null,
+    address: (street || zipStr) && addrParts.length ? `${addrParts.join(', ')}, FL` : null,
+    city: cityStr || null,
   });
   if (!coords.lat || !coords.lng) return { status: 'need_location' };
 
@@ -190,6 +197,14 @@ function availabilityResultToText(res) {
 async function executeTool(name, input = {}, ctx = {}) {
   try {
     if (name === 'capture_lead') {
+      // Robocall/spam: do NOT write it to the lead pipeline (createLeadFromExtraction
+      // records any truthy quality as a normal lead). Suppress the hangup capture
+      // floor too so it doesn't write a fallback lead for the same call.
+      if (input.lead_quality === 'spam') {
+        if (typeof ctx.markCaptured === 'function') ctx.markCaptured();
+        logger.info(`[voice-relay] capture_lead suppressed (spam) callSid=${ctx.callSid || 'n/a'}`);
+        return 'Marked as spam/robocall — no lead created. Wrap up and end the call politely.';
+      }
       // Voice-agent lead contract (AGENTS.md): reject non-E.164 caller IDs
       // before any lead create/merge. Prefer a number the caller gave verbally
       // (callback_phone) over the inbound caller ID, which is blocked/withheld

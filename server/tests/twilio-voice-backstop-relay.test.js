@@ -149,6 +149,15 @@ describe('buildRelayTwiML — authenticates the upgrade + disclosure greeting', 
     expect(xml).toContain(`url="${RELAY_URL}"`);
     expect(xml).not.toContain('key=');
   });
+
+  test('adds the <Connect action> fallback when an action is provided, omits it otherwise', () => {
+    delete process.env.VOICE_RELAY_WS_SECRET;
+    expect(buildRelayTwiML({ wsUrl: RELAY_URL, action: '/api/webhooks/twilio/relay-complete' }))
+      .toContain('<Connect action="/api/webhooks/twilio/relay-complete" method="POST">');
+    const noAction = buildRelayTwiML({ wsUrl: RELAY_URL });
+    expect(noAction).toContain('<Connect>');
+    expect(noAction).not.toContain('action=');
+  });
 });
 
 describe('relay-protocol auth/PII helpers', () => {

@@ -119,6 +119,7 @@ function buildRelayTwiML({
   ttsProvider = DEFAULT_TTS_PROVIDER,
   language = DEFAULT_LANGUAGE,
   voice, // optional provider-specific voice id
+  action, // optional <Connect action> URL — Twilio POSTs here when the session ends/fails
   wsSecret = process.env.VOICE_RELAY_WS_SECRET,
 } = {}) {
   if (!wsUrl) throw new Error('buildRelayTwiML: wsUrl is required');
@@ -132,9 +133,13 @@ function buildRelayTwiML({
     `language="${escapeXmlAttr(language)}"`,
   ];
   if (voice) attrs.push(`voice="${escapeXmlAttr(voice)}"`);
+  // <Connect action> lets Twilio hit a fallback URL when the relay session ends
+  // or fails (e.g. a rejected upgrade or transient WS error) instead of
+  // stranding the call — the live backstop points it at /relay-complete.
+  const connectAttrs = action ? ` action="${escapeXmlAttr(action)}" method="POST"` : '';
   return (
     '<?xml version="1.0" encoding="UTF-8"?>' +
-    '<Response><Connect>' +
+    `<Response><Connect${connectAttrs}>` +
     `<ConversationRelay ${attrs.join(' ')} />` +
     '</Connect></Response>'
   );

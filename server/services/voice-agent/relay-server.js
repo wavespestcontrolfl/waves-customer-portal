@@ -139,6 +139,10 @@ function attachVoiceRelay(httpServer) {
         }
         case 'prompt': {
           if (!convo) return;
+          // Ignore interim/partial STT frames — only act on the FINAL prompt, so
+          // the agent never responds to (or runs tools on) a half-spoken phrase
+          // and then re-processes the completed utterance.
+          if (msg.last === false) break;
           const text = parsePrompt(msg);
           if (text) convo.handlePrompt(text);
           break;
@@ -148,12 +152,11 @@ function attachVoiceRelay(httpServer) {
           break;
         }
         case 'error': {
-          // Never log the full inbound frame — it can carry caller PII / custom
-          // parameters. Log only a short sanitized description.
-          const desc = typeof msg.description === 'string' && msg.description.trim()
-            ? msg.description.trim().slice(0, 200)
-            : 'no description';
-          logger.warn(`[voice-relay] relay error frame: ${desc}`);
+          // Never log the description verbatim: Twilio can echo the offending
+          // frame back in it, and our outbound frames carry the assistant's
+          // (PII-bearing) replies. Log only that an error arrived + its length.
+          const len = typeof msg.description === 'string' ? msg.description.length : 0;
+          logger.warn(`[voice-relay] relay error frame received (description withheld, ${len} chars)`);
           break;
         }
         // 'dtmf' and others: ignored in Phase 0

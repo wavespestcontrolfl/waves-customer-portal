@@ -304,6 +304,7 @@ function queueVoiceMessageSync(callSid) {
 }
 
 const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
+const RELAY_COMPLETE_ACTION = '/api/webhooks/twilio/relay-complete';
 
 // Classify how the configured agent endpoint is reachable, so the live-routing
 // paths emit the right TwiML and never strand a call:
@@ -553,7 +554,7 @@ router.post('/voice', async (req, res) => {
           if (handoffKind === 'relay') {
             // ConversationRelay's welcomeGreeting carries the FL §934.03 +
             // automated-assistant disclosure, so no separate greeting MP3 here.
-            return res.type('text/xml').send(buildRelayTwiML({ wsUrl: routingConfig.agentEndpoint.trim() }));
+            return res.type('text/xml').send(buildRelayTwiML({ wsUrl: routingConfig.agentEndpoint.trim(), action: RELAY_COMPLETE_ACTION }));
           }
           const agentTwiml = new VoiceResponse();
           agentTwiml.play(greetingUrl); // FL §934.03 disclosure before the agent leg
@@ -702,7 +703,7 @@ router.post('/call-complete', async (req, res) => {
               await db('call_log').where('twilio_call_sid', CallSid)
                 .update({ answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
                 .catch(() => {});
-              return res.type('text/xml').send(buildRelayTwiML({ wsUrl: routingConfig.agentEndpoint.trim() }));
+              return res.type('text/xml').send(buildRelayTwiML({ wsUrl: routingConfig.agentEndpoint.trim(), action: RELAY_COMPLETE_ACTION }));
             }
             if (handoffKind === 'dial') {
               logger.info(`[call-complete] AI backstop dial (${decision.reason}) for ${maskSid(CallSid)}`);
@@ -741,6 +742,32 @@ router.post('/call-complete', async (req, res) => {
 // =========================================================================
 router.post('/voicemail-complete', (req, res) => {
   res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+});
+
+// =========================================================================
+// POST /api/webhooks/twilio/relay-complete — <Connect action> for the AI relay
+//
+// Twilio requests this when a <Connect><ConversationRelay> session ends. On a
+// relay/WS FAILURE (the session-ending errors Twilio documents, e.g. 64102 /
+// 64105, a rejected upgrade, or a transient disconnect) we fall OPEN to the
+// Waves voicemail so a no-answer-backstop call is never stranded; on a normal
+// end (agent finished, or the caller hung up) we just complete the call.
+//
+// NOTE: ConversationRelay result param names vary by version — verify
+// ErrorCode/SessionStatus against the live account on the first call (same
+// caveat as relay-protocol.parsePrompt). Unrecognized → clean hangup (valid
+// TwiML), never dead air.
+// =========================================================================
+router.post('/relay-complete', (req, res) => {
+  const errorCode = req.body?.ErrorCode || req.body?.errorCode || '';
+  const sessionStatus = String(req.body?.SessionStatus || req.body?.sessionStatus || '').toLowerCase();
+  const failed = !!errorCode || ['failed', 'error', 'disconnected'].includes(sessionStatus);
+  const twiml = new VoiceResponse();
+  if (failed) {
+    logger.warn(`[relay-complete] relay session failed (${errorCode || sessionStatus || 'unknown'}) for ${maskSid(req.body?.CallSid)} — falling back to voicemail`);
+    appendVoicemailRecording(twiml);
+  }
+  res.type('text/xml').send(twiml.toString());
 });
 
 // =========================================================================
