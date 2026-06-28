@@ -228,8 +228,19 @@ class RelayConversation {
     // sandbox path, which has no call_log row.
     if (this.callSid) {
       try {
+        // RACE: end() runs on EVERY WebSocket close, including a relay failure
+        // (rejected upgrade / WS error / transient disconnect). On failure Twilio
+        // also hits /relay-complete, which stamps call_outcome='voicemail' as the
+        // terminal fallback. Those two writes race, and end() can land last —
+        // overwriting the voicemail fallback with an optimistic 'ai_handled'.
+        // Guard on `call_outcome <> 'voicemail'` so the failure path always wins:
+        // if /relay-complete already wrote voicemail, this matches 0 rows; in the
+        // reverse ordering /relay-complete's unconditional failure write still
+        // overwrites this ai_handled. (The handoff cleared call_outcome to null
+        // before the relay leg, so 'voicemail' here can only mean a real failure.)
         await db('call_log')
           .where('twilio_call_sid', this.callSid)
+          .whereNot('call_outcome', 'voicemail')
           .update({
             status: 'completed',
             answered_by: 'ai_agent',
