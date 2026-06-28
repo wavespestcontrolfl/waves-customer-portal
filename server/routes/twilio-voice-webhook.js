@@ -422,15 +422,22 @@ function appendAgentHandoff(twiml, config, opts = {}) {
 //     duration>0 but forwardAccepted=false, so it is skipped, and so are
 //     rings / no-answers / hangups / wrong-numbers / spam,
 //   • anonymous / blocked / malformed callers are skipped (no real # = no lead),
-//   • the call_log claim + lead write are atomic in one transaction →
-//     exactly-once and retryable on failure: if attribution throws, the txn
-//     rolls back so the marker (paid_lead_attributed_at) is cleared and a Twilio
-//     retry of /call-complete re-attempts; a concurrent retry blocks on the row
-//     lock, then sees claimed=0 and skips. /call-complete has no dedupe of its own.
+//   • the call_log claim + lead write are atomic in one transaction → no
+//     half-state, no double-count: the marker (paid_lead_attributed_at) and the
+//     lead commit together, and a concurrent caller blocks on the row lock then
+//     sees the row already claimed and skips.
+//
+// FIRE-AND-FORGET, best-effort: /call-complete always returns its TwiML, so
+// Twilio is acked and does NOT redeliver this webhook — there is no retry queue.
+// On a transient DB failure the transaction rolls back cleanly (marker cleared,
+// no partial lead), and that one call's qualified-lead signal is simply not
+// re-driven. That's acceptable: the call is still in call_log, becomes a
+// customer via call-recording-processor, and a later booking still uploads the
+// completed-job conversion keyed on the customer's phone.
 //
 // attributeInboundContact is also idempotent per caller phone and never marks
-// the lead qualified (conversion fires later when it books). Best-effort +
-// non-blocking: any failure is logged and never affects the voice flow / TwiML.
+// the lead qualified (conversion fires later when it books). Any failure is
+// logged and never affects the voice flow / TwiML response.
 //
 // Ships DARK behind GATE_PAID_CALL_LEAD_ATTRIBUTION — fail-closed, so paid
 // calls only create leads once the owner flips the env var to exactly 'true'.
@@ -451,11 +458,11 @@ async function maybeAttributePaidInboundCall({ from, to, callSid, callDuration, 
     // 4. Connected = a human accepted the forwarded leg (pressed 1) and the
     //    call did not drop to voicemail. Excludes carrier voicemail pickups.
     if (!(forwardAccepted === true && !shouldRecordVoicemail)) return;
-    // 5. Claim + lead write are atomic in one transaction (exactly-once,
-    //    retryable). The marker is set and the lead written together; if
-    //    attribution throws, the whole txn rolls back so the marker clears and a
-    //    retry re-attempts. A concurrent retry blocks on the row lock, then sees
-    //    claimed=0 and skips. (call_log row was written by /voice keyed on the
+    // 5. Claim + lead write are atomic in one transaction (no half-state). The
+    //    marker is set and the lead written together; if attribution throws, the
+    //    whole txn rolls back so the marker clears (no partial lead). A
+    //    concurrent caller blocks on the row lock, then sees the row already
+    //    claimed and skips. (call_log row was written by /voice keyed on the
     //    parent CallSid.)
     const { attributeInboundContact } = require('../services/lead-attribution');
     await db.transaction(async (trx) => {
@@ -463,7 +470,10 @@ async function maybeAttributePaidInboundCall({ from, to, callSid, callDuration, 
         .where({ twilio_call_sid: callSid })
         .whereNull('paid_lead_attributed_at')
         .update({ paid_lead_attributed_at: db.fn.now() });
-      if (claimed !== 1) return; // already attributed OR no row yet → skip
+      // claimed<1 ⇒ already attributed OR no row yet ⇒ skip; a positive claim
+      // (even >1 if dup call_log rows exist — twilio_call_sid is not unique)
+      // attributes exactly once (attributeInboundContact is phone-idempotent).
+      if (claimed < 1) return;
       const res = await attributeInboundContact(
         { from, to, type: 'call', callSid, callDuration: Number(callDuration) || null },
         { trx },

@@ -170,24 +170,38 @@ describe('maybeAttributePaidInboundCall (twilio-voice-webhook.js)', () => {
     expect(attributeInboundContact).not.toHaveBeenCalled();
   });
 
-  test('is idempotent per CallSid — a retry whose claim returns 0 does not re-attribute', async () => {
-    claimResults = [1, 0]; // first delivery wins the claim, the Twilio retry loses
+  test('claim===0 (already attributed / no row) does NOT attribute', async () => {
+    claimResults = [0];
+    await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-zero' });
+    expect(attributeInboundContact).not.toHaveBeenCalled();
+  });
+
+  test('claim>1 (dup call_log rows for a non-unique CallSid) still attributes exactly once', async () => {
+    claimResults = [2]; // UPDATE marked 2 null rows — a positive claim, not a skip
+    await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-multi' });
+    expect(attributeInboundContact).toHaveBeenCalledTimes(1);
+  });
+
+  test('a second invocation whose claim returns 0 does not re-attribute (idempotent)', async () => {
+    claimResults = [1, 0]; // first invocation wins the claim, the second sees it taken
     await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-dup' });
     await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-dup' });
     expect(attributeInboundContact).toHaveBeenCalledTimes(1);
   });
 
-  test('rolls back on attribution failure so a later retry re-attempts', async () => {
-    // Real knex: a throw inside the txn rolls back the claim marker (so the next
-    // delivery re-claims) and re-throws. We model that with claim 1 then 1.
+  test('attribution failure rolls back cleanly (no half-state) and is logged, not thrown', async () => {
+    // Real knex: a throw inside the txn rolls back the claim marker (no partial
+    // lead) and re-throws; the helper logs it and never rejects. There is no
+    // Twilio retry of /call-complete — this only proves the no-half-state
+    // guarantee, modeled here with the txn cb rejecting.
     claimResults = [1, 1];
     attributeInboundContact
-      .mockRejectedValueOnce(new Error('boom'))                       // first attempt fails
-      .mockResolvedValueOnce({ type: 'new_lead', leadId: 'L1' });     // retry succeeds
-    // First delivery: txn throws → helper try/catch logs (does not propagate).
-    await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-retry' });
+      .mockRejectedValueOnce(new Error('boom'))                       // attempt fails
+      .mockResolvedValueOnce({ type: 'new_lead', leadId: 'L1' });     // re-invoke succeeds
+    // Failure is swallowed (best-effort): the call resolves, error is logged.
+    await expect(maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-retry' })).resolves.toBeUndefined();
     expect(logger.error).toHaveBeenCalledTimes(1);
-    // Retry: marker was rolled back → claim wins again → attribution succeeds.
+    // Rollback left no marker, so a fresh invocation can still attribute.
     await maybeAttributePaidInboundCall({ ...CONNECTED, callSid: 'CA-retry' });
     expect(attributeInboundContact).toHaveBeenCalledTimes(2);
   });
