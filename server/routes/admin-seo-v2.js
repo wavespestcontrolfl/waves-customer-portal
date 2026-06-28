@@ -412,6 +412,7 @@ const AIOverviewTracker = require('../services/seo/ai-overview-tracker');
 const ContentQA = require('../services/seo/content-qa');
 const CannibalizationDetector = require('../services/seo/cannibalization');
 const ContentDecayDetector = require('../services/seo/content-decay');
+const RefreshAudit = require('../services/seo/refresh-audit');
 const CitationAuditor = require('../services/seo/citation-auditor');
 const ConversionFunnel = require('../services/seo/conversion-funnel');
 const SiteRollup = require('../services/seo/site-rollup');
@@ -752,6 +753,28 @@ router.get('/decay', async (req, res, next) => {
     const data = await ContentDecayDetector.getDashboard();
     res.json(data);
   } catch (err) { next(err); }
+});
+
+// Refresh Audit (Pillar 4) — ranks published pages by refresh priority (age +
+// QA gap + decay) and hands a chosen page to the existing autonomous engine.
+router.get('/refresh-audit', async (req, res, next) => {
+  try {
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
+    res.json(await RefreshAudit.getAudit({ limit }));
+  } catch (err) { next(err); }
+});
+
+router.post('/refresh-audit/enqueue', requireAdmin, async (req, res, next) => {
+  try {
+    const { blogPostId = null, url = null } = req.body || {};
+    if (!blogPostId && !url) return res.status(400).json({ error: 'blogPostId or url is required' });
+    const result = await RefreshAudit.enqueueRefresh({ blogPostId, url });
+    res.json(result);
+  } catch (err) {
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+    if (err.code === 'NO_URL') return res.status(422).json({ error: err.message });
+    next(err);
+  }
 });
 
 // Citations
