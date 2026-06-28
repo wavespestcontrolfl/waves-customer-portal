@@ -16,6 +16,16 @@ function channelForAddress(address) {
   return String(address || '').startsWith('messenger:') ? 'facebook_messenger' : null;
 }
 
+// Non-PII view of an address for logs: the channel scheme only, never the
+// identifier. A misroute here can carry real E.164 / WhatsApp numbers, so we
+// must not write the raw value to logs.
+function addressScheme(address) {
+  const a = String(address || '');
+  if (!a) return 'empty';
+  const i = a.indexOf(':');
+  return i > 0 ? a.slice(0, i) : 'e164';
+}
+
 /**
  * Inbound Facebook Messenger messages.
  *
@@ -52,7 +62,8 @@ router.post('/messenger', async (req, res) => {
     // create a bogus social conversation.
     const channel = channelForAddress(To);
     if (!channel || !String(From).startsWith('messenger:')) {
-      logger.warn(`[messenger] ignoring non-Messenger address shape (from=${From} to=${To})`);
+      // Log channel scheme only — From/To may be real phone/WhatsApp PII here.
+      logger.warn(`[messenger] ignoring non-Messenger address shape (from=${addressScheme(From)} to=${addressScheme(To)})`);
       return res.type('text/xml').send('<Response></Response>');
     }
 
@@ -68,7 +79,7 @@ router.post('/messenger', async (req, res) => {
     let customerId = null;
     try {
       const prior = await db('conversations')
-        .where({ contact_external_id: From, channel })
+        .where({ contact_external_id: From, channel, our_endpoint_id: To })
         .whereNotNull('customer_id')
         .first();
       if (prior) customerId = prior.customer_id;

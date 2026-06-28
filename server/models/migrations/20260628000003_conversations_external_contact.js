@@ -27,9 +27,21 @@ exports.up = async function up(knex) {
       ON conversations (contact_external_id, channel, our_endpoint_id)
       WHERE customer_id IS NULL AND contact_external_id IS NOT NULL
   `);
+
+  // The dedup index above is partial to unknown threads (customer_id IS NULL).
+  // Once a social contact is linked to a customer, the webhook's prior-link
+  // lookup queries customer_id IS NOT NULL, which that index can't serve — so
+  // index linked external contacts too (non-unique; a customer may have
+  // several threads).
+  await knex.raw(`
+    CREATE INDEX IF NOT EXISTS conversations_external_linked
+      ON conversations (contact_external_id, channel, our_endpoint_id)
+      WHERE customer_id IS NOT NULL AND contact_external_id IS NOT NULL
+  `);
 };
 
 exports.down = async function down(knex) {
+  await knex.raw('DROP INDEX IF EXISTS conversations_external_linked');
   await knex.raw('DROP INDEX IF EXISTS conversations_external_dedup');
   if (await knex.schema.hasColumn('conversations', 'contact_external_id')) {
     await knex.schema.alterTable('conversations', (t) => {

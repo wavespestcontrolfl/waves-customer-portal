@@ -36,6 +36,17 @@ async function lockPhoneThreadKeyWith(conn, { channel, ourEndpointId, contactPho
   return key;
 }
 
+// Serialize find-or-create for external-id contacts (FB Messenger etc.) the
+// same way lockPhoneThreadKeyWith does for phones, so two near-simultaneous
+// first DMs from a new contact can't both pass the read and then collide on the
+// partial unique index (which would 500 a valid inbound DM).
+async function lockExternalThreadKeyWith(conn, { channel, ourEndpointId, contactExternalId }) {
+  if (!contactExternalId) return;
+  await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [
+    `conversation:${channel}:${ourEndpointId || ''}:ext:${contactExternalId}`,
+  ]);
+}
+
 async function findUnknownPhoneThreadWith(conn, { channel, ourEndpointId, contactPhone }) {
   const key = phoneLookupKey(contactPhone);
   if (!key) return null;
@@ -118,6 +129,10 @@ async function findOrCreateThreadWith(conn, {
 
   if (contactPhone) {
     await lockPhoneThreadKeyWith(conn, { channel, ourEndpointId, contactPhone });
+  }
+
+  if (contactExternalId) {
+    await lockExternalThreadKeyWith(conn, { channel, ourEndpointId, contactExternalId });
   }
 
   if (customerId) {
