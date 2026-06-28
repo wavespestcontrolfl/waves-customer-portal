@@ -14,6 +14,7 @@
 
 const logger = require('../logger');
 const { createLeadFromExtraction } = require('../lead-from-extraction');
+const { toE164, isLikelyE164 } = require('../../utils/phone');
 
 const LEAD_QUALITIES = ['hot', 'warm', 'cold', 'spam'];
 
@@ -31,6 +32,11 @@ const TOOLS = [
         first_name: { type: 'string', description: 'Caller first name, if given' },
         last_name: { type: 'string', description: 'Caller last name, if given' },
         email: { type: 'string', description: 'Email, if given' },
+        callback_phone: {
+          type: 'string',
+          description: 'Best phone number to reach the caller (10-digit US or E.164). '
+            + 'Capture this especially if they are calling from a blocked/withheld or different number.',
+        },
         address_line1: { type: 'string', description: 'Street address of the service location' },
         city: { type: 'string', description: 'City of the service location' },
         zip: { type: 'string', description: '5-digit ZIP of the service location' },
@@ -184,6 +190,16 @@ function availabilityResultToText(res) {
 async function executeTool(name, input = {}, ctx = {}) {
   try {
     if (name === 'capture_lead') {
+      // Voice-agent lead contract (AGENTS.md): reject non-E.164 caller IDs
+      // before any lead create/merge. Prefer a number the caller gave verbally
+      // (callback_phone) over the inbound caller ID, which is blocked/withheld
+      // for some callers. No valid number → do not write a junk-phone lead.
+      const callerPhone = toE164(input.callback_phone || ctx.from || '');
+      if (!isLikelyE164(callerPhone)) {
+        logger.warn(`[voice-relay] capture_lead skipped — no valid E.164 callback number callSid=${ctx.callSid || 'n/a'}`);
+        return 'I could not save the lead yet — we do not have a valid phone number to reach the caller. '
+          + 'Ask the caller for the best 10-digit number and call capture_lead again with callback_phone.';
+      }
       const extracted = {
         first_name: input.first_name || null,
         last_name: input.last_name || null,
@@ -199,7 +215,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         lead_quality: LEAD_QUALITIES.includes(input.lead_quality) ? input.lead_quality : null,
       };
       await createLeadFromExtraction(extracted, {
-        phone: ctx.from || null,
+        phone: callerPhone,
         toPhone: ctx.to || null,
         callSid: ctx.callSid || null,
         language: ctx.language || null,

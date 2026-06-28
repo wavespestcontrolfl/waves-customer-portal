@@ -396,6 +396,20 @@ finding and warns on P1. Reviewers must return JSON matching
   (caller name/phone/address); rejects non-E.164 caller IDs before any lead
   create/merge and writes via `createLeadFromExtraction` into the existing lead
   pipeline. Any change to this route or its payload is security-critical).
+  `/ws/voice-agent` (WebSocket upgrade; machine-to-machine — Twilio
+  ConversationRelay connects here for an AI-handled call and exchanges JSON
+  text frames with the Claude tool-use loop, which can spend Anthropic tokens
+  and write leads. NOT browser-facing. Fail-closed in two layers: (1) the ws
+  server only ATTACHES when `VOICE_RELAY_ENABLED=true` AND `ANTHROPIC_API_KEY`
+  AND `VOICE_RELAY_WS_SECRET` are all set — otherwise the endpoint does not
+  exist; (2) every upgrade is rejected (socket destroyed before handshake)
+  unless the `?key=` query param matches `VOICE_RELAY_WS_SECRET` via a
+  constant-time compare, so only Twilio carrying the configured secret can
+  connect. Caller PII is masked in logs; lead writes require a valid E.164
+  caller number (`capture_lead` tool + the capture-floor on session close).
+  The live `/voice` backstop only routes a call here when the relay actually
+  attached (`isRelayAttached`). Any change to this endpoint, its auth, or its
+  frame handling is security-critical).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
