@@ -475,6 +475,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY BACKLINK PROFILE → ASTRO sameAs SYNC (gated: cronJobs AND backlinkProfileSync)
+  // Opens a PR adding verifier-confirmed (status='live') directory/citation/social
+  // profile URLs from seo_link_prospects to the marketing site's
+  // entity-profiles.auto.json (Organization sameAs). Never auto-merges. Mon 9:00am ET.
+  // =========================================================================
+  cron.schedule('0 9 * * 1', async () => {
+    if (!isEnabled('backlinkProfileSync')) return;
+    logger.info('Running: Backlink profile → astro sameAs sync');
+    try {
+      // runExclusive: a single PR per run — a deploy overlap must not open duplicates.
+      await runExclusive('backlink-profile-astro-sync', async () => {
+        const { syncProfilesToAstro } = require('./backlink-profile-astro-sync');
+        const result = await syncProfilesToAstro({ dryRun: process.env.BACKLINK_SYNC_DRY_RUN === 'true' });
+        logger.info(`[backlink-sync] cron run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Backlink profile sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // SEO COMMAND CENTER CRONS (gated behind GATE_SEO_INTELLIGENCE)
   // =========================================================================
 
