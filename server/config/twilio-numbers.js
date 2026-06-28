@@ -60,6 +60,21 @@ const TWILIO_NUMBERS = {
     },
   },
 
+  // ── GBP Call Tracking ────────────────────────────────────────
+  // One dedicated number per Google Business Profile, wired to the GBP
+  // "Call" button (set as the profile's primary number). Lets us tell a
+  // GBP-sourced call apart from an organic city-page (website) call, which
+  // the shared location number cannot. The website + citations stay on the
+  // real location number (the NAP anchor Google checks against citations) —
+  // untouched. All route to /voice, so every GBP call lands in call_log
+  // stamped location='GBP — <City>' / numberType='gbp_tracking'.
+  gbpTracking: {
+    bradenton: { number: '+19413521572', formatted: '(941) 352-1572', label: 'GBP — Bradenton', location: 'bradenton', area: 'Bradenton' },
+    parrish: { number: '+19413840224', formatted: '(941) 384-0224', label: 'GBP — Parrish', location: 'parrish', area: 'Parrish' },
+    sarasota: { number: '+19414910407', formatted: '(941) 491-0407', label: 'GBP — Sarasota', location: 'sarasota', area: 'Sarasota' },
+    venice: { number: '+19414774880', formatted: '(941) 477-4880', label: 'GBP — Venice', location: 'venice', area: 'Venice' },
+  },
+
   // ── Unassigned ──────────────────────────────────────────────
   unassigned: [],
 
@@ -69,6 +84,7 @@ const TWILIO_NUMBERS = {
     const nums = Object.values(this.locations).map(l => l.number);
     this.domainTracking.forEach(d => nums.push(d.number));
     this.lawnDomainTracking.forEach(d => nums.push(d.number));
+    Object.values(this.gbpTracking).forEach(g => nums.push(g.number));
     nums.push(this.tracking.vanWrap.number);
     nums.push(this.tollFree.number);
     return [...new Set(nums)];
@@ -80,6 +96,7 @@ const TWILIO_NUMBERS = {
       ...this.domainTracking.map(d => ({ ...d, type: 'pest_domain' })),
       ...this.lawnDomainTracking.map(d => ({ ...d, type: 'lawn_domain' })),
       ...Object.entries(this.paidTracking).map(([id, p]) => ({ ...p, type: 'google_ads', trackingId: id })),
+      ...Object.entries(this.gbpTracking).map(([id, g]) => ({ ...g, type: 'gbp_tracking', locationId: g.location, gbpProfileId: id })),
       { ...this.tracking.vanWrap, type: 'van_tracking' },
       { ...this.tollFree, type: 'customer_chat' },
       ...this.unassigned.map(u => ({ ...u, type: 'unassigned', label: 'Unassigned' })),
@@ -100,6 +117,10 @@ const TWILIO_NUMBERS = {
     // Paid campaign tracking
     for (const [id, paid] of Object.entries(this.paidTracking)) {
       if (paid.number === phoneNumber) return { ...paid, type: 'google_ads', trackingId: id, locationId: paid.location };
+    }
+    // GBP call tracking
+    for (const [id, gbp] of Object.entries(this.gbpTracking)) {
+      if (gbp.number === phoneNumber) return { ...gbp, type: 'gbp_tracking', locationId: gbp.location, gbpProfileId: id };
     }
     // Van wrap
     if (this.tracking.vanWrap.number === phoneNumber) return { ...this.tracking.vanWrap, type: 'van_tracking' };
@@ -122,6 +143,9 @@ const TWILIO_NUMBERS = {
     if (lawn) return { source: 'domain_website', domain: lawn.domain, area: lawn.area };
     for (const [, paid] of Object.entries(this.paidTracking)) {
       if (paid.number === phoneNumber) return { source: 'google_ads', domain: null, area: paid.label };
+    }
+    for (const [, gbp] of Object.entries(this.gbpTracking)) {
+      if (gbp.number === phoneNumber) return { source: 'google_business_profile', domain: null, area: gbp.area };
     }
     if (this.tracking.vanWrap.number === phoneNumber) return { source: 'van_wrap', domain: null, area: null };
     for (const [, loc] of Object.entries(this.locations)) {
