@@ -16,9 +16,11 @@
 
 const Anthropic = require('@anthropic-ai/sdk');
 const MODELS = require('../../config/models');
+const db = require('../../models/db');
 const logger = require('../logger');
 const { isLikelyE164 } = require('../../utils/phone');
 const { createLeadFromExtraction } = require('../lead-from-extraction');
+const { syncVoiceMessageForCall } = require('../conversations');
 const { TOOLS, executeTool } = require('./relay-tools');
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
@@ -176,6 +178,23 @@ class RelayConversation {
     if (this.ended) return;
     this.ended = true;
     this.interrupt();
+
+    // Reconcile call reporting: this call was handled by the AI agent, not
+    // voicemail. The /voice backstop cleared call_outcome at handoff; stamp the
+    // final outcome here so backstop calls don't linger as no-answer/null and
+    // the unified messages row resyncs. Keyed by CallSid — a no-op (0 rows) for
+    // the TwiML-Bin sandbox path, which has no call_log row.
+    if (this.callSid) {
+      try {
+        await db('call_log')
+          .where('twilio_call_sid', this.callSid)
+          .update({ answered_by: 'ai_agent', call_outcome: 'ai_handled', updated_at: new Date() });
+        syncVoiceMessageForCall(this.callSid);
+      } catch (err) {
+        logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
+      }
+    }
+
     if (this.leadCaptured || !isLikelyE164(this.from || '')) return;
     try {
       await createLeadFromExtraction(

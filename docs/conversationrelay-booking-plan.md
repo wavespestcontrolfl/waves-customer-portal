@@ -59,18 +59,18 @@ Socket.io registers its own `upgrade` handler and only acts on `/socket.io/`. We
 
 ## Owner steps to test Phase 0 on the sandbox
 
-1. Deploy this branch (or run locally) with `VOICE_RELAY_ENABLED=true` and `ANTHROPIC_API_KEY` set.
-2. In Twilio, create a TwiML Bin with this XML (swap `<host>` for the deployed host) and set it as the **Voice webhook for +19412691697 only**:
+1. Deploy this branch (or run locally) with `VOICE_RELAY_ENABLED=true`, `ANTHROPIC_API_KEY`, and **`VOICE_RELAY_WS_SECRET`** (a long random string) set. Without the secret the ws endpoint **refuses to attach** (fail-closed) — it is otherwise public and can spend tokens / write leads.
+2. In Twilio, create a TwiML Bin with this XML (swap `<host>` for the deployed host and `<secret>` for `VOICE_RELAY_WS_SECRET`) and set it as the **Voice webhook for +19412691697 only**:
 
    ```xml
    <?xml version="1.0" encoding="UTF-8"?>
    <Response><Connect>
-     <ConversationRelay url="wss://<host>/ws/voice-agent"
+     <ConversationRelay url="wss://<host>/ws/voice-agent?key=<secret>"
        welcomeGreeting="Thanks for calling Waves Pest Control. Just so you know, this call may be recorded, and you're speaking with our automated assistant. How can I help you today?"
        ttsProvider="ElevenLabs" language="en-US" />
    </Connect></Response>
    ```
-   (`relay-protocol.buildRelayTwiML()` renders this exact string.)
+   (`relay-protocol.buildRelayTwiML()` renders this exact string, auto-appending `?key=` from `VOICE_RELAY_WS_SECRET`.) The `/ws/voice-agent` upgrade is rejected (socket destroyed) unless the `key` matches — so only Twilio, carrying the secret you configured, can connect.
 3. Call the GA# and confirm: it answers, sounds natural, latency feels OK, and a lead lands in the Leads UI. **This call answers the build-vs-buy question.**
 
 ⚠️ On the first live call, verify the inbound `prompt` text field and outbound `text` frame against the deployed ConversationRelay version — `relay-protocol.parsePrompt()` already tolerates `voicePrompt`/`payload.text`; adjust there if needed.
@@ -93,27 +93,38 @@ the staff ring when a backstop is reachable. It was dormant only because
 (for a PSTN/SIP agent), not ConversationRelay. The change:
 
 - `agentHandoffKind(config)` classifies the configured `agentEndpoint`:
-  `relay` (a `wss://` URL **and** `VOICE_RELAY_ENABLED=true`), `relay_disabled`
-  (a `wss://` URL but the relay server is off), `dial` (PSTN/SIP), or `none`.
+  `relay` (a `wss://` URL **and** the relay ws server *actually attached* —
+  `isRelayAttached()`, which reflects every prerequisite: enabled flag +
+  `ANTHROPIC_API_KEY` + `VOICE_RELAY_WS_SECRET` + deps loaded), `relay_disabled`
+  (a `wss://` URL but the server did not attach), `dial` (PSTN/SIP), or `none`.
+  Basing this on the *attach state* rather than the raw env flag means a
+  half-configured relay falls through to voicemail instead of a dead endpoint.
 - When `relay`, `/voice` (answers-first) and `/call-complete` (backstop) return
-  `buildRelayTwiML()` (`<Connect><ConversationRelay url="wss://…/ws/voice-agent">`)
-  — the same wire format the TwiML Bin used, now served from the app.
+  `buildRelayTwiML()` (`<Connect><ConversationRelay url="wss://…/ws/voice-agent?key=…">`)
+  — the same wire format the TwiML Bin used, now served from the app, with the
+  shared-secret `key` that authenticates the upgrade.
 - `appendAgentHandoff()` refuses a `wss://` endpoint, so a misconfig can never
   `<Dial>` a WebSocket URL as a phone number. `relay_disabled`/`none` fall through
   to the existing human/voicemail flow **byte-for-byte**.
+- On relay session close, `relay-conversation.end()` stamps
+  `call_outcome='ai_handled'` / `answered_by='ai_agent'` (keyed by CallSid) and
+  resyncs the message row, so backstop-answered calls don't linger as
+  `no-answer`/null in reporting.
 
 **Fail-closed posture (all must hold, or it's the exact voicemail flow as today):**
 1. `isEnabled('voiceAiAgent')` — the feature gate; off (default) short-circuits
    before any config read, so the staff simul-ring + voicemail are unchanged.
 2. `call_routing.agentEndpoint = wss://<host>/ws/voice-agent` — names the relay
    as the agent (set via the admin call-routing settings API).
-3. `VOICE_RELAY_ENABLED=true` (+ `ANTHROPIC_API_KEY`) — the `/ws/voice-agent`
-   server is actually attached; otherwise `agentHandoffKind` returns
-   `relay_disabled` and the call stays on voicemail (never stranded).
+3. `VOICE_RELAY_ENABLED=true` + `ANTHROPIC_API_KEY` + `VOICE_RELAY_WS_SECRET` —
+   all required for the `/ws/voice-agent` server to actually attach; otherwise
+   `agentHandoffKind` returns `relay_disabled` and the call stays on voicemail
+   (never stranded). The secret also authenticates the ws upgrade — connections
+   without the matching `?key=` are rejected before handshake.
 
 **Owner steps to activate the backstop (after Phase 0 sandbox passes):**
 1. Re-point `+19412691697` (and any other number) **back to `/api/webhooks/twilio/voice`** — remove the standalone TwiML Bin.
-2. Set `VOICE_RELAY_ENABLED=true` + `ANTHROPIC_API_KEY` on the deploy.
+2. Set `VOICE_RELAY_ENABLED=true` + `ANTHROPIC_API_KEY` + `VOICE_RELAY_WS_SECRET` (long random string) on the deploy.
 3. Set `call_routing.agentEndpoint = wss://<deployed-host>/ws/voice-agent` (admin call-routing settings). Leave `noAnswerBackstopEnabled` at its default `true`.
 4. Enable the `voiceAiAgent` feature gate.
 5. Place a test call, let it ring out (don't answer) → the agent should pick up

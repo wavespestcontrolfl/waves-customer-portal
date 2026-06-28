@@ -10,7 +10,8 @@ const { recordTouchpoint, syncVoiceMessageForCall } = require('../services/conve
 const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 const { getCallRoutingConfig } = require('../services/call-routing-config');
 const { decideVoiceRoute } = require('../services/voice-route-decision');
-const { buildRelayTwiML, isRelayEnabled } = require('../services/voice-agent/relay-protocol');
+const { buildRelayTwiML } = require('../services/voice-agent/relay-protocol');
+const { isRelayAttached } = require('../services/voice-agent/relay-server');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
@@ -307,18 +308,19 @@ const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
 // Classify how the configured agent endpoint is reachable, so the live-routing
 // paths emit the right TwiML and never strand a call:
 //   'relay'          → our ConversationRelay WebSocket agent (agentEndpoint is a
-//                      wss:// URL) AND VOICE_RELAY_ENABLED=true, i.e. the ws
-//                      server is actually attached. Handed off via <Connect>
-//                      <ConversationRelay> (buildRelayTwiML), NOT <Dial>.
+//                      wss:// URL) AND the relay ws server ACTUALLY attached
+//                      (isRelayAttached — reflects VOICE_RELAY_ENABLED +
+//                      ANTHROPIC_API_KEY + VOICE_RELAY_WS_SECRET + deps loaded).
+//                      Handed off via <Connect><ConversationRelay>, NOT <Dial>.
 //   'relay_disabled' → a wss:// endpoint is configured but the relay ws server
-//                      is OFF → treat as no reachable agent (caller stays on the
-//                      normal human/voicemail flow; never dial a wss URL).
+//                      did NOT attach → treat as no reachable agent (caller stays
+//                      on the normal human/voicemail flow; never dial a wss URL).
 //   'dial'           → a PSTN number or SIP URI agent → <Dial> handoff.
 //   'none'           → no endpoint configured.
 function agentHandoffKind(config) {
   const endpoint = String(config?.agentEndpoint || '').trim();
   if (!endpoint) return 'none';
-  if (/^wss?:\/\//i.test(endpoint)) return isRelayEnabled() ? 'relay' : 'relay_disabled';
+  if (/^wss?:\/\//i.test(endpoint)) return isRelayAttached() ? 'relay' : 'relay_disabled';
   return 'dial';
 }
 

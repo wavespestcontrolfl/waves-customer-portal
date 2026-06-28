@@ -22,12 +22,32 @@
  * targets this endpoint. See docs/conversationrelay-booking-plan.md.
  */
 
+const crypto = require('crypto');
 const logger = require('../logger');
-const { RELAY_WS_PATH, parsePrompt, isRelayEnabled } = require('./relay-protocol');
+const { RELAY_WS_PATH, parsePrompt, isRelayEnabled, maskPhone } = require('./relay-protocol');
 
 // VOICE_RELAY_ENABLED check lives in relay-protocol (single source of truth,
 // shared with the /voice webhook). Re-exported here under the name index.js uses.
 const isEnabled = isRelayEnabled;
+
+// True only after attachVoiceRelay has fully wired the ws endpoint (every
+// prerequisite met). The /voice webhook consults THIS — not the raw env flag —
+// so it never hands a live call to a relay that did not actually attach.
+let attached = false;
+function isRelayAttached() {
+  return attached;
+}
+
+// Timing-safe check of the shared-secret `key` query param against
+// VOICE_RELAY_WS_SECRET. False when either side is empty or the lengths differ.
+function isValidWsKey(provided) {
+  const secret = process.env.VOICE_RELAY_WS_SECRET || '';
+  if (!secret || !provided) return false;
+  const a = Buffer.from(String(provided));
+  const b = Buffer.from(secret);
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch { return false; }
+}
 
 /**
  * @param {import('http').Server} httpServer
@@ -40,6 +60,10 @@ function attachVoiceRelay(httpServer) {
   }
   if (!process.env.ANTHROPIC_API_KEY) {
     logger.warn('[voice-relay] ANTHROPIC_API_KEY missing — refusing to attach (fail-closed)');
+    return null;
+  }
+  if (!process.env.VOICE_RELAY_WS_SECRET) {
+    logger.warn('[voice-relay] VOICE_RELAY_WS_SECRET missing — refusing to attach (fail-closed; the ws endpoint would be unauthenticated)');
     return null;
   }
 
@@ -61,13 +85,22 @@ function attachVoiceRelay(httpServer) {
   // non-matching paths is what lets Socket.io's own 'upgrade' listener handle
   // /socket.io/ upgrades exactly as it does today.
   httpServer.on('upgrade', (req, socket, head) => {
-    let pathname;
+    let url;
     try {
-      pathname = new URL(req.url, 'http://internal').pathname;
+      url = new URL(req.url, 'http://internal');
     } catch {
       return; // malformed — leave it for other listeners / Node default
     }
-    if (pathname !== RELAY_WS_PATH) return; // NOT ours — do not touch the socket
+    if (url.pathname !== RELAY_WS_PATH) return; // NOT ours — do not touch the socket
+    // Authenticate BEFORE accepting the upgrade — this endpoint can spend
+    // Anthropic tokens and write leads, so an unauthenticated client is a P0.
+    // ConversationRelay carries the shared secret as the `key` query param
+    // (relay-protocol.appendWsKey / buildRelayTwiML embed it in the wss URL).
+    if (!isValidWsKey(url.searchParams.get('key'))) {
+      logger.warn('[voice-relay] rejected ws upgrade: missing/invalid key');
+      try { socket.destroy(); } catch { /* socket already gone */ }
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   });
 
@@ -101,7 +134,7 @@ function attachVoiceRelay(httpServer) {
             language: msg.lang || p.lang || null,
             send,
           });
-          logger.info(`[voice-relay] session setup callSid=${convo.callSid} from=${convo.from || 'n/a'}`);
+          logger.info(`[voice-relay] session setup callSid=${convo.callSid} from=${convo.from ? maskPhone(convo.from) : 'n/a'}`);
           break;
         }
         case 'prompt': {
@@ -133,7 +166,8 @@ function attachVoiceRelay(httpServer) {
   });
 
   logger.info(`[voice-relay] attached ws endpoint at ${RELAY_WS_PATH} (model-driven capture, Phase 0)`);
+  attached = true;
   return wss;
 }
 
-module.exports = { attachVoiceRelay, isEnabled };
+module.exports = { attachVoiceRelay, isEnabled, isRelayAttached };

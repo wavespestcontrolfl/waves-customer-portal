@@ -40,6 +40,23 @@ function isRelayEnabled() {
   return String(process.env.VOICE_RELAY_ENABLED || '').toLowerCase() === 'true';
 }
 
+/** Mask a phone number for logs — keep only the last 4 digits (PII hygiene). */
+function maskPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `***${digits.slice(-4)}` : '***';
+}
+
+/**
+ * Append the shared-secret `key` that authenticates the ConversationRelay
+ * WebSocket upgrade (validated in relay-server before handleUpgrade). Returns
+ * the URL unchanged when no secret is configured or a key is already present.
+ */
+function appendWsKey(wsUrl, secret = process.env.VOICE_RELAY_WS_SECRET) {
+  if (!secret) return wsUrl;
+  if (/[?&]key=/.test(wsUrl)) return wsUrl;
+  return `${wsUrl}${wsUrl.includes('?') ? '&' : '?'}key=${encodeURIComponent(secret)}`;
+}
+
 // FL §934.03 recorded-line disclosure + explicit AI disclosure, spoken by
 // Twilio TTS before the first caller turn. Kept here so the TwiML Bin and any
 // future in-app TwiML render the identical greeting.
@@ -95,10 +112,14 @@ function buildRelayTwiML({
   ttsProvider = DEFAULT_TTS_PROVIDER,
   language = DEFAULT_LANGUAGE,
   voice, // optional provider-specific voice id
+  wsSecret = process.env.VOICE_RELAY_WS_SECRET,
 } = {}) {
   if (!wsUrl) throw new Error('buildRelayTwiML: wsUrl is required');
+  // Authenticate the upgrade: the shared-secret `key` is validated in
+  // relay-server before handleUpgrade (the ws endpoint is otherwise public).
+  const authedUrl = appendWsKey(wsUrl, wsSecret);
   const attrs = [
-    `url="${escapeXmlAttr(wsUrl)}"`,
+    `url="${escapeXmlAttr(authedUrl)}"`,
     `welcomeGreeting="${escapeXmlAttr(welcomeGreeting)}"`,
     `ttsProvider="${escapeXmlAttr(ttsProvider)}"`,
     `language="${escapeXmlAttr(language)}"`,
@@ -118,6 +139,8 @@ module.exports = {
   DEFAULT_TTS_PROVIDER,
   DEFAULT_LANGUAGE,
   isRelayEnabled,
+  maskPhone,
+  appendWsKey,
   parsePrompt,
   textFrame,
   endFrame,
