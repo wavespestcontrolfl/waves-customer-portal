@@ -3790,7 +3790,7 @@ function RefreshAuditTab() {
       // published) from a transient failure (which offers Retry).
       const msg = e?.message || "Enqueue failed";
       const noGsc = /search console|gsc/i.test(msg);
-      const blocked = /could not map|not published|no resolvable url/i.test(msg);
+      const blocked = /could not (map|determine)|not published|no resolvable url/i.test(msg);
       setEnq((s) => ({ ...s, [c.blogPostId]: noGsc ? "no_gsc" : blocked ? "blocked" : "error" }));
       setEnqErr((s) => ({ ...s, [c.blogPostId]: msg }));
     }

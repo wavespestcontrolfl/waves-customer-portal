@@ -323,12 +323,14 @@ class RefreshAudit {
 
     const path = pathFor(post);
     const targetDomain = targetDomainFor(post);
-    // City + service the way the engine derives them: prefer the URL/keyword
-    // classifiers (so a city-scoped URL with an empty blog_posts.city or an
-    // unmapped tag is still anchored) and fall back to the stored fields.
-    const inferUrl = post.astro_live_url || path;
-    const service = serviceForPage(post, inferUrl);
-    const city = miner.normalizeCity(post.city) || miner.inferCityFromUrl(inferUrl) || null;
+    // City + service the way the engine derives them, classified off the
+    // host-stripped PATH (pathFor already strips host): a hub/spoke HOST like
+    // "wavespestcontrol.com" contains "pestcontrol", so inferServiceFromUrl on the
+    // full URL would return 'pest' for EVERY page and defeat the NO_SERVICE gate.
+    // The live path is authoritative for what the page targets, so URL-derived
+    // city wins over a possibly-stale stored city.
+    const service = serviceForPage(post, path);
+    const city = miner.inferCityFromUrl(path) || miner.normalizeCity(post.city) || null;
     // Fail closed on a city-scoped page with no determinable service: the runner's
     // facts-sufficiency / claims-ledger grounding only applies when BOTH city and
     // service are present, so queuing city-without-service would refresh WITHOUT
