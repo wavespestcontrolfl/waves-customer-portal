@@ -6,8 +6,9 @@
  * for Twilio to speak. Phase 0 scope: capture-only (see relay-tools.js) — no
  * quoting, no booking, no schedule mutation.
  *
- * Model: MODELS.VOICE (claude-sonnet-4-6) — the repo's warm customer-facing
- * tier (CLAUDE.md: never hardcode model IDs). Overridable via VOICE_RELAY_MODEL.
+ * Model: MODELS.VOICE — the repo's warm customer-facing tier (CLAUDE.md: never
+ * hardcode model IDs; concrete IDs live only in server/config/models.js).
+ * Overridable via VOICE_RELAY_MODEL.
  * Thinking is DISABLED: this is a live phone call where a "thinking" pause reads
  * as dead air; tool-use + a tight system prompt carry the structure instead.
  * Streaming (.stream + .finalMessage) per the claude-api skill — avoids HTTP

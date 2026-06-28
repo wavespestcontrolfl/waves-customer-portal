@@ -27,7 +27,7 @@ Inbound call (Phase 0: dead GA# +19412691697 sandbox)
         │  setup → prompt ⇄ text → (ws close)
         ▼
    RelayConversation (relay-conversation.js — Claude streaming tool-use loop,
-        │             MODELS.VOICE / sonnet-4-6, thinking disabled)
+        │             MODELS.VOICE tier, thinking disabled)
         ▼
    tools (relay-tools.js): Phase 0 = capture_lead → createLeadFromExtraction
         ▼
