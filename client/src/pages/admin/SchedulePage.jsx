@@ -268,6 +268,25 @@ function observationChipsForLine(serviceLine) {
 function recommendationChipsForLine(serviceLine) {
   return CHIP_RECOMMENDATIONS_BY_LINE[serviceLine] || CHIP_RECOMMENDATIONS_PEST;
 }
+// Pest-primary combined services ("Pest & Rodent Control", "Quarterly Pest +
+// Termite Bait Station") keep the PEST chip set, mirroring the server
+// classifier (server/services/service-report/service-line-configs.js
+// detectServiceLine): a "pest" mention BEFORE the rodent/termite token marks a
+// pest-primary bundle whose companion line is just a section, not the report
+// layout. Token order is load-bearing — "Rodent Pest Control" stays rodent;
+// lawn/turf/mosquito mentions still win. The client serviceLineFromType lacks
+// this precedence, so apply it here before selecting chips (chips only — the
+// recap/tree-shrub gating on serviceLineForCloseout is intentionally unchanged).
+function closeoutChipLine(serviceType, serviceLine) {
+  const text = String(serviceType || "").toLowerCase();
+  if (
+    /\bpest\b.*\b(rodent|termite)\b/.test(text) &&
+    !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(text)
+  ) {
+    return "pest";
+  }
+  return serviceLine;
+}
 const VISIT_OUTCOME_OPTIONS = [
   { value: "completed", label: "Completed" },
   { value: "inspection_only", label: "Inspection only" },
@@ -7137,11 +7156,13 @@ export function CompletionPanel({
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
-  // Closeout observation/recommendation chips are scoped to the service line:
-  // lawn + tree/shrub share the horticultural set; mosquito/termite/rodent/palm
-  // each get their own; everything else falls back to the pest set.
-  const observationChips = observationChipsForLine(serviceLineForCloseout);
-  const recommendationChips = recommendationChipsForLine(serviceLineForCloseout);
+  // Closeout observation/recommendation chips are scoped to the service line
+  // (lawn / tree_shrub / mosquito / termite / rodent / palm each have their own
+  // set; pest is the fallback). Pest-primary combined names resolve back to pest
+  // via closeoutChipLine so a "Pest & Rodent Control" bundle keeps the pest set.
+  const chipServiceLine = closeoutChipLine(serviceTypeForArea, serviceLineForCloseout);
+  const observationChips = observationChipsForLine(chipServiceLine);
+  const recommendationChips = recommendationChipsForLine(chipServiceLine);
   const recapEligible = pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest";
   const treeShrubCloseoutOn =
     treeShrubCloseoutReady && treeShrubCloseoutFlag && serviceLineForCloseout === "tree_shrub";
