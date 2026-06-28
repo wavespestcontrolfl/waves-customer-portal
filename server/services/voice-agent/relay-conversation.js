@@ -187,6 +187,15 @@ class RelayConversation {
     this.ended = true;
     this.interrupt();
 
+    // Drain the serialized prompt/tool chain BEFORE the capture floor runs. If
+    // the caller hung up while executeTool('capture_lead') was mid-write, this
+    // lets it finish and set leadCaptured first — otherwise the floor below
+    // could start a second createLeadFromExtraction (not idempotent on callSid)
+    // and duplicate the lead. interrupt() already aborted any in-flight Claude
+    // stream, and queued turns early-return once `ended` is set, so this settles
+    // promptly.
+    try { await this._chain; } catch { /* per-turn loop errors are already logged */ }
+
     // Reconcile call reporting: this call was handled by the AI agent, not
     // voicemail. The /voice answers-first and /call-complete backstop paths
     // leave the row at a non-final status ('ringing' / 'no-answer') with a
