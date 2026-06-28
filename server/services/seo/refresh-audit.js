@@ -24,8 +24,29 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
-const HUB = 'https://wavespestcontrol.com';
+// Astro/GSC canonical hub origin (used only for DISPLAY + a never-seeded
+// fallback — all gsc_pages/decay matching below is host-agnostic by path).
+const HUB = 'https://www.wavespestcontrol.com';
 const GSC_LOOKBACK_DAYS = 90;
+// Host-agnostic path of a gsc_pages/decay url, trailing slash trimmed: GSC may
+// report www vs non-www and ?utm tracking variants, so we match on path only.
+// SQL mirror (CANON_PATH_SQL) uses chr(63) for '?' — a literal '?' in knex raw
+// collides with bind placeholders (same trick as gsc-opportunity-miner).
+const CANON_PATH_SQL = "regexp_replace(regexp_replace(split_part(page_url, chr(63), 1), '^[a-z]+://[^/]+', ''), '/+$', '')";
+
+function slugPath(slug) {
+  return `/${String(slug || '').replace(/^\/+|\/+$/g, '')}`;
+}
+function urlToPath(u) {
+  if (!u) return null;
+  return (
+    String(u)
+      .split('#')[0]
+      .split('?')[0]
+      .replace(/^[a-z]+:\/\/[^/]+/i, '')
+      .replace(/\/+$/, '') || '/'
+  );
+}
 
 // Staleness ramp: nothing below FRESH_DAYS, full weight at/above STALE_FULL_DAYS.
 const FRESH_DAYS = 90;
@@ -100,19 +121,21 @@ function scorePriority({ ageDays, qa, decay }) {
   return { priority: Math.min(100, Math.round(priority)), reasons };
 }
 
-/** Most-severe open decay alert per page (by abs change_pct). */
+/** Most-severe open decay alert per page (by abs change_pct), keyed by
+ *  blog_post_id and by host-agnostic path. */
 function indexDecay(rows) {
   const byPost = new Map();
-  const byUrl = new Map();
+  const byPath = new Map();
   const keep = (map, key, row) => {
+    if (key == null) return;
     const cur = map.get(key);
     if (!cur || Math.abs(Number(row.change_pct) || 0) > Math.abs(Number(cur.change_pct) || 0)) map.set(key, row);
   };
   for (const r of rows) {
     if (r.blog_post_id) keep(byPost, r.blog_post_id, r);
-    if (r.url) keep(byUrl, r.url, r);
+    keep(byPath, urlToPath(r.url), r);
   }
-  return { byPost, byUrl };
+  return { byPost, byPath };
 }
 
 class RefreshAudit {
@@ -133,13 +156,13 @@ class RefreshAudit {
     }
 
     const decayRows = await db('seo_content_decay_alerts').where('status', 'open');
-    const { byPost: decayByPost, byUrl: decayByUrl } = indexDecay(decayRows);
+    const { byPost: decayByPost, byPath: decayByPath } = indexDecay(decayRows);
 
     const now = Date.now();
     const candidates = posts.map((p) => {
       const url = pageUrlFor(p);
       const qa = qaByPost.get(p.id) || null;
-      const decay = decayByPost.get(p.id) || (url ? decayByUrl.get(url) : null) || null;
+      const decay = decayByPost.get(p.id) || decayByPath.get(slugPath(p.slug)) || null;
       const ageDays = ageDaysFrom(p, now);
       const { priority, reasons } = scorePriority({ ageDays, qa, decay });
       return {
@@ -185,7 +208,7 @@ class RefreshAudit {
     if (blogPostId) {
       post = await db('blog_posts').where({ id: blogPostId }).first();
     } else if (url) {
-      const slug = String(url).replace(/https?:\/\/[^/]+/, '').replace(/^\/|\/$/g, '');
+      const slug = String(url).replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/^\/|\/$/g, '');
       post = await db('blog_posts').where({ slug }).first();
     }
     if (!post) {
@@ -193,13 +216,21 @@ class RefreshAudit {
       err.code = 'NOT_FOUND';
       throw err;
     }
-
-    const pageUrl = pageUrlFor(post);
-    if (!pageUrl) {
+    // The audit is a PUBLISHED-page contract — getAudit only ranks published
+    // posts. Don't let a direct API caller seed refresh work for a draft/scheduled
+    // post (it would point the autonomous runner at unpublished content).
+    if (post.status !== 'published') {
+      const err = new Error(`page is not published (status: ${post.status})`);
+      err.code = 'NOT_PUBLISHED';
+      throw err;
+    }
+    if (!post.slug && !post.astro_live_url) {
       const err = new Error('page has no resolvable URL (missing slug)');
       err.code = 'NO_URL';
       throw err;
     }
+
+    const path = post.slug ? slugPath(post.slug) : urlToPath(post.astro_live_url);
 
     const qa = await db('seo_content_qa_scores')
       .where({ blog_post_id: post.id })
@@ -209,7 +240,7 @@ class RefreshAudit {
     const decay = await db('seo_content_decay_alerts')
       .where({ status: 'open' })
       .andWhere(function () {
-        this.where({ blog_post_id: post.id }).orWhere({ url: pageUrl });
+        this.where({ blog_post_id: post.id }).orWhereRaw(`${CANON_PATH_SQL} = ?`, [path]);
       })
       .orderByRaw('abs(change_pct) desc')
       .first();
@@ -219,20 +250,23 @@ class RefreshAudit {
     // and content-quality-gate hard-fails a non-operator refresh when
     // gsc_signal.impressions is missing (and `impressions || null` makes 0 → null).
     // So a queued refresh MUST carry the page's real Search Console signal — same
-    // contract as a gsc-opportunity-miner decay_refresh row. A page with no GSC
-    // impressions can't be meaningfully refreshed by this engine; fail fast with a
-    // clear reason instead of seeding a run doomed to no_gsc_signal.
+    // contract as a gsc-opportunity-miner decay_refresh row. Match gsc_pages by
+    // host-agnostic PATH (GSC may report www vs non-www and ?utm variants), and
+    // also recover the real GSC-reported URL to seed as the target. A page with no
+    // GSC impressions can't be meaningfully refreshed by this engine; fail fast
+    // with a clear reason instead of seeding a run doomed to no_gsc_signal.
     const since = etDateString(addETDays(new Date(), -GSC_LOOKBACK_DAYS));
     const gsc = await db('gsc_pages')
-      .where('page_url', pageUrl)
       .where('date', '>=', since)
+      .whereRaw(`${CANON_PATH_SQL} = ?`, [path])
+      .select(db.raw('min(split_part(page_url, chr(63), 1)) as gsc_url'))
       .sum('clicks as clicks')
       .sum('impressions as impressions')
       .avg('position as avg_position')
       .first();
     const impressions = gsc && gsc.impressions != null ? Math.round(Number(gsc.impressions)) : 0;
     if (!impressions) {
-      const err = new Error(`no Search Console impressions for ${pageUrl} in the last ${GSC_LOOKBACK_DAYS} days — the refresh engine needs GSC signal to refresh against`);
+      const err = new Error(`no Search Console impressions for ${path} in the last ${GSC_LOOKBACK_DAYS} days — the refresh engine needs GSC signal to refresh against`);
       err.code = 'NO_GSC_SIGNAL';
       throw err;
     }
@@ -240,6 +274,12 @@ class RefreshAudit {
     const avgPosition = gsc && gsc.avg_position != null ? Number(Number(gsc.avg_position).toFixed(1)) : null;
     const ctr = Number((clicks / impressions).toFixed(4));
     const decayPct = decay ? Math.round(Number(decay.change_pct) || 0) : null;
+
+    // Target URL the runner/publisher will load: the authoritative live URL if
+    // known, else the real GSC-reported host (not a guessed origin), else the
+    // canonical hub fallback. The gsc_signal above is path-derived, so impressions
+    // are correct regardless of which host string we seed here.
+    const pageUrl = post.astro_live_url || gsc.gsc_url || pageUrlFor(post);
 
     const ageDays = ageDaysFrom(post, Date.now());
     const { priority, reasons } = scorePriority({ ageDays, qa: qa || null, decay: decay || null });
