@@ -207,19 +207,28 @@ function mapWater(waterContext, waterSnapshot = null) {
 const MOW_STATUS = { below: 'too_short', above: 'too_tall', in_range: 'ideal' };
 function mapMowing(mowingHeight, grassLabel) {
   if (!mowingHeight) return null;
-  const status = MOW_STATUS[mowingHeight.status] || 'ideal';
-  const rec = status === 'too_short'
-    ? `Your ${grassLabel} is being kept a bit short. Short mowing makes turf show heat and dry stress faster — consider raising the mower one setting.`
-    : status === 'too_tall'
-      ? `Your ${grassLabel} is being kept a bit tall, which can shade the base and hold moisture — consider lowering the mower one setting.`
-      : `Mowing height looks good — right in the ideal range for your ${grassLabel}.`;
+  const measured = num(mowingHeight.heightIn);
+  const photoUrl = mowingHeight.photoUrl || null;
+  // Nothing to surface — no numeric reading AND no on-site lawn-length photo.
+  if (measured == null && !photoUrl) return null;
+  // Status + recommendation only apply when a numeric reading was captured; a
+  // photo-only visit surfaces just the image.
+  const status = measured == null ? null : (MOW_STATUS[mowingHeight.status] || 'ideal');
+  const rec = status == null
+    ? null
+    : status === 'too_short'
+      ? `Your ${grassLabel} is being kept a bit short. Short mowing makes turf show heat and dry stress faster — consider raising the mower one setting.`
+      : status === 'too_tall'
+        ? `Your ${grassLabel} is being kept a bit tall, which can shade the base and hold moisture — consider lowering the mower one setting.`
+        : `Mowing height looks good — right in the ideal range for your ${grassLabel}.`;
   return {
-    measuredHeightInches: num(mowingHeight.heightIn),
+    measuredHeightInches: measured,
     idealMinInches: num(mowingHeight.band?.min),
     idealMaxInches: num(mowingHeight.band?.max),
     grassType: mowingHeight.grassType || null,
     status,
     recommendation: rec,
+    photoUrl,
   };
 }
 

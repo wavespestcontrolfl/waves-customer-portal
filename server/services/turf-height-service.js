@@ -76,8 +76,12 @@ async function getTurfHeightForVisit(serviceRecordId, knex = db) {
 async function getLatestTurfHeight(customerId, knex = db) {
   if (!customerId) return null;
   try {
+    // The card shows the maintained height-of-cut, so return the latest reading
+    // that actually has a numeric value — a photo-only visit (null height) must
+    // not blank a previously-populated card.
     return await knex('turf_height_readings')
       .where({ customer_id: customerId })
+      .whereNotNull('manual_height_in')
       .orderBy('measured_at', 'desc')
       .first(READING_COLUMNS);
   } catch {

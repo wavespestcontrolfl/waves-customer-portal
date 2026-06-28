@@ -38,6 +38,7 @@ import { addETDays, etDateString } from "../../lib/timezone";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import AnnualPrepayLauncher from "../../components/schedule/AnnualPrepayLauncher";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
+import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
 import TreeShrubCloseoutSummary from "../../components/tech/TreeShrubCloseoutSummary";
@@ -242,11 +243,6 @@ const AREAS_BY_SERVICE = {
     "Front yard",
     "Back yard",
     "Side yard",
-    "Landscape beds",
-    "Shrubs",
-    "Palms",
-    "Problem area",
-    "Irrigation zone",
   ],
   universal: [
     "No issues found",
@@ -5160,7 +5156,21 @@ function parseProtocolFieldChecks(value) {
   };
 }
 
-function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
+function LawnAssessmentCompletionBlock({
+  service,
+  disabled,
+  onConfirmed,
+  // Optional on-site lawn-length (gauge) photo — captured inline next to the turf
+  // photos here, but stored on the shared turf-height state (CompletionPanel owns
+  // it). Only rendered when the gauge-reading capture applies (turf-height flag).
+  gaugePhoto = null,
+  onGaugePhoto,
+  showGaugePhoto = false,
+  // Gauge reading (height-of-cut) — sits inline with the lawn-length photo it
+  // documents. Stored on the same shared turf-height state.
+  gaugeHeightIn = null,
+  onGaugeHeight,
+}) {
   const [photos, setPhotos] = useState([]);
   const [result, setResult] = useState(null);
   const [techScores, setTechScores] = useState(null);
@@ -5176,6 +5186,17 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState("");
   const fileRef = useRef(null);
+  const gaugeFileRef = useRef(null);
+
+  async function onPickGaugePhoto(e) {
+    const file = (e.target.files || [])[0];
+    if (!file) return;
+    try {
+      const photo = await prepareCompletionPhoto(file);
+      onGaugePhoto?.({ data: photo.data, name: photo.name || "lawn-length.jpg" });
+    } catch { alert("Could not prepare the lawn length photo."); }
+    if (gaugeFileRef.current) gaugeFileRef.current.value = "";
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -5368,23 +5389,23 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
-        Capture turf photos for this lawn visit before closing the service.
-      </div>
       {loading && (
         <div style={{ fontSize: 12, color: D.muted }}>Checking existing assessment...</div>
       )}
-      {!hasResult && (
-        <>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            multiple
-            onChange={addPhotos}
-            style={{ display: "none" }}
-          />
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+      {/* Capture row — always visible so the lawn-length photo + gauge reading can be
+          added even after the assessment is analyzed (Codex P1). "Add turf photos" +
+          "Analyze lawn" stay pre-analysis only. */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        multiple
+        onChange={addPhotos}
+        style={{ display: "none" }}
+      />
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        {!hasResult && (
+          <>
             <button
               type="button"
               onClick={() => fileRef.current?.click()}
@@ -5405,7 +5426,67 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
               Add turf photos
             </button>
             <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/3</span>
+          </>
+        )}
+            {showGaugePhoto && (
+              <>
+                <input
+                  ref={gaugeFileRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={onPickGaugePhoto}
+                  style={{ display: "none" }}
+                />
+                <button
+                  type="button"
+                  onClick={() => gaugeFileRef.current?.click()}
+                  disabled={disabled || analyzing}
+                  style={{
+                    height: 38,
+                    padding: "0 14px",
+                    borderRadius: 8,
+                    border: `1px solid ${D.border}`,
+                    background: D.white,
+                    color: D.heading,
+                    fontSize: 13,
+                    fontWeight: 700,
+                    cursor: disabled || analyzing ? "not-allowed" : "pointer",
+                    opacity: disabled || analyzing ? 0.55 : 1,
+                  }}
+                >
+                  Add lawn length photo
+                </button>
+                <span style={{ fontSize: 12, color: D.muted }}>{gaugePhoto ? 1 : 0}/1</span>
+                {/* Gauge reading (height of cut) — sits with the lawn-length photo it documents. */}
+                <span style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Gauge reading</span>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="0.25"
+                  min="0.5"
+                  max="8"
+                  value={gaugeHeightIn ?? ""}
+                  disabled={disabled || analyzing}
+                  placeholder="e.g. 4"
+                  onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
+                  style={{
+                    width: 64,
+                    height: 38,
+                    padding: "0 10px",
+                    borderRadius: 8,
+                    border: `1px solid ${D.border}`,
+                    background: D.white,
+                    color: D.heading,
+                    fontSize: 13,
+                  }}
+                />
+                <span style={{ fontSize: 12, color: D.muted }}>inches</span>
+              </>
+            )}
           </div>
+          {!hasResult && (
+            <>
           {photos.length > 0 && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {photos.map((photo, index) => (
@@ -6392,110 +6473,9 @@ function smsRecapPreview(value) {
   return text ? `${text} - Waves` : "";
 }
 
-// Turfchek II gauge stops + grass→ideal-band map. Mirror of
-// server/services/service-report/turf-height.js (the server snapshots the
-// authoritative band on submit; this drives the tech's live status preview).
-const TURF_HEIGHT_BANDS = {
-  st_augustine: { min: 3.5, max: 4.0 },
-  bahia: { min: 3.0, max: 4.0 },
-  bermuda: { min: 1.0, max: 2.0 },
-  zoysia: { min: 1.5, max: 2.0 },
-};
-const TURF_OVERRIDE_REASONS = [
-  { code: "no_gauge_on_truck", label: "No gauge on truck" },
-  { code: "gauge_unreadable", label: "Gauge unreadable" },
-  { code: "not_applicable", label: "Not applicable" },
-];
-function turfBandFor(grassType) {
-  return TURF_HEIGHT_BANDS[grassType] || TURF_HEIGHT_BANDS.st_augustine;
-}
-
-// Tech-facing height-of-cut capture (lawn completion, behind the feature flag).
-// Numeric height entry + live range status + OPTIONAL gauge photo, or a
-// reason-coded override. value = { heightIn, gaugePhoto, overrideReason }.
-function TurfHeightCapture({ service, value, onChange, disabled }) {
-  const [grassType, setGrassType] = useState(null);
-  const fileRef = useRef(null);
-  useEffect(() => {
-    let live = true;
-    if (!service?.customerId) return undefined;
-    adminFetch(`/admin/customers/${service.customerId}/turf-profile`)
-      .then((d) => { if (live) setGrassType(d?.profile?.grass_type || "unknown"); })
-      .catch(() => { if (live) setGrassType("unknown"); });
-    return () => { live = false; };
-  }, [service?.customerId]);
-
-  const band = turfBandFor(grassType);
-  const bandLabel = `${band.min}–${band.max}″`;
-  const overridden = !!value.overrideReason;
-  const h = value.heightIn;
-  const status = h == null ? null : (h < band.min ? "below" : (h > band.max ? "above" : "in_range"));
-  const statusMeta = {
-    in_range: { color: CP_M.ink, text: `In range (ideal ${bandLabel})` },
-    above: { color: CP_M.ink, text: `Above ideal ${bandLabel}` },
-    below: { color: "#C8102E", text: `Below ideal ${bandLabel} — scalping risk` },
-  }[status];
-
-  async function onPickPhoto(e) {
-    const file = (e.target.files || [])[0];
-    if (!file) return;
-    try {
-      const photo = await prepareCompletionPhoto(file);
-      onChange({ ...value, gaugePhoto: { data: photo.data, name: photo.name || "turf-gauge.jpg" }, overrideReason: null });
-    } catch { alert("Could not prepare the gauge photo."); }
-    if (fileRef.current) fileRef.current.value = "";
-  }
-
-  return (
-    <div style={{ opacity: disabled ? 0.6 : 1 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, opacity: overridden ? 0.45 : 1 }}>
-        <input
-          type="number"
-          inputMode="decimal"
-          step="0.25"
-          min="0.5"
-          max="8"
-          value={value.heightIn ?? ""}
-          disabled={disabled || overridden}
-          placeholder="e.g. 4"
-          onChange={(e) => onChange({
-            ...value,
-            heightIn: e.target.value === "" ? null : Number(e.target.value),
-            overrideReason: null,
-          })}
-          style={{ width: 96, height: 38, padding: "0 12px", borderRadius: 8, border: `1px solid ${CP_M.hairline}`, fontFamily: CP_FONT, fontSize: 15, color: CP_M.ink, background: CP_M.card }}
-        />
-        <span style={{ fontFamily: CP_FONT, fontSize: 14, color: CP_M.ink4 }}>inches</span>
-      </div>
-      {statusMeta && !overridden && (
-        <div style={{ marginTop: 10, fontFamily: CP_FONT, fontSize: 13, fontWeight: 600, color: statusMeta.color }}>{statusMeta.text}</div>
-      )}
-      <div style={{ marginTop: 14 }}>
-        <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onPickPhoto} disabled={disabled || overridden} />
-        <button type="button" onClick={() => fileRef.current?.click()} disabled={disabled || overridden}
-          style={{ height: 36, padding: "0 14px", borderRadius: 999, background: value.gaugePhoto ? CP_M.ink : CP_M.card, color: value.gaugePhoto ? CP_M.actionFg : CP_M.ink, border: `1px solid ${CP_M.hairline}`, fontFamily: CP_FONT, fontSize: 13, fontWeight: 500, cursor: disabled || overridden ? "default" : "pointer" }}>
-          {value.gaugePhoto ? "✓ Gauge photo added" : "Add gauge photo (optional)"}
-        </button>
-        {!value.gaugePhoto && !overridden && (
-          <span style={{ marginLeft: 10, fontFamily: CP_FONT, fontSize: 12, color: CP_M.ink4 }}>Optional — gauge scale + canopy line visible.</span>
-        )}
-      </div>
-      <div style={{ marginTop: 14, fontFamily: CP_FONT, fontSize: 12, color: CP_M.ink4 }}>
-        Can&rsquo;t capture a reading?
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
-          {TURF_OVERRIDE_REASONS.map((r) => (
-            <CPChip key={r.code} selected={value.overrideReason === r.code}
-              onClick={disabled ? undefined : () => onChange(value.overrideReason === r.code
-                ? { ...value, overrideReason: null }
-                : { heightIn: null, gaugePhoto: null, overrideReason: r.code })}>
-              {r.label}
-            </CPChip>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
+// (Removed the standalone TurfHeightCapture component + its grass-band map — the
+// gauge reading is now captured inline in LawnAssessmentCompletionBlock next to
+// the lawn-length photo it documents.)
 
 // Recap chips — action tags (top 8 + more). role is sent to the server, which
 // derives the friendly customer caption (recap-media.js ROLE_MAP). Mirrors the
@@ -6775,6 +6755,19 @@ export function CompletionPanel({
     if (generating) return;
     setNotes((b) => (b ? `${b} ${text}` : text));
   });
+  // Customer email isn't on the schedule payload (only name/phone are), so fetch
+  // it for the header contact card's tap-to-email link.
+  const [customerEmail, setCustomerEmail] = useState("");
+  useEffect(() => {
+    let live = true;
+    setCustomerEmail(""); // clear stale email before (re)fetching for a new service
+    const cid = service.customerId || service.customer_id;
+    if (!cid) return undefined;
+    adminFetch(`/admin/customers/${cid}`)
+      .then((d) => { if (live) setCustomerEmail(d?.customer?.email || ""); })
+      .catch(() => { if (live) setCustomerEmail(""); });
+    return () => { live = false; };
+  }, [service.customerId, service.customer_id]);
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
@@ -6820,7 +6813,7 @@ export function CompletionPanel({
   // completion flow is unchanged and the server's post-commit auto-score still runs.
   const { enabled: treeShrubCloseoutFlag, ready: treeShrubCloseoutReady } = useFeatureFlagReady("tree-shrub-closeout-v2");
   const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
-  const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null, overrideReason: null });
+  const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
     defaultTreeShrubCloseout(service),
   );
@@ -7077,10 +7070,15 @@ export function CompletionPanel({
     setLawnAssessmentId(assessmentId || null);
     setLawnAssessmentRevision((v) => v + 1);
   };
-  const areaOptions = [
-    ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
-    ...AREAS_BY_SERVICE.universal,
-  ];
+  // Lawn visits use only the real turf zones — no ornamental/tree-shrub areas
+  // and no generic status chips ("No issues found" / "Follow-up recommended"),
+  // which don't belong on a lawn report. Other lines keep the universal set.
+  const areaOptions = serviceCategory === "lawn"
+    ? [...AREAS_BY_SERVICE.lawn]
+    : [
+        ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
+        ...AREAS_BY_SERVICE.universal,
+      ];
   const onSiteEntry = (service.statusLog || []).find(
     (e) => e.status === "on_site",
   );
@@ -7158,13 +7156,12 @@ export function CompletionPanel({
   ]
     .filter(Boolean)
     .join("\n\n");
-  const canAutoDraftRecap =
-    !isIncompleteVisit &&
-    notes.trim().length >= 15 &&
-    (selectedProducts.length > 0 ||
-      areasServiced.length > 0 ||
-      visitOutcome !== "completed" ||
-      customerInteraction);
+  // Recap auto-drafting is disabled: the customer-facing report summary is now
+  // generated server-side from the technician notes at completion. There's no
+  // recap editor/preview to review a client draft, and drafting here would burn
+  // a second LLM call for hidden state. Kept as a const so dependent effects/deps
+  // stay inert.
+  const canAutoDraftRecap = false;
   const reviewScheduledFor = () => {
     if (!willReview || oneTimeRecapOnly) return null;
     if (reviewTiming === "tomorrow_8") {
@@ -8418,9 +8415,9 @@ export function CompletionPanel({
       alert("Hang on — finishing the AI draft. Try again in a moment.");
       return;
     }
-    // The turf-height flag drives a server-required field on lawn visits; don't
-    // submit until its state is loaded, or a pre-load submit hides the field the
-    // server still enforces (422). The flag is session-cached so this rarely waits.
+    // The turf-height flag drives the (optional) gauge-reading section on lawn
+    // visits; don't submit until its state is loaded so a pre-load submit can't
+    // silently drop a reading/photo. The flag is session-cached so this rarely waits.
     if (isLawn && !turfHeightFlagReady) {
       alert("Completion options are still loading — please try again in a moment.");
       return;
@@ -8702,7 +8699,10 @@ export function CompletionPanel({
       const body = {
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
-        customerRecap,
+        // customerRecap is intentionally NOT sent: the report summary is generated
+        // server-side from the technician notes (there's no recap editor here).
+        // Sending a hidden/restored stale draft would bypass that and become
+        // unreviewed customer-facing copy (Codex P1).
         visitOutcome,
         reviewSuppression: reviewSuppressionReason,
         equipmentSystemId: equipmentSystemId || null,
@@ -8771,8 +8771,10 @@ export function CompletionPanel({
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
               ...treeShrubCloseout,
+              // Don't fall back to the hidden customerRecap state (auto-generated /
+              // restored, never reviewed) — use the tech's note or the typed notes.
               customerNote:
-                treeShrubCloseout.customerNote || customerRecap || notes || "",
+                treeShrubCloseout.customerNote || notes || "",
             }
           : null,
         oneTimeRecapOnly,
@@ -8822,12 +8824,12 @@ export function CompletionPanel({
           caption: photo.caption || null,
           ...(photo.captionSource === "ai" ? { aiTags: { captionSource: "ai" } } : {}),
         })),
-        // Turf height-of-cut (lawn only, behind the flag). The server gates +
-        // snapshots the authoritative band; off-flag/non-lawn these are inert.
+        // Gauge reading (lawn only, behind the flag). Both the height-of-cut
+        // reading and the on-site lawn-length photo are OPTIONAL; the server
+        // snapshots the authoritative band. Off-flag/non-lawn these are inert.
         ...(turfHeightFlag && isLawn ? {
           manualHeightIn: turfHeight.heightIn,
           gaugePhoto: turfHeight.gaugePhoto,
-          turfHeightOverrideReason: turfHeight.overrideReason,
         } : {}),
       };
       if (isCustomerConcernInteraction(customerInteraction) && customerConcern) {
@@ -9563,20 +9565,6 @@ export function CompletionPanel({
               >
                 Complete service
               </div>{" "}
-              <div
-                style={{
-                  fontFamily: font,
-                  fontSize: 13,
-                  fontWeight: 400,
-                  color: M.ink3,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  marginTop: 1,
-                }}
-              >
-                {service.customerName}
-              </div>{" "}
             </div>
             {onViewDetails ? (
               <button
@@ -9658,22 +9646,44 @@ export function CompletionPanel({
                 </div>{" "}
               </div>
             )}
-            {/* Service meta */}
-            <div
-              style={{
-                fontFamily: font,
-                fontSize: 13,
-                color: M.ink3,
-                marginBottom: 20,
-                lineHeight: 1.4,
-              }}
-            >
-              {service.serviceType}
+            {/* Customer contact card — name + tap-to-navigate / call / email */}
+            <div style={{ marginBottom: 20, lineHeight: 1.5 }}>
+              <div
+                style={{
+                  fontFamily: font,
+                  fontSize: 16,
+                  fontWeight: 600,
+                  color: M.ink,
+                  marginBottom: 4,
+                }}
+              >
+                {service.customerName}
+              </div>
               {service.address ? (
-                <>
-                  <br />
+                <a
+                  href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(service.address)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ display: "block", fontFamily: font, fontSize: 13, color: M.ink, textDecoration: "underline", marginTop: 2 }}
+                >
                   {service.address}
-                </>
+                </a>
+              ) : null}
+              {service.customerPhone ? (
+                <a
+                  href={`tel:${service.customerPhone}`}
+                  style={{ display: "block", fontFamily: font, fontSize: 13, color: M.ink, textDecoration: "underline", marginTop: 2 }}
+                >
+                  {service.customerPhone}
+                </a>
+              ) : null}
+              {customerEmail ? (
+                <a
+                  href={`mailto:${customerEmail}`}
+                  style={{ display: "block", fontFamily: font, fontSize: 13, color: M.ink, textDecoration: "underline", marginTop: 2, wordBreak: "break-word" }}
+                >
+                  {customerEmail}
+                </a>
               ) : null}
             </div>
             {/* Time on-site */}
@@ -9747,16 +9757,11 @@ export function CompletionPanel({
                   service={service}
                   disabled={isIncompleteVisit || submitting}
                   onConfirmed={handleLawnAssessmentConfirmed}
-                />
-              </Field>
-            )}
-            {isLawn && turfHeightFlag && !quickComplete && (
-              <Field label="Mowing height (gauge reading)">
-                <TurfHeightCapture
-                  service={service}
-                  value={turfHeight}
-                  onChange={setTurfHeight}
-                  disabled={isIncompleteVisit || submitting}
+                  showGaugePhoto={turfHeightFlag}
+                  gaugePhoto={turfHeight.gaugePhoto}
+                  onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
+                  gaugeHeightIn={turfHeight.heightIn}
+                  onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
                 />
               </Field>
             )}
@@ -9785,7 +9790,7 @@ export function CompletionPanel({
               </Field>
             )}
             {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
-              <Field label="10/10 protocol closeout">
+              <Field label="Lawn Care Protocol">
                 <div
                   style={{
                     background: M.card,
@@ -10282,28 +10287,13 @@ export function CompletionPanel({
                       boxShadow: "0 1px 3px rgba(0,0,0,0.12)",
                     }}
                   >
-                    {dictation.listening ? "■" : "🎙"}
+                    {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
                   </button>
                 )}
               </div>
             </Field>
             {!isTypedFindings && (
               <Field label="Protocol actions">
-                {protocolActionMeta?.programName && (
-                  <div
-                    style={{
-                      fontFamily: font,
-                      fontSize: 12,
-                      color: M.ink4,
-                      marginBottom: 8,
-                    }}
-                  >
-                    {protocolActionMeta.programName}
-                    {protocolActionMeta.visit?.month
-                      ? ` - ${protocolActionMeta.visit.month}`
-                      : ""}
-                  </div>
-                )}
                 {protocolActionsLoading ? (
                   <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>
                     Loading protocol actions...
@@ -10432,7 +10422,7 @@ export function CompletionPanel({
                   opacity: generating ? 0.5 : 1,
                 }}
               >
-                {generating ? "Generating…" : "✨ Generate AI report"}
+                {generating ? "Generating…" : "Generate AI report"}
               </button>
             )}
             {/* Service photos — pure lawn visits capture turf photos in the
@@ -10967,100 +10957,9 @@ export function CompletionPanel({
                 </div>{" "}
               </Field>
             )}
-            {/* Customer recap + final SMS preview */}
-            {isIncompleteVisit ? (
-              <Field label="Customer recap">
-                {" "}
-                <div
-                  style={{
-                    background: M.card,
-                    border: `0.5px solid ${M.hairline}`,
-                    borderRadius: 12,
-                    padding: 14,
-                    fontFamily: font,
-                    fontSize: 13,
-                    color: M.ink3,
-                    lineHeight: 1.45,
-                  }}
-                >
-                  This visit will be closed without a customer recap, charge, or
-                  review request. The office will see the reason and follow up.
-                </div>{" "}
-              </Field>
-            ) : (
-              <Field label="Customer recap">
-                {" "}
-                <textarea
-                  value={customerRecap}
-                  onChange={(e) => handleCustomerRecapChange(e.target.value)}
-                  rows={4}
-                  placeholder="Customer-facing summary..."
-                  style={{ ...mTextarea, minHeight: 112 }}
-                />{" "}
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 8,
-                    marginTop: 8,
-                    alignItems: "center",
-                  }}
-                >
-                  {" "}
-                  <span
-                    style={{
-                      fontFamily: font,
-                      fontSize: 12,
-                      color: recapError
-                        ? M.err
-                        : recapStaleAfterEdit
-                          ? M.warn
-                          : M.ink4,
-                    }}
-                  >
-                    {recapStatusText}
-                  </span>{" "}
-                  <button
-                    type="button"
-                    onClick={regenerateCustomerRecap}
-                    disabled={recapLoading}
-                    style={{
-                      ...tertiaryPill,
-                      width: "auto",
-                      height: 36,
-                      padding: "0 14px",
-                      border: `1px solid ${M.hairline}`,
-                      fontSize: 12,
-                      opacity: recapLoading ? 0.5 : 1,
-                    }}
-                  >
-                    Regenerate
-                  </button>{" "}
-                </div>{" "}
-              </Field>
-            )}
-            {effectiveSendSms && (
-              <Field
-                label={`Customer SMS preview - ${completionSmsTemplateName}`}
-              >
-                {" "}
-                <div
-                  style={{
-                    background: M.card,
-                    border: `0.5px solid ${M.hairline}`,
-                    borderRadius: 12,
-                    padding: 14,
-                    fontFamily: font,
-                    fontSize: 14,
-                    color: M.ink,
-                    lineHeight: 1.45,
-                    whiteSpace: "pre-wrap",
-                  }}
-                >
-                  {smsPreview || "Add notes to preview the customer message."}
-                </div>{" "}
-              </Field>
-            )}
+            {/* The customer-facing report summary is now auto-generated from the
+                technician notes at completion (server: CompletionRecap.generateRecap)
+                — no manual "Customer recap" box or SMS preview here. */}
             {/* Customer interaction */}
             {!quickComplete && (
               <Field label="Customer interaction">
@@ -11777,18 +11676,11 @@ export function CompletionPanel({
                 service={service}
                 disabled={isIncompleteVisit || submitting}
                 onConfirmed={handleLawnAssessmentConfirmed}
-              />
-            </div>
-          )}
-          {isLawn && turfHeightFlag && !quickComplete && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Mowing height (gauge reading)</label>{" "}
-              <TurfHeightCapture
-                service={service}
-                value={turfHeight}
-                onChange={setTurfHeight}
-                disabled={isIncompleteVisit || submitting}
+                showGaugePhoto={turfHeightFlag}
+                gaugePhoto={turfHeight.gaugePhoto}
+                onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
+                gaugeHeightIn={turfHeight.heightIn}
+                onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
               />
             </div>
           )}
@@ -12351,7 +12243,7 @@ export function CompletionPanel({
                   justifyContent: "center",
                 }}
               >
-                {dictation.listening ? "■" : "🎙"}
+                {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
               </button>
             )}
           </div>
@@ -12504,7 +12396,7 @@ export function CompletionPanel({
                 gap: 8,
               }}
             >
-              {generating ? "Generating Report..." : "✨ Generate AI Service Report"}
+              {generating ? "Generating Report..." : "Generate AI Service Report"}
             </button>
           )}
           {/* Photo Upload — hidden in quick complete. Pure lawn visits capture
@@ -13022,109 +12914,9 @@ export function CompletionPanel({
               </div>{" "}
             </div>
           )}
-          {/* Customer Recap */}
-          <label style={labelStyle}>Customer Recap</label>
-          {isIncompleteVisit ? (
-            <div
-              style={{
-                background: D.card,
-                border: `1px solid ${D.border}`,
-                borderRadius: 10,
-                padding: 12,
-                color: D.muted,
-                fontSize: 13,
-                lineHeight: 1.5,
-                marginBottom: 16,
-              }}
-            >
-              This visit will be closed without a customer recap, charge, or
-              review request. The office will see the reason and follow up.
-            </div>
-          ) : (
-            <>
-              {" "}
-              <textarea
-                value={customerRecap}
-                onChange={(e) => handleCustomerRecapChange(e.target.value)}
-                rows={4}
-                style={{
-                  width: "100%",
-                  background: D.input,
-                  color: D.text,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 10,
-                  padding: 12,
-                  fontSize: 14,
-                  resize: "vertical",
-                  fontFamily: "'Nunito Sans', sans-serif",
-                  boxSizing: "border-box",
-                  marginBottom: 8,
-                }}
-                placeholder="Customer-facing summary..."
-              />{" "}
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 8,
-                  marginBottom: 16,
-                }}
-              >
-                {" "}
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: recapError
-                      ? D.red
-                      : recapStaleAfterEdit
-                        ? D.amber
-                        : D.muted,
-                  }}
-                >
-                  {recapStatusText}
-                </span>{" "}
-                <button
-                  onClick={regenerateCustomerRecap}
-                  disabled={recapLoading}
-                  style={{
-                    ...btnBase,
-                    width: "auto",
-                    height: 36,
-                    padding: "0 14px",
-                    background: "transparent",
-                    color: D.teal,
-                    border: `1px solid ${D.teal}44`,
-                    opacity: recapLoading ? 0.5 : 1,
-                  }}
-                >
-                  Regenerate
-                </button>{" "}
-              </div>{" "}
-            </>
-          )}
-          {effectiveSendSms && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>
-                Customer SMS Preview - {completionSmsTemplateName}
-              </label>{" "}
-              <div
-                style={{
-                  background: D.card,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 10,
-                  padding: 12,
-                  color: D.text,
-                  fontSize: 13,
-                  lineHeight: 1.5,
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                {smsPreview || "Add notes to preview the customer message."}
-              </div>{" "}
-            </div>
-          )}
+          {/* Customer recap + SMS preview removed (desktop) — the report summary is
+              auto-generated server-side from the technician notes at completion
+              (CompletionRecap.generateRecap). Kept in lockstep with the mobile layout. */}
           {/* Customer Interaction */}
           {!quickComplete && (
             <div style={{ marginBottom: 20 }}>

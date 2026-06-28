@@ -616,34 +616,50 @@ export function RainLast7DaysChart({ days = [] }) {
 // ── 5. Mowing height gauge ───────────────────────────────────────────────────────
 export function MowingHeightGauge({ mowing = {} }) {
   if (!mowing) return null; // explicit null bypasses the default — e.g. no turf reading this visit
-  const measured = Number(mowing.measuredHeightInches);
+  // Photo-only rows send measuredHeightInches: null — guard the null BEFORE Number()
+  // (Number(null) === 0 would otherwise render a false 0-inch / "too short" gauge).
+  const measured = mowing.measuredHeightInches == null ? NaN : Number(mowing.measuredHeightInches);
   const lo = Number(mowing.idealMinInches);
   const hi = Number(mowing.idealMaxInches);
-  if (!Number.isFinite(measured) || !Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+  const hasGauge = Number.isFinite(measured) && Number.isFinite(lo) && Number.isFinite(hi);
+  const photoUrl = mowing.photoUrl || null;
+  // Nothing to show this visit — no numeric reading and no on-site lawn-length photo.
+  if (!hasGauge && !photoUrl) return null;
   const axisMin = 0;
-  const axisMax = Math.max(hi + 1, measured + 0.5);
+  const axisMax = hasGauge ? Math.max(hi + 1, measured + 0.5) : 0;
   const pct = (v) => `${clamp(((v - axisMin) / (axisMax - axisMin)) * 100)}%`;
-  const status = mowing.status || (measured < lo ? 'too_short' : measured > hi ? 'too_tall' : 'ideal');
+  const status = hasGauge ? (mowing.status || (measured < lo ? 'too_short' : measured > hi ? 'too_tall' : 'ideal')) : null;
   return (
     <Card>
       <CardTitle sub="The maintained height of cut we measured before today’s visit.">Mowing Height</CardTitle>
-      <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 16 }}>
-        <span style={{ color: MUTED }}>Measured</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(measured)}</strong>
-        <span style={{ color: MUTED }}>Ideal range</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(lo)}–{inchLabel(hi)}</strong>
-      </div>
-      <div style={{ position: 'relative', height: 34 }}>
-        <div style={{ position: 'absolute', left: 0, right: 0, top: 13, height: 8, borderRadius: 6, background: '#F1EEE6' }} />
-        {/* ideal band */}
-        <div style={{ position: 'absolute', left: pct(lo), width: `calc(${pct(hi)} - ${pct(lo)})`, top: 13, height: 8, borderRadius: 6, background: COLORS.greenLight, border: `1px solid ${COLORS.green}` }} />
-        {/* measured marker */}
-        <div style={{ position: 'absolute', left: pct(measured), top: 4, transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-          <div style={{ width: 3, height: 26, background: statusMeta(status).color, borderRadius: 2 }} />
-        </div>
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: MUTED, marginTop: 4 }}>
-        <span>Too short</span><span>Ideal</span><span>Too tall</span>
-      </div>
-      <div style={{ marginTop: 12 }}><StatusPill status={status} small /></div>
+      {hasGauge ? (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 16 }}>
+            <span style={{ color: MUTED }}>Measured</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(measured)}</strong>
+            <span style={{ color: MUTED }}>Ideal range</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(lo)}–{inchLabel(hi)}</strong>
+          </div>
+          <div style={{ position: 'relative', height: 34 }}>
+            <div style={{ position: 'absolute', left: 0, right: 0, top: 13, height: 8, borderRadius: 6, background: '#F1EEE6' }} />
+            {/* ideal band */}
+            <div style={{ position: 'absolute', left: pct(lo), width: `calc(${pct(hi)} - ${pct(lo)})`, top: 13, height: 8, borderRadius: 6, background: COLORS.greenLight, border: `1px solid ${COLORS.green}` }} />
+            {/* measured marker */}
+            <div style={{ position: 'absolute', left: pct(measured), top: 4, transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <div style={{ width: 3, height: 26, background: statusMeta(status).color, borderRadius: 2 }} />
+            </div>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: MUTED, marginTop: 4 }}>
+            <span>Too short</span><span>Ideal</span><span>Too tall</span>
+          </div>
+          <div style={{ marginTop: 12 }}><StatusPill status={status} small /></div>
+        </>
+      ) : null}
+      {photoUrl ? (
+        <figure style={{ margin: hasGauge ? '16px 0 0' : 0 }}>
+          <img src={photoUrl} alt="On-site lawn length" loading="lazy"
+            style={{ width: '100%', borderRadius: 10, display: 'block', border: `1px solid ${COLORS.greenLight}` }} />
+          <figcaption style={{ marginTop: 6, fontSize: 12, color: MUTED }}>On-site lawn length</figcaption>
+        </figure>
+      ) : null}
       {mowing.recommendation ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{mowing.recommendation}</p>
       ) : null}

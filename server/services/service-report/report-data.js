@@ -2188,9 +2188,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ...protocol.recommendations,
     ...findings.map((finding) => finding.recommendation).filter(Boolean),
   ]);
-  // Drop the turf-height gauge image from the customer DISPLAY payload only — it's
-  // a measurement/QA artifact, not a field photo. It stays in `photos` so the
-  // tamper-evident hash chain (validated below) remains intact. Fail-soft.
+  // The turf-height gauge image is the on-site lawn-length documentation photo.
+  // Surface it in the Mowing Height report module (next to the reading it
+  // documents) instead of the generic gallery, so it appears exactly once. We
+  // resolve its URL onto `mowingHeight.photoUrl` and exclude it from the gallery
+  // payload below. It stays in `photos` so the tamper-evident hash chain
+  // (validated below) remains intact. Fail-soft on every step.
   let gaugePhotoId = null;
   try {
     const gaugeRow = await knex('turf_height_readings')
@@ -2199,8 +2202,19 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       .first('gauge_photo_id');
     gaugePhotoId = gaugeRow?.gauge_photo_id || null;
   } catch { gaugePhotoId = null; }
+  if (gaugePhotoId && mowingHeight) {
+    try {
+      const gaugePhoto = photos.find((p) => String(p.id) === String(gaugePhotoId));
+      const gaugeUrl = gaugePhoto ? await photoUrl(gaugePhoto) : null;
+      if (gaugeUrl) mowingHeight = { ...mowingHeight, photoUrl: gaugeUrl };
+    } catch { /* fail-soft: report still renders the reading without the photo */ }
+  }
+  // Build the gallery with ALL photos. The gauge/lawn-length photo is dropped from
+  // the gallery LATER (at the return) and only when Lawn Report V2 actually built and
+  // surfaced it in the mowing module — so a failed/absent V2 build (legacy path,
+  // flag off, no assessment, or a build error) keeps the photo in the gallery instead
+  // of losing it (Codex P1).
   const photoPayload = await Promise.all(photos
-    .filter((photo) => !gaugePhotoId || String(photo.id) !== String(gaugePhotoId))
     .map(async (photo) => ({
       id: photo.id,
       url: await photoUrl(photo),
@@ -2604,7 +2618,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     lawnProgramOverview,
     visualServiceMoments: approvedVisualMoments,
     proofMoments: approvedVisualMoments,
-    photos: photoPayload,
+    // Drop the gauge/lawn-length photo from the gallery only when Lawn Report V2
+    // actually built and surfaced it in the mowing module (else it would show
+    // twice). A null/failed V2 build keeps it in the gallery so it is never lost.
+    photos: (gaugePhotoId && reportV2 && mowingHeight && mowingHeight.photoUrl)
+      ? photoPayload.filter((p) => String(p.id) !== String(gaugePhotoId))
+      : photoPayload,
     photoChain,
     pdfUrl: `/api/reports/${token}`,
     legacy: {
