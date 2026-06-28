@@ -9648,17 +9648,35 @@ export function CompletionPanel({
             )}
             {/* Customer contact card — name + tap-to-navigate / call / email */}
             <div style={{ marginBottom: 20, lineHeight: 1.5 }}>
-              <div
-                style={{
-                  fontFamily: font,
-                  fontSize: 16,
-                  fontWeight: 600,
-                  color: M.ink,
-                  marginBottom: 4,
-                }}
-              >
-                {service.customerName}
-              </div>
+              {(service.customerId || service.customer_id) ? (
+                <a
+                  href={`/admin/customers?customerId=${encodeURIComponent(service.customerId || service.customer_id)}`}
+                  style={{
+                    display: "block",
+                    fontFamily: font,
+                    fontSize: 16,
+                    fontWeight: 600,
+                    color: M.ink,
+                    marginBottom: 4,
+                    textDecoration: "underline",
+                    cursor: "pointer",
+                  }}
+                >
+                  {service.customerName}
+                </a>
+              ) : (
+                <div
+                  style={{
+                    fontFamily: font,
+                    fontSize: 16,
+                    fontWeight: 600,
+                    color: M.ink,
+                    marginBottom: 4,
+                  }}
+                >
+                  {service.customerName}
+                </div>
+              )}
               {service.address ? (
                 <a
                   href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(service.address)}`}
@@ -11544,9 +11562,18 @@ export function CompletionPanel({
               &times;
             </button>{" "}
           </div>{" "}
-          <div style={{ fontSize: 14, color: D.text, fontWeight: 600 }}>
-            {service.customerName}
-          </div>{" "}
+          {(service.customerId || service.customer_id) ? (
+            <a
+              href={`/admin/customers?customerId=${encodeURIComponent(service.customerId || service.customer_id)}`}
+              style={{ display: "block", fontSize: 14, color: D.text, fontWeight: 600, textDecoration: "underline", cursor: "pointer" }}
+            >
+              {service.customerName}
+            </a>
+          ) : (
+            <div style={{ fontSize: 14, color: D.text, fontWeight: 600 }}>
+              {service.customerName}
+            </div>
+          )}{" "}
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
             {service.address}
           </div>{" "}
