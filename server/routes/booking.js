@@ -393,6 +393,18 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   return { lat: resolvedLat, lng: resolvedLng };
 }
 
+// Load the singleton booking_config row, falling back to the same defaults the
+// public routes use. Exported so non-route callers (e.g. the voice agent's
+// read-only quoting tools) share one source of truth for the config window.
+async function loadBookingConfig() {
+  return (await db('booking_config').first()) || {
+    advance_days_min: 1, advance_days_max: 14,
+    slot_duration_minutes: 60,
+    day_start: '08:00', day_end: '17:00',
+    max_self_books_per_day: 3,
+  };
+}
+
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
@@ -1203,4 +1215,11 @@ module.exports = router;
 module.exports._internals = {
   isOneTimeBookingSource,
   cleanBookingServiceLabel,
+  // Read-only engine surface reused by the voice agent's quoting tools so a
+  // phoned-in availability check runs the exact same route-aware slot finder as
+  // the web /book funnel (no duplicated scheduling logic).
+  resolveBookingCoords,
+  buildBookingAvailability,
+  loadBookingConfig,
+  MAX_BOOKING_HORIZON_DAYS,
 };
