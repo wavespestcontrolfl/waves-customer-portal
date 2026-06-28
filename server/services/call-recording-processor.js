@@ -2077,14 +2077,19 @@ const CallRecordingProcessor = {
         // it only counts actual leads (shouldCreateLead already excluded established
         // customers). campaign_id is null here (single-number bucket; the
         // call-reporting bridge fills the campaign when it matches). Best-effort.
-        // Scope to ACTUAL Google Ads sources — a `channel='paid'` row with a
-        // non-Google source_type (Facebook/LSA/other paid number) must not be
-        // labelled google_ads and pollute the Google Ads PPC funnel.
-        if (leadId && customerId && leadSourceRow && leadSourceRow.source_type === 'google_ads') {
+        // Label each PAID source with its OWN platform so Google and Facebook
+        // calls land in their respective funnels — never mislabel one as the other.
+        // For Google the call-reporting bridge backfills the campaign later; Meta
+        // has no call→campaign reporting, so Facebook rows stay campaign-null (the
+        // conversion still counts). recordCallPpcAttribution dedupes by lead_id and
+        // respects first-touch (a web-attributed lead keeps its source), so this
+        // never double-counts.
+        if (leadId && customerId && leadSourceRow
+            && ['google_ads', 'facebook'].includes(leadSourceRow.source_type)) {
           require('./ads/call-attribution').recordCallPpcAttribution({
             customerId,
             leadId,
-            leadSource: 'google_ads',
+            leadSource: leadSourceRow.source_type, // 'google_ads' | 'facebook'
             leadSourceDetail: leadSourceRow.name || 'inbound call',
             // service_interest isn't on the lead row yet (enrichment writes it
             // later) — pass the extracted service so service-line ROI is right.

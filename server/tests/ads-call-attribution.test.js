@@ -108,6 +108,32 @@ describe('recordCallPpcAttribution', () => {
     });
   });
 
+  test('records a Facebook paid call with lead_source=facebook and a null campaign (Meta has no call→campaign reporting)', async () => {
+    firstByTable.ad_service_attribution = undefined; // no existing row for this lead
+    firstByTable.ad_campaigns = undefined; // no campaign lookup for Facebook calls
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C9',
+      leadId: 'L9',
+      leadSource: 'facebook',
+      leadSourceDetail: 'Facebook Ads — Pest (call-extension)',
+      serviceInterest: 'Lawn Care',
+      leadDate: new Date('2026-06-28T18:00:00Z'),
+    });
+
+    expect(res).toEqual({ recorded: true, campaignId: null });
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0].row).toMatchObject({
+      campaign_id: null,
+      customer_id: 'C9',
+      lead_id: 'L9',
+      lead_source: 'facebook',
+      lead_source_detail: 'Facebook Ads — Pest (call-extension)',
+      service_line: 'lawn',
+      funnel_stage: 'lead',
+    });
+  });
+
   test('falls back to the lead service_interest when none is passed', async () => {
     firstByTable.ad_service_attribution = undefined;
     firstByTable.leads = { service_interest: 'Lawn Care' };
