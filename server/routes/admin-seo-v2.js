@@ -766,11 +766,12 @@ router.get('/refresh-audit', async (req, res, next) => {
 
 router.post('/refresh-audit/enqueue', requireAdmin, async (req, res, next) => {
   try {
-    const { blogPostId = null, url = null } = req.body || {};
-    if (!blogPostId && !url) return res.status(400).json({ error: 'blogPostId or url is required' });
-    const result = await RefreshAudit.enqueueRefresh({ blogPostId, url });
+    const { blogPostId = null } = req.body || {};
+    if (!blogPostId) return res.status(400).json({ error: 'blogPostId is required' });
+    const result = await RefreshAudit.enqueueRefresh({ blogPostId });
     res.json(result);
   } catch (err) {
+    if (err.code === 'BAD_REQUEST') return res.status(400).json({ error: err.message });
     if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
     if (err.code === 'NOT_PUBLISHED' || err.code === 'NO_URL' || err.code === 'NO_GSC_SIGNAL') {
       return res.status(422).json({ error: err.message, code: err.code });

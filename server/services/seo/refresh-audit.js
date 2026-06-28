@@ -264,24 +264,20 @@ class RefreshAudit {
    * Hand a chosen published page to the existing autonomous refresh engine by
    * seeding opportunity_queue (action_type=refresh_existing_page). Idempotent via
    * dedupe_key; never resets a row the runner already claimed/finished. Safe by
-   * default (shadow mode). Accepts { blogPostId } or { url }.
+   * default (shadow mode).
+   *
+   * Keyed by { blogPostId } ONLY — the audit always carries blogPostId, and a
+   * raw-URL lookup is unsafe on this hub/spoke network (paths are shared across
+   * domains, so a URL could resolve to the wrong domain's post). blogPostId is
+   * unambiguous and pins the exact page + its domain (via astro_live_url).
    */
-  async enqueueRefresh({ blogPostId = null, url = null } = {}) {
-    let post = null;
-    if (blogPostId) {
-      post = await db('blog_posts').where({ id: blogPostId }).first();
-    } else if (url) {
-      // Match the requested URL's canonical path against EITHER blog_posts.slug OR
-      // the live astro_live_url path — the two diverge for imports / edited slugs,
-      // and a slug-only lookup would 404 a valid live URL.
-      const reqPath = urlToPath(url);
-      const slug = String(reqPath || '').replace(/^\/+/, '');
-      post = await db('blog_posts')
-        .where(function () {
-          this.where({ slug }).orWhereRaw(`${canonPathSql('astro_live_url')} = ?`, [reqPath]);
-        })
-        .first();
+  async enqueueRefresh({ blogPostId = null } = {}) {
+    if (!blogPostId) {
+      const err = new Error('blogPostId is required');
+      err.code = 'BAD_REQUEST';
+      throw err;
     }
+    const post = await db('blog_posts').where({ id: blogPostId }).first();
     if (!post) {
       const err = new Error('page not found for refresh enqueue');
       err.code = 'NOT_FOUND';
