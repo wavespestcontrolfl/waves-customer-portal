@@ -2307,6 +2307,51 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:20AM — Google Ads call→campaign attribution bridge. Matches Google
+  // Ads call-reporting rows to CRM call_log entries (≥70 confidence auto-match)
+  // and writes the campaign back onto call_log + ad_service_attribution, so
+  // phone-call leads stop being invisible to PPC ROI. Previously admin-trigger
+  // only (POST /api/admin/ads/call-bridge/apply). Runs BEFORE the 6:25 ad-cost
+  // allocation so its fresh attribution rows get ad_cost the same morning.
+  // No external upload (reads Google call reporting, writes only our own DB);
+  // no-ops unless the Google Ads API is configured, and idempotent (already-
+  // bridged calls are skipped) so a daily 30-day re-scan never double-attributes
+  // — hence no opt-in flag, matching the Google/Meta SYNC crons above.
+  // =========================================================================
+  cron.schedule('20 6 * * *', async () => {
+    try {
+      const googleAds = require('./ads/google-ads');
+      if (!googleAds.isConfigured()) return;
+      logger.info('Running: Google Ads call→campaign bridge');
+      const callBridge = require('./ads/google-call-bridge');
+      // No cron lock needed: the only non-idempotent step — bridge lead-source
+      // creation — is atomic in ensureBridgeLeadSource() (advisory lock keyed
+      // to the source name, shared by every caller incl. the manual admin
+      // apply), and the call_log/attribution writes are idempotent (already-
+      // bridged calls are skipped). Per cron-lock.js, jobs that claim work
+      // atomically are fleet-safe without runExclusive.
+      // limit 500 = the existing CRM-side cap in fetchCrmCalls(); keep the
+      // Google scan symmetric (was 200) so the cron isn't the narrower side.
+      // Both sides are bounded by design — warn if either hits the cap (older
+      // calls would go unbridged and need pagination, a wider refactor that's
+      // unwarranted today at ~0 Google-Ads-driven calls).
+      const r = await callBridge.applyBridge({ days: 30, limit: 500 });
+      if ((r.summary?.googleCalls || 0) >= 500 || (r.summary?.crmMainLineCalls || 0) >= 500) {
+        logger.warn('[google-call-bridge cron] 30-day scan hit the 500-row cap — older calls may be unbridged; add pagination if call volume grows');
+      }
+      logger.info(`[google-call-bridge cron] ${JSON.stringify({
+        configured: r.configured,
+        applied: r.appliedCount,
+        skipped: r.skippedCount,
+        googleCalls: r.summary?.googleCalls,
+        crmMainLineCalls: r.summary?.crmMainLineCalls,
+      })}`);
+    } catch (err) {
+      logger.error(`Google Ads call bridge failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:25AM — Ad cost allocation. Runs AFTER the Google (6am) + Meta
   // (6:15am) syncs land fresh spend, spreading each paid channel-month's spend
   // across that channel's leads into ad_service_attribution.ad_cost — the
