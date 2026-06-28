@@ -148,7 +148,12 @@ function attachVoiceRelay(httpServer) {
           break;
         }
         case 'error': {
-          logger.warn(`[voice-relay] relay error frame: ${msg.description || JSON.stringify(msg)}`);
+          // Never log the full inbound frame — it can carry caller PII / custom
+          // parameters. Log only a short sanitized description.
+          const desc = typeof msg.description === 'string' && msg.description.trim()
+            ? msg.description.trim().slice(0, 200)
+            : 'no description';
+          logger.warn(`[voice-relay] relay error frame: ${desc}`);
           break;
         }
         // 'dtmf' and others: ignored in Phase 0

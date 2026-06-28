@@ -10,7 +10,7 @@ const { recordTouchpoint, syncVoiceMessageForCall } = require('../services/conve
 const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 const { getCallRoutingConfig } = require('../services/call-routing-config');
 const { decideVoiceRoute } = require('../services/voice-route-decision');
-const { buildRelayTwiML } = require('../services/voice-agent/relay-protocol');
+const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
 const { isRelayAttached } = require('../services/voice-agent/relay-server');
 
 function notifyTwilioFailure(payload) {
@@ -317,10 +317,28 @@ const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
 //                      on the normal human/voicemail flow; never dial a wss URL).
 //   'dial'           → a PSTN number or SIP URI agent → <Dial> handoff.
 //   'none'           → no endpoint configured.
+//
+// A ws/wss endpoint that isn't a VALID relay target (wrong scheme, wrong path)
+// classifies as 'relay_disabled' — never 'dial' (can't dial a ws URL) and never
+// 'relay' — so a misconfigured endpoint falls through to voicemail rather than
+// emitting <Connect><ConversationRelay> to a dead/insecure socket.
+function isRelayEndpoint(endpoint) {
+  let url;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  const secureWs = url.protocol === 'wss:';
+  const localDevWs = url.protocol === 'ws:' && /^(localhost|127\.0\.0\.1)$/.test(url.hostname);
+  return (secureWs || localDevWs) && url.pathname === RELAY_WS_PATH;
+}
 function agentHandoffKind(config) {
   const endpoint = String(config?.agentEndpoint || '').trim();
   if (!endpoint) return 'none';
-  if (/^wss?:\/\//i.test(endpoint)) return isRelayAttached() ? 'relay' : 'relay_disabled';
+  if (/^wss?:\/\//i.test(endpoint)) {
+    return (isRelayEndpoint(endpoint) && isRelayAttached()) ? 'relay' : 'relay_disabled';
+  }
   return 'dial';
 }
 

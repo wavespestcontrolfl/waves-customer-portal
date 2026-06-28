@@ -54,15 +54,22 @@ describe('agentHandoffKind — reachability reflects ACTUAL relay attach', () =>
     expect(agentHandoffKind(null)).toBe('none');
   });
 
-  test('wss endpoint → relay only when the ws server actually attached', () => {
+  test('valid relay endpoint → relay only when the ws server actually attached', () => {
     isRelayAttached.mockReturnValue(true);
     expect(agentHandoffKind({ agentEndpoint: RELAY_URL })).toBe('relay');
     expect(agentHandoffKind({ agentEndpoint: 'ws://localhost:3000/ws/voice-agent' })).toBe('relay');
   });
 
-  test('wss endpoint → relay_disabled when the ws server did NOT attach', () => {
+  test('valid relay endpoint → relay_disabled when the ws server did NOT attach', () => {
     isRelayAttached.mockReturnValue(false);
     expect(agentHandoffKind({ agentEndpoint: RELAY_URL })).toBe('relay_disabled');
+  });
+
+  test('malformed ws/wss endpoint → relay_disabled (never relay, never dialed)', () => {
+    isRelayAttached.mockReturnValue(true); // even when the server is up
+    expect(agentHandoffKind({ agentEndpoint: 'wss://portal.example.com/wrong-path' })).toBe('relay_disabled');
+    expect(agentHandoffKind({ agentEndpoint: 'ws://evil.example.com/ws/voice-agent' })).toBe('relay_disabled'); // ws:// only allowed on localhost
+    expect(agentHandoffKind({ agentEndpoint: 'wss://not a url' })).toBe('relay_disabled');
   });
 
   test('PSTN number / SIP URI → dial regardless of relay attach', () => {
@@ -135,10 +142,10 @@ describe('buildRelayTwiML — authenticates the upgrade + disclosure greeting', 
 });
 
 describe('relay-protocol auth/PII helpers', () => {
-  test('appendWsKey appends key, respects existing query, no-op without secret', () => {
+  test('appendWsKey sets the current key (overwriting any stale one), no-op without secret', () => {
     expect(appendWsKey('wss://h/ws', 'sek')).toBe('wss://h/ws?key=sek');
     expect(appendWsKey('wss://h/ws?x=1', 'sek')).toBe('wss://h/ws?x=1&key=sek');
-    expect(appendWsKey('wss://h/ws?key=already', 'sek')).toBe('wss://h/ws?key=already');
+    expect(appendWsKey('wss://h/ws?key=stale', 'sek')).toBe('wss://h/ws?key=sek'); // overwrite, never reuse stale
     expect(appendWsKey('wss://h/ws', '')).toBe('wss://h/ws');
     expect(appendWsKey('wss://h/ws', undefined)).toBe('wss://h/ws');
   });

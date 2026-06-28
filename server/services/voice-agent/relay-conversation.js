@@ -18,7 +18,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const MODELS = require('../../config/models');
 const db = require('../../models/db');
 const logger = require('../logger');
-const { isLikelyE164 } = require('../../utils/phone');
+const { toE164, isLikelyE164 } = require('../../utils/phone');
 const { createLeadFromExtraction } = require('../lead-from-extraction');
 const { syncVoiceMessageForCall } = require('../conversations');
 const { TOOLS, executeTool } = require('./relay-tools');
@@ -221,7 +221,11 @@ class RelayConversation {
       }
     }
 
-    if (this.leadCaptured || !isLikelyE164(this.from || '')) return;
+    // Normalize to E.164 and persist the normalized value (the voice-agent lead
+    // contract requires a valid E.164 — isLikelyE164 alone accepts bare digits),
+    // matching capture_lead in relay-tools.
+    const callerPhone = toE164(this.from || '');
+    if (this.leadCaptured || !isLikelyE164(callerPhone)) return;
     try {
       await createLeadFromExtraction(
         {
@@ -230,7 +234,7 @@ class RelayConversation {
             (this._userTurns.length ? `Caller said: ${this._userTurns.join(' | ').slice(0, 600)}` : 'No transcript captured.'),
           requested_service: null,
         },
-        { phone: this.from, toPhone: this.to, callSid: this.callSid, language: this.language }
+        { phone: callerPhone, toPhone: this.to, callSid: this.callSid, language: this.language }
       );
       logger.info(`[voice-relay] capture-floor lead written callSid=${this.callSid} reason=${reason || 'end'}`);
     } catch (err) {

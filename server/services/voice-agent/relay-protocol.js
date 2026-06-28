@@ -53,8 +53,15 @@ function maskPhone(value) {
  */
 function appendWsKey(wsUrl, secret = process.env.VOICE_RELAY_WS_SECRET) {
   if (!secret) return wsUrl;
-  if (/[?&]key=/.test(wsUrl)) return wsUrl;
-  return `${wsUrl}${wsUrl.includes('?') ? '&' : '?'}key=${encodeURIComponent(secret)}`;
+  try {
+    const u = new URL(wsUrl);
+    u.searchParams.set('key', secret); // overwrite any stale key with the CURRENT secret
+    return u.toString();
+  } catch {
+    // Unparseable/relative — naive append, only if no key is already present.
+    if (/[?&]key=/.test(wsUrl)) return wsUrl;
+    return `${wsUrl}${wsUrl.includes('?') ? '&' : '?'}key=${encodeURIComponent(secret)}`;
+  }
 }
 
 // FL §934.03 recorded-line disclosure + explicit AI disclosure, spoken by
