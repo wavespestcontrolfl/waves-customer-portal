@@ -21,6 +21,7 @@ const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { etDateString } = require('../../utils/datetime-et');
+const { runExclusive } = require('../../utils/cron-lock');
 
 // ── Config (tune to control DataForSEO spend) ────────────────────────────────
 const GRID_SIZE = 5; // N×N pins per office/keyword (5×5 = 25)
@@ -52,15 +53,19 @@ function buildGrid(office) {
   return pins;
 }
 
-/** This office's rank within the map-pack items (by place_id; fallback title). null if absent. */
+/** This office's rank within the map-pack items. Matches THIS office's GBP by
+ *  place_id (a different Waves office's listing must not count as this office's
+ *  win); the "waves pest control" title fallback applies ONLY to items with no
+ *  place_id to disambiguate. null if absent. */
 function findOfficeRank(items, office) {
   for (const m of items) {
     const pid = m.place_id || '';
-    const title = String(m.title || '').toLowerCase();
     const rank = m.rank_absolute || m.rank_group || null;
-    if ((office.googlePlaceId && pid === office.googlePlaceId) || title.includes('waves pest control')) {
-      return rank;
+    if (office.googlePlaceId && pid) {
+      if (pid === office.googlePlaceId) return rank;
+      continue; // a known, different place_id — not this office
     }
+    if (String(m.title || '').toLowerCase().includes('waves pest control')) return rank;
   }
   return null;
 }
@@ -68,17 +73,25 @@ function findOfficeRank(items, office) {
 async function scanOfficeKeyword(office, keyword, scanDate) {
   const pins = buildGrid(office);
   let stored = 0;
+  let skipped = 0;
   for (const pin of pins) {
-    let rank = null;
-    let top = [];
+    let result = null;
     try {
       const data = await dataforseo.serpMaps(keyword, `${pin.latitude},${pin.longitude},${COORDINATE_RADIUS_KM}`);
-      const items = data?.tasks?.[0]?.result?.[0]?.items || [];
-      rank = findOfficeRank(items, office);
-      top = items.slice(0, 3).map((m) => ({ title: m.title, rank: m.rank_absolute || m.rank_group || null }));
+      result = data?.tasks?.[0]?.result?.[0] ?? null;
     } catch (err) {
       logger.warn(`[geo-grid] ${office.id}/${keyword} pin ${pin.row},${pin.col} failed: ${err.message}`);
     }
+    // No real SERP result (gate off, API error, transient null) → DON'T upsert a
+    // fake miss over a previously-valid cell; leave the pin's prior data intact.
+    // Only a real response (the office genuinely absent from the pack) stores null.
+    if (!result) {
+      skipped++;
+      continue;
+    }
+    const items = result.items || [];
+    const rank = findOfficeRank(items, office);
+    const top = items.slice(0, 3).map((m) => ({ title: m.title, rank: m.rank_absolute || m.rank_group || null }));
     await db('geo_grid_ranks')
       .insert({
         scan_date: scanDate,
@@ -96,6 +109,7 @@ async function scanOfficeKeyword(office, keyword, scanDate) {
       .merge();
     stored++;
   }
+  if (skipped) logger.warn(`[geo-grid] ${office.id}/${keyword}: ${skipped}/${pins.length} pins skipped (no SERP result) — not stored`);
   return stored;
 }
 
@@ -109,25 +123,35 @@ async function runScan({ officeId = null, keyword = null } = {}) {
     return { skipped: 'dataforseo_unconfigured' };
   }
   if (scanning) {
-    logger.warn('[geo-grid] a scan is already in progress — skipping');
+    logger.warn('[geo-grid] a scan is already in progress (this instance) — skipping');
     return { skipped: 'in_progress' };
   }
-  scanning = true;
-  const scanDate = etDateString();
-  const offices = WAVES_LOCATIONS.filter((o) => !officeId || o.id === officeId);
-  const keywords = keyword ? [keyword] : KEYWORDS;
-  let pins = 0;
-  try {
-    for (const office of offices) {
-      for (const kw of keywords) {
-        pins += await scanOfficeKeyword(office, kw, scanDate);
+  // Cross-instance lock — a manual run + the weekly cron + a Railway deploy
+  // overlap must not double-spend live API calls or race the same-day upserts.
+  // runExclusive returns { skipped:true } when the lease is held elsewhere.
+  const result = await runExclusive('geo-grid-scan', async () => {
+    scanning = true;
+    const scanDate = etDateString();
+    const offices = WAVES_LOCATIONS.filter((o) => !officeId || o.id === officeId);
+    const keywords = keyword ? [keyword] : KEYWORDS;
+    let pins = 0;
+    try {
+      for (const office of offices) {
+        for (const kw of keywords) {
+          pins += await scanOfficeKeyword(office, kw, scanDate);
+        }
       }
+    } finally {
+      scanning = false;
     }
-  } finally {
-    scanning = false;
+    logger.info(`[geo-grid] scan ${scanDate}: ${offices.length} office(s) × ${keywords.length} keyword(s) = ${pins} pins`);
+    return { scanDate, offices: offices.length, keywords: keywords.length, pins };
+  });
+  if (result && result.skipped) {
+    logger.info('[geo-grid] scan lease held elsewhere — skipped');
+    return { skipped: 'locked' };
   }
-  logger.info(`[geo-grid] scan ${scanDate}: ${offices.length} office(s) × ${keywords.length} keyword(s) = ${pins} pins`);
-  return { scanDate, offices: offices.length, keywords: keywords.length, pins };
+  return result;
 }
 
 /** Latest grid + stats for one office+keyword (drives the heat map). */

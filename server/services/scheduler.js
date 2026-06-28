@@ -504,13 +504,11 @@ function initScheduledJobs() {
     if (!isEnabled('geoGridTracking')) return;
     logger.info('Running: Weekly geo-grid map-pack scan');
     try {
-      // runExclusive: a full sweep is many slow live calls — a deploy overlap
-      // must not start a second concurrent scan.
-      await runExclusive('geo-grid-scan', async () => {
-        const { runScan } = require('./seo/geo-grid-tracker');
-        const result = await runScan();
-        logger.info(`[geo-grid] cron run: ${JSON.stringify(result)}`);
-      });
+      // runScan() self-serializes via runExclusive('geo-grid-scan') — covers the
+      // cron, the manual /run trigger, and deploy overlaps in one place.
+      const { runScan } = require('./seo/geo-grid-tracker');
+      const result = await runScan();
+      logger.info(`[geo-grid] cron run: ${JSON.stringify(result)}`);
     } catch (err) {
       logger.error(`Geo-grid scan failed: ${err.message}`);
     }

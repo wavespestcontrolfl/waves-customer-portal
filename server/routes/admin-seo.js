@@ -368,41 +368,6 @@ const CannibalizationDetector = require('../services/seo/cannibalization');
 const ContentDecayDetector = require('../services/seo/content-decay');
 const CitationAuditor = require('../services/seo/citation-auditor');
 const ConversionFunnel = require('../services/seo/conversion-funnel');
-const GeoGrid = require('../services/seo/geo-grid-tracker');
-const { isEnabled } = require('../config/feature-gates');
-
-// Geo-grid map-pack tracker (Pillar 3)
-router.get('/geo-grid', async (req, res, next) => {
-  try {
-    const cfg = GeoGrid.config();
-    const available = await db('geo_grid_ranks')
-      .select('office_id', 'keyword')
-      .max('scan_date as scan_date')
-      .groupBy('office_id', 'keyword');
-    res.json({ ...cfg, gated: !isEnabled('geoGridTracking'), scanning: GeoGrid.isScanning(), available });
-  } catch (err) { next(err); }
-});
-
-router.get('/geo-grid/heatmap', async (req, res, next) => {
-  try {
-    const { office, keyword } = req.query;
-    if (!office || !keyword) return res.status(400).json({ error: 'office and keyword are required' });
-    res.json(await GeoGrid.getHeatmap(office, keyword));
-  } catch (err) { next(err); }
-});
-
-router.post('/geo-grid/run', async (req, res, next) => {
-  try {
-    if (!isEnabled('geoGridTracking')) return res.status(403).json({ error: 'geo-grid tracking is gated off (set GATE_GEO_GRID=true)' });
-    if (GeoGrid.isScanning()) return res.json({ started: false, reason: 'in_progress' });
-    const { officeId = null, keyword = null } = req.body || {};
-    // Fire-and-forget — a sweep is many slow live calls; the client polls the heatmap.
-    GeoGrid.runScan({ officeId, keyword })
-      .then((r) => logger.info(`[geo-grid] manual run: ${JSON.stringify(r)}`))
-      .catch((e) => logger.error(`[geo-grid] manual run failed: ${e.message}`));
-    res.json({ started: true, officeId, keyword });
-  } catch (err) { next(err); }
-});
 
 // Rankings
 router.get('/rankings', async (req, res, next) => {
