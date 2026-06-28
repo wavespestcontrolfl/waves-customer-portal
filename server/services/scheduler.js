@@ -2307,6 +2307,36 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:20AM — Google Ads call→campaign attribution bridge. Matches Google
+  // Ads call-reporting rows to CRM call_log entries (≥70 confidence auto-match)
+  // and writes the campaign back onto call_log + ad_service_attribution, so
+  // phone-call leads stop being invisible to PPC ROI. Previously admin-trigger
+  // only (POST /api/admin/ads/call-bridge/apply). Runs BEFORE the 6:25 ad-cost
+  // allocation so its fresh attribution rows get ad_cost the same morning.
+  // No external upload (reads Google call reporting, writes only our own DB);
+  // no-ops unless the Google Ads API is configured, and idempotent (already-
+  // bridged calls are skipped) so a daily 30-day re-scan never double-attributes
+  // — hence no opt-in flag, matching the Google/Meta SYNC crons above.
+  // =========================================================================
+  cron.schedule('20 6 * * *', async () => {
+    try {
+      const googleAds = require('./ads/google-ads');
+      if (!googleAds.isConfigured()) return;
+      logger.info('Running: Google Ads call→campaign bridge');
+      const callBridge = require('./ads/google-call-bridge');
+      const r = await callBridge.applyBridge({ days: 30, limit: 200 });
+      logger.info(`[google-call-bridge cron] ${JSON.stringify({
+        configured: r.configured,
+        applied: r.appliedCount,
+        skipped: r.skippedCount,
+        matches: Array.isArray(r.matches) ? r.matches.length : undefined,
+      })}`);
+    } catch (err) {
+      logger.error(`Google Ads call bridge failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:25AM — Ad cost allocation. Runs AFTER the Google (6am) + Meta
   // (6:15am) syncs land fresh spend, spreading each paid channel-month's spend
   // across that channel's leads into ad_service_attribution.ad_cost — the
