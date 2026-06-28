@@ -105,6 +105,7 @@ describe('recordCallPpcAttribution', () => {
       lead_source: 'google_ads',
       lead_source_detail: 'Waves - GBP Search',
       funnel_stage: 'lead',
+      is_paid: true, // call-sourced rows are inherently paid (paid tracking number)
     });
   });
 
@@ -131,6 +132,9 @@ describe('recordCallPpcAttribution', () => {
       lead_source_detail: 'Facebook Ads — Pest (call-extension)',
       service_line: 'lawn',
       funnel_stage: 'lead',
+      // Facebook calls carry no fbclid/_fbc, so is_paid is what keeps them in the
+      // PAID Meta bucket (channel-attribution / ad-cost-allocation).
+      is_paid: true,
     });
   });
 

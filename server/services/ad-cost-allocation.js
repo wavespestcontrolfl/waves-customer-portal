@@ -37,16 +37,20 @@ function resolveDb(db) {
   return db || require('../models/db');
 }
 
-// Restrict a query to genuine paid clicks for paidOnly channels (Meta: fbclid/_fbc).
-// LIMITATION (deferred): a paid Meta click whose fbclid/_fbc was stripped (ad-block
-// / consent) but that carries utm_medium=cpc is classified paid at ingestion, yet
-// utm_medium isn't persisted on the row, so it's missed here. Fully separating paid
-// vs organic Facebook needs a paid/organic channel dimension on ad_service_attribution
-// (a focused follow-up). Currently no live impact — Meta Ads ship dark (META_ADS_*
-// unprovisioned), so there is no Facebook spend to mis-allocate yet.
+// Restrict a query to genuine paid leads for paidOnly channels (Meta): a paid
+// click id (fbclid/_fbc) OR the explicit is_paid flag. is_paid is the paid/organic
+// dimension that call-sourced rows carry — phone calls to the paid Facebook
+// tracking number have no click cookies, so without it they'd read as organic.
+// Web-organic Facebook (no fbclid/_fbc and is_paid NULL) is still correctly
+// excluded, so Meta ad spend never smears onto organic-social leads.
+// LIMITATION (deferred): a paid Meta WEB click whose fbclid/_fbc was stripped
+// (ad-block / consent) but that carries utm_medium=cpc is classified paid at
+// ingestion, yet utm_medium isn't persisted on the row and the web path doesn't
+// set is_paid, so it's still missed here. Currently no live impact — Meta Ads ship
+// dark (META_ADS_* unprovisioned), so there is no Facebook spend to mis-allocate.
 function applyPaidFilter(q, channel) {
   if (channel.paidOnly) {
-    q.where((b) => b.whereNotNull('fbclid').orWhereNotNull('fbc'));
+    q.where((b) => b.whereNotNull('fbclid').orWhereNotNull('fbc').orWhere('is_paid', true));
   }
   return q;
 }

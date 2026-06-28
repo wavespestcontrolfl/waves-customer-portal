@@ -146,6 +146,11 @@ async function recordCallPpcAttribution({
       lead_source: leadSource,
       lead_source_detail: leadSourceDetail,
       funnel_stage: 'lead',
+      // Call-sourced rows come from PAID tracking numbers (google_ads + facebook),
+      // so they are inherently paid. Calls carry no click ids (gclid/fbclid), so
+      // this flag is how the paid filters count them — without it a Facebook call
+      // would be mis-bucketed as organic (no fbclid/_fbc).
+      is_paid: true,
     }).onConflict('lead_id').ignore();
     logger.info(`[call-attribution] recorded ${leadSource} call lead ${leadId}${campaignId ? ` (campaign ${campaignId})` : ''}`);
     return { recorded: true, campaignId };

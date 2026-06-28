@@ -57,7 +57,20 @@ function makeDb(state) {
     const range = {};
     const b = {
       where: (a, op, val) => {
-        if (typeof a === 'function') { captured.paidFilterApplied = (captured.paidFilterApplied || 0) + 1; return b; }
+        if (typeof a === 'function') {
+          captured.paidFilterApplied = (captured.paidFilterApplied || 0) + 1;
+          // Exercise the paid predicate against a recording sub-builder so tests
+          // can assert which columns count as "paid".
+          const sub = {
+            cols: [],
+            whereNotNull(c) { this.cols.push(c); return this; },
+            orWhereNotNull(c) { this.cols.push(c); return this; },
+            orWhere(c) { this.cols.push(c); return this; },
+          };
+          a(sub);
+          captured.paidFilterCols = sub.cols;
+          return b;
+        }
         if (a === 'lead_source') platform = op;
         if (a === 'lead_date' && op === '>=') range.start = val;
         if (a === 'lead_date' && op === '<') range.end = val;
@@ -146,6 +159,16 @@ describe('allocateAdCosts', () => {
     };
     await allocateAdCosts(makeDb(state));
     expect(state.captured.paidFilterApplied).toBeGreaterThan(0); // fbclid/_fbc filter ran
+  });
+
+  test('the facebook paid filter also counts is_paid rows (call-sourced paid, no click id)', async () => {
+    const state = {
+      spendByPlatform: { facebook: [{ ym: '2026-06', spend: '200' }] },
+      leadsByPlatform: { facebook: [{ ym: '2026-06', leads: '4' }] },
+    };
+    await allocateAdCosts(makeDb(state));
+    // Paid Meta lead = a click id (fbclid/_fbc) OR the explicit is_paid flag.
+    expect(state.captured.paidFilterCols).toEqual(expect.arrayContaining(['fbclid', 'fbc', 'is_paid']));
   });
 
   test('no-op when the tables are absent', async () => {
