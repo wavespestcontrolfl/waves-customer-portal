@@ -28,6 +28,45 @@ const RECURRING_SERVICE_PATTERNS = {
   tree_shrub: 'bimonthly',
 };
 
+function readCookie(name) {
+  try {
+    const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+    return m ? decodeURIComponent(m[1]) : null;
+  } catch { return null; }
+}
+
+// Capture paid-click attribution from the current URL + Meta cookies so a direct
+// /book?gclid=… / ?fbclid=… booking on the portal page is attributed the same way
+// the astro funnel's BookingForm is. Mirrors the LeadAttribution shape the server
+// reads (services/lead-estimate-link.js attributeSelfBooking). Current-URL only —
+// the portal page is itself the landing for a direct ad click.
+function captureBookingAttribution() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const p = new URLSearchParams(window.location.search);
+    const utm = {
+      source: p.get('utm_source') || null,
+      medium: p.get('utm_medium') || null,
+      campaign: p.get('utm_campaign') || null,
+      term: p.get('utm_term') || null,
+      content: p.get('utm_content') || null,
+    };
+    const hasUtm = Object.values(utm).some(Boolean);
+    return {
+      utm: hasUtm ? utm : null,
+      gclid: p.get('gclid') || null,
+      wbraid: p.get('wbraid') || null,
+      gbraid: p.get('gbraid') || null,
+      fbclid: p.get('fbclid') || null,
+      fbc: readCookie('_fbc'),
+      fbp: readCookie('_fbp'),
+      referrer: document.referrer || null,
+      landing_url: window.location.href || null,
+      domain: (window.location.hostname || '').replace(/^www\./, '') || null,
+    };
+  } catch { return null; }
+}
+
 export default function PublicBookingPage() {
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
@@ -227,6 +266,9 @@ export default function PublicBookingPage() {
           customer_notes: notes,
           source,
           referrer_url: document.referrer || null,
+          // Carry paid-click attribution so a portal /book?gclid=…/?fbclid=… booking
+          // is attributed to its ad channel (server mints a won lead + PPC row).
+          attribution: captureBookingAttribution() || undefined,
           // Server creates only when phone/name are present; address is also used to re-verify matched customers.
           new_customer: {
             first_name: contact.firstName,

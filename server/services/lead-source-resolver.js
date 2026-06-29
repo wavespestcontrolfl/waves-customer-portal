@@ -54,10 +54,19 @@ async function resolveLeadSource(attribution) {
   let targetName = MAIN_SITE_NAME;
   let detail = null;
   let metaPaid = false;
+  let googlePaid = false;
 
   const utmSrc = String(utm.source || '').toLowerCase();
+  const utmMed = String(utm.medium || '').toLowerCase();
   const isMetaClick = utmSrc === 'facebook' || utmSrc === 'fb'
     || !!attribution?.fbclid || !!attribution?.fbc;
+  // Google auto-tagging appends gclid (or wbraid/gbraid for iOS/web-to-app) to
+  // ad-click landing URLs WITHOUT utm_source/medium, so a click-only paid click
+  // would otherwise fall through to Main Site and never count as Google Ads. The
+  // Google analog of the Meta branch below — mirrors the webhook's
+  // determineLeadSource. (Explicit utm_source=google&cpc also qualifies.)
+  const isGoogleAdsClick = (utmSrc === 'google' && utmMed === 'cpc')
+    || !!attribution?.gclid || !!attribution?.wbraid || !!attribution?.gbraid;
 
   if (isGbpUtmCampaign({ source: utm.source, medium: utm.medium, campaign: utm.campaign })) {
     const loc = findGbpLocationByUtmContent(utm.content);
@@ -67,6 +76,16 @@ async function resolveLeadSource(attribution) {
     } else {
       detail = `GBP website link: ${utm.content || 'unknown profile'}`;
     }
+  } else if (isGoogleAdsClick) {
+    // Paid Google click — attribute to Google Ads, NOT the Main Site / spoke it
+    // landed on. Resolved by source_type (a stable column) so it finds whatever
+    // Google Ads lead_sources row exists (or leaves it null — never Main Site).
+    googlePaid = true;
+    targetName = 'Google Ads';
+    detail = attribution?.gclid ? 'Google Ads click (gclid)'
+      : attribution?.wbraid ? 'Google Ads click (wbraid)'
+        : attribution?.gbraid ? 'Google Ads click (gbraid)'
+          : `google ${utm.medium || ''} ${utm.campaign || ''}`.trim();
   } else if (isMetaClick) {
     // Meta paid click (fbclid/_fbc, or utm_source=facebook) — attribute to
     // Facebook, NOT the Main Site / spoke landing it happened to land on. Mirrors
@@ -92,10 +111,14 @@ async function resolveLeadSource(attribution) {
 
   let row = null;
   try {
-    row = metaPaid
-      ? await db('lead_sources').whereRaw("LOWER(name) LIKE '%facebook%'").first()
-      : await db('lead_sources').where({ name: targetName }).first();
-  } catch { /* swallow — caller still gets meta strings even if FK lookup fails */ }
+    if (metaPaid) {
+      row = await db('lead_sources').whereRaw("LOWER(name) LIKE '%facebook%'").first();
+    } else if (googlePaid) {
+      row = await db('lead_sources').where({ source_type: 'google_ads' }).first();
+    } else {
+      row = await db('lead_sources').where({ name: targetName }).first();
+    }
+  } catch { /* swallow — caller still gets the classified strings even if FK lookup fails */ }
 
   return {
     leadSourceId: row?.id || null,

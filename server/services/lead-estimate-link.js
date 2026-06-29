@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
+const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString } = require('../utils/datetime-et');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
@@ -493,6 +494,157 @@ async function convertLeadFromEvent({
   }
 }
 
+// ---------------------------------------------------------------------------
+// Self-booking click-id attribution
+//
+// A public /book self-booking creates a customer + appointment but NO lead, and
+// the offline-conversion pipeline (data-manager qualified_lead candidates + Meta
+// CAPI) reads ad click ids ONLY off the `leads` table. So a cold ad click that
+// books straight from the funnel — exactly the "book from the feed" flow — would
+// reach Google/Meta only via a hashed-PII match, never the deterministic click
+// id, weakening ad optimization and per-channel CAC.
+//
+// attributeSelfBooking closes that loop: when a booking is genuinely ad-tracked
+// AND the booker has no lead of any kind on file, it mints a single already-won
+// lead carrying the click ids plus the customer's phone/email match keys. Minting
+// (not just converting) is required because the cold case has no lead to convert;
+// won-on-create keeps it out of the open pipeline / new-lead auto-response so it
+// only surfaces in attribution + LTV:CAC reporting. An existing lead is left
+// untouched: a web lead already captured its own click ids, and stamping this
+// booking's click id onto a call/manual-origin lead would mis-channel it.
+// Best-effort + idempotent — never throws into the (already-committed) booking.
+// ---------------------------------------------------------------------------
+
+// gclid is varchar(200); wbraid/gbraid/fbclid/fbc/fbp are varchar(255).
+const LEAD_CLICK_ID_MAX = { gclid: 200, wbraid: 255, gbraid: 255, fbclid: 255, fbc: 255, fbp: 255 };
+const LEAD_CLICK_ID_COLUMNS = Object.keys(LEAD_CLICK_ID_MAX);
+
+// A self-booking is minted as a paid lead ONLY on a deterministic paid click id:
+// Google gclid/wbraid/gbraid or Meta fbclid/_fbc — these are appended only on an
+// ad click. _fbc counts (Meta's persisted click id fb.1.<ts>.<fbclid>, the match
+// key when the URL fbclid has fallen off by booking time). A bare UTM is NOT
+// enough — newsletters/organic/referral links carry UTMs too — and the ambient
+// _fbp cookie (Meta sets it on every pixel visit, organic included) is NEVER a
+// trigger; it is kept only as an auxiliary CAPI match key alongside a real click
+// id. Mirrors the paid-click rule in the lead-webhook's determineLeadSource.
+function attributionHasPaidClickId(attribution) {
+  if (!attribution || typeof attribution !== 'object') return false;
+  return !!(attribution.gclid || attribution.wbraid || attribution.gbraid
+    || attribution.fbclid || attribution.fbc);
+}
+
+function clickIdColumnsFromAttribution(attribution) {
+  const out = {};
+  if (!attribution || typeof attribution !== 'object') return out;
+  for (const col of LEAD_CLICK_ID_COLUMNS) {
+    const v = attribution[col];
+    if (typeof v === 'string' && v.trim()) out[col] = v.trim().slice(0, LEAD_CLICK_ID_MAX[col]);
+  }
+  return out;
+}
+
+async function attributeSelfBooking({
+  customerId,
+  attribution,
+  serviceInterest = null,
+  customerCreated = false,
+  database = db,
+}) {
+  try {
+    if (!customerId || !attributionHasPaidClickId(attribution)) {
+      return { attributed: false, reason: 'no_paid_click_id' };
+    }
+    const clickIds = clickIdColumnsFromAttribution(attribution);
+    if (!Object.keys(clickIds).length) return { attributed: false, reason: 'no_click_ids' };
+
+    // Only mint for a genuinely NEW acquisition — a customer this booking just
+    // created. A pre-existing customer (resolved by phone/estimate) is a repeat
+    // booker, not a fresh paid lead; minting a won/qualified lead for them would
+    // feed the offline-conversion pipeline a synthetic "new qualified lead" and
+    // inflate paid-channel conversions. (Legacy/admin customers can have prior
+    // activity but no lead row, so an existing-lead check alone is insufficient.)
+    if (!customerCreated) return { attributed: false, reason: 'existing_customer' };
+
+    const customer = await database('customers').where({ id: customerId }).first();
+    if (!customer) return { attributed: false, reason: 'no_customer' };
+
+    // Belt-and-suspenders: even a just-created customer could already match a
+    // lead created earlier without a customer link. An existing lead owns its own
+    // channel attribution — never overwrite or duplicate it.
+    const linkedLead = await database('leads').where({ customer_id: customerId }).first('id');
+    if (linkedLead) return { attributed: false, reason: 'existing_customer_lead' };
+    const contactMatches = await findUnconvertedLeadsByContact(database, customer.phone, customer.email);
+    if (contactMatches.length) return { attributed: false, reason: 'existing_contact_lead' };
+
+    const { leadSourceId, leadSourceDetail } = await resolveLeadSource(attribution);
+    const now = new Date();
+    const [minted] = await database('leads').insert({
+      customer_id: customerId,
+      first_name: customer.first_name || null,
+      last_name: customer.last_name || '',
+      phone: customer.phone || null,
+      email: customer.email || null,
+      lead_source_id: leadSourceId,
+      lead_type: 'self_booking',
+      first_contact_channel: 'web',
+      service_interest: serviceInterest || null,
+      first_contact_at: now,
+      converted_at: now,
+      status: 'won',
+      is_qualified: true,
+      ...clickIds,
+    }).returning('*');
+
+    await database('lead_activities').insert({
+      lead_id: minted.id,
+      activity_type: 'converted',
+      description: 'Self-booked from a tracked ad click — minted as a won lead to attribute the booking to its ad channel.',
+      performed_by: 'system',
+      metadata: JSON.stringify({ source: 'self_booking', clickIds: Object.keys(clickIds), leadSourceId: leadSourceId || null }),
+    }).catch((e) => logger.warn(`[self-booking-attribution] activity log failed (non-blocking): ${e.message}`));
+
+    // Mirror the web-lead PPC funnel row (routes/lead-webhook.js) so the minted
+    // lead is visible in /admin ads CAC/ROAS reporting and revenue sync, not just
+    // the offline-conversion upload. Source is the paid platform of the click id
+    // (a minted lead always carries one); idempotent on lead_id.
+    const ppcSource = (clickIds.gclid || clickIds.wbraid || clickIds.gbraid) ? 'google_ads'
+      : (clickIds.fbclid || clickIds.fbc) ? 'facebook' : null;
+    if (ppcSource) {
+      try {
+        const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
+        const utm = (attribution && typeof attribution.utm === 'object' && attribution.utm) || {};
+        await database('ad_service_attribution').insert({
+          customer_id: customerId,
+          lead_id: minted.id,
+          service_line: inferServiceLine(serviceInterest),
+          specific_service: inferSpecificService(serviceInterest),
+          service_bucket: inferServiceBucket(serviceInterest),
+          lead_date: etDateString(),
+          lead_source: ppcSource,
+          lead_source_detail: leadSourceDetail || null,
+          gclid: clickIds.gclid || null,
+          wbraid: clickIds.wbraid || null,
+          gbraid: clickIds.gbraid || null,
+          fbclid: clickIds.fbclid || null,
+          fbc: clickIds.fbc || null,
+          fbp: clickIds.fbp || null,
+          utm_campaign: utm.campaign || null,
+          utm_term: utm.term || null,
+          funnel_stage: 'lead',
+        }).onConflict('lead_id').ignore();
+      } catch (attrErr) {
+        logger.warn(`[self-booking-attribution] PPC funnel row failed (non-blocking): ${attrErr.message}`);
+      }
+    }
+
+    logger.info(`[self-booking-attribution] minted won lead ${minted.id} for customer=${customerId} (${Object.keys(clickIds).join(',')})`);
+    return { attributed: true, leadId: minted.id, minted: true };
+  } catch (err) {
+    logger.warn(`[self-booking-attribution] failed for customer=${customerId || 'unknown'}: ${err.message}`);
+    return { attributed: false, reason: 'error' };
+  }
+}
+
 module.exports = {
   attachLeadToEstimate,
   assertLeadCanAttachEstimate,
@@ -502,4 +654,5 @@ module.exports = {
   markLinkedLeadEstimateAccepted,
   convertLeadFromEvent,
   findUnconvertedLeadsByContact,
+  attributeSelfBooking,
 };
