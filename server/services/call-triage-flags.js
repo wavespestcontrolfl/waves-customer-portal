@@ -346,7 +346,32 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
     if (n.city) adopt.city = n.city;
     if (n.state) adopt.state = n.state;
     if (n.postal_code) adopt.zip = n.postal_code;
-    if (Object.keys(adopt).length) normalizedAddress = adopt;
+    // Google validated the V2 address is a real premise — NOT that the caller
+    // said it. In shadow mode the legacy V1 extraction is source-of-record, so
+    // adopt only when the validated street matches the legacy one (normalization
+    // / ZIP correction). On a street disagreement, hold for review instead of
+    // overwriting a possibly-correct legacy address with a V2 mix-up.
+    const houseNum = (s) => (String(s || '').trim().match(/^\d+/) || [''])[0];
+    const streetName = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
+      .replace(/^\s*\d+\s*/, '')
+      .replace(/\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|ct|court|blvd|boulevard|cir|circle|pl|place|ter|terrace|way|trl|trail|pkwy|parkway|hwy|highway)\b/g, '')
+      .replace(/\s+/g, ' ').trim();
+    const sameStreet = () => {
+      const hn = houseNum(adopt.address_line1), ho = houseNum(extracted.address_line1);
+      if (hn && ho && hn !== ho) return false;
+      const sn = streetName(adopt.address_line1), so = streetName(extracted.address_line1);
+      if (!sn || !so) return !!(hn && ho && hn === ho);
+      return sn === so || sn.split(' ')[0] === so.split(' ')[0] || sn.includes(so) || so.includes(sn);
+    };
+    if (Object.keys(adopt).length) {
+      if (!hadStreet) {
+        // No legacy street to corroborate — don't adopt a V2-only address.
+      } else if (adopt.address_line1 && !sameStreet()) {
+        needsConfirmation.push('address_unverified'); // V1/V2 street disagreement -> review
+      } else {
+        normalizedAddress = adopt;
+      }
+    }
   } else if (hadStreet && (status === 'missing_component' || status === 'ambiguous' || status === 'confirm_needed')) {
     needsConfirmation.push('address_unverified');
   } else if (hadStreet && status === 'out_of_service_area') {

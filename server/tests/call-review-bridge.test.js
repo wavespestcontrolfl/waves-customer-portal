@@ -21,6 +21,17 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     expect(out.needsConfirmation).toEqual([]);
   });
 
+  test('validated_accept but a DIFFERENT street than the legacy address → held for review, not adopted', () => {
+    // Google validated the V2 address is real, but it is a different street than
+    // what V1 extracted — in shadow mode we must NOT overwrite the legacy address.
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'validated_accept', normalized: NORMALIZED }, // 7620 Charleston Ln
+      extracted: { address_line1: '123 Main St', city: 'Sarasota', first_name: 'Pat', last_name: 'Doe', lead_quality: 'warm' },
+    });
+    expect(out.normalizedAddress).toBeNull();
+    expect(out.needsConfirmation).toContain('address_unverified');
+  });
+
   test.each(['missing_component', 'ambiguous', 'confirm_needed'])(
     '%s with a street given → address_unverified, no address adopted',
     (status) => {

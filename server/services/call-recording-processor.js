@@ -1857,11 +1857,24 @@ const CallRecordingProcessor = {
     // gate above owns all of this, so this bridge is guarded off then.
     if (CALL_EXTRACTION_V2_ENABLED && !CALL_EXTRACTION_V2_DRIVES_ROUTING) {
       try {
+        const v2Ext = v2Result?.extraction || null;
+        // Merge deterministic caller-authorization flags so `caller_not_authorized`
+        // (caller.on_site_authorization === false + non-owner) is caught even when
+        // the model omits the redundant triage_flag — matching the enforce gate.
+        let bridgeTriageFlags = Array.isArray(v2Ext?.triage_flags) ? v2Ext.triage_flags : [];
+        if (v2Ext && isV2Extraction(v2Ext)) {
+          try {
+            bridgeTriageFlags = mergeTriageFlags(
+              bridgeTriageFlags,
+              computeDeterministicTriageFlags(v2Ext, { contactPhone, addressValidation: v2AddressValidation })
+            );
+          } catch (_e) { /* fall back to model flags only */ }
+        }
         const { normalizedAddress, needsConfirmation } = deriveCallReviewBridge({
           addressValidation: v2AddressValidation,
           extracted,
-          v2TriageFlags: v2Result?.extraction?.triage_flags,
-          callerRelationship: v2Result?.extraction?.caller?.relationship_to_property,
+          v2TriageFlags: bridgeTriageFlags,
+          callerRelationship: v2Ext?.caller?.relationship_to_property,
         });
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
@@ -1877,6 +1890,24 @@ const CallRecordingProcessor = {
         if (needsConfirmation.length) {
           bridgeNeedsConfirmation.push(...needsConfirmation);
           logger.info(`[call-proc-bridge] ${callSid} needs confirmation: ${needsConfirmation.join(', ')} (av=${v2AddressValidation?.status || 'n/a'})`);
+          // Surface in the Needs Review inbox, which is driven by triage_items
+          // rows (admin-triage.js filters by status), not call_log.review_status.
+          // Shadow mode does not block the write -> severity 'advisory'.
+          for (const flag of needsConfirmation.slice(0, 10)) {
+            try {
+              await db('triage_items')
+                .insert(buildTriageItem({
+                  callLogId: call.id,
+                  flag,
+                  extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                  severity: 'advisory',
+                }))
+                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                .ignore();
+            } catch (triageErr) {
+              logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+            }
+          }
         }
       } catch (bridgeErr) {
         logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
