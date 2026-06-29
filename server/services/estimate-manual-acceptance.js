@@ -67,6 +67,26 @@ function isCommercialProposalEstimate(estimate = {}) {
   return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true;
 }
 
+// The amount actually INVOICED when this estimate is accepted as annual prepay —
+// the undiscounted recurring annual run through the converter's shared resolver,
+// which applies the prepay discount (non-fee mixes) and the margin floor. Same
+// inputs the public render + accept response use, so a schedule-modal preview
+// matches the invoice the booking creates (no $660-vs-$627 drift). Returns null
+// when there's no recurring annual to prepay.
+function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
+  const baseAnnual = resolveAnnualPrepayAmount(estimate);
+  if (!baseAnnual) return null;
+  const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  const { acceptanceServiceLists } = require('../routes/estimate-public');
+  const { recurringSvcList } = acceptanceServiceLists(data);
+  const resolved = EstimateConverter.resolveAnnualPrepayInvoiceTotal({
+    baseAnnual,
+    recurringServices: recurringSvcList,
+    estimateData: data,
+  });
+  return resolved?.amount != null ? Number(resolved.amount) : null;
+}
+
 function httpError(message, statusCode = 400) {
   const err = new Error(message);
   err.statusCode = statusCode;
@@ -104,6 +124,10 @@ async function markEstimateManuallyAccepted({
   adminUserId,
   source = 'verbal_yes',
   billingTerm = 'standard',
+  // Booked first-visit date (YYYY-MM-DD) for an annual-prepay accept made WHILE
+  // scheduling — anchors the renewal term to the actual first service instead of
+  // today. Ignored for standard accepts and when not supplied.
+  annualPrepayTermStart = null,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted },
   estimateConverter = EstimateConverter,
@@ -319,6 +343,7 @@ async function markEstimateManuallyAccepted({
           convertOptions.billingTerm = 'prepay_annual';
           convertOptions.prepayInvoiceAmount = annualPrepayAmount;
           convertOptions.autoSendInvoice = false;
+          if (annualPrepayTermStart) convertOptions.annualPrepayTermStart = annualPrepayTermStart;
         }
         conversion = await estimateConverter.convertEstimate(updatedEstimate.id, convertOptions);
         if (annualPrepaySelected && !conversion?.draftInvoiceId) {
@@ -422,6 +447,7 @@ module.exports = {
   markEstimateManuallyAccepted,
   normalizeManualBillingTerm,
   resolveAnnualPrepayAmount,
+  annualPrepayInvoiceTotalForEstimate,
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
   isCommercialProposalEstimate,

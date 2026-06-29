@@ -1601,6 +1601,12 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
           linked ? { scheduledServiceId: linked.id, useLinkedFallback: false } : {},
         );
       } catch { deposit = null; }
+      // Exact amount the annual-prepay invoice would bill (discount + floor
+      // applied), so the Schedule modal's prepay option matches the invoice.
+      let prepayInvoiceTotal = null;
+      try {
+        prepayInvoiceTotal = require('../services/estimate-manual-acceptance').annualPrepayInvoiceTotalForEstimate(estimate);
+      } catch { prepayInvoiceTotal = null; }
       return {
         id: estimate.id,
         token: estimate.token,
@@ -1612,6 +1618,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         annualTotal,
         onetimeTotal,
         quotedTotal,
+        prepayInvoiceTotal,
         waveguardTier: estimate.waveguard_tier,
         lines,
         deposit,

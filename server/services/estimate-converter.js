@@ -930,6 +930,15 @@ const EstimateConverter = {
     // converter auto-pick the next feasible zone date. Self-accept paths
     // still auto-schedule when there's no reservation row.
     const skipAutoSchedule = opts.skipAutoSchedule === true;
+    // When the caller schedules the first visit itself (skipAutoSchedule) and
+    // books an annual-prepay quote, the converter can't see that booked row yet
+    // (it's linked after acceptance), so without this the renewal term would
+    // default its start to today — a future-dated booking could then renew
+    // before the first service. The caller passes the booked first date here so
+    // the term aligns to the actual service start. Date-only 'YYYY-MM-DD'.
+    const annualPrepayTermStart = typeof opts.annualPrepayTermStart === 'string' && opts.annualPrepayTermStart
+      ? opts.annualPrepayTermStart
+      : null;
     const deferFollowUpReminderRegistration = opts.deferFollowUpReminderRegistration === true;
     const usingCallerDatabase = !!opts.database;
     const database = opts.database || db;
@@ -1204,6 +1213,9 @@ const EstimateConverter = {
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
         `skipAutoSchedule=true (manual Mark Won)`,
       );
+      // The caller booked the first visit itself; align the annual-prepay term
+      // start to that booked date when supplied (else it defaults to today).
+      if (annualPrepayTermStart) termStartDate = annualPrepayTermStart;
     } else {
       const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
       termStartDate = firstServiceDate;

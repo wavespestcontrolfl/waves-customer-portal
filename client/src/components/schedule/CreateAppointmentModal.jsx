@@ -1538,6 +1538,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           ? Number(linkedEstimate.annualTotal)
                           : (Number(linkedEstimate.monthlyTotal) > 0 ? Number(linkedEstimate.monthlyTotal) * 12 : 0);
                         if (!(annual > 0)) return null;
+                        // Show the exact amount the prepay invoice will bill
+                        // (server applies the prepay discount + margin floor);
+                        // fall back to the recurring annual if it wasn't resolved.
+                        const invoiceAmount = Number(linkedEstimate.prepayInvoiceTotal) > 0
+                          ? Number(linkedEstimate.prepayInvoiceTotal)
+                          : annual;
                         const segStyle = (active) => ({
                           flex: 1,
                           padding: '6px 10px',
@@ -1563,12 +1569,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                                 onClick={() => { setBillAsAnnualPrepay(true); setCollectPrepay(false); }}
                                 style={segStyle(billAsAnnualPrepay)}
                               >
-                                Annual prepay — invoice {formatMoney(annual)}
+                                Annual prepay — invoice {formatMoney(invoiceAmount)}
                               </button>
                             </div>
                             {billAsAnnualPrepay && (
                               <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-                                Booking creates a pending annual prepay invoice ({formatMoney(annual)}) + renewal term. Send it from the customer&rsquo;s invoices.
+                                Booking creates a pending annual prepay invoice ({formatMoney(invoiceAmount)}) + renewal term. Send it from the customer&rsquo;s invoices.
                               </div>
                             )}
                           </div>

@@ -1407,6 +1407,12 @@ router.get('/:id/schedule-source', async (req, res, next) => {
     // only when there's no monthly) plus any one-time. annual_total is the
     // annualized monthly, so summing both would double-count.
     const quotedTotal = (monthlyTotal || annualTotal || 0) + (onetimeTotal || 0);
+    // Exact amount the annual-prepay invoice will bill (discount + floor applied),
+    // so the Schedule modal's prepay option doesn't show a pre-discount figure.
+    let prepayInvoiceTotal = null;
+    try {
+      prepayInvoiceTotal = require('../services/estimate-manual-acceptance').annualPrepayInvoiceTotalForEstimate(estimate);
+    } catch { prepayInvoiceTotal = null; }
 
     const nameParts = String(estimate.customer_name || '').trim().split(/\s+/).filter(Boolean);
 
@@ -1422,6 +1428,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
         annualTotal,
         onetimeTotal,
         quotedTotal,
+        prepayInvoiceTotal,
         waveguardTier: estimate.waveguard_tier,
         lines,
         deposit,

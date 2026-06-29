@@ -2088,6 +2088,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
           adminUserId: req.technicianId || null,
           source: bookingBillingTerm === 'prepay_annual' ? 'verbal_annual_prepay_booking' : 'verbal_yes_booking',
           billingTerm: bookingBillingTerm,
+          // Anchor the prepay renewal term to the visit we just booked (the
+          // converter can't see the row yet — it's linked after acceptance).
+          annualPrepayTermStart: bookingBillingTerm === 'prepay_annual' ? scheduledDate : null,
         });
         estimateAutoAccepted = true;
         // A recurring conversion sends its own new-recurring welcome SMS
