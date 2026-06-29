@@ -40,7 +40,7 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { validateAddress, buildAddressLines } = require('./address-validation');
@@ -1782,6 +1782,18 @@ const CallRecordingProcessor = {
           });
           await db('route_decisions').insert(routeDecision).onConflict(['call_log_id', 'decision_version', 'mode']).ignore();
 
+          // Advisory flags (missing surname / rental / second address) reach the
+          // Needs Review inbox even when the call AUTO-ROUTES — they inform, they
+          // don't block. Without this, promoting DRIVES_ROUTING would silence the
+          // identity signals the shadow bridge used to surface. onConflict dedups
+          // against the blocked-branch inserts below.
+          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
+            await db('triage_items')
+              .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory' }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore();
+          }
+
           if (!routingResult.allowed) {
             const triageReasons = finalFlags.length > 0 ? finalFlags : [routingResult.reason || 'routing_rejected'];
             for (const flag of triageReasons.slice(0, 10)) {
@@ -2061,12 +2073,35 @@ const CallRecordingProcessor = {
     // vs. their own home. Skips brand-new customers (their address IS this call's).
     if (customerId && !createdCustomerFromCall && extracted.address_line1) {
       try {
-        const existingCust = await db('customers').where({ id: customerId }).select('address_line1').first();
-        const onFile = normStreet(existingCust?.address_line1);
-        const fromCall = normStreet(extracted.address_line1);
-        if (onFile && fromCall && onFile !== fromCall && !bridgeNeedsConfirmation.includes('second_service_address')) {
+        const existingCust = await db('customers').where({ id: customerId }).select('address_line1', 'city', 'zip').first();
+        const onFileStreet = normStreet(existingCust?.address_line1);
+        const fromCallStreet = normStreet(extracted.address_line1);
+        // Compare the full service LOCATION, not just the street: a different
+        // street OR (same street but a different city/ZIP, both present) is a
+        // different property. "100 Main St, Bradenton" != "100 Main St, Sarasota".
+        const bothPresentAndDiffer = (a, b) => !!normStreet(a) && !!normStreet(b) && normStreet(a) !== normStreet(b);
+        const locationDiffers = (onFileStreet !== fromCallStreet)
+          || bothPresentAndDiffer(existingCust?.city, extracted.city)
+          || bothPresentAndDiffer(existingCust?.zip, extracted.zip);
+        if (onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
           bridgeNeedsConfirmation.push('second_service_address');
           logger.info(`[call-proc-bridge] ${callSid} service address differs from customer record (possible second property)`);
+          // This flag is appended AFTER the bridge's triage_items loop above, so
+          // insert its row here too — the Needs Review inbox is driven by
+          // triage_items, not call_log.review_status. Advisory (non-blocking).
+          try {
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'second_service_address',
+                extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                severity: 'advisory',
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore();
+          } catch (triageErr) {
+            logger.warn(`[call-proc-bridge] second_service_address triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+          }
         }
       } catch (e) {
         logger.warn(`[call-proc-bridge] second-address check skipped for ${maskSid(callSid)}: ${e.message}`);

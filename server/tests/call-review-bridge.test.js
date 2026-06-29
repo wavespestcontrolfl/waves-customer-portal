@@ -32,6 +32,26 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     expect(out.needsConfirmation).toContain('address_unverified');
   });
 
+  test('same house number + shared first token but DIFFERENT street → held, not adopted', () => {
+    // "123 Amber Way" (Google) vs "123 Amber Creek Dr" (V1) share house 123 and
+    // the token "amber" — that is NOT the same street; must hold for review.
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'validated_accept', normalized: { street_line_1: '123 Amber Way', city: 'Bradenton', state: 'FL', postal_code: '34211' } },
+      extracted: { address_line1: '123 Amber Creek Dr', city: 'Bradenton', lead_quality: 'warm' },
+    });
+    expect(out.normalizedAddress).toBeNull();
+    expect(out.needsConfirmation).toContain('address_unverified');
+  });
+
+  test('same house number + same street, different suffix (Ln vs Dr) → adopted (ZIP/suffix normalization)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'corrected', normalized: { street_line_1: '123 Amber Creek Ln', city: 'Bradenton', state: 'FL', postal_code: '34211' } },
+      extracted: { address_line1: '123 Amber Creek Dr', city: 'Bradenton', zip: '34210', lead_quality: 'warm' },
+    });
+    expect(out.normalizedAddress).toMatchObject({ address_line1: '123 Amber Creek Ln', zip: '34211' });
+    expect(out.needsConfirmation).not.toContain('address_unverified');
+  });
+
   test.each(['missing_component', 'ambiguous', 'confirm_needed'])(
     '%s with a street given → address_unverified, no address adopted',
     (status) => {

@@ -87,9 +87,13 @@ WHERE created_at > now() - interval '30 days'
 GROUP BY 1 ORDER BY 2 DESC;
 
 -- b) Shadow routing outcome: how many calls WOULD auto-route vs need review.
-SELECT action, COUNT(*)
+-- The decision column is `final_action_taken` (values shadow_auto_route_candidate
+-- / shadow_needs_review_candidate); scope to the V2 decision_version so legacy
+-- `legacy-call-v1` shadow rows don't mix into the V2 readiness numbers.
+SELECT final_action_taken, COUNT(*)
 FROM route_decisions
-WHERE mode = 'shadow' AND created_at > now() - interval '30 days'
+WHERE mode = 'shadow' AND decision_version = 'v2-1.0.0'
+  AND created_at > now() - interval '30 days'
 GROUP BY 1 ORDER BY 2 DESC;
 
 -- c) V2 schema-pass rate by prompt version (promotion readiness — want ~all 'valid').

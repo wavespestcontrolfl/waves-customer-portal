@@ -233,6 +233,18 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     }
   }
 
+  // Advisory identity signals — emitted here (not just in the shadow bridge) so
+  // they survive once CALL_EXTRACTION_V2_DRIVES_ROUTING is promoted and the
+  // bridge is guarded off. They are ADVISORY (see ADVISORY_TRIAGE_FLAGS): they
+  // reach Needs Review but do NOT block an otherwise-routable appointment.
+  if (caller.first_name && !String(caller.last_name || '').trim()
+      && (sentiment.lead_quality === 'hot' || sentiment.lead_quality === 'warm')) {
+    flags.push('missing_last_name');
+  }
+  if (detectRentalSignal({ extracted: { call_summary: extraction.meta.call_summary }, callerRelationship: caller.relationship_to_property })) {
+    flags.push('rental_or_tenant_occupied');
+  }
+
   // A decisive AV acceptance is authoritative for the address + service area —
   // drop any address flags reached above (incl. a lead_quality-sourced
   // out_of_service_area) so a verified in-area address is not held.
@@ -242,6 +254,15 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
 const SMS_ONLY_FLAGS = new Set([
   'no_sms_consent_captured',
   'sms_consent_missing',
+]);
+
+// Advisory flags — they surface in the Needs Review inbox (informational: missing
+// surname, rental/tenant-occupied, a second service address) but must NOT block
+// an otherwise-routable appointment. Excluded from appointmentBlockingFlags.
+const ADVISORY_TRIAGE_FLAGS = new Set([
+  'missing_last_name',
+  'rental_or_tenant_occupied',
+  'second_service_address',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."
@@ -290,7 +311,7 @@ function canAutoRoute(extraction, opts = {}) {
   const modelFlags = suppressAddressFlagsForAV(extraction.triage_flags || [], opts.addressValidation);
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
   const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-  const appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f));
+  const appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f) && !ADVISORY_TRIAGE_FLAGS.has(f));
 
   if (appointmentBlockingFlags.length > 0) {
     return { allowed: false, reason: 'triage_flags', flags: finalFlags, appointmentBlockingFlags };
@@ -358,10 +379,13 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
       .replace(/\s+/g, ' ').trim();
     const sameStreet = () => {
       const hn = houseNum(adopt.address_line1), ho = houseNum(extracted.address_line1);
-      if (hn && ho && hn !== ho) return false;
+      if (hn && ho && hn !== ho) return false;            // different house number → different premise
       const sn = streetName(adopt.address_line1), so = streetName(extracted.address_line1);
-      if (!sn || !so) return !!(hn && ho && hn === ho);
-      return sn === so || sn.split(' ')[0] === so.split(' ')[0] || sn.includes(so) || so.includes(sn);
+      if (!sn || !so) return !!(hn && ho && hn === ho);   // no street word → rely on house-number match
+      // Require FULL normalized street-name equality. A shared first token
+      // ("Amber Creek Dr" vs "Amber Way") or a substring is NOT enough — those
+      // are different streets and must be held for review, not silently adopted.
+      return sn === so;
     };
     if (Object.keys(adopt).length) {
       if (!hadStreet) {
@@ -386,20 +410,29 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
     needsConfirmation.push('missing_last_name');
   }
 
-  // Rental / tenant-occupied property — a non-owner-occupant caller (tenant /
-  // property manager) OR an owner calling about their tenants ("my tenants have
-  // ants"). Flagged so the office can plan property access (occupant != owner)
-  // and decide whether to tag it a rental, since the customer model has no
-  // owner-occupied vs. rental field.
-  const rel = String(callerRelationship || '').toLowerCase();
-  const tenantText = /\b(tenants?|renters?|rental|landlord)\b/i.test(
-    `${extracted.pain_points || ''} ${extracted.call_summary || ''} ${extracted.requested_service || ''}`
-  );
-  if (rel === 'tenant' || rel === 'property_manager' || tenantText) {
+  // Rental / tenant-occupied property — flagged so the office can plan property
+  // access (occupant != owner) and decide whether to tag it a rental.
+  if (detectRentalSignal({ extracted, callerRelationship })) {
     needsConfirmation.push('rental_or_tenant_occupied');
   }
 
   return { normalizedAddress, needsConfirmation };
+}
+
+/**
+ * True when a call indicates a rental / tenant-occupied property — a non-owner-
+ * occupant caller (tenant / property manager), OR an owner calling about their
+ * tenants ("my tenants have ants"). Shared by the shadow bridge and the enforce-
+ * path deterministic flags so the classification is identical in both modes.
+ * `extracted` is a loose bag of free-text fields (pain_points / call_summary /
+ * requested_service) — pass V1 `extracted` or `{ call_summary }` from V2.
+ */
+function detectRentalSignal({ extracted = {}, callerRelationship = null } = {}) {
+  const rel = String(callerRelationship || '').toLowerCase();
+  if (rel === 'tenant' || rel === 'property_manager') return true;
+  return /\b(tenants?|renters?|rental|landlord)\b/i.test(
+    `${extracted.pain_points || ''} ${extracted.call_summary || ''} ${extracted.requested_service || ''}`
+  );
 }
 
 module.exports = {
@@ -407,8 +440,10 @@ module.exports = {
   mergeTriageFlags,
   suppressAddressFlagsForAV,
   deriveCallReviewBridge,
+  detectRentalSignal,
   canAutoRoute,
   SMS_ONLY_FLAGS,
+  ADVISORY_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
   hasCanonicalWriteBlock,
   hasNameEmailMismatch,

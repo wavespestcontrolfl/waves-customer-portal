@@ -938,3 +938,35 @@ describe('name_email_mismatch in routing', () => {
     expect(item.category).toBe('name_review');
   });
 });
+
+// Advisory identity flags emitted by the enforce path too (survive DRIVES_ROUTING
+// promotion), but ADVISORY = they reach Needs Review without blocking auto-route.
+describe('advisory identity flags (missing_last_name / rental_or_tenant_occupied)', () => {
+  test('missing surname on a hot/warm lead is flagged', () => {
+    const e = validV2Extraction();
+    e.caller.last_name = '';
+    expect(computeDeterministicTriageFlags(e)).toContain('missing_last_name');
+    e.sentiment_and_lead.lead_quality = 'cold';
+    expect(computeDeterministicTriageFlags(e)).not.toContain('missing_last_name');
+  });
+
+  test('rental flagged via tenant/property_manager relationship or tenant text', () => {
+    const e = validV2Extraction();
+    e.caller.relationship_to_property = 'tenant';
+    expect(computeDeterministicTriageFlags(e)).toContain('rental_or_tenant_occupied');
+    const e2 = validV2Extraction();
+    e2.caller.relationship_to_property = 'owner';
+    e2.meta.call_summary = 'Owner says his tenants have ants.';
+    expect(computeDeterministicTriageFlags(e2)).toContain('rental_or_tenant_occupied');
+  });
+
+  test('advisory flags do NOT block an otherwise auto-routable call', () => {
+    const e = validV2Extraction();
+    e.caller.last_name = '';                 // missing_last_name (advisory)
+    e.caller.relationship_to_property = 'tenant'; // rental_or_tenant_occupied (advisory)
+    const av = { status: 'validated_accept', inServiceArea: true, county: 'Manatee' };
+    const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: av });
+    expect(r.allowed).toBe(true);
+    expect(r.flags).toEqual(expect.arrayContaining(['missing_last_name', 'rental_or_tenant_occupied']));
+  });
+});
