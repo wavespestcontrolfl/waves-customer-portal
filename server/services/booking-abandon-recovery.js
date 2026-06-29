@@ -115,7 +115,12 @@ async function customerEmailDisabled(customerId) {
   try {
     const prefs = await db('notification_prefs').where({ customer_id: customerId }).first('email_enabled');
     return !!prefs && prefs.email_enabled === false;
-  } catch { return false; }
+  } catch (e) {
+    // FAIL CLOSED — if we can't verify the customer's email pref, don't email
+    // (better to skip a recovery nudge than email someone who opted out).
+    logger.warn(`[booking-recovery] email-pref lookup failed for customer=${customerId} — skipping: ${e.message}`);
+    return true;
+  }
 }
 
 async function renderSms(vars) {
@@ -249,10 +254,6 @@ async function runSmsStage(now, sentPhones) {
         logger.info(`[booking-recovery] SMS skip ${intent.id}: customer-replied-recently`);
         continue;
       }
-      if (await hasActiveBooking(intent)) {
-        logger.info(`[booking-recovery] SMS skip ${intent.id}: already has an upcoming booking`);
-        continue;
-      }
       const body = await renderSms({
         first_name: firstNameOf(intent),
         service_type: serviceLabelOf(intent),
@@ -262,6 +263,13 @@ async function runSmsStage(now, sentPhones) {
 
       if (!(await claimStage(intent.id, 'followup_sms_sent', new Date(nowMs - SMS_MIN_AGE_H * 3600000)))) continue;
       claimed = true;
+      // Re-check AFTER claiming: a booking landing between the candidate SELECT and
+      // the claim — esp. a CSR-created scheduled_services row that doesn't set the
+      // intent's converted_at — must not be texted. `continue` releases the claim.
+      if (await hasActiveBooking(intent)) {
+        logger.info(`[booking-recovery] SMS skip ${intent.id}: booked after select (pre-send recheck)`);
+        continue;
+      }
 
       const result = await sendCustomerMessage({
         to: intent.phone,
@@ -347,10 +355,6 @@ async function runEmailStage(now, sentPhones) {
         logger.info(`[booking-recovery] email skip ${intent.id}: customer email opt-out`);
         continue;
       }
-      if (await hasActiveBooking(intent)) {
-        logger.info(`[booking-recovery] email skip ${intent.id}: already has an upcoming booking`);
-        continue;
-      }
       // Reply-pause applies to the email touch too — if they're already in an SMS
       // conversation with us after abandoning, let staff handle it live.
       if (await hasRepliedRecently(intent.phone)) {
@@ -359,6 +363,11 @@ async function runEmailStage(now, sentPhones) {
       }
       if (!(await claimStage(intent.id, 'followup_email_sent', new Date(nowMs - EMAIL_MIN_AGE_H * 3600000)))) continue;
       claimed = true;
+      // Re-check active booking AFTER claiming (race-safe; see SMS stage).
+      if (await hasActiveBooking(intent)) {
+        logger.info(`[booking-recovery] email skip ${intent.id}: booked after select (pre-send recheck)`);
+        continue;
+      }
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'booking.abandonment_recovery',
         to: intent.email,

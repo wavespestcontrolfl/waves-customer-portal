@@ -162,16 +162,22 @@ describe('runSmsStage (touch 1)', () => {
     expect(updates).toEqual([]);
   });
 
-  test('skips a phone that already has an upcoming booking (incl. CSR-created)', async () => {
+  test('skips a phone that already has an upcoming booking (incl. CSR-created) — re-checked after claim', async () => {
     enqueue('booking_intents', { rows: [intent()] });
     enqueue('messages', { first: null });               // no recent reply
-    enqueue('scheduled_services as ss', { first: { id: 'ss-1' } }); // already booked
+    enqueue('booking_intents', { update: 1 });          // claim
+    enqueue('scheduled_services as ss', { first: { id: 'ss-1' } }); // booked after select
+    enqueue('booking_intents', { update: 1 });          // release (race-safe recheck)
 
     const sent = await _internals.runSmsStage(NOW, new Set());
 
     expect(sent).toBe(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(updates).toEqual([]);
+    // claimed then released — never sent
+    expect(updates).toEqual([
+      { table: 'booking_intents', payload: expect.objectContaining({ followup_sms_sent: true }) },
+      { table: 'booking_intents', payload: expect.objectContaining({ followup_sms_sent: false }) },
+    ]);
   });
 
   test('retryable hold (quiet-hours) releases the claim so it retries next tick', async () => {

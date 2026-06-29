@@ -1280,9 +1280,20 @@ router.post('/confirm', async (req, res, next) => {
 // Tight per-IP limiter: an intent row becomes send-eligible (the recovery cron
 // treats it as transactional consent), so the public endpoint must not be usable
 // to seed bulk outbound sends to arbitrary recipients.
+// Two per-IP layers — a real funnel only captures a handful of times per session,
+// so these are generous for genuine use but bound bulk abuse (the rows become
+// send-eligible). A short burst cap + an hourly ceiling. (Full recipient-binding
+// would need a Turnstile/OTP challenge — a deferred product decision.)
 const captureIntentLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 12,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, skipped: 'rate_limited' },
+});
+const captureIntentHourlyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 40,
   standardHeaders: true,
   legacyHeaders: false,
   message: { ok: false, skipped: 'rate_limited' },
@@ -1293,7 +1304,7 @@ const captureIntentLimiter = rateLimit({
 // abandoned-booking recovery cron can follow up if they never finish. One OPEN
 // intent per phone (refreshed, not duplicated); booked phones are skipped.
 // Fire-and-forget: never returns a funnel-blocking error.
-router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
+router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter, async (req, res) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('selfBooking')) return res.json({ ok: false, skipped: 'gate' });
