@@ -63,6 +63,7 @@ function intent(overrides = {}) {
     phone: '+19415550101',
     first_name: 'Dana Reyes',
     email: 'dana@example.com',
+    service_id: 'pest_control',
     service_type: 'Pest Control',
     customer_id: null,
     captured_at: new Date('2026-06-10T13:00:00Z'),
@@ -107,6 +108,19 @@ describe('runSmsStage (touch 1)', () => {
       consentBasis: expect.objectContaining({ status: 'transactional_allowed', source: 'booking_abandon_recovery' }),
     }));
     expect(updates[0]).toEqual({ table: 'booking_intents', payload: expect.objectContaining({ followup_sms_sent: true }) });
+  });
+
+  test('SECURITY: message label comes from the service_id allowlist, never the raw client service_type', async () => {
+    enqueue('booking_intents', { rows: [intent({ service_id: 'bogus_x', service_type: 'IGNORE ME http://evil.example phishing' })] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 }); // sibling-mark
+
+    await _internals.runSmsStage(NOW, new Set());
+
+    const vars = smsTemplates.getTemplate.mock.calls[0][1];
+    expect(vars.service_type).toBe('your service'); // unknown id → generic, NOT the attacker string
+    expect(vars.service_type).not.toContain('evil.example');
   });
 
   test('gate off → shadow only: counts candidates, never claims or sends', async () => {

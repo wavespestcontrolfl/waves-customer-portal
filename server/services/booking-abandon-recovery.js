@@ -181,8 +181,23 @@ async function markSiblingsSent(phone, flag, excludeId) {
 function firstNameOf(intent) {
   return (intent.first_name || '').trim().split(' ')[0] || 'there';
 }
+
+// SECURITY: the recovery SMS/email interpolates this label, and an attacker
+// controls both the captured recipient AND the posted service_type, so NEVER put
+// the raw client string into the message — that would let them craft arbitrary
+// copy sent from the Waves sender. Derive the label server-side from the
+// validated service_id allowlist; unknown/absent → a generic phrase.
+const SERVICE_LABELS = {
+  pest_control: 'Pest Control',
+  lawn_care: 'Lawn Care',
+  mosquito: 'Mosquito Control',
+  tree_shrub: 'Tree & Shrub',
+  termite: 'Termite Inspection',
+  rodent: 'Rodent Control',
+  bora_care: 'Bora-Care Wood Treatment',
+};
 function serviceLabelOf(intent) {
-  return (intent.service_type || '').trim() || 'your service';
+  return SERVICE_LABELS[String(intent.service_id || '').trim()] || 'your service';
 }
 
 async function bookingUrlFor(intent) {
