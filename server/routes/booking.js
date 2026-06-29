@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -993,7 +994,26 @@ async function createSelfBooking(payload = {}) {
       throw txErr;
     }
 
+    // Close out any abandoned-booking recovery intents for this booker the moment
+    // the booking is committed — BEFORE the post-commit tail (reminders, SMS,
+    // attribution) — so the recovery cron can never text "your spot isn't
+    // reserved yet" to someone who just booked. Best-effort; covers the replay
+    // path too (a double-submit replay is still a real booking).
+    const markBookingIntentsConverted = async (bookingId) => {
+      try {
+        const ten = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+        if (ten.length !== 10) return;
+        await db('booking_intents')
+          .whereNull('converted_at')
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
+          .update({ converted_at: db.fn.now(), converted_booking_id: bookingId, updated_at: db.fn.now() });
+      } catch (err) {
+        logger.warn(`[booking:confirm] booking-intent conversion mark failed for customer=${custId}: ${err.message}`);
+      }
+    };
+
     if (txResult.existing) {
+      await markBookingIntentsConverted(txResult.existing.id);
       logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slotDateStr} ${slot_start} — returning existing booking ${txResult.existing.id}`);
       return { ok: true, body: {
         booking: txResult.existing,
@@ -1003,6 +1023,7 @@ async function createSelfBooking(payload = {}) {
     }
 
     const { booking, serviceRow } = txResult;
+    await markBookingIntentsConverted(booking.id);
 
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
     const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
@@ -1178,20 +1199,6 @@ async function createSelfBooking(payload = {}) {
       logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
     }
 
-    // Close out any abandoned-booking recovery intents for this booker — they
-    // just booked, so the recovery cron must never chase them. Best-effort.
-    try {
-      const bookedTen = String(customer.phone || '').replace(/\D/g, '').slice(-10);
-      if (bookedTen.length === 10) {
-        await db('booking_intents')
-          .whereNull('converted_at')
-          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [bookedTen])
-          .update({ converted_at: db.fn.now(), converted_booking_id: booking.id, updated_at: db.fn.now() });
-      }
-    } catch (err) {
-      logger.warn(`[booking:confirm] booking-intent conversion mark failed for customer=${custId}: ${err.message}`);
-    }
-
     return { ok: true, body: { booking, confirmationCode: confCode } };
 }
 
@@ -1215,12 +1222,23 @@ router.post('/confirm', async (req, res, next) => {
   }
 });
 
+// Tight per-IP limiter: an intent row becomes send-eligible (the recovery cron
+// treats it as transactional consent), so the public endpoint must not be usable
+// to seed bulk outbound sends to arbitrary recipients.
+const captureIntentLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, skipped: 'rate_limited' },
+});
+
 // POST /api/booking/capture-intent — partial capture of a high-intent /book
 // visitor (entered contact + picked a slot, hasn't confirmed yet) so the
 // abandoned-booking recovery cron can follow up if they never finish. One OPEN
 // intent per phone (refreshed, not duplicated); booked phones are skipped.
 // Fire-and-forget: never returns a funnel-blocking error.
-router.post('/capture-intent', async (req, res) => {
+router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('selfBooking')) return res.json({ ok: false, skipped: 'gate' });
@@ -1260,6 +1278,34 @@ router.post('/capture-intent', async (req, res) => {
     const booked = await tenMatch(db('booking_intents').whereNotNull('converted_at')
       .where('converted_at', '>', new Date(Date.now() - 24 * 3600000))).first('id');
     if (booked) return res.json({ ok: true, skipped: 'already_booked' });
+
+    // Proof of a REAL, serviceable booking context. This unauthenticated row
+    // becomes send-eligible, so require coords that resolve to a location in our
+    // service area with live availability — a genuine funnel pick always has
+    // this; an arbitrary victim-phone POST does not. Fail closed: any miss
+    // creates no send-eligible row.
+    try {
+      const { lat, lng } = await resolveBookingCoords({ lat: row.lat, lng: row.lng, address: row.address_line1, city: row.city });
+      if (!lat || !lng) return res.json({ ok: true, skipped: 'unserviceable' });
+      const cfg = (await db('booking_config').first()) || {};
+      const avail = await buildBookingAvailability({
+        lat, lng,
+        duration: cfg.slot_duration_minutes || 60,
+        rangeFrom: etDateString(),
+        rangeTo: addETDays(etDateString(), 14),
+        config: cfg,
+        today: new Date(),
+        expandOpenDays: true,
+      });
+      const slotCount = (avail && avail.slots && avail.slots.length)
+        || (avail && avail.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
+      if (!slotCount) return res.json({ ok: true, skipped: 'unserviceable' });
+      row.lat = lat;
+      row.lng = lng;
+    } catch (e) {
+      logger.warn(`[booking:capture-intent] serviceability check failed: ${e.message}`);
+      return res.json({ ok: false, skipped: 'unverified' });
+    }
 
     // Refresh the existing open intent (one per phone) or insert a new one.
     const open = await tenMatch(db('booking_intents').whereNull('converted_at').where('suppressed', false))

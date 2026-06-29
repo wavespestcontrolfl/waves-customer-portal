@@ -171,6 +171,17 @@ describe('runSmsStage (touch 1)', () => {
     ]);
   });
 
+  test('lost claim (converted/suppressed between SELECT and UPDATE) → no send', async () => {
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 0 }); // atomic claim affected 0 rows → lost
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('one touch per phone within a run (sentPhones dedup)', async () => {
     const sent = await _internals.runSmsStage(NOW, new Set(['9415550101']));
     // candidate query still runs but the phone is pre-marked → never sends

@@ -89,8 +89,14 @@ async function renderSms(vars) {
 // won. (The cron is single-instance via runExclusive, but the claim also guards
 // an accidental overlap and pairs with release-on-failure.)
 async function claimStage(intentId, flag) {
+  // Keep the eligibility predicates IN the atomic claim: if /booking/confirm or
+  // a suppression flips converted_at/suppressed between the candidate SELECT and
+  // this UPDATE, the claim must lose (0 rows) so we never send to someone who
+  // already booked or opted out.
   const affected = await db('booking_intents')
     .where({ id: intentId })
+    .whereNull('converted_at')
+    .where('suppressed', false)
     .where((q) => q.where(flag, false).orWhereNull(flag))
     .update({ [flag]: true, updated_at: db.fn.now() });
   return affected === 1;
