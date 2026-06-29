@@ -1660,7 +1660,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
         .where({ id: linkedEstimateId })
         .first('id', 'customer_id', 'status', 'estimate_data', 'expires_at');
       if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
-      if (String(linkedEstimate.customer_id || '') !== String(customerId)) {
+      // Reject only a genuine MISMATCH (estimate owned by a different customer).
+      // A lead / standalone quote carries customer_id = NULL — that's bookable:
+      // it gets attached to this customer on book (below) so the customer-keyed
+      // acceptance/conversion can run against them. (EstimateConverter refuses a
+      // null-customer estimate, so the attach must happen before acceptance.)
+      if (linkedEstimate.customer_id && String(linkedEstimate.customer_id) !== String(customerId)) {
         return res.status(400).json({ error: 'Linked estimate belongs to a different customer' });
       }
       // Gate which statuses may be linked BEFORE any scheduled_services rows are
@@ -2000,6 +2005,25 @@ router.post('/', requireAdmin, async (req, res, next) => {
         });
       }
     });
+
+    // A lead / standalone quote (customer_id was NULL at booking) gets attached
+    // to the customer we just booked — only now that the appointment series is
+    // committed — so it shows under them afterward and the acceptance/conversion
+    // below runs against the right customer. Guarded to customer_id IS NULL so a
+    // concurrent attach can't re-home it. Covers both the accept-on-book and the
+    // already-accepted link path.
+    if (linkedEstimate && !linkedEstimate.customer_id) {
+      try {
+        await db('estimates')
+          .where({ id: linkedEstimateId })
+          .whereNull('customer_id')
+          .update({ customer_id: customerId, updated_at: new Date() });
+        linkedEstimate.customer_id = customerId;
+      } catch (e) {
+        logger.warn(`[schedule] could not attach estimate ${linkedEstimateId} to customer ${customerId}: ${e.message}`);
+        bookingWarnings.push('Appointment booked, but linking the quote to this customer failed. Open the estimate and re-link it from the Estimates page.');
+      }
+    }
 
     // Record the win for a phone-accepted quote — only now that the appointment
     // series is committed, so a booking failure can never strand an accepted

@@ -128,6 +128,21 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 
   await db('leads').where('id', leadId).update(updates);
 
+  // Attach the lead's quote to the customer so it becomes a customer estimate —
+  // visible in the New Appointment "Estimate source" and convertible (until now
+  // a lead estimate kept customer_id = NULL and was invisible/unbookable). Lazy
+  // require breaks the lead-estimate-link ⇄ lead-attribution cycle. Best-effort:
+  // a backfill miss must never break the conversion.
+  if (customerId) {
+    try {
+      const lead = await db('leads').where('id', leadId).first('id', 'estimate_id', 'phone', 'email');
+      const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
+      await linkLeadEstimatesToCustomer({ lead, customerId });
+    } catch (err) {
+      logger.warn(`[LeadAttribution] estimate→customer backfill failed for lead ${leadId}: ${err.message}`);
+    }
+  }
+
   await db('lead_activities').insert({
     lead_id: leadId,
     activity_type: 'converted',

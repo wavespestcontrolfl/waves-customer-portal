@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
+const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
 const logger = require('../services/logger');
 const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
@@ -1096,6 +1097,14 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         is_qualified: true,
         updated_at: new Date(),
       });
+      // Attach the lead's quote to this customer (same txn) so it becomes a
+      // customer estimate visible in the New Appointment "Estimate source".
+      // Best-effort — a backfill miss must not fail the booking.
+      try {
+        await linkLeadEstimatesToCustomer({ database: trx, lead, customerId });
+      } catch (e) {
+        logger.warn(`[leads] estimate→customer backfill failed for lead ${req.params.id}: ${e.message}`);
+      }
       await trx('lead_activities').insert({
         lead_id: req.params.id,
         activity_type: 'converted',

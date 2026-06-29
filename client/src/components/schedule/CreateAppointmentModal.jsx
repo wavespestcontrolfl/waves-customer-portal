@@ -274,7 +274,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLoading, setCustomerLoading] = useState(false);
-  const [selectedCustomer, setSelectedCustomer] = useState(defaultCustomer);
+  // Only treat a default customer as "selected" when it actually resolves to a
+  // customer record. The Estimates page passes a placeholder with id = null for
+  // a LEAD's quote (no customer yet); that must leave the customer unselected so
+  // the operator creates one (prefilled from the quote — see the estimate-load
+  // effect) rather than booking against a null id.
+  const [selectedCustomer, setSelectedCustomer] = useState(defaultCustomer?.id ? defaultCustomer : null);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
 
@@ -353,31 +358,64 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   useEffect(() => {
     const customerId = selectedCustomer?.id;
-    setLinkedEstimate(null);
+    // When booking a SPECIFIC estimate (defaultEstimateId), the estimate — not
+    // the customer — is the anchor. The lead-estimate flow creates the customer
+    // mid-modal (quick-add), which re-runs this effect; clearing the link there
+    // would drop the quote from the booking. So only reset the link when we're
+    // NOT pinned to a default estimate.
+    if (!defaultEstimateId) {
+      setLinkedEstimate(null);
+      autoAppliedScheduleEstimateRef.current = null;
+    }
     setScheduleEstimates([]);
     setScheduleEstimateError('');
-    autoAppliedScheduleEstimateRef.current = null;
-    if (!customerId) {
-      setScheduleEstimatesLoading(false);
-      return undefined;
-    }
     let cancelled = false;
     setScheduleEstimatesLoading(true);
-    adminFetch(`/admin/customers/${customerId}/schedule-estimates`)
-      .then((r) => {
-        if (cancelled) return;
-        setScheduleEstimates(Array.isArray(r.estimates) ? r.estimates : []);
-      })
+    (async () => {
+      let list = [];
+      if (customerId) {
+        const r = await adminFetch(`/admin/customers/${customerId}/schedule-estimates`);
+        list = Array.isArray(r.estimates) ? r.estimates : [];
+      }
+      // Ensure the estimate we were opened to book is present even when the
+      // selected customer doesn't own it yet — a lead's quote (customer_id NULL)
+      // scheduled before the lead is converted. schedule-source needs no
+      // customer and also hands back the quote's contact so we can stage the
+      // customer the operator still has to create.
+      if (defaultEstimateId && !list.some((e) => String(e.id) === String(defaultEstimateId))) {
+        try {
+          const r = await adminFetch(`/admin/estimates/${defaultEstimateId}/schedule-source`);
+          if (r?.estimate) {
+            list = [r.estimate, ...list];
+            const c = r.contact || {};
+            if (!cancelled && !customerId && (c.firstName || c.phone || c.email)) {
+              setQuickAdd((prev) => ({
+                ...prev,
+                firstName: prev.firstName || c.firstName || '',
+                lastName: prev.lastName || c.lastName || '',
+                phone: prev.phone || c.phone || '',
+                email: prev.email || c.email || '',
+                address: prev.address || c.address || '',
+              }));
+              setShowQuickAdd(true);
+            }
+          }
+        } catch { /* schedule-source is best-effort — fall back to manual entry */ }
+      }
+      return list;
+    })()
+      .then((list) => { if (!cancelled) setScheduleEstimates(list); })
       .catch((e) => {
         if (cancelled) return;
-        setScheduleEstimateError(e.message || 'Could not load won estimates');
+        setScheduleEstimateError(e.message || 'Could not load estimates');
         setScheduleEstimates([]);
       })
       .finally(() => {
         if (!cancelled) setScheduleEstimatesLoading(false);
       });
     return () => { cancelled = true; };
-  }, [selectedCustomer?.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCustomer?.id, defaultEstimateId]);
 
   // Find-a-Time state
   const [findingTimes, setFindingTimes] = useState(false);
@@ -1398,7 +1436,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             )}
           </div>
 
-          {selectedCustomer && (
+          {(selectedCustomer || scheduleEstimatesLoading || scheduleEstimates.length > 0) && (
             <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${D.border}` }}>
               <label style={labelStyle}>{ESTIMATE_SOURCE_LABEL}</label>
               {scheduleEstimatesLoading ? (
