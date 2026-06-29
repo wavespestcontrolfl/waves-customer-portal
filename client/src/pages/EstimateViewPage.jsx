@@ -2186,6 +2186,15 @@ export default function EstimateViewPage() {
     () => (serviceCadenceCombos.length ? new Set(Object.keys(serviceCadenceCombos[0].selection || {})) : null),
     [serviceCadenceCombos],
   );
+  // Combo behavior (independent selection + non-axis locking) applies ONLY when
+  // every combo axis is actually rendered as its own section. If the bundle fell
+  // back to a single synthetic `bundle` section (split validation failed,
+  // pest-only choice, …), combos don't apply to this render — stay fully legacy
+  // so the one cadence slider keeps working.
+  const comboModeActive = useMemo(
+    () => !!comboAxisKeys && Array.from(comboAxisKeys).every((axis) => services.some((s) => s.key === axis)),
+    [comboAxisKeys, services],
+  );
   const selectedCombo = useMemo(
     () => selectedServiceCadenceCombo(data?.pricing, services, selected),
     [data?.pricing, services, selected],
@@ -2410,7 +2419,7 @@ export default function EstimateViewPage() {
     // NON-axis recurring sections (e.g. mosquito) still mirror the pest cadence,
     // so a pest change carries them along (they're locked from direct change).
     // Legacy bundles (no combos) keep the all-share-the-key mirror behavior.
-    const affectedSections = comboAxisKeys
+    const affectedSections = comboModeActive
       ? services.filter((section) => (
         section.key === sectionKey
         || (!comboAxisKeys.has(section.key) && section.frequencies?.some((item) => item.key === nextFrequency))
@@ -2438,7 +2447,7 @@ export default function EstimateViewPage() {
     setError(null);
     setCtaPhase('configure');
     setSlotsRefreshSignal((v) => v + 1);
-  }, [services, comboAxisKeys]);
+  }, [services, comboAxisKeys, comboModeActive]);
 
   const performAccept = useCallback(async () => {
     setCtaPhase('submitting');
@@ -2661,7 +2670,7 @@ export default function EstimateViewPage() {
   // locked from direct change — its slider would otherwise let the customer
   // pick a cadence that accept ignores (not in serviceCadences/the combo).
   const isLockedMirrorSection = (section) => (
-    !!comboAxisKeys && section?.isRecurring && section.key !== 'pest_control' && !comboAxisKeys.has(section.key)
+    comboModeActive && section?.isRecurring && section.key !== 'pest_control' && !comboAxisKeys.has(section.key)
   );
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
