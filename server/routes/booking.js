@@ -301,13 +301,19 @@ router.get('/customer-lookup', async (req, res, next) => {
 
     if (address) {
       // SECURITY: an unauthenticated caller must not be able to turn a street
-      // address into the resident's identity (name/UUID) — a doxxing vector.
-      // Return only WHETHER a returning customer exists at this address; the
-      // funnel's autofill is driven by the phone step above (with address
-      // re-verification), not by this signal. The client only reads
-      // `possible_match` from this branch.
+      // address into the resident's PII (name / email / home address) — a
+      // doxxing vector. Disclose ONLY the opaque customer id + a match boolean,
+      // never personal details. The id is required so a recognized returning
+      // customer is linked to their account at step 1; without it the account
+      // link would depend on the racy step-3 phone lookup and a fast Confirm
+      // would hit the phone-on-file guard (409) on a valid booking. Tightening
+      // the id->booking trust (book-on-behalf via a guessed address) is a
+      // separate, pre-existing hardening item, not in scope here.
       const match = await findUniqueCustomerByAddress(address, city, zip);
-      return res.json({ customer: null, possible_match: !!match });
+      return res.json({
+        customer: match ? { id: match.id } : null,
+        possible_match: !!match,
+      });
     }
 
     res.json({ customer: null });
