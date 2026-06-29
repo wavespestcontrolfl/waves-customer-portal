@@ -36,6 +36,10 @@ CALLER NAME:
 - Do NOT invent names from caller ID, address, email, or context.
 - Set name_confidence: 0.9+ when clearly stated, 0.5-0.8 when spelled out ambiguously, <0.5 when only partially heard.
 
+SPELLED-OUT INPUT IS AUTHORITATIVE (names + emails):
+- When the caller spells a name or email letter-by-letter, or with phonetic markers ("B as in boy", "V as in Victor", "N as in Nancy"), the SPELLED letters are the source of truth — use them, not the word as it was transcribed phonetically. Callers spell precisely because the spoken form is easy to mishear (e.g. caller says "Smyth" but spells S-M-I-T-H -> use "Smith", and the email is jane.smith@example.com, NOT smyth). These are illustrative only — never copy this example name or email into the output.
+- When an email is described relative to the name ("first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
+
 PHONE:
 - phone_e164: Set to the callback number the caller states, in E.164 format (+1XXXXXXXXXX).
 - phone_raw_spoken: Verbatim as spoken in transcript (e.g. "nine four one, five five five...").

@@ -233,6 +233,18 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     }
   }
 
+  // Advisory identity signals — emitted here (not just in the shadow bridge) so
+  // they survive once CALL_EXTRACTION_V2_DRIVES_ROUTING is promoted and the
+  // bridge is guarded off. They are ADVISORY (see ADVISORY_TRIAGE_FLAGS): they
+  // reach Needs Review but do NOT block an otherwise-routable appointment.
+  if (caller.first_name && !String(caller.last_name || '').trim()
+      && (sentiment.lead_quality === 'hot' || sentiment.lead_quality === 'warm')) {
+    flags.push('missing_last_name');
+  }
+  if (detectRentalSignal({ extracted: { call_summary: extraction.meta.call_summary }, callerRelationship: caller.relationship_to_property })) {
+    flags.push('rental_or_tenant_occupied');
+  }
+
   // A decisive AV acceptance is authoritative for the address + service area —
   // drop any address flags reached above (incl. a lead_quality-sourced
   // out_of_service_area) so a verified in-area address is not held.
@@ -242,6 +254,15 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
 const SMS_ONLY_FLAGS = new Set([
   'no_sms_consent_captured',
   'sms_consent_missing',
+]);
+
+// Advisory flags — they surface in the Needs Review inbox (informational: missing
+// surname, rental/tenant-occupied, a second service address) but must NOT block
+// an otherwise-routable appointment. Excluded from appointmentBlockingFlags.
+const ADVISORY_TRIAGE_FLAGS = new Set([
+  'missing_last_name',
+  'rental_or_tenant_occupied',
+  'second_service_address',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."
@@ -290,7 +311,7 @@ function canAutoRoute(extraction, opts = {}) {
   const modelFlags = suppressAddressFlagsForAV(extraction.triage_flags || [], opts.addressValidation);
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
   const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-  const appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f));
+  const appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f) && !ADVISORY_TRIAGE_FLAGS.has(f));
 
   if (appointmentBlockingFlags.length > 0) {
     return { allowed: false, reason: 'triage_flags', flags: finalFlags, appointmentBlockingFlags };
@@ -319,12 +340,130 @@ function canAutoRoute(extraction, opts = {}) {
   return { allowed: true, flags: finalFlags };
 }
 
+// Suffix-insensitive street comparison shared by the shadow bridge and the
+// second-address check, so "123 Main St" and "123 Main Street" compare equal
+// (otherwise a benign expansion opens a false second_service_address review).
+const streetHouseNum = (s) => (String(s || '').trim().match(/^\d+/) || [''])[0];
+const streetNameOnly = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
+  .replace(/^\s*\d+\s*/, '')
+  .replace(/\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|ct|court|blvd|boulevard|cir|circle|pl|place|ter|terrace|way|trl|trail|pkwy|parkway|hwy|highway)\b/g, '')
+  .replace(/\s+/g, ' ').trim();
+/** Normalized "<house> <street-name>" key with common suffixes stripped. */
+function streetCompareKey(s) {
+  return `${streetHouseNum(s)} ${streetNameOnly(s)}`.trim();
+}
+
+/**
+ * Address/identity review bridge — pure decision used by the call processor when
+ * V2 address validation runs in SHADOW (V2 enabled, not yet driving routing). It
+ * lets the legacy live write consume just the AV verdict without taking on the
+ * full enforce-mode routing gate. Given the AV result, the legacy flat
+ * `extracted` record, and the V2 model triage flags, returns:
+ *   - normalizedAddress: the {address_line1, city, state, zip} subset to adopt
+ *     when AV decisively accepted/corrected an in-area premise (null otherwise),
+ *   - needsConfirmation: human-review reasons — an unverifiable / out-of-area
+ *     address (only when a street was actually given), caller-not-owner, and a
+ *     missing surname on a real (hot/warm) prospect.
+ * Pure: no side effects. The caller mutates `extracted` and persists the reasons.
+ */
+function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [], callerRelationship = null } = {}) {
+  const av = addressValidation || null;
+  const status = av && av.status ? av.status : null;
+  const hadStreet = !!String(extracted.address_line1 || '').trim();
+  const needsConfirmation = [];
+  let normalizedAddress = null;
+
+  if (av && av.normalized && (status === 'validated_accept' || status === 'corrected')) {
+    const n = av.normalized;
+    const adopt = {};
+    if (n.street_line_1) adopt.address_line1 = n.street_line_1;
+    if (n.city) adopt.city = n.city;
+    if (n.state) adopt.state = n.state;
+    if (n.postal_code) adopt.zip = n.postal_code;
+    // Google validated the V2 address is a real premise — NOT that the caller
+    // said it. In shadow mode the legacy V1 extraction is source-of-record, so
+    // adopt only when the validated street matches the legacy one (normalization
+    // / ZIP correction). On a street disagreement, hold for review instead of
+    // overwriting a possibly-correct legacy address with a V2 mix-up.
+    const normTok = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    // Same PREMISE as what the caller (V1) said — not just a real address Google
+    // happened to validate. Require a corroborating legacy house number (don't
+    // graft a V2-only house number onto a street-only legacy address), full
+    // street-name equality, and matching city/ZIP when both sides have them.
+    const sameLocation = () => {
+      if (adopt.address_line1) {
+        const hn = streetHouseNum(adopt.address_line1), ho = streetHouseNum(extracted.address_line1);
+        if (!hn || !ho || hn !== ho) return false;          // need a matching legacy house number
+        const sn = streetNameOnly(adopt.address_line1), so = streetNameOnly(extracted.address_line1);
+        if (sn && so && sn !== so) return false;            // different street → hold for review
+      }
+      // For validated_accept Google changed NOTHING, so a different city/ZIP means
+      // V2 sent a different place → hold. For `corrected` the difference IS
+      // Google's trusted correction (e.g. a bad ZIP), so don't reject on it.
+      if (status === 'validated_accept') {
+        if (adopt.city && extracted.city && normTok(adopt.city) !== normTok(extracted.city)) return false;
+        if (adopt.zip && extracted.zip && normTok(adopt.zip) !== normTok(extracted.zip)) return false;
+      }
+      return true;
+    };
+    if (Object.keys(adopt).length) {
+      if (!hadStreet) {
+        // No legacy street to corroborate — don't adopt a V2-only address.
+      } else if (!sameLocation()) {
+        needsConfirmation.push('address_unverified'); // V1/V2 location disagreement -> review
+      } else {
+        normalizedAddress = adopt;
+      }
+    }
+  } else if (hadStreet && (status === 'missing_component' || status === 'ambiguous' || status === 'confirm_needed')) {
+    needsConfirmation.push('address_unverified');
+  } else if (hadStreet && status === 'out_of_service_area') {
+    needsConfirmation.push('out_of_service_area');
+  }
+
+  const flags = Array.isArray(v2TriageFlags) ? v2TriageFlags : [];
+  if (flags.includes('caller_not_authorized')) needsConfirmation.push('caller_not_authorized');
+
+  if (extracted.first_name && !String(extracted.last_name || '').trim()
+      && (extracted.lead_quality === 'hot' || extracted.lead_quality === 'warm')) {
+    needsConfirmation.push('missing_last_name');
+  }
+
+  // Rental / tenant-occupied property — flagged so the office can plan property
+  // access (occupant != owner) and decide whether to tag it a rental.
+  if (detectRentalSignal({ extracted, callerRelationship })) {
+    needsConfirmation.push('rental_or_tenant_occupied');
+  }
+
+  return { normalizedAddress, needsConfirmation };
+}
+
+/**
+ * True when a call indicates a rental / tenant-occupied property — a non-owner-
+ * occupant caller (tenant / property manager), OR an owner calling about their
+ * tenants ("my tenants have ants"). Shared by the shadow bridge and the enforce-
+ * path deterministic flags so the classification is identical in both modes.
+ * `extracted` is a loose bag of free-text fields (pain_points / call_summary /
+ * requested_service) — pass V1 `extracted` or `{ call_summary }` from V2.
+ */
+function detectRentalSignal({ extracted = {}, callerRelationship = null } = {}) {
+  const rel = String(callerRelationship || '').toLowerCase();
+  if (rel === 'tenant' || rel === 'property_manager') return true;
+  return /\b(tenants?|renters?|rental|landlord)\b/i.test(
+    `${extracted.pain_points || ''} ${extracted.call_summary || ''} ${extracted.requested_service || ''}`
+  );
+}
+
 module.exports = {
   computeDeterministicTriageFlags,
   mergeTriageFlags,
   suppressAddressFlagsForAV,
+  deriveCallReviewBridge,
+  detectRentalSignal,
+  streetCompareKey,
   canAutoRoute,
   SMS_ONLY_FLAGS,
+  ADVISORY_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
   hasCanonicalWriteBlock,
   hasNameEmailMismatch,

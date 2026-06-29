@@ -100,6 +100,10 @@ function buildTriageItem({
     do_not_contact_requested: 'customer_field_conflict',
     name_email_mismatch: 'name_review',
     voicemail: 'service_unknown',
+    // Shadow address/identity bridge reasons (deriveCallReviewBridge).
+    missing_last_name: 'name_review',
+    rental_or_tenant_occupied: 'customer_field_conflict',
+    second_service_address: 'address_review',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;

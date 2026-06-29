@@ -40,7 +40,7 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, ADVISORY_TRIAGE_FLAGS, streetCompareKey } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { validateAddress, buildAddressLines } = require('./address-validation');
@@ -64,6 +64,23 @@ const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'ge
 // Flash), and unlike Claude Opus 4.7 it still supports temperature (extraction
 // pins temp 0.2 for determinism). Env-overridable for instant rollback.
 const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro';
+
+// Human-readable "confirm before dispatch" reasons surfaced by the address /
+// identity bridge below. Shown on the lead's AI-triage activity so Virginia
+// knows exactly what to verify on the callback, instead of dispatching on a
+// silently-unverified address or an incomplete account holder.
+const CONFIRM_REASON_TEXT = {
+  address_unverified: 'service address could not be verified — read it back to the caller',
+  out_of_service_area: 'address resolves outside the service area — verify the county',
+  caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
+  missing_last_name: "no last name captured — get the account holder's full name",
+  rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
+  second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
+};
+const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
+// Normalized street comparison (case/space/punctuation-insensitive) — "12338
+// Amber Creek" != "12398 Amber Creek", but "Ambercreek" == "Amber Creek".
+const normStreet = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 function twilioClient() {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
@@ -1199,6 +1216,10 @@ IMPORTANT — customer name rules:
 - If only one name is clearly stated, put it in first_name and leave last_name null.
 - Do not invent a last name from caller ID, address, email, or context.
 
+IMPORTANT — spelled-out names and emails are authoritative over how they sounded:
+- When the caller spells a name or email letter-by-letter, or with phonetic markers ("B as in boy", "V as in Victor", "N as in Nancy"), the SPELLED letters are the source of truth — use them, not the word as it was transcribed phonetically. Callers spell precisely because the spoken form is easy to mishear (e.g. the caller says "Smyth" but then spells S-M-I-T-H, so the correct value is "Smith", and the email is jane.smith@example.com — NOT smyth). This is an illustrative example only — never copy this name or email into the output.
+- When an email is described relative to the name (e.g. "first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
+
 IMPORTANT — customer contact rules:
 - Do not invent email addresses. Only return email when the caller clearly says or spells the complete address.
 - If the transcript contains an uncertain, partial, or malformed email, return null.
@@ -1719,6 +1740,9 @@ const CallRecordingProcessor = {
     let v2EmailBlocked = false;
     let v2CanonicalWriteBlocked = false;
     let v2ApprovedExtraction = null;
+    // Address/identity bridge (populated below in shadow mode): "confirm before
+    // dispatch" reasons that flag the call for a human without blocking writes.
+    const bridgeNeedsConfirmation = [];
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2Extraction = v2Result?.extraction || null;
@@ -1758,8 +1782,30 @@ const CallRecordingProcessor = {
           });
           await db('route_decisions').insert(routeDecision).onConflict(['call_log_id', 'decision_version', 'mode']).ignore();
 
+          // Advisory flags (missing surname / rental / second address) reach the
+          // Needs Review inbox even when the call AUTO-ROUTES — they inform, they
+          // don't block. Without this, promoting DRIVES_ROUTING would silence the
+          // identity signals the shadow bridge used to surface. onConflict dedups
+          // against the blocked-branch inserts below.
+          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
+            await db('triage_items')
+              .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory' }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore();
+          }
+
           if (!routingResult.allowed) {
-            const triageReasons = finalFlags.length > 0 ? finalFlags : [routingResult.reason || 'routing_rejected'];
+            // Prefer the flags that actually BLOCK the appointment. When none do
+            // (the block came from a non-flag reason like low_confidence /
+            // not_confirmed / confirmed_without_start_time), finalFlags may hold
+            // only advisory flags — so fall back to routingResult.reason instead
+            // of letting the Needs Review row explain only the advisory note and
+            // hide why the call was actually held. (Advisory flags get their own
+            // rows from the advisory loop above.)
+            const blockingReasons = (routingResult.appointmentBlockingFlags && routingResult.appointmentBlockingFlags.length)
+              ? routingResult.appointmentBlockingFlags
+              : [routingResult.reason || 'routing_rejected'];
+            const triageReasons = blockingReasons;
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
@@ -1812,6 +1858,81 @@ const CallRecordingProcessor = {
         } catch (triageErr) {
           logger.error(`[call-proc-v2] Triage insert also failed for ${callSid}: ${triageErr.message}`);
         }
+      }
+    }
+
+    // ── Address-validation bridge (shadow mode only) ─────────────────────
+    // When V2 is enabled but NOT yet driving routing, the Google Address
+    // Validation verdict (v2AddressValidation) is computed on every call but
+    // otherwise ignored by the live write. Consume just that verdict here — no
+    // appointment/routing changes — so the legacy customer/lead write stops
+    // silently persisting an unverifiable address as if it were clean:
+    //   • validated_accept / corrected → adopt Google's normalized address
+    //     (auto-fixes a bad ZIP/street), mirroring the enforce-path approval
+    //     branch above. Mutated into `extracted` BEFORE the customer/lead
+    //     upsert reads it, so both records get the corrected address.
+    //   • missing_component / ambiguous / confirm_needed / out_of_service_area
+    //     (a street WAS given) → keep the raw address but record a needs-
+    //     confirmation reason so the call is flagged for a human.
+    // Plus two identity signals on real prospects: caller-arranging-for-someone-
+    // else and a missing surname. When DRIVES_ROUTING is later promoted the full
+    // gate above owns all of this, so this bridge is guarded off then.
+    if (CALL_EXTRACTION_V2_ENABLED && !CALL_EXTRACTION_V2_DRIVES_ROUTING) {
+      try {
+        const v2Ext = v2Result?.extraction || null;
+        // Merge deterministic caller-authorization flags so `caller_not_authorized`
+        // (caller.on_site_authorization === false + non-owner) is caught even when
+        // the model omits the redundant triage_flag — matching the enforce gate.
+        let bridgeTriageFlags = Array.isArray(v2Ext?.triage_flags) ? v2Ext.triage_flags : [];
+        if (v2Ext && isV2Extraction(v2Ext)) {
+          try {
+            bridgeTriageFlags = mergeTriageFlags(
+              bridgeTriageFlags,
+              computeDeterministicTriageFlags(v2Ext, { contactPhone, addressValidation: v2AddressValidation })
+            );
+          } catch (_e) { /* fall back to model flags only */ }
+        }
+        const { normalizedAddress, needsConfirmation } = deriveCallReviewBridge({
+          addressValidation: v2AddressValidation,
+          extracted,
+          v2TriageFlags: bridgeTriageFlags,
+          callerRelationship: v2Ext?.caller?.relationship_to_property,
+        });
+        if (normalizedAddress) {
+          // Adopt Google's normalized address BEFORE the customer/lead upsert
+          // reads extracted.* below, so both records get the corrected address.
+          if (normalizedAddress.address_line1) extracted.address_line1 = normalizedAddress.address_line1;
+          if (normalizedAddress.city) extracted.city = normalizedAddress.city;
+          if (normalizedAddress.state) extracted.state = normalizedAddress.state;
+          if (normalizedAddress.zip) extracted.zip = normalizedAddress.zip;
+          if (v2AddressValidation?.status === 'corrected') {
+            logger.info(`[call-proc-bridge] Adopted Google-corrected address for ${maskSid(callSid)}`);
+          }
+        }
+        if (needsConfirmation.length) {
+          bridgeNeedsConfirmation.push(...needsConfirmation);
+          logger.info(`[call-proc-bridge] ${callSid} needs confirmation: ${needsConfirmation.join(', ')} (av=${v2AddressValidation?.status || 'n/a'})`);
+          // Surface in the Needs Review inbox, which is driven by triage_items
+          // rows (admin-triage.js filters by status), not call_log.review_status.
+          // Shadow mode does not block the write -> severity 'advisory'.
+          for (const flag of needsConfirmation.slice(0, 10)) {
+            try {
+              await db('triage_items')
+                .insert(buildTriageItem({
+                  callLogId: call.id,
+                  flag,
+                  extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                  severity: 'advisory',
+                }))
+                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                .ignore();
+            } catch (triageErr) {
+              logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+            }
+          }
+        }
+      } catch (bridgeErr) {
+        logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
       }
     }
 
@@ -1950,6 +2071,52 @@ const CallRecordingProcessor = {
         }
       } else if (!extracted.first_name) {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
+      }
+    }
+
+    // Lightweight multi-property signal: a returning caller gave a service
+    // address that differs from the one already on their customer record (the
+    // one-address-per-customer model can't hold both, and the upsert above only
+    // fills an EMPTY address — so a second address would otherwise be dropped
+    // silently). We do NOT overwrite (can't tell which is primary) — flag it so
+    // the office can decide if it's a second property, e.g. a landlord's rental
+    // vs. their own home. Skips brand-new customers (their address IS this call's).
+    if (customerId && !createdCustomerFromCall && extracted.address_line1) {
+      try {
+        const existingCust = await db('customers').where({ id: customerId }).select('address_line1', 'city', 'zip').first();
+        // Suffix-insensitive street compare so "123 Main St" vs "123 Main Street"
+        // (a benign normalization) isn't treated as a different property.
+        const onFileStreet = streetCompareKey(existingCust?.address_line1);
+        const fromCallStreet = streetCompareKey(extracted.address_line1);
+        // Compare the full service LOCATION, not just the street: a different
+        // street OR (same street but a different city/ZIP, both present) is a
+        // different property. "100 Main St, Bradenton" != "100 Main St, Sarasota".
+        const bothPresentAndDiffer = (a, b) => !!normStreet(a) && !!normStreet(b) && normStreet(a) !== normStreet(b);
+        const locationDiffers = (onFileStreet !== fromCallStreet)
+          || bothPresentAndDiffer(existingCust?.city, extracted.city)
+          || bothPresentAndDiffer(existingCust?.zip, extracted.zip);
+        if (onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
+          bridgeNeedsConfirmation.push('second_service_address');
+          logger.info(`[call-proc-bridge] ${callSid} service address differs from customer record (possible second property)`);
+          // This flag is appended AFTER the bridge's triage_items loop above, so
+          // insert its row here too — the Needs Review inbox is driven by
+          // triage_items, not call_log.review_status. Advisory (non-blocking).
+          try {
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'second_service_address',
+                extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                severity: 'advisory',
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore();
+          } catch (triageErr) {
+            logger.warn(`[call-proc-bridge] second_service_address triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+          }
+        }
+      } catch (e) {
+        logger.warn(`[call-proc-bridge] second-address check skipped for ${maskSid(callSid)}: ${e.message}`);
       }
     }
 
@@ -2133,6 +2300,7 @@ const CallRecordingProcessor = {
             pain_points: extracted.pain_points,
             preferred_date_time: extracted.preferred_date_time,
             sentiment: extracted.sentiment,
+            ...(bridgeNeedsConfirmation.length ? { needs_confirmation: bridgeNeedsConfirmation } : {}),
           });
           // is_qualified: hot/warm only. Spam was already early-returned, so
           // checking != 'spam' would mark cold leads qualified.
@@ -2141,13 +2309,26 @@ const CallRecordingProcessor = {
           leadUpdates.updated_at = new Date();
           await db('leads').where({ id: leadId }).update(leadUpdates);
 
-          // Log AI triage activity
+          // Log AI triage activity. When the bridge flagged anything, append a
+          // plain-language "confirm before dispatch" line so it's visible on the
+          // lead timeline Virginia works, not just in extracted_data.
+          const triageBase = `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`;
+          const triageDesc = bridgeNeedsConfirmation.length
+            ? `${triageBase} — ⚠ CONFIRM BEFORE DISPATCH: ${bridgeNeedsConfirmation.map(describeConfirmReason).join('; ')}`
+            : triageBase;
           await db('lead_activities').insert({
             lead_id: leadId,
             activity_type: 'ai_triage',
-            description: `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`,
+            description: triageDesc,
             performed_by: 'AI Call Processor',
-            metadata: JSON.stringify({ call_summary: extracted.call_summary, pain_points: extracted.pain_points, sentiment: extracted.sentiment }),
+            metadata: JSON.stringify({
+              call_summary: extracted.call_summary,
+              pain_points: extracted.pain_points,
+              sentiment: extracted.sentiment,
+              ...(bridgeNeedsConfirmation.length
+                ? { needs_confirmation: bridgeNeedsConfirmation, address_validation_status: v2AddressValidation?.status || null }
+                : {}),
+            }),
           }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
         }
       } catch (leadErr) {
@@ -2716,6 +2897,9 @@ const CallRecordingProcessor = {
         processing_status: finalStatus,
         processing_token: null,
         processing_started_at: null,
+        // Address unverifiable / caller-not-owner / missing surname → open the
+        // call for human review instead of letting it look fully processed.
+        ...(bridgeNeedsConfirmation.length ? { review_status: 'open' } : {}),
         updated_at: new Date(),
       });
     if (finalized === 0) {
