@@ -22,10 +22,10 @@ const PRODUCT = {
   active: true,
   active_ingredient: 'Penthiopyrad',
   formulation: 'WDG',
-  // products_catalog.epa_reg_number is NOT NULL. Seed the codebase placeholder
-  // ('N/A', the convention from 20260517000004) rather than an unverified reg on
-  // a compliance-output field; owner sets the label-verified reg in the catalog.
-  epa_reg_number: 'N/A',
+  // products_catalog.epa_reg_number is NOT NULL, and the report-enrichment path
+  // (report-data.js) rejects 'N/A' pesticide rows — so seed the real Syngenta
+  // Velista WDG registration. Owner: confirm against the physical label.
+  epa_reg_number: '100-1241',
   frac_group: '7',
   analysis_n: 0,
   analysis_p: 0,
@@ -36,7 +36,7 @@ const PRODUCT = {
   rate_unit: 'oz',
   mixing_order_category: 'dry_wg_wdg_wp_df',
   label_source_note:
-    'Velista WDG turf label lists ~0.3-0.7 oz per 1,000 sq ft by disease target; seeded 0.5 oz/1k for the Zoysia large-patch rotation. Price: Syngenta/SiteOne 22 oz @ $297.00. EPA reg + exact rates pending label verification by owner.',
+    'Velista WDG turf label lists ~0.3-0.7 oz per 1,000 sq ft by disease target; seeded 0.5 oz/1k for the Zoysia large-patch rotation (conditional, large-patch history). Price: Syngenta/SiteOne 22 oz @ $297.00. EPA reg 100-1241; exact rates pending owner label verification.',
   best_price: 297.0,
   cost_per_unit: 13.5,
   cost_unit: 'oz',

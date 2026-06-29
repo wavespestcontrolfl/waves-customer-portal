@@ -433,7 +433,7 @@
           "visit": 2,
           "month": "Feb",
           "primary": "Chelated Iron Plus foliar ($1.52)\nHigh Mn Combo micros ($1.33)\nGreen Flo 6-0-0 Ca ($1.39)",
-          "secondary": "★ Medallion SC (FRAC 12) if large patch active ($8.90)\nOR Torque (FRAC 3) if Headway used Jan ($7.50)\n★ IRRIGATION AUDIT #1: VWC >40% = reduce 20%",
+          "secondary": "★ Medallion SC (FRAC 12) if large patch active ($8.90)\nOR Velista (FRAC 7) if Headway used Jan ($67.50)\n★ IRRIGATION AUDIT #1: VWC >40% = reduce 20%",
           "material_cost": "6.87",
           "labor_cost": "26.96",
           "tiers": {
@@ -582,9 +582,9 @@
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)\n★ Velista (FRAC 7) large patch #3 ($67.50)",
-          "secondary": "★ OPTIONAL Basic/Std: Door hanger + irrigation winterize\n★ OPTIONAL: Annual report on request\n★ FRAC rotation: Velista (7) follows Medallion (12)\nThatch assessment for spring mechanical work",
-          "material_cost": "85.8",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)",
+          "secondary": "★ Velista (FRAC 7) large patch #3 if large patch active ($67.50)\n★ OPTIONAL Basic/Std: Door hanger + irrigation winterize\n★ OPTIONAL: Annual report on request\n★ FRAC rotation: Velista (7) follows Medallion (12)\nThatch assessment for spring mechanical work",
+          "material_cost": "18.3",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
