@@ -57,7 +57,20 @@ function makeDb(state) {
     const range = {};
     const b = {
       where: (a, op, val) => {
-        if (typeof a === 'function') { captured.paidFilterApplied = (captured.paidFilterApplied || 0) + 1; return b; }
+        if (typeof a === 'function') {
+          captured.paidFilterApplied = (captured.paidFilterApplied || 0) + 1;
+          // Exercise the paid predicate against a recording sub-builder so tests
+          // can assert which columns count as "paid".
+          const sub = {
+            cols: [],
+            whereNotNull(c) { this.cols.push(c); return this; },
+            orWhereNotNull(c) { this.cols.push(c); return this; },
+            orWhere(c) { this.cols.push(c); return this; },
+          };
+          a(sub);
+          captured.paidFilterCols = sub.cols;
+          return b;
+        }
         if (a === 'lead_source') platform = op;
         if (a === 'lead_date' && op === '>=') range.start = val;
         if (a === 'lead_date' && op === '<') range.end = val;
@@ -81,7 +94,12 @@ function makeDb(state) {
     throw new Error(`unexpected table ${t}`);
   };
   db.raw = (sql) => ({ sql });
-  db.schema = { hasTable: () => Promise.resolve(state.tablesExist !== false) };
+  db.schema = {
+    hasTable: () => Promise.resolve(state.tablesExist !== false),
+    // is_paid column present by default; set hasIsPaid:false to simulate a fresh DB
+    // running the all-time backfill BEFORE migration 000004 adds the column.
+    hasColumn: () => Promise.resolve(state.hasIsPaid !== false),
+  };
   return db;
 }
 
@@ -146,6 +164,28 @@ describe('allocateAdCosts', () => {
     };
     await allocateAdCosts(makeDb(state));
     expect(state.captured.paidFilterApplied).toBeGreaterThan(0); // fbclid/_fbc filter ran
+  });
+
+  test('the facebook paid filter also counts is_paid rows when the column exists', async () => {
+    const state = {
+      // hasIsPaid defaults to true (column present)
+      spendByPlatform: { facebook: [{ ym: '2026-06', spend: '200' }] },
+      leadsByPlatform: { facebook: [{ ym: '2026-06', leads: '4' }] },
+    };
+    await allocateAdCosts(makeDb(state));
+    // Paid Meta lead = a click id (fbclid/_fbc) OR the explicit is_paid flag.
+    expect(state.captured.paidFilterCols).toEqual(['fbclid', 'fbc', 'is_paid']);
+  });
+
+  test('omits the is_paid clause when the column is absent (fresh DB, 000003 backfill before 000004)', async () => {
+    const state = {
+      hasIsPaid: false, // column not yet added
+      spendByPlatform: { facebook: [{ ym: '2026-06', spend: '200' }] },
+      leadsByPlatform: { facebook: [{ ym: '2026-06', leads: '4' }] },
+    };
+    await allocateAdCosts(makeDb(state));
+    expect(state.captured.paidFilterApplied).toBeGreaterThan(0); // filter still runs
+    expect(state.captured.paidFilterCols).toEqual(['fbclid', 'fbc']); // no is_paid clause
   });
 
   test('no-op when the tables are absent', async () => {

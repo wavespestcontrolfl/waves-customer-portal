@@ -92,11 +92,12 @@ async function recordCallPpcAttribution({
         return { recorded: false, reason: 'other_source' };
       }
       // A web-attributed row owns this lead's first-touch PPC attribution — via a
-      // click id (gclid/wbraid/gbraid) OR, for consent/ad-blocker cases with no
-      // click id, via UTM (utm_campaign/utm_term). A later phone call to the same
-      // lead must NOT overwrite that. Call rows never carry click ids or UTMs, so
-      // this only excludes genuine web rows.
+      // click id (Google: gclid/wbraid/gbraid, Meta: fbclid/_fbc) OR, for
+      // consent/ad-blocker cases with no click id, via UTM (utm_campaign/utm_term).
+      // A later phone call to the same lead must NOT overwrite that. Call rows never
+      // carry click ids/cookies or UTMs, so this only excludes genuine web rows.
       if (existing.gclid || existing.wbraid || existing.gbraid
+        || existing.fbclid || existing.fbc
         || existing.utm_campaign || existing.utm_term) {
         return { recorded: false, reason: 'web_attributed' };
       }
@@ -146,6 +147,11 @@ async function recordCallPpcAttribution({
       lead_source: leadSource,
       lead_source_detail: leadSourceDetail,
       funnel_stage: 'lead',
+      // Call-sourced rows come from PAID tracking numbers (google_ads + facebook),
+      // so they are inherently paid. Calls carry no click ids (gclid/fbclid), so
+      // this flag is how the paid filters count them — without it a Facebook call
+      // would be mis-bucketed as organic (no fbclid/_fbc).
+      is_paid: true,
     }).onConflict('lead_id').ignore();
     logger.info(`[call-attribution] recorded ${leadSource} call lead ${leadId}${campaignId ? ` (campaign ${campaignId})` : ''}`);
     return { recorded: true, campaignId };

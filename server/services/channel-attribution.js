@@ -95,13 +95,15 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {},
 
 // Facebook is the one paid lead_source that also collects ORGANIC social: the lead
 // webhook stamps lead_source='facebook' for any utm_source=facebook, paid or not.
-// Paid Meta clicks carry fbclid/_fbc; re-map the rest to 'facebook_organic' so
-// organic completions don't inflate the paid Meta ratio (matched to Meta ad spend)
-// while staying visible as their own no-spend channel. Mirrors the fbclid/_fbc
-// paid signal the ad-cost allocation path uses. Pure.
+// Paid Meta leads carry a paid signal — a click id (fbclid/_fbc) OR the explicit
+// is_paid flag (call-sourced rows from the paid Facebook tracking number have no
+// click cookies, so is_paid is how they're marked paid). Re-map only the rest to
+// 'facebook_organic' so organic completions don't inflate the paid Meta ratio
+// (matched to Meta ad spend) while staying visible as their own no-spend channel.
+// Mirrors the paid signal the ad-cost allocation path uses. Pure.
 function splitFacebookByPaid(rows = []) {
   return rows.map((r) => (
-    r.lead_source === 'facebook' && !r.fbclid && !r.fbc
+    r.lead_source === 'facebook' && !r.fbclid && !r.fbc && !r.is_paid
       ? { ...r, lead_source: 'facebook_organic' }
       : r
   ));

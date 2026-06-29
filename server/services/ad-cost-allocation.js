@@ -37,16 +37,26 @@ function resolveDb(db) {
   return db || require('../models/db');
 }
 
-// Restrict a query to genuine paid clicks for paidOnly channels (Meta: fbclid/_fbc).
-// LIMITATION (deferred): a paid Meta click whose fbclid/_fbc was stripped (ad-block
-// / consent) but that carries utm_medium=cpc is classified paid at ingestion, yet
-// utm_medium isn't persisted on the row, so it's missed here. Fully separating paid
-// vs organic Facebook needs a paid/organic channel dimension on ad_service_attribution
-// (a focused follow-up). Currently no live impact — Meta Ads ship dark (META_ADS_*
-// unprovisioned), so there is no Facebook spend to mis-allocate yet.
-function applyPaidFilter(q, channel) {
+// Restrict a query to genuine paid leads for paidOnly channels (Meta): a paid
+// click id (fbclid/_fbc) OR the explicit is_paid flag. is_paid is the paid/organic
+// dimension that call-sourced rows carry — phone calls to the paid Facebook
+// tracking number have no click cookies, so without it they'd read as organic.
+// Web-organic Facebook (no fbclid/_fbc and is_paid NULL) is still correctly
+// excluded, so Meta ad spend never smears onto organic-social leads.
+// LIMITATION (deferred): a paid Meta WEB click whose fbclid/_fbc was stripped
+// (ad-block / consent) but that carries utm_medium=cpc is classified paid at
+// ingestion, yet utm_medium isn't persisted on the row and the web path doesn't
+// set is_paid, so it's still missed here. Currently no live impact — Meta Ads ship
+// dark (META_ADS_* unprovisioned), so there is no Facebook spend to mis-allocate.
+// hasIsPaid guards the new column: the all-time backfill migration (000003) calls
+// allocateAdCosts BEFORE migration 000004 adds is_paid, so on a fresh DB the
+// is_paid clause must be omitted until the column exists.
+function applyPaidFilter(q, channel, hasIsPaid) {
   if (channel.paidOnly) {
-    q.where((b) => b.whereNotNull('fbclid').orWhereNotNull('fbc'));
+    q.where((b) => {
+      b.whereNotNull('fbclid').orWhereNotNull('fbc');
+      if (hasIsPaid) b.orWhere('is_paid', true);
+    });
   }
   return q;
 }
@@ -86,6 +96,9 @@ async function allocateAdCosts(db, { sinceDate = null } = {}) {
   if (!(await db.schema.hasTable('ad_service_attribution')) || !(await db.schema.hasTable('ad_performance_daily'))) {
     return { updatedRows: 0, monthsTouched: 0 };
   }
+  // Resolve once: the all-time backfill migration runs this BEFORE the column
+  // exists, so the paid filter must drop the is_paid clause until then.
+  const hasIsPaid = await db.schema.hasColumn('ad_service_attribution', 'is_paid');
 
   // Normalize to the FIRST of the month. The cron passes today-90d, which lands
   // mid-month; without this the spend/lead queries would see only that partial
@@ -112,7 +125,7 @@ async function allocateAdCosts(db, { sinceDate = null } = {}) {
       .where('lead_source', channel.source)
       .whereNotNull('lead_date')
       .modify((q) => { if (since) q.where('lead_date', '>=', since); })
-      .modify((q) => applyPaidFilter(q, channel))
+      .modify((q) => applyPaidFilter(q, channel, hasIsPaid))
       .groupByRaw("to_char(lead_date, 'YYYY-MM')")
       .select(db.raw("to_char(lead_date, 'YYYY-MM') as ym"), db.raw('COUNT(*) as leads'));
 
@@ -125,7 +138,7 @@ async function allocateAdCosts(db, { sinceDate = null } = {}) {
         .where('lead_source', channel.source)
         .where('lead_date', '>=', start)
         .where('lead_date', '<', end)
-        .modify((q) => applyPaidFilter(q, channel))
+        .modify((q) => applyPaidFilter(q, channel, hasIsPaid))
         .update({ ad_cost: perLead, updated_at: new Date() });
       updatedRows += n;
       monthsTouched += 1;

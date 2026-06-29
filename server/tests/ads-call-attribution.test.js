@@ -105,6 +105,36 @@ describe('recordCallPpcAttribution', () => {
       lead_source: 'google_ads',
       lead_source_detail: 'Waves - GBP Search',
       funnel_stage: 'lead',
+      is_paid: true, // call-sourced rows are inherently paid (paid tracking number)
+    });
+  });
+
+  test('records a Facebook paid call with lead_source=facebook and a null campaign (Meta has no call→campaign reporting)', async () => {
+    firstByTable.ad_service_attribution = undefined; // no existing row for this lead
+    firstByTable.ad_campaigns = undefined; // no campaign lookup for Facebook calls
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C9',
+      leadId: 'L9',
+      leadSource: 'facebook',
+      leadSourceDetail: 'Facebook Ads — Pest (call-extension)',
+      serviceInterest: 'Lawn Care',
+      leadDate: new Date('2026-06-28T18:00:00Z'),
+    });
+
+    expect(res).toEqual({ recorded: true, campaignId: null });
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0].row).toMatchObject({
+      campaign_id: null,
+      customer_id: 'C9',
+      lead_id: 'L9',
+      lead_source: 'facebook',
+      lead_source_detail: 'Facebook Ads — Pest (call-extension)',
+      service_line: 'lawn',
+      funnel_stage: 'lead',
+      // Facebook calls carry no fbclid/_fbc, so is_paid is what keeps them in the
+      // PAID Meta bucket (channel-attribution / ad-cost-allocation).
+      is_paid: true,
     });
   });
 
@@ -191,6 +221,31 @@ describe('recordCallPpcAttribution', () => {
 
     const res = await CallAttribution.recordCallPpcAttribution({
       customerId: 'C1', leadId: 'L1', leadSource: 'google_ads', googleCampaignId: '22594274874', leadSourceDetail: 'Call Campaign',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'web_attributed' });
+    expect(updateCalls).toHaveLength(0);
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  test('leaves a Meta web first-touch row (fbclid) untouched when a Facebook call arrives', async () => {
+    // A facebook WEB lead: same source, no campaign_id, but it has an fbclid.
+    firstByTable.ad_service_attribution = { id: 'fbweb', lead_source: 'facebook', fbclid: 'fb.click.1', campaign_id: null, lead_source_detail: 'web detail', service_line: 'lawn' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', leadSource: 'facebook', leadSourceDetail: 'Facebook Ads — call-extension',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'web_attributed' });
+    expect(updateCalls).toHaveLength(0);
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  test('leaves a Meta web first-touch row (_fbc cookie, no fbclid) untouched too', async () => {
+    firstByTable.ad_service_attribution = { id: 'fbweb2', lead_source: 'facebook', fbclid: null, fbc: 'fb.1.1700000000.abc', campaign_id: null, lead_source_detail: 'web detail' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', leadSource: 'facebook', leadSourceDetail: 'Facebook Ads — call-extension',
     });
 
     expect(res).toEqual({ recorded: false, reason: 'web_attributed' });

@@ -433,7 +433,7 @@ async function fetchChannelAttribution(since, months = 1) {
   const completedRaw = await db('ad_service_attribution')
     .where('lead_date', '>=', since)
     .where('funnel_stage', 'completed')
-    .select('lead_source', 'completed_revenue', 'gross_profit', 'projected_ltv_12mo', 'is_recurring', 'customer_id', 'fbclid', 'fbc');
+    .select('lead_source', 'completed_revenue', 'gross_profit', 'projected_ltv_12mo', 'is_recurring', 'customer_id', 'fbclid', 'fbc', 'is_paid');
   // Split organic Facebook off the paid Meta bucket so organic-social completions
   // don't inflate the paid ratio (organic facebook still shows as its own channel).
   const completed = splitFacebookByPaid(completedRaw);
