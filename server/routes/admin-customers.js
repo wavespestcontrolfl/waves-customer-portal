@@ -1332,6 +1332,74 @@ router.get('/:id/cards', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
+// Lazily backfills a primary property for customers created after the migration.
+router.get('/:id/properties', async (req, res, next) => {
+  try {
+    const customerProperties = require('../services/customer-properties');
+    await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
+    const properties = await customerProperties.listProperties(req.params.id);
+    res.json({ properties });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/customers/:id/properties — add a second (non-primary) property.
+router.post('/:id/properties', requireAdmin, async (req, res, next) => {
+  try {
+    const customerProperties = require('../services/customer-properties');
+    const { address_line1, address_line2, city, state, zip, occupancy_type, label } = req.body || {};
+    if (!String(address_line1 || '').trim()) {
+      return res.status(400).json({ error: 'address_line1 is required' });
+    }
+    // Require city + ZIP too: the full-address dedup key includes them, so a
+    // partial address (street only) would not match the existing primary's key
+    // and could slip a duplicate past the 409 / unique index.
+    if (!String(city || '').trim() || !String(zip || '').trim()) {
+      return res.status(400).json({ error: 'city and zip are required' });
+    }
+    // Ensure the primary exists first, so the customer's current address is
+    // represented before we add a secondary. This also makes recordCallProperty's
+    // street-dedup reject a POST of the customer's own (primary) address (409)
+    // instead of creating a lone non-primary that a later read would duplicate.
+    await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
+    const result = await customerProperties.recordCallProperty({
+      customerId: req.params.id,
+      address_line1, address_line2, city, state, zip,
+      occupancyType: occupancy_type,
+      label,
+      source: 'manual',
+    });
+    if (!result.created) {
+      return res.status(409).json({ error: 'A property with that street already exists for this customer' });
+    }
+    const properties = await customerProperties.listProperties(req.params.id);
+    return res.status(201).json({ propertyId: result.propertyId, properties });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/customers/:id/properties/:propertyId — edit occupancy/label.
+router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next) => {
+  try {
+    const { OCCUPANCY_TYPES, listProperties } = require('../services/customer-properties');
+    const updates = {};
+    if (req.body && req.body.occupancy_type !== undefined) {
+      if (!OCCUPANCY_TYPES.includes(req.body.occupancy_type)) {
+        return res.status(400).json({ error: 'invalid occupancy_type' });
+      }
+      updates.occupancy_type = req.body.occupancy_type;
+    }
+    if (req.body && req.body.label !== undefined) updates.label = req.body.label || null;
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'nothing to update' });
+    updates.updated_at = new Date();
+    const n = await db('customer_properties')
+      .where({ id: req.params.propertyId, customer_id: req.params.id })
+      .update(updates);
+    if (!n) return res.status(404).json({ error: 'property not found' });
+    const properties = await listProperties(req.params.id);
+    return res.json({ properties });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/customers/:id/timeline — unified customer timeline
 router.get('/:id/timeline', async (req, res, next) => {
   try {

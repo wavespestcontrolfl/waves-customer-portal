@@ -1,4 +1,4 @@
-const { deriveCallReviewBridge, streetCompareKey } = require('../services/call-triage-flags');
+const { deriveCallReviewBridge, detectRentalSignal, streetCompareKey } = require('../services/call-triage-flags');
 
 describe('streetCompareKey — suffix-insensitive street key', () => {
   test('St vs Street (and case/spacing) collapse together', () => {
@@ -40,6 +40,21 @@ describe('deriveCallReviewBridge — V1/V2 location guard (F3/F4)', () => {
 });
 
 const NORMALIZED = { street_line_1: '7620 Charleston Ln', city: 'Sarasota', state: 'FL', postal_code: '34243' };
+
+describe('detectRentalSignal (shared by bridge + property writer, works in both modes)', () => {
+  test('tenant / property_manager caller relationship', () => {
+    expect(detectRentalSignal({ callerRelationship: 'tenant' })).toBe(true);
+    expect(detectRentalSignal({ callerRelationship: 'property_manager' })).toBe(true);
+    expect(detectRentalSignal({ callerRelationship: 'owner' })).toBe(false);
+  });
+  test('owner-about-tenants text signal (Raymond call 1)', () => {
+    expect(detectRentalSignal({ extracted: { pain_points: 'my tenants are having an ant problem' }, callerRelationship: 'owner' })).toBe(true);
+  });
+  test('owner-occupied with no rental language', () => {
+    expect(detectRentalSignal({ extracted: { call_summary: 'wants maintenance at my house' }, callerRelationship: 'owner' })).toBe(false);
+    expect(detectRentalSignal()).toBe(false);
+  });
+});
 
 describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
   test('corrected → adopts Google address, no confirmation needed', () => {

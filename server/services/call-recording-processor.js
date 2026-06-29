@@ -40,7 +40,7 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, ADVISORY_TRIAGE_FLAGS, streetCompareKey } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, detectRentalSignal, ADVISORY_TRIAGE_FLAGS, streetCompareKey } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { validateAddress, buildAddressLines } = require('./address-validation');
@@ -2083,19 +2083,34 @@ const CallRecordingProcessor = {
     // vs. their own home. Skips brand-new customers (their address IS this call's).
     if (customerId && !createdCustomerFromCall && extracted.address_line1) {
       try {
-        const existingCust = await db('customers').where({ id: customerId }).select('address_line1', 'city', 'zip').first();
+        // Unit/line2 isn't in the legacy extraction or flatView's flat map, so
+        // pull it from the V2 service_address when present — otherwise Unit A and
+        // Unit B at one building collapse to the same address key.
+        const callUnit = extracted.address_line2 || v2Result?.extraction?.property?.service_address?.street_line_2 || null;
+        // When the multi-property table is live, an address already recorded there
+        // (the primary OR a prior secondary) is NOT a new second address — don't
+        // re-flag it, or the office is asked to confirm a place we already know.
+        let knownProperty = false;
+        if (process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
+          const { addressKey } = require('./customer-properties');
+          const callKey = addressKey({ address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip });
+          const props = await db('customer_properties').where({ customer_id: customerId, active: true }).select('address_line1', 'address_line2', 'city', 'zip');
+          knownProperty = !!callKey && props.some((p) => addressKey(p) === callKey);
+        }
+        const existingCust = await db('customers').where({ id: customerId }).select('address_line1', 'address_line2', 'city', 'zip').first();
         // Suffix-insensitive street compare so "123 Main St" vs "123 Main Street"
         // (a benign normalization) isn't treated as a different property.
         const onFileStreet = streetCompareKey(existingCust?.address_line1);
         const fromCallStreet = streetCompareKey(extracted.address_line1);
         // Compare the full service LOCATION, not just the street: a different
-        // street OR (same street but a different city/ZIP, both present) is a
-        // different property. "100 Main St, Bradenton" != "100 Main St, Sarasota".
+        // street, UNIT, city, or ZIP (both present) is a different property —
+        // "100 Main St, Bradenton" != "100 Main St, Sarasota", and Unit A != Unit B.
         const bothPresentAndDiffer = (a, b) => !!normStreet(a) && !!normStreet(b) && normStreet(a) !== normStreet(b);
         const locationDiffers = (onFileStreet !== fromCallStreet)
+          || bothPresentAndDiffer(existingCust?.address_line2, callUnit)
           || bothPresentAndDiffer(existingCust?.city, extracted.city)
           || bothPresentAndDiffer(existingCust?.zip, extracted.zip);
-        if (onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
+        if (!knownProperty && onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
           bridgeNeedsConfirmation.push('second_service_address');
           logger.info(`[call-proc-bridge] ${callSid} service address differs from customer record (possible second property)`);
           // This flag is appended AFTER the bridge's triage_items loop above, so
@@ -2117,6 +2132,45 @@ const CallRecordingProcessor = {
         }
       } catch (e) {
         logger.warn(`[call-proc-bridge] second-address check skipped for ${maskSid(callSid)}: ${e.message}`);
+      }
+    }
+
+    // Phase 1 multi-property persistence (additive, gated, non-blocking). Ensure
+    // a primary exists, then record THIS call's service address. recordCallProperty
+    // dedups on the full address (so a call about the existing primary is a no-op),
+    // makes the row primary + mirrors to customers.address_* when the customer has
+    // no primary yet (an addressless customer's first address — captured here even
+    // when no second_service_address was raised), and otherwise stores a second
+    // property. Never overwrites an existing primary mirror.
+    if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId && extracted.address_line1) {
+      try {
+        const customerProperties = require('./customer-properties');
+        // propertyId is null only when the customer is addressless AND has no
+        // primary yet — i.e. this call carries their FIRST service address (the
+        // !customerId upsert above is skipped when the call is pre-linked, so
+        // ensurePrimaryProperty has nothing to backfill from).
+        const ensured = await customerProperties.ensurePrimaryProperty(customerId);
+        const isFirstAddress = !ensured.propertyId;
+        if (bridgeNeedsConfirmation.includes('second_service_address') || isFirstAddress) {
+          // Rental signal — works in BOTH shadow and enforce (DRIVES_ROUTING) modes:
+          // the shadow bridge may not have run, so re-derive from the V2 extraction.
+          const isRental = bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
+            || detectRentalSignal({ extracted, callerRelationship: v2Result?.extraction?.caller?.relationship_to_property });
+          // Unit/line2 from the V2 service_address (legacy extraction + flatView drop it).
+          const callUnit = extracted.address_line2 || v2Result?.extraction?.property?.service_address?.street_line_2 || null;
+          await customerProperties.recordCallProperty({
+            customerId,
+            address_line1: extracted.address_line1,
+            address_line2: callUnit,
+            city: extracted.city,
+            state: extracted.state,
+            zip: extracted.zip,
+            occupancyType: isRental ? 'rental_investment' : 'unknown',
+            source: 'call_pipeline',
+          });
+        }
+      } catch (e) {
+        logger.warn(`[customer-properties] call-pipeline write skipped for ${maskSid(callSid)}: ${e.message}`);
       }
     }
 
