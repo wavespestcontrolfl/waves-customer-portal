@@ -204,9 +204,14 @@ export default function PublicBookingPage() {
       if (!res.ok) return;
       const data = await res.json();
       setAddressMayMatchCustomer(!!data.possible_match);
-      if (data.customer) applyCustomer(data.customer);
+      // Link a recognized returning customer to their account as early as
+      // step 1 so a fast Confirm doesn't race the step-3 phone lookup and trip
+      // the phone-on-file guard. The address lookup intentionally returns only
+      // the opaque id (no PII), so don't run applyCustomer here — contact
+      // fields are filled later by the phone lookup, which does return them.
+      if (data.customer?.id) setExistingCustomerId(data.customer.id);
     } catch { /* best-effort */ }
-  }, [applyCustomer]);
+  }, []);
 
   // Top of the booking funnel — fires once on mount.
   useEffect(() => {

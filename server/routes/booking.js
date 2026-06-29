@@ -287,29 +287,33 @@ router.get('/customer-lookup', async (req, res, next) => {
         });
 
       customer = await query.select(phoneCustomerFields).first();
-      if (customer && address && !addressMatchesCustomer(customer, address, zip)) {
+      // SECURITY: never disclose a customer's PII (name/email/address) on a
+      // phone number alone — that lets anyone enumerate identities from a
+      // number they merely possess. Require a matching address before
+      // disclosing. The booking funnel always collects the address (step 1)
+      // before the phone step, so legitimate returning-customer autofill is
+      // unaffected; only the address-less enumeration path is closed.
+      if (customer && !(address && addressMatchesCustomer(customer, address, zip))) {
         customer = null;
       }
       return res.json({ customer: customer || null });
     }
 
     if (address) {
-      customer = await findUniqueCustomerByAddress(address, city, zip);
-      if (customer) {
-        return res.json({
-          customer: {
-            id: customer.id,
-            first_name: customer.first_name,
-            last_name: customer.last_name,
-            address_line1: customer.address_line1,
-            city: customer.city,
-            state: customer.state,
-            zip: customer.zip,
-          },
-          possible_match: true,
-        });
-      }
-      return res.json({ customer: null, possible_match: false });
+      // SECURITY: an unauthenticated caller must not be able to turn a street
+      // address into the resident's PII (name / email / home address) — a
+      // doxxing vector. Disclose ONLY the opaque customer id + a match boolean,
+      // never personal details. The id is required so a recognized returning
+      // customer is linked to their account at step 1; without it the account
+      // link would depend on the racy step-3 phone lookup and a fast Confirm
+      // would hit the phone-on-file guard (409) on a valid booking. Tightening
+      // the id->booking trust (book-on-behalf via a guessed address) is a
+      // separate, pre-existing hardening item, not in scope here.
+      const match = await findUniqueCustomerByAddress(address, city, zip);
+      return res.json({
+        customer: match ? { id: match.id } : null,
+        possible_match: !!match,
+      });
     }
 
     res.json({ customer: null });
