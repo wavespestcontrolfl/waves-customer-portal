@@ -3891,6 +3891,10 @@ export default function EstimateToolViewV2({
   const provisionalState = computeProvisionalState(
     enrichedProfile?.propertyDataQuality
   );
+  // Present-mode trust gates: a custom-quote estimate has no firm price to show,
+  // and an unsaved one hasn't been through the server-authoritative recompute.
+  const presentQuoteRequired = !!estimate && estimateRequiresQuote(estimate);
+  const presentUnsaved = !savedId;
   const generateBusy = generating || saving || sending;
 
   // ═══════════════════════════════════════════════════════════════
@@ -3937,9 +3941,9 @@ export default function EstimateToolViewV2({
                   Exit
                 </Button>
               </div>
-              {/* Operator-facing: if the price was server-recomputed on save, the
-                  in-memory preview can be stale — warn before quoting it aloud. */}
-              {priceRecomputeNotice && (
+              {/* Operator-facing warning strip — reasons the shown price may not be
+                  firm. Suppressed for custom quotes, which show no firm price at all. */}
+              {!presentQuoteRequired && priceRecomputeNotice && (
                 <div className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-12 text-ink-secondary">
                   Final price was server-recomputed on save
                   {priceRecomputeNotice.serverMonthly != null && (
@@ -3951,31 +3955,71 @@ export default function EstimateToolViewV2({
                   . Re-generate before quoting this price.
                 </div>
               )}
+              {!presentQuoteRequired && provisionalState.provisional && (
+                <div className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-12 text-ink-secondary">
+                  Provisional — based on unverified property data ({provisionalSummary(provisionalState)}). Price may change after field verification.
+                </div>
+              )}
+              {!presentQuoteRequired && presentUnsaved && (
+                <div className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-12 text-ink-secondary">
+                  Unsaved preview — save the estimate to lock the server-authoritative price before quoting it as final.
+                </div>
+              )}
             </div>
             <div className="mx-auto max-w-[760px] px-3 py-5 md:px-5">
-              <EstimateErrorBoundary key={JSON.stringify(estimate).slice(0, 100)}>
-                <CustomerEstimatePreviewV2
-                  E={E}
-                  R={R}
-                  form={form}
-                  satelliteUrl={satelliteData?.imageUrl || null}
-                  presentMode
-                  onSelectPestFreq={(apps) => {
-                    // Ignore tier taps while a recalc is in flight: doGenerate
-                    // early-returns on `generating`, but the form mutation below
-                    // would still apply, pairing the in-flight (old-tier) estimate
-                    // with the new cadence and showing the customer mismatched
-                    // pricing. Wait for the current generate to settle first.
-                    if (generating) return;
-                    // Update cadence + regenerate WITHOUT routing through set(),
-                    // which nulls `estimate` and would unmount this overlay
-                    // (presentMode && E) mid-presentation. doGenerate replaces the
-                    // estimate in place when it resolves.
-                    setForm((f) => ({ ...f, pestFreq: String(apps) }));
-                    doGenerate({ pestFreq: apps });
-                  }}
-                />
-              </EstimateErrorBoundary>
+              {presentQuoteRequired ? (
+                // Custom-quote estimate: no firm price to present (the saved/public
+                // flow zeroes totals and the link won't honor a partial price).
+                <div className="customer-preview-scope rounded-[14px] border border-[#E7E2D7] bg-white p-8 text-center">
+                  <div className="customer-preview-serif text-[28px] leading-tight text-[#1B2C5B] mb-3">
+                    This is a custom quote
+                  </div>
+                  <div className="mx-auto max-w-[460px] text-15 leading-relaxed text-[#6B7280]">
+                    The services selected need an on-site inspection before we can set a firm
+                    price, so there's no final number to show here yet. We'll prepare a detailed
+                    quote and send it over.
+                  </div>
+                </div>
+              ) : (
+                <div className="relative">
+                  {/* Mask the preview while regenerating so the customer never sees the
+                      newly-selected cadence paired with the previous tier's price. */}
+                  {generating && (
+                    <div className="absolute inset-0 z-10 flex items-start justify-center bg-[#FAF8F3]/70 pt-12 backdrop-blur-[1px]">
+                      <span className="rounded-full border border-[#E7E2D7] bg-white px-4 py-2 text-13 font-medium text-[#1B2C5B] shadow-sm">
+                        Updating pricing…
+                      </span>
+                    </div>
+                  )}
+                  <EstimateErrorBoundary key={JSON.stringify(estimate).slice(0, 100)}>
+                    <CustomerEstimatePreviewV2
+                      E={E}
+                      R={R}
+                      form={form}
+                      satelliteUrl={satelliteData?.imageUrl || null}
+                      presentMode
+                      onSelectPestFreq={(apps) => {
+                        // Ignore tier taps while a recalc is in flight: doGenerate
+                        // early-returns on `generating`, but the form mutation below
+                        // would still apply, pairing the in-flight (old-tier) estimate
+                        // with the new cadence and showing the customer mismatched
+                        // pricing. Wait for the current generate to settle first.
+                        if (generating) return;
+                        // Update cadence + regenerate WITHOUT routing through set(),
+                        // which nulls `estimate` and would unmount this overlay
+                        // (presentMode && E) mid-presentation. doGenerate replaces the
+                        // estimate in place when it resolves. Still mirror set()'s
+                        // saved-state reset, since changing the cadence invalidates the
+                        // saved record (keeps the "unsaved preview" warning accurate).
+                        setForm((f) => ({ ...f, pestFreq: String(apps) }));
+                        setSavedId(null);
+                        setSavedViewUrl(null);
+                        doGenerate({ pestFreq: apps });
+                      }}
+                    />
+                  </EstimateErrorBoundary>
+                </div>
+              )}
             </div>
           </div>
         )}
