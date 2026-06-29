@@ -1712,7 +1712,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // only link an already-accepted estimate — an open quote is linked once its
     // acceptance lands, keeping source_estimate_id pointed only at recorded wins.
     const acceptEstimateOnBook = !!(linkedEstimate && linkedEstimate.status !== 'accepted');
-    const insertLinkId = acceptEstimateOnBook ? null : linkedEstimateId;
+    // An UNOWNED quote (customer_id NULL) must be attached to this customer
+    // post-commit before it can carry source_estimate_id — otherwise a lost
+    // attach race would leave the appointment linked to a quote that now belongs
+    // to someone else. Defer linking for it too (covers the already-accepted
+    // unowned case, which acceptEstimateOnBook does not).
+    const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
+    const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
     const zone = getZone(customer?.city, customer?.zip);
     let duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
 
@@ -2037,7 +2043,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // concurrent attach can't re-home it. Covers both the accept-on-book and the
     // already-accepted link path.
     let estimateAttachRaceLost = false;
-    if (linkedEstimate && !linkedEstimate.customer_id) {
+    if (estimateNeedsAttach) {
       try {
         const attached = await db('estimates')
           .where({ id: linkedEstimateId })
@@ -2094,6 +2100,21 @@ router.post('/', requireAdmin, async (req, res, next) => {
       } catch (err) {
         logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
         bookingWarnings.push(`Appointment booked, but the estimate could not be marked accepted automatically (${err.message}). Mark it accepted from the Estimates page to record the win.`);
+      }
+    }
+
+    // An already-accepted but unowned estimate skips the accept-on-book block, so
+    // its source_estimate_id was deferred out of the booking txn (insertLinkId
+    // null). Link the rows now that the customer_id attach has won — never before,
+    // so a lost race can't point the appointment at another customer's quote.
+    if (estimateNeedsAttach && !acceptEstimateOnBook && !estimateAttachRaceLost
+        && cols.source_estimate_id && createdAppointments.length) {
+      try {
+        await db('scheduled_services')
+          .whereIn('id', createdAppointments.map((a) => a.id))
+          .update({ source_estimate_id: linkedEstimateId });
+      } catch (e) {
+        logger.warn(`[schedule] could not link appointment to attached estimate ${linkedEstimateId}: ${e.message}`);
       }
     }
 
