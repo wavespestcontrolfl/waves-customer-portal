@@ -1569,6 +1569,12 @@ function EstimateToolView() {
       enrichedProfile ||
       (form.svcBedbug && (bedBugOnlyManual || hasManualPropertyDimensions));
     const hasServerOnlyService = !!form.svcWdo;
+    // Commercial estimates are server-priced: the cost-buildup commercial
+    // pricers (lawn / tree / pest) live ONLY in the server engine. Force
+    // commercial through the server calculator whenever we have a lookup or
+    // manual dimensions, so a commercial estimate never falls back to the
+    // deprecated client engine (which would persist a $0 manual quote).
+    const canUseServerForCommercial = formIsCommercial && (enrichedProfile || hasManualPropertyDimensions);
 
     if (form.svcBedbug && hasLawnPricedService && !enrichedProfile && !hasManualLawnDimensions) {
       alert("Enter lot size or run Property Lookup before generating a bed bug estimate with lawn services.");
@@ -1580,9 +1586,16 @@ function EstimateToolView() {
       return;
     }
 
+    // Without dimensions or a lookup the server can't size a commercial job —
+    // block (with guidance) rather than fall through to the client engine.
+    if (formIsCommercial && !canUseServerForCommercial) {
+      alert("Enter home or lot sq ft, or run Property Lookup, to price a commercial estimate.");
+      return;
+    }
+
     // Bed bug pricing is server-only. Without lookup data, keep the legacy
     // dimension guard for any non-bed-bug services still selected.
-    if (enrichedProfile || canUseServerForBedBug || hasServerOnlyService) {
+    if (enrichedProfile || canUseServerForBedBug || hasServerOnlyService || canUseServerForCommercial) {
       try {
         // Don't overwrite lookup status — keep property specs visible
 

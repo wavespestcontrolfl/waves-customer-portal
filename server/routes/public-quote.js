@@ -1096,8 +1096,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
 
     // has_setup_fee flags the $99 WaveGuard initial fee (recurring pest only).
-    // UI notes this is waivable with annual prepay.
-    const hasSetupFee = !!services.pest;
+    // UI notes this is waivable with annual prepay. Commercial accounts are
+    // non-members with NO WaveGuard setup fee (owner directive), so suppress it
+    // even though commercial pest sets services.pest.
+    const hasSetupFee = !!services.pest && !commercialDetected;
 
     // Confidence flag: when satellite enrichment came back empty (new construction,
     // missing imagery, AI couldn't classify), widen the customer-facing range from
