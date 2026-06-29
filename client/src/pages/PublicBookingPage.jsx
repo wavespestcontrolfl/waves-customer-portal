@@ -278,6 +278,15 @@ export default function PublicBookingPage() {
     } catch { /* never block the funnel */ }
   };
 
+  // Keep the captured intent in sync with the booking context. The blur handlers
+  // only fire on contact edits, so a visitor who already entered a phone, then
+  // changed slot / service / address and abandoned without re-blurring would
+  // otherwise leave a STALE intent (recovery would name the wrong appointment).
+  useEffect(() => {
+    if ((contact.phone || '').replace(/\D/g, '').length === 10 && selectedSlot) captureBookingIntent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSlot?.start_time, selectedDate, service.id, address.line1]);
+
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
     ? null
     : RECURRING_SERVICE_PATTERNS[service.id] || null;
