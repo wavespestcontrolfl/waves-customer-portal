@@ -2178,6 +2178,14 @@ export default function EstimateViewPage() {
     () => (Array.isArray(data?.pricing?.serviceCadenceCombos) ? data.pricing.serviceCadenceCombos : []),
     [data?.pricing],
   );
+  // The combo's selection keys are the only INDEPENDENTLY selectable sections
+  // (pest + lawn/tree). Any other recurring section (e.g. mosquito, which isn't
+  // a combo axis) must mirror the pest cadence and stay locked — otherwise the
+  // customer could change it but accept would ignore it (not in serviceCadences).
+  const comboAxisKeys = useMemo(
+    () => (serviceCadenceCombos.length ? new Set(Object.keys(serviceCadenceCombos[0].selection || {})) : null),
+    [serviceCadenceCombos],
+  );
   const selectedCombo = useMemo(
     () => selectedServiceCadenceCombo(data?.pricing, services, selected),
     [data?.pricing, services, selected],
@@ -2396,13 +2404,17 @@ export default function EstimateViewPage() {
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
-    // With per-service combos, each section's cadence is INDEPENDENT — only the
-    // changed section moves (otherwise sections that happen to share a tier key,
-    // e.g. lawn + tree both having "standard", would wrongly move together).
-    // Legacy single-cadence bundles keep the mirror behavior (all sections that
-    // share the chosen pest-cadence key move as one).
-    const affectedSections = serviceCadenceCombos.length
-      ? services.filter((section) => section.key === sectionKey)
+    // With per-service combos: combo-axis sections (pest + lawn/tree) are
+    // INDEPENDENT — only the changed section moves (so sections sharing a tier
+    // key, e.g. lawn + tree both having "standard", don't move together). But
+    // NON-axis recurring sections (e.g. mosquito) still mirror the pest cadence,
+    // so a pest change carries them along (they're locked from direct change).
+    // Legacy bundles (no combos) keep the all-share-the-key mirror behavior.
+    const affectedSections = comboAxisKeys
+      ? services.filter((section) => (
+        section.key === sectionKey
+        || (!comboAxisKeys.has(section.key) && section.frequencies?.some((item) => item.key === nextFrequency))
+      ))
       : services.filter((section) => (
         section.key === sectionKey
         || section.frequencies?.some((item) => item.key === nextFrequency)
@@ -2426,7 +2438,7 @@ export default function EstimateViewPage() {
     setError(null);
     setCtaPhase('configure');
     setSlotsRefreshSignal((v) => v + 1);
-  }, [services, serviceCadenceCombos]);
+  }, [services, comboAxisKeys]);
 
   const performAccept = useCallback(async () => {
     setCtaPhase('submitting');
@@ -2644,6 +2656,13 @@ export default function EstimateViewPage() {
       sameDayTreatmentTotal: selectedCombo.sameDayTreatmentTotal ?? combinedBaseFrequency?.sameDayTreatmentTotal,
     }
     : combinedBaseFrequency;
+  // A recurring section that isn't a combo axis (e.g. mosquito when only
+  // lawn/tree are independently selectable) mirrors the pest cadence and is
+  // locked from direct change — its slider would otherwise let the customer
+  // pick a cadence that accept ignores (not in serviceCadences/the combo).
+  const isLockedMirrorSection = (section) => (
+    !!comboAxisKeys && section?.isRecurring && section.key !== 'pest_control' && !comboAxisKeys.has(section.key)
+  );
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
@@ -2688,7 +2707,7 @@ export default function EstimateViewPage() {
                 selectedAddOns={selectedAddOns[section.key] || new Set()}
                 onFrequencyChange={handleFrequencyChange}
                 onAddOnToggle={onToggleAddOn}
-                disabled={cardsDisabled}
+                disabled={cardsDisabled || isLockedMirrorSection(section)}
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}
                 afterPrice={afterPrice}
