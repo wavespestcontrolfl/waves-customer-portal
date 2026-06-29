@@ -11201,6 +11201,15 @@ async function buildPricingBundle(estimate) {
       oneTimeBreakdown: storedOneTimeBreakdown,
       source: 'v1_engine_shape',
     }), estimate, estData);
+    // Per-service cadence combinations (bundles): lets the customer pick each
+    // service's cadence independently. Each combo is priced through shapeFromV1
+    // (same path as the default), so the view can show the authoritative total
+    // for any selection and accept resolves the exact same number. Null for
+    // pest-only / single-tier bundles (the pest ladder already covers those).
+    const serviceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: pestOnlyChoice });
+    if (serviceCadenceCombos && serviceCadenceCombos.length) {
+      payload.serviceCadenceCombos = serviceCadenceCombos;
+    }
     setEstimatePricingCache(estimate, payload);
     return payload;
   }
