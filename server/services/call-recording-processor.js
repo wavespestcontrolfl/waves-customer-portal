@@ -1211,6 +1211,10 @@ IMPORTANT — customer name rules:
 - If only one name is clearly stated, put it in first_name and leave last_name null.
 - Do not invent a last name from caller ID, address, email, or context.
 
+IMPORTANT — spelled-out names and emails are authoritative over how they sounded:
+- When the caller spells a name or email letter-by-letter, or with phonetic markers ("B as in boy", "V as in Victor", "N as in Nancy"), the SPELLED letters are the source of truth — use them, not the word as it was transcribed phonetically. Callers spell precisely because the spoken form is easy to mishear (e.g. the caller says "Bavona" but then spells B-I-V-O-N-A, so the correct value is "Bivona", and the email is raymond.bivona@gmail.com — NOT bavona).
+- When an email is described relative to the name (e.g. "first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
+
 IMPORTANT — customer contact rules:
 - Do not invent email addresses. Only return email when the caller clearly says or spells the complete address.
 - If the transcript contains an uncertain, partial, or malformed email, return null.
