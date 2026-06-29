@@ -38,6 +38,14 @@ function isRelayAttached() {
   return attached;
 }
 
+// DoS backstops for the authenticated ws (defense-in-depth should the shared
+// key ever leak): cap inbound frame size, drop a session that has gone fully
+// silent too long, and hard-cap a single call's duration. ConversationRelay
+// frames are tiny JSON, so these never bite a real call.
+const WS_MAX_PAYLOAD_BYTES = 64 * 1024;
+const WS_IDLE_MS = 2 * 60 * 1000;        // no inbound frame for 2 min → drop
+const WS_MAX_SESSION_MS = 15 * 60 * 1000; // hard cap on a single call
+
 // Timing-safe check of the shared-secret `key` query param against
 // VOICE_RELAY_WS_SECRET. False when either side is empty or the lengths differ.
 function isValidWsKey(provided) {
@@ -80,7 +88,7 @@ function attachVoiceRelay(httpServer) {
     return null;
   }
 
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
 
   // Path-scoped upgrade routing. Returning without touching `socket` for
   // non-matching paths is what lets Socket.io's own 'upgrade' listener handle
@@ -108,6 +116,36 @@ function attachVoiceRelay(httpServer) {
   wss.on('connection', (ws) => {
     let convo = null;
 
+    // Idle + max-duration backstops. All cleanup funnels through teardown()
+    // (idempotent) so a leaked-key client can't pin an open socket — and keep
+    // the model loop alive — indefinitely. The idle timer resets on every
+    // inbound frame; ws.terminate() re-fires 'close', which the guard absorbs.
+    let idleTimer = null;
+    let sessionTimer = null;
+    let torn = false;
+    const teardown = (reason) => {
+      if (torn) return;
+      torn = true;
+      clearTimeout(idleTimer);
+      clearTimeout(sessionTimer);
+      if (convo) convo.end(reason).catch(() => {});
+      try { ws.terminate(); } catch { /* already closed */ }
+    };
+    const bumpIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        logger.warn('[voice-relay] idle timeout — terminating ws');
+        teardown('ws_idle_timeout');
+      }, WS_IDLE_MS);
+      idleTimer.unref?.(); // never let the backstop keep the process alive
+    };
+    sessionTimer = setTimeout(() => {
+      logger.warn('[voice-relay] max session duration — terminating ws');
+      teardown('ws_max_session');
+    }, WS_MAX_SESSION_MS);
+    sessionTimer.unref?.();
+    bumpIdle();
+
     const send = (text) => {
       if (ws.readyState === ws.OPEN) {
         try {
@@ -131,6 +169,7 @@ function attachVoiceRelay(httpServer) {
     };
 
     ws.on('message', (raw) => {
+      bumpIdle();
       let msg;
       try {
         msg = JSON.parse(raw.toString());
@@ -179,9 +218,7 @@ function attachVoiceRelay(httpServer) {
       }
     });
 
-    ws.on('close', () => {
-      if (convo) convo.end('ws_close').catch(() => {});
-    });
+    ws.on('close', () => teardown('ws_close'));
     ws.on('error', (e) => {
       logger.error(`[voice-relay] ws error: ${e.message}`);
     });

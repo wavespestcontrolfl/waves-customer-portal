@@ -581,34 +581,48 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // in place so we don't double-count leads for a single conversion.
     let lead;
     if (leadId) {
-      // Don't overwrite a lead_source_id set at property-lookup time — only fill
-      // it in if the row is still missing one (manual leadId reuse, legacy rows).
-      const updateFields = {
-        first_name: contactFirstName,
-        last_name: contactLastName,
-        email: contactEmail,
-        phone: contactPhone,
-        address: quoteFullAddress,
-        city: quoteCity || null,
-        zip: quoteZip || null,
-        service_interest: serviceInterest,
-        monthly_value: leadMonthlyValue,
-        extracted_data: extractedData,
-        updated_at: new Date(),
-      };
-      if (gclid) updateFields.gclid = gclid;
-      if (wbraid) updateFields.wbraid = wbraid;
-      if (gbraid) updateFields.gbraid = gbraid;
-      if (fbclid) updateFields.fbclid = fbclid;
-      if (fbc) updateFields.fbc = fbc;
-      if (fbp) updateFields.fbp = fbp;
-      const rows = await db('leads')
-        .where({ id: leadId })
-        .update(updateFields)
-        .returning(['id', 'lead_source_id']);
-      lead = rows[0];
-      if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
-        await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
+      // OWNERSHIP: leadId is a client-supplied id with no auth token behind it.
+      // Only claim/overwrite a lead row in place when it's plausibly THIS
+      // visitor's property-lookup row — the row has no email yet, or its email
+      // matches the email they just typed (the same leadId+email guard /upsell
+      // uses). Otherwise ignore the id and fall through to creating a fresh lead,
+      // so a guessed/known id can't be used to overwrite another person's lead
+      // contact + ad attribution. /calculate already requires contactEmail
+      // above, so a legitimate visitor's row is always claimable here.
+      const existingLead = await db('leads').where({ id: leadId }).first();
+      const existingEmail = existingLead?.email ? String(existingLead.email).toLowerCase().trim() : '';
+      const claimable = !!existingLead
+        && (!existingEmail || existingEmail === String(contactEmail).toLowerCase().trim());
+      if (claimable) {
+        // Don't overwrite a lead_source_id set at property-lookup time — only fill
+        // it in if the row is still missing one (manual leadId reuse, legacy rows).
+        const updateFields = {
+          first_name: contactFirstName,
+          last_name: contactLastName,
+          email: contactEmail,
+          phone: contactPhone,
+          address: quoteFullAddress,
+          city: quoteCity || null,
+          zip: quoteZip || null,
+          service_interest: serviceInterest,
+          monthly_value: leadMonthlyValue,
+          extracted_data: extractedData,
+          updated_at: new Date(),
+        };
+        if (gclid) updateFields.gclid = gclid;
+        if (wbraid) updateFields.wbraid = wbraid;
+        if (gbraid) updateFields.gbraid = gbraid;
+        if (fbclid) updateFields.fbclid = fbclid;
+        if (fbc) updateFields.fbc = fbc;
+        if (fbp) updateFields.fbp = fbp;
+        const rows = await db('leads')
+          .where({ id: leadId })
+          .update(updateFields)
+          .returning(['id', 'lead_source_id']);
+        lead = rows[0];
+        if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
+          await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
+        }
       }
     }
     if (!lead) {
