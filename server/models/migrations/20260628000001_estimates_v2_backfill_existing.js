@@ -36,6 +36,7 @@
  */
 const {
   estimateDataHasUnresolvedManagerApproval,
+  estimateDataHasQuoteRequirement,
 } = require('../../services/estimate-delivery-options');
 
 function parseEstimateData(raw) {
@@ -48,24 +49,14 @@ function parseEstimateData(raw) {
   }
 }
 
-// Mirrors routes/estimate-public.js#normalizeOneTimeBreakdown's quote-required
-// item detection (item.quoteRequired / item.requiresCustomQuote) across the same
-// arrays it scans — result.oneTime.items and result.results.oneTime.items.
-function hasQuoteRequiredOneTimeItem(estData) {
-  const result = estData?.result && typeof estData.result === 'object'
-    ? estData.result
-    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null);
-  if (!result) return false;
-  const arrays = [];
-  if (result.oneTime && Array.isArray(result.oneTime.items)) arrays.push(result.oneTime.items);
-  if (result.results?.oneTime && Array.isArray(result.results.oneTime.items)) arrays.push(result.results.oneTime.items);
-  return arrays.some((list) => list.some(
-    (item) => item && (item.quoteRequired === true || item.requiresCustomQuote === true),
-  ));
-}
-
 // TRUE when the React view would show a degraded recap vs. the legacy HTML, so the
-// row should stay on the HTML renderer (NOT be flipped to use_v2_view=true).
+// row should stay on the HTML renderer (NOT be flipped to use_v2_view=true). The
+// quote-required signals mirror routes/estimate-public.js#resolveEstimateQuoteRequirement:
+// an authored commercial proposal, an unresolved manager approval, or any
+// quoteRequired/requiresCustomQuote flag anywhere in estimate_data. The recursive
+// estimateDataHasQuoteRequirement covers every shape that carries it — top-level
+// result.quoteRequired, result.quoteRequiredItems, oneTime.specItems, etc. — not
+// just the one-time items list.
 function reactCannotFaithfullyRecap(row, estData) {
   // P1 — accepted before accepted_service_mode was stored.
   if (row.status === 'accepted' && !row.accepted_service_mode) return true;
@@ -73,7 +64,7 @@ function reactCannotFaithfullyRecap(row, estData) {
   if (row.status === 'quote_required') return true;
   if (estData?.proposal?.enabled === true) return true;
   if (estimateDataHasUnresolvedManagerApproval(estData)) return true;
-  if (hasQuoteRequiredOneTimeItem(estData)) return true;
+  if (estimateDataHasQuoteRequirement(estData)) return true;
   return false;
 }
 

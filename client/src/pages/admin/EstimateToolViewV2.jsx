@@ -3961,6 +3961,12 @@ export default function EstimateToolViewV2({
                   satelliteUrl={satelliteData?.imageUrl || null}
                   presentMode
                   onSelectPestFreq={(apps) => {
+                    // Ignore tier taps while a recalc is in flight: doGenerate
+                    // early-returns on `generating`, but the form mutation below
+                    // would still apply, pairing the in-flight (old-tier) estimate
+                    // with the new cadence and showing the customer mismatched
+                    // pricing. Wait for the current generate to settle first.
+                    if (generating) return;
                     // Update cadence + regenerate WITHOUT routing through set(),
                     // which nulls `estimate` and would unmount this overlay
                     // (presentMode && E) mid-presentation. doGenerate replaces the
