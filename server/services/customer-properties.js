@@ -259,7 +259,9 @@ async function completePrimaryFromCall(customerId, call = {}) {
     });
     ppatch.updated_at = new Date();
     await db('customer_properties').where({ id: primary.id }).update(ppatch)
-      .catch((e) => logger.warn(`[customer-properties] primary complete skipped for ${customerId}: ${e.message}`));
+      // Log the error CODE only — a DB error on an address_key write can echo the
+      // canonicalized address (PII) in its message.
+      .catch((e) => logger.warn(`[customer-properties] primary complete skipped for ${customerId}: ${e.code || e.name || 'db_error'}`));
   }
 }
 
@@ -296,7 +298,8 @@ async function syncPrimaryAddress(customerOrId) {
   });
   next.updated_at = new Date();
   await db('customer_properties').where({ id: primary.id }).update(next)
-    .catch((e) => logger.warn(`[customer-properties] primary address sync failed for ${customer.id}: ${e.message}`));
+    // Error CODE only — an address_key write error can echo the address (PII).
+    .catch((e) => logger.warn(`[customer-properties] primary address sync failed for ${customer.id}: ${e.code || e.name || 'db_error'}`));
 }
 
 module.exports = {
