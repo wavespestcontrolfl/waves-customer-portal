@@ -5,7 +5,7 @@
       "notes": [
         "⚠ PRODIAMINE TIMING: Apply Visit 1 by January 15. Soil temps can hit 55°F germination window by late Jan in Sarasota/Man",
         "⚠ CELSIUS CAP: Maximum 3 applications per property per year. Log every Celsius app. If maxed, use Blindside WDG or Three",
-        "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Jul = Ca supplement. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
+        "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
         "★ NEW v4: N RATE CONTROL — Explicit lb N/1,000 per visit in Notes. Annual target: Basic/Std 1.5 lb N, Enh/Prem 3.0 lb N.",
         "★ NEW v4: Soil-test branching — P index >80 skip 24-2-11, K >80 ppm skip K-Flow. Chinch IPM ≥20/sq ft threshold + MOA ro",
         "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Torque (3) Oct. SpeedZone Apr weather-gated at 90°F.",
@@ -93,7 +93,7 @@
           "month": "Jun",
           "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP K-Flow → micros only\nHigh Mn Combo ($1.33)",
           "secondary": "★ CHINCH FLOAT TEST #1: threshold ≥20/sq ft\nTalstar P curative if threshold met ($3.82)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce 20%",
-          "material_cost": "8.15",
+          "material_cost": "6.63",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -108,7 +108,7 @@
           "month": "Jul",
           "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nGreen Flo Phyte Plus 0-0-26 ($4.45)",
           "secondary": "Moisture Manager ($7.45)\n★ Chinch re-check ≥20/sq ft threshold\n★ If Talstar failed Jun: Arena 50 WDG (Group 4A) ($5.20)",
-          "material_cost": "12.35",
+          "material_cost": "10.96",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -116,7 +116,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius app 2/3. ★ Ca replaces K-Flow (cation rotation). ★ Chinch MOA rotation: Talstar (3A) → Arena (4A) if no knockdown 7d."
+          "notes": "Celsius app 2/3. ★ Chinch MOA rotation: Talstar (3A) → Arena (4A) if no knockdown 7d."
         },
         {
           "visit": 8,
@@ -138,7 +138,7 @@
           "month": "Sep",
           "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP K-Flow\nSpeedZone Southern + NIS ($5.95)",
           "secondary": "Dismiss for fall sedge ($4.36)\nPre-position for Oct N app",
-          "material_cost": "8.47",
+          "material_cost": "6.95",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -297,7 +297,7 @@
           "month": "Jun",
           "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP → micros only\nPrimo Maxx PGR ($1.91)",
           "secondary": "★ ARMYWORM SOAP FLUSH — threshold ≥3/sq ft\n★ If threshold met: Bifen I/T curative (Group 3A) ($3.50)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce",
-          "material_cost": "15.57",
+          "material_cost": "14.05",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -312,7 +312,7 @@
           "month": "Jul",
           "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nPrimo Maxx PGR ($1.91)",
           "secondary": "Moisture Manager ($7.45)\n★ Armyworm re-check — if Bifen failed Jun:\nrotate to chlorantraniliprole (Group 28) ($4.50)\n★ Document PGR response",
-          "material_cost": "13.82",
+          "material_cost": "12.43",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -320,7 +320,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius replaces SpeedZone (>90°F). PGR cycle 5. Ca replaces K-Flow. ★ Armyworm MOA rotation: Bifen (3A) → chlorantraniliprole (28)."
+          "notes": "Celsius replaces SpeedZone (>90°F). PGR cycle 5. ★ Armyworm MOA rotation: Bifen (3A) → chlorantraniliprole (28)."
         },
         {
           "visit": 8,
@@ -494,7 +494,7 @@
           "month": "Jun",
           "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP → micros only\nPrimo Maxx PGR conservative ($1.91)",
           "secondary": "Zoysia grows slower — PGR every 4-5 weeks not 3-4\n★ IRRIGATION AUDIT #2: VWC >40% = reduce\nWebworm check",
-          "material_cost": "15.57",
+          "material_cost": "14.05",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -509,7 +509,7 @@
           "month": "Jul",
           "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nPrimo Maxx PGR ($1.91)",
           "secondary": "Celsius replaces SpeedZone — too hot (>90°F)\nMoisture Manager if needed ($7.45)\n★ Document PGR response — critical on Zoysia",
-          "material_cost": "13.82",
+          "material_cost": "12.43",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -517,7 +517,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius for summer. SpeedZone BANNED Jul-Sep. Ca replaces K-Flow. ★ PGR response doc — if turf thinning, reduce rate IMMEDIATELY."
+          "notes": "Celsius for summer. SpeedZone BANNED Jul-Sep. ★ PGR response doc — if turf thinning, reduce rate IMMEDIATELY."
         },
         {
           "visit": 8,
@@ -539,7 +539,7 @@
           "month": "Sep",
           "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nK-Flow 0-0-25 ($2.18)",
           "secondary": "Dismiss for sedge ($4.36)\nCelsius — still too hot for SpeedZone\n★ Pre-position for Oct large patch fungicide",
-          "material_cost": "9.61",
+          "material_cost": "8.09",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -584,7 +584,7 @@
           "month": "Dec",
           "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)\n★ Velista (FRAC 7) large patch #3",
           "secondary": "★ OPTIONAL Basic/Std: Door hanger + irrigation winterize\n★ OPTIONAL: Annual report on request\n★ FRAC rotation: Velista (7) follows Medallion (12)\nThatch assessment for spring mechanical work",
-          "material_cost": "25.8",
+          "material_cost": "18.3",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -693,7 +693,7 @@
           "month": "Jun",
           "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: skip K-Flow → micros only\nHigh Mn Combo ($1.33)",
           "secondary": "★ MOLE CRICKET SOAP FLUSH #2:\nSame method as Feb (2 tbsp/gal, 2 sq ft)\nDamage shows as spongy/lifted turf\nIf ≥2 per 2 sq ft: Dylox 420 SL curative ($12.53)",
-          "material_cost": "8.15",
+          "material_cost": "6.63",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -707,8 +707,8 @@
           "visit": 7,
           "month": "Jul",
           "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)",
-          "secondary": "★ Ca replaces K-Flow — cation rotation\n★ OPTIONAL CUSTOMER EXPECTATION TALK #2 — SEED HEADS:\n\"Bahia produces seed heads Jun-Aug. This is normal,\nhealthy biology — not a problem. Mowing frequency\ncontrols the l",
-          "material_cost": "5.07",
+          "secondary": "★ OPTIONAL CUSTOMER EXPECTATION TALK #2 — SEED HEADS:\n\"Bahia produces seed heads Jun-Aug. This is normal,\nhealthy biology — not a problem. Mowing frequency\ncontrols the l",
+          "material_cost": "3.68",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -716,7 +716,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius app 2. Ca replaces K-Flow. ★ Seed head customer talk STRUCTURED — proactive, not reactive. Mowing upsell opportunity if mowing division/partner available."
+          "notes": "Celsius app 2. ★ Seed head customer talk STRUCTURED — proactive, not reactive. Mowing upsell opportunity if mowing division/partner available."
         },
         {
           "visit": 8,
