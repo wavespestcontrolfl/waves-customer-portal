@@ -13,6 +13,7 @@ const {
   shouldIncludeWaveGuardSetupFeeForRecurring,
   shouldCreateDraftInvoiceForRecurring,
   shouldSuppressRecurringConversion,
+  resolveCommercialPrepayTaxRate,
 } = require('../services/estimate-converter');
 
 describe('estimate converter annual prepay amount', () => {
@@ -386,5 +387,44 @@ describe('estimate converter annual prepay amount', () => {
       firstScheduledServiceId: null,
       firstApplicationAmount: 128.45,
     })).toBe(false);
+  });
+});
+
+describe('commercial prepay blended tax rate (taxable pest share only)', () => {
+  test('pest-only commercial prepay is fully taxable (7%)', () => {
+    expect(resolveCommercialPrepayTaxRate([
+      { service: 'commercial_pest', annual: 2280, taxable: true },
+    ])).toBeCloseTo(0.07, 4);
+  });
+
+  test('lawn/tree-only commercial prepay is NOT taxed (lawn_spraying_or_treatment exempt)', () => {
+    expect(resolveCommercialPrepayTaxRate([
+      { service: 'commercial_lawn', annual: 4689, taxable: false },
+      { service: 'commercial_tree_shrub', annual: 2412, taxable: false },
+    ])).toBe(0);
+  });
+
+  test('mixed plan blends the rate to the taxable (pest) share only', () => {
+    // pest 2000 of 10000 total → 20% taxable → 0.20 * 0.07 = 0.014.
+    const rate = resolveCommercialPrepayTaxRate([
+      { service: 'commercial_pest', annual: 2000, taxable: true },
+      { service: 'commercial_lawn', annual: 8000, taxable: false },
+    ]);
+    expect(rate).toBeCloseTo(0.014, 4);
+    // Applied to the $10k prepay this yields $140 tax = exactly 7% of the $2k pest.
+    expect(Math.round(10000 * rate * 100) / 100).toBe(140);
+  });
+
+  test('keys off the service even when the taxable flag was dropped on a save path', () => {
+    // 50/50 pest+lawn, pest flag missing → still 0.5 * 0.07 = 0.035.
+    expect(resolveCommercialPrepayTaxRate([
+      { service: 'commercial_pest', annual: 1000 },
+      { service: 'commercial_lawn', annual: 1000 },
+    ])).toBeCloseTo(0.035, 4);
+  });
+
+  test('empty / zero-total recurring set yields a 0 rate (no divide-by-zero)', () => {
+    expect(resolveCommercialPrepayTaxRate([])).toBe(0);
+    expect(resolveCommercialPrepayTaxRate([{ service: 'commercial_pest', annual: 0 }])).toBe(0);
   });
 });

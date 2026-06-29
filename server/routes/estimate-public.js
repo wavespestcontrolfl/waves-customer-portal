@@ -7496,7 +7496,12 @@ router.put('/:token/accept', async (req, res, next) => {
           skipSetupInvoice: billByInvoice || isCommercialAccept,
           skipAutoSchedule: isCommercialAccept,
           prepayInvoiceAmount: annualPrepayInvoiceAmount,
-          firstApplicationAmount: firstApplicationInvoiceAmount,
+          // Commercial (standard) bills manually — create NO auto first-
+          // application invoice (which would also mis-tax a mixed plan); the team
+          // invoices after on-site confirmation. The commercial customer is
+          // marked property_type='commercial' by the converter so that manual
+          // invoice taxes the taxable services (pest) correctly.
+          firstApplicationAmount: isCommercialAccept ? null : firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
           autoSendInvoice: !isCommercialAccept,
         });

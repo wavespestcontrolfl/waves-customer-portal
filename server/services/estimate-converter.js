@@ -639,6 +639,29 @@ function recurringLineAnnualAmount(item = {}) {
   return 0;
 }
 
+// FL nonresidential sales tax (6% state + 1% surtax). New commercial customers
+// have no zip yet, so the county lookup also defaults here.
+const FL_COMMERCIAL_TAX_RATE = 0.07;
+
+// Commercial prepay tax rate. The single-line annual-prepay invoice can't carry
+// per-service taxability, and InvoiceService taxes the whole invoice at ONE
+// rate — but a commercial plan mixes TAXABLE pest (nonresidential_pest_control)
+// with NON-TAXABLE lawn/tree (lawn_spraying_or_treatment). Return a BLENDED rate
+// that taxes only the taxable share: pest-only → 0.07, lawn/tree-only → 0,
+// mixed → proportional. Keyed off the service (commercial_pest) as well as the
+// taxable flag so a dropped flag on a save-path still taxes correctly.
+function resolveCommercialPrepayTaxRate(recurringServices = []) {
+  const rows = Array.isArray(recurringServices) ? recurringServices : [];
+  const totalAnnual = rows.reduce((sum, svc) => sum + recurringLineAnnualAmount(svc), 0);
+  if (!(totalAnnual > 0)) return 0;
+  const isTaxableCommercial = (svc) =>
+    svc?.taxable === true || recurringServiceKey(svc) === 'commercial_pest';
+  const taxableAnnual = rows
+    .filter(isTaxableCommercial)
+    .reduce((sum, svc) => sum + recurringLineAnnualAmount(svc), 0);
+  return Math.round((taxableAnnual / totalAnnual) * FL_COMMERCIAL_TAX_RATE * 10000) / 10000;
+}
+
 function isNonDiscountableRecurringLine(item = {}) {
   const key = recurringServiceKey(item);
   // Commercial auto-priced programs EARN the annual-prepay discount (owner
@@ -1044,6 +1067,12 @@ const EstimateConverter = {
           // tier with a positive monthly_rate falls through those predicates'
           // legacy rate>0 fallback and would be treated/rendered as Bronze.
           waveguard_tier: commercialOnlyRecurring ? 'Commercial' : (tier === 'none' ? null : tier),
+          // A commercial recurring plan means the property is commercial — mark
+          // it so InvoiceService applies FL sales tax to taxable commercial
+          // services (e.g. commercial pest = nonresidential_pest_control 7%).
+          // Without this the customer reads residential and tax is forced to $0.
+          // Only SET it for commercial; never downgrade a residential customer.
+          ...(hasCommercialRecurring ? { property_type: 'commercial' } : {}),
           monthly_rate: monthlyRate,
           active: true,
           deleted_at: null,
@@ -1373,6 +1402,14 @@ const EstimateConverter = {
           const prepayNotes = prepayDiscountApplied
             ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
             : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99 setup fee waived per WaveGuard membership policy.`;
+          // Commercial prepay tax: pass an explicit BLENDED rate (see
+          // resolveCommercialPrepayTaxRate) so only the taxable pest share of a
+          // mixed commercial plan is taxed. Non-commercial prepay passes no rate
+          // → stays residential-exempt ($0). The customer was marked
+          // property_type='commercial' above, so InvoiceService honors this rate.
+          const prepayTaxRate = hasCommercialRecurring
+            ? resolveCommercialPrepayTaxRate(recurringServicesForConversion)
+            : undefined;
           const inv = await InvoiceService.create({
             database,
             customerId,
@@ -1384,6 +1421,7 @@ const EstimateConverter = {
             }],
             notes: prepayNotes,
             dueDate: etDateString(),
+            ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
           });
           draftInvoiceId = inv?.id || null;
           draftInvoiceAmount = annualAmount;
@@ -1695,6 +1733,7 @@ module.exports.durationMinutesForRecurringService = durationMinutesForRecurringS
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
+module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;
 module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConversion;
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;
