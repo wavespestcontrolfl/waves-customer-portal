@@ -415,22 +415,28 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // MEASURED building size — priceCommercialPest falls back to a manual quote
     // when false rather than auto-pricing off the synthetic default. (Residential
     // and commercial lawn/tree ignore this flag.)
-    // Real building size = the lookup MEASURED it (any alias), OR the customer
-    // edited/confirmed the value on the confirm step (buildingSizeConfirmed).
-    // Only the untouched synthetic 2,000 default leaves this false.
-    const measuredBuildingSqFt = [ep.homeSqFt, ep.buildingSqFt, ep.livingAreaSqFt, ep.footprintSqFt]
-      .map(Number).find((n) => Number.isFinite(n) && n > 0) || null;
-    const buildingSizeMeasured = buildingSizeConfirmed === true || measuredBuildingSqFt != null;
-    // The engine prices commercial pest off homeSqFt. When the building was
-    // measured via an alias (not homeSqFt) but the client only carried the
-    // synthetic default, forward the MEASURED size so the flag stays consistent
-    // with the footprint the engine actually sees (a confirmed client value
-    // still wins; residential is unchanged).
-    const engineHomeSqFt = (commercialDetected && buildingSizeConfirmed !== true && measuredBuildingSqFt)
-      ? Math.max(500, Math.min(HOME_CAP, measuredBuildingSqFt))
-      : sqft;
+    // Commercial pest prices off the building FOOTPRINT. Resolve a real footprint
+    // with correct per-source semantics — footprintSqFt/buildingSqFt are already
+    // a footprint; homeSqFt/livingArea (and a user-CONFIRMED client homeSqFt) are
+    // living area ÷ stories (mirrors resolvePestFootprint + livingAreaToFootprint).
+    // Only the untouched synthetic 2,000 confirm default leaves this null → manual.
+    const storiesNum = Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1));
+    const livingAreaFootprint = (v) => Math.max(1, Math.round(Number(v) / storiesNum));
+    const realFootprintSqFt = (() => {
+      if (Number(ep.footprintSqFt) > 0) return Number(ep.footprintSqFt);
+      if (Number(ep.buildingSqFt) > 0) return Number(ep.buildingSqFt);
+      if (Number(ep.homeSqFt) > 0) return livingAreaFootprint(ep.homeSqFt);
+      if (Number(ep.livingAreaSqFt) > 0) return livingAreaFootprint(ep.livingAreaSqFt);
+      if (buildingSizeConfirmed === true && Number(homeSqFt) > 0) return livingAreaFootprint(homeSqFt);
+      return null;
+    })();
+    const buildingSizeMeasured = realFootprintSqFt != null;
     const engineInput = {
-      homeSqFt: engineHomeSqFt,
+      homeSqFt: sqft,
+      // For COMMERCIAL, pass the resolved footprint explicitly (resolvePestFootprint
+      // reads footprintSqFt BEFORE homeSqFt, so the synthetic confirm default can't
+      // win and there's no double ÷-stories). Residential is unchanged.
+      ...(commercialDetected && realFootprintSqFt != null ? { footprintSqFt: realFootprintSqFt } : {}),
       buildingSizeMeasured,
       stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
       lotSqFt: lot,
