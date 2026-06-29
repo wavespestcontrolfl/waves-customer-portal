@@ -21,6 +21,14 @@ describe('customer-properties pure helpers', () => {
       .toBe(addressKey({ address_line1: '100 Main St', city: 'Bradenton' }));
   });
 
+  test('addressKey canonicalizes street suffixes (St==Street) but keeps streets distinct (St!=Ave)', () => {
+    const base = { city: 'Bradenton', zip: '34205' };
+    expect(addressKey({ ...base, address_line1: '123 Main St' }))
+      .toBe(addressKey({ ...base, address_line1: '123 Main Street' }));   // abbreviation == expansion
+    expect(addressKey({ ...base, address_line1: '123 Main St' }))
+      .not.toBe(addressKey({ ...base, address_line1: '123 Main Ave' }));  // different street, NOT merged
+  });
+
   test('normalizeOccupancy coerces unknown values', () => {
     for (const t of OCCUPANCY_TYPES) expect(normalizeOccupancy(t)).toBe(t);
     expect(normalizeOccupancy('rental')).toBe('unknown');

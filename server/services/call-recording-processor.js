@@ -2106,8 +2106,13 @@ const CallRecordingProcessor = {
         // street, UNIT, city, or ZIP (both present) is a different property —
         // "100 Main St, Bradenton" != "100 Main St, Sarasota", and Unit A != Unit B.
         const bothPresentAndDiffer = (a, b) => !!normStreet(a) && !!normStreet(b) && normStreet(a) !== normStreet(b);
+        // A unit the CALL supplies that differs from what's on file is a different
+        // property (Unit A on file, call about Unit B — or no unit on file, call
+        // adds one). One-sided: the caller omitting a unit they didn't mention is
+        // NOT treated as a change.
+        const callAddsDifferentUnit = !!normStreet(callUnit) && normStreet(callUnit) !== normStreet(existingCust?.address_line2);
         const locationDiffers = (onFileStreet !== fromCallStreet)
-          || bothPresentAndDiffer(existingCust?.address_line2, callUnit)
+          || callAddsDifferentUnit
           || bothPresentAndDiffer(existingCust?.city, extracted.city)
           || bothPresentAndDiffer(existingCust?.zip, extracted.zip);
         if (!knownProperty && onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
@@ -2151,7 +2156,12 @@ const CallRecordingProcessor = {
         // ensurePrimaryProperty has nothing to backfill from).
         const ensured = await customerProperties.ensurePrimaryProperty(customerId);
         const isFirstAddress = !ensured.propertyId;
-        if (bridgeNeedsConfirmation.includes('second_service_address') || isFirstAddress) {
+        // A SECONDARY write needs a complete-enough address (city + ZIP) so its
+        // dedup key matches a later full-address call — otherwise a partial row
+        // would miss the dedup and duplicate. A partial second address still gets
+        // the review flag above. The first/primary address is recorded regardless.
+        const hasFullAddress = !!String(extracted.city || '').trim() && !!String(extracted.zip || '').trim();
+        if (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress)) {
           // Rental signal — works in BOTH shadow and enforce (DRIVES_ROUTING) modes:
           // the shadow bridge may not have run, so re-derive from the V2 extraction.
           const isRental = bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')

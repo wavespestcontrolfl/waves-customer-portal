@@ -18,14 +18,29 @@ const OCCUPANCY_TYPES = ['owner_occupied', 'rental_investment', 'commercial', 's
 /** Case/space/punctuation-insensitive street key — "12338 Amber Creek" ≠ "12398 Amber Creek". */
 const normStreet = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
+// Canonical street-suffix forms. We EXPAND abbreviations to one canonical spelling
+// (st -> street) so "123 Main St" and "123 Main Street" key identically — but we
+// never STRIP the suffix, so "Main St" and "Main Ave" stay DISTINCT streets.
+const STREET_SUFFIX_CANON = {
+  st: 'street', street: 'street', ave: 'avenue', avenue: 'avenue', rd: 'road', road: 'road',
+  dr: 'drive', drive: 'drive', ln: 'lane', lane: 'lane', ct: 'court', court: 'court',
+  blvd: 'boulevard', boulevard: 'boulevard', cir: 'circle', circle: 'circle',
+  pl: 'place', place: 'place', ter: 'terrace', terrace: 'terrace', way: 'way',
+  trl: 'trail', trail: 'trail', pkwy: 'parkway', parkway: 'parkway', hwy: 'highway', highway: 'highway',
+};
+const canonicalizeAddress = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
+  .split(/\s+/).map((w) => STREET_SUFFIX_CANON[w] || w).join(' ');
+
 /**
  * Normalized key for the FULL service address — street + unit + city + ZIP — so
  * "100 Main St, Bradenton" and "100 Main St, Sarasota" are DISTINCT, and so are
- * two units at one street ("100 Main Unit A" vs "Unit B"). Mirrors the migration's
- * unique-index expression (concat_ws(' ', line1, line2, city, zip)).
+ * two units at one street ("100 Main Unit A" vs "Unit B"). Suffix-canonical, so
+ * "123 Main St" and "123 Main Street" dedupe (the call bridge does the same).
+ * This APP-level key is the authoritative dedup; the migration's unique index is
+ * a coarser concurrency backstop (a suffix-variant is deduped here before insert).
  */
 function addressKey({ address_line1, address_line2, city, zip } = {}) {
-  return normStreet([address_line1, address_line2, city, zip].filter(Boolean).join(' '));
+  return canonicalizeAddress([address_line1, address_line2, city, zip].filter(Boolean).join(' ')).replace(/[^a-z0-9]/g, '');
 }
 
 /** Coerce to a known occupancy enum value (pure). */
