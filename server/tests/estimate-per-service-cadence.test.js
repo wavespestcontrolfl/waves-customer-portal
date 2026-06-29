@@ -130,6 +130,28 @@ describe('buildServiceCadenceCombos — full combination ladder', () => {
     const pestOnly = { pestTiers: pestLawnV1().pestTiers, services: [pestLawnV1().services[0]], discount: 0 };
     expect(buildServiceCadenceCombos(pestOnly, {}, {})).toBeNull();
   });
+
+  test('returns null for a no-pest bundle (combos require a pest axis for billing cadence)', () => {
+    // Lawn + tree, no pest. Per-service combos must NOT be emitted — otherwise a
+    // placeholder pest cadence would mis-resolve billing to quarterly/per-app
+    // instead of the services' own monthly billing (Codex P1).
+    const lawnTree = {
+      pestTiers: [],
+      services: [
+        { name: 'Lawn Care', service: 'lawn_care', mo: 66.75, visitsPerYear: 9 },
+        { name: 'Tree & Shrub', service: 'tree_shrub', mo: 40, visitsPerYear: 6 },
+      ],
+      discount: 0.10,
+    };
+    const rs = {
+      lawn: LAWN_RESULT_STATS.lawn,
+      ts: [
+        { name: 'Light', v: 4, mo: 30, ann: 360, pa: 90 },
+        { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
+      ],
+    };
+    expect(buildServiceCadenceCombos(lawnTree, {}, rs)).toBeNull();
+  });
 });
 
 describe('bundleSectionLadderForService — non-pest section own-cadence slider', () => {

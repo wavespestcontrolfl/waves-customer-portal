@@ -10642,10 +10642,15 @@ function serviceCadenceComboKey(selection = {}) {
 // Precompute every selectable cadence combination for a bundle so the view can
 // look up the authoritative total locally (no per-change round-trip) and the
 // accept handler can resolve the exact same number. Returns null when there is
-// nothing extra to vary (pest-only, or no non-pest service has >1 tier) — in
-// that case the existing pest ladder already covers it.
+// nothing extra to vary (pest-only, or no non-pest service has >1 tier), or for
+// no-pest bundles — in those cases the existing (non-combo) ladder already
+// covers it. Per-service combos require a pest axis: the billing cadence /
+// interval is driven by the pest cadence, so a no-pest bundle must NOT inherit a
+// placeholder pest cadence (it would mis-resolve billing to quarterly/per-app).
 function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false } = {}) {
   if (!v1 || !Array.isArray(v1.services)) return null;
+  const hasPest = Array.isArray(v1.pestTiers) && v1.pestTiers.length > 0;
+  if (!hasPest) return null;
   const tierBaseMap = nonPestTierBaseMap(resultStats);
   const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
   const selectableNonPest = recurringKeys.filter(
@@ -10653,16 +10658,13 @@ function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false } 
   );
   if (!selectableNonPest.length) return null;
 
-  const hasPest = Array.isArray(v1.pestTiers) && v1.pestTiers.length > 0;
-  const pestAxis = hasPest
-    ? Object.entries(V1_LABEL_TO_LADDER)
-      .map(([label, ladder]) => ({ ladder, pestTier: v1.pestTiers.find((t) => t?.label === label) || null }))
-      .filter((e) => e.pestTier)
-    : [{ ladder: Object.values(V1_LABEL_TO_LADDER)[0], pestTier: null }];
+  const pestAxis = Object.entries(V1_LABEL_TO_LADDER)
+    .map(([label, ladder]) => ({ ladder, pestTier: v1.pestTiers.find((t) => t?.label === label) || null }))
+    .filter((e) => e.pestTier);
 
   let combos = pestAxis.map((p) => ({
     pest: p,
-    selection: hasPest ? { pest_control: p.ladder.key } : {},
+    selection: { pest_control: p.ladder.key },
   }));
   for (const key of selectableNonPest) {
     const tierKeys = Object.keys(tierBaseMap[key]);
@@ -10782,7 +10784,10 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
         // customer picks each independently); the composite selection is priced
         // via the serviceCadenceCombos on the payload. Falls back to the legacy
         // pest-cadence-mirrored ladder when the service has only one tier.
-        const ownLadder = key !== 'pest_control'
+        // Own-cadence ladders pair with serviceCadenceCombos, which only exist
+        // for bundles that include pest (no-pest bundles keep legacy behavior so
+        // billing cadence isn't mis-resolved — see buildServiceCadenceCombos).
+        const ownLadder = (key !== 'pest_control' && hasRecurringPestSection)
           ? bundleSectionLadderForService(key, estData, recurringService, recurringDiscount)
           : null;
         const sectionFrequencies = (ownLadder && ownLadder.length)
