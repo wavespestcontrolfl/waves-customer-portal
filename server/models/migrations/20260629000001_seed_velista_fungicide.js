@@ -1,12 +1,19 @@
 /**
- * Seed the Velista (penthiopyrad, FRAC 7) fungicide into products_catalog.
+ * Seed the Velista (penthiopyrad, FRAC 7) fungicide into products_catalog and
+ * finish the PR #2205 FRAC-correction backfills that only the protocol/CSV text
+ * carried (existing catalog rows + structured rows need direct DB updates).
  *
- * Velista was added to the Zoysia December large-patch slot (PR #2205) to break
- * the FRAC-3 rotation overlap, but it had no catalog row — so the plan builder
- * (waveguard-plan-engine.js, which resolves protocol text against products_catalog)
- * and the material-cost audit couldn't price/rate it. This adds the real
- * inventory row: Syngenta Velista 22 oz @ $297.00 ($13.50/oz), label rate
- * 0.5 oz/1,000 sq ft. Idempotent — upserts by name.
+ * 1. Velista was added to the Zoysia December large-patch slot to break the
+ *    FRAC-3 rotation overlap, but it had no catalog row — so the plan builder
+ *    (waveguard-plan-engine.js, which resolves protocol text against
+ *    products_catalog) and the material-cost audit couldn't price/rate it. This
+ *    adds the real inventory row: Syngenta Velista 22 oz @ $297.00 ($13.50/oz),
+ *    label rate 0.5 oz/1,000 sq ft, and links the structured lawn_protocol_products
+ *    'Velista' row (seeded with product_id NULL in 20260529000003).
+ * 2. Backfills products_catalog.frac_group for Medallion SC (12) and Torque SC (3)
+ *    — pricing.csv only feeds fresh imports, but waveguard-approval-engine reads
+ *    products_catalog.frac_group for fungicide rotation blocks on existing DBs.
+ * Idempotent throughout.
  */
 
 const PRODUCT = {
@@ -71,6 +78,25 @@ exports.up = async function up(knex) {
           .catch(() => {});
       }
     }
+  }
+
+  // Link the structured Velista row (20260529000003 seeded it with product_id NULL,
+  // since the catalog row did not exist yet) so the Command Center prices it.
+  if (productId && (await knex.schema.hasTable('lawn_protocol_products'))) {
+    await knex('lawn_protocol_products')
+      .where({ product_name: 'Velista' })
+      .whereNull('product_id')
+      .update({ product_id: productId, updated_at: knex.fn.now() })
+      .catch(() => {});
+  }
+
+  // Backfill corrected FRAC groups on existing catalog rows (PR #2205 relabel):
+  // Medallion (fludioxonil) = FRAC 12, Torque (tebuconazole) = FRAC 3.
+  for (const [name, frac] of [['Medallion SC', '12'], ['Torque SC', '3']]) {
+    await knex('products_catalog')
+      .where({ name })
+      .update({ frac_group: frac, updated_at: knex.fn.now() })
+      .catch(() => {});
   }
 };
 
