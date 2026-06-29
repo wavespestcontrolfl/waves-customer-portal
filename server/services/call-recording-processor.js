@@ -2172,11 +2172,22 @@ const CallRecordingProcessor = {
         // default owner_occupied).
         const isRental = bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
           || detectRentalSignal({ extracted, callerRelationship: v2Result?.extraction?.caller?.relationship_to_property });
+        // The rental signal is about THIS CALL's address. ensurePrimaryProperty
+        // creates the primary from customers.address_line1, which can be a DIFFERENT
+        // address (the customer's own home) when the call is about a secondary
+        // rental — so only let the primary inherit the rental occupancy when the
+        // call's street IS the primary's. Otherwise the rental rides the secondary
+        // (recordCallProperty below).
+        const custStreetRow = await db('customers').where({ id: customerId }).select('address_line1').first();
+        const callIsPrimaryStreet = !!customerProperties.streetKey(custStreetRow?.address_line1)
+          && customerProperties.streetKey(custStreetRow?.address_line1) === customerProperties.streetKey(extracted.address_line1);
         // propertyId is null only when the customer is addressless AND has no
         // primary yet — i.e. this call carries their FIRST service address (the
         // !customerId upsert above is skipped when the call is pre-linked, so
         // ensurePrimaryProperty has nothing to backfill from).
-        const ensured = await customerProperties.ensurePrimaryProperty(customerId, { occupancyType: isRental ? 'rental_investment' : undefined });
+        const ensured = await customerProperties.ensurePrimaryProperty(customerId, {
+          occupancyType: (isRental && callIsPrimaryStreet) ? 'rental_investment' : undefined,
+        });
         const isFirstAddress = !ensured.propertyId;
         // A SECONDARY write needs a complete-enough address (city + ZIP) so its
         // dedup key matches a later full-address call — otherwise a partial row
