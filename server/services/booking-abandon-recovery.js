@@ -22,6 +22,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { shortenOrPassthrough } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled } = require('../config/feature-gates');
+const { etDateString } = require('../utils/datetime-et');
 
 // Touch windows (hours from captured_at). The cron runs every 30 min, so the
 // SMS fires ~1–1.5h after abandon. Max-age caps how stale a lead we'll chase.
@@ -68,6 +69,40 @@ async function hasRepliedRecently(phone, days = 14) {
     logger.warn(`[booking-recovery] reply-pause check skipped: ${e.message}`);
     return false; // fail open
   }
+}
+
+// Suppress recovery if the booker already has an upcoming appointment booked by
+// ANY path — incl. a CSR/admin booking that creates a scheduled_services row
+// without touching booking_intents.converted_at (so the convert-mark + the
+// capture-time self_booked check don't see it). Matches by customer_id when the
+// intent resolved to one, else by the phone's last 10 digits.
+async function hasActiveBooking(intent) {
+  const ten = last10(intent.phone);
+  if (!intent.customer_id && !ten) return false;
+  try {
+    const q = db('scheduled_services as ss')
+      .leftJoin('customers as c', 'ss.customer_id', 'c.id')
+      .whereNotIn('ss.status', ['cancelled'])
+      .where('ss.scheduled_date', '>=', etDateString())
+      .first('ss.id');
+    if (intent.customer_id) q.where('ss.customer_id', intent.customer_id);
+    else q.whereRaw("RIGHT(regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
+    return !!(await q);
+  } catch (e) {
+    logger.warn(`[booking-recovery] active-booking check skipped: ${e.message}`);
+    return false; // fail open
+  }
+}
+
+// Honor an existing customer's email opt-out (notification_prefs.email_enabled).
+// email_suppressions covers hard bounces/unsubs; this covers a customer who
+// turned email off in prefs but isn't suppressed.
+async function customerEmailDisabled(customerId) {
+  if (!customerId) return false;
+  try {
+    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first('email_enabled');
+    return !!prefs && prefs.email_enabled === false;
+  } catch { return false; }
 }
 
 async function renderSms(vars) {
@@ -168,6 +203,10 @@ async function runSmsStage(now, sentPhones) {
         logger.info(`[booking-recovery] SMS skip ${intent.id}: customer-replied-recently`);
         continue;
       }
+      if (await hasActiveBooking(intent)) {
+        logger.info(`[booking-recovery] SMS skip ${intent.id}: already has an upcoming booking`);
+        continue;
+      }
       const body = await renderSms({
         first_name: firstNameOf(intent),
         service_type: serviceLabelOf(intent),
@@ -246,6 +285,14 @@ async function runEmailStage(now, sentPhones) {
     if (emailKey && sentPhones.has(`email:${emailKey}`)) continue;
     let claimed = false;
     try {
+      if (await customerEmailDisabled(intent.customer_id)) {
+        logger.info(`[booking-recovery] email skip ${intent.id}: customer email opt-out`);
+        continue;
+      }
+      if (await hasActiveBooking(intent)) {
+        logger.info(`[booking-recovery] email skip ${intent.id}: already has an upcoming booking`);
+        continue;
+      }
       if (!(await claimStage(intent.id, 'followup_email_sent'))) continue;
       claimed = true;
       const result = await EmailTemplateLibrary.sendTemplate({

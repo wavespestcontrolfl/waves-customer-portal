@@ -35,8 +35,8 @@ const updates = [];
 function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
-    'join', 'where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull',
-    'whereRaw', 'orWhereNull', 'andWhere', 'orderBy', 'select', 'groupBy', 'max', 'as',
+    'join', 'leftJoin', 'where', 'whereIn', 'whereNotIn', 'whereNot', 'whereNull',
+    'whereNotNull', 'whereRaw', 'orWhereNull', 'andWhere', 'orderBy', 'select', 'groupBy', 'max', 'as',
   ]) b[m] = jest.fn(() => b);
   b.first = jest.fn(() => { b._mode = 'first'; return b; });
   b.update = jest.fn((payload) => { b._mode = 'update'; updates.push({ table, payload }); return b; });
@@ -141,6 +141,18 @@ describe('runSmsStage (touch 1)', () => {
     expect(updates).toEqual([]);
   });
 
+  test('skips a phone that already has an upcoming booking (incl. CSR-created)', async () => {
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });               // no recent reply
+    enqueue('scheduled_services as ss', { first: { id: 'ss-1' } }); // already booked
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+  });
+
   test('retryable hold (quiet-hours) releases the claim so it retries next tick', async () => {
     sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', retryable: true });
     enqueue('booking_intents', { rows: [intent()] });
@@ -215,6 +227,17 @@ describe('runEmailStage (touch 2)', () => {
     expect(sent).toBe(0);
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     expect(updates).toEqual([]);
+  });
+
+  test('skips the recovery email when the customer has email opt-out in prefs', async () => {
+    enqueue('booking_intents', { rows: [intent({ customer_id: 'cust-9' })] });
+    enqueue('notification_prefs', { first: { email_enabled: false } });
+
+    const sent = await _internals.runEmailStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(updates).toEqual([]); // skipped before claiming
   });
 
   test('keeps the claim (no retry) when the email address is suppressed', async () => {

@@ -38,7 +38,14 @@ describe('capture token', () => {
   test('rejects an expired token', () => {
     // Mint as if 31 minutes ago (TTL is 30 min) → now > exp.
     const past = Date.now() - 31 * 60 * 1000;
-    const expired = mintCaptureToken(past);
+    const expired = mintCaptureToken('', past);
     expect(verifyCaptureToken(expired)).toBe(false);
+  });
+
+  test('is bound to the IP key — a token is unusable from a different IP', () => {
+    const tok = mintCaptureToken('ip-aaaa');
+    expect(verifyCaptureToken(tok, 'ip-aaaa')).toBe(true);
+    expect(verifyCaptureToken(tok, 'ip-bbbb')).toBe(false);
+    expect(verifyCaptureToken(tok)).toBe(false); // default '' key ≠ minted key
   });
 });

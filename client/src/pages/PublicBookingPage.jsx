@@ -113,6 +113,9 @@ export default function PublicBookingPage() {
   // Guards booking_availability_loaded against double-firing when a manually
   // typed address is geocoded server-side (setCoords re-runs loadAvailability).
   const availTrackedForRef = useRef(null);
+  // Proof-of-funnel token from the availability response; echoed to
+  // /capture-intent so the public capture endpoint can't be abused.
+  const captureTokenRef = useRef(null);
 
   const updateAddress = useCallback((updater) => {
     setAddress((current) => {
@@ -154,6 +157,7 @@ export default function PublicBookingPage() {
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not load availability');
+      if (data.capture_token) captureTokenRef.current = data.capture_token;
       setAvailability(data.days || []);
       // Fire once per resolved address: loadAvailability re-runs when the server
       // returns coords for a manually typed address (setCoords → new callback
@@ -247,13 +251,14 @@ export default function PublicBookingPage() {
   // bail before confirming. keepalive so it survives the tab closing right after.
   const captureBookingIntent = () => {
     const digits = (contact.phone || '').replace(/\D/g, '');
-    if (digits.length !== 10 || !selectedSlot) return;
+    if (digits.length !== 10 || !selectedSlot || !captureTokenRef.current) return;
     try {
       fetch(`${API_BASE}/booking/capture-intent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         keepalive: true,
         body: JSON.stringify({
+          capture_token: captureTokenRef.current,
           source,
           service_type: quotedServiceLabel || service.label,
           quoted_service_label: quotedServiceLabel || null,

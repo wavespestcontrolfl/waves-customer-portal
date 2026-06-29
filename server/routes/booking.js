@@ -348,18 +348,29 @@ const MAX_BOOKING_HORIZON_DAYS = 90;
 // flow at ~12/min for the token's lifetime.
 const CAPTURE_TOKEN_SECRET = process.env.JWT_SECRET || process.env.BOOKING_CAPTURE_SECRET || 'waves-booking-capture-dev';
 const CAPTURE_TOKEN_TTL_MS = 30 * 60 * 1000;
-function mintCaptureToken(now = Date.now()) {
+// Bind the token to the requesting IP (trust proxy is set, so req.ip is the
+// client). This stops "fetch one token, then POST many victim phones" — a
+// captured token is only usable from the IP that minted it, so reuse is bounded
+// by the same per-IP rate limiter. Hashed so the token never leaks the address.
+// (CGNAT/mobile IP rotation just fails closed → that capture is skipped, no error.)
+function captureIpKey(req) {
+  const xff = req && req.headers && typeof req.headers['x-forwarded-for'] === 'string'
+    ? req.headers['x-forwarded-for'].split(',')[0].trim() : '';
+  const ip = (req && req.ip) || xff || '';
+  return crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`ip:${ip}`).digest('base64url').slice(0, 16);
+}
+function mintCaptureToken(ipKey = '', now = Date.now()) {
   const exp = now + CAPTURE_TOKEN_TTL_MS;
-  const sig = crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`capture:${exp}`).digest('base64url');
+  const sig = crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`capture:${exp}:${ipKey}`).digest('base64url');
   return `${exp}.${sig}`;
 }
-function verifyCaptureToken(token, now = Date.now()) {
+function verifyCaptureToken(token, ipKey = '', now = Date.now()) {
   if (!token || typeof token !== 'string' || !token.includes('.')) return false;
   const [expStr, sig] = token.split('.');
   const exp = parseInt(expStr, 10);
   // Reject expired tokens and any exp implausibly far in the future (forged).
   if (!Number.isFinite(exp) || now > exp || exp > now + CAPTURE_TOKEN_TTL_MS + 60000) return false;
-  const expected = crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`capture:${exp}`).digest('base64url');
+  const expected = crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`capture:${exp}:${ipKey}`).digest('base64url');
   try {
     return !!sig && sig.length === expected.length
       && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
@@ -643,7 +654,7 @@ router.get('/availability', async (req, res, next) => {
       service_type: service_type || null,
       total_feasible: availability.total_feasible,
       // Proof-of-funnel token the client echoes to /capture-intent.
-      capture_token: mintCaptureToken(),
+      capture_token: mintCaptureToken(captureIpKey(req)),
     });
   } catch (err) {
     logger.error('[booking:availability] failed:', err);
@@ -716,7 +727,7 @@ router.post('/find-slots', async (req, res, next) => {
       lng: resolvedLng,
       duration_minutes: duration,
       service_type: service_type || null,
-      capture_token: mintCaptureToken(),
+      capture_token: mintCaptureToken(captureIpKey(req)),
     });
   } catch (err) {
     logger.error('[booking:find-slots] failed:', err);
@@ -1278,11 +1289,20 @@ router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
 
     // Proof the caller went through the real booking funnel: a token minted in the
     // availability response (the funnel always fetches availability before the
-    // contact step). Without it this public, send-eligible endpoint could be used
-    // to seed recovery SMS/email to arbitrary recipients (rate-limit alone can't
-    // stop targeted abuse). Fail closed — no token, no send-eligible row.
-    if (!verifyCaptureToken(b.capture_token)) {
+    // contact step), bound to the requesting IP. Without it this public,
+    // send-eligible endpoint could be used to seed recovery SMS/email to arbitrary
+    // recipients. Fail closed — no/invalid token, no send-eligible row.
+    if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
       return res.json({ ok: true, skipped: 'unverified' });
+    }
+
+    // One-time / estimate-accept sources are recovered by the estimate
+    // deposit-abandonment lane (services/estimate-follow-up.js), not here —
+    // capturing them would double-nudge AND a recovery link carrying source
+    // 'booking_recovery' would drop the one-time semantics, letting
+    // createSelfBooking seed a recurring series for a one-off visit.
+    if (isOneTimeBookingSource(b.source)) {
+      return res.json({ ok: true, skipped: 'estimate_source' });
     }
 
     const nc = b.new_customer || b;
