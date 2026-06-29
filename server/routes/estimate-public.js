@@ -6576,14 +6576,17 @@ router.put('/:token/accept', async (req, res, next) => {
     const acceptedSchedulingFrequencyKey = acceptedServiceTierKey || acceptedFrequencyKey;
     const selectedServiceTierBillsMonthly = !!acceptedServiceTierKey && acceptedFrequencyKey === 'monthly';
     let acceptedEstDataForPricing = selectedFrequency
-      ? applySelectedLawnTierToEstimateData(
-          applySelectedTreeShrubTierToEstimateData(estData, selectedFrequency),
+      ? applySelectedMosquitoTierToEstimateData(
+          applySelectedLawnTierToEstimateData(
+            applySelectedTreeShrubTierToEstimateData(estData, selectedFrequency),
+            selectedFrequency,
+          ),
           selectedFrequency,
         )
       : estData;
     // Per-service cadence: rewrite each independently-selected non-pest tier into
     // the recurring rows so the converter schedules + bills each service at its
-    // chosen cadence (lawn / tree have apply-helpers; see NON_PEST_RESULT_ROWS).
+    // chosen cadence (lawn / tree / mosquito have apply-helpers; see NON_PEST_RESULT_ROWS).
     if (selectedCombo && serviceCadences) {
       const rDisc = Number(estData?.result?.recurring?.discount) || 0;
       for (const [svcKey, tierKey] of Object.entries(serviceCadences)) {
@@ -6595,6 +6598,8 @@ router.put('/:token/accept', async (req, res, next) => {
           acceptedEstDataForPricing = applySelectedLawnTierToEstimateData(acceptedEstDataForPricing, tierEntry);
         } else if (svcKey === 'tree_shrub') {
           acceptedEstDataForPricing = applySelectedTreeShrubTierToEstimateData(acceptedEstDataForPricing, tierEntry);
+        } else if (svcKey === 'mosquito') {
+          acceptedEstDataForPricing = applySelectedMosquitoTierToEstimateData(acceptedEstDataForPricing, tierEntry);
         }
       }
     }
@@ -10269,6 +10274,118 @@ function applySelectedLawnTierToEstimateData(estData = {}, frequency = {}) {
   return nextData;
 }
 
+// ─── Mosquito cadence (Seasonal 9-visit / Monthly 12-visit) ──────────────────
+// Mirror of the lawn cadence machinery so a customer who picks a mosquito
+// cadence (in a bundle OR mosquito-only) gets it re-stamped onto the recurring
+// line for scheduling/billing — the accepted PRICE already comes from the
+// frequency/combo. Mosquito always bills monthly; the cadence drives visits/yr
+// (Seasonal = 9 Mar–Nov, Monthly = 12). Seasonal reuses the proven 9-visit
+// scheduling key (same as lawn Enhanced).
+const MOSQUITO_CADENCE_RUNTIME = {
+  seasonal9: { tierKey: 'seasonal9', serviceKey: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequencyKey: 'every_6_weeks', label: 'Seasonal', visitsPerYear: 9 },
+  monthly12: { tierKey: 'monthly12', serviceKey: 'mosquito_monthly', name: 'Monthly Mosquito Control', frequencyKey: 'monthly', label: 'Monthly', visitsPerYear: 12 },
+};
+function mosquitoTierRuntimeMeta(tierKey) {
+  return MOSQUITO_CADENCE_RUNTIME[String(tierKey || '').trim().toLowerCase()] || null;
+}
+
+function isMosquitoTierFrequency(frequency = {}) {
+  if (!mosquitoTierRuntimeMeta(frequency?.key)) return false;
+  if (frequency.serviceCategory === 'mosquito') return true;
+  const included = Array.isArray(frequency.included) ? frequency.included : [];
+  return included.some((item) => String(item?.key || item?.service || item?.label || '').toLowerCase().includes('mosquito'));
+}
+
+function selectedMosquitoServiceRow(existing = {}, frequency = {}) {
+  const meta = mosquitoTierRuntimeMeta(frequency?.key);
+  if (!meta) return existing;
+  const monthly = finiteNumberOrNull(frequency.monthly ?? frequency.monthlyBase ?? existing.mo ?? existing.monthly ?? existing.monthlyTotal);
+  const annual = finiteNumberOrNull(frequency.annual ?? existing.annual ?? existing.ann ?? existing.annualAfterDiscount);
+  const perTreatment = finiteNumberOrNull(frequency.perTreatment ?? frequency.perVisit ?? existing.perTreatment ?? existing.perVisit ?? existing.pa ?? existing.pv);
+  const visits = finiteNumberOrNull(frequency.visitsPerYear ?? existing.visitsPerYear ?? existing.visits ?? existing.v) || meta.visitsPerYear;
+  const label = frequency.label || meta.label;
+  const row = {
+    ...existing,
+    service: 'mosquito', serviceKey: meta.serviceKey, service_key: meta.serviceKey,
+    name: meta.name, label: meta.name, displayName: meta.name,
+    frequency: meta.frequencyKey, cadence: meta.frequencyKey, cadenceLabel: label,
+    tier: meta.tierKey, tierKey: meta.tierKey, serviceTier: meta.tierKey, tierLabel: label,
+    billingFrequencyKey: frequency.billingFrequencyKey || 'monthly',
+    selected: true, isSelected: true,
+  };
+  if (monthly != null) { row.mo = monthly; row.monthly = monthly; row.monthlyTotal = monthly; }
+  if (annual != null) { row.ann = annual; row.annual = annual; row.annualAfterDiscount = annual; }
+  if (perTreatment != null) { row.pa = perTreatment; row.pv = perTreatment; row.perTreatment = perTreatment; row.perVisit = perTreatment; }
+  if (visits != null) { row.v = visits; row.visits = visits; row.visitsPerYear = visits; row.appsPerYear = visits; }
+  return row;
+}
+
+function rewriteMosquitoRecurringServices(services = [], frequency = {}) {
+  if (!Array.isArray(services)) return { services, changed: false };
+  let changed = false;
+  const nextServices = services.map((svc) => {
+    const name = svc?.name || svc?.label || svc?.displayName || svc?.service || svc?.serviceKey || svc?.service_key;
+    if (!isMosquitoServiceName(name)) return svc;
+    changed = true;
+    return selectedMosquitoServiceRow(svc, frequency);
+  });
+  return { services: nextServices, changed };
+}
+
+function applyMosquitoTierToRecurring(recurring = {}, frequency = {}) {
+  if (!recurring || typeof recurring !== 'object') return recurring;
+  const { services, changed } = rewriteMosquitoRecurringServices(recurring.services, frequency);
+  if (!changed) return recurring;
+  const monthly = finiteNumberOrNull(frequency.monthly ?? frequency.monthlyBase);
+  const annual = finiteNumberOrNull(frequency.annual);
+  return {
+    ...recurring,
+    services,
+    ...(monthly != null ? { monthlyTotal: monthly, grandTotal: monthly, mo: monthly } : {}),
+    ...(annual != null ? { annualAfterDiscount: annual, annual, ann: annual } : {}),
+  };
+}
+
+function markSelectedMosquitoTierRows(rows = [], selectedTierKey = '') {
+  if (!Array.isArray(rows)) return rows;
+  const normalizedSelected = String(selectedTierKey || '').trim().toLowerCase();
+  return rows.map((row) => {
+    const tierKey = mosquitoTierKey(row);
+    if (!['seasonal9', 'monthly12'].includes(tierKey)) return row;
+    return { ...row, selected: tierKey === normalizedSelected, isSelected: tierKey === normalizedSelected };
+  });
+}
+
+// Mirror of applySelectedLawnTierToEstimateData for mosquito. Self-guards on a
+// mosquito cadence frequency, so it's a no-op for any other selection.
+function applySelectedMosquitoTierToEstimateData(estData = {}, frequency = {}) {
+  if (!isMosquitoTierFrequency(frequency)) return estData;
+  const hasResult = estData.result && typeof estData.result === 'object';
+  const sourceResult = hasResult ? estData.result : estData;
+  const result = { ...sourceResult };
+
+  if (result.recurring && typeof result.recurring === 'object') {
+    result.recurring = applyMosquitoTierToRecurring(result.recurring, frequency);
+  }
+  if (result.results && typeof result.results === 'object') {
+    const results = { ...result.results };
+    if (Array.isArray(results.mq)) {
+      results.mq = markSelectedMosquitoTierRows(results.mq, frequency.key);
+    }
+    if (results.recurring && typeof results.recurring === 'object') {
+      results.recurring = applyMosquitoTierToRecurring(results.recurring, frequency);
+    }
+    result.results = results;
+  }
+
+  if (!hasResult) return result;
+  const nextData = { ...estData, result };
+  if (estData.recurring && typeof estData.recurring === 'object') {
+    nextData.recurring = applyMosquitoTierToRecurring(estData.recurring, frequency);
+  }
+  return nextData;
+}
+
 function shapeServiceFrequency(frequency = {}, { allowAddOns = false } = {}) {
   const monthly = finiteNumberOrNull(frequency.monthly);
   const explicitAnnual = finiteNumberOrNull(frequency.annual);
@@ -10571,12 +10688,12 @@ function buildServiceSection({ key, category, label, isRecurring, isPest, freque
 // (result.results.lawn / .ts / .mq) — the same rows the cadence extractors read.
 // Only services with an applySelected*TierToEstimateData helper can be made
 // independently selectable — accept rewrites the chosen tier into the recurring
-// rows so the converter schedules + bills at that cadence. Lawn + Tree/Shrub
-// have that today; mosquito is a fast-follow (needs a mosquito apply-helper) and
-// keeps its current bundle behavior until then.
+// rows so the converter schedules + bills at that cadence. Lawn, Tree/Shrub, and
+// Mosquito all have that helper.
 const NON_PEST_RESULT_ROWS = {
   lawn_care: ['lawn', lawnTierKey],
   tree_shrub: ['ts', treeShrubTierKey],
+  mosquito: ['mq', mosquitoTierKey],
 };
 
 // serviceKey -> { tierKey -> { mo, ann, pa, v, recommended, selected } } from the
@@ -10698,6 +10815,7 @@ function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false } 
 const BUNDLE_SECTION_EXTRACTOR = {
   lawn_care: lawnFrequenciesFromResultStats,
   tree_shrub: treeShrubFrequenciesFromResultStats,
+  mosquito: mosquitoFrequenciesFromResultStats,
 };
 function bundleSectionLadderForService(serviceKey, estData, recurringService, recurringDiscount) {
   const extractor = BUNDLE_SECTION_EXTRACTOR[serviceKey];
@@ -11876,6 +11994,7 @@ module.exports.bundleSectionLadderForService = bundleSectionLadderForService;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
+module.exports.applySelectedMosquitoTierToEstimateData = applySelectedMosquitoTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.sectionTierEligibleFromKeys = sectionTierEligibleFromKeys;
 module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;

@@ -4,7 +4,39 @@ const {
   serviceCadenceComboKey,
   buildServiceCadenceCombos,
   bundleSectionLadderForService,
+  applySelectedMosquitoTierToEstimateData,
 } = require('../routes/estimate-public');
+
+// A pest + lawn + mosquito bundle (Gold tier = 3 qualifying services → 15% off).
+function pestLawnMosquitoV1() {
+  return {
+    pestTiers: [
+      { label: 'Quarterly', mo: 60, ann: 720, pa: 180, apps: 4 },
+      { label: 'Bi-Monthly', mo: 80, ann: 960, pa: 160, apps: 6 },
+      { label: 'Monthly', mo: 120, ann: 1440, pa: 120, apps: 12 },
+    ],
+    services: [
+      { name: 'Pest Control', service: 'pest_control', mo: 60, ann: 720, perTreatment: 180, visitsPerYear: 4 },
+      { name: 'Lawn Care', service: 'lawn_care', mo: 66.75, ann: 801, perTreatment: 89, visitsPerYear: 9 },
+      { name: 'Mosquito Control', service: 'mosquito', mo: 79, ann: 948, perTreatment: 79, visitsPerYear: 12 },
+    ],
+    discount: 0.15,
+    manualDiscount: null,
+  };
+}
+
+const LAWN_MQ_RESULT_STATS = {
+  lawn: [
+    { name: 'Basic', v: 4, mo: 35, ann: 420, pa: 105 },
+    { name: 'Standard', v: 6, mo: 45.5, ann: 546, pa: 91 },
+    { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true },
+    { name: 'Premium', v: 12, mo: 89, ann: 1068, pa: 89 },
+  ],
+  mq: [
+    { n: 'Seasonal', v: 9, mo: 65, ann: 780, pv: 86.67 },
+    { n: 'Monthly', v: 12, mo: 79, ann: 948, pv: 79, recommended: true },
+  ],
+};
 
 // A pest + lawn bundle in the v1 (admin) shape. Silver tier (2 qualifying
 // recurring services) → 10% WaveGuard discount. Lawn defaults to Enhanced (9x).
@@ -178,5 +210,66 @@ describe('bundleSectionLadderForService — non-pest section own-cadence slider'
   test('returns null for a service with no tier rows / no extractor', () => {
     expect(bundleSectionLadderForService('lawn_care', { results: {} }, lawnSvc, 0.1)).toBeNull();
     expect(bundleSectionLadderForService('pest_control', { results: LAWN_RESULT_STATS }, {}, 0.1)).toBeNull();
+  });
+});
+
+describe('mosquito as a per-service combo axis (pest + lawn + mosquito)', () => {
+  test('nonPestTierBaseMap includes mosquito seasonal/monthly tiers', () => {
+    const map = nonPestTierBaseMap(LAWN_MQ_RESULT_STATS);
+    expect(Object.keys(map).sort()).toEqual(['lawn_care', 'mosquito']);
+    expect(map.mosquito.seasonal9).toMatchObject({ mo: 65, v: 9 });
+    expect(map.mosquito.monthly12).toMatchObject({ mo: 79, v: 12, recommended: true });
+  });
+
+  test('combos fan out pest(3) × lawn(4) × mosquito(2) = 24, summed at 15% off', () => {
+    const combos = buildServiceCadenceCombos(pestLawnMosquitoV1(), {}, LAWN_MQ_RESULT_STATS);
+    expect(combos).toHaveLength(24);
+    // pest Monthly 120 + lawn Basic 35 + mosquito Seasonal 65, each * 0.85
+    const c = combos.find((x) => x.key === 'lawn_care:basic|mosquito:seasonal9|pest_control:monthly');
+    expect(c.monthly).toBe(187); // 102 + 29.75 + 55.25
+    for (const combo of combos) {
+      expect(combo.selection.pest_control).toBeTruthy();
+      expect(combo.selection.lawn_care).toBeTruthy();
+      expect(combo.selection.mosquito).toBeTruthy();
+    }
+  });
+});
+
+describe('applySelectedMosquitoTierToEstimateData — accept re-stamps the picked mosquito cadence', () => {
+  function estDataWithRecurringMosquito() {
+    return {
+      result: {
+        recurring: {
+          monthlyTotal: 79,
+          services: [{ name: 'Mosquito Control', service: 'mosquito', mo: 79, ann: 948, v: 12, visitsPerYear: 12 }],
+        },
+        results: {
+          mq: [
+            { n: 'Seasonal', v: 9, mo: 65, ann: 780, pv: 86.67 },
+            { n: 'Monthly', v: 12, mo: 79, ann: 948, pv: 79, recommended: true },
+          ],
+        },
+      },
+    };
+  }
+  const seasonalFreq = {
+    key: 'seasonal9', serviceCategory: 'mosquito', monthly: 65, annual: 780,
+    perTreatment: 86.67, visitsPerYear: 9, billingFrequencyKey: 'monthly', label: 'Seasonal',
+  };
+
+  test('selecting Seasonal rewrites the recurring mosquito line to 9 visits + marks results.mq', () => {
+    const out = applySelectedMosquitoTierToEstimateData(estDataWithRecurringMosquito(), seasonalFreq);
+    const svc = out.result.recurring.services[0];
+    expect(svc.visitsPerYear).toBe(9);
+    expect(svc.monthly).toBe(65);
+    expect(svc.tierKey).toBe('seasonal9');
+    expect(svc.billingFrequencyKey).toBe('monthly'); // mosquito always bills monthly
+    expect(out.result.results.mq.filter((r) => r.selected).map((r) => r.n)).toEqual(['Seasonal']);
+  });
+
+  test('is a no-op for a non-mosquito (e.g. lawn) selection', () => {
+    const lawnFreq = { key: 'basic', serviceCategory: 'lawn_care', monthly: 35 };
+    const input = estDataWithRecurringMosquito();
+    expect(applySelectedMosquitoTierToEstimateData(input, lawnFreq)).toBe(input);
   });
 });
