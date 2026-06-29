@@ -116,6 +116,15 @@ export default function PublicBookingPage() {
   // Proof-of-funnel token from the availability response; echoed to
   // /capture-intent so the public capture endpoint can't be abused.
   const captureTokenRef = useRef(null);
+  // Stable per /book session — the capture upsert key, so a corrected phone (after
+  // a mistyped first attempt) updates the SAME intent instead of orphaning the
+  // wrong number as its own recovery-eligible row.
+  const sessionIdRef = useRef(null);
+  if (!sessionIdRef.current) {
+    sessionIdRef.current = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `bk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
 
   const updateAddress = useCallback((updater) => {
     setAddress((current) => {
@@ -259,6 +268,7 @@ export default function PublicBookingPage() {
         keepalive: true,
         body: JSON.stringify({
           capture_token: captureTokenRef.current,
+          session_id: sessionIdRef.current,
           source,
           service_type: quotedServiceLabel || service.label,
           quoted_service_label: quotedServiceLabel || null,
@@ -385,6 +395,7 @@ export default function PublicBookingPage() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Search failed');
+    if (data.capture_token) captureTokenRef.current = data.capture_token;
     setPickedDate(null);
     setSelectedDate(null);
     setSelectedSlot(null);
@@ -418,6 +429,7 @@ export default function PublicBookingPage() {
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json();
       if (latestPickedDateRef.current !== date) return;
+      if (data.capture_token) captureTokenRef.current = data.capture_token;
       setBrowseDays(data.days || []);
     } catch {
       if (latestPickedDateRef.current !== date) return;

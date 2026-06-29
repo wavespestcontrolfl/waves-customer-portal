@@ -72,8 +72,12 @@ function emailTemplateRow(t) {
     audience: 'customer',
     message_priority: 'normal',
     content_sensitivity: t.sensitivity || 'service',
-    send_stream: 'transactional_required',
-    suppression_group_key: 'transactional_required',
+    // A re-engagement nudge — NOT a required transactional notice. Use the
+    // service_operational stream/group so a SendGrid unsubscribe is honored
+    // (transactional_required bypasses unsubscribe suppressions; see
+    // email-template-library.activeSuppressionFor).
+    send_stream: 'service_operational',
+    suppression_group_key: 'service_operational',
     layout_wrapper_id: 'service_default_v1',
     from_name: 'Waves Pest Control',
     from_email: SERVICE_FROM,
@@ -142,6 +146,7 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('booking_intents'))) {
     await knex.schema.createTable('booking_intents', (t) => {
       t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
+      t.string('session_id');                    // stable per /book session — upsert key, so a corrected phone updates the SAME row (no orphaned mistyped-number intent)
       t.string('phone').notNullable();           // recovery key (as entered)
       t.string('first_name');
       t.string('last_name');
@@ -162,6 +167,7 @@ exports.up = async function up(knex) {
       t.timestamp('captured_at').defaultTo(knex.fn.now());
       t.timestamp('last_activity_at').defaultTo(knex.fn.now());
       t.boolean('followup_sms_sent').defaultTo(false);   // stage-1 claim flag
+      t.timestamp('followup_sms_sent_at');               // when the SMS actually went out — gates the email to ~23h later even if the SMS fired late
       t.boolean('followup_email_sent').defaultTo(false); // stage-2 claim flag
       t.timestamp('converted_at');               // set when this person actually books
       t.uuid('converted_booking_id');
@@ -169,6 +175,7 @@ exports.up = async function up(knex) {
       t.timestamp('created_at').defaultTo(knex.fn.now());
       t.timestamp('updated_at').defaultTo(knex.fn.now());
       t.index(['phone']);
+      t.index(['session_id']);
       // The recovery scan: open, un-suppressed intents in a recency window.
       t.index(['converted_at', 'suppressed', 'captured_at']);
     });

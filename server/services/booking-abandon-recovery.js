@@ -82,7 +82,10 @@ async function hasActiveBooking(intent) {
   try {
     const q = db('scheduled_services as ss')
       .leftJoin('customers as c', 'ss.customer_id', 'c.id')
-      .whereNotIn('ss.status', ['cancelled'])
+      // Only a genuinely-active upcoming appointment counts — a rescheduled /
+      // skipped / no-show / completed / cancelled row is NOT a spot to protect,
+      // and suppressing on those would wrongly drop a real recovery.
+      .whereNotIn('ss.status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
       .where('ss.scheduled_date', '>=', etDateString())
       .first('ss.id');
     if (intent.customer_id) q.where('ss.customer_id', intent.customer_id);
@@ -123,17 +126,19 @@ async function renderSms(vars) {
 // Atomic stage claim — flips false/NULL → true, returns true only if THIS caller
 // won. (The cron is single-instance via runExclusive, but the claim also guards
 // an accidental overlap and pairs with release-on-failure.)
-async function claimStage(intentId, flag) {
-  // Keep the eligibility predicates IN the atomic claim: if /booking/confirm or
-  // a suppression flips converted_at/suppressed between the candidate SELECT and
-  // this UPDATE, the claim must lose (0 rows) so we never send to someone who
-  // already booked or opted out.
-  const affected = await db('booking_intents')
+async function claimStage(intentId, flag, maxActivityBefore) {
+  // Keep ALL eligibility predicates IN the atomic claim: if /booking/confirm, a
+  // suppression, OR a fresh /capture-intent (the visitor returned and bumped
+  // last_activity_at) lands between the candidate SELECT and this UPDATE, the
+  // claim must lose (0 rows) so we never send to someone who already booked, opted
+  // out, or is actively filling the form again.
+  const q = db('booking_intents')
     .where({ id: intentId })
     .whereNull('converted_at')
     .where('suppressed', false)
-    .where((q) => q.where(flag, false).orWhereNull(flag))
-    .update({ [flag]: true, updated_at: db.fn.now() });
+    .where((qq) => qq.where(flag, false).orWhereNull(flag));
+  if (maxActivityBefore) q.where('last_activity_at', '<', maxActivityBefore);
+  const affected = await q.update({ [flag]: true, updated_at: db.fn.now() });
   return affected === 1;
 }
 
@@ -214,7 +219,7 @@ async function runSmsStage(now, sentPhones) {
       });
       if (!body) continue; // missing template — don't claim, retry next tick
 
-      if (!(await claimStage(intent.id, 'followup_sms_sent'))) continue;
+      if (!(await claimStage(intent.id, 'followup_sms_sent', new Date(nowMs - SMS_MIN_AGE_H * 3600000)))) continue;
       claimed = true;
 
       const result = await sendCustomerMessage({
@@ -238,13 +243,21 @@ async function runSmsStage(now, sentPhones) {
         sent++;
         claimed = false;
         if (ten) sentPhones.add(ten);
+        // Stamp when the SMS actually went out so the 24h email is held to ~23h
+        // AFTER it, even if the SMS itself fired late (gate/quiet-hours/outage).
+        await db('booking_intents').where({ id: intent.id })
+          .update({ followup_sms_sent_at: db.fn.now() }).catch(() => {});
         await markSiblingsSent(intent.phone, 'followup_sms_sent', intent.id);
       } else {
         logger.warn(`[booking-recovery] SMS blocked for intent ${intent.id}: ${result?.code || 'unknown'} ${result?.reason || ''}`);
-        // Terminal block (opted out / landline) — keep the claim so we never
-        // re-attempt a suppressed number. A retryable hold (quiet hours) leaves
-        // the claim set → released in `finally` → retried next tick.
-        if (result && result.retryable === false) claimed = false;
+        // Keep the claim ONLY for a genuine terminal block (opt-out / landline
+        // suppression, or a provider-terminal failure) so we never re-attempt a
+        // dead number. An unclassified provider failure (retryable:false but not
+        // blocked/terminal) sent nothing — leave the claim set → released in
+        // `finally` → retried next tick. Retryable holds (quiet hours) also retry.
+        if (result && result.retryable === false && (result.blocked === true || result.terminal === true)) {
+          claimed = false;
+        }
       }
     } catch (e) {
       logger.error(`[booking-recovery] SMS send failed for intent ${intent.id}: ${e.message}`);
@@ -264,6 +277,10 @@ async function runEmailStage(now, sentPhones) {
     .where((q) => q.where('followup_email_sent', false).orWhereNull('followup_email_sent'))
     .where('last_activity_at', '<', new Date(nowMs - EMAIL_MIN_AGE_H * 3600000))
     .where('last_activity_at', '>', new Date(nowMs - EMAIL_MAX_AGE_H * 3600000))
+    // Hold the email to ~23h AFTER the SMS actually went out, so a late first
+    // touch (gate/quiet-hours/outage delayed the SMS past 24h) doesn't trigger
+    // SMS-then-email back-to-back in consecutive ticks.
+    .where((q) => q.whereNull('followup_sms_sent_at').orWhere('followup_sms_sent_at', '<', new Date(nowMs - 23 * 3600000)))
     .whereNotNull('email')
     .orderBy('last_activity_at', 'desc')
     .select('*');
@@ -293,7 +310,13 @@ async function runEmailStage(now, sentPhones) {
         logger.info(`[booking-recovery] email skip ${intent.id}: already has an upcoming booking`);
         continue;
       }
-      if (!(await claimStage(intent.id, 'followup_email_sent'))) continue;
+      // Reply-pause applies to the email touch too — if they're already in an SMS
+      // conversation with us after abandoning, let staff handle it live.
+      if (await hasRepliedRecently(intent.phone)) {
+        logger.info(`[booking-recovery] email skip ${intent.id}: customer-replied-recently`);
+        continue;
+      }
+      if (!(await claimStage(intent.id, 'followup_email_sent', new Date(nowMs - EMAIL_MIN_AGE_H * 3600000)))) continue;
       claimed = true;
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'booking.abandonment_recovery',

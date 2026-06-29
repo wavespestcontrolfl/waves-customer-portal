@@ -229,6 +229,17 @@ describe('runEmailStage (touch 2)', () => {
     expect(updates).toEqual([]);
   });
 
+  test('applies reply-pause to the email touch too (active SMS convo → skip)', async () => {
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: { id: 'm-9' } }); // replied recently
+
+    const sent = await _internals.runEmailStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+  });
+
   test('skips the recovery email when the customer has email opt-out in prefs', async () => {
     enqueue('booking_intents', { rows: [intent({ customer_id: 'cust-9' })] });
     enqueue('notification_prefs', { first: { email_enabled: false } });

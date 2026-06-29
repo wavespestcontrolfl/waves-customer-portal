@@ -1312,7 +1312,9 @@ router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
 
     const str = (v, n) => { const s = (v == null ? '' : String(v)).trim(); return s ? s.slice(0, n) : null; };
     const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+    const sessionId = str(b.session_id, 80);
     const row = {
+      session_id: sessionId,
       phone: phoneDigits,
       first_name: str(nc.first_name, 120),
       last_name: str(nc.last_name, 120),
@@ -1363,9 +1365,20 @@ router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
       row.customer_id = match && match.id ? match.id : null;
     } catch { /* best-effort — leave customer_id unset */ }
 
-    // Refresh the existing open intent (one per phone) or insert a new one.
-    const open = await tenMatch(db('booking_intents').whereNull('converted_at').where('suppressed', false))
-      .orderBy('captured_at', 'desc').first('id');
+    // Refresh the existing OPEN intent, keyed by session_id when the client sends
+    // one — so a corrected phone (after a mistyped first attempt) updates the SAME
+    // row instead of orphaning the wrong number as its own recovery-eligible
+    // intent. Fall back to the phone match for older clients with no session id.
+    let open = null;
+    if (sessionId) {
+      open = await db('booking_intents').where({ session_id: sessionId })
+        .whereNull('converted_at').where('suppressed', false)
+        .orderBy('captured_at', 'desc').first('id');
+    }
+    if (!open) {
+      open = await tenMatch(db('booking_intents').whereNull('converted_at').where('suppressed', false))
+        .orderBy('captured_at', 'desc').first('id');
+    }
     if (open) {
       await db('booking_intents').where({ id: open.id }).update(row);
       return res.json({ ok: true, intent_id: open.id, updated: true });
