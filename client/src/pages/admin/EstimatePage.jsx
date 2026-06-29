@@ -696,9 +696,7 @@ function EstimateToolView() {
   const autocompleteRef = useRef(null);
 
   useEffect(() => {
-    const apiKey =
-      import.meta.env.VITE_GOOGLE_MAPS_API_KEY ||
-      "AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk";
+    const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || "";
     if (!apiKey) return;
 
     // Inject dark-theme styles for the Google autocomplete dropdown
