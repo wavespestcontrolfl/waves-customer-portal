@@ -157,7 +157,8 @@ exports.up = async function up(knex) {
       t.string('zip');
       t.decimal('lat', 10, 7);
       t.decimal('lng', 10, 7);
-      t.string('service_type');
+      t.string('service_type');                  // display label (for the message copy)
+      t.string('service_id');                    // booking service id (pest_control/lawn_care/…) for the recovery /book?service= link
       t.string('slot_date');                     // YYYY-MM-DD (best-effort; may be taken by send time)
       t.string('slot_start');                    // HH:MM
       t.string('slot_end');

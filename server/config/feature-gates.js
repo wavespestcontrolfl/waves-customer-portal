@@ -232,12 +232,12 @@ const gates = {
   estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
 
   // Abandoned-booking recovery — chases /book drop-offs (booking_intents) with a
-  // ~1h recovery SMS + ~24h email. Ships LIVE (owner directive: live on merge) so
-  // it is ON by default in EVERY environment; GATE_BOOKING_ABANDON_RECOVERY=false
-  // is the kill switch and is honored everywhere (incl. preview/dev, which may
-  // hold real Twilio/SendGrid creds) — not just prod. When off, the cron only
-  // shadow-logs candidate counts and never claims/sends.
-  bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY !== 'false',
+  // ~1h recovery SMS + ~24h email. A customer-facing auto-send, so it FAILS CLOSED
+  // (explicit opt-in in EVERY environment) per the house rule — a preview/dev env
+  // with real Twilio/SendGrid creds + cronJobs on must NOT auto-send. Owner sets
+  // GATE_BOOKING_ABANDON_RECOVERY=true on prod at merge to go live (effectively
+  // "live on merge", one env flip). Off → the cron only shadow-logs candidates.
+  bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY === 'true',
 
   // Proactive line-type lookup — before the first SMS to a number, Twilio Lookup
   // its line type and skip landlines (avoids the wasted send + 30006 bounce that

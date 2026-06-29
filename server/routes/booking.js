@@ -1339,6 +1339,7 @@ router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
       lat: num(nc.lat),
       lng: num(nc.lng),
       service_type: cleanBookingServiceLabel(b.quoted_service_label) || cleanBookingServiceLabel(b.service_type) || str(b.service_type, 120),
+      service_id: str(b.service_id, 60),
       slot_date: b.slot_date ? String(b.slot_date).split('T')[0].slice(0, 10) : null,
       slot_start: str(b.slot_start, 10),
       slot_end: str(b.slot_end, 10),

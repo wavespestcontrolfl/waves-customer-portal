@@ -186,9 +186,15 @@ function serviceLabelOf(intent) {
 }
 
 async function bookingUrlFor(intent) {
-  return shortenOrPassthrough(BOOKING_URL, {
+  // Carry the abandoned service so the recovery link preselects it — without
+  // ?service=, /book defaults to pest_control, which would mis-route a lawn /
+  // mosquito / tree-shrub abandoner into the wrong service flow + recurrence.
+  let url = BOOKING_URL;
+  const sid = String(intent.service_id || '').trim();
+  if (/^[a-z_]{1,40}$/.test(sid)) url += `&service=${encodeURIComponent(sid)}`;
+  return shortenOrPassthrough(url, {
     kind: 'booking', entityType: 'booking_intents', entityId: intent.id, customerId: intent.customer_id || null,
-  }).catch(() => BOOKING_URL);
+  }).catch(() => url);
 }
 
 // ── SMS stage (touch 1) ────────────────────────────────────────────────────
