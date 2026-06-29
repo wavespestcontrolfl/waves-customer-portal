@@ -6705,6 +6705,14 @@ router.put('/:token/accept', async (req, res, next) => {
     // converter needs). For post-accept customer/admin messaging AND the API
     // response we must quote the amount actually invoiced — the converter's shared
     // calc applies the discount and the margin-floor clamp, so this always matches.
+    // Commercial prepay tax is the customer's EFFECTIVE rate (exemptions +
+    // county), not a hardcoded 7% — resolve it for the display so the quoted
+    // amount matches the invoice the converter creates. A linked customer
+    // resolves their real rate; a brand-new one (no row yet) defaults to the FL
+    // rate, which is also what the converter's new-customer invoice resolves.
+    const prepayDisplayBaseRate = annualPrepaySelected && isCommercialAccept
+      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, {})
+      : 0;
     const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
       ? (() => {
         const converter = require('../services/estimate-converter');
@@ -6719,7 +6727,7 @@ router.put('/:token/accept', async (req, res, next) => {
         // + PaymentIntent the converter creates (uses the same blended rate +
         // post-discount allocation). Residential prepay is untaxed (rate 0).
         const taxRate = isCommercialAccept
-          ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0 })
+          ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0, baseRate: prepayDisplayBaseRate })
           : 0;
         // Mirror InvoiceService EXACTLY: tax dollars rounded to cents, then added
         // to the base — so the messaged amount equals inv.total to the cent.

@@ -457,6 +457,19 @@ describe('commercial prepay blended tax rate (taxable pest share only)', () => {
     expect(resolveCommercialPrepayTaxRate([{ service: 'commercial_pest', annual: 0 }])).toBe(0);
   });
 
+  test('baseRate honors exemptions and non-7% counties (not hardcoded)', () => {
+    const rows = [
+      { service: 'commercial_pest', annual: 2000, taxable: true },
+      { service: 'commercial_lawn', annual: 8000, taxable: false },
+    ];
+    // Tax-exempt customer → effective baseRate 0 → no tax at all.
+    expect(resolveCommercialPrepayTaxRate(rows, { baseRate: 0 })).toBe(0);
+    // A 6.5% county (e.g. Lee) → blended on the 20% pest share = 0.013, not 0.014.
+    expect(resolveCommercialPrepayTaxRate(rows, { baseRate: 0.065 })).toBeCloseTo(0.2 * 0.065, 4);
+    // Default (no baseRate) still falls back to the FL 7%.
+    expect(resolveCommercialPrepayTaxRate(rows)).toBeCloseTo(0.2 * 0.07, 4);
+  });
+
   test('full-precision rate: a tiny taxable share still produces the right tax dollars', () => {
     // pest $50 of $50,050 → share ~0.000999 → rate ~0.0000699. Rounding the rate
     // to 4 dp would drop the tax; full precision keeps it. (Regression for the
