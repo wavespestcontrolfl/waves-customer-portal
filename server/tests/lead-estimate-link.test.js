@@ -1,13 +1,20 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/lead-attribution', () => ({ markConverted: jest.fn() }));
+jest.mock('../services/lead-source-resolver', () => ({
+  resolveLeadSource: jest.fn(async () => ({ leadSourceId: 'ls-fb', leadSourceName: 'Facebook', leadSourceDetail: 'Meta click (fbclid)' })),
+  MAIN_SITE_NAME: 'Main Site (wavespestcontrol.com)',
+  SPOKE_DOMAIN_TO_SOURCE_NAME: {},
+}));
 
 const db = require('../models/db');
 const leadAttribution = require('../services/lead-attribution');
+const { resolveLeadSource } = require('../services/lead-source-resolver');
 const {
   attachLeadToEstimate,
   markLinkedLeadEstimateAccepted,
   markLinkedLeadEstimateSent,
   convertLeadFromEvent,
+  attributeSelfBooking,
 } = require('../services/lead-estimate-link');
 
 function makeDb(lead, estimate = null) {
@@ -646,5 +653,148 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
 
     expect(result).toEqual({ converted: false, reason: 'ambiguous_customer_link' });
     expect(markConverted).not.toHaveBeenCalled();
+  });
+});
+
+describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', () => {
+  // Mock surface used by attributeSelfBooking:
+  //   customers.where({id}).first()                       -> the booker
+  //   leads.where({customer_id}).first('id')              -> existing-lead guard
+  //   leads.whereNotIn(...).whereNull(...).andWhere(...)  -> findUnconvertedLeadsByContact
+  //   leads.insert(row).returning('*')                    -> minted lead
+  //   lead_activities.insert(row).catch(fn)               -> audit log (best-effort)
+  function makeAttrDb(opts = {}) {
+    const inserted = [];
+    const database = (table) => {
+      if (opts.throwOnTable === table) throw new Error('db boom');
+      return {
+        where(clause) {
+          if (table === 'customers') return { first: async () => opts.customer || null };
+          if (table === 'leads' && clause && 'customer_id' in clause) {
+            return { first: async () => opts.linkedLead || null };
+          }
+          return { first: async () => null };
+        },
+        whereNotIn() {
+          return { whereNull: () => ({ andWhere: () => Promise.resolve(opts.contactLeads || []) }) };
+        },
+        insert(row) {
+          inserted.push({ table, row });
+          return {
+            returning: async () => [{ id: opts.mintedId || 'minted-1', ...row }],
+            catch: () => Promise.resolve(),
+          };
+        },
+      };
+    };
+    database._inserted = inserted;
+    return database;
+  }
+
+  const FB_ATTR = {
+    utm: { source: 'facebook', medium: 'paid', campaign: 'spring', term: null, content: null },
+    fbclid: 'fb-click-123',
+    fbc: 'fb.1.1700000000000.fb-click-123',
+    fbp: 'fb.1.1700000000000.987654321',
+    gclid: null, wbraid: null, gbraid: null,
+    referrer: 'https://facebook.com/', landing_url: 'https://wavespestcontrol.com/book?fbclid=fb-click-123',
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resolveLeadSource.mockResolvedValue({ leadSourceId: 'ls-fb', leadSourceName: 'Facebook', leadSourceDetail: 'Meta click (fbclid)' });
+  });
+
+  test('mints a won lead carrying the click ids when ad-tracked and the booker has no lead', async () => {
+    const database = makeAttrDb({
+      customer: { id: 'c1', first_name: 'Dana', last_name: 'Reyes', phone: '+19415550101', email: 'dana@example.com' },
+    });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1', attribution: FB_ATTR, serviceInterest: 'General Pest Control', database,
+    });
+
+    expect(result).toMatchObject({ attributed: true, minted: true, leadId: 'minted-1' });
+    const mint = database._inserted.find((i) => i.table === 'leads');
+    expect(mint).toBeTruthy();
+    expect(mint.row).toMatchObject({
+      customer_id: 'c1',
+      status: 'won',
+      is_qualified: true,
+      lead_type: 'self_booking',
+      first_contact_channel: 'web',
+      lead_source_id: 'ls-fb',
+      service_interest: 'General Pest Control',
+      fbclid: 'fb-click-123',
+      fbc: 'fb.1.1700000000000.fb-click-123',
+      fbp: 'fb.1.1700000000000.987654321',
+      phone: '+19415550101',
+      email: 'dana@example.com',
+    });
+    expect(mint.row.converted_at).toBeInstanceOf(Date);
+    // null click ids are not written as keys
+    expect(mint.row).not.toHaveProperty('gclid');
+    // audit trail
+    expect(database._inserted.some((i) => i.table === 'lead_activities')).toBe(true);
+  });
+
+  test('persists a Google gclid (capped to the column length) for a paid Google self-booking', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+    const longGclid = 'g'.repeat(260);
+
+    await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { utm: { source: 'google', medium: 'cpc' }, gclid: longGclid, fbclid: null, wbraid: null, gbraid: null },
+      database,
+    });
+
+    const mint = database._inserted.find((i) => i.table === 'leads');
+    expect(mint.row.gclid).toHaveLength(200); // varchar(200) cap
+    expect(mint.row).not.toHaveProperty('fbclid');
+  });
+
+  test('does NOT mint when the touch carries no ad tracking (a bare _fbp cookie is not a tracked click)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fb.1.x.ambient' },
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'no_ad_tracking' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('does NOT mint a duplicate when the booker already has a lead on file', async () => {
+    const database = makeAttrDb({
+      customer: { id: 'c1', phone: '+19415550101' },
+      linkedLead: { id: 'existing-lead' },
+    });
+
+    const result = await attributeSelfBooking({ customerId: 'c1', attribution: FB_ATTR, database });
+
+    expect(result).toEqual({ attributed: false, reason: 'existing_customer_lead' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('does NOT mint when an unconverted lead matches the booker by contact', async () => {
+    const database = makeAttrDb({
+      customer: { id: 'c1', phone: '+19415550101', email: 'dana@example.com' },
+      contactLeads: [{ id: 'open-contact-lead', status: 'new', customer_id: null }],
+    });
+
+    const result = await attributeSelfBooking({ customerId: 'c1', attribution: FB_ATTR, database });
+
+    expect(result).toEqual({ attributed: false, reason: 'existing_contact_lead' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('never throws into the committed booking — a db failure resolves to an error result', async () => {
+    const database = makeAttrDb({ throwOnTable: 'customers' });
+
+    const result = await attributeSelfBooking({ customerId: 'c1', attribution: FB_ATTR, database });
+
+    expect(result).toEqual({ attributed: false, reason: 'error' });
   });
 });
