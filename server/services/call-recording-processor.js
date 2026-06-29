@@ -40,7 +40,7 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { validateAddress, buildAddressLines } = require('./address-validation');
@@ -64,6 +64,18 @@ const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'ge
 // Flash), and unlike Claude Opus 4.7 it still supports temperature (extraction
 // pins temp 0.2 for determinism). Env-overridable for instant rollback.
 const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro';
+
+// Human-readable "confirm before dispatch" reasons surfaced by the address /
+// identity bridge below. Shown on the lead's AI-triage activity so Virginia
+// knows exactly what to verify on the callback, instead of dispatching on a
+// silently-unverified address or an incomplete account holder.
+const CONFIRM_REASON_TEXT = {
+  address_unverified: 'service address could not be verified — read it back to the caller',
+  out_of_service_area: 'address resolves outside the service area — verify the county',
+  caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
+  missing_last_name: "no last name captured — get the account holder's full name",
+};
+const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 
 function twilioClient() {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
@@ -1719,6 +1731,9 @@ const CallRecordingProcessor = {
     let v2EmailBlocked = false;
     let v2CanonicalWriteBlocked = false;
     let v2ApprovedExtraction = null;
+    // Address/identity bridge (populated below in shadow mode): "confirm before
+    // dispatch" reasons that flag the call for a human without blocking writes.
+    const bridgeNeedsConfirmation = [];
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2Extraction = v2Result?.extraction || null;
@@ -1812,6 +1827,49 @@ const CallRecordingProcessor = {
         } catch (triageErr) {
           logger.error(`[call-proc-v2] Triage insert also failed for ${callSid}: ${triageErr.message}`);
         }
+      }
+    }
+
+    // ── Address-validation bridge (shadow mode only) ─────────────────────
+    // When V2 is enabled but NOT yet driving routing, the Google Address
+    // Validation verdict (v2AddressValidation) is computed on every call but
+    // otherwise ignored by the live write. Consume just that verdict here — no
+    // appointment/routing changes — so the legacy customer/lead write stops
+    // silently persisting an unverifiable address as if it were clean:
+    //   • validated_accept / corrected → adopt Google's normalized address
+    //     (auto-fixes a bad ZIP/street), mirroring the enforce-path approval
+    //     branch above. Mutated into `extracted` BEFORE the customer/lead
+    //     upsert reads it, so both records get the corrected address.
+    //   • missing_component / ambiguous / confirm_needed / out_of_service_area
+    //     (a street WAS given) → keep the raw address but record a needs-
+    //     confirmation reason so the call is flagged for a human.
+    // Plus two identity signals on real prospects: caller-arranging-for-someone-
+    // else and a missing surname. When DRIVES_ROUTING is later promoted the full
+    // gate above owns all of this, so this bridge is guarded off then.
+    if (CALL_EXTRACTION_V2_ENABLED && !CALL_EXTRACTION_V2_DRIVES_ROUTING) {
+      try {
+        const { normalizedAddress, needsConfirmation } = deriveCallReviewBridge({
+          addressValidation: v2AddressValidation,
+          extracted,
+          v2TriageFlags: v2Result?.extraction?.triage_flags,
+        });
+        if (normalizedAddress) {
+          // Adopt Google's normalized address BEFORE the customer/lead upsert
+          // reads extracted.* below, so both records get the corrected address.
+          if (normalizedAddress.address_line1) extracted.address_line1 = normalizedAddress.address_line1;
+          if (normalizedAddress.city) extracted.city = normalizedAddress.city;
+          if (normalizedAddress.state) extracted.state = normalizedAddress.state;
+          if (normalizedAddress.zip) extracted.zip = normalizedAddress.zip;
+          if (v2AddressValidation?.status === 'corrected') {
+            logger.info(`[call-proc-bridge] Adopted Google-corrected address for ${maskSid(callSid)}`);
+          }
+        }
+        if (needsConfirmation.length) {
+          bridgeNeedsConfirmation.push(...needsConfirmation);
+          logger.info(`[call-proc-bridge] ${callSid} needs confirmation: ${needsConfirmation.join(', ')} (av=${v2AddressValidation?.status || 'n/a'})`);
+        }
+      } catch (bridgeErr) {
+        logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
       }
     }
 
@@ -2133,6 +2191,7 @@ const CallRecordingProcessor = {
             pain_points: extracted.pain_points,
             preferred_date_time: extracted.preferred_date_time,
             sentiment: extracted.sentiment,
+            ...(bridgeNeedsConfirmation.length ? { needs_confirmation: bridgeNeedsConfirmation } : {}),
           });
           // is_qualified: hot/warm only. Spam was already early-returned, so
           // checking != 'spam' would mark cold leads qualified.
@@ -2141,13 +2200,26 @@ const CallRecordingProcessor = {
           leadUpdates.updated_at = new Date();
           await db('leads').where({ id: leadId }).update(leadUpdates);
 
-          // Log AI triage activity
+          // Log AI triage activity. When the bridge flagged anything, append a
+          // plain-language "confirm before dispatch" line so it's visible on the
+          // lead timeline Virginia works, not just in extracted_data.
+          const triageBase = `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`;
+          const triageDesc = bridgeNeedsConfirmation.length
+            ? `${triageBase} — ⚠ CONFIRM BEFORE DISPATCH: ${bridgeNeedsConfirmation.map(describeConfirmReason).join('; ')}`
+            : triageBase;
           await db('lead_activities').insert({
             lead_id: leadId,
             activity_type: 'ai_triage',
-            description: `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`,
+            description: triageDesc,
             performed_by: 'AI Call Processor',
-            metadata: JSON.stringify({ call_summary: extracted.call_summary, pain_points: extracted.pain_points, sentiment: extracted.sentiment }),
+            metadata: JSON.stringify({
+              call_summary: extracted.call_summary,
+              pain_points: extracted.pain_points,
+              sentiment: extracted.sentiment,
+              ...(bridgeNeedsConfirmation.length
+                ? { needs_confirmation: bridgeNeedsConfirmation, address_validation_status: v2AddressValidation?.status || null }
+                : {}),
+            }),
           }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
         }
       } catch (leadErr) {
@@ -2716,6 +2788,9 @@ const CallRecordingProcessor = {
         processing_status: finalStatus,
         processing_token: null,
         processing_started_at: null,
+        // Address unverifiable / caller-not-owner / missing surname → open the
+        // call for human review instead of letting it look fully processed.
+        ...(bridgeNeedsConfirmation.length ? { review_status: 'open' } : {}),
         updated_at: new Date(),
       });
     if (finalized === 0) {

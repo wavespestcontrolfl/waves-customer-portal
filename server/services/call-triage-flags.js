@@ -319,10 +319,56 @@ function canAutoRoute(extraction, opts = {}) {
   return { allowed: true, flags: finalFlags };
 }
 
+/**
+ * Address/identity review bridge — pure decision used by the call processor when
+ * V2 address validation runs in SHADOW (V2 enabled, not yet driving routing). It
+ * lets the legacy live write consume just the AV verdict without taking on the
+ * full enforce-mode routing gate. Given the AV result, the legacy flat
+ * `extracted` record, and the V2 model triage flags, returns:
+ *   - normalizedAddress: the {address_line1, city, state, zip} subset to adopt
+ *     when AV decisively accepted/corrected an in-area premise (null otherwise),
+ *   - needsConfirmation: human-review reasons — an unverifiable / out-of-area
+ *     address (only when a street was actually given), caller-not-owner, and a
+ *     missing surname on a real (hot/warm) prospect.
+ * Pure: no side effects. The caller mutates `extracted` and persists the reasons.
+ */
+function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [] } = {}) {
+  const av = addressValidation || null;
+  const status = av && av.status ? av.status : null;
+  const hadStreet = !!String(extracted.address_line1 || '').trim();
+  const needsConfirmation = [];
+  let normalizedAddress = null;
+
+  if (av && av.normalized && (status === 'validated_accept' || status === 'corrected')) {
+    const n = av.normalized;
+    const adopt = {};
+    if (n.street_line_1) adopt.address_line1 = n.street_line_1;
+    if (n.city) adopt.city = n.city;
+    if (n.state) adopt.state = n.state;
+    if (n.postal_code) adopt.zip = n.postal_code;
+    if (Object.keys(adopt).length) normalizedAddress = adopt;
+  } else if (hadStreet && (status === 'missing_component' || status === 'ambiguous' || status === 'confirm_needed')) {
+    needsConfirmation.push('address_unverified');
+  } else if (hadStreet && status === 'out_of_service_area') {
+    needsConfirmation.push('out_of_service_area');
+  }
+
+  const flags = Array.isArray(v2TriageFlags) ? v2TriageFlags : [];
+  if (flags.includes('caller_not_authorized')) needsConfirmation.push('caller_not_authorized');
+
+  if (extracted.first_name && !String(extracted.last_name || '').trim()
+      && (extracted.lead_quality === 'hot' || extracted.lead_quality === 'warm')) {
+    needsConfirmation.push('missing_last_name');
+  }
+
+  return { normalizedAddress, needsConfirmation };
+}
+
 module.exports = {
   computeDeterministicTriageFlags,
   mergeTriageFlags,
   suppressAddressFlagsForAV,
+  deriveCallReviewBridge,
   canAutoRoute,
   SMS_ONLY_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
