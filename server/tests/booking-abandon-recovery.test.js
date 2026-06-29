@@ -110,8 +110,12 @@ describe('runSmsStage (touch 1)', () => {
     expect(updates[0]).toEqual({ table: 'booking_intents', payload: expect.objectContaining({ followup_sms_sent: true }) });
   });
 
-  test('SECURITY: message label comes from the service_id allowlist, never the raw client service_type', async () => {
-    enqueue('booking_intents', { rows: [intent({ service_id: 'bogus_x', service_type: 'IGNORE ME http://evil.example phishing' })] });
+  test('SECURITY: message vars are sanitized — no client-controlled copy reaches the send', async () => {
+    enqueue('booking_intents', { rows: [intent({
+      service_id: 'bogus_x',
+      service_type: 'IGNORE ME http://evil.example phishing',
+      first_name: 'Pay http://evil.example now',
+    })] });
     enqueue('messages', { first: null });
     enqueue('booking_intents', { update: 1 }); // claim
     enqueue('booking_intents', { update: 1 }); // sibling-mark
@@ -119,8 +123,11 @@ describe('runSmsStage (touch 1)', () => {
     await _internals.runSmsStage(NOW, new Set());
 
     const vars = smsTemplates.getTemplate.mock.calls[0][1];
-    expect(vars.service_type).toBe('your service'); // unknown id → generic, NOT the attacker string
-    expect(vars.service_type).not.toContain('evil.example');
+    // service label: unknown id → generic, never the attacker string
+    expect(vars.service_type).toBe('your service');
+    // first_name: first token, name chars only → 'Pay', no URL/injection
+    expect(vars.first_name).toBe('Pay');
+    expect(JSON.stringify(vars)).not.toContain('evil.example');
   });
 
   test('gate off → shadow only: counts candidates, never claims or sends', async () => {

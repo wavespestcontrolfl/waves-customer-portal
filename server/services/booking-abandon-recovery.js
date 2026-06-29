@@ -179,7 +179,12 @@ async function markSiblingsSent(phone, flag, excludeId) {
 }
 
 function firstNameOf(intent) {
-  return (intent.first_name || '').trim().split(' ')[0] || 'there';
+  // SECURITY: client-supplied + interpolated into the message, so strip anything
+  // that isn't a plausible name character (no URLs / markup / injection payloads),
+  // take the first token, cap length, and fall back to a generic greeting.
+  const raw = String(intent.first_name || '').trim().split(/\s+/)[0] || '';
+  const clean = raw.replace(/[^\p{L}\p{M}'’-]/gu, '').slice(0, 40);
+  return clean || 'there';
 }
 
 // SECURITY: the recovery SMS/email interpolates this label, and an attacker

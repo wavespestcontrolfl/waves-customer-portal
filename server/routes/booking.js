@@ -1410,7 +1410,13 @@ router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
       const { findCustomerByPhone } = require('../services/lead-from-extraction');
       const match = await findCustomerByPhone(phoneDigits);
       row.customer_id = match && match.id ? match.id : null;
-    } catch { /* best-effort — leave customer_id unset */ }
+    } catch (e) {
+      // FAIL CLOSED on a lookup ERROR (vs a clean no-match): leaving customer_id
+      // null would treat an existing OPTED-OUT customer as a lead and bypass their
+      // opt-out on the recovery send. A transient blip → skip this capture.
+      logger.warn(`[booking:capture-intent] customer lookup failed — skipping capture: ${e.message}`);
+      return res.json({ ok: false, skipped: 'lookup_failed' });
+    }
 
     // Refresh the existing OPEN intent, keyed by session_id when the client sends
     // one — so a corrected phone (after a mistyped first attempt) updates the SAME
