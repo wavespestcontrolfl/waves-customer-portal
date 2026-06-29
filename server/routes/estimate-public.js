@@ -9532,13 +9532,13 @@ function lawnTierKey(row = {}) {
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
-const LAWN_CADENCE_LABEL = { basic: 'Quarterly', standard: 'Bi-monthly', enhanced: 'Every 6 weeks', premium: 'Monthly' };
+const LAWN_CADENCE_LABEL = { basic: 'Quarterly', standard: 'Bi-monthly', enhanced: '9 visits / yr', premium: 'Monthly' };
 
 // Customer-facing lawn cadence options from the stored lawn cost-floor tiers.
 // Mirrors treeShrubFrequenciesFromResultStats: only fires for lawn-only
 // estimates (when lawn is the sole recurring service); mixed bundles price
 // lawn inside the pest cadence. Pricing is unchanged — the 4/6/9/12 cost-floor
-// numbers, relabeled as Quarterly / Bi-monthly / Every 6 weeks / Monthly.
+// numbers, relabeled as Quarterly / Bi-monthly / 9 visits / yr / Monthly.
 function lawnFrequenciesFromResultStats(estData = {}) {
   const resultStats = recurringResultStats(estData);
   const rows = Array.isArray(resultStats.lawn) ? resultStats.lawn : [];
@@ -10094,7 +10094,7 @@ function applySelectedTreeShrubTierToEstimateData(estData = {}, frequency = {}) 
 const LAWN_CADENCE_RUNTIME = {
   basic: { tierKey: 'basic', serviceKey: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', frequencyKey: 'quarterly', label: 'Quarterly', visitsPerYear: 4 },
   standard: { tierKey: 'standard', serviceKey: 'lawn_care_bimonthly', name: 'Bi-Monthly Lawn Care Service', frequencyKey: 'bi_monthly', label: 'Bi-monthly', visitsPerYear: 6 },
-  enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: 'Every 6 weeks', visitsPerYear: 9 },
+  enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: '9 visits / yr', visitsPerYear: 9 },
   premium: { tierKey: 'premium', serviceKey: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', frequencyKey: 'monthly', label: 'Monthly', visitsPerYear: 12 },
 };
 function lawnTierRuntimeMeta(tierKey) {
