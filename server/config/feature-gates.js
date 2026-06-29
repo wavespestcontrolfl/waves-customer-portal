@@ -233,9 +233,11 @@ const gates = {
 
   // Abandoned-booking recovery — chases /book drop-offs (booking_intents) with a
   // ~1h recovery SMS + ~24h email. Ships LIVE (owner directive: live on merge) so
-  // it is ON by default; GATE_BOOKING_ABANDON_RECOVERY=false is the kill switch.
-  // When off, the cron only shadow-logs candidate counts and never claims/sends.
-  bookingAbandonRecovery: isProd ? process.env.GATE_BOOKING_ABANDON_RECOVERY !== 'false' : true,
+  // it is ON by default in EVERY environment; GATE_BOOKING_ABANDON_RECOVERY=false
+  // is the kill switch and is honored everywhere (incl. preview/dev, which may
+  // hold real Twilio/SendGrid creds) — not just prod. When off, the cron only
+  // shadow-logs candidate counts and never claims/sends.
+  bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY !== 'false',
 
   // Proactive line-type lookup — before the first SMS to a number, Twilio Lookup
   // its line type and skip landlines (avoids the wasted send + 30006 bounce that

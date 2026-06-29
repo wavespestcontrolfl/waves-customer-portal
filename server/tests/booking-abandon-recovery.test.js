@@ -207,6 +207,16 @@ describe('runEmailStage (touch 2)', () => {
     expect(updates[0]).toEqual({ table: 'booking_intents', payload: expect.objectContaining({ followup_email_sent: true }) });
   });
 
+  test('skips email for a phone already SMS\'d this run (preserves 1h/24h cadence)', async () => {
+    enqueue('booking_intents', { rows: [intent()] }); // candidates
+
+    const sent = await _internals.runEmailStage(NOW, new Set(['9415550101']));
+
+    expect(sent).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+  });
+
   test('keeps the claim (no retry) when the email address is suppressed', async () => {
     EmailTemplateLibrary.sendTemplate.mockResolvedValue({ blocked: true, reason: 'unsubscribed' });
     enqueue('booking_intents', { rows: [intent()] });

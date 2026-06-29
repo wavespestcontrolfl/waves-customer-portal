@@ -237,6 +237,11 @@ async function runEmailStage(now, sentPhones) {
 
   let sent = 0;
   for (const intent of candidates) {
+    // If we already SMS'd this phone THIS run (e.g. an intent that aged past 24h
+    // while still unsent, so both stages fire in one tick), don't also email — that
+    // would collapse the intended 1h SMS / 24h email cadence into a double nudge.
+    const ten = last10(intent.phone);
+    if (ten && sentPhones.has(ten)) continue;
     const emailKey = String(intent.email || '').trim().toLowerCase();
     if (emailKey && sentPhones.has(`email:${emailKey}`)) continue;
     let claimed = false;

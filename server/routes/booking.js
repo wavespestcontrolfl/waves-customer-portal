@@ -1,5 +1,6 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -338,6 +339,33 @@ router.get('/config', async (req, res, next) => {
 // explicitly picks a later date or searches via the Waves AI bar.
 const MAX_BOOKING_HORIZON_DAYS = 90;
 
+// Short-lived HMAC token minted in the availability response and REQUIRED by
+// /capture-intent. It proves the caller went through a real booking-availability
+// fetch (the funnel always does) rather than POSTing raw — so the public capture
+// endpoint can't be used to seed abandoned-booking recovery SMS/email to
+// arbitrary recipients. Bound to expiry (not to the phone, which the funnel
+// doesn't prove); combined with the per-IP limiter this caps abuse to the funnel
+// flow at ~12/min for the token's lifetime.
+const CAPTURE_TOKEN_SECRET = process.env.JWT_SECRET || process.env.BOOKING_CAPTURE_SECRET || 'waves-booking-capture-dev';
+const CAPTURE_TOKEN_TTL_MS = 30 * 60 * 1000;
+function mintCaptureToken(now = Date.now()) {
+  const exp = now + CAPTURE_TOKEN_TTL_MS;
+  const sig = crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`capture:${exp}`).digest('base64url');
+  return `${exp}.${sig}`;
+}
+function verifyCaptureToken(token, now = Date.now()) {
+  if (!token || typeof token !== 'string' || !token.includes('.')) return false;
+  const [expStr, sig] = token.split('.');
+  const exp = parseInt(expStr, 10);
+  // Reject expired tokens and any exp implausibly far in the future (forged).
+  if (!Number.isFinite(exp) || now > exp || exp > now + CAPTURE_TOKEN_TTL_MS + 60000) return false;
+  const expected = crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`capture:${exp}`).digest('base64url');
+  try {
+    return !!sig && sig.length === expected.length
+      && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  } catch { return false; }
+}
+
 // A slot counts as "nearby" (route-efficient) when its detour is small enough
 // to earn one of the proximity reasons — i.e. a tech is already working close
 // by. Drives the soft "no route near you that day yet" messaging downstream.
@@ -614,6 +642,8 @@ router.get('/availability', async (req, res, next) => {
       duration_minutes: duration,
       service_type: service_type || null,
       total_feasible: availability.total_feasible,
+      // Proof-of-funnel token the client echoes to /capture-intent.
+      capture_token: mintCaptureToken(),
     });
   } catch (err) {
     logger.error('[booking:availability] failed:', err);
@@ -686,6 +716,7 @@ router.post('/find-slots', async (req, res, next) => {
       lng: resolvedLng,
       duration_minutes: duration,
       service_type: service_type || null,
+      capture_token: mintCaptureToken(),
     });
   } catch (err) {
     logger.error('[booking:find-slots] failed:', err);
@@ -1244,6 +1275,16 @@ router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
     if (!isEnabled('selfBooking')) return res.json({ ok: false, skipped: 'gate' });
 
     const b = req.body || {};
+
+    // Proof the caller went through the real booking funnel: a token minted in the
+    // availability response (the funnel always fetches availability before the
+    // contact step). Without it this public, send-eligible endpoint could be used
+    // to seed recovery SMS/email to arbitrary recipients (rate-limit alone can't
+    // stop targeted abuse). Fail closed — no token, no send-eligible row.
+    if (!verifyCaptureToken(b.capture_token)) {
+      return res.json({ ok: true, skipped: 'unverified' });
+    }
+
     const nc = b.new_customer || b;
     const phoneDigits = String(nc.phone || b.phone || '').replace(/\D/g, '');
     if (phoneDigits.length < 10) return res.status(400).json({ error: 'valid phone required' });
@@ -1274,38 +1315,33 @@ router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
 
     const tenMatch = (q) => q.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
 
-    // Already booked in the last 24h → nothing to recover.
+    // Already booked → nothing to recover. Check BOTH a recently-converted intent
+    // AND a recent self_booked_appointment for the phone: a fire-and-forget
+    // capture fired on the Confirm click can land AFTER /booking/confirm committed
+    // and marked intents converted, so a phone with a fresh booking but no prior
+    // intent would otherwise mint a new open row and get a "spot isn't reserved
+    // yet" nudge for a booking that already succeeded.
     const booked = await tenMatch(db('booking_intents').whereNotNull('converted_at')
       .where('converted_at', '>', new Date(Date.now() - 24 * 3600000))).first('id');
     if (booked) return res.json({ ok: true, skipped: 'already_booked' });
+    const recentBooking = await db('self_booked_appointments as sba')
+      .leftJoin('customers as c', 'sba.customer_id', 'c.id')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
+      .where('sba.created_at', '>', new Date(Date.now() - 6 * 3600000))
+      .whereNot('sba.status', 'cancelled')
+      .first('sba.id');
+    if (recentBooking) return res.json({ ok: true, skipped: 'already_booked' });
 
-    // Proof of a REAL, serviceable booking context. This unauthenticated row
-    // becomes send-eligible, so require coords that resolve to a location in our
-    // service area with live availability — a genuine funnel pick always has
-    // this; an arbitrary victim-phone POST does not. Fail closed: any miss
-    // creates no send-eligible row.
+    // Resolve an existing customer by phone so a recovery send to a known customer
+    // honors THEIR notification prefs (opt-out) via the customer-consent path,
+    // instead of falling through to lead transactional consent (which would let an
+    // opted-out customer still get the recovery SMS). Best-effort; new prospects
+    // simply resolve to null.
     try {
-      const { lat, lng } = await resolveBookingCoords({ lat: row.lat, lng: row.lng, address: row.address_line1, city: row.city });
-      if (!lat || !lng) return res.json({ ok: true, skipped: 'unserviceable' });
-      const cfg = (await db('booking_config').first()) || {};
-      const avail = await buildBookingAvailability({
-        lat, lng,
-        duration: cfg.slot_duration_minutes || 60,
-        rangeFrom: etDateString(),
-        rangeTo: addETDays(etDateString(), 14),
-        config: cfg,
-        today: new Date(),
-        expandOpenDays: true,
-      });
-      const slotCount = (avail && avail.slots && avail.slots.length)
-        || (avail && avail.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
-      if (!slotCount) return res.json({ ok: true, skipped: 'unserviceable' });
-      row.lat = lat;
-      row.lng = lng;
-    } catch (e) {
-      logger.warn(`[booking:capture-intent] serviceability check failed: ${e.message}`);
-      return res.json({ ok: false, skipped: 'unverified' });
-    }
+      const { findCustomerByPhone } = require('../services/lead-from-extraction');
+      const match = await findCustomerByPhone(phoneDigits);
+      row.customer_id = match && match.id ? match.id : null;
+    } catch { /* best-effort — leave customer_id unset */ }
 
     // Refresh the existing open intent (one per phone) or insert a new one.
     const open = await tenMatch(db('booking_intents').whereNull('converted_at').where('suppressed', false))
@@ -1395,4 +1431,6 @@ module.exports._internals = {
   loadBookingConfig,
   createSelfBooking,
   MAX_BOOKING_HORIZON_DAYS,
+  mintCaptureToken,
+  verifyCaptureToken,
 };
