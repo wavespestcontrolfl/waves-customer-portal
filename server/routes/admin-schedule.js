@@ -1658,10 +1658,23 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (linkedEstimateId) {
       linkedEstimate = await db('estimates')
         .where({ id: linkedEstimateId })
-        .first('id', 'customer_id', 'status', 'estimate_data');
+        .first('id', 'customer_id', 'status', 'estimate_data', 'expires_at');
       if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
       if (String(linkedEstimate.customer_id || '') !== String(customerId)) {
         return res.status(400).json({ error: 'Linked estimate belongs to a different customer' });
+      }
+      // Gate which statuses may be linked BEFORE any scheduled_services rows are
+      // created: an accepted win, or a live open quote the customer can still
+      // say yes to (sent/viewed, not lapsed). Anything else — draft / declined /
+      // expired / sending — is rejected up front so a stale modal or crafted
+      // request can't book against (and fire confirmations for) a quote the
+      // customer never accepted.
+      const BOOKABLE_ESTIMATE_STATUSES = ['accepted', 'sent', 'viewed'];
+      if (!BOOKABLE_ESTIMATE_STATUSES.includes(linkedEstimate.status)) {
+        return res.status(400).json({ error: `Cannot book from an estimate that is ${linkedEstimate.status}. Only accepted, sent, or viewed estimates can be linked.` });
+      }
+      if (linkedEstimate.status !== 'accepted' && linkedEstimate.expires_at && new Date(linkedEstimate.expires_at) < new Date()) {
+        return res.status(400).json({ error: 'This estimate has expired. Revive it on the Estimates page before booking from it.' });
       }
     }
     // Booking from a phone "yes": a sent/viewed quote the customer accepted
