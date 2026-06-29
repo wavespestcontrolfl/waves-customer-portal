@@ -10731,6 +10731,10 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   const oneTimeItems = Array.isArray(oneTimeBreakdown?.items) ? oneTimeBreakdown.items : [];
   const serviceCategory = deriveServiceCategory(estData, recurringServices, oneTimeItems);
   const frequencies = Array.isArray(payload.frequencies) ? payload.frequencies : [];
+  // Own-cadence section ladders are gated on the payload actually carrying the
+  // backing combo pricing (set by the v1 recompute path); otherwise sections
+  // keep the legacy ladder so sliders never appear without priceable combos.
+  const hasServiceCadenceCombos = Array.isArray(payload.serviceCadenceCombos) && payload.serviceCadenceCombos.length > 0;
   const recurringKeys = Array.from(new Set(
     recurringServices
       .map(recurringServiceKey)
@@ -10784,10 +10788,12 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
         // customer picks each independently); the composite selection is priced
         // via the serviceCadenceCombos on the payload. Falls back to the legacy
         // pest-cadence-mirrored ladder when the service has only one tier.
-        // Own-cadence ladders pair with serviceCadenceCombos, which only exist
-        // for bundles that include pest (no-pest bundles keep legacy behavior so
-        // billing cadence isn't mis-resolved — see buildServiceCadenceCombos).
-        const ownLadder = (key !== 'pest_control' && hasRecurringPestSection)
+        // Own-cadence ladders are exposed ONLY when the payload carries the
+        // backing serviceCadenceCombos (priced + accept-resolvable). This keeps
+        // sliders and combo pricing inseparable across snapshot / engine /
+        // recompute paths — a bundle without combos keeps the legacy ladder so
+        // the customer can't pick a cadence that isn't priced or persisted.
+        const ownLadder = (key !== 'pest_control' && hasRecurringPestSection && hasServiceCadenceCombos)
           ? bundleSectionLadderForService(key, estData, recurringService, recurringDiscount)
           : null;
         const sectionFrequencies = (ownLadder && ownLadder.length)
@@ -11310,6 +11316,16 @@ async function buildPricingBundle(estimate) {
       ? Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100)
       : rawV1OneTimeTotal);
 
+    // Per-service cadence combinations (bundles): lets the customer pick each
+    // service's cadence independently. Each combo is priced through shapeFromV1
+    // (same path as the default), so the view can show the authoritative total
+    // for any selection and accept resolves the exact same number. Null for
+    // pest-only / single-tier / no-pest bundles (the pest ladder already covers
+    // those). Computed BEFORE finalize and threaded into the payload so
+    // buildPricingServices only exposes own-cadence section ladders when the
+    // backing combo pricing is present — the two never desync across snapshot /
+    // engine / recompute paths.
+    const serviceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: pestOnlyChoice });
     const payload = finalizePricingBundle(withManualDiscount({
       frequencies: finalFreqs,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
@@ -11319,17 +11335,9 @@ async function buildPricingBundle(estimate) {
       setupFee: firstVisitFees.find((f) => f.waivedWithPrepay) || null,
       firstVisitFees,
       oneTimeBreakdown: storedOneTimeBreakdown,
+      ...(serviceCadenceCombos && serviceCadenceCombos.length ? { serviceCadenceCombos } : {}),
       source: 'v1_engine_shape',
     }), estimate, estData);
-    // Per-service cadence combinations (bundles): lets the customer pick each
-    // service's cadence independently. Each combo is priced through shapeFromV1
-    // (same path as the default), so the view can show the authoritative total
-    // for any selection and accept resolves the exact same number. Null for
-    // pest-only / single-tier bundles (the pest ladder already covers those).
-    const serviceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: pestOnlyChoice });
-    if (serviceCadenceCombos && serviceCadenceCombos.length) {
-      payload.serviceCadenceCombos = serviceCadenceCombos;
-    }
     setEstimatePricingCache(estimate, payload);
     return payload;
   }
