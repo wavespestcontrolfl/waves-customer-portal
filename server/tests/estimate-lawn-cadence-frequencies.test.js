@@ -24,12 +24,12 @@ function lawnEstData({ recommendedVisits = 9 } = {}) {
 }
 
 describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () => {
-  test('maps the 4/6/9/12 tiers to Quarterly / Bi-monthly / Every 6 weeks / Monthly, in order', () => {
+  test('maps the 4/6/9/12 tiers to Quarterly / Bi-monthly / 9 visits / yr / Monthly, in order', () => {
     const freqs = lawnFrequenciesFromResultStats(lawnEstData());
     expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear])).toEqual([
       ['basic', 'Quarterly', 4],
       ['standard', 'Bi-monthly', 6],
-      ['enhanced', 'Every 6 weeks', 9],
+      ['enhanced', '9 visits / yr', 9],
       ['premium', 'Monthly', 12],
     ]);
   });
@@ -61,7 +61,7 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(enhanced.monthly).toBe(enhanced.monthlyBase);
   });
 
-  test('the recommended cadence follows the engine row (default = Every 6 weeks / 9)', () => {
+  test('the recommended cadence follows the engine row (default = enhanced / 9 visits)', () => {
     const freqs = lawnFrequenciesFromResultStats(lawnEstData({ recommendedVisits: 9 }));
     expect(freqs.filter((f) => f.recommended).map((f) => f.key)).toEqual(['enhanced']);
   });
@@ -132,7 +132,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear, f.monthly])).toEqual([
       ['basic', 'Quarterly', 4, 35],
       ['standard', 'Bi-monthly', 6, 45],
-      ['enhanced', 'Every 6 weeks', 9, 62.25],
+      ['enhanced', '9 visits / yr', 9, 62.25],
       ['premium', 'Monthly', 12, 84],
     ]);
     expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(true);
