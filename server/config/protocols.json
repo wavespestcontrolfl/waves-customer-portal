@@ -582,9 +582,9 @@
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)\n★ Velista (FRAC 7) large patch #3",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)\n★ Velista (FRAC 7) large patch #3 ($67.50)",
           "secondary": "★ OPTIONAL Basic/Std: Door hanger + irrigation winterize\n★ OPTIONAL: Annual report on request\n★ FRAC rotation: Velista (7) follows Medallion (12)\nThatch assessment for spring mechanical work",
-          "material_cost": "18.3",
+          "material_cost": "85.8",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
