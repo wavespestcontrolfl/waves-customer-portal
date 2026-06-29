@@ -45,7 +45,7 @@ exports.up = async function up(knex) {
     const [row] = await knex('products_catalog')
       .insert({
         ...PRODUCT,
-        content_status: 'active',
+        content_status: 'draft', // products_catalog_content_status_check allows draft/approved_*/retired
         created_at: knex.fn.now(),
         updated_at: knex.fn.now(),
       })
@@ -54,6 +54,8 @@ exports.up = async function up(knex) {
   }
 
   // Alias so the protocol text "Velista" and any "Velista SC/WDG" variants resolve.
+  // Only insert an alias when one with that name does not already exist (so we
+  // never adopt or clobber a pre-existing mapping owned by another product).
   if (productId && (await knex.schema.hasTable('product_aliases'))) {
     for (const aliasName of ['Velista SC', 'Velista WDG']) {
       const exists = await knex('product_aliases').where({ alias_name: aliasName }).first().catch(() => null);
@@ -72,10 +74,8 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down(knex) {
-  // Non-destructive: leave the catalog row in place (it may have accrued
-  // inventory/movement history). Only drop the aliases this migration added.
-  if (await knex.schema.hasTable('product_aliases')) {
-    await knex('product_aliases').whereIn('alias_name', ['Velista SC', 'Velista WDG']).del().catch(() => {});
-  }
+exports.down = async function down() {
+  // Non-destructive seed: leave the catalog row (it may have accrued inventory /
+  // movement history) and the aliases (down() can't prove this migration owns a
+  // given alias row vs. a pre-existing/manual one, so deleting by name is unsafe).
 };
