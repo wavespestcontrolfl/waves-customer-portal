@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
@@ -76,8 +77,45 @@ function applyLeadEstimateAutomationGate(readiness = {}) {
   };
 }
 
+// --- Abuse protection for the public, unauthenticated lead webhook ---
+// Every accepted POST fans out to real-money side effects: a customer-facing
+// SMS to the SUBMITTED number, a call/SMS to the owner's personal cell, and
+// marketing enrollment. Unthrottled, this is an SMS-pumping + owner-harassment
+// vector — any anonymous caller can ring the owner's cell on every request.
+// Legitimate lead-form submissions from one visitor/number are rare, so tight
+// caps cost real users nothing. Prod-only (mirrors the app-wide limiter) so
+// local dev and the Jest suite — which POST here repeatedly — are unaffected.
+const leadWebhookIpLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 8,
+  message: { error: 'Too many submissions, please try again shortly.' },
+  skip: () => process.env.NODE_ENV !== 'production',
+});
+
+// Second axis: cap how often any single phone number can be the lead target,
+// independent of source IP. This blunts a rotating-IP attacker pumping SMS at
+// one victim number. Keyed off the SAME phone the handler will text (via the
+// shared intake builder). Engages only when a phone is present; the IP limiter
+// covers the rest, so there is no shared-bucket / IPv6-keying edge case here.
+function leadSubmittedPhoneKey(req) {
+  try {
+    const { rawPhone } = buildLeadWebhookIntake(req.body || {});
+    const digits = String(rawPhone || '').replace(/\D/g, '');
+    return digits.length >= 10 ? digits.slice(-10) : '';
+  } catch (_err) {
+    return '';
+  }
+}
+const leadWebhookPhoneLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 4,
+  message: { error: 'Too many submissions for this number, please try again later.' },
+  keyGenerator: (req) => `leadphone:${leadSubmittedPhoneKey(req)}`,
+  skip: (req) => process.env.NODE_ENV !== 'production' || !leadSubmittedPhoneKey(req),
+});
+
 // POST /api/webhooks/lead — website lead-form submission webhook
-router.post('/', async (req, res) => {
+router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res) => {
   try {
     const body = req.body;
     const intake = buildLeadWebhookIntake(body);

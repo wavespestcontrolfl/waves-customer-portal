@@ -287,29 +287,27 @@ router.get('/customer-lookup', async (req, res, next) => {
         });
 
       customer = await query.select(phoneCustomerFields).first();
-      if (customer && address && !addressMatchesCustomer(customer, address, zip)) {
+      // SECURITY: never disclose a customer's PII (name/email/address) on a
+      // phone number alone — that lets anyone enumerate identities from a
+      // number they merely possess. Require a matching address before
+      // disclosing. The booking funnel always collects the address (step 1)
+      // before the phone step, so legitimate returning-customer autofill is
+      // unaffected; only the address-less enumeration path is closed.
+      if (customer && !(address && addressMatchesCustomer(customer, address, zip))) {
         customer = null;
       }
       return res.json({ customer: customer || null });
     }
 
     if (address) {
-      customer = await findUniqueCustomerByAddress(address, city, zip);
-      if (customer) {
-        return res.json({
-          customer: {
-            id: customer.id,
-            first_name: customer.first_name,
-            last_name: customer.last_name,
-            address_line1: customer.address_line1,
-            city: customer.city,
-            state: customer.state,
-            zip: customer.zip,
-          },
-          possible_match: true,
-        });
-      }
-      return res.json({ customer: null, possible_match: false });
+      // SECURITY: an unauthenticated caller must not be able to turn a street
+      // address into the resident's identity (name/UUID) — a doxxing vector.
+      // Return only WHETHER a returning customer exists at this address; the
+      // funnel's autofill is driven by the phone step above (with address
+      // re-verification), not by this signal. The client only reads
+      // `possible_match` from this branch.
+      const match = await findUniqueCustomerByAddress(address, city, zip);
+      return res.json({ customer: null, possible_match: !!match });
     }
 
     res.json({ customer: null });
