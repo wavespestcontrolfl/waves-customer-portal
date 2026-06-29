@@ -10616,6 +10616,41 @@ function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false } 
   });
 }
 
+// Own-cadence ladder for a non-pest section in a bundle. Reuses the service's
+// cadence extractor (same tier KEYS the combo ladder selects on), then reprices
+// each tier post-WaveGuard-discount but PRE manual discount — manual is applied
+// once to the bundle total and surfaced as its own line, so per-section cards
+// must not also subtract it. Returns null unless the service offers 2+ tiers.
+const BUNDLE_SECTION_EXTRACTOR = {
+  lawn_care: lawnFrequenciesFromResultStats,
+  tree_shrub: treeShrubFrequenciesFromResultStats,
+  mosquito: mosquitoFrequenciesFromResultStats,
+};
+function bundleSectionLadderForService(serviceKey, estData, recurringService, recurringDiscount) {
+  const extractor = BUNDLE_SECTION_EXTRACTOR[serviceKey];
+  if (!extractor) return null;
+  const entries = extractor(estData);
+  if (!Array.isArray(entries) || entries.length < 2) return null;
+  const d = recurringServiceReceivesTierDiscount(recurringService) ? (Number(recurringDiscount) || 0) : 0;
+  return entries.map((e) => {
+    const base = Number(e.monthlyBase);
+    if (!Number.isFinite(base) || base <= 0) return { ...e, manualDiscount: null };
+    const monthly = roundMonthly(base * (1 - d));
+    const visits = Number(e.visitsPerYear) || null;
+    const perTreatment = visits ? roundMonthly((monthly * 12) / visits) : (e.perTreatment ?? null);
+    return {
+      ...e,
+      monthly,
+      annual: roundMonthly(monthly * 12),
+      perTreatment,
+      manualDiscount: null,
+      perServiceTreatments: Array.isArray(e.perServiceTreatments)
+        ? e.perServiceTreatments.map((r) => ({ ...r, perTreatment, displayPrice: perTreatment }))
+        : [],
+    };
+  });
+}
+
 function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   const estResult = estData?.result || estData?.engineResult || estData || {};
   const recurringServices = recurringServicesWithSupplements(estResult);
@@ -10672,9 +10707,18 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       const hasSelectableLadder = frequencies.filter((frequency) => frequency?.key).length > 1;
       const splitSections = recurringRows.map(([key, recurringService]) => {
         const category = categoryForRecurringServiceKey(key) || key;
-        const sectionFrequencies = sectionFrequenciesForRecurringService(key, recurringService, frequencies, recurringDiscount, {
-          preserveSelectableKeys: !hasRecurringPestSection || hasSelectableLadder,
-        });
+        // Non-pest services in a bundle expose their OWN cadence ladder (the
+        // customer picks each independently); the composite selection is priced
+        // via the serviceCadenceCombos on the payload. Falls back to the legacy
+        // pest-cadence-mirrored ladder when the service has only one tier.
+        const ownLadder = key !== 'pest_control'
+          ? bundleSectionLadderForService(key, estData, recurringService, recurringDiscount)
+          : null;
+        const sectionFrequencies = (ownLadder && ownLadder.length)
+          ? ownLadder
+          : sectionFrequenciesForRecurringService(key, recurringService, frequencies, recurringDiscount, {
+            preserveSelectableKeys: !hasRecurringPestSection || hasSelectableLadder,
+          });
         if (!sectionFrequencies.length && payload.quoteRequired !== true) return null;
         return buildServiceSection({
           key,
@@ -11744,6 +11788,7 @@ module.exports.nonPestTierBaseMap = nonPestTierBaseMap;
 module.exports.comboPricingEntry = comboPricingEntry;
 module.exports.serviceCadenceComboKey = serviceCadenceComboKey;
 module.exports.buildServiceCadenceCombos = buildServiceCadenceCombos;
+module.exports.bundleSectionLadderForService = bundleSectionLadderForService;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;

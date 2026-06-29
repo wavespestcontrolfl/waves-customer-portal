@@ -3,6 +3,7 @@ const {
   comboPricingEntry,
   serviceCadenceComboKey,
   buildServiceCadenceCombos,
+  bundleSectionLadderForService,
 } = require('../routes/estimate-public');
 
 // A pest + lawn bundle in the v1 (admin) shape. Silver tier (2 qualifying
@@ -114,5 +115,32 @@ describe('buildServiceCadenceCombos — full combination ladder', () => {
     // Pest-only bundle: nothing extra to vary.
     const pestOnly = { pestTiers: pestLawnV1().pestTiers, services: [pestLawnV1().services[0]], discount: 0 };
     expect(buildServiceCadenceCombos(pestOnly, {}, {})).toBeNull();
+  });
+});
+
+describe('bundleSectionLadderForService — non-pest section own-cadence slider', () => {
+  const lawnSvc = { name: 'Lawn Care', service: 'lawn_care' };
+
+  test('reprices each lawn tier post-WaveGuard discount, PRE manual (manual null)', () => {
+    const ladder = bundleSectionLadderForService('lawn_care', { results: LAWN_RESULT_STATS }, lawnSvc, 0.10);
+    expect(ladder.map((e) => e.key)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
+    const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
+    expect(byKey.basic.monthly).toBe(31.5); // 35 * 0.9
+    expect(byKey.standard.monthly).toBe(40.95); // 45.5 * 0.9
+    expect(byKey.premium.monthly).toBe(80.1); // 89 * 0.9
+    // Manual discount is applied once at the bundle total, never per-section.
+    for (const e of ladder) expect(e.manualDiscount).toBeNull();
+  });
+
+  test('no discount applied when the rate is 0 (Bronze / single-service)', () => {
+    const ladder = bundleSectionLadderForService('lawn_care', { results: LAWN_RESULT_STATS }, lawnSvc, 0);
+    const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
+    expect(byKey.basic.monthly).toBe(35);
+    expect(byKey.premium.monthly).toBe(89);
+  });
+
+  test('returns null for a service with no tier rows / no extractor', () => {
+    expect(bundleSectionLadderForService('lawn_care', { results: {} }, lawnSvc, 0.1)).toBeNull();
+    expect(bundleSectionLadderForService('pest_control', { results: LAWN_RESULT_STATS }, {}, 0.1)).toBeNull();
   });
 });
