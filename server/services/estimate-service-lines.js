@@ -1,6 +1,7 @@
 const SERVICE_LINE_LABELS = {
   commercial_pest: 'Commercial Pest Control',
   commercial_lawn: 'Commercial Lawn Treatment',
+  commercial_tree_shrub: 'Commercial Tree & Shrub',
   pest: 'Pest Control',
   lawn: 'Lawn Care',
   mosquito: 'Mosquito',
@@ -13,6 +14,7 @@ const SERVICE_LINE_LABELS = {
 const SERVICE_LINE_PATTERNS = [
   ['commercial_pest', /commercial.*pest|pest.*commercial|commercial_pest/],
   ['commercial_lawn', /commercial.*lawn|commercial.*turf|lawn.*commercial|commercial_lawn/],
+  ['commercial_tree_shrub', /commercial.*(tree|shrub|ornamental)|(tree|shrub|ornamental).*commercial|commercial_tree_shrub/],
   ['termite', /termite|foam|trench(?:ing)?|bora\s*care|boracare|termidor|trelona|advance|preslab|pre\s*slab|wdo/],
   ['mosquito', /mosquito/],
   ['rodent', /rodent|rat|mouse|mice/],
@@ -55,6 +57,7 @@ function serviceKeysFromText(...parts) {
   return keys.filter((key) => {
     if (key === 'pest' && keys.includes('commercial_pest')) return false;
     if (key === 'lawn' && keys.includes('commercial_lawn')) return false;
+    if (key === 'tree_shrub' && keys.includes('commercial_tree_shrub')) return false;
     return true;
   });
 }
@@ -135,6 +138,7 @@ function commercialKeyFromService(service) {
   const key = String(service || '').toLowerCase();
   if (key === 'commercial_pest') return 'commercial_pest';
   if (key === 'commercial_lawn') return 'commercial_lawn';
+  if (key === 'commercial_tree_shrub') return 'commercial_tree_shrub';
   return null;
 }
 
@@ -152,6 +156,12 @@ function commercialManualLinesFromData(data) {
     .map((line) => {
       const key = commercialKeyFromService(line?.service);
       if (!key) return null;
+      // Priced commercial programs (auto_estimate, e.g. commercial_lawn /
+      // commercial_tree_shrub) are NOT manual-quote lines — they surface as
+      // recurring services. Only genuine manual-quote lines (commercial pest)
+      // belong here; otherwise the priced line is double-counted.
+      const isManual = !!line.quoteRequired || !!line.requiresManualReview;
+      if (!isManual) return null;
       const id = `${key}|${line.originalRequestedService || ''}`;
       if (seen.has(id)) return null;
       seen.add(id);
@@ -160,6 +170,38 @@ function commercialManualLinesFromData(data) {
         service: line.service,
         amount: numberOrNull(line.monthly, line.price, line.amount),
         amountBasis: 'manual_quote',
+        ...commercialMetadata(line),
+      };
+    })
+    .filter(Boolean);
+}
+
+// Priced commercial recurring lines (commercial_lawn / commercial_tree_shrub
+// auto_estimate). The public quote flow persists these under
+// engineResult.lineItems (no recurring.services block), so without this they'd
+// fall back to service_interest text and be classified as residential, losing
+// the commercial metadata.
+function commercialPricedLinesFromData(data) {
+  const sources = [
+    ...(Array.isArray(data?.engineResult?.lineItems) ? data.engineResult.lineItems : []),
+    ...(Array.isArray(data?.result?.lineItems) ? data.result.lineItems : []),
+  ];
+  const seen = new Set();
+  return sources
+    .map((line) => {
+      const key = commercialKeyFromService(line?.service);
+      if (!key) return null;
+      // Manual commercial lines are handled by commercialManualLinesFromData.
+      if (line.quoteRequired === true || line.requiresManualReview === true) return null;
+      const amount = numberOrNull(line.monthly, line.mo, line.amount);
+      if (!Number.isFinite(amount) || amount <= 0) return null;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      return {
+        key,
+        service: line.service,
+        amount,
+        amountBasis: 'monthly',
         ...commercialMetadata(line),
       };
     })
@@ -306,9 +348,15 @@ function inferEstimateServiceLines(estimate = {}) {
   const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
   const commercialManualLines = commercialManualLinesFromData(data);
   const recurringLines = recurringServicesFromData(data);
-  if (commercialManualLines.length) {
+  // Priced commercial lines persisted under engineResult.lineItems — skip keys
+  // already surfaced via recurring.services (admin flow) to avoid duplicates.
+  const recurringKeys = new Set(recurringLines.map((line) => line.key));
+  const commercialPricedLines = commercialPricedLinesFromData(data)
+    .filter((line) => !recurringKeys.has(line.key));
+  const commercialLines = [...commercialPricedLines, ...commercialManualLines];
+  if (commercialLines.length) {
     return [
-      ...commercialManualLines,
+      ...commercialLines,
       ...recurringLines,
       ...oneTimeServicesFromData(data),
     ];

@@ -1219,6 +1219,11 @@ export default function QuotePage({ serviceSlug = '' }) {
                           ? `$${Number(result.per_application).toLocaleString()} per application · ${result.service_interest}`
                           : `$${Number(result.annual_total).toLocaleString()}/yr · ${result.service_interest}`}
                       </div>
+                      {result.estimated_pricing && result.disclaimer && (
+                        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, padding: '10px 14px', background: '#FEF3C7', borderRadius: 8, lineHeight: 1.5 }}>
+                          {result.disclaimer}
+                        </div>
+                      )}
                       {result.has_setup_fee && (
                         <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
                           + $99 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>

@@ -2309,7 +2309,7 @@ function CustomerMap({ customers: _ignored, onSelect }) {
                 <div style={{ fontSize: 12, color: D.muted }}>
                   {selectedPin.phone}
                 </div>
-                {selectedPin.tier && (
+                {selectedPin.tier && selectedPin.tier !== 'Commercial' && selectedPin.tier !== 'One-Time' && (
                   <div
                     style={{
                       fontSize: 11,

@@ -4,7 +4,7 @@
 const {
   GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
-  TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
+  TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
 const {
@@ -2363,6 +2363,272 @@ function priceTreeShrub(property, options = {}) {
     manualReviewReasons,
     warnings: [...new Set(warnings)],
     ...(warningCodes.length > 0 ? { warningCodes: [...new Set(warningCodes)] } : {}),
+  };
+}
+
+// ============================================================
+// COMMERCIAL LAWN — cost-buildup auto-pricer (constants COMMERCIAL_LAWN)
+// ============================================================
+// Reuses the shared lawn cost-floor arithmetic with commercial knobs. Prices
+// ALL commercial turf (no size cap, owner directive 2026-06-28) and flags the
+// result as an estimate to be confirmed on site. Turf basis is the same
+// property.turfSf the residential pricer reads (profile-resolved: measured →
+// lawnSqFt → satellite estimate → lot-derived), so accuracy on large commercial
+// rides on the satellite estimate — hence pricingConfidence + the disclaimer.
+function resolveCommercialTurfSqFt(property = {}) {
+  const candidates = [
+    ['turfSf', property.turfSf],
+    ['lawnSqFt', property.lawnSqFt],
+    ['estimatedTurfSf', property.estimatedTurfSf],
+  ];
+  for (const [basis, raw] of candidates) {
+    // Respect an explicit numeric value INCLUDING 0 — turf measured as absent
+    // (all-hardscape lot) is authoritative and must price at the account
+    // minimum, not fall through to an invented lot-based estimate. Only a
+    // genuinely missing value (null/undefined/'') falls through.
+    if (raw === null || raw === undefined || raw === '') continue;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) {
+      return {
+        turfSf: n,
+        turfBasis: property.turfBasis || basis,
+        estimated: basis === 'turfSf' ? !!property.turfEstimated : true,
+      };
+    }
+  }
+  const lot = Number(property.lotSqFt);
+  if (Number.isFinite(lot) && lot > 0) {
+    // No measured/estimated turf: assume ~45% of the lot is maintained turf.
+    return { turfSf: Math.round(lot * 0.45), turfBasis: 'commercialLotFallback', estimated: true };
+  }
+  return { turfSf: 8000, turfBasis: 'commercialDefault', estimated: true };
+}
+
+function priceCommercialLawn(property = {}, options = {}) {
+  const cfg = COMMERCIAL_LAWN;
+  const { turfSf, turfBasis, estimated } = resolveCommercialTurfSqFt(property);
+  const visits = cfg.programVisits;
+  const annualMaterial = cfg.materialAnnualPerK * (turfSf / 1000);
+  const materialCostPerVisit = annualMaterial / visits;
+
+  const floor = computeLawnCostFloor({
+    lawnSqFt: turfSf,
+    visits,
+    materialCostPerVisit,
+    laborMinutesBase: cfg.laborMinutesBase,
+    laborMinutesPer1000Sqft: cfg.laborMinutesPerK,
+    complexityMinutes: 0,
+    laborRate: GLOBAL.LABOR_RATE,
+    routeDriveMinutes: cfg.routeDriveMinutes,
+    callbackReservePerVisit: cfg.callbackReservePerVisit,
+    equipmentReservePerVisit: cfg.equipmentReservePerVisit,
+    adminAnnual: cfg.adminAnnual,
+    targetGrossMargin: cfg.targetGrossMargin,
+  });
+
+  const computedAnnual = floor.minimumCollectedAnnualPriceFor55;
+  const minApplied = computedAnnual < cfg.minAnnual;
+  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const monthly = roundMoney(annual / 12);
+  const perApp = roundMoney(annual / visits);
+  const margin = annual > 0 ? roundRatio((annual - floor.annualCost) / annual) : 0;
+  const pricingConfidence = (turfSf > cfg.lowConfidenceTurfSf || estimated) ? 'LOW' : 'MEDIUM';
+
+  return {
+    service: 'commercial_lawn',
+    name: 'Commercial Lawn Treatment',
+    originalRequestedService: 'lawn_care',
+    propertyType: 'commercial',
+    isCommercial: true,
+    commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+    commercialPricingMode: 'auto_estimate',
+    estimatedPricing: true,
+    // Flat commercial pricing — never WaveGuard/recurring-discountable. Carried
+    // so the accept/recurring helpers exclude it from % discounts even where a
+    // service key normalizes to "lawn".
+    discountable: false,
+    excludeFromPctDiscount: true,
+    quoteRequired: false,
+    requiresManualReview: false,
+    detail: 'Commercial turf program (fertilization + weed + insect control). Estimated from property data — final price confirmed on site.',
+    disclaimer: 'Estimated from property data — final price confirmed on site.',
+    turfSf,
+    turfBasis,
+    turfEstimated: estimated,
+    frequency: visits,
+    visitsPerYear: visits,
+    monthly,
+    annual,
+    perApp,
+    perVisit: perApp,
+    pricingBasis: 'COMMERCIAL_COST_BUILDUP',
+    pricingConfidence,
+    minApplied,
+    program: { fertApps: 4, preEmergentApps: 2, postEmergentApps: 4, insectApps: 2 },
+    taxable: cfg.taxable,
+    taxCategory: cfg.taxCategory,
+    costs: {
+      annualMaterial: roundMoney(floor.annualMaterial),
+      annualLabor: roundMoney(floor.annualLabor),
+      annualDrive: roundMoney(floor.annualDrive),
+      annualCallbackReserve: roundMoney(floor.annualCallbackReserve),
+      annualAdmin: roundMoney(floor.annualAdmin),
+      total: roundMoney(floor.annualCost),
+    },
+    margin,
+    marginFloorOk: margin >= cfg.targetGrossMargin - 0.01,
+  };
+}
+
+// ============================================================
+// COMMERCIAL TREE & SHRUB — cost-buildup auto-pricer (COMMERCIAL_TREE_SHRUB)
+// ============================================================
+// Bed area is resolved UNCAPPED for commercial (explicit → estimated → lot
+// density), unlike residential which caps at BED_AREA_CAP, because commercial
+// auto-pricing has no size cap.
+function resolveCommercialBedArea(property = {}) {
+  // No size cap for commercial: when calculatePropertyProfile already capped a
+  // lot-derived/estimated bed area at BED_AREA_CAP (preserving the true value
+  // as uncappedBedAreaEstimate), recover the uncapped figure — otherwise large
+  // commercial beds would be underquoted at the 8,000 sqft residential cap.
+  if (property.bedAreaCapped === true && Number(property.uncappedBedAreaEstimate) > 0) {
+    return {
+      bedArea: Number(property.uncappedBedAreaEstimate),
+      bedBasis: property.bedAreaSource || 'lot_based',
+      estimated: true,
+    };
+  }
+  // Respect an explicit numeric bed area. A ZERO bed area is authoritative ONLY
+  // when it's a deliberate/explicit measurement (all-hardscape lot, beds
+  // measured as absent) — NOT an inferred/estimated zero. The admin V2 form
+  // sends estimatedBedAreaSf: 0 as its blank default, which
+  // calculatePropertyProfile resolves to bedArea: 0 with bedAreaSource:
+  // 'estimated'; honoring that as "no beds" would underquote a real commercial
+  // property at the $900 minimum, so an estimated/lot_based zero falls through
+  // to the lot-density estimate instead. (A positive value is always honored.)
+  if (property.bedArea !== null && property.bedArea !== undefined && property.bedArea !== '') {
+    const explicit = Number(property.bedArea);
+    const src = property.bedAreaSource;
+    const isInferredZero = explicit === 0 && src && src !== 'explicit';
+    if (Number.isFinite(explicit) && explicit >= 0 && !isInferredZero) {
+      return {
+        bedArea: explicit,
+        bedBasis: src || 'explicit',
+        estimated: src ? src !== 'explicit' : false,
+      };
+    }
+  }
+  // An estimated bed area is only authoritative when positive — an estimated
+  // zero is the blank-default case above, never a real "no beds" measurement.
+  const estRaw = property.estimatedBedArea ?? property.estimatedBedAreaSf;
+  if (estRaw !== null && estRaw !== undefined && estRaw !== '') {
+    const est = Number(estRaw);
+    if (Number.isFinite(est) && est > 0) {
+      return { bedArea: est, bedBasis: 'estimated', estimated: true };
+    }
+  }
+  const lotEstimate = estimateTreeShrubBedAreaFromLot(property);
+  if (lotEstimate && lotEstimate.rawBedArea > 0) {
+    return { bedArea: lotEstimate.rawBedArea, bedBasis: 'lot_based', estimated: true };
+  }
+  return { bedArea: 3000, bedBasis: 'commercialDefault', estimated: true };
+}
+
+function priceCommercialTreeShrub(property = {}, options = {}) {
+  const cfg = COMMERCIAL_TREE_SHRUB;
+  const { bedArea, bedBasis, estimated } = resolveCommercialBedArea(property);
+  // Tree count resolution (mirrors residential priceTreeShrub):
+  //  1. Only a POSITIVE count is authoritative — callers (e.g. the public quote
+  //     adapter) may pass treeCount: 0 to mean "omitted", which must NOT
+  //     suppress the fallback or the per-tree material term is priced away.
+  //  2. When no positive count exists, estimate from the tree-DENSITY enum
+  //     (public quote enrichment supplies features.trees), instead of pricing
+  //     zero trees on a light/moderate/heavy commercial property.
+  const positiveTreeCount = [
+    Number(options.treeCount),
+    Number(property.treeCount),
+    Number(property.features?.treeCount),
+  ].find((n) => Number.isFinite(n) && n > 0);
+  let treeCount;
+  if (positiveTreeCount !== undefined) {
+    treeCount = positiveTreeCount;
+  } else {
+    const treeDensity = normalizeTreeShrubEnum(
+      property.treeDensity || property.features?.trees || property.features?.treeDensity, ''
+    );
+    const densityCount = TREE_SHRUB.treeDensityCounts?.[treeDensity];
+    treeCount = (densityCount !== undefined && densityCount > 0) ? densityCount : 0;
+  }
+  treeCount = Math.max(0, Number(treeCount) || 0);
+  const visits = cfg.programVisits;
+
+  const annualMaterial = cfg.materialFixedAnnual
+    + cfg.materialPerSqFtAnnual * bedArea
+    + cfg.materialPerTreeAnnual * treeCount;
+
+  const onSiteMin = cfg.laborMinutesBase
+    + (bedArea / 100) * cfg.laborMinutesPerHundredSqFt
+    + treeCount * cfg.laborMinutesPerTree;
+  const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + cfg.laborOverheadMinutesPerVisit) / 60);
+  const drivePerVisit = GLOBAL.LABOR_RATE * (cfg.routeDriveMinutes / 60);
+  const annualLabor = laborPerVisit * visits;
+  const annualDrive = drivePerVisit * visits;
+
+  const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
+  const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
+  const minApplied = computedAnnual < cfg.minAnnual;
+  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const monthly = roundMoney(annual / 12);
+  const perApp = roundMoney(annual / visits);
+  const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
+  const pricingConfidence = (bedArea > cfg.lowConfidenceBedSf || estimated) ? 'LOW' : 'MEDIUM';
+
+  return {
+    service: 'commercial_tree_shrub',
+    name: 'Commercial Tree & Shrub',
+    originalRequestedService: 'tree_shrub',
+    propertyType: 'commercial',
+    isCommercial: true,
+    commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+    commercialPricingMode: 'auto_estimate',
+    estimatedPricing: true,
+    // Flat commercial pricing — never WaveGuard/recurring-discountable. Carried
+    // so the accept/recurring helpers exclude it from % discounts even where a
+    // service key normalizes to "lawn".
+    discountable: false,
+    excludeFromPctDiscount: true,
+    quoteRequired: false,
+    requiresManualReview: false,
+    detail: 'Commercial ornamental program (shrub/tree fertilization + insect + bed weed control). Estimated from property data — final price confirmed on site.',
+    disclaimer: 'Estimated from property data — final price confirmed on site.',
+    bedArea,
+    bedAreaUsed: bedArea,
+    bedAreaSource: bedBasis,
+    bedAreaEstimated: estimated,
+    treeCount,
+    frequency: visits,
+    visitsPerYear: visits,
+    onSiteMin: roundMoney(onSiteMin),
+    monthly,
+    annual,
+    perApp,
+    internalPerVisitRevenue: perApp,
+    perVisit: perApp,
+    pricingBasis: 'COMMERCIAL_COST_BUILDUP',
+    pricingConfidence,
+    minApplied,
+    taxable: cfg.taxable,
+    taxCategory: cfg.taxCategory,
+    costs: {
+      materialCost: roundMoney(annualMaterial),
+      laborCost: roundMoney(annualLabor),
+      driveCost: roundMoney(annualDrive),
+      adminCost: cfg.adminAnnual,
+      directCost: roundMoney(annualMaterial + annualLabor + annualDrive),
+      total: roundMoney(annualCost),
+    },
+    margin,
+    marginFloorOk: margin >= cfg.targetGrossMargin - 0.01,
   };
 }
 
@@ -6772,7 +7038,8 @@ function applyRodentBundle(componentTotal, bundle) {
 }
 
 module.exports = {
-  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
+  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
+  priceCommercialLawn, priceCommercialTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,

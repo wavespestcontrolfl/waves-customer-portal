@@ -963,6 +963,10 @@ const StripeService = {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
 
+    // The "WaveGuard Monthly" marker is load-bearing: billing-cron identifies
+    // monthly autopay rows by a `%WaveGuard Monthly%` LIKE match for its
+    // month-window duplicate guard + failed-payment retry scheduling. Keep it
+    // even for the flat 'Commercial' tier so those guards still see the charge.
     const description = `${customer.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${customer.first_name} ${customer.last_name}`;
     // Default durable scope: one autopay charge per customer per ET day
     // is the business rule for the daily cron (its month-window guard

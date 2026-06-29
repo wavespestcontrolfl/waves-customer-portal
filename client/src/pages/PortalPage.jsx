@@ -1292,20 +1292,29 @@ function DashboardTab({ customer, onSwitchTab }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              <div style={{
-                display: 'inline-flex', alignItems: 'center', gap: 8,
-                padding: '6px 10px',
-                borderRadius: 8,
-                background: PORTAL_SHELL.soft,
-                border: `1px solid ${PORTAL_SHELL.softBorder}`,
-                color: B.blueDeeper,
-                fontSize: 12,
-                fontWeight: 850,
-                fontFamily: FONTS.heading,
-              }}>
-                <Icon name="shield" size={14} strokeWidth={2} />
-                WaveGuard {customer.tier || 'Member'}
-              </div>
+              {(() => {
+                // Use the shared membership resolver so a non-member tier
+                // (e.g. the flat-commercial 'Commercial' sentinel) does NOT
+                // render a "WaveGuard …" badge.
+                const activeTierName = resolveActiveTierName(customer);
+                if (!activeTierName) return null;
+                return (
+                  <div style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 8,
+                    padding: '6px 10px',
+                    borderRadius: 8,
+                    background: PORTAL_SHELL.soft,
+                    border: `1px solid ${PORTAL_SHELL.softBorder}`,
+                    color: B.blueDeeper,
+                    fontSize: 12,
+                    fontWeight: 850,
+                    fontFamily: FONTS.heading,
+                  }}>
+                    <Icon name="shield" size={14} strokeWidth={2} />
+                    WaveGuard {activeTierName}
+                  </div>
+                );
+              })()}
               {annualPrepay && (
                 <div style={{
                   display: 'inline-flex', alignItems: 'center', gap: 8,
@@ -3687,7 +3696,7 @@ function BillingTab({ customer }) {
           {[
             { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? `Next ${dueDateLabel}` : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
-            { label: 'Monthly plan', value: money(monthlyRate), sub: activeTierName ? `WaveGuard ${tierName}` : 'No active plan' },
+            { label: 'Monthly plan', value: money(monthlyRate), sub: activeTierName ? `WaveGuard ${tierName}` : (membershipTierKey(customer?.tier) === 'commercial' ? 'Commercial service plan' : 'No active plan') },
             { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
           ].map((item) => (
             <div key={item.label} style={{
@@ -6093,7 +6102,7 @@ const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
 
 // Tier values that explicitly mean "not a WaveGuard member" (mirrors the server
 // NON_MEMBERSHIP_TIER_KEYS in services/waveguard-existing-services.js).
-const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset']);
+const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 function membershipTierKey(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
 }

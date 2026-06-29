@@ -88,6 +88,48 @@ router.use(rateLimit({
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 
+// Commercial auto-priced estimates are NOT customer self-schedulable — the team
+// sets up the (longer, route-sensitive) commercial visit schedule. Detect them
+// so the slots lookup + reservation are blocked: a residential-length 45/60-min
+// slot must never be reserved for a commercial job priced from tens of thousands
+// of sqft. (The slot profiler falls back to service_interest and can't size the
+// commercial visit; per the owner directive, commercial schedules manually.)
+// Mirror the slot service's terminal/expired gate (estimate-slot-availability.js
+// BLOCKED_STATES_FOR_SLOTS + expires_at) so the commercial manual-scheduling
+// short-circuit can't return a 200 for an accepted/declined/expired estimate.
+// Returns a sent response (caller must `return` it) or null when eligible.
+const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired']);
+function rejectIneligibleEstimate(res, estimate = {}) {
+  if (SLOT_BLOCKED_STATES.has(estimate.status)) {
+    return res.status(409).json({ error: 'Estimate is no longer active' });
+  }
+  if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  return null;
+}
+
+function isCommercialAutoEstimate(estimate = {}) {
+  let data = estimate.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
+  data = data || {};
+  if (data.commercialEstimatedPricing === true) return true;
+  const isCommercialSvc = (s) => String(s?.service || s?.serviceKey || s?.name || '')
+    .toLowerCase().includes('commercial_lawn')
+    || String(s?.service || s?.serviceKey || s?.name || '').toLowerCase().includes('commercial_tree');
+  // Quote-wizard/engine save → engineResult.lineItems; admin save → the mapped
+  // result.recurring.services (v1-legacy-mapper). Check both shapes.
+  const lineItems = Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems : [];
+  if (lineItems.some((li) => li && li.estimatedPricing === true && isCommercialSvc(li) && Number(li.annual) > 0)) {
+    return true;
+  }
+  const recurringRows = [
+    ...(Array.isArray(data.result?.recurring?.services) ? data.result.recurring.services : []),
+    ...(Array.isArray(data.recurring?.services) ? data.recurring.services : []),
+  ];
+  return recurringRows.some(isCommercialSvc);
+}
+
 router.get('/:token/available-slots', async (req, res) => {
   const token = req.params.token;
   if (!token || !TOKEN_RE.test(token)) {
@@ -100,6 +142,15 @@ router.get('/:token/available-slots', async (req, res) => {
       .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
+    }
+    const ineligible = rejectIneligibleEstimate(res, estimate);
+    if (ineligible) return ineligible;
+    if (isCommercialAutoEstimate(estimate)) {
+      return res.json({
+        primary: [], expander: [], availableSlots: [], summary: null,
+        commercialManualScheduling: true,
+        message: 'A Waves team member will reach out to schedule your commercial service.',
+      });
     }
 
     const windowDays = Number.parseInt(req.query.windowDays, 10);
@@ -198,8 +249,19 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
     }
     // Model-backed endpoint — same gate as /ask: require the short-lived signed
     // askToken bound to this estimate, on top of the URL token + rate limit.
+    // The commercial short-circuit must come AFTER this gate so a bare URL-token
+    // holder can't get a success payload without the signed askToken.
     if (!verifyEstimateAskToken(req, estimate)) {
       return res.status(403).json({ error: 'estimate_ask_forbidden' });
+    }
+    const ineligible = rejectIneligibleEstimate(res, estimate);
+    if (ineligible) return ineligible;
+    if (isCommercialAutoEstimate(estimate)) {
+      return res.json({
+        primary: [], expander: [], availableSlots: [], summary: null,
+        commercialManualScheduling: true,
+        message: 'A Waves team member will reach out to schedule your commercial service.',
+      });
     }
     const serviceMode = resolveSlotServiceMode(estimate, req.body?.serviceMode);
     const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
@@ -255,6 +317,14 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
+    }
+    const ineligible = rejectIneligibleEstimate(res, estimate);
+    if (ineligible) return ineligible;
+    if (isCommercialAutoEstimate(estimate)) {
+      return res.status(409).json({
+        error: 'Commercial service is scheduled by our team — no self-booking.',
+        commercialManualScheduling: true,
+      });
     }
 
     slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);

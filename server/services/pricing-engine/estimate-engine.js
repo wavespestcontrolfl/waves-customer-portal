@@ -25,7 +25,8 @@ function guardedLineCost(item) {
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
-  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
+  pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
+  priceCommercialLawn, priceCommercialTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
@@ -556,7 +557,15 @@ function generateEstimate(input) {
   const propertyIsCommercial = profileIsCommercial || isCommercialProperty(propertyForCommercialDetection, commercialContext);
   const addCommercialManualQuote = (service) => {
     const result = buildCommercialManualQuoteResult(service, property, { commercialSubtype });
-    if (!lineItems.some((line) => line.service === result.service)) {
+    // Dedupe only against an existing MANUAL row of the same service. A priced
+    // auto line (e.g. commercial_lawn from the auto-pricer) shares the service
+    // key but must NOT suppress a manual lawn-adjacent add-on (palm / top
+    // dressing / dethatching / plugging) — otherwise the requested add-on is
+    // silently dropped while the estimate still looks priced.
+    const alreadyHasManual = lineItems.some(
+      (line) => line.service === result.service && line.quoteRequired === true
+    );
+    if (!alreadyHasManual) {
       lineItems.push(result);
     }
   };
@@ -620,9 +629,15 @@ function generateEstimate(input) {
   // Lawn Care
   if (services.lawn || serviceSelected(services.commercialLawn)) {
     if (propertyIsCommercial) {
-      // PR 1 safety gate: commercial lawn treatment has no residential
-      // fallback until the small-commercial pilot pricer is implemented.
-      addCommercialManualQuote('lawn_care');
+      // Commercial auto-pricing (owner directive 2026-06-28): all commercial
+      // turf is auto-priced via the cost-buildup pricer and shown to the lead
+      // instantly with an "estimated, confirmed on site" disclaimer. No size
+      // cap, no manual-quote fallback for lawn.
+      const result = priceCommercialLawn(property, { commercialSubtype });
+      if (!lineItems.some((line) => line.service === result.service)) {
+        lineItems.push(result);
+        activeServiceKeys.push('commercial_lawn');
+      }
     } else {
       const result = priceLawnCare(property, {
         track: services.lawn.track || 'st_augustine',
@@ -641,22 +656,35 @@ function generateEstimate(input) {
   }
 
   // Tree & Shrub
-  if (services.treeShrub && !useCommercialManualQuote(services.treeShrub, 'lawn_care')) {
-    const result = priceTreeShrub(property, {
-      tier: services.treeShrub.tier,
-      access: services.treeShrub.access || 'easy',
-      // No synthetic 0 here: pass the service-line override through and let
-      // priceTreeShrub resolve property.treeCount / features.treeCount, then
-      // fall back to the treeDensity estimate when no count exists at all
-      // (v4.6 — a fabricated 0 would price the per-tree material term away).
-      treeCount: services.treeShrub.treeCount,
-    });
-    result.annual = Math.round(result.annual);
-    result.monthly = Math.round(result.annual / 12 * 100) / 100;
-    result.internalPerVisitRevenue = Math.round(result.annual / result.frequency * 100) / 100;
-    result.perApp = result.internalPerVisitRevenue;
-    lineItems.push(result);
-    activeServiceKeys.push('tree_shrub');
+  if (services.treeShrub) {
+    if (propertyIsCommercial) {
+      // Commercial auto-pricing — priced ornamental program (shrub/tree fert +
+      // insect + bed weed control). Replaces the old lawn-adjacent manual quote.
+      const result = priceCommercialTreeShrub(property, {
+        commercialSubtype,
+        treeCount: services.treeShrub.treeCount,
+      });
+      if (!lineItems.some((line) => line.service === result.service)) {
+        lineItems.push(result);
+        activeServiceKeys.push('commercial_tree_shrub');
+      }
+    } else {
+      const result = priceTreeShrub(property, {
+        tier: services.treeShrub.tier,
+        access: services.treeShrub.access || 'easy',
+        // No synthetic 0 here: pass the service-line override through and let
+        // priceTreeShrub resolve property.treeCount / features.treeCount, then
+        // fall back to the treeDensity estimate when no count exists at all
+        // (v4.6 — a fabricated 0 would price the per-tree material term away).
+        treeCount: services.treeShrub.treeCount,
+      });
+      result.annual = Math.round(result.annual);
+      result.monthly = Math.round(result.annual / 12 * 100) / 100;
+      result.internalPerVisitRevenue = Math.round(result.annual / result.frequency * 100) / 100;
+      result.perApp = result.internalPerVisitRevenue;
+      lineItems.push(result);
+      activeServiceKeys.push('tree_shrub');
+    }
   }
 
   // Palm Injection

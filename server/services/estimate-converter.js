@@ -129,6 +129,14 @@ function recurringServiceKey(svc = {}) {
     || raw.includes('rodent_monitoring')
     || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
   ) return 'rodent_bait';
+  // Commercial auto-priced lines keep a DISTINCT key — they must never be
+  // classified as residential lawn_care/tree_shrub, which are discountable for
+  // annual prepay (the flat commercial price would then get a 5% prepay cut).
+  if (raw.includes('commercial')) {
+    if (raw.includes('lawn') || raw.includes('turf')) return 'commercial_lawn';
+    if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'commercial_tree_shrub';
+    if (raw.includes('pest')) return 'commercial_pest';
+  }
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
@@ -496,6 +504,50 @@ function mergeRecurringServiceLists(...lists) {
   return [...byIdentity.values()];
 }
 
+// Priced recurring lines persisted under engineResult.lineItems (or
+// result.lineItems). The quote-wizard / engine-backed save shape stores priced
+// recurring services there with NO recurring.services block, so without this a
+// lawn-only/tree-only commercial (or foam) estimate would convert with zero
+// recurring services — no scheduling, no first-service invoice, and the
+// Commercial non-member tier missed. Recurring lines carry an annual amount;
+// one-time/specialty lines (price/total) and manual quotes are excluded.
+// Raw engine lineItems often omit a display name (the pricers return a service
+// key but no name). The scheduler falls back to 'Service' for nameless rows,
+// which breaks dispatch/profile resolution — so synthesize a name from the
+// canonical service key before these rows reach conversion.
+const RECURRING_SERVICE_DISPLAY_NAMES = {
+  pest_control: 'Pest Control',
+  lawn_care: 'Lawn Care',
+  tree_shrub: 'Tree & Shrub',
+  mosquito: 'Mosquito',
+  termite_bait: 'Termite Bait',
+  foam_recurring: 'Recurring Foam Treatment',
+  rodent_bait: 'Rodent Bait Stations',
+  palm_injection: 'Palm Injection',
+  commercial_lawn: 'Commercial Lawn Treatment',
+  commercial_tree_shrub: 'Commercial Tree & Shrub',
+};
+
+function recurringLinesFromEngineResult(data = {}) {
+  const lineItems = [
+    ...(Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems : []),
+    ...(Array.isArray(data.result?.lineItems) ? data.result.lineItems : []),
+  ];
+  return lineItems
+    .filter((li) =>
+      li
+      && typeof li === 'object'
+      && li.quoteRequired !== true
+      && li.requiresManualReview !== true
+      && Number(li.annual) > 0
+    )
+    .map((li) => {
+      if (li.name || li.label || li.displayName || li.serviceName || li.service_name) return li;
+      const synthesized = RECURRING_SERVICE_DISPLAY_NAMES[recurringServiceKey(li)];
+      return synthesized ? { ...li, name: synthesized } : li;
+    });
+}
+
 function recurringServicesFromEstimateData(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   return mergeRecurringServiceLists(
@@ -503,6 +555,9 @@ function recurringServicesFromEstimateData(estimateData = {}) {
     data.result?.recurring?.services,
     data.result?.results?.recurring?.services,
     Array.isArray(data.services) ? data.services.filter((svc) => svc.recurring || svc.frequency) : [],
+    // Deduped by recurringServiceKey, so this coalesces with (never duplicates)
+    // any matching recurring.services row from the admin/mapped save shape.
+    recurringLinesFromEngineResult(data),
   );
 }
 
@@ -584,7 +639,17 @@ function recurringLineAnnualAmount(item = {}) {
 }
 
 function isNonDiscountableRecurringLine(item = {}) {
-  if (recurringServiceKey(item) === 'lawn_care') return false;
+  const key = recurringServiceKey(item);
+  // Commercial auto-priced lawn/tree EARN the annual-prepay discount (owner
+  // directive 2026-06-29: commercial prepay = 5%, same as residential lawn/tree;
+  // there is no WaveGuard setup fee on commercial). They remain NON-MEMBERS —
+  // excluded from the WaveGuard TIER % via excludeFromPctDiscount (see
+  // recurringServiceReceivesTierDiscount), which is a separate path from this
+  // prepay floor. So they are discountable HERE (return false) just like
+  // lawn_care. Commercial pest stays a manual quote (no annual) and never
+  // reaches the prepay floor.
+  if (key === 'commercial_lawn' || key === 'commercial_tree_shrub') return false;
+  if (key === 'lawn_care') return false;
   const annual = recurringLineAnnualAmount(item);
   if (!(annual > 0)) return false;
   // foam_recurring is non-discountable by owner directive — the cadence
@@ -913,6 +978,18 @@ const EstimateConverter = {
     });
     const recurringServicesForConversion = suppressRecurringConversion ? [] : recurringServices;
     const serviceCount = countTierQualifyingRecurringServices(recurringServicesForConversion);
+    // Commercial auto-priced programs are FLAT and never a WaveGuard membership.
+    // Used both to flag manual scheduling (the follow-up seeder doesn't support
+    // their cadence) and to keep them off the Bronze tier fallback.
+    const hasCommercialRecurring = recurringServicesForConversion.some(
+      (svc) => String(recurringServiceKey(svc) || '').startsWith('commercial_')
+    );
+    // A plan is commercial-only (non-member) when it has a commercial recurring
+    // line and NO WaveGuard-qualifying recurring service. Commercial keys are
+    // never qualifying, so serviceCount===0 means there is no qualifying
+    // non-commercial service — and a flat non-qualifying add-on (e.g. recurring
+    // foam) must NOT promote the flat commercial plan to a Bronze membership.
+    const commercialOnlyRecurring = hasCommercialRecurring && serviceCount === 0;
     const shouldCreateDraftInvoice = shouldCreateDraftInvoiceForRecurring({
       billingTerm,
       recurringServices: recurringServicesForConversion,
@@ -921,7 +998,9 @@ const EstimateConverter = {
     // Determine tier
     const { tier, discount } = suppressRecurringConversion
       ? { tier: 'One-Time', discount: 0 }
-      : determineTier(serviceCount, recurringServicesForConversion.length > 0);
+      : commercialOnlyRecurring
+        ? { tier: 'none', discount: 0 } // written as the non-member 'Commercial' sentinel below
+        : determineTier(serviceCount, recurringServicesForConversion.length > 0);
     const inferredFrequencyKey = estimateData.customerSelection?.frequency
       || inferFrequencyKeyFromEstimateData(estimateData);
     // Combined routing only trusts the customer's REAL accepted selection —
@@ -959,7 +1038,12 @@ const EstimateConverter = {
           member_since: ['active_customer', 'won', 'at_risk', 'churned', 'dormant'].includes(customer.pipeline_stage)
             ? (customer.member_since || etDateString())
             : etDateString(),
-          waveguard_tier: tier,
+          // An all-commercial recurring plan is NOT a WaveGuard membership. Store
+          // the explicit non-member 'Commercial' tier (in the CHECK + every
+          // membership predicate's NON_MEMBERSHIP set) rather than NULL — a NULL
+          // tier with a positive monthly_rate falls through those predicates'
+          // legacy rate>0 fallback and would be treated/rendered as Bronze.
+          waveguard_tier: commercialOnlyRecurring ? 'Commercial' : (tier === 'none' ? null : tier),
           monthly_rate: monthlyRate,
           active: true,
           deleted_at: null,
@@ -1275,16 +1359,24 @@ const EstimateConverter = {
             ? monthlyRate
             : Math.round((annualAmount / 12) * 100) / 100;
           const prepayDiscountPctLabel = `${Math.round(ANNUAL_PREPAY_DISCOUNT_PCT * 100)}%`;
-          const prepayLineDescription = prepayDiscountApplied
-            ? `WaveGuard ${tier || 'Bronze'} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`
-            : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
+          // Commercial plans are not a WaveGuard membership and tier is the
+          // non-member 'none'; label them 'Commercial' rather than letting the
+          // truthy 'none' render as "WaveGuard none".
+          const prepayPlanPrefix = commercialOnlyRecurring
+            ? 'Commercial'
+            : `WaveGuard ${tier && tier !== 'none' ? tier : 'Bronze'}`;
+          const prepayLineDescription = commercialOnlyRecurring
+            ? `${prepayPlanPrefix} — 12 months prepaid`
+            : prepayDiscountApplied
+              ? `${prepayPlanPrefix} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`
+              : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
           const prepayNotes = prepayDiscountApplied
             ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
             : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99 setup fee waived per WaveGuard membership policy.`;
           const inv = await InvoiceService.create({
             database,
             customerId,
-            title: `WaveGuard ${tier || 'Bronze'} — Annual Prepay (12 months)`,
+            title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
             lineItems: [{
               description: prepayLineDescription,
               quantity: 1,
@@ -1303,7 +1395,7 @@ const EstimateConverter = {
               customerId,
               sourceEstimateId: estimateId,
               prepayInvoiceId: draftInvoiceId,
-              planLabel: `WaveGuard ${tier || 'Bronze'} Annual Prepay`,
+              planLabel: `${prepayPlanPrefix} Annual Prepay`,
               monthlyRate: termMonthlyRate,
               prepayAmount: annualAmount,
               termStart: termStartDate || null,
@@ -1494,9 +1586,34 @@ const EstimateConverter = {
         .join(', '),
     };
 
-    if (opts.skipMembershipEmail !== true && !suppressRecurringConversion) {
+    if (opts.skipMembershipEmail !== true && !suppressRecurringConversion && !commercialOnlyRecurring) {
       void AccountMembershipEmail.sendMembershipStarted(membershipEmail)
         .catch((err) => logger.warn(`[estimate-converter] membership.started email failed for customer ${customerId}: ${err.message}`));
+    }
+
+    // Commercial recurring follow-ups aren't auto-scheduled yet — surface it so
+    // the team sets up the schedule manually (fire-and-forget; never blocks the
+    // accept). Only the initial visit was scheduled above.
+    if (hasCommercialRecurring && !suppressRecurringConversion) {
+      // skipAutoSchedule (manual Mark Won) schedules NOTHING; the normal path
+      // schedules only the initial visit. Reflect what actually happened so
+      // dispatch knows whether the first appointment also needs creating.
+      const nothingScheduled = skipAutoSchedule || scheduledCount === 0;
+      const scheduleNote = nothingScheduled
+        ? 'No visits were auto-scheduled — set up the full commercial visit schedule (including the first visit) manually.'
+        : 'Initial visit scheduled — set up the remaining recurring commercial visits manually.';
+      logger.warn(`[estimate-converter] Commercial recurring estimate ${estimateId} (customer ${customerId}) accepted — ${scheduleNote} (commercial cadence auto-scheduling not yet supported).`);
+      try {
+        const NotificationService = require('./notification-service');
+        void NotificationService.notifyAdmin(
+          'estimate_converted',
+          `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
+          `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
+          { icon: '\u{1F4C5}', link: '/admin/dispatch', metadata: { estimateId, customerId } }
+        ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
+      }
     }
 
     // Welcome SMS for new recurring signups — unified across every accept
@@ -1507,7 +1624,7 @@ const EstimateConverter = {
     // guard), so it won't double-send if the admin-schedule path also runs.
     // wasNewRecurringSignup gates it to genuinely new customers; all tiers are
     // included (Bronze too).
-    const welcomeSms = (opts.skipWelcomeSms !== true && !suppressRecurringConversion && wasNewRecurringSignup)
+    const welcomeSms = (opts.skipWelcomeSms !== true && !suppressRecurringConversion && wasNewRecurringSignup && !commercialOnlyRecurring)
       ? {
           customer: {
             id: customerId,
@@ -1539,13 +1656,18 @@ const EstimateConverter = {
       monthlyRate,
       serviceCount,
       scheduledCount,
+      requiresManualRecurringScheduling: hasCommercialRecurring,
       firstScheduledServiceId,
       billingTerm,
       draftInvoiceId,
       draftInvoiceAmount,
       draftInvoicePayUrl,
       invoiceDelivery,
-      membershipEmail,
+      // A flat commercial-only plan is NOT a WaveGuard membership — don't hand
+      // back a membership-started payload (callers like manual Mark Won fire the
+      // returned email post-commit, which would send WaveGuard copy with a
+      // non-member 'none'/'Commercial' tier).
+      membershipEmail: commercialOnlyRecurring ? null : membershipEmail,
       welcomeSms,
       deferredFollowUpReminderRows,
       serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',

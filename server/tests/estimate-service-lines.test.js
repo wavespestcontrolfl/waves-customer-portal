@@ -5,6 +5,41 @@ const {
 } = require('../services/estimate-service-lines');
 
 describe('estimate service line inference', () => {
+  test('infers priced commercial lines from engineResult.lineItems (public quote save shape)', () => {
+    // Public quote persists priced commercial programs under
+    // engineResult.lineItems with no recurring.services block — they must be
+    // classified with their commercial key + metadata, not as residential.
+    const estimate = {
+      estimate_data: {
+        engineResult: {
+          lineItems: [
+            {
+              service: 'commercial_lawn', name: 'Commercial Lawn Treatment',
+              monthly: 391, annual: 4689, quoteRequired: false, isCommercial: true,
+              commercialPricingMode: 'auto_estimate', taxable: false,
+              taxCategory: 'lawn_spraying_or_treatment', pricingConfidence: 'LOW',
+            },
+            {
+              service: 'commercial_tree_shrub', name: 'Commercial Tree & Shrub',
+              monthly: 201, annual: 2412, quoteRequired: false, isCommercial: true,
+            },
+          ],
+        },
+      },
+    };
+    const lines = inferEstimateServiceLines(estimate);
+    const byKey = Object.fromEntries(lines.map((l) => [l.key, l]));
+    expect(byKey.commercial_lawn).toBeTruthy();
+    expect(byKey.commercial_lawn.isCommercial).toBe(true);
+    expect(byKey.commercial_lawn.commercialPricingMode).toBe('auto_estimate');
+    expect(byKey.commercial_lawn.amount).toBe(391);
+    expect(byKey.commercial_tree_shrub).toBeTruthy();
+    expect(byKey.commercial_tree_shrub.isCommercial).toBe(true);
+    // Not misclassified as residential lawn / tree_shrub.
+    expect(byKey.lawn).toBeUndefined();
+    expect(byKey.tree_shrub).toBeUndefined();
+  });
+
   test('classifies explicit service-interest text without defaulting blanks to pest', () => {
     expect(serviceKeysFromText('General Pest Control')).toEqual(['pest']);
     expect(serviceKeysFromText('General Pest Control + Lawn Care')).toEqual(['lawn', 'pest']);

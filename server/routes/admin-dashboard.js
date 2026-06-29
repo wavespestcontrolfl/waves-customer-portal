@@ -813,8 +813,9 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     }
 
     // Memberships sold — new WaveGuard members whose member_since (a DATE)
-    // lands in the period window. 'none'/'None'/'One-Time' are non-membership
-    // classifications (Bronze/Silver/Gold/Platinum are the real tiers). Scoped
+    // lands in the period window. 'none'/'None'/'One-Time'/'Commercial' are
+    // non-membership classifications (Bronze/Silver/Gold/Platinum are the real
+    // tiers — flat commercial plans set member_since but are NOT a membership). Scoped
     // to LIVE customers (active + not-deleted + real customer stage) the same
     // way the momentum/customer KPIs are, so a deleted/deactivated/non-customer
     // row with member_since in the window can't inflate the count.
@@ -823,7 +824,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
       const m = await db('customers')
         .where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
         .whereNotNull('waveguard_tier')
-        .whereNotIn('waveguard_tier', ['none', 'None', 'One-Time'])
+        .whereNotIn('waveguard_tier', ['none', 'None', 'One-Time', 'Commercial'])
         .where('member_since', '>=', start)
         .where('member_since', '<=', todayStr)
         .count('* as n').first();

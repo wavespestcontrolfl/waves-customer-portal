@@ -136,6 +136,20 @@ router.get('/relevant', async (req, res, next) => {
     const currentTier = customer.waveguard_tier || 'Bronze';
     const currentDiscount = TIERS[currentTier]?.discount || 0;
 
+    // Commercial accounts are non-members on a flat commercial service plan, not
+    // the residential WaveGuard tier ladder. 'Commercial' isn't in TIER_ORDER,
+    // so indexOf(currentTier) === -1 and every seasonal add-on would falsely
+    // read as a discounted member tier-upgrade. Never pitch WaveGuard member
+    // promos to a commercial account — return no promotions.
+    if (String(currentTier).toLowerCase() === 'commercial') {
+      return res.json({
+        fullyProtected: false,
+        tier: currentTier,
+        discount: '0%',
+        promotions: [],
+      });
+    }
+
     // Determine which services the customer already has
     const serviceRecords = await db('service_records')
       .where({ customer_id: req.customerId })

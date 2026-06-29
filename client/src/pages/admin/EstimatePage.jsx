@@ -918,10 +918,12 @@ function EstimateToolView() {
       "svcTermiteBait",
     ];
     const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
+    // Commercial LAWN now auto-prices (a priced recurring line); only commercial
+    // PEST stays a manual quote. So lawn counts toward recurring, not manual.
     const commercialManualQuoteCount =
-      commercialDetected ? ["svcLawn", "svcPest"].filter((k) => form[k]).length : 0;
+      commercialDetected ? ["svcPest"].filter((k) => form[k]).length : 0;
     const recurringCount = qualifyingRecurringKeys
-      .filter((k) => form[k] && !(commercialDetected && (k === "svcLawn" || k === "svcPest")))
+      .filter((k) => form[k] && !(commercialDetected && k === "svcPest"))
       .length;
     const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
@@ -1331,9 +1333,11 @@ function EstimateToolView() {
           );
           if (match) {
             setExistingCustomerMatch(match);
-            // Only apply loyalty discount if they have an active WaveGuard tier
+            // Only apply loyalty discount if they have an active WaveGuard tier.
+            // 'Commercial' is a flat non-member tier — exclude it so a commercial
+            // customer doesn't unlock recurring-customer loyalty discounts.
             const hasActivePlan =
-              match.tier && match.tier !== "null" && match.monthlyRate > 0;
+              match.tier && match.tier !== "null" && match.tier !== "Commercial" && match.monthlyRate > 0;
             setForm((f) => ({
               ...f,
               isRecurringCustomer: hasActivePlan ? "YES" : "NO",
@@ -2963,12 +2967,12 @@ function EstimateToolView() {
               {form.svcLawn && commercialDetected && (
                 <div style={{
                   ...sSubOpts,
-                  background: "rgba(245,158,11,0.12)",
-                  border: "1px solid rgba(245,158,11,0.45)",
-                  color: C.amber,
+                  background: "rgba(113,113,122,0.10)",
+                  border: "1px solid rgba(113,113,122,0.30)",
+                  color: C.textBody || C.muted,
                   fontSize: 13,
                 }}>
-                  Commercial lawn treatment is set to manual quote. Residential lawn pricing is suppressed.
+                  Commercial lawn treatment is auto-priced (estimated — confirmed on site). Residential lawn pricing is suppressed.
                 </div>
               )}
               {form.svcLawn && !commercialDetected && (
