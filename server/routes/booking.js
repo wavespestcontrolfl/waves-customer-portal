@@ -1299,6 +1299,11 @@ const captureIntentHourlyLimiter = rateLimit({
   message: { ok: false, skipped: 'rate_limited' },
 });
 
+// Estimate-originated booking-link sources NOT covered by isOneTimeBookingSource
+// that the recovery lane must still skip (one-time semantics; handled by the
+// estimate follow-up lane). admin-manual-booking-resend = admin estimate resend.
+const RECOVERY_SKIP_SOURCES = new Set(['admin-manual-booking-resend']);
+
 // POST /api/booking/capture-intent — partial capture of a high-intent /book
 // visitor (entered contact + picked a slot, hasn't confirmed yet) so the
 // abandoned-booking recovery cron can follow up if they never finish. One OPEN
@@ -1320,12 +1325,15 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       return res.json({ ok: true, skipped: 'unverified' });
     }
 
-    // One-time / estimate-accept sources are recovered by the estimate
+    // One-time / estimate-originated booking links are recovered by the estimate
     // deposit-abandonment lane (services/estimate-follow-up.js), not here —
     // capturing them would double-nudge AND a recovery link carrying source
     // 'booking_recovery' would drop the one-time semantics, letting
-    // createSelfBooking seed a recurring series for a one-off visit.
-    if (isOneTimeBookingSource(b.source)) {
+    // createSelfBooking seed a recurring series for a one-off visit. Skips the
+    // shared one-time sources PLUS the admin one-time estimate-resend link, which
+    // isn't in that helper (this is a recovery-lane guard only — it does not
+    // change createSelfBooking's recurring decision for those sources).
+    if (isOneTimeBookingSource(b.source) || RECOVERY_SKIP_SOURCES.has(String(b.source || '').trim())) {
       return res.json({ ok: true, skipped: 'estimate_source' });
     }
 
