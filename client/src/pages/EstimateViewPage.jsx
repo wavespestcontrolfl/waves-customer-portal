@@ -122,6 +122,29 @@ function selectedCombinedFrequency(pricing = {}, selectedFrequencyKey) {
   return frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
 }
 
+// Per-service cadence: find the precomputed combo matching the customer's
+// independent per-section selections so the combined total reflects EVERY
+// service's chosen cadence (not just the pest cadence). Returns null when the
+// estimate carries no combos or its sections don't map onto the combo axes.
+function selectedServiceCadenceCombo(pricing = {}, services = [], selected = {}) {
+  const combos = Array.isArray(pricing?.serviceCadenceCombos) ? pricing.serviceCadenceCombos : [];
+  if (!combos.length) return null;
+  const axisKeys = Object.keys(combos[0].selection || {});
+  if (!axisKeys.length) return null;
+  const current = {};
+  for (const axis of axisKeys) {
+    const section = services.find((s) => s.key === axis);
+    if (!section) return null;
+    const key = selected[section.key] || section.defaultFrequencyKey || section.frequencies?.[0]?.key;
+    if (!key) return null;
+    current[axis] = key;
+  }
+  return combos.find((c) => {
+    const sel = c.selection || {};
+    return Object.keys(sel).length === axisKeys.length && axisKeys.every((k) => sel[k] === current[k]);
+  }) || null;
+}
+
 function serviceLabelForKey(key) {
   switch (key) {
     case 'tree_shrub': return 'Tree & Shrub';
@@ -2149,6 +2172,29 @@ export default function EstimateViewPage() {
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
   const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
   const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
+  // Per-service cadence (bundles): the precomputed combo matching every section's
+  // independent selection, plus the non-pest selection map sent on accept.
+  const serviceCadenceCombos = useMemo(
+    () => (Array.isArray(data?.pricing?.serviceCadenceCombos) ? data.pricing.serviceCadenceCombos : []),
+    [data?.pricing],
+  );
+  const selectedCombo = useMemo(
+    () => selectedServiceCadenceCombo(data?.pricing, services, selected),
+    [data?.pricing, services, selected],
+  );
+  const serviceCadences = useMemo(() => {
+    if (!serviceCadenceCombos.length) return null;
+    const axisKeys = Object.keys(serviceCadenceCombos[0].selection || {}).filter((k) => k !== 'pest_control');
+    if (!axisKeys.length) return null;
+    const out = {};
+    for (const axis of axisKeys) {
+      const section = services.find((s) => s.key === axis);
+      if (!section) continue;
+      const key = selected[section.key] || section.defaultFrequencyKey || section.frequencies?.[0]?.key;
+      if (key) out[axis] = key;
+    }
+    return Object.keys(out).length ? out : null;
+  }, [serviceCadenceCombos, services, selected]);
   const currentFrequency = useMemo(() => {
     const pestSection = services.find((section) => section.key === 'pest_control');
     const primarySection = pestSection || services.find((section) => section.isRecurring) || services[0];
@@ -2350,10 +2396,17 @@ export default function EstimateViewPage() {
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
-    const affectedSections = services.filter((section) => (
-      section.key === sectionKey
-      || section.frequencies?.some((item) => item.key === nextFrequency)
-    ));
+    // With per-service combos, each section's cadence is INDEPENDENT — only the
+    // changed section moves (otherwise sections that happen to share a tier key,
+    // e.g. lawn + tree both having "standard", would wrongly move together).
+    // Legacy single-cadence bundles keep the mirror behavior (all sections that
+    // share the chosen pest-cadence key move as one).
+    const affectedSections = serviceCadenceCombos.length
+      ? services.filter((section) => section.key === sectionKey)
+      : services.filter((section) => (
+        section.key === sectionKey
+        || section.frequencies?.some((item) => item.key === nextFrequency)
+      ));
     setSelected((prev) => affectedSections.reduce((next, section) => ({
       ...next,
       [section.key]: nextFrequency,
@@ -2373,7 +2426,7 @@ export default function EstimateViewPage() {
     setError(null);
     setCtaPhase('configure');
     setSlotsRefreshSignal((v) => v + 1);
-  }, [services]);
+  }, [services, serviceCadenceCombos]);
 
   const performAccept = useCallback(async () => {
     setCtaPhase('submitting');
@@ -2388,6 +2441,7 @@ export default function EstimateViewPage() {
           paymentMethodPreference: paymentPreference,
           serviceMode,
           selectedFrequency,
+          serviceCadences: serviceCadences || undefined,
           depositPaymentIntentId: depositPaymentIntentIdRef.current || undefined,
           cardHoldSetupIntentId: cardHoldSetupIntentIdRef.current || undefined,
         }),
@@ -2433,7 +2487,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('review');
     }
-  }, [existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency]);
+  }, [existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -2577,7 +2631,19 @@ export default function EstimateViewPage() {
   // the tier only if any section in it is eligible (so an excluded-only bundle
   // — e.g. palm + rodent — stays badge-free here too).
   const combinedTierEligible = services.some((s) => s?.waveGuardTierEligible === true);
-  const combinedFrequency = selectedCombinedFrequency(pricing, selectedFrequency);
+  // Combined card total reflects EVERY service's chosen cadence: when a combo
+  // matches the per-section selections, use its authoritative total; otherwise
+  // fall back to the pest-cadence entry (single-cadence / legacy bundles).
+  const combinedBaseFrequency = selectedCombinedFrequency(pricing, selectedFrequency);
+  const combinedFrequency = selectedCombo
+    ? {
+      ...combinedBaseFrequency,
+      monthly: selectedCombo.monthly,
+      annual: selectedCombo.annual,
+      perServiceTreatments: selectedCombo.perServiceTreatments ?? combinedBaseFrequency?.perServiceTreatments,
+      sameDayTreatmentTotal: selectedCombo.sameDayTreatmentTotal ?? combinedBaseFrequency?.sameDayTreatmentTotal,
+    }
+    : combinedBaseFrequency;
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
