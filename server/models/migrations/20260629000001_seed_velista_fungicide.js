@@ -18,7 +18,7 @@
 
 const PRODUCT = {
   name: 'Velista',
-  category: 'Fungicide',
+  category: 'fungicide', // lowercase — waveguard-approval-engine matches sp.product_category exactly
   active: true,
   active_ingredient: 'Penthiopyrad',
   formulation: 'WDG',
@@ -31,7 +31,12 @@ const PRODUCT = {
   analysis_p: 0,
   analysis_k: 0,
   default_rate_per_1000: 0.5,
+  min_label_rate_per_1000: 0.3,
+  max_label_rate_per_1000: 0.7,
   rate_unit: 'oz',
+  mixing_order_category: 'dry_wg_wdg_wp_df',
+  label_source_note:
+    'Velista WDG turf label lists ~0.3-0.7 oz per 1,000 sq ft by disease target; seeded 0.5 oz/1k for the Zoysia large-patch rotation. Price: Syngenta/SiteOne 22 oz @ $297.00. EPA reg + exact rates pending label verification by owner.',
   best_price: 297.0,
   cost_per_unit: 13.5,
   cost_unit: 'oz',
