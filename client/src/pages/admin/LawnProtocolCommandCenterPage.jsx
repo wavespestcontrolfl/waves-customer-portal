@@ -306,6 +306,8 @@ export default function LawnProtocolCommandCenterPage() {
   const [wikiDraft, setWikiDraft] = useState("");
   const [savingWiki, setSavingWiki] = useState(false);
   const [syncingWiki, setSyncingWiki] = useState(false);
+  const [tasksDraft, setTasksDraft] = useState("");
+  const [savingTasks, setSavingTasks] = useState(false);
   const [gateDrafts, setGateDrafts] = useState({});
   const [savingGateId, setSavingGateId] = useState("");
   const [selectedProtocolId, setSelectedProtocolId] = useState("");
@@ -330,6 +332,7 @@ export default function LawnProtocolCommandCenterPage() {
       .then((result) => {
         setData(result);
         setWikiDraft((result?.protocol?.window?.wikiRefs || []).join("\n"));
+        setTasksDraft((result?.protocol?.window?.requiredTasks || []).join("\n"));
         const nextGateDrafts = {};
         (result?.protocol?.gates || []).forEach((gate) => {
           if (gate.id) nextGateDrafts[gate.id] = buildGateDraft(gate);
@@ -407,6 +410,22 @@ export default function LawnProtocolCommandCenterPage() {
       setError(err.message || "Could not update wiki references");
     } finally {
       setSavingWiki(false);
+    }
+  }
+
+  async function saveRequiredTasks() {
+    if (!window.key) return;
+    setSavingTasks(true);
+    setError("");
+    setNotice("");
+    try {
+      await adminPut(`/admin/protocols/lawn/windows/${window.key}`, { protocolId: protocol.id, requiredTasks: tasksDraft });
+      setNotice("Required closeout tasks updated.");
+      await load();
+    } catch (err) {
+      setError(err.message || "Could not update required tasks");
+    } finally {
+      setSavingTasks(false);
     }
   }
 
@@ -837,6 +856,30 @@ export default function LawnProtocolCommandCenterPage() {
                     ))}
                     {!window.requiredTasks?.length && <div className="text-13 text-zinc-500">No required tasks for this window.</div>}
                   </div>
+                  {canEditProtocol ? (
+                    <div className="mt-3 border-t border-zinc-200 pt-3">
+                      <textarea
+                        value={tasksDraft}
+                        onChange={(e) => setTasksDraft(e.target.value)}
+                        rows={5}
+                        className="w-full rounded-sm border border-zinc-300 px-3 py-2 text-13 text-zinc-900"
+                        placeholder="One closeout task per line (e.g. chinch_float_test)"
+                      />
+                      <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+                        <div className="text-12 text-zinc-500">Drives the closeout checklist gate — a missing required task blocks completion.</div>
+                        <button
+                          type="button"
+                          className="rounded-sm bg-zinc-900 px-3 py-2 text-12 font-medium uppercase tracking-label text-white disabled:opacity-50"
+                          disabled={savingTasks || !window.key}
+                          onClick={saveRequiredTasks}
+                        >
+                          {savingTasks ? "Saving..." : "Save Tasks"}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-12 text-zinc-500">Create or select a draft to edit required tasks.</div>
+                  )}
                 </Section>
 
                 <Section title="Compliance Gates" icon={ShieldCheck}>
