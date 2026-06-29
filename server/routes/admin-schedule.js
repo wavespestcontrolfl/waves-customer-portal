@@ -1667,6 +1667,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
+    // Optional: accept the linked open quote as annual prepay on book (creates
+    // the pending prepay invoice + renewal term). Only 'prepay_annual' is
+    // honored; anything else falls through to the standard verbal-yes accept.
+    // markEstimateManuallyAccepted enforces prepay eligibility (recurring rows /
+    // service mix) and degrades to a booking warning if ineligible.
+    const bookingBillingTerm = req.body.billingTerm === 'prepay_annual' ? 'prepay_annual' : 'standard';
     let linkedEstimate = null;
     let estimateAutoAccepted = false;
     const bookingWarnings = [];
@@ -2080,7 +2086,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
         const acceptResult = await markEstimateManuallyAccepted({
           estimateId: linkedEstimateId,
           adminUserId: req.technicianId || null,
-          source: 'verbal_yes_booking',
+          source: bookingBillingTerm === 'prepay_annual' ? 'verbal_annual_prepay_booking' : 'verbal_yes_booking',
+          billingTerm: bookingBillingTerm,
         });
         estimateAutoAccepted = true;
         // A recurring conversion sends its own new-recurring welcome SMS

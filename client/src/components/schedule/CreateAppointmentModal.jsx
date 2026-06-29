@@ -455,6 +455,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [collectPrepay, setCollectPrepay] = useState(false);
   const [prepayMethod, setPrepayMethod] = useState('cash');
   const [prepayNote, setPrepayNote] = useState('');
+  // Bill the LINKED estimate as annual prepay on book: the accept-on-book passes
+  // billingTerm='prepay_annual', so the same booking that schedules the visit
+  // also creates the pending annual prepay invoice + renewal term (one step
+  // instead of the Annual Prepay button + Schedule dance). Distinct from
+  // collectPrepay (cash/card in person) — mutually exclusive with it.
+  const [billAsAnnualPrepay, setBillAsAnnualPrepay] = useState(false);
   const [discountPresets, setDiscountPresets] = useState([]);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
@@ -1105,6 +1111,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             method: prepayMethod,
             note: prepayNote || undefined,
           } : undefined,
+          // Accept the linked open quote as annual prepay on book — the server's
+          // accept-on-book creates the pending prepay invoice + renewal term.
+          // Guarded so a stale toggle can't leak onto an already-accepted estimate.
+          billingTerm: (billAsAnnualPrepay && linkedEstimate && linkedEstimate.status !== 'accepted')
+            ? 'prepay_annual'
+            : undefined,
         };
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
         createdGroupKeysRef.current.add(key);
@@ -1516,6 +1528,52 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         deposit={linkedEstimate.deposit}
                         style={{ marginTop: 10 }}
                       />
+                      {/* Billing term for the accept-on-book. Annual prepay is
+                          offered only for a recurring quote (has an annual /
+                          monthly total) that isn't accepted yet — picking it
+                          makes the booking also create the pending prepay
+                          invoice + renewal term. */}
+                      {linkedEstimate.status !== 'accepted' && (() => {
+                        const annual = Number(linkedEstimate.annualTotal) > 0
+                          ? Number(linkedEstimate.annualTotal)
+                          : (Number(linkedEstimate.monthlyTotal) > 0 ? Number(linkedEstimate.monthlyTotal) * 12 : 0);
+                        if (!(annual > 0)) return null;
+                        const segStyle = (active) => ({
+                          flex: 1,
+                          padding: '6px 10px',
+                          borderRadius: 6,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          border: active ? '1.5px solid #166534' : `1px solid ${D.border}`,
+                          background: active ? '#DCFCE7' : D.bg,
+                          color: active ? '#166534' : D.muted,
+                        });
+                        return (
+                          <div style={{ marginTop: 10 }}>
+                            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
+                              Billing on acceptance
+                            </div>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                              <button type="button" onClick={() => setBillAsAnnualPrepay(false)} style={segStyle(!billAsAnnualPrepay)}>
+                                Standard
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => { setBillAsAnnualPrepay(true); setCollectPrepay(false); }}
+                                style={segStyle(billAsAnnualPrepay)}
+                              >
+                                Annual prepay — invoice {formatMoney(annual)}
+                              </button>
+                            </div>
+                            {billAsAnnualPrepay && (
+                              <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                                Booking creates a pending annual prepay invoice ({formatMoney(annual)}) + renewal term. Send it from the customer&rsquo;s invoices.
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginTop: 8, fontSize: 12, color: D.muted }}>
                         <span style={{ minWidth: 0 }}>
                           {linkedEstimate.status === 'accepted'
@@ -1896,8 +1954,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           return (
             <div style={{ ...sectionStyle, background: collectPrepay ? '#F0FDF4' : undefined, border: collectPrepay ? '1px solid #BBF7D0' : undefined, borderRadius: 8, padding: collectPrepay ? 14 : undefined }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                <input type="checkbox" checked={collectPrepay} onChange={(e) => setCollectPrepay(e.target.checked)} />
-                <span style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Collect prepayment</span>
+                <input type="checkbox" checked={collectPrepay} onChange={(e) => { setCollectPrepay(e.target.checked); if (e.target.checked) setBillAsAnnualPrepay(false); }} />
+                <span style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Collect prepayment{billAsAnnualPrepay ? ' in person (annual prepay will be invoiced instead)' : ''}</span>
               </label>
               {collectPrepay && (
                 <div style={{ marginTop: 10 }}>
