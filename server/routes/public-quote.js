@@ -408,8 +408,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // sees a ±5% range (variance_low/high below) so AI misclassification has
     // headroom. Zero retroactive impact: no quote_wizard leads existed when
     // this landed.
+    // The confirm step seeds homeSqFt to a synthetic 2,000 default when the
+    // lookup didn't measure the building (QuotePage.jsx). Commercial PEST prices
+    // off the BUILDING footprint (not lot-derivable), so flag whether we have a
+    // MEASURED building size — priceCommercialPest falls back to a manual quote
+    // when false rather than auto-pricing off the synthetic default. (Residential
+    // and commercial lawn/tree ignore this flag.)
+    const buildingSizeMeasured = Number(ep.homeSqFt) > 0
+      || Number(ep.buildingSqFt) > 0
+      || Number(ep.livingAreaSqFt) > 0
+      || Number(ep.footprintSqFt) > 0;
     const engineInput = {
       homeSqFt: sqft,
+      buildingSizeMeasured,
       stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
       lotSqFt: lot,
       propertyType: commercialDetected ? 'commercial' : (propertyType || ep.propertyType || 'Single Family'),

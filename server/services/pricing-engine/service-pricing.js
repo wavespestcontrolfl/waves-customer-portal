@@ -2520,8 +2520,11 @@ function priceCommercialPest(property = {}, options = {}) {
   // No real building size → DON'T auto-price (and bill/prepay) off the 2,000 sqft
   // fallback, which is unrelated to the actual building. Fall back to a manual
   // quote until a building/home/footprint sqft is provided. (Lawn/tree are
-  // lot-derivable so they still auto-price; pest is not.)
-  if (defaulted) {
+  // lot-derivable so they still auto-price; pest is not.) A caller can also force
+  // this via buildingSizeMeasured:false — the public wizard sets it when the
+  // building size is its synthetic confirm-step default, which would otherwise
+  // resolve as a real footprint.
+  if (defaulted || options.buildingSizeMeasured === false) {
     return {
       service: 'commercial_pest',
       name: 'Commercial Pest Control',

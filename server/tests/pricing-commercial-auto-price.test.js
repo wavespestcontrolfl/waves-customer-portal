@@ -214,6 +214,36 @@ describe('priceCommercialPest — cost-buildup auto-pricer', () => {
     // Not an active/priced service.
     expect(est.waveGuard.activeServices).not.toContain('commercial_pest');
   });
+
+  test('buildingSizeMeasured:false (public synthetic 2,000 sqft) forces a manual pest quote', () => {
+    // The public wizard seeds homeSqFt=2000 when the lookup found no building —
+    // a real-looking footprint that must NOT auto-price commercial pest. The
+    // public-quote route flags it via buildingSizeMeasured:false. (Regression for
+    // the PR bot's synthetic-footprint P1.)
+    const synthetic = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 2000,
+      lotSqFt: 40000,
+      buildingSizeMeasured: false,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const sPest = synthetic.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(sPest.quoteRequired).toBe(true);
+    expect(synthetic.waveGuard.activeServices).not.toContain('commercial_pest');
+
+    // A MEASURED 2,000 sqft building (flag true / admin undefined) still prices.
+    const measured = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 2000,
+      lotSqFt: 40000,
+      buildingSizeMeasured: true,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    expect(measured.lineItems.find((l) => l.service === 'commercial_pest').quoteRequired).toBe(false);
+
+    // Direct-call: the option also forces manual even with a real footprint.
+    expect(priceCommercialPest({ footprint: 2000 }, { buildingSizeMeasured: false }).quoteRequired).toBe(true);
+  });
 });
 
 describe('generateEstimate — commercial integration', () => {

@@ -584,7 +584,13 @@ function generateEstimate(input) {
       // (interior + exterior barrier, monthly baseline) and shown instantly with
       // the "estimated, confirmed on site" disclaimer. FL-taxed. No size cap, no
       // manual-quote fallback. (One-time commercial pest stays manual below.)
-      const result = priceCommercialPest(property, { commercialSubtype });
+      const result = priceCommercialPest(property, {
+        commercialSubtype,
+        // Public quotes set this false when the building size is the synthetic
+        // confirm-step default (no measured building) — pest can't auto-price
+        // off it. Undefined (admin / measured) → auto-price as usual.
+        buildingSizeMeasured: input.buildingSizeMeasured,
+      });
       if (result.quoteRequired) {
         // No real building footprint to size interior treatment — priceCommercialPest
         // returns a manual quote. Route through the canonical manual path so it
