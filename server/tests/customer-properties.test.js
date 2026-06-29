@@ -15,6 +15,13 @@ describe('address key normalization (suffix + ZIP)', () => {
     expect(streetKey('123 Main St')).toBe(streetKey('123 Main Street'));
     expect(streetKey('123 Main St')).not.toBe(streetKey('123 Main Ave'));
   });
+  test('streetKey strips a trailing unit so a street-only compare ignores units', () => {
+    expect(streetKey('100 Main St Apt 4')).toBe(streetKey('100 Main St'));
+    expect(streetKey('100 Main St #4')).toBe(streetKey('100 Main Street'));
+    // but addressKey (full) still keeps the unit distinct
+    expect(addressKey({ address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton' }))
+      .not.toBe(addressKey({ address_line1: '100 Main St', city: 'Bradenton' }));
+  });
 });
 
 describe('customer-properties pure helpers', () => {

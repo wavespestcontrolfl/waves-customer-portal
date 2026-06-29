@@ -34,8 +34,13 @@ const canonicalizeAddress = (s) => String(s || '').toLowerCase().replace(/[.,#]/
 /** First 5 ZIP digits, so "34205" and "34205-1234" (ZIP+4) key identically. */
 const normalizeZip = (z) => (String(z || '').match(/\d{5}/) || [''])[0];
 
-/** Suffix-canonical street key — "123 Main St" == "123 Main Street", but != "123 Main Ave". */
-const streetKey = (s) => canonicalizeAddress(s).replace(/[^a-z0-9]/g, '');
+// Strip a trailing unit designator so a STREET-ONLY comparison ignores units
+// (units are compared separately and preserved in the full addressKey): a legacy
+// "100 Main St Apt 4" and a later "100 Main St" share the same street key.
+const stripTrailingUnit = (s) => String(s || '').replace(/\s+(?:apt|apartment|unit|ste|suite|#)\.?\s*[a-z0-9-]+\s*$/i, '').trim();
+
+/** Suffix-canonical, unit-stripped street key — "123 Main St" == "123 Main Street", but != "123 Main Ave". */
+const streetKey = (s) => canonicalizeAddress(stripTrailingUnit(s)).replace(/[^a-z0-9]/g, '');
 
 /**
  * Normalized key for the FULL service address — street + unit + city + ZIP — so
@@ -207,6 +212,51 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
   return { created: true, propertyId };
 }
 
+/**
+ * When a call's address is the customer's PRIMARY street but supplies city / ZIP
+ * / unit the records are missing, fill those gaps into BOTH the customers mirror
+ * AND the existing primary property (recomputing its address_key) — so the primary
+ * stays complete and a later full-address call dedups instead of duplicating.
+ * Fill-only (never overwrites a present value); same-street guard so a different
+ * address's details are never grafted on. Call BEFORE ensurePrimaryProperty so a
+ * newly-created primary also inherits the completed mirror.
+ */
+async function completePrimaryFromCall(customerId, call = {}) {
+  if (!customerId || !String(call.address_line1 || '').trim()) return;
+  const cust = await db('customers').where({ id: customerId })
+    .select('address_line1', 'address_line2', 'city', 'zip').first();
+  if (!cust || !String(cust.address_line1 || '').trim()) return;
+  if (streetKey(cust.address_line1) !== streetKey(call.address_line1)) return;
+
+  const gap = (cur) => !String(cur || '').trim();
+  const patch = {};
+  if (gap(cust.address_line2) && call.address_line2) patch.address_line2 = call.address_line2;
+  if (gap(cust.city) && call.city) patch.city = call.city;
+  if (gap(cust.zip) && call.zip) patch.zip = call.zip;
+  if (Object.keys(patch).length) {
+    await db('customers').where({ id: customerId }).update({ ...patch, updated_at: new Date() })
+      .catch((e) => logger.warn(`[customer-properties] mirror complete skipped for ${customerId}: ${e.message}`));
+  }
+
+  const primary = await db('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
+  if (!primary) return;
+  const ppatch = {};
+  if (gap(primary.address_line2) && call.address_line2) ppatch.address_line2 = call.address_line2;
+  if (gap(primary.city) && call.city) ppatch.city = call.city;
+  if (gap(primary.zip) && call.zip) ppatch.zip = call.zip;
+  if (Object.keys(ppatch).length) {
+    ppatch.address_key = addressKey({
+      address_line1: primary.address_line1,
+      address_line2: ppatch.address_line2 || primary.address_line2,
+      city: ppatch.city || primary.city,
+      zip: ppatch.zip || primary.zip,
+    });
+    ppatch.updated_at = new Date();
+    await db('customer_properties').where({ id: primary.id }).update(ppatch)
+      .catch((e) => logger.warn(`[customer-properties] primary complete skipped for ${customerId}: ${e.message}`));
+  }
+}
+
 module.exports = {
   OCCUPANCY_TYPES,
   normStreet,
@@ -215,6 +265,7 @@ module.exports = {
   normalizeZip,
   normalizeOccupancy,
   isNewAddress,
+  completePrimaryFromCall,
   listProperties,
   ensurePrimaryProperty,
   recordCallProperty,

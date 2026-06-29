@@ -2155,22 +2155,15 @@ const CallRecordingProcessor = {
     if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId && extracted.address_line1) {
       try {
         const customerProperties = require('./customer-properties');
-        // If the customer has a street but is missing city/ZIP and THIS call's
-        // address is the same street with them, fill those first (the appointment
-        // path does this later) — otherwise ensurePrimaryProperty snapshots a
-        // PARTIAL primary that a later full-address call treats as a new property.
-        if (extracted.city && extracted.zip) {
-          const cust = await db('customers').where({ id: customerId }).select('address_line1', 'city', 'zip').first();
-          const custIncomplete = cust && String(cust.address_line1 || '').trim()
-            && (!String(cust.city || '').trim() || !String(cust.zip || '').trim());
-          if (custIncomplete && customerProperties.streetKey(cust.address_line1) === customerProperties.streetKey(extracted.address_line1)) {
-            await db('customers').where({ id: customerId }).update({
-              ...(String(cust.city || '').trim() ? {} : { city: extracted.city }),
-              ...(String(cust.zip || '').trim() ? {} : { zip: extracted.zip }),
-              updated_at: new Date(),
-            }).catch((e) => logger.warn(`[customer-properties] pre-primary city/zip fill skipped for ${maskSid(callSid)}: ${e.message}`));
-          }
-        }
+        // Unit/line2 from the V2 service_address (legacy extraction + flatView drop it).
+        const callUnit = extracted.address_line2 || v2Result?.extraction?.property?.service_address?.street_line_2 || null;
+        // When this call is the customer's PRIMARY street but adds city/ZIP/unit
+        // the records lack, complete the mirror AND the existing primary property
+        // (recomputing its key) BEFORE snapshotting — otherwise the primary is
+        // captured partial / unitless and a later full-address call duplicates it.
+        await customerProperties.completePrimaryFromCall(customerId, {
+          address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
+        });
         // propertyId is null only when the customer is addressless AND has no
         // primary yet — i.e. this call carries their FIRST service address (the
         // !customerId upsert above is skipped when the call is pre-linked, so
@@ -2187,8 +2180,6 @@ const CallRecordingProcessor = {
           // the shadow bridge may not have run, so re-derive from the V2 extraction.
           const isRental = bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
             || detectRentalSignal({ extracted, callerRelationship: v2Result?.extraction?.caller?.relationship_to_property });
-          // Unit/line2 from the V2 service_address (legacy extraction + flatView drop it).
-          const callUnit = extracted.address_line2 || v2Result?.extraction?.property?.service_address?.street_line_2 || null;
           await customerProperties.recordCallProperty({
             customerId,
             address_line1: extracted.address_line1,
