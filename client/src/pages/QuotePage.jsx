@@ -318,6 +318,10 @@ export default function QuotePage({ serviceSlug = '' }) {
   const [pestFreq, setPestFreq] = useState('quarterly');
   const [grassType, setGrassType] = useState('st_augustine');
   const [homeSqFt, setHomeSqFt] = useState('');
+  // True when the building sqft is real: the lookup MEASURED it, or the user
+  // edited the synthetic default. Sent so the server doesn't auto-price
+  // commercial pest off the unconfirmed 2,000 sqft confirm-step default.
+  const [homeSqFtConfirmed, setHomeSqFtConfirmed] = useState(false);
   const [lotSqFt, setLotSqFt] = useState('');
 
   const [result, setResult] = useState(null);
@@ -360,7 +364,7 @@ export default function QuotePage({ serviceSlug = '' }) {
     setLookupStatus(''); setLookupSub('');
     setLeadId(null); setEnriched(null); setSatellite(null); setAiSources(null);
     setSvcPest(false); setSvcLawn(false);
-    setHomeSqFt(''); setLotSqFt('');
+    setHomeSqFt(''); setHomeSqFtConfirmed(false); setLotSqFt('');
     setUpsellSelected({}); setUpsellLoading(false); setUpsellError('');
     setNewsletterOptIn(false);
     setSubscribeStatus('idle');
@@ -525,6 +529,9 @@ export default function QuotePage({ serviceSlug = '' }) {
       // is easy to mistake for a prefilled value, and the user gets a "min 500"
       // error on submit. Defaults are SWFL median-ish and editable.
       setHomeSqFt(d.enriched?.homeSqFt ? String(d.enriched.homeSqFt) : '2000');
+      // Confirmed only when the lookup actually measured the building (not the
+      // synthetic 2,000 default); editing the field below flips it true.
+      setHomeSqFtConfirmed(!!d.enriched?.homeSqFt);
       setLotSqFt(d.enriched?.lotSqFt   ? String(d.enriched.lotSqFt)   : '8000');
       setSvcPest(intake.interest === 'pest' || intake.interest === 'both');
       setSvcLawn(intake.interest === 'lawn' || intake.interest === 'both');
@@ -668,6 +675,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           city: address.city,
           zip: address.zip,
           homeSqFt: sq,
+          buildingSizeConfirmed: homeSqFtConfirmed,
           lotSqFt: Number(lotSqFt) || undefined,
           stories: Number(enriched?.stories) || 1,
           propertyType: enriched?.propertyType || undefined,
@@ -701,7 +709,7 @@ export default function QuotePage({ serviceSlug = '' }) {
     setLookupStatus(''); setLookupSub('');
     setLeadId(null); setEnriched(null); setSatellite(null); setAiSources(null);
     setSvcPest(false); setSvcLawn(false);
-    setHomeSqFt(''); setLotSqFt('');
+    setHomeSqFt(''); setHomeSqFtConfirmed(false); setLotSqFt('');
     setUpsellSelected({}); setUpsellLoading(false); setUpsellError('');
     setNewsletterOptIn(false);
     setSubscribeStatus('idle');
@@ -1085,7 +1093,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
                   <div>
                     <label style={sLabel}>Home square footage</label>
-                    <input style={sInput} type="number" inputMode="numeric" value={homeSqFt} onChange={(e) => setHomeSqFt(e.target.value)} placeholder="2000" />
+                    <input style={sInput} type="number" inputMode="numeric" value={homeSqFt} onChange={(e) => { setHomeSqFt(e.target.value); setHomeSqFtConfirmed(true); }} placeholder="2000" />
                   </div>
                   <div>
                     <label style={sLabel}>Lot size (sq ft)</label>

@@ -338,6 +338,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
     const {
       leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
+      buildingSizeConfirmed,
       lotSqFt, stories, propertyType, category, isCommercial, commercialSubtype,
       enriched, services, attribution,
     } = req.body || {};
@@ -414,7 +415,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // MEASURED building size — priceCommercialPest falls back to a manual quote
     // when false rather than auto-pricing off the synthetic default. (Residential
     // and commercial lawn/tree ignore this flag.)
-    const buildingSizeMeasured = Number(ep.homeSqFt) > 0
+    // Real building size = the lookup MEASURED it, OR the customer edited/​
+    // confirmed the value on the confirm step (buildingSizeConfirmed). Only the
+    // untouched synthetic 2,000 default leaves this false.
+    const buildingSizeMeasured = buildingSizeConfirmed === true
+      || Number(ep.homeSqFt) > 0
       || Number(ep.buildingSqFt) > 0
       || Number(ep.livingAreaSqFt) > 0
       || Number(ep.footprintSqFt) > 0;
