@@ -22,6 +22,7 @@ const PRODUCT = {
   active: true,
   active_ingredient: 'Penthiopyrad',
   formulation: 'WDG',
+  epa_reg_number: '100-1241', // Syngenta Velista WDG (column is NOT NULL); verify
   frac_group: '7',
   analysis_n: 0,
   analysis_p: 0,
