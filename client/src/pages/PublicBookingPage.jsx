@@ -269,7 +269,9 @@ export default function PublicBookingPage() {
         body: JSON.stringify({
           capture_token: captureTokenRef.current,
           session_id: sessionIdRef.current,
+          capture_client_ts: Date.now(),
           source,
+          service_id: service.id,
           service_type: quotedServiceLabel || service.label,
           quoted_service_label: quotedServiceLabel || null,
           slot_date: selectedDate,

@@ -1326,8 +1326,12 @@ router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
     const str = (v, n) => { const s = (v == null ? '' : String(v)).trim(); return s ? s.slice(0, n) : null; };
     const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
     const sessionId = str(b.session_id, 80);
+    // Client capture time — used to reject a stale (out-of-order / slow keepalive)
+    // capture from overwriting a newer one for the same session.
+    const clientTs = Number.isFinite(Number(b.capture_client_ts)) ? Math.floor(Number(b.capture_client_ts)) : null;
     const row = {
       session_id: sessionId,
+      capture_client_ts: clientTs,
       phone: phoneDigits,
       first_name: str(nc.first_name, 120),
       last_name: str(nc.last_name, 120),
@@ -1423,8 +1427,12 @@ router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
         .orderBy('captured_at', 'desc').first('id');
     }
     if (open) {
-      await db('booking_intents').where({ id: open.id }).update(row);
-      return res.json({ ok: true, intent_id: open.id, updated: true });
+      // Guard against a stale capture overwriting corrected contact: only apply if
+      // this request's client timestamp is >= the stored one (or either is absent).
+      const upd = db('booking_intents').where({ id: open.id });
+      if (clientTs != null) upd.where((q) => q.whereNull('capture_client_ts').orWhere('capture_client_ts', '<=', clientTs));
+      const affected = await upd.update(row);
+      return res.json({ ok: true, intent_id: open.id, updated: affected === 1, stale: affected === 0 });
     }
     const [created] = await db('booking_intents').insert(row).returning('id');
     return res.json({ ok: true, intent_id: created?.id || created, created: true });

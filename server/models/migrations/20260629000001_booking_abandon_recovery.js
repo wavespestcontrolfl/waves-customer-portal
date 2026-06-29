@@ -172,6 +172,7 @@ exports.up = async function up(knex) {
       t.boolean('followup_email_sent').defaultTo(false); // stage-2 claim flag
       t.timestamp('converted_at');               // set when this person actually books
       t.uuid('converted_booking_id');
+      t.bigInteger('capture_client_ts');         // client Date.now() at capture — a stale (slow keepalive) request can't overwrite a newer one for the same session
       t.boolean('suppressed').defaultTo(false);  // manual / opt-out kill
       t.timestamp('created_at').defaultTo(knex.fn.now());
       t.timestamp('updated_at').defaultTo(knex.fn.now());
