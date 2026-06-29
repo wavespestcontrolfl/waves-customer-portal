@@ -41,11 +41,24 @@ describe('commercial lines EARN the 5% annual-prepay discount but never the Wave
     expect(r.discount).toBe(120.60);
   });
 
+  test('commercial pest also takes the 5% prepay discount but is FL-taxed', () => {
+    const data = { engineResult: { lineItems: [{ service: 'commercial_pest', annual: 2280, monthly: 190 }] } };
+    const r = resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 2280,
+      recurringServices: [{ service: 'commercial_pest' }],
+      estimateData: data,
+    });
+    expect(r.rate).toBeCloseTo(0.05, 4);
+    expect(r.amount).toBe(2166.00);
+    expect(r.discount).toBe(114.00);
+  });
+
   test('commercial lines are STILL excluded from the WaveGuard tier % (non-members)', () => {
     // The prepay 5% is a cash discount; the WaveGuard membership tier % is a
     // separate path (excludeFromPctDiscount) the commercial line never receives.
     expect(recurringServiceReceivesTierDiscount({ service: 'commercial_lawn', excludeFromPctDiscount: true })).toBe(false);
     expect(recurringServiceReceivesTierDiscount({ service: 'commercial_tree_shrub', excludeFromPctDiscount: true })).toBe(false);
+    expect(recurringServiceReceivesTierDiscount({ service: 'commercial_pest', excludeFromPctDiscount: true })).toBe(false);
   });
 
   test('residential lawn still receives the annual-prepay discount (unchanged)', () => {

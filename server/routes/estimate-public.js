@@ -1894,6 +1894,7 @@ function recurringServiceDisplayName(key) {
     case 'rodent': return 'Rodent Remediation';
     case 'commercial_lawn': return 'Commercial Lawn Treatment';
     case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
+    case 'commercial_pest': return 'Commercial Pest Control';
     default: return null;
   }
 }
@@ -2176,7 +2177,7 @@ function recurringServicesWithSupplements(estResult = {}) {
     indexByKey.set(key, services.length - 1);
   };
 
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest']);
   if (Array.isArray(estResult.lineItems)) {
     estResult.lineItems.forEach((item) => {
       const key = recurringServiceKey(item);
@@ -3332,7 +3333,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     estData?.commercialEstimatedPricing === true
     || recurring.some((s) => {
       const k = String(recurringServiceKey(s) || s.service || s.name || '').toLowerCase();
-      return k.includes('commercial_lawn') || k.includes('commercial_tree');
+      return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest');
     })
   );
 
@@ -6312,7 +6313,7 @@ function isCommercialAutoAcceptEstimate(estimate = {}) {
   if (data.commercialEstimatedPricing === true) return true;
   const isCommercialSvc = (s) => {
     const k = String(s?.service || s?.serviceKey || s?.name || '').toLowerCase();
-    return k.includes('commercial_lawn') || k.includes('commercial_tree');
+    return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest');
   };
   const lineItems = Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems : [];
   if (lineItems.some((li) => li && li.estimatedPricing === true && isCommercialSvc(li) && Number(li.annual) > 0)) return true;
@@ -8117,7 +8118,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   // (mosquito uses `visits`, T&S uses `frequency`; palm and rodent bait
   // are separate recurring lines that do not receive WaveGuard percentage
   // discounts).
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest']);
   const labelForRecurring = (svc) => {
     switch (svc) {
       case 'pest_control': return 'Pest Control';
@@ -9572,6 +9573,7 @@ function categoryForRecurringServiceKey(key) {
     // copy/ask chips for a commercial lawn or tree quote.
     case 'commercial_lawn': return 'lawn_care';
     case 'commercial_tree_shrub': return 'tree_shrub';
+    case 'commercial_pest': return 'pest_control';
     default: return null;
   }
 }

@@ -26,7 +26,7 @@ const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
-  priceCommercialLawn, priceCommercialTreeShrub, pricePalmInjection,
+  priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
@@ -579,9 +579,16 @@ function generateEstimate(input) {
   // Pest Control
   if (services.pest || serviceSelected(services.commercialPest)) {
     if (propertyIsCommercial) {
-      // PR 1 safety gate: commercial pest has no residential fallback. Even
-      // an explicit pilot flag stays manual until the pilot pricer is built.
-      addCommercialManualQuote('pest_control');
+      // Commercial auto-pricing (owner directive 2026-06-29: ALL commercial
+      // pricing is auto). Commercial pest is priced via the cost-buildup pricer
+      // (interior + exterior barrier, monthly baseline) and shown instantly with
+      // the "estimated, confirmed on site" disclaimer. FL-taxed. No size cap, no
+      // manual-quote fallback. (One-time commercial pest stays manual below.)
+      const result = priceCommercialPest(property, { commercialSubtype });
+      if (!lineItems.some((line) => line.service === result.service)) {
+        lineItems.push(result);
+        activeServiceKeys.push('commercial_pest');
+      }
     } else {
       const result = pricePestControl(property, {
         frequency: services.pest.frequency || 'quarterly',

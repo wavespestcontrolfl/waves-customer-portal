@@ -69,11 +69,11 @@ function numberOrNull(...values) {
 
 function isManualQuoteLine(line = {}) {
   if (line?.quoteRequired === true || line?.requiresManualReview === true) return true;
-  // Priced commercial programs (commercial_lawn / commercial_tree_shrub
-  // auto_estimate, owner directive 2026-06-28) carry an annual and flow as
-  // normal priced recurring lines shown to the lead. Only a commercial line
-  // with NO auto price (e.g. commercial pest, which stays manual) is a manual
-  // quote line.
+  // Priced commercial programs (commercial_lawn / commercial_tree_shrub /
+  // commercial_pest auto_estimate — owner directive: ALL commercial auto-prices)
+  // carry an annual and flow as normal priced recurring lines shown to the lead.
+  // Only a commercial line with NO auto price (e.g. a mosquito/termite/rodent
+  // service that collapses to a manual commercial_pest quote) is a manual line.
   if (String(line?.service || '').startsWith('commercial_')) {
     const hasAutoPrice = Number(line?.annual) > 0 || Number(line?.monthly) > 0 || Number(line?.price) > 0;
     return !hasAutoPrice;

@@ -2125,12 +2125,14 @@ export default function EstimateToolViewV2({
       "svcTermiteBait",
     ];
     const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
-    // Commercial LAWN now auto-prices (a priced recurring line); only commercial
-    // PEST stays a manual quote. So lawn counts toward recurring, not manual.
+    // ALL commercial services with an auto-pricer (lawn, pest, tree/shrub) now
+    // price instantly as recurring lines. Commercial mosquito / termite-bait
+    // have no pricer yet and collapse to a manual commercial quote.
+    const commercialManualKeys = ["svcMosquito", "svcTermiteBait"];
     const commercialManualQuoteCount =
-      commercialDetected ? ["svcPest"].filter((k) => form[k]).length : 0;
+      commercialDetected ? commercialManualKeys.filter((k) => form[k]).length : 0;
     const recurringCount = qualifyingRecurringKeys
-      .filter((k) => form[k] && !(commercialDetected && k === "svcPest"))
+      .filter((k) => form[k] && !(commercialDetected && commercialManualKeys.includes(k)))
       .length;
     const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
@@ -4743,8 +4745,8 @@ export default function EstimateToolViewV2({
               )}
               <CheckboxV2 k="svcPest" label="Pest Control" />
               {form.svcPest && commercialDetected && (
-                <div className="ml-7 mb-2 p-3 bg-alert-bg rounded-xs border-hairline border-alert-fg text-12 text-alert-fg">
-                  Commercial pest is set to manual quote. Residential pest pricing is suppressed.
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-12 text-zinc-600">
+                  Commercial pest is auto-priced (estimated — confirmed on site). Residential pest pricing is suppressed.
                 </div>
               )}
               {form.svcPest && !commercialDetected && (
@@ -5020,8 +5022,8 @@ export default function EstimateToolViewV2({
               )}
               {livePreview.commercialManualQuoteCount > 0 && (
                 <div className="mt-3 mb-1.5 px-3 py-2 rounded-xs bg-alert-bg border-hairline border-alert-fg text-12 text-alert-fg">
-                  {livePreview.commercialManualQuoteCount} commercial lawn/pest selection
-                  {livePreview.commercialManualQuoteCount > 1 ? "s" : ""} set to manual quote.
+                  {livePreview.commercialManualQuoteCount} commercial selection
+                  {livePreview.commercialManualQuoteCount > 1 ? "s" : ""} (mosquito / termite) set to manual quote.
                 </div>
               )}
               <SubGroupLabel>One-Time Services</SubGroupLabel>{" "}

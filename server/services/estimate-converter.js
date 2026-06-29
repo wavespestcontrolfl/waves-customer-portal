@@ -526,6 +526,7 @@ const RECURRING_SERVICE_DISPLAY_NAMES = {
   palm_injection: 'Palm Injection',
   commercial_lawn: 'Commercial Lawn Treatment',
   commercial_tree_shrub: 'Commercial Tree & Shrub',
+  commercial_pest: 'Commercial Pest Control',
 };
 
 function recurringLinesFromEngineResult(data = {}) {
@@ -640,15 +641,14 @@ function recurringLineAnnualAmount(item = {}) {
 
 function isNonDiscountableRecurringLine(item = {}) {
   const key = recurringServiceKey(item);
-  // Commercial auto-priced lawn/tree EARN the annual-prepay discount (owner
+  // Commercial auto-priced programs EARN the annual-prepay discount (owner
   // directive 2026-06-29: commercial prepay = 5%, same as residential lawn/tree;
   // there is no WaveGuard setup fee on commercial). They remain NON-MEMBERS —
   // excluded from the WaveGuard TIER % via excludeFromPctDiscount (see
   // recurringServiceReceivesTierDiscount), which is a separate path from this
   // prepay floor. So they are discountable HERE (return false) just like
-  // lawn_care. Commercial pest stays a manual quote (no annual) and never
-  // reaches the prepay floor.
-  if (key === 'commercial_lawn' || key === 'commercial_tree_shrub') return false;
+  // lawn_care. (commercial_pest is now an auto-priced recurring line too.)
+  if (key === 'commercial_lawn' || key === 'commercial_tree_shrub' || key === 'commercial_pest') return false;
   if (key === 'lawn_care') return false;
   const annual = recurringLineAnnualAmount(item);
   if (!(annual > 0)) return false;

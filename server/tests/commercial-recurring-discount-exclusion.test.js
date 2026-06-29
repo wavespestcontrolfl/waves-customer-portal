@@ -9,12 +9,14 @@ const {
 } = require('../routes/estimate-public');
 
 describe('commercial recurring lines are excluded from WaveGuard discounts on accept', () => {
-  test('commercial lawn/tree keep a distinct service key (not normalized to lawn_care/tree_shrub)', () => {
+  test('commercial lawn/tree/pest keep a distinct service key (not normalized to residential)', () => {
     expect(recurringServiceKey({ service: 'commercial_lawn' })).toBe('commercial_lawn');
     expect(recurringServiceKey({ service: 'commercial_tree_shrub' })).toBe('commercial_tree_shrub');
+    expect(recurringServiceKey({ service: 'commercial_pest' })).toBe('commercial_pest');
     // Match by display name too (persisted rows may only carry a label).
     expect(recurringServiceKey({ name: 'Commercial Lawn Treatment' })).toBe('commercial_lawn');
     expect(recurringServiceKey({ name: 'Commercial Tree & Shrub' })).toBe('commercial_tree_shrub');
+    expect(recurringServiceKey({ name: 'Commercial Pest Control' })).toBe('commercial_pest');
   });
 
   test('residential lawn_care / tree_shrub normalization is unchanged', () => {
@@ -26,17 +28,22 @@ describe('commercial recurring lines are excluded from WaveGuard discounts on ac
   });
 
   test('commercial lines never receive a tier discount — even with no exclusion flags', () => {
-    // Structural: commercial_lawn is not a WaveGuard-qualifying key.
+    // Structural: commercial_* is not a WaveGuard-qualifying key.
     expect(recurringServiceReceivesTierDiscount({ service: 'commercial_lawn' })).toBe(false);
     expect(recurringServiceReceivesTierDiscount({ service: 'commercial_tree_shrub' })).toBe(false);
+    expect(recurringServiceReceivesTierDiscount({ service: 'commercial_pest' })).toBe(false);
     // And with the carried exclusion flags.
     expect(recurringServiceReceivesTierDiscount({
       service: 'commercial_lawn', excludeFromPctDiscount: true, discountable: false,
+    })).toBe(false);
+    expect(recurringServiceReceivesTierDiscount({
+      service: 'commercial_pest', excludeFromPctDiscount: true, discountable: false,
     })).toBe(false);
   });
 
   test('commercial lines do not count toward the WaveGuard tier', () => {
     expect(recurringServiceCountsTowardTier({ service: 'commercial_lawn' })).toBe(false);
     expect(recurringServiceCountsTowardTier({ service: 'commercial_tree_shrub' })).toBe(false);
+    expect(recurringServiceCountsTowardTier({ service: 'commercial_pest' })).toBe(false);
   });
 });

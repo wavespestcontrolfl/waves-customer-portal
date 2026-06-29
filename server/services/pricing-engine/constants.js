@@ -447,6 +447,28 @@ const COMMERCIAL_TREE_SHRUB = {
   taxable: false,
   taxCategory: 'lawn_spraying_or_treatment',
 };
+// Commercial PEST (general pest control for non-residential accounts). Cost-
+// buildup keyed off building footprint (interior treatment) + perimeter
+// (exterior barrier). Monthly is the commercial baseline cadence (most
+// commercial accounts run monthly; the rep confirms/adjusts the frequency on
+// site). UNLIKE commercial lawn/tree, commercial pest is TAXED in FL
+// (nonresidential_pest_control = 7%). All values tunable against real quotes.
+const COMMERCIAL_PEST = {
+  programVisits: 12,                  // monthly service — the common commercial baseline
+  materialPerVisitBase: 6,            // baseline chemistry per visit (interior + exterior barrier)
+  materialPerKSqFtPerVisit: 1.5,      // $/1000 sqft footprint/visit — added product for larger interiors
+  laborMinutesBase: 25,               // mobilization + interior base per visit
+  laborMinutesPerKSqFt: 6,            // interior treatment labor per 1000 sqft footprint
+  laborMinutesPerimeterPer100Lf: 4,   // exterior barrier labor per 100 linear ft of perimeter
+  laborOverheadMinutesPerVisit: 10,   // reporting / logbook / pest-sighting documentation
+  routeDriveMinutes: 15,
+  adminAnnual: 120,                   // COI tracking, net-terms invoicing, account management
+  targetGrossMargin: 0.45,            // commercial target margin (tunable)
+  minAnnual: 720,                     // commercial pest account annual minimum ($60/mo floor)
+  lowConfidenceFootprintSf: 30000,    // above this the footprint estimate is flagged LOW confidence
+  taxable: true,
+  taxCategory: 'nonresidential_pest_control',
+};
 
 // ============================================================
 // PALM INJECTION - protocol-based pricing
@@ -1764,7 +1786,7 @@ module.exports = {
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
   PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
-  TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT,
+  TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST, PALM, MOSQUITO, TERMITE, RODENT,
   ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD,
   PROCESSING_ADJUSTMENT,

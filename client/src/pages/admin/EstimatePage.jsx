@@ -918,12 +918,14 @@ function EstimateToolView() {
       "svcTermiteBait",
     ];
     const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
-    // Commercial LAWN now auto-prices (a priced recurring line); only commercial
-    // PEST stays a manual quote. So lawn counts toward recurring, not manual.
+    // ALL commercial services with an auto-pricer (lawn, pest, tree/shrub) now
+    // price instantly as recurring lines. Commercial mosquito / termite-bait
+    // have no pricer yet and collapse to a manual commercial quote.
+    const commercialManualKeys = ["svcMosquito", "svcTermiteBait"];
     const commercialManualQuoteCount =
-      commercialDetected ? ["svcPest"].filter((k) => form[k]).length : 0;
+      commercialDetected ? commercialManualKeys.filter((k) => form[k]).length : 0;
     const recurringCount = qualifyingRecurringKeys
-      .filter((k) => form[k] && !(commercialDetected && k === "svcPest"))
+      .filter((k) => form[k] && !(commercialDetected && commercialManualKeys.includes(k)))
       .length;
     const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
@@ -2996,12 +2998,12 @@ function EstimateToolView() {
               {form.svcPest && commercialDetected && (
                 <div style={{
                   ...sSubOpts,
-                  background: "rgba(245,158,11,0.12)",
-                  border: "1px solid rgba(245,158,11,0.45)",
-                  color: C.amber,
+                  background: "rgba(113,113,122,0.10)",
+                  border: "1px solid rgba(113,113,122,0.30)",
+                  color: C.textBody || C.muted,
                   fontSize: 13,
                 }}>
-                  Commercial pest is set to manual quote. Residential pest pricing is suppressed.
+                  Commercial pest is auto-priced (estimated — confirmed on site). Residential pest pricing is suppressed.
                 </div>
               )}
               {form.svcPest && !commercialDetected && (
@@ -3131,8 +3133,8 @@ function EstimateToolView() {
                     color: C.amber,
                   }}
                 >
-                  {livePreview.commercialManualQuoteCount} commercial lawn/pest selection
-                  {livePreview.commercialManualQuoteCount > 1 ? "s" : ""} set to manual quote.
+                  {livePreview.commercialManualQuoteCount} commercial selection
+                  {livePreview.commercialManualQuoteCount > 1 ? "s" : ""} (mosquito / termite) set to manual quote.
                 </div>
               )}
               <div style={sSvcSection}>One-Time Services</div>
