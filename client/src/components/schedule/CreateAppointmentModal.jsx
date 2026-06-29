@@ -255,9 +255,12 @@ export function pickAutoScheduleEstimate({
   appliedKey = null,
 } = {}) {
   if (!customerId || isLoading || error || linkedEstimate || serviceCount > 0) return null;
-  const unlinked = estimates.filter((estimate) => !estimate.linkedAppointment);
-  if (unlinked.length !== 1) return null;
-  const estimate = unlinked[0];
+  // Only auto-apply a formally ACCEPTED quote. Open quotes (sent/viewed) are
+  // surfaced in the picker but must be picked deliberately — auto-applying one
+  // would let an unrelated booking silently mark it accepted on submit.
+  const candidates = estimates.filter((estimate) => estimate.status === 'accepted' && !estimate.linkedAppointment);
+  if (candidates.length !== 1) return null;
+  const estimate = candidates[0];
   const key = `${customerId}:${estimate.id}`;
   if (appliedKey === key) return null;
   return { estimate, key };

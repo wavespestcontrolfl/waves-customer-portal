@@ -24,30 +24,37 @@ describe('CreateAppointmentModal won estimate helpers', () => {
     expect(formatScheduleEstimateAmount({ monthlyTotal: '94.08' })).toBe('$94.08/mo');
   });
 
-  it('auto-selects exactly one unlinked won estimate for an empty schedule form', () => {
+  it('auto-selects exactly one unlinked accepted estimate for an empty schedule form', () => {
     expect(pickAutoScheduleEstimate({
       customerId: 7,
-      estimates: [{ id: 108, linkedAppointment: false }],
+      estimates: [{ id: 108, status: 'accepted', linkedAppointment: false }],
     })).toEqual({
-      estimate: { id: 108, linkedAppointment: false },
+      estimate: { id: 108, status: 'accepted', linkedAppointment: false },
       key: '7:108',
     });
   });
 
-  it('does not auto-select when there are multiple unlinked won estimates', () => {
+  it('does not auto-select an open (sent/viewed) quote — it must be picked deliberately', () => {
+    expect(pickAutoScheduleEstimate({
+      customerId: 7,
+      estimates: [{ id: 108, status: 'sent', linkedAppointment: false }],
+    })).toBeNull();
+  });
+
+  it('does not auto-select when there are multiple unlinked accepted estimates', () => {
     expect(pickAutoScheduleEstimate({
       customerId: 7,
       estimates: [
-        { id: 108, linkedAppointment: false },
-        { id: 109, linkedAppointment: false },
+        { id: 108, status: 'accepted', linkedAppointment: false },
+        { id: 109, status: 'accepted', linkedAppointment: false },
       ],
     })).toBeNull();
   });
 
-  it('does not auto-select the same won estimate twice', () => {
+  it('does not auto-select the same accepted estimate twice', () => {
     expect(pickAutoScheduleEstimate({
       customerId: 7,
-      estimates: [{ id: 108, linkedAppointment: false }],
+      estimates: [{ id: 108, status: 'accepted', linkedAppointment: false }],
       appliedKey: '7:108',
     })).toBeNull();
   });

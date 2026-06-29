@@ -1651,7 +1651,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    let linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
+    const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
     let linkedEstimate = null;
     let estimateAutoAccepted = false;
     const bookingWarnings = [];
@@ -1663,35 +1663,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (String(linkedEstimate.customer_id || '') !== String(customerId)) {
         return res.status(400).json({ error: 'Linked estimate belongs to a different customer' });
       }
-      if (linkedEstimate.status !== 'accepted') {
-        // Booking from a phone "yes" → record the win. Reuse the canonical
-        // manual-accept flow so funnel reporting, the linked-lead conversion,
-        // and (for recurring quotes) customer conversion all run exactly as a
-        // desk "Mark Won" would — scheduling stays with this booking
-        // (skipAutoSchedule). Best-effort: the estimate shapes the manual flow
-        // intentionally guards (a one-time/recurring choice, invoice-mode,
-        // expired, pending manager approval) can't be auto-accepted here, so we
-        // still book the appointment — just without the formal estimate link,
-        // since the deposit / actuals / invoicing paths that read
-        // source_estimate_id assume a recorded win.
-        try {
-          const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
-          await markEstimateManuallyAccepted({
-            estimateId: linkedEstimateId,
-            adminUserId: req.technicianId || null,
-            source: 'verbal_yes_booking',
-          });
-          linkedEstimate.status = 'accepted';
-          estimateAutoAccepted = true;
-        } catch (err) {
-          logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
-          bookingWarnings.push(`Appointment booked, but the estimate could not be marked accepted automatically (${err.message}). Mark it accepted from the Estimates page to record the win.`);
-          // Don't carry a non-accepted estimate into source_estimate_id.
-          linkedEstimateId = null;
-          linkedEstimate = null;
-        }
-      }
     }
+    // Booking from a phone "yes": a sent/viewed quote the customer accepted
+    // verbally gets its win recorded AFTER the appointment commits (below), so
+    // a booking failure never leaves an orphaned acceptance. Until that runs we
+    // only link an already-accepted estimate — an open quote is linked once its
+    // acceptance lands, keeping source_estimate_id pointed only at recorded wins.
+    const acceptEstimateOnBook = !!(linkedEstimate && linkedEstimate.status !== 'accepted');
+    const insertLinkId = acceptEstimateOnBook ? null : linkedEstimateId;
     const zone = getZone(customer?.city, customer?.zip);
     let duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
 
@@ -1789,7 +1768,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const addonCols = pricing.addonLines.length > 0
       ? await db('scheduled_service_addons').columnInfo()
       : {};
-    const shouldSendNewRecurringWelcome = isRecurring
+    let shouldSendNewRecurringWelcome = isRecurring
       ? await isNewRecurringSignupCandidate(customerId)
       : false;
 
@@ -1811,7 +1790,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
       if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
-      if (cols.source_estimate_id && linkedEstimateId) insertData.source_estimate_id = linkedEstimateId;
+      if (cols.source_estimate_id && insertLinkId) insertData.source_estimate_id = insertLinkId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
       if (isRecurring) {
         if (cols.recurring_nth && monthAnchorOpts.nth != null && monthAnchorOpts.nth !== '' && !isNaN(parseInt(monthAnchorOpts.nth))) insertData.recurring_nth = parseInt(monthAnchorOpts.nth);
@@ -1886,7 +1865,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) childData.recurring_interval_days = parseInt(recurringIntervalDays);
         if (cols.skip_weekends) childData.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && skipWeekends) childData.weekend_shift = shiftDir;
-        if (cols.source_estimate_id && linkedEstimateId) childData.source_estimate_id = linkedEstimateId;
+        if (cols.source_estimate_id && insertLinkId) childData.source_estimate_id = insertLinkId;
         const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr);
         const childFinancials = calculateVisitFinancialsForAddons(pricing, childAddonLines);
         // Carry callback status + suppression onto recurring children: if an
@@ -1960,7 +1939,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.internal_notes && internalNotes) boosterData.internal_notes = internalNotes;
           if (cols.skip_weekends) boosterData.skip_weekends = !!skipWeekends;
           if (cols.weekend_shift && skipWeekends) boosterData.weekend_shift = shiftDir;
-          if (cols.source_estimate_id && linkedEstimateId) boosterData.source_estimate_id = linkedEstimateId;
+          if (cols.source_estimate_id && insertLinkId) boosterData.source_estimate_id = insertLinkId;
           if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) boosterData.discount_id = pricing.appointmentDiscount.discountId;
           if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) boosterData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
           if (cols.discount_type && appointmentDiscountType) boosterData.discount_type = appointmentDiscountType;
@@ -2008,6 +1987,44 @@ router.post('/', requireAdmin, async (req, res, next) => {
         });
       }
     });
+
+    // Record the win for a phone-accepted quote — only now that the appointment
+    // series is committed, so a booking failure can never strand an accepted
+    // estimate with no visit. Reuse the canonical manual-accept flow so funnel
+    // reporting, the linked-lead conversion, and (for recurring quotes) customer
+    // conversion run exactly as a desk "Mark Won" would, with scheduling left to
+    // this booking. Best-effort: estimate shapes that flow intentionally guards
+    // (a one-time/recurring choice, invoice-mode, expired, pending manager
+    // approval) keep the booked appointment but stay unlinked and surface a
+    // warning, rather than failing the request.
+    if (acceptEstimateOnBook) {
+      try {
+        const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+        const acceptResult = await markEstimateManuallyAccepted({
+          estimateId: linkedEstimateId,
+          adminUserId: req.technicianId || null,
+          source: 'verbal_yes_booking',
+        });
+        estimateAutoAccepted = true;
+        // A recurring conversion sends its own new-recurring welcome SMS
+        // post-commit; suppress this handler's duplicate so the customer isn't
+        // double-texted.
+        if (acceptResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
+        // Link the just-created rows now that the estimate is a recorded win.
+        if (cols.source_estimate_id && createdAppointments.length) {
+          try {
+            await db('scheduled_services')
+              .whereIn('id', createdAppointments.map((a) => a.id))
+              .update({ source_estimate_id: linkedEstimateId });
+          } catch (e) {
+            logger.warn(`[schedule] estimate ${linkedEstimateId} accepted but linking the appointment failed: ${e.message}`);
+          }
+        }
+      } catch (err) {
+        logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
+        bookingWarnings.push(`Appointment booked, but the estimate could not be marked accepted automatically (${err.message}). Mark it accepted from the Estimates page to record the win.`);
+      }
+    }
 
     // Register appointment-reminder rows synchronously, BEFORE the response, with
     // deferConfirmation so the slow Twilio confirmation SMS does NOT run here.
