@@ -228,6 +228,31 @@ describe('recordCallPpcAttribution', () => {
     expect(insertCalls).toHaveLength(0);
   });
 
+  test('leaves a Meta web first-touch row (fbclid) untouched when a Facebook call arrives', async () => {
+    // A facebook WEB lead: same source, no campaign_id, but it has an fbclid.
+    firstByTable.ad_service_attribution = { id: 'fbweb', lead_source: 'facebook', fbclid: 'fb.click.1', campaign_id: null, lead_source_detail: 'web detail', service_line: 'lawn' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', leadSource: 'facebook', leadSourceDetail: 'Facebook Ads — call-extension',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'web_attributed' });
+    expect(updateCalls).toHaveLength(0);
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  test('leaves a Meta web first-touch row (_fbc cookie, no fbclid) untouched too', async () => {
+    firstByTable.ad_service_attribution = { id: 'fbweb2', lead_source: 'facebook', fbclid: null, fbc: 'fb.1.1700000000.abc', campaign_id: null, lead_source_detail: 'web detail' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', leadSource: 'facebook', leadSourceDetail: 'Facebook Ads — call-extension',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'web_attributed' });
+    expect(updateCalls).toHaveLength(0);
+    expect(insertCalls).toHaveLength(0);
+  });
+
   test('does not duplicate or override when the lead already has a different-source row (reused web lead)', async () => {
     firstByTable.ad_service_attribution = { id: 'web-row', lead_source: 'domain_website', campaign_id: null, service_line: 'pest' };
     firstByTable.ad_campaigns = { id: 'local-9' };
