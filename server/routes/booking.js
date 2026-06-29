@@ -1178,6 +1178,20 @@ async function createSelfBooking(payload = {}) {
       logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
     }
 
+    // Close out any abandoned-booking recovery intents for this booker — they
+    // just booked, so the recovery cron must never chase them. Best-effort.
+    try {
+      const bookedTen = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+      if (bookedTen.length === 10) {
+        await db('booking_intents')
+          .whereNull('converted_at')
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [bookedTen])
+          .update({ converted_at: db.fn.now(), converted_booking_id: booking.id, updated_at: db.fn.now() });
+      }
+    } catch (err) {
+      logger.warn(`[booking:confirm] booking-intent conversion mark failed for customer=${custId}: ${err.message}`);
+    }
+
     return { ok: true, body: { booking, confirmationCode: confCode } };
 }
 
@@ -1198,6 +1212,67 @@ router.post('/confirm', async (req, res, next) => {
   } catch (err) {
     logger.error('[booking:confirm] failed:', err);
     next(err);
+  }
+});
+
+// POST /api/booking/capture-intent — partial capture of a high-intent /book
+// visitor (entered contact + picked a slot, hasn't confirmed yet) so the
+// abandoned-booking recovery cron can follow up if they never finish. One OPEN
+// intent per phone (refreshed, not duplicated); booked phones are skipped.
+// Fire-and-forget: never returns a funnel-blocking error.
+router.post('/capture-intent', async (req, res) => {
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('selfBooking')) return res.json({ ok: false, skipped: 'gate' });
+
+    const b = req.body || {};
+    const nc = b.new_customer || b;
+    const phoneDigits = String(nc.phone || b.phone || '').replace(/\D/g, '');
+    if (phoneDigits.length < 10) return res.status(400).json({ error: 'valid phone required' });
+    const ten = phoneDigits.slice(-10);
+
+    const str = (v, n) => { const s = (v == null ? '' : String(v)).trim(); return s ? s.slice(0, n) : null; };
+    const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+    const row = {
+      phone: phoneDigits,
+      first_name: str(nc.first_name, 120),
+      last_name: str(nc.last_name, 120),
+      email: str(nc.email, 200),
+      address_line1: str(nc.address_line1 || b.address, 250),
+      city: str(nc.city, 120),
+      state: str(nc.state, 40),
+      zip: str(nc.zip, 20),
+      lat: num(nc.lat),
+      lng: num(nc.lng),
+      service_type: cleanBookingServiceLabel(b.quoted_service_label) || cleanBookingServiceLabel(b.service_type) || str(b.service_type, 120),
+      slot_date: b.slot_date ? String(b.slot_date).split('T')[0].slice(0, 10) : null,
+      slot_start: str(b.slot_start, 10),
+      slot_end: str(b.slot_end, 10),
+      source: str(b.source, 60),
+      attribution: b.attribution ? JSON.stringify(b.attribution) : null,
+      last_activity_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    };
+
+    const tenMatch = (q) => q.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
+
+    // Already booked in the last 24h → nothing to recover.
+    const booked = await tenMatch(db('booking_intents').whereNotNull('converted_at')
+      .where('converted_at', '>', new Date(Date.now() - 24 * 3600000))).first('id');
+    if (booked) return res.json({ ok: true, skipped: 'already_booked' });
+
+    // Refresh the existing open intent (one per phone) or insert a new one.
+    const open = await tenMatch(db('booking_intents').whereNull('converted_at').where('suppressed', false))
+      .orderBy('captured_at', 'desc').first('id');
+    if (open) {
+      await db('booking_intents').where({ id: open.id }).update(row);
+      return res.json({ ok: true, intent_id: open.id, updated: true });
+    }
+    const [created] = await db('booking_intents').insert(row).returning('id');
+    return res.json({ ok: true, intent_id: created?.id || created, created: true });
+  } catch (err) {
+    logger.error(`[booking:capture-intent] failed: ${err.message}`);
+    return res.json({ ok: false }); // fire-and-forget — never block the funnel
   }
 });
 

@@ -242,6 +242,42 @@ export default function PublicBookingPage() {
     } catch { /* best-effort */ }
   }, [address, applyCustomer]);
 
+  // Fire-and-forget partial capture: once a visitor has entered a phone + picked
+  // a slot, record a booking_intent so the recovery cron can follow up if they
+  // bail before confirming. keepalive so it survives the tab closing right after.
+  const captureBookingIntent = () => {
+    const digits = (contact.phone || '').replace(/\D/g, '');
+    if (digits.length !== 10 || !selectedSlot) return;
+    try {
+      fetch(`${API_BASE}/booking/capture-intent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
+        body: JSON.stringify({
+          source,
+          service_type: quotedServiceLabel || service.label,
+          quoted_service_label: quotedServiceLabel || null,
+          slot_date: selectedDate,
+          slot_start: selectedSlot.start_time,
+          slot_end: selectedSlot.end_time,
+          attribution: captureBookingAttribution() || undefined,
+          new_customer: {
+            first_name: contact.firstName,
+            last_name: contact.lastName,
+            phone: digits,
+            email: contact.email,
+            address_line1: address.line1,
+            city: address.city,
+            state: address.state,
+            zip: address.zip,
+            lat: coords?.lat,
+            lng: coords?.lng,
+          },
+        }),
+      }).catch(() => {});
+    } catch { /* never block the funnel */ }
+  };
+
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
     ? null
     : RECURRING_SERVICE_PATTERNS[service.id] || null;
@@ -778,7 +814,7 @@ export default function PublicBookingPage() {
                   placeholder="(941) 555-1234"
                   value={contact.phone}
                   onChange={e => setContact(c => ({ ...c, phone: e.target.value }))}
-                  onBlur={() => checkExistingCustomer(contact.phone)}
+                  onBlur={() => { checkExistingCustomer(contact.phone); captureBookingIntent(); }}
                   style={inputStyle}
                   disabled={!!existingCustomerId}
                 />
@@ -809,6 +845,7 @@ export default function PublicBookingPage() {
                   type="email"
                   value={contact.email}
                   onChange={e => setContact(c => ({ ...c, email: e.target.value }))}
+                  onBlur={() => captureBookingIntent()}
                   style={inputStyle}
                 />
               </div>}
