@@ -176,8 +176,9 @@ exports.up = async function up(knex) {
       t.timestamp('updated_at').defaultTo(knex.fn.now());
       t.index(['phone']);
       t.index(['session_id']);
-      // The recovery scan: open, un-suppressed intents in a recency window.
-      t.index(['converted_at', 'suppressed', 'captured_at']);
+      // The recovery scan filters/orders by last_activity_at (the last funnel
+      // touch), so index that — not captured_at — for the SMS/email age windows.
+      t.index(['converted_at', 'suppressed', 'last_activity_at']);
     });
   }
 

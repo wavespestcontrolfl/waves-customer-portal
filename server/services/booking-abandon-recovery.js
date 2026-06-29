@@ -33,6 +33,16 @@ const EMAIL_MAX_AGE_H = 168; // 7 days
 
 const BOOKING_URL = 'https://portal.wavespestcontrol.com/book?source=booking_recovery';
 
+// Genuine TERMINAL suppression codes — the recipient can never receive this
+// purpose, so keep the claim (never re-attempt). Everything else that blocks
+// (CONSENT_LOOKUP_FAILED / CONTRACT_VIOLATION / UNKNOWN_POLICY / PROVIDER_FAILURE
+// / QUIET_HOURS_HOLD) sent nothing operationally → release the claim and retry.
+const TERMINAL_SMS_CODES = new Set([
+  'SMS_OPTED_OUT', 'PURPOSE_OPTED_OUT', 'NO_MARKETING_CONSENT', 'NO_CONSENT_RECORD',
+  'SUPPRESSED_OPT_OUT', 'SUPPRESSED_NON_MOBILE', 'SUPPRESSED_MANUAL_DNC',
+  'SUPPRESSED_WRONG_NUMBER', 'SUPPRESSED_OTHER', 'NON_MOBILE_SMS_RECIPIENT',
+]);
+
 // 8a–8p America/New_York — never text outside business hours (matches the
 // messaging quiet-hours validator window for enforced purposes). The pre-check
 // avoids claim churn; the validator is the backstop.
@@ -152,12 +162,17 @@ async function markSiblingsSent(phone, flag, excludeId) {
   const ten = last10(phone);
   if (!ten) return;
   try {
+    const patch = { [flag]: true, updated_at: db.fn.now() };
+    // Marking SMS siblings sent must also stamp followup_sms_sent_at, or a sibling
+    // intent would keep a NULL timestamp and the email stage could fire ~23h early
+    // for it on a later tick (the in-run sentPhones guard only covers this tick).
+    if (flag === 'followup_sms_sent') patch.followup_sms_sent_at = db.fn.now();
     await db('booking_intents')
       .whereNot('id', excludeId)
       .whereNull('converted_at')
       .where((q) => q.where(flag, false).orWhereNull(flag))
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
-      .update({ [flag]: true, updated_at: db.fn.now() });
+      .update(patch);
   } catch (e) {
     logger.warn(`[booking-recovery] sibling mark failed (non-blocking): ${e.message}`);
   }
@@ -250,12 +265,12 @@ async function runSmsStage(now, sentPhones) {
         await markSiblingsSent(intent.phone, 'followup_sms_sent', intent.id);
       } else {
         logger.warn(`[booking-recovery] SMS blocked for intent ${intent.id}: ${result?.code || 'unknown'} ${result?.reason || ''}`);
-        // Keep the claim ONLY for a genuine terminal block (opt-out / landline
-        // suppression, or a provider-terminal failure) so we never re-attempt a
-        // dead number. An unclassified provider failure (retryable:false but not
-        // blocked/terminal) sent nothing — leave the claim set → released in
-        // `finally` → retried next tick. Retryable holds (quiet hours) also retry.
-        if (result && result.retryable === false && (result.blocked === true || result.terminal === true)) {
+        // Keep the claim ONLY for a genuine TERMINAL suppression (opt-out /
+        // landline / DNC), so we never re-attempt a dead number. Operational
+        // blocks (CONSENT_LOOKUP_FAILED, CONTRACT_VIOLATION, …) and any retryable
+        // hold sent nothing → leave the claim set → released in `finally` →
+        // retried next tick. A provider-terminal failure also keeps the claim.
+        if (result && ((result.code && TERMINAL_SMS_CODES.has(result.code)) || result.terminal === true)) {
           claimed = false;
         }
       }

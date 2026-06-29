@@ -1014,6 +1014,20 @@ async function createSelfBooking(payload = {}) {
         zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
       }).returning('*');
 
+      // Mark abandoned-booking recovery intents converted ATOMICALLY with the
+      // booking (same transaction), so converted_at is visible the instant the
+      // booking commits. A post-commit update would leave a window where the
+      // recovery cron — having SELECTed the intent before commit — could still
+      // win the claim and text "your spot isn't reserved yet" to someone who
+      // just booked.
+      const bookedTen = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+      if (bookedTen.length === 10) {
+        await trx('booking_intents')
+          .whereNull('converted_at')
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [bookedTen])
+          .update({ converted_at: trx.fn.now(), converted_booking_id: bookingRow.id, updated_at: trx.fn.now() });
+      }
+
       return { booking: bookingRow, serviceRow: scheduledRow };
       });
     } catch (txErr) {
@@ -1036,11 +1050,10 @@ async function createSelfBooking(payload = {}) {
       throw txErr;
     }
 
-    // Close out any abandoned-booking recovery intents for this booker the moment
-    // the booking is committed — BEFORE the post-commit tail (reminders, SMS,
-    // attribution) — so the recovery cron can never text "your spot isn't
-    // reserved yet" to someone who just booked. Best-effort; covers the replay
-    // path too (a double-submit replay is still a real booking).
+    // New bookings mark their recovery intents converted INSIDE the transaction
+    // above (atomic, race-free). This post-commit helper now only covers the
+    // double-submit REPLAY path — the existing booking committed in an earlier
+    // request, so a best-effort re-mark here closes out any intent captured since.
     const markBookingIntentsConverted = async (bookingId) => {
       try {
         const ten = String(customer.phone || '').replace(/\D/g, '').slice(-10);
@@ -1065,7 +1078,7 @@ async function createSelfBooking(payload = {}) {
     }
 
     const { booking, serviceRow } = txResult;
-    await markBookingIntentsConverted(booking.id);
+    // (new-booking intents already converted in the transaction above)
 
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
     const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
@@ -1353,6 +1366,35 @@ router.post('/capture-intent', captureIntentLimiter, async (req, res) => {
       .whereNot('sba.status', 'cancelled')
       .first('sba.id');
     if (recentBooking) return res.json({ ok: true, skipped: 'already_booked' });
+
+    // Revalidate the SUBMITTED booking context server-side. The IP-bound token
+    // proves the caller fetched availability, but not for THIS slot — so confirm
+    // the posted slot is a real, currently-offered opening for the resolved coords
+    // before making the row send-eligible. Combined with the token + per-IP
+    // limiter, this stops a single availability fetch from seeding recovery sends
+    // to arbitrary phones without a genuine bookable slot. Fail closed.
+    try {
+      const { lat, lng } = await resolveBookingCoords({ lat: row.lat, lng: row.lng, address: row.address_line1, city: row.city });
+      if (!lat || !lng || !row.slot_date || !row.slot_start) {
+        return res.json({ ok: true, skipped: 'unverified_slot' });
+      }
+      const cfg = (await db('booking_config').first()) || {};
+      const avail = await buildBookingAvailability({
+        lat, lng,
+        duration: cfg.slot_duration_minutes || 60,
+        rangeFrom: row.slot_date, rangeTo: row.slot_date,
+        config: cfg, today: new Date(), expandOpenDays: true,
+      });
+      const day = (avail.days || []).find((d) => String(d.date).slice(0, 10) === row.slot_date);
+      const offered = !!day && Array.isArray(day.slots)
+        && day.slots.some((s) => String(s.start_time).slice(0, 5) === String(row.slot_start).slice(0, 5));
+      if (!offered) return res.json({ ok: true, skipped: 'slot_unavailable' });
+      row.lat = lat;
+      row.lng = lng;
+    } catch (e) {
+      logger.warn(`[booking:capture-intent] slot revalidation failed: ${e.message}`);
+      return res.json({ ok: false, skipped: 'unverified' });
+    }
 
     // Resolve an existing customer by phone so a recovery send to a known customer
     // honors THEIR notification prefs (opt-out) via the customer-consent path,

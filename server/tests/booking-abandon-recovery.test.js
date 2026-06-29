@@ -183,6 +183,22 @@ describe('runSmsStage (touch 1)', () => {
     ]);
   });
 
+  test('operational block (CONSENT_LOOKUP_FAILED) releases the claim → retried, not burned', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'CONSENT_LOOKUP_FAILED', retryable: false });
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 }); // release
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(updates).toEqual([
+      { table: 'booking_intents', payload: expect.objectContaining({ followup_sms_sent: true }) },
+      { table: 'booking_intents', payload: expect.objectContaining({ followup_sms_sent: false }) },
+    ]);
+  });
+
   test('lost claim (converted/suppressed between SELECT and UPDATE) → no send', async () => {
     enqueue('booking_intents', { rows: [intent()] });
     enqueue('messages', { first: null });
