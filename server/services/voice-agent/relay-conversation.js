@@ -26,6 +26,8 @@ const { TOOLS, executeTool } = require('./relay-tools');
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 const MAX_TOOL_ROUNDS = 6; // safety cap on tool_use loops per caller turn
+const MAX_CALL_TURNS = 40; // safety cap on total caller turns for one call
+const STREAM_TIMEOUT_MS = 20000; // bound a single model stream so it can't hang
 const MAX_TOKENS = 1024; // voice replies are short
 
 let anthropic = null;
@@ -110,6 +112,23 @@ class RelayConversation {
   handlePrompt(text) {
     const t = String(text || '').trim();
     if (!t || this.ended || this._ending) return this._chain;
+    // Per-call cap on total caller turns. MAX_TOOL_ROUNDS bounds the tool loop
+    // WITHIN a turn; this bounds the NUMBER of turns so a never-ending or abusive
+    // call (or a leaked ws key) can't drive the model — and spend Anthropic
+    // tokens — without limit. End gracefully rather than going silent.
+    if (this._userTurns.length >= MAX_CALL_TURNS) {
+      if (!this._ending) {
+        logger.warn(`[voice-relay] call turn cap (${MAX_CALL_TURNS}) reached callSid=${this.callSid} — ending`);
+        this.say('A Waves team member will follow up with you shortly to take care of this. Thanks for calling!');
+        this._ending = true;
+        try {
+          if (this._endSession) this._endSession({ reason: 'turn_cap', captured: this.leadCaptured });
+        } catch (e) {
+          logger.error(`[voice-relay] endSession (turn cap) failed callSid=${this.callSid}: ${e.message}`);
+        }
+      }
+      return this._chain;
+    }
     this._userTurns.push(t);
     // Append the turn to the shared transcript INSIDE the serialized chain —
     // right before the loop that handles it — so a turn that arrives while a
@@ -153,6 +172,14 @@ class RelayConversation {
       if (this.ended) return;
       this._controller = new AbortController();
       let msg;
+      // Bound the model stream: without this a hung upstream call would pin the
+      // serialized turn chain open with no recovery. On timeout we abort the
+      // same controller barge-in uses, then surface a graceful reprompt.
+      let streamTimedOut = false;
+      const streamTimer = setTimeout(() => {
+        streamTimedOut = true;
+        try { this._controller.abort(); } catch { /* no-op */ }
+      }, STREAM_TIMEOUT_MS);
       try {
         const stream = anthropic.messages.stream(
           {
@@ -167,10 +194,17 @@ class RelayConversation {
         );
         msg = await stream.finalMessage();
       } catch (err) {
+        if (streamTimedOut) {
+          logger.warn(`[voice-relay] model stream timeout (${STREAM_TIMEOUT_MS}ms) callSid=${this.callSid}`);
+          this.say('Sorry, that took a moment — could you say that again?');
+          return;
+        }
         if (this._controller.signal.aborted) return; // barge-in; caller is talking
         logger.error(`[voice-relay] anthropic error callSid=${this.callSid}: ${err.message}`);
         this.say('Sorry, I had trouble there. Could you say that again?');
         return;
+      } finally {
+        clearTimeout(streamTimer);
       }
 
       this.messages.push({ role: 'assistant', content: msg.content });

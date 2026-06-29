@@ -304,7 +304,12 @@ router.post('/:token/setup', async (req, res, next) => {
     //     cancels and re-mints it so the customer can pay (no operator needed).
     if (err.statusCode === 409) {
       if (!err.inProgress) {
-        logger.warn(`[pay-v2] Setup 409 (recoverable conflict) for invoice ${invoice?.id || req.params.token}: ${err.message}`);
+        // Never log the raw pay-link token — it is the bearer credential for
+        // this invoice and errors.log is broadly readable. When the invoice id
+        // is unavailable, fall back to a masked suffix that still aids
+        // correlation without disclosing the token.
+        const tokenHint = req.params.token ? `tok…${String(req.params.token).slice(-4)}` : 'unknown';
+        logger.warn(`[pay-v2] Setup 409 (recoverable conflict) for invoice ${invoice?.id || tokenHint}: ${err.message}`);
         reportBillPaymentError(req, {
           invoice,
           phase: 'setup',

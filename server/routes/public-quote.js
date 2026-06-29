@@ -581,8 +581,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // in place so we don't double-count leads for a single conversion.
     let lead;
     if (leadId) {
-      // Don't overwrite a lead_source_id set at property-lookup time — only fill
-      // it in if the row is still missing one (manual leadId reuse, legacy rows).
+      // OWNERSHIP (atomic): leadId is a client-supplied id on a public,
+      // PII-accepting write surface, so prove ownership the same way /upsell
+      // does — the email the visitor just typed must match the email already on
+      // the lead row (captured at property-lookup time, see
+      // public-property-lookup.js). The predicate lives INSIDE the UPDATE, so
+      // there is no check-then-write race and no id-only overwrite path: a
+      // guessed/known id for someone else's lead matches zero rows and falls
+      // through to creating a fresh lead below. /calculate already requires
+      // contactEmail above, so a legitimate visitor's own row always matches.
       const updateFields = {
         first_name: contactFirstName,
         last_name: contactLastName,
@@ -604,6 +611,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (fbp) updateFields.fbp = fbp;
       const rows = await db('leads')
         .where({ id: leadId })
+        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
         .update(updateFields)
         .returning(['id', 'lead_source_id']);
       lead = rows[0];
