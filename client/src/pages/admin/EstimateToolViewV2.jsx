@@ -45,7 +45,7 @@ import {
 } from "../../lib/estimateEngine";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Monitor, X } from "lucide-react";
 import {
   buildManualDiscountPayload,
   buildServiceSpecificDiscountPayloads,
@@ -1493,7 +1493,7 @@ function oneTimeChoicePreviewMeta(E, pestTier, oneTimeRows = []) {
   };
 }
 
-function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq }) {
+function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq, presentMode = false }) {
   if (!E) return null;
 
   const pestTier = selectedPestTierForPreview(R, form);
@@ -1732,17 +1732,19 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq 
           </div>
         )}
 
-        <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
-          <div className="customer-preview-serif text-24 leading-tight text-[#1B2C5B] mb-3">
-            Find a date &amp; time that works for you
+        {!presentMode && (
+          <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
+            <div className="customer-preview-serif text-24 leading-tight text-[#1B2C5B] mb-3">
+              Find a date &amp; time that works for you
+            </div>
+            <div className="text-14 text-[#6B7280] leading-relaxed mb-4">
+              These are the route windows customers see after opening their secure estimate link.
+            </div>
+            <div className="bg-[#F7F5EE] border border-dashed border-[#D4CBB8] rounded-[10px] p-4 text-center text-13 text-[#6B7280]">
+              Live route availability loads on the public estimate.
+            </div>
           </div>
-          <div className="text-14 text-[#6B7280] leading-relaxed mb-4">
-            These are the route windows customers see after opening their secure estimate link.
-          </div>
-          <div className="bg-[#F7F5EE] border border-dashed border-[#D4CBB8] rounded-[10px] p-4 text-center text-13 text-[#6B7280]">
-            Live route availability loads on the public estimate.
-          </div>
-        </div>
+        )}
 
         {oneTimeRows.length > 0 && !hasOneTimeChoice && (
           <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
@@ -1789,9 +1791,11 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq 
             Wave Goodbye to Pests!
           </div>
           <div className="text-14 text-white/80 mt-2">No surprise increases, no hidden fees.</div>
-          <div className="inline-flex mt-4 px-5 py-3 rounded-[10px] bg-white text-[#1B2C5B] text-15 font-semibold">
-            Pick a time and book
-          </div>
+          {!presentMode && (
+            <div className="inline-flex mt-4 px-5 py-3 rounded-[10px] bg-white text-[#1B2C5B] text-15 font-semibold">
+              Pick a time and book
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -2246,6 +2250,10 @@ export default function EstimateToolViewV2({
   const [estimate, setEstimate] = useState(null);
   const [savedId, setSavedId] = useState(null);
   const [savedViewUrl, setSavedViewUrl] = useState(null);
+  // Full-screen, pricing-only "present to customer" mode — hides the booking
+  // section + book CTA so the operator can show prices in person (issue: in-person
+  // billing display). Reuses CustomerEstimatePreviewV2 with presentMode=true.
+  const [presentMode, setPresentMode] = useState(false);
   // Set when the server-authoritative price (Decision #2) differs from the
   // client preview at save time, so the operator isn't left quoting a stale number.
   const [priceRecomputeNotice, setPriceRecomputeNotice] = useState(null);
@@ -3883,6 +3891,10 @@ export default function EstimateToolViewV2({
   const provisionalState = computeProvisionalState(
     enrichedProfile?.propertyDataQuality
   );
+  // Present-mode trust gates: a custom-quote estimate has no firm price to show,
+  // and an unsaved one hasn't been through the server-authoritative recompute.
+  const presentQuoteRequired = !!estimate && estimateRequiresQuote(estimate);
+  const presentUnsaved = !savedId;
   const generateBusy = generating || saving || sending;
 
   // ═══════════════════════════════════════════════════════════════
@@ -3909,6 +3921,108 @@ export default function EstimateToolViewV2({
             font-family: 'Source Serif 4', Georgia, serif !important;
           }
         `}</style>{" "}
+        {/* Full-screen pricing-only present mode — show prices to the customer
+            in person without the booking section. Tier toggle stays live so the
+            operator can switch frequency in front of the customer. */}
+        {presentMode && E && (
+          <div className="fixed inset-0 z-50 bg-[#FAF8F3] overflow-y-auto">
+            <div className="sticky top-0 z-10 border-b border-[#E7E2D7] bg-white/95 backdrop-blur">
+              <div className="flex items-center justify-between gap-4 px-4 py-2.5">
+                <span className="text-11 font-medium uppercase tracking-[0.1em] text-[#6B7280]">
+                  Presenting to customer · pricing only
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={() => setPresentMode(false)}
+                >
+                  <X size={14} strokeWidth={1.8} aria-hidden />
+                  Exit
+                </Button>
+              </div>
+              {/* Operator-facing warning strip — reasons the shown price may not be
+                  firm. Suppressed for custom quotes, which show no firm price at all. */}
+              {!presentQuoteRequired && priceRecomputeNotice && (
+                <div className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-12 text-ink-secondary">
+                  Final price was server-recomputed on save
+                  {priceRecomputeNotice.serverMonthly != null && (
+                    <> — bills ${priceRecomputeNotice.serverMonthly.toFixed(2)}/mo (preview shows ${Number(priceRecomputeNotice.clientMonthly || 0).toFixed(2)})</>
+                  )}
+                  {priceRecomputeNotice.serverOnetime != null && (
+                    <> — ${priceRecomputeNotice.serverOnetime.toFixed(2)} one-time</>
+                  )}
+                  . Re-generate before quoting this price.
+                </div>
+              )}
+              {!presentQuoteRequired && provisionalState.provisional && (
+                <div className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-12 text-ink-secondary">
+                  Provisional — based on unverified property data ({provisionalSummary(provisionalState)}). Price may change after field verification.
+                </div>
+              )}
+              {!presentQuoteRequired && presentUnsaved && (
+                <div className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-12 text-ink-secondary">
+                  Unsaved preview — save the estimate to lock the server-authoritative price before quoting it as final.
+                </div>
+              )}
+            </div>
+            <div className="mx-auto max-w-[760px] px-3 py-5 md:px-5">
+              {presentQuoteRequired ? (
+                // Custom-quote estimate: no firm price to present (the saved/public
+                // flow zeroes totals and the link won't honor a partial price).
+                <div className="customer-preview-scope rounded-[14px] border border-[#E7E2D7] bg-white p-8 text-center">
+                  <div className="customer-preview-serif text-[28px] leading-tight text-[#1B2C5B] mb-3">
+                    This is a custom quote
+                  </div>
+                  <div className="mx-auto max-w-[460px] text-15 leading-relaxed text-[#6B7280]">
+                    The services selected need an on-site inspection before we can set a firm
+                    price, so there's no final number to show here yet. We'll prepare a detailed
+                    quote and send it over.
+                  </div>
+                </div>
+              ) : (
+                <div className="relative">
+                  {/* Mask the preview while regenerating so the customer never sees the
+                      newly-selected cadence paired with the previous tier's price. */}
+                  {generating && (
+                    <div className="absolute inset-0 z-10 flex items-start justify-center bg-[#FAF8F3]/70 pt-12 backdrop-blur-[1px]">
+                      <span className="rounded-full border border-[#E7E2D7] bg-white px-4 py-2 text-13 font-medium text-[#1B2C5B] shadow-sm">
+                        Updating pricing…
+                      </span>
+                    </div>
+                  )}
+                  <EstimateErrorBoundary key={JSON.stringify(estimate).slice(0, 100)}>
+                    <CustomerEstimatePreviewV2
+                      E={E}
+                      R={R}
+                      form={form}
+                      satelliteUrl={satelliteData?.imageUrl || null}
+                      presentMode
+                      onSelectPestFreq={(apps) => {
+                        // Ignore tier taps while a recalc is in flight: doGenerate
+                        // early-returns on `generating`, but the form mutation below
+                        // would still apply, pairing the in-flight (old-tier) estimate
+                        // with the new cadence and showing the customer mismatched
+                        // pricing. Wait for the current generate to settle first.
+                        if (generating) return;
+                        // Update cadence + regenerate WITHOUT routing through set(),
+                        // which nulls `estimate` and would unmount this overlay
+                        // (presentMode && E) mid-presentation. doGenerate replaces the
+                        // estimate in place when it resolves. Still mirror set()'s
+                        // saved-state reset, since changing the cadence invalidates the
+                        // saved record (keeps the "unsaved preview" warning accurate).
+                        setForm((f) => ({ ...f, pestFreq: String(apps) }));
+                        setSavedId(null);
+                        setSavedViewUrl(null);
+                        doGenerate({ pestFreq: apps });
+                      }}
+                    />
+                  </EstimateErrorBoundary>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
           {/* ═══ LEFT COLUMN: FORM ═══ */}
           <div className="space-y-4">
@@ -6365,6 +6479,16 @@ export default function EstimateToolViewV2({
                     >
                       <ExternalLink size={13} strokeWidth={1.8} aria-hidden />
                       Customer View
+                    </Button>{" "}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={() => setPresentMode(true)}
+                      title="Show pricing full-screen to the customer in person — no booking"
+                    >
+                      <Monitor size={13} strokeWidth={1.8} aria-hidden />
+                      Present to Customer
                     </Button>{" "}
                     <Button
                       variant="secondary"
