@@ -682,6 +682,7 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
           inserted.push({ table, row });
           return {
             returning: async () => [{ id: opts.mintedId || 'minted-1', ...row }],
+            onConflict: () => ({ ignore: async () => 1 }),
             catch: () => Promise.resolve(),
           };
         },
@@ -705,13 +706,13 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     resolveLeadSource.mockResolvedValue({ leadSourceId: 'ls-fb', leadSourceName: 'Facebook', leadSourceDetail: 'Meta click (fbclid)' });
   });
 
-  test('mints a won lead carrying the click ids when ad-tracked and the booker has no lead', async () => {
+  test('mints a won lead + PPC funnel row when ad-tracked, customer just created, and no lead exists', async () => {
     const database = makeAttrDb({
       customer: { id: 'c1', first_name: 'Dana', last_name: 'Reyes', phone: '+19415550101', email: 'dana@example.com' },
     });
 
     const result = await attributeSelfBooking({
-      customerId: 'c1', attribution: FB_ATTR, serviceInterest: 'General Pest Control', database,
+      customerId: 'c1', attribution: FB_ATTR, serviceInterest: 'General Pest Control', customerCreated: true, database,
     });
 
     expect(result).toMatchObject({ attributed: true, minted: true, leadId: 'minted-1' });
@@ -736,6 +737,27 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     expect(mint.row).not.toHaveProperty('gclid');
     // audit trail
     expect(database._inserted.some((i) => i.table === 'lead_activities')).toBe(true);
+    // PPC funnel row mirrors the web-lead path, source = the click's platform
+    const ppc = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(ppc).toBeTruthy();
+    expect(ppc.row).toMatchObject({
+      lead_id: 'minted-1',
+      customer_id: 'c1',
+      lead_source: 'facebook',
+      fbclid: 'fb-click-123',
+      funnel_stage: 'lead',
+    });
+  });
+
+  test('does NOT mint for a pre-existing customer (repeat booker, not a fresh paid lead)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1', attribution: FB_ATTR, customerCreated: false, database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'existing_customer' });
+    expect(database._inserted).toEqual([]);
   });
 
   test('mints for a Meta booking carrying only an _fbc cookie (fbclid fell off the URL)', async () => {
@@ -744,6 +766,7 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     const result = await attributeSelfBooking({
       customerId: 'c1',
       attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: 'fb.1.1700000000000.late-click', fbp: 'fb.1.x.ambient' },
+      customerCreated: true,
       database,
     });
 
@@ -760,12 +783,17 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     await attributeSelfBooking({
       customerId: 'c1',
       attribution: { utm: { source: 'google', medium: 'cpc' }, gclid: longGclid, fbclid: null, wbraid: null, gbraid: null },
+      customerCreated: true,
       database,
     });
 
     const mint = database._inserted.find((i) => i.table === 'leads');
     expect(mint.row.gclid).toHaveLength(200); // varchar(200) cap
     expect(mint.row).not.toHaveProperty('fbclid');
+    // PPC funnel row attributes it to Google Ads
+    const ppc = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(ppc.row.lead_source).toBe('google_ads');
+    expect(ppc.row.gclid).toHaveLength(200);
   });
 
   test('does NOT mint when the touch carries no ad tracking (a bare _fbp cookie is not a tracked click)', async () => {
@@ -787,7 +815,7 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
       linkedLead: { id: 'existing-lead' },
     });
 
-    const result = await attributeSelfBooking({ customerId: 'c1', attribution: FB_ATTR, database });
+    const result = await attributeSelfBooking({ customerId: 'c1', attribution: FB_ATTR, customerCreated: true, database });
 
     expect(result).toEqual({ attributed: false, reason: 'existing_customer_lead' });
     expect(database._inserted).toEqual([]);
@@ -799,7 +827,7 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
       contactLeads: [{ id: 'open-contact-lead', status: 'new', customer_id: null }],
     });
 
-    const result = await attributeSelfBooking({ customerId: 'c1', attribution: FB_ATTR, database });
+    const result = await attributeSelfBooking({ customerId: 'c1', attribution: FB_ATTR, customerCreated: true, database });
 
     expect(result).toEqual({ attributed: false, reason: 'existing_contact_lead' });
     expect(database._inserted).toEqual([]);
@@ -808,7 +836,7 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
   test('never throws into the committed booking — a db failure resolves to an error result', async () => {
     const database = makeAttrDb({ throwOnTable: 'customers' });
 
-    const result = await attributeSelfBooking({ customerId: 'c1', attribution: FB_ATTR, database });
+    const result = await attributeSelfBooking({ customerId: 'c1', attribution: FB_ATTR, customerCreated: true, database });
 
     expect(result).toEqual({ attributed: false, reason: 'error' });
   });

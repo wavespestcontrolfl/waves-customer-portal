@@ -1170,6 +1170,9 @@ async function createSelfBooking(payload = {}) {
         customerId: custId,
         attribution,
         serviceInterest: resolvedServiceType,
+        // Only a customer this booking just created is a fresh paid acquisition;
+        // a resolved existing customer is a repeat booker, not a new lead.
+        customerCreated: !!createdCustomerId,
       });
     } catch (err) {
       logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
