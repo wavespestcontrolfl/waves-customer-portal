@@ -415,16 +415,22 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // MEASURED building size — priceCommercialPest falls back to a manual quote
     // when false rather than auto-pricing off the synthetic default. (Residential
     // and commercial lawn/tree ignore this flag.)
-    // Real building size = the lookup MEASURED it, OR the customer edited/​
-    // confirmed the value on the confirm step (buildingSizeConfirmed). Only the
-    // untouched synthetic 2,000 default leaves this false.
-    const buildingSizeMeasured = buildingSizeConfirmed === true
-      || Number(ep.homeSqFt) > 0
-      || Number(ep.buildingSqFt) > 0
-      || Number(ep.livingAreaSqFt) > 0
-      || Number(ep.footprintSqFt) > 0;
+    // Real building size = the lookup MEASURED it (any alias), OR the customer
+    // edited/confirmed the value on the confirm step (buildingSizeConfirmed).
+    // Only the untouched synthetic 2,000 default leaves this false.
+    const measuredBuildingSqFt = [ep.homeSqFt, ep.buildingSqFt, ep.livingAreaSqFt, ep.footprintSqFt]
+      .map(Number).find((n) => Number.isFinite(n) && n > 0) || null;
+    const buildingSizeMeasured = buildingSizeConfirmed === true || measuredBuildingSqFt != null;
+    // The engine prices commercial pest off homeSqFt. When the building was
+    // measured via an alias (not homeSqFt) but the client only carried the
+    // synthetic default, forward the MEASURED size so the flag stays consistent
+    // with the footprint the engine actually sees (a confirmed client value
+    // still wins; residential is unchanged).
+    const engineHomeSqFt = (commercialDetected && buildingSizeConfirmed !== true && measuredBuildingSqFt)
+      ? Math.max(500, Math.min(HOME_CAP, measuredBuildingSqFt))
+      : sqft;
     const engineInput = {
-      homeSqFt: sqft,
+      homeSqFt: engineHomeSqFt,
       buildingSizeMeasured,
       stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
       lotSqFt: lot,
