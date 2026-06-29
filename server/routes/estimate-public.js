@@ -6498,7 +6498,7 @@ router.put('/:token/accept', async (req, res, next) => {
         ? pricingFrequencies.find((f) => f.key === selectedFrequencyKey)
         : defaultFrequencyFromList(pricingFrequencies))
       : null;
-    const pricingVisitFrequency = selectedFrequency
+    let pricingVisitFrequency = selectedFrequency
       || null;
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
@@ -6536,6 +6536,19 @@ router.put('/:token/accept', async (req, res, next) => {
       if (!selectedCombo) {
         return res.status(400).json({ error: 'selected service cadence combination is not available for this estimate' });
       }
+    }
+    // Re-base the visit-pricing frequency on the selected combo so BOTH the
+    // recurring total AND the first-application invoice / same-day-visit math use
+    // the chosen per-service treatments (matches the client's combinedFrequency).
+    // Keeps the base entry's pest cadence key (billing interval is unchanged).
+    if (selectedCombo && pricingVisitFrequency) {
+      pricingVisitFrequency = {
+        ...pricingVisitFrequency,
+        monthly: selectedCombo.monthly,
+        annual: selectedCombo.annual,
+        perServiceTreatments: selectedCombo.perServiceTreatments ?? pricingVisitFrequency.perServiceTreatments,
+        sameDayTreatmentTotal: selectedCombo.sameDayTreatmentTotal ?? pricingVisitFrequency.sameDayTreatmentTotal,
+      };
     }
     const effectiveMonthlyTotal = selectedCombo?.monthly != null
       ? Number(selectedCombo.monthly)
@@ -6620,7 +6633,7 @@ router.put('/:token/accept', async (req, res, next) => {
     const selectedFrequencyFirstVisitAmount = selectedServiceTierBillsMonthly
       ? null
       : resolveRecurringFirstVisitAmountFromFrequency(
-          selectedFrequency,
+          pricingVisitFrequency,
           { prefMonthlyOff: acceptPrefMonthlyOff, services: recurringSvcList },
         );
     const recurringFirstVisitAmount = !treatAsOneTime && !selectedServiceTierBillsMonthly

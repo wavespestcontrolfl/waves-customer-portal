@@ -111,6 +111,20 @@ describe('buildServiceCadenceCombos — full combination ladder', () => {
     }
   });
 
+  test('combo perServiceTreatments reflect the SELECTED tier (drives first-visit invoice)', () => {
+    // The accept handler re-bases the first-application invoice on the selected
+    // combo's perServiceTreatments — so they must carry the chosen tier's
+    // per-visit price, not the default tier's. (Regression for the P0 where the
+    // first invoice billed the default non-pest rows.)
+    const combos = buildServiceCadenceCombos(pestLawnV1(), {}, LAWN_RESULT_STATS);
+    const monthlyBasic = combos.find((c) => c.key === 'lawn_care:basic|pest_control:monthly');
+    const lawnRow = monthlyBasic.perServiceTreatments.find((r) => /lawn/i.test(r.service || ''));
+    expect(lawnRow.displayPrice).toBe(94.5); // basic per-app 105 * 0.9 (10% off)
+    const quarterlyPremium = combos.find((c) => c.key === 'lawn_care:premium|pest_control:quarterly');
+    const lawnRow2 = quarterlyPremium.perServiceTreatments.find((r) => /lawn/i.test(r.service || ''));
+    expect(lawnRow2.displayPrice).toBe(80.1); // premium per-app 89 * 0.9
+  });
+
   test('returns null when no non-pest service has more than one tier', () => {
     // Pest-only bundle: nothing extra to vary.
     const pestOnly = { pestTiers: pestLawnV1().pestTiers, services: [pestLawnV1().services[0]], discount: 0 };
