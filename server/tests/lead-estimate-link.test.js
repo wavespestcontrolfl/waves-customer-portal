@@ -738,6 +738,21 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     expect(database._inserted.some((i) => i.table === 'lead_activities')).toBe(true);
   });
 
+  test('mints for a Meta booking carrying only an _fbc cookie (fbclid fell off the URL)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: 'fb.1.1700000000000.late-click', fbp: 'fb.1.x.ambient' },
+      database,
+    });
+
+    expect(result).toMatchObject({ attributed: true, minted: true });
+    const mint = database._inserted.find((i) => i.table === 'leads');
+    expect(mint.row.fbc).toBe('fb.1.1700000000000.late-click');
+    expect(mint.row).not.toHaveProperty('fbclid');
+  });
+
   test('persists a Google gclid (capped to the column length) for a paid Google self-booking', async () => {
     const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
     const longGclid = 'g'.repeat(260);

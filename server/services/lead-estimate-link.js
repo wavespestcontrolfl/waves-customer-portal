@@ -519,14 +519,17 @@ async function convertLeadFromEvent({
 const LEAD_CLICK_ID_MAX = { gclid: 200, wbraid: 255, gbraid: 255, fbclid: 255, fbc: 255, fbp: 255 };
 const LEAD_CLICK_ID_COLUMNS = Object.keys(LEAD_CLICK_ID_MAX);
 
-// Mirror astro attribution.ts hasTracking(): a bare _fbp/_fbc cookie or a
-// referrer/landing is NOT a tracked ad touch — only real UTMs or click ids are.
-// (Meta sets _fbp on every visit, so it must never by itself mint a lead.)
+// An ad touch = a real UTM or a real click id. _fbc COUNTS: it is Meta's
+// persisted click id (fb.1.<ts>.<fbclid>) and is the match key when the URL
+// fbclid has fallen off by booking time — same rule as the lead-webhook's
+// determineLeadSource. A bare _fbp does NOT count (Meta sets it on every visit,
+// organic included), nor does a referrer/landing alone.
 function attributionHasAdTracking(attribution) {
   if (!attribution || typeof attribution !== 'object') return false;
   const utm = attribution.utm;
   const hasUtm = utm && typeof utm === 'object' && Object.values(utm).some(Boolean);
-  return !!(hasUtm || attribution.gclid || attribution.wbraid || attribution.gbraid || attribution.fbclid);
+  return !!(hasUtm || attribution.gclid || attribution.wbraid || attribution.gbraid
+    || attribution.fbclid || attribution.fbc);
 }
 
 function clickIdColumnsFromAttribution(attribution) {
