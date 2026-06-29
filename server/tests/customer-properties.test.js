@@ -1,4 +1,21 @@
-const { normStreet, addressKey, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES } = require('../services/customer-properties');
+const { normStreet, addressKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES } = require('../services/customer-properties');
+
+describe('address key normalization (suffix + ZIP)', () => {
+  test('normalizeZip takes the 5-digit form (ZIP+4 insensitive)', () => {
+    expect(normalizeZip('34205-1234')).toBe('34205');
+    expect(normalizeZip('34205')).toBe('34205');
+    expect(normalizeZip('')).toBe('');
+  });
+  test('addressKey is ZIP+4-insensitive', () => {
+    const a = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205' };
+    const b = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205-1234' };
+    expect(addressKey(a)).toBe(addressKey(b));
+  });
+  test('streetKey canonicalizes suffixes (St==Street) but keeps St!=Ave', () => {
+    expect(streetKey('123 Main St')).toBe(streetKey('123 Main Street'));
+    expect(streetKey('123 Main St')).not.toBe(streetKey('123 Main Ave'));
+  });
+});
 
 describe('customer-properties pure helpers', () => {
   test('normStreet ignores case/space/punctuation but keeps the house number', () => {

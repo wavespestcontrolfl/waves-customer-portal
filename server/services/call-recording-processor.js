@@ -40,7 +40,7 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, detectRentalSignal, ADVISORY_TRIAGE_FLAGS, streetCompareKey } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { validateAddress, buildAddressLines } = require('./address-validation');
@@ -2087,21 +2087,22 @@ const CallRecordingProcessor = {
         // pull it from the V2 service_address when present — otherwise Unit A and
         // Unit B at one building collapse to the same address key.
         const callUnit = extracted.address_line2 || v2Result?.extraction?.property?.service_address?.street_line_2 || null;
+        const { addressKey, streetKey } = require('./customer-properties');
         // When the multi-property table is live, an address already recorded there
         // (the primary OR a prior secondary) is NOT a new second address — don't
         // re-flag it, or the office is asked to confirm a place we already know.
         let knownProperty = false;
         if (process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
-          const { addressKey } = require('./customer-properties');
           const callKey = addressKey({ address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip });
           const props = await db('customer_properties').where({ customer_id: customerId, active: true }).select('address_line1', 'address_line2', 'city', 'zip');
           knownProperty = !!callKey && props.some((p) => addressKey(p) === callKey);
         }
         const existingCust = await db('customers').where({ id: customerId }).select('address_line1', 'address_line2', 'city', 'zip').first();
-        // Suffix-insensitive street compare so "123 Main St" vs "123 Main Street"
-        // (a benign normalization) isn't treated as a different property.
-        const onFileStreet = streetCompareKey(existingCust?.address_line1);
-        const fromCallStreet = streetCompareKey(extracted.address_line1);
+        // Suffix-CANONICAL street compare so "123 Main St" == "123 Main Street" but
+        // "123 Main St" != "123 Main Ave" (canonicalize, don't strip — a stripping
+        // key would merge St and Ave and miss a genuinely different street).
+        const onFileStreet = streetKey(existingCust?.address_line1);
+        const fromCallStreet = streetKey(extracted.address_line1);
         // Compare the full service LOCATION, not just the street: a different
         // street, UNIT, city, or ZIP (both present) is a different property —
         // "100 Main St, Bradenton" != "100 Main St, Sarasota", and Unit A != Unit B.
@@ -2109,8 +2110,12 @@ const CallRecordingProcessor = {
         // A unit the CALL supplies that differs from what's on file is a different
         // property (Unit A on file, call about Unit B — or no unit on file, call
         // adds one). One-sided: the caller omitting a unit they didn't mention is
-        // NOT treated as a change.
-        const callAddsDifferentUnit = !!normStreet(callUnit) && normStreet(callUnit) !== normStreet(existingCust?.address_line2);
+        // NOT a change; and a unit already embedded in the stored street (legacy
+        // "100 Main St Apt 4" with empty line2) is NOT a new unit.
+        const callUnitKey = normStreet(callUnit);
+        const callAddsDifferentUnit = !!callUnitKey
+          && callUnitKey !== normStreet(existingCust?.address_line2)
+          && !normStreet(existingCust?.address_line1).includes(callUnitKey);
         const locationDiffers = (onFileStreet !== fromCallStreet)
           || callAddsDifferentUnit
           || bothPresentAndDiffer(existingCust?.city, extracted.city)
@@ -2150,6 +2155,22 @@ const CallRecordingProcessor = {
     if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId && extracted.address_line1) {
       try {
         const customerProperties = require('./customer-properties');
+        // If the customer has a street but is missing city/ZIP and THIS call's
+        // address is the same street with them, fill those first (the appointment
+        // path does this later) — otherwise ensurePrimaryProperty snapshots a
+        // PARTIAL primary that a later full-address call treats as a new property.
+        if (extracted.city && extracted.zip) {
+          const cust = await db('customers').where({ id: customerId }).select('address_line1', 'city', 'zip').first();
+          const custIncomplete = cust && String(cust.address_line1 || '').trim()
+            && (!String(cust.city || '').trim() || !String(cust.zip || '').trim());
+          if (custIncomplete && customerProperties.streetKey(cust.address_line1) === customerProperties.streetKey(extracted.address_line1)) {
+            await db('customers').where({ id: customerId }).update({
+              ...(String(cust.city || '').trim() ? {} : { city: extracted.city }),
+              ...(String(cust.zip || '').trim() ? {} : { zip: extracted.zip }),
+              updated_at: new Date(),
+            }).catch((e) => logger.warn(`[customer-properties] pre-primary city/zip fill skipped for ${maskSid(callSid)}: ${e.message}`));
+          }
+        }
         // propertyId is null only when the customer is addressless AND has no
         // primary yet — i.e. this call carries their FIRST service address (the
         // !customerId upsert above is skipped when the call is pre-linked, so

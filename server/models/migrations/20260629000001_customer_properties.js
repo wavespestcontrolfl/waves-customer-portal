@@ -43,6 +43,10 @@ exports.up = async function (knex) {
       t.integer('linear_ft_perimeter');
       t.integer('palm_count');
       t.string('canopy_type', 30);
+      // Canonical full-address dedup key (street+unit+city+ZIP), computed by the
+      // service's addressKey() so the unique index below uses the EXACT same
+      // normalization as the app — no JS/SQL drift on suffix/ZIP+4 variants.
+      t.string('address_key', 400);
       t.string('source', 30); // 'backfill' | 'call_pipeline' | 'manual' | 'self_book'
       t.boolean('active').notNullable().defaultTo(true);
       t.timestamps(true, true);
@@ -56,15 +60,13 @@ exports.up = async function (knex) {
       'CREATE UNIQUE INDEX IF NOT EXISTS customer_properties_one_primary '
       + 'ON customer_properties (customer_id) WHERE is_primary'
     );
-    // One active property per normalized FULL service address per customer — the
-    // atomic backstop for the read-then-insert dedup in recordCallProperty. The
-    // expression mirrors the service's addressKey() (street + unit + city + ZIP),
-    // so the same street in a different city/ZIP — or a different unit — is a
-    // distinct property and is NOT rejected.
+    // One active property per canonical full address per customer — the atomic
+    // backstop for the read-then-insert dedup in recordCallProperty. Indexes the
+    // app-computed address_key, so the DB uniqueness uses the SAME suffix-canonical,
+    // ZIP+4-insensitive normalization as the service helper (no JS/SQL drift).
     await knex.raw(
       'CREATE UNIQUE INDEX IF NOT EXISTS customer_properties_customer_address_uniq '
-      + "ON customer_properties (customer_id, lower(regexp_replace(concat_ws(' ', address_line1, address_line2, city, zip), '[^a-zA-Z0-9]', '', 'g'))) "
-      + 'WHERE active'
+      + 'ON customer_properties (customer_id, address_key) WHERE active'
     );
   }
 
@@ -92,6 +94,16 @@ exports.up = async function (knex) {
     WHERE c.address_line1 IS NOT NULL AND c.address_line1 <> ''
       AND NOT EXISTS (SELECT 1 FROM customer_properties cp WHERE cp.customer_id = c.id)
   `);
+
+  // Populate address_key for the backfilled rows with the SAME helper the runtime
+  // uses, so a backfilled primary dedupes identically against later call/API adds.
+  // (Computed in JS — not SQL — so there is exactly one normalization definition.)
+  const { addressKey } = require('../../services/customer-properties');
+  const rows = await knex('customer_properties').whereNull('address_key')
+    .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+  for (const r of rows) {
+    await knex('customer_properties').where({ id: r.id }).update({ address_key: addressKey(r) });
+  }
 };
 
 exports.down = async function (knex) {

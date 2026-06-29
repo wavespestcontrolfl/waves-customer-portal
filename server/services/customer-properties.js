@@ -31,16 +31,22 @@ const STREET_SUFFIX_CANON = {
 const canonicalizeAddress = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
   .split(/\s+/).map((w) => STREET_SUFFIX_CANON[w] || w).join(' ');
 
+/** First 5 ZIP digits, so "34205" and "34205-1234" (ZIP+4) key identically. */
+const normalizeZip = (z) => (String(z || '').match(/\d{5}/) || [''])[0];
+
+/** Suffix-canonical street key — "123 Main St" == "123 Main Street", but != "123 Main Ave". */
+const streetKey = (s) => canonicalizeAddress(s).replace(/[^a-z0-9]/g, '');
+
 /**
  * Normalized key for the FULL service address — street + unit + city + ZIP — so
  * "100 Main St, Bradenton" and "100 Main St, Sarasota" are DISTINCT, and so are
- * two units at one street ("100 Main Unit A" vs "Unit B"). Suffix-canonical, so
- * "123 Main St" and "123 Main Street" dedupe (the call bridge does the same).
- * This APP-level key is the authoritative dedup; the migration's unique index is
- * a coarser concurrency backstop (a suffix-variant is deduped here before insert).
+ * two units at one street ("100 Main Unit A" vs "Unit B"). Suffix-canonical
+ * ("123 Main St" == "123 Main Street") and ZIP+4-insensitive. Stored in the
+ * customer_properties.address_key column and uniquely indexed, so the DB
+ * uniqueness uses the SAME normalization as this helper (no JS/SQL drift).
  */
 function addressKey({ address_line1, address_line2, city, zip } = {}) {
-  return canonicalizeAddress([address_line1, address_line2, city, zip].filter(Boolean).join(' ')).replace(/[^a-z0-9]/g, '');
+  return canonicalizeAddress([address_line1, address_line2, city, normalizeZip(zip)].filter(Boolean).join(' ')).replace(/[^a-z0-9]/g, '');
 }
 
 /** Coerce to a known occupancy enum value (pure). */
@@ -102,6 +108,7 @@ async function ensurePrimaryProperty(customerOrId) {
       linear_ft_perimeter: customer.linear_ft_perimeter ?? null,
       palm_count: customer.palm_count ?? null,
       canopy_type: customer.canopy_type ?? null,
+      address_key: addressKey({ address_line1: customer.address_line1, address_line2: customer.address_line2, city: customer.city, zip: customer.zip }),
       source: 'backfill',
       active: true,
     }).returning('id');
@@ -131,30 +138,53 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
   const existing = await db('customer_properties').where({ customer_id: customerId });
   if (!isNewAddress(existing, candidate)) return { created: false, propertyId: null };
 
-  const isPrimary = !existing.some((p) => p.is_primary);
+  const key = addressKey(candidate);
+  const baseRow = {
+    customer_id: customerId,
+    label: label || null,
+    occupancy_type: normalizeOccupancy(occupancyType),
+    address_line1: street,
+    address_line2: address_line2 || null,
+    city: city || null,
+    state: state || 'FL',
+    zip: zip || null,
+    address_key: key,
+    source,
+    active: true,
+  };
 
-  let row;
+  // Insert as primary only if the customer has none yet. On a one-primary race
+  // (two concurrent first-address writes), the loser retries as a NON-primary so
+  // a genuinely distinct address isn't dropped; an address-uniqueness violation
+  // means the same address already exists → already-present.
+  const insertRow = async (isPrimary) => {
+    const [r] = await db('customer_properties')
+      .insert({ ...baseRow, is_primary: isPrimary, label: baseRow.label || (isPrimary ? 'Primary' : null) })
+      .returning('id');
+    return r && (r.id || r);
+  };
+
+  let isPrimary = !existing.some((p) => p.is_primary);
+  let propertyId;
   try {
-    [row] = await db('customer_properties').insert({
-      customer_id: customerId,
-      label: label || (isPrimary ? 'Primary' : null),
-      occupancy_type: normalizeOccupancy(occupancyType),
-      is_primary: isPrimary,
-      address_line1: street,
-      address_line2: address_line2 || null,
-      city: city || null,
-      state: state || 'FL',
-      zip: zip || null,
-      source,
-      active: true,
-    }).returning('id');
+    propertyId = await insertRow(isPrimary);
   } catch (e) {
-    // 23505 = unique_violation: a concurrent writer already added this address
-    // (or won the race to create the primary). Treat as already-present.
-    if (e && e.code === '23505') return { created: false, propertyId: null };
-    throw e;
+    const constraint = e && (e.constraint || '');
+    if (e && e.code === '23505' && constraint === 'customer_properties_one_primary' && isPrimary) {
+      // Lost the primary race — another address won. Keep ours as a secondary.
+      try {
+        isPrimary = false;
+        propertyId = await insertRow(false);
+      } catch (e2) {
+        if (e2 && e2.code === '23505') return { created: false, propertyId: null };
+        throw e2;
+      }
+    } else if (e && e.code === '23505') {
+      return { created: false, propertyId: null }; // same address already present
+    } else {
+      throw e;
+    }
   }
-  const propertyId = row && (row.id || row);
 
   if (isPrimary) {
     // Mirror the new primary into customers.address_* — only when empty so we
@@ -181,6 +211,8 @@ module.exports = {
   OCCUPANCY_TYPES,
   normStreet,
   addressKey,
+  streetKey,
+  normalizeZip,
   normalizeOccupancy,
   isNewAddress,
   listProperties,
