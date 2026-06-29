@@ -340,6 +340,19 @@ function canAutoRoute(extraction, opts = {}) {
   return { allowed: true, flags: finalFlags };
 }
 
+// Suffix-insensitive street comparison shared by the shadow bridge and the
+// second-address check, so "123 Main St" and "123 Main Street" compare equal
+// (otherwise a benign expansion opens a false second_service_address review).
+const streetHouseNum = (s) => (String(s || '').trim().match(/^\d+/) || [''])[0];
+const streetNameOnly = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
+  .replace(/^\s*\d+\s*/, '')
+  .replace(/\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|ct|court|blvd|boulevard|cir|circle|pl|place|ter|terrace|way|trl|trail|pkwy|parkway|hwy|highway)\b/g, '')
+  .replace(/\s+/g, ' ').trim();
+/** Normalized "<house> <street-name>" key with common suffixes stripped. */
+function streetCompareKey(s) {
+  return `${streetHouseNum(s)} ${streetNameOnly(s)}`.trim();
+}
+
 /**
  * Address/identity review bridge — pure decision used by the call processor when
  * V2 address validation runs in SHADOW (V2 enabled, not yet driving routing). It
@@ -372,26 +385,32 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
     // adopt only when the validated street matches the legacy one (normalization
     // / ZIP correction). On a street disagreement, hold for review instead of
     // overwriting a possibly-correct legacy address with a V2 mix-up.
-    const houseNum = (s) => (String(s || '').trim().match(/^\d+/) || [''])[0];
-    const streetName = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
-      .replace(/^\s*\d+\s*/, '')
-      .replace(/\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|ct|court|blvd|boulevard|cir|circle|pl|place|ter|terrace|way|trl|trail|pkwy|parkway|hwy|highway)\b/g, '')
-      .replace(/\s+/g, ' ').trim();
-    const sameStreet = () => {
-      const hn = houseNum(adopt.address_line1), ho = houseNum(extracted.address_line1);
-      if (hn && ho && hn !== ho) return false;            // different house number → different premise
-      const sn = streetName(adopt.address_line1), so = streetName(extracted.address_line1);
-      if (!sn || !so) return !!(hn && ho && hn === ho);   // no street word → rely on house-number match
-      // Require FULL normalized street-name equality. A shared first token
-      // ("Amber Creek Dr" vs "Amber Way") or a substring is NOT enough — those
-      // are different streets and must be held for review, not silently adopted.
-      return sn === so;
+    const normTok = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    // Same PREMISE as what the caller (V1) said — not just a real address Google
+    // happened to validate. Require a corroborating legacy house number (don't
+    // graft a V2-only house number onto a street-only legacy address), full
+    // street-name equality, and matching city/ZIP when both sides have them.
+    const sameLocation = () => {
+      if (adopt.address_line1) {
+        const hn = streetHouseNum(adopt.address_line1), ho = streetHouseNum(extracted.address_line1);
+        if (!hn || !ho || hn !== ho) return false;          // need a matching legacy house number
+        const sn = streetNameOnly(adopt.address_line1), so = streetNameOnly(extracted.address_line1);
+        if (sn && so && sn !== so) return false;            // different street → hold for review
+      }
+      // For validated_accept Google changed NOTHING, so a different city/ZIP means
+      // V2 sent a different place → hold. For `corrected` the difference IS
+      // Google's trusted correction (e.g. a bad ZIP), so don't reject on it.
+      if (status === 'validated_accept') {
+        if (adopt.city && extracted.city && normTok(adopt.city) !== normTok(extracted.city)) return false;
+        if (adopt.zip && extracted.zip && normTok(adopt.zip) !== normTok(extracted.zip)) return false;
+      }
+      return true;
     };
     if (Object.keys(adopt).length) {
       if (!hadStreet) {
         // No legacy street to corroborate — don't adopt a V2-only address.
-      } else if (adopt.address_line1 && !sameStreet()) {
-        needsConfirmation.push('address_unverified'); // V1/V2 street disagreement -> review
+      } else if (!sameLocation()) {
+        needsConfirmation.push('address_unverified'); // V1/V2 location disagreement -> review
       } else {
         normalizedAddress = adopt;
       }
@@ -441,6 +460,7 @@ module.exports = {
   suppressAddressFlagsForAV,
   deriveCallReviewBridge,
   detectRentalSignal,
+  streetCompareKey,
   canAutoRoute,
   SMS_ONLY_FLAGS,
   ADVISORY_TRIAGE_FLAGS,

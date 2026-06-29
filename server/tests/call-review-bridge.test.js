@@ -1,4 +1,43 @@
-const { deriveCallReviewBridge } = require('../services/call-triage-flags');
+const { deriveCallReviewBridge, streetCompareKey } = require('../services/call-triage-flags');
+
+describe('streetCompareKey — suffix-insensitive street key', () => {
+  test('St vs Street (and case/spacing) collapse together', () => {
+    expect(streetCompareKey('123 Main St')).toBe(streetCompareKey('123 Main Street'));
+    expect(streetCompareKey('123  MAIN st.')).toBe(streetCompareKey('123 Main Street'));
+  });
+  test('different house number stays distinct', () => {
+    expect(streetCompareKey('123 Main St')).not.toBe(streetCompareKey('125 Main St'));
+  });
+});
+
+describe('deriveCallReviewBridge — V1/V2 location guard (F3/F4)', () => {
+  test('validated_accept, same street but DIFFERENT city → held (not adopted)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'validated_accept', normalized: { street_line_1: '100 Main St', city: 'Bradenton', state: 'FL', postal_code: '34211' } },
+      extracted: { address_line1: '100 Main St', city: 'Sarasota', lead_quality: 'warm' },
+    });
+    expect(out.normalizedAddress).toBeNull();
+    expect(out.needsConfirmation).toContain('address_unverified');
+  });
+
+  test('corrected with a different city/ZIP STILL adopts (trusted Google correction)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'corrected', normalized: { street_line_1: '100 Main St', city: 'Bradenton', state: 'FL', postal_code: '34211' } },
+      extracted: { address_line1: '100 Main St', city: 'Sarasota', zip: '34236', lead_quality: 'warm' },
+    });
+    expect(out.normalizedAddress).toMatchObject({ address_line1: '100 Main St', city: 'Bradenton', zip: '34211' });
+    expect(out.needsConfirmation).not.toContain('address_unverified');
+  });
+
+  test('V1 street-only (no house number) → held even when Google returns a premise (F4)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'validated_accept', normalized: { street_line_1: '7620 Charleston Ln', city: 'Sarasota', state: 'FL', postal_code: '34243' } },
+      extracted: { address_line1: 'Charleston Ln', city: 'Sarasota', lead_quality: 'warm' },
+    });
+    expect(out.normalizedAddress).toBeNull();
+    expect(out.needsConfirmation).toContain('address_unverified');
+  });
+});
 
 const NORMALIZED = { street_line_1: '7620 Charleston Ln', city: 'Sarasota', state: 'FL', postal_code: '34243' };
 

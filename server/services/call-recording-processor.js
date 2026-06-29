@@ -40,7 +40,7 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, ADVISORY_TRIAGE_FLAGS, streetCompareKey } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { validateAddress, buildAddressLines } = require('./address-validation');
@@ -1217,7 +1217,7 @@ IMPORTANT — customer name rules:
 - Do not invent a last name from caller ID, address, email, or context.
 
 IMPORTANT — spelled-out names and emails are authoritative over how they sounded:
-- When the caller spells a name or email letter-by-letter, or with phonetic markers ("B as in boy", "V as in Victor", "N as in Nancy"), the SPELLED letters are the source of truth — use them, not the word as it was transcribed phonetically. Callers spell precisely because the spoken form is easy to mishear (e.g. the caller says "Bavona" but then spells B-I-V-O-N-A, so the correct value is "Bivona", and the email is raymond.bivona@gmail.com — NOT bavona).
+- When the caller spells a name or email letter-by-letter, or with phonetic markers ("B as in boy", "V as in Victor", "N as in Nancy"), the SPELLED letters are the source of truth — use them, not the word as it was transcribed phonetically. Callers spell precisely because the spoken form is easy to mishear (e.g. the caller says "Smyth" but then spells S-M-I-T-H, so the correct value is "Smith", and the email is jane.smith@example.com — NOT smyth). This is an illustrative example only — never copy this name or email into the output.
 - When an email is described relative to the name (e.g. "first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
 
 IMPORTANT — customer contact rules:
@@ -1795,7 +1795,17 @@ const CallRecordingProcessor = {
           }
 
           if (!routingResult.allowed) {
-            const triageReasons = finalFlags.length > 0 ? finalFlags : [routingResult.reason || 'routing_rejected'];
+            // Prefer the flags that actually BLOCK the appointment. When none do
+            // (the block came from a non-flag reason like low_confidence /
+            // not_confirmed / confirmed_without_start_time), finalFlags may hold
+            // only advisory flags — so fall back to routingResult.reason instead
+            // of letting the Needs Review row explain only the advisory note and
+            // hide why the call was actually held. (Advisory flags get their own
+            // rows from the advisory loop above.)
+            const blockingReasons = (routingResult.appointmentBlockingFlags && routingResult.appointmentBlockingFlags.length)
+              ? routingResult.appointmentBlockingFlags
+              : [routingResult.reason || 'routing_rejected'];
+            const triageReasons = blockingReasons;
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
@@ -2074,8 +2084,10 @@ const CallRecordingProcessor = {
     if (customerId && !createdCustomerFromCall && extracted.address_line1) {
       try {
         const existingCust = await db('customers').where({ id: customerId }).select('address_line1', 'city', 'zip').first();
-        const onFileStreet = normStreet(existingCust?.address_line1);
-        const fromCallStreet = normStreet(extracted.address_line1);
+        // Suffix-insensitive street compare so "123 Main St" vs "123 Main Street"
+        // (a benign normalization) isn't treated as a different property.
+        const onFileStreet = streetCompareKey(existingCust?.address_line1);
+        const fromCallStreet = streetCompareKey(extracted.address_line1);
         // Compare the full service LOCATION, not just the street: a different
         // street OR (same street but a different city/ZIP, both present) is a
         // different property. "100 Main St, Bradenton" != "100 Main St, Sarasota".
