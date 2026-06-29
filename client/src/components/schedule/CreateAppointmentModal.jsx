@@ -255,9 +255,12 @@ export function pickAutoScheduleEstimate({
   appliedKey = null,
 } = {}) {
   if (!customerId || isLoading || error || linkedEstimate || serviceCount > 0) return null;
-  const unlinked = estimates.filter((estimate) => !estimate.linkedAppointment);
-  if (unlinked.length !== 1) return null;
-  const estimate = unlinked[0];
+  // Only auto-apply a formally ACCEPTED quote. Open quotes (sent/viewed) are
+  // surfaced in the picker but must be picked deliberately — auto-applying one
+  // would let an unrelated booking silently mark it accepted on submit.
+  const candidates = estimates.filter((estimate) => estimate.status === 'accepted' && !estimate.linkedAppointment);
+  if (candidates.length !== 1) return null;
+  const estimate = candidates[0];
   const key = `${customerId}:${estimate.id}`;
   if (appliedKey === key) return null;
   return { estimate, key };
@@ -481,13 +484,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   const formatScheduleEstimateLabel = (estimate) => {
     if (!estimate) return '';
-    const accepted = estimate.acceptedAt || estimate.createdAt;
-    const date = accepted
-      ? new Date(accepted).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-      : 'Won estimate';
-    const servicesLabel = estimate.serviceInterest || (estimate.lines || []).map((l) => l.estimateLabel || l.name).filter(Boolean).slice(0, 2).join(' + ') || 'Accepted estimate';
+    const isAccepted = estimate.status === 'accepted';
+    const stamp = isAccepted ? estimate.acceptedAt : (estimate.createdAt || estimate.acceptedAt);
+    const date = stamp
+      ? new Date(stamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      : '';
+    // Spell out acceptance so the operator can tell a phone-accepted-but-not-
+    // yet-marked quote from one the customer formally accepted.
+    const statusLabel = isAccepted
+      ? `Accepted${date ? ` ${date}` : ''}`
+      : `Sent${date ? ` ${date}` : ''} - not yet accepted`;
+    const servicesLabel = estimate.serviceInterest || (estimate.lines || []).map((l) => l.estimateLabel || l.name).filter(Boolean).slice(0, 2).join(' + ') || 'Estimate';
     const amount = formatScheduleEstimateAmount(estimate);
-    return [servicesLabel, amount, date].filter(Boolean).join(' - ');
+    return [servicesLabel, amount, statusLabel].filter(Boolean).join(' - ');
   };
   const applyScheduleEstimate = (estimateId) => {
     if (!estimateId) {
@@ -1008,6 +1017,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // (windowStart..windowEnd) instead of just the primary line's
           // catalog default — capacity / dispatch math depends on this.
           estimatedDuration: groupDuration > 0 ? groupDuration : undefined,
+          // Always pass the linked estimate id. The server links accepted
+          // estimates directly; for a sent/viewed quote the customer accepted
+          // by phone it records the acceptance first (canonical Mark-Won flow)
+          // and then links, or — for estimate shapes that can't be auto-
+          // accepted — books without the link and returns a warning.
           sourceEstimateId: linkedEstimate?.id || undefined,
           urgency: 'routine',
           notes: customerNotes || undefined,
@@ -1069,10 +1083,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       return;
     }
     const apptCount = results.length || createdGroupKeysRef.current.size;
-    const message = apptCount === 1
+    const estimateAccepted = results.some((r) => r?.estimateAccepted);
+    const apptWarnings = results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : []));
+    const baseMessage = apptCount === 1
       ? 'Appointment created — invoice will send with service report'
       : `${apptCount} appointment series created — invoices will send with each service report`;
-    setToast(message);
+    setToast(estimateAccepted ? `Estimate marked accepted. ${baseMessage}` : baseMessage);
+    // A guarded estimate (one-time/recurring choice, invoice-mode, expired,
+    // pending manager approval) books fine but couldn't be auto-accepted — tell
+    // the operator so they can record the win from the Estimates page.
+    if (apptWarnings.length) alert(apptWarnings.join('\n\n'));
     setTimeout(() => {
       createdGroupKeysRef.current = new Set();
       onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
@@ -1382,7 +1402,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${D.border}` }}>
               <label style={labelStyle}>{ESTIMATE_SOURCE_LABEL}</label>
               {scheduleEstimatesLoading ? (
-                <div style={{ fontSize: 13, color: D.muted, minHeight: 36, display: 'flex', alignItems: 'center' }}>Loading won estimates...</div>
+                <div style={{ fontSize: 13, color: D.muted, minHeight: 36, display: 'flex', alignItems: 'center' }}>Loading estimates...</div>
               ) : scheduleEstimateError ? (
                 <div style={{ fontSize: 12, color: D.red }}>{scheduleEstimateError}</div>
               ) : scheduleEstimates.length > 0 ? (
@@ -1402,6 +1422,43 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </select>
                   {linkedEstimate && (
                     <>
+                      {/* Acceptance status — spells out whether the customer
+                          formally accepted (status flipped in the system) or
+                          this is still an open quote we're booking from a phone
+                          "yes". An accepted quote links to the appointment;
+                          a not-yet-accepted one only fills the prices. */}
+                      {(() => {
+                        const accepted = linkedEstimate.status === 'accepted';
+                        return (
+                          <div style={{
+                            marginTop: 10,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8,
+                            fontSize: 12,
+                            fontWeight: 600,
+                            color: D.text,
+                          }}>
+                            <span style={{
+                              display: 'inline-block',
+                              padding: '2px 8px',
+                              borderRadius: 999,
+                              border: `1px solid ${D.border}`,
+                              background: D.bg,
+                              textTransform: 'uppercase',
+                              letterSpacing: 0.5,
+                              fontSize: 10,
+                            }}>
+                              {accepted ? 'Accepted' : 'Not yet accepted'}
+                            </span>
+                            <span style={{ fontWeight: 400, color: D.muted }}>
+                              {accepted
+                                ? 'Customer accepted this estimate.'
+                                : 'Saving this appointment will mark the estimate accepted and record the win.'}
+                            </span>
+                          </div>
+                        );
+                      })()}
                       {/* Quoted vs current charge, deposit posture, and the
                           balance to collect at the visit once any paid deposit
                           is credited — same card the appointment detail sheet
@@ -1418,14 +1475,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       />
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginTop: 8, fontSize: 12, color: D.muted }}>
                         <span style={{ minWidth: 0 }}>
-                          Linked to estimate #{String(linkedEstimate.id).slice(0, 8)}. Service lines and prices can still be edited before saving.
+                          {linkedEstimate.status === 'accepted'
+                            ? `Linked to estimate #${String(linkedEstimate.id).slice(0, 8)}. Service lines and prices can still be edited before saving.`
+                            : `From estimate #${String(linkedEstimate.id).slice(0, 8)} — saving marks it accepted and links it. Prices filled from the quote; edit before saving as needed.`}
                         </span>
                         <button
                           type="button"
                           onClick={() => setLinkedEstimate(null)}
                           style={{ border: 'none', background: 'transparent', color: D.text, cursor: 'pointer', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', padding: '4px 0' }}
                         >
-                          Unlink
+                          {linkedEstimate.status === 'accepted' ? 'Unlink' : 'Clear'}
                         </button>
                       </div>
                     </>
@@ -1433,7 +1492,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 </>
               ) : (
                 <div style={{ fontSize: 13, color: D.muted, minHeight: 36, display: 'flex', alignItems: 'center' }}>
-                  No won estimates found. Choose services manually below.
+                  No estimates found. Choose services manually below.
                 </div>
               )}
             </div>

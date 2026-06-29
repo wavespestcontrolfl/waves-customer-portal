@@ -1504,10 +1504,14 @@ router.get('/:id/comms', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/customers/:id/schedule-estimates — accepted estimates
-// formatted for the New Appointment modal. This keeps the UI from guessing
-// at estimate_data shapes and returns service-library ids when we can match
-// the quoted line to a schedulable service.
+// GET /api/admin/customers/:id/schedule-estimates — bookable estimates
+// formatted for the New Appointment modal. Surfaces accepted estimates plus
+// still-open quotes the customer has been sent (sent / viewed) so a phone
+// acceptance ("he called and accepted") can be booked before anyone has
+// formally marked the estimate accepted in the system. Each row carries its
+// `status` so the UI can show whether it's accepted yet. This keeps the UI
+// from guessing at estimate_data shapes and returns service-library ids when
+// we can match the quoted line to a schedulable service.
 router.get('/:id/schedule-estimates', async (req, res, next) => {
   try {
     const customer = await db('customers')
@@ -1518,8 +1522,23 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
 
     const [estimates, serviceRows] = await Promise.all([
       db('estimates')
-        .where({ customer_id: customer.id, status: 'accepted' })
+        .where({ customer_id: customer.id })
         .whereNull('archived_at')
+        // Accepted estimates always qualify. Open quotes (sent / viewed)
+        // qualify too — that's the phone-acceptance case — but only while
+        // they're still live, so an expired quote's stale price doesn't show
+        // up as bookable (and can't hit the doomed auto-accept path).
+        .where((qb) => qb
+          .where('status', 'accepted')
+          .orWhere((open) => open
+            .whereIn('status', ['sent', 'viewed'])
+            .andWhere((live) => live
+              .whereNull('expires_at')
+              .orWhere('expires_at', '>=', db.fn.now()))))
+        // Accepted estimates float to the top; open quotes follow, each set
+        // newest-first (accepted_at is null for sent/viewed, so those fall
+        // through to created_at).
+        .orderByRaw("CASE WHEN status = 'accepted' THEN 0 ELSE 1 END")
         .orderBy('accepted_at', 'desc')
         .orderBy('created_at', 'desc')
         .select(
