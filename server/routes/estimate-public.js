@@ -1077,7 +1077,12 @@ function intervalPriceFromMonthly(monthlyAmount, frequencyKey) {
 // preference toggles are applied — used together with the engine's
 // PEST.floor to cap how much the toggles can discount.
 function detectPestRecurring(recurring) {
-  const pest = (recurring || []).filter((s) => /pest/i.test(String(s.name || '')));
+  // RESIDENTIAL pest only. The interior-spray / exterior-eave-sweep opt-out
+  // ($10/visit each) is a residential-pest preference; commercial_pest is FLAT.
+  // Match by the normalized service KEY, NOT a /pest/i name substring — which
+  // also matches "Commercial Pest Control" and would let a customer subtract the
+  // residential opt-out discounts from (and persist a lower) commercial price.
+  const pest = (recurring || []).filter((s) => recurringServiceKey(s) === 'pest_control');
   if (!pest.length) return null;
   const vpy = pest.reduce((acc, s) => Math.max(acc, visitsPerYearFromFrequency(s.frequency || s.billing || s.cadence)), 0) || 4;
   const monthlyBase = pest.reduce((acc, s) => acc + Number(s.mo || s.monthly || 0), 0);
@@ -1090,6 +1095,9 @@ function detectPestRecurring(recurring) {
 // so only a general one-time pest line should surface them.
 function isGeneralPestOneTimeItem(it = {}) {
   const service = String(it.service || '').toLowerCase();
+  // Commercial pest is flat (no interior/exterior opt-out) — never a general
+  // residential pest item, even though its name contains "Pest".
+  if (service.startsWith('commercial_')) return false;
   if (service === 'one_time_pest' || service === 'pest_control') return true;
   if (service === 'german_roach') return false; // specialty cleanout (handled separately)
   const name = String(it.name || it.displayName || it.label || '').toLowerCase();
@@ -7847,6 +7855,13 @@ router.put('/:token/preferences', async (req, res, next) => {
     const pestRecurring = detectPestRecurring(recurring);
     const hasPestOneTime = detectPestOneTime(oneTimeItems);
     const pestOneTimeTotal = hasPestOneTime ? pestOneTimeBase(oneTimeItems) : 0;
+    // The interior-spray / exterior-sweep preferences only apply to RESIDENTIAL
+    // pest (recurring or one-time). With no residential pest line there's nothing
+    // to discount — no-op so a commercial-only estimate can't persist a lower
+    // total via these toggles. (The pref card isn't rendered for it either.)
+    if (!pestRecurring && !hasPestOneTime) {
+      return res.status(400).json({ error: 'Service preferences are not available for this estimate' });
+    }
 
     // baseMonthly resolution via shared helper (see resolveBaseMonthly).
     // Persisted back to estimate_data.baseMonthly below so subsequent
@@ -12117,6 +12132,7 @@ module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
