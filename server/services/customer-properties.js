@@ -80,7 +80,7 @@ async function listProperties(customerId) {
  * created after the migration). Idempotent — the partial-unique index makes a
  * concurrent double-create safe. Returns { created, propertyId }.
  */
-async function ensurePrimaryProperty(customerOrId) {
+async function ensurePrimaryProperty(customerOrId, { occupancyType } = {}) {
   const customer = typeof customerOrId === 'string'
     ? await db('customers').where({ id: customerOrId }).first()
     : customerOrId;
@@ -94,7 +94,9 @@ async function ensurePrimaryProperty(customerOrId) {
     const [row] = await db('customer_properties').insert({
       customer_id: customer.id,
       label: customer.profile_label || 'Primary',
-      occupancy_type: 'owner_occupied',
+      // Default owner-occupied for a plain backfill, but honor a caller-supplied
+      // occupancy so a primary created from a tenant/rental call isn't mislabeled.
+      occupancy_type: occupancyType ? normalizeOccupancy(occupancyType) : 'owner_occupied',
       is_primary: true,
       address_line1: customer.address_line1,
       address_line2: customer.address_line2 || null,
@@ -214,12 +216,18 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
 
 /**
  * When a call's address is the customer's PRIMARY street but supplies city / ZIP
- * / unit the records are missing, fill those gaps into BOTH the customers mirror
- * AND the existing primary property (recomputing its address_key) — so the primary
- * stays complete and a later full-address call dedups instead of duplicating.
- * Fill-only (never overwrites a present value); same-street guard so a different
- * address's details are never grafted on. Call BEFORE ensurePrimaryProperty so a
- * newly-created primary also inherits the completed mirror.
+ * the records are missing, fill those gaps into BOTH the customers mirror AND the
+ * existing primary property (recomputing its address_key) — so the primary stays
+ * complete and a later full-address call dedups instead of duplicating. Fill-only
+ * (never overwrites a present value); same-street guard so a different address's
+ * details are never grafted on. Call BEFORE ensurePrimaryProperty so a newly-
+ * created primary also inherits the completed mirror.
+ *
+ * Deliberately does NOT fill the UNIT (address_line2): a call that adds a unit to
+ * a unitless primary is classified upstream as a SECOND service address (the unit
+ * makes it a distinct property), so grafting that unit onto the primary would both
+ * corrupt the primary's identity and make the later secondary insert dedup against
+ * the now-mutated primary. The unit-bearing call is handled by recordCallProperty.
  */
 async function completePrimaryFromCall(customerId, call = {}) {
   if (!customerId || !String(call.address_line1 || '').trim()) return;
@@ -230,7 +238,6 @@ async function completePrimaryFromCall(customerId, call = {}) {
 
   const gap = (cur) => !String(cur || '').trim();
   const patch = {};
-  if (gap(cust.address_line2) && call.address_line2) patch.address_line2 = call.address_line2;
   if (gap(cust.city) && call.city) patch.city = call.city;
   if (gap(cust.zip) && call.zip) patch.zip = call.zip;
   if (Object.keys(patch).length) {
@@ -241,13 +248,12 @@ async function completePrimaryFromCall(customerId, call = {}) {
   const primary = await db('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
   if (!primary) return;
   const ppatch = {};
-  if (gap(primary.address_line2) && call.address_line2) ppatch.address_line2 = call.address_line2;
   if (gap(primary.city) && call.city) ppatch.city = call.city;
   if (gap(primary.zip) && call.zip) ppatch.zip = call.zip;
   if (Object.keys(ppatch).length) {
     ppatch.address_key = addressKey({
       address_line1: primary.address_line1,
-      address_line2: ppatch.address_line2 || primary.address_line2,
+      address_line2: primary.address_line2,
       city: ppatch.city || primary.city,
       zip: ppatch.zip || primary.zip,
     });
@@ -255,6 +261,42 @@ async function completePrimaryFromCall(customerId, call = {}) {
     await db('customer_properties').where({ id: primary.id }).update(ppatch)
       .catch((e) => logger.warn(`[customer-properties] primary complete skipped for ${customerId}: ${e.message}`));
   }
+}
+
+/**
+ * After an admin edits customers.address_* (the primary's mirror), bring the
+ * primary customer_properties row back in sync — including recomputing its
+ * address_key — so the properties API and the call-pipeline dedup match the
+ * corrected address instead of the stale one. Address fields ONLY; never touches
+ * occupancy_type, label, or the property-grained attributes. No-op when the
+ * primary already matches.
+ */
+async function syncPrimaryAddress(customerOrId) {
+  const customer = typeof customerOrId === 'string'
+    ? await db('customers').where({ id: customerOrId }).first()
+    : customerOrId;
+  if (!customer || !customer.id) return;
+  const primary = await db('customer_properties')
+    .where({ customer_id: customer.id, is_primary: true, active: true }).first();
+  if (!primary) return;
+
+  const next = {
+    address_line1: customer.address_line1 || null,
+    address_line2: customer.address_line2 ?? primary.address_line2 ?? null,
+    city: customer.city || null,
+    state: customer.state || primary.state || 'FL',
+    zip: customer.zip || null,
+  };
+  const changed = ['address_line1', 'address_line2', 'city', 'state', 'zip']
+    .some((f) => String(primary[f] || '') !== String(next[f] || ''));
+  if (!changed) return;
+
+  next.address_key = addressKey({
+    address_line1: next.address_line1, address_line2: next.address_line2, city: next.city, zip: next.zip,
+  });
+  next.updated_at = new Date();
+  await db('customer_properties').where({ id: primary.id }).update(next)
+    .catch((e) => logger.warn(`[customer-properties] primary address sync failed for ${customer.id}: ${e.message}`));
 }
 
 module.exports = {
@@ -266,6 +308,7 @@ module.exports = {
   normalizeOccupancy,
   isNewAddress,
   completePrimaryFromCall,
+  syncPrimaryAddress,
   listProperties,
   ensurePrimaryProperty,
   recordCallProperty,

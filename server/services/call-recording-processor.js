@@ -2164,11 +2164,19 @@ const CallRecordingProcessor = {
         await customerProperties.completePrimaryFromCall(customerId, {
           address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
         });
+        // Rental signal — works in BOTH shadow and enforce (DRIVES_ROUTING) modes:
+        // the shadow bridge may not have run, so re-derive from the V2 extraction.
+        // Computed BEFORE ensurePrimaryProperty so a first-call tenant/rental
+        // primary is created with the right occupancy (its recordCallProperty
+        // branch never runs once the primary exists → it would otherwise stay the
+        // default owner_occupied).
+        const isRental = bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
+          || detectRentalSignal({ extracted, callerRelationship: v2Result?.extraction?.caller?.relationship_to_property });
         // propertyId is null only when the customer is addressless AND has no
         // primary yet — i.e. this call carries their FIRST service address (the
         // !customerId upsert above is skipped when the call is pre-linked, so
         // ensurePrimaryProperty has nothing to backfill from).
-        const ensured = await customerProperties.ensurePrimaryProperty(customerId);
+        const ensured = await customerProperties.ensurePrimaryProperty(customerId, { occupancyType: isRental ? 'rental_investment' : undefined });
         const isFirstAddress = !ensured.propertyId;
         // A SECONDARY write needs a complete-enough address (city + ZIP) so its
         // dedup key matches a later full-address call — otherwise a partial row
@@ -2176,10 +2184,6 @@ const CallRecordingProcessor = {
         // the review flag above. The first/primary address is recorded regardless.
         const hasFullAddress = !!String(extracted.city || '').trim() && !!String(extracted.zip || '').trim();
         if (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress)) {
-          // Rental signal — works in BOTH shadow and enforce (DRIVES_ROUTING) modes:
-          // the shadow bridge may not have run, so re-derive from the V2 extraction.
-          const isRental = bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
-            || detectRentalSignal({ extracted, callerRelationship: v2Result?.extraction?.caller?.relationship_to_property });
           await customerProperties.recordCallProperty({
             customerId,
             address_line1: extracted.address_line1,

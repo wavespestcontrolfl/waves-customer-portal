@@ -2275,6 +2275,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         }, true);
       }
       const after = { ...before, ...updates };
+      // Phase 1 multi-property: an admin address edit must reach the primary
+      // customer_properties row too — the mirror alone leaves its dedup key stale,
+      // so the properties API + call-pipeline dedup would keep matching the old
+      // address. Best-effort, gated, address-only.
+      if (process.env.GATE_CUSTOMER_PROPERTIES === 'true'
+          && changed.some((f) => ['address_line1', 'address_line2', 'city', 'state', 'zip'].includes(f))) {
+        await require('../services/customer-properties').syncPrimaryAddress(after).catch(() => {});
+      }
       const beforeHasMembership = hasMembership(before);
       const afterHasMembership = hasMembership(after);
       const membershipFieldChanged = membershipDetailsChanged(before, after);
