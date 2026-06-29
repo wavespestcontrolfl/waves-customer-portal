@@ -6698,11 +6698,20 @@ router.put('/:token/accept', async (req, res, next) => {
     // response we must quote the amount actually invoiced — the converter's shared
     // calc applies the discount and the margin-floor clamp, so this always matches.
     const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
-      ? require('../services/estimate-converter').resolveAnnualPrepayInvoiceTotal({
-        baseAnnual: annualPrepayInvoiceAmount,
-        recurringServices: recurringSvcList,
-        estimateData: estData,
-      }).amount
+      ? (() => {
+        const converter = require('../services/estimate-converter');
+        const base = converter.resolveAnnualPrepayInvoiceTotal({
+          baseAnnual: annualPrepayInvoiceAmount,
+          recurringServices: recurringSvcList,
+          estimateData: estData,
+        }).amount;
+        // Commercial prepay is taxed on the taxable pest share — quote the
+        // TAX-INCLUSIVE total so the customer/admin message matches the invoice
+        // + PaymentIntent the converter creates (uses the same blended rate).
+        // Residential prepay is untaxed (rate 0) → base is unchanged.
+        const taxRate = isCommercialAccept ? converter.resolveCommercialPrepayTaxRate(recurringSvcList) : 0;
+        return Math.round(base * (1 + taxRate) * 100) / 100;
+      })()
       : null;
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
     const acceptedFrequencyKey = selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || selectedFrequencyKey;

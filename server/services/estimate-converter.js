@@ -1424,7 +1424,10 @@ const EstimateConverter = {
             ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
           });
           draftInvoiceId = inv?.id || null;
-          draftInvoiceAmount = annualAmount;
+          // Quote the amount actually invoiced/charged (tax-inclusive) so the
+          // customer/admin messaging matches the PaymentIntent. For residential
+          // (untaxed) inv.total === annualAmount, so this is a no-op there.
+          draftInvoiceAmount = inv?.total != null ? Number(inv.total) : annualAmount;
           draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
 
           try {
