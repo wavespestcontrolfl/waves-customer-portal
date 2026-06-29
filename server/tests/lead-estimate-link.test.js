@@ -14,6 +14,7 @@ const {
   markLinkedLeadEstimateAccepted,
   markLinkedLeadEstimateSent,
   convertLeadFromEvent,
+  linkLeadEstimatesToCustomer,
   attributeSelfBooking,
 } = require('../services/lead-estimate-link');
 
@@ -854,5 +855,100 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     const result = await attributeSelfBooking({ customerId: 'c1', attribution: FB_ATTR, customerCreated: true, database });
 
     expect(result).toEqual({ attributed: false, reason: 'error' });
+  });
+});
+
+describe('linkLeadEstimatesToCustomer', () => {
+  // Records each estimates() query chain so we can assert the guard + patch
+  // without a real db. update() resolves to a row count like knex/pg; select()
+  // resolves to the configured tagged rows (the estimate_data.lead_id prefilter).
+  function makeBackfillDb({ rowsUpdated = 1, throwOnUpdate = false, taggedRows = [] } = {}) {
+    const ops = [];
+    function chain(table) {
+      const ctx = { table, wheres: [], patch: null, selected: false };
+      ops.push(ctx);
+      const c = {
+        where: (a) => { ctx.wheres.push(['where', a]); return c; },
+        whereNull: (col) => { ctx.wheres.push(['whereNull', col]); return c; },
+        whereIn: (col, vals) => { ctx.wheres.push(['whereIn', col, vals]); return c; },
+        whereRaw: (sql, b) => { ctx.wheres.push(['whereRaw', sql, b]); return c; },
+        select: async () => { ctx.selected = true; return taggedRows; },
+        update: async (patch) => {
+          if (throwOnUpdate) throw new Error('boom');
+          ctx.patch = patch;
+          return rowsUpdated;
+        },
+      };
+      return c;
+    }
+    const database = (table) => chain(table);
+    return { database, ops };
+  }
+
+  test('attaches the FK-linked estimate, guarded to unowned, and returns the count', async () => {
+    const { database, ops } = makeBackfillDb({ rowsUpdated: 1 });
+    const n = await linkLeadEstimatesToCustomer({
+      database,
+      lead: { id: 'lead-1', estimate_id: 'est-1', phone: '9415550101', email: 'jake@example.com' },
+      customerId: 'cust-9',
+    });
+    expect(n).toBe(1);
+    expect(ops).toHaveLength(1);
+    expect(ops[0].table).toBe('estimates');
+    // Targets the FK estimate and never re-homes an already-owned one.
+    expect(ops[0].wheres).toContainEqual(['where', { id: 'est-1' }]);
+    expect(ops[0].wheres).toContainEqual(['whereNull', 'customer_id']);
+    expect(ops[0].patch.customer_id).toBe('cust-9');
+  });
+
+  test('falls back to the estimate_data.lead_id mirror (exact id, not contact) when there is no FK link', async () => {
+    const taggedRows = [
+      { id: 'est-a', estimate_data: JSON.stringify({ lead_id: 'lead-2' }) },
+      { id: 'est-b', estimate_data: JSON.stringify({ lead_id: 'someone-else' }) },
+    ];
+    const { database, ops } = makeBackfillDb({ rowsUpdated: 1, taggedRows });
+    const n = await linkLeadEstimatesToCustomer({
+      database,
+      // Shares a phone with est-b's lead, but only est-a is tagged with lead-2.
+      lead: { id: 'lead-2', estimate_id: null, phone: '9415550102', email: 'pat@example.com' },
+      customerId: 'cust-7',
+    });
+    expect(n).toBe(1);
+    const update = ops.find((o) => o.patch);
+    // Only the estimate whose estimate_data.lead_id === lead.id is attached.
+    expect(update.wheres).toContainEqual(['whereIn', 'id', ['est-a']]);
+    expect(update.wheres).toContainEqual(['whereNull', 'customer_id']);
+    expect(update.patch.customer_id).toBe('cust-7');
+  });
+
+  test('returns 0 when no FK link and nothing is tagged with the lead id (no contact sweep)', async () => {
+    const taggedRows = [{ id: 'est-x', estimate_data: JSON.stringify({ lead_id: 'unrelated' }) }];
+    const { database, ops } = makeBackfillDb({ taggedRows });
+    const n = await linkLeadEstimatesToCustomer({
+      database,
+      lead: { id: 'lead-3', estimate_id: null, phone: '9415550102', email: 'pat@example.com' },
+      customerId: 'cust-1',
+    });
+    expect(n).toBe(0);
+    // Prefilter ran, but no update (no exact lead-id match).
+    expect(ops.some((o) => o.selected)).toBe(true);
+    expect(ops.some((o) => o.patch)).toBe(false);
+  });
+
+  test('no-ops without a customerId or lead', async () => {
+    const { database, ops } = makeBackfillDb();
+    expect(await linkLeadEstimatesToCustomer({ database, lead: { id: 'l', estimate_id: 'e' }, customerId: null })).toBe(0);
+    expect(await linkLeadEstimatesToCustomer({ database, lead: null, customerId: 'c' })).toBe(0);
+    expect(ops).toHaveLength(0);
+  });
+
+  test('swallows db errors (never breaks the conversion) and returns 0', async () => {
+    const { database } = makeBackfillDb({ throwOnUpdate: true });
+    const n = await linkLeadEstimatesToCustomer({
+      database,
+      lead: { id: 'lead-5', estimate_id: 'est-5' },
+      customerId: 'cust-5',
+    });
+    expect(n).toBe(0);
   });
 });

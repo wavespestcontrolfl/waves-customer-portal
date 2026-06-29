@@ -291,6 +291,51 @@ async function findUnconvertedLeadsByContact(database, phone, email) {
     });
 }
 
+// Backfill `estimates.customer_id` so a lead's quote becomes a customer estimate
+// the moment the lead gets a customer (converted / booked / accepted). Until
+// then a lead estimate carries `customer_id = NULL` and is invisible to the
+// customer-keyed New Appointment "Estimate source" (which queries
+// `estimates.customer_id`) — and EstimateConverter refuses to convert it
+// ("has no linked customer"). Two PRECISE signals only, never a contact sweep
+// (a shared phone/email must not re-home an unrelated quote): the lead's
+// FK-linked estimate (`leads.estimate_id`), then estimates explicitly tagged
+// with this lead's id in `estimate_data.lead_id` (the public-quote mirror).
+// Always guarded to `customer_id IS NULL` so an estimate tied to another
+// customer is never re-homed. Best-effort: a failure here never breaks the
+// conversion. Returns the number of estimates attached.
+async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } = {}) {
+  if (!customerId || !lead) return 0;
+  try {
+    // Primary: the lead's FK-linked estimate — deterministic, zero ambiguity.
+    if (lead.estimate_id) {
+      return await database('estimates')
+        .where({ id: lead.estimate_id })
+        .whereNull('customer_id')
+        .update({ customer_id: customerId, updated_at: new Date() });
+    }
+    // Fallback: estimates explicitly mirroring THIS lead's id in estimate_data
+    // (public-quote leads stamp `estimate_data.lead_id`, not `leads.estimate_id`).
+    // estimate_data is stored as JSON text, so prefilter with a LIKE on the
+    // lead-id substring (a UUID — no LIKE metacharacters) and confirm the exact
+    // value in JS. No phone/email matching — precise lead-id only.
+    const tagged = await database('estimates')
+      .whereNull('customer_id')
+      .whereRaw('estimate_data::text LIKE ?', [`%${lead.id}%`])
+      .select('id', 'estimate_data');
+    const ids = tagged
+      .filter((e) => parseEstimateData(e.estimate_data)?.lead_id === lead.id)
+      .map((e) => e.id);
+    if (!ids.length) return 0;
+    return await database('estimates')
+      .whereIn('id', ids)
+      .whereNull('customer_id')
+      .update({ customer_id: customerId, updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[lead-estimate-link] backfill estimate.customer_id failed for lead ${lead?.id} → customer ${customerId}: ${err.message}`);
+    return 0;
+  }
+}
+
 // Customer-link match — an OPEN lead already attached to the EXACT customer the
 // event is about. Tighter than the contact fallback above: the lead is
 // explicitly tied to this customer (e.g. its `customer_id` was stamped when the
@@ -654,5 +699,6 @@ module.exports = {
   markLinkedLeadEstimateAccepted,
   convertLeadFromEvent,
   findUnconvertedLeadsByContact,
+  linkLeadEstimatesToCustomer,
   attributeSelfBooking,
 };

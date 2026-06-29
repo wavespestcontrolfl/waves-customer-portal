@@ -1333,6 +1333,119 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /:id/schedule-source — one estimate formatted exactly like a
+// /admin/customers/:id/schedule-estimates row, so the New Appointment modal can
+// surface a quote that has NO customer yet (a lead's estimate). This lets the
+// operator schedule a verbal "yes" before the lead is converted; booking then
+// attaches the estimate to the chosen customer (POST /admin/schedule). Returns
+// the estimate's captured contact + lead linkage so the modal can prefill the
+// customer it needs to create.
+router.get('/:id/schedule-source', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates')
+      .where({ id: req.params.id })
+      .whereNull('archived_at')
+      .first(
+        'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
+        'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
+        'bill_by_invoice', 'created_at', 'accepted_at', 'expires_at',
+        'customer_name', 'customer_phone', 'customer_email', 'address',
+      );
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+
+    const { indexServicesForSchedule, scheduleLinesFromEstimate } = require('./admin-customers')._private;
+    const serviceRows = await db('services')
+      .where({ is_active: true })
+      .select(
+        'id', 'service_key', 'name', 'short_name', 'category', 'billing_type',
+        'frequency', 'visits_per_year', 'default_duration_minutes',
+        'base_price', 'price_range_min', 'price_range_max',
+      )
+      .catch(() => []);
+    const serviceIndex = indexServicesForSchedule(serviceRows);
+    const lines = scheduleLinesFromEstimate(estimate, serviceIndex);
+
+    // Already linked to a live appointment?
+    let linked = null;
+    try {
+      linked = await db('scheduled_services')
+        .where({ source_estimate_id: estimate.id })
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .orderBy('scheduled_date', 'asc')
+        .orderBy('window_start', 'asc')
+        .first('id', 'scheduled_date', 'window_start', 'service_type', 'status');
+    } catch { linked = null; }
+
+    let deposit = null;
+    try {
+      const { summarizeEstimateDeposit } = require('../services/estimate-deposits');
+      deposit = await summarizeEstimateDeposit(
+        estimate,
+        linked ? { scheduledServiceId: linked.id, useLinkedFallback: false } : {},
+      );
+    } catch { deposit = null; }
+
+    // Lead linkage — for the modal's customer prefill when there's no customer
+    // yet. Prefer the FK (leads.estimate_id); fall back to the public-quote
+    // mirror in estimate_data.lead_id.
+    let leadId = null;
+    try {
+      const lead = await db('leads').where({ estimate_id: estimate.id }).first('id');
+      leadId = lead?.id || null;
+      if (!leadId) {
+        const data = typeof estimate.estimate_data === 'string'
+          ? (() => { try { return JSON.parse(estimate.estimate_data); } catch { return null; } })()
+          : estimate.estimate_data;
+        leadId = data?.lead_id || null;
+      }
+    } catch { leadId = null; }
+
+    const monthlyTotal = estimate.monthly_total != null ? Number(estimate.monthly_total) : null;
+    const annualTotal = estimate.annual_total != null ? Number(estimate.annual_total) : null;
+    const onetimeTotal = estimate.onetime_total != null ? Number(estimate.onetime_total) : null;
+    // Mirror the customer endpoint: recurring period charge (monthly, or annual
+    // only when there's no monthly) plus any one-time. annual_total is the
+    // annualized monthly, so summing both would double-count.
+    const quotedTotal = (monthlyTotal || annualTotal || 0) + (onetimeTotal || 0);
+
+    const nameParts = String(estimate.customer_name || '').trim().split(/\s+/).filter(Boolean);
+
+    res.json({
+      estimate: {
+        id: estimate.id,
+        token: estimate.token,
+        status: estimate.status,
+        serviceInterest: estimate.service_interest,
+        acceptedAt: estimate.accepted_at,
+        createdAt: estimate.created_at,
+        monthlyTotal,
+        annualTotal,
+        onetimeTotal,
+        quotedTotal,
+        waveguardTier: estimate.waveguard_tier,
+        lines,
+        deposit,
+        linkedAppointment: linked ? {
+          id: linked.id,
+          scheduledDate: linked.scheduled_date,
+          windowStart: linked.window_start,
+          serviceType: linked.service_type,
+          status: linked.status,
+        } : null,
+      },
+      customerId: estimate.customer_id || null,
+      leadId,
+      contact: {
+        firstName: nameParts[0] || '',
+        lastName: nameParts.slice(1).join(' ') || '',
+        phone: estimate.customer_phone || '',
+        email: estimate.customer_email || '',
+        address: estimate.address || '',
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 // POST /:id/archive — tuck an estimate out of the default list. Allowed
 // for sent / viewed / declined / expired / accepted. Drafts can't be
 // archived (they should be deleted instead — DELETE /:id). Archiving a

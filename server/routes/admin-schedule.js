@@ -64,6 +64,21 @@ function finiteNumber(value) {
   return Number.isFinite(num) ? num : null;
 }
 
+// Does an unowned (customer_id NULL) quote's captured contact match the customer
+// we're about to book it against? Compares the last 10 phone digits (phones are
+// stored mixed E.164 / 10-digit) or a lowercased email. Used to gate attaching a
+// lead/standalone estimate to a customer — never pair a quote with a stranger.
+function estimateContactMatchesCustomer(estimate, customer) {
+  if (!estimate || !customer) return false;
+  const digits10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const ep = digits10(estimate.customer_phone);
+  const cp = digits10(customer.phone);
+  if (ep && ep.length === 10 && ep === cp) return true;
+  const ee = String(estimate.customer_email || '').trim().toLowerCase();
+  const ce = String(customer.email || '').trim().toLowerCase();
+  return !!(ee && ee === ce);
+}
+
 async function refreshAnnualPrepayTermsForCustomer(customerId) {
   if (!customerId) return;
   try {
@@ -1658,10 +1673,24 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (linkedEstimateId) {
       linkedEstimate = await db('estimates')
         .where({ id: linkedEstimateId })
-        .first('id', 'customer_id', 'status', 'estimate_data', 'expires_at');
+        .first('id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at');
       if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
-      if (String(linkedEstimate.customer_id || '') !== String(customerId)) {
+      // Reject only a genuine MISMATCH (estimate owned by a different customer).
+      // A lead / standalone quote carries customer_id = NULL — that's bookable:
+      // it gets attached to this customer on book (below) so the customer-keyed
+      // acceptance/conversion can run against them. (EstimateConverter refuses a
+      // null-customer estimate, so the attach must happen before acceptance.)
+      if (linkedEstimate.customer_id && String(linkedEstimate.customer_id) !== String(customerId)) {
         return res.status(400).json({ error: 'Linked estimate belongs to a different customer' });
+      }
+      // An UNOWNED quote can only be paired with a customer it was actually
+      // prepared for: require its captured contact (phone or email) to match the
+      // booking customer BEFORE any rows are created. Without this, a stale
+      // defaultEstimateId or a swapped customer selection could attach (and
+      // accept) any null-customer quote against any customer. Fail-closed: a
+      // quote with no captured contact can't be confidently associated.
+      if (!linkedEstimate.customer_id && !estimateContactMatchesCustomer(linkedEstimate, customer)) {
+        return res.status(400).json({ error: 'This quote was prepared for a different contact. Link it to this customer on the Estimates page before booking from it.' });
       }
       // Gate which statuses may be linked BEFORE any scheduled_services rows are
       // created: an accepted win, or a live open quote the customer can still
@@ -1683,7 +1712,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // only link an already-accepted estimate — an open quote is linked once its
     // acceptance lands, keeping source_estimate_id pointed only at recorded wins.
     const acceptEstimateOnBook = !!(linkedEstimate && linkedEstimate.status !== 'accepted');
-    const insertLinkId = acceptEstimateOnBook ? null : linkedEstimateId;
+    // An UNOWNED quote (customer_id NULL) must be attached to this customer
+    // post-commit before it can carry source_estimate_id — otherwise a lost
+    // attach race would leave the appointment linked to a quote that now belongs
+    // to someone else. Defer linking for it too (covers the already-accepted
+    // unowned case, which acceptEstimateOnBook does not).
+    const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
+    const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
     const zone = getZone(customer?.city, customer?.zip);
     let duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
 
@@ -2001,6 +2036,34 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     });
 
+    // A lead / standalone quote (customer_id was NULL at booking) gets attached
+    // to the customer we just booked — only now that the appointment series is
+    // committed — so it shows under them afterward and the acceptance/conversion
+    // below runs against the right customer. Guarded to customer_id IS NULL so a
+    // concurrent attach can't re-home it. Covers both the accept-on-book and the
+    // already-accepted link path.
+    let estimateAttachRaceLost = false;
+    if (estimateNeedsAttach) {
+      try {
+        const attached = await db('estimates')
+          .where({ id: linkedEstimateId })
+          .whereNull('customer_id')
+          .update({ customer_id: customerId, updated_at: new Date() });
+        if (attached) {
+          linkedEstimate.customer_id = customerId;
+        } else {
+          // 0 rows: the quote was attached to another customer between our
+          // up-front contact check and here. Don't accept it for THIS customer.
+          estimateAttachRaceLost = true;
+          bookingWarnings.push('Appointment booked, but the quote was just linked to another customer — it was not marked accepted here. Re-link it from the Estimates page if needed.');
+        }
+      } catch (e) {
+        estimateAttachRaceLost = true;
+        logger.warn(`[schedule] could not attach estimate ${linkedEstimateId} to customer ${customerId}: ${e.message}`);
+        bookingWarnings.push('Appointment booked, but linking the quote to this customer failed. Open the estimate and re-link it from the Estimates page.');
+      }
+    }
+
     // Record the win for a phone-accepted quote — only now that the appointment
     // series is committed, so a booking failure can never strand an accepted
     // estimate with no visit. Reuse the canonical manual-accept flow so funnel
@@ -2009,8 +2072,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // this booking. Best-effort: estimate shapes that flow intentionally guards
     // (a one-time/recurring choice, invoice-mode, expired, pending manager
     // approval) keep the booked appointment but stay unlinked and surface a
-    // warning, rather than failing the request.
-    if (acceptEstimateOnBook) {
+    // warning, rather than failing the request. Skipped if the attach above lost
+    // a race — accepting would convert the quote against the wrong customer.
+    if (acceptEstimateOnBook && !estimateAttachRaceLost) {
       try {
         const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
         const acceptResult = await markEstimateManuallyAccepted({
@@ -2036,6 +2100,21 @@ router.post('/', requireAdmin, async (req, res, next) => {
       } catch (err) {
         logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
         bookingWarnings.push(`Appointment booked, but the estimate could not be marked accepted automatically (${err.message}). Mark it accepted from the Estimates page to record the win.`);
+      }
+    }
+
+    // An already-accepted but unowned estimate skips the accept-on-book block, so
+    // its source_estimate_id was deferred out of the booking txn (insertLinkId
+    // null). Link the rows now that the customer_id attach has won — never before,
+    // so a lost race can't point the appointment at another customer's quote.
+    if (estimateNeedsAttach && !acceptEstimateOnBook && !estimateAttachRaceLost
+        && cols.source_estimate_id && createdAppointments.length) {
+      try {
+        await db('scheduled_services')
+          .whereIn('id', createdAppointments.map((a) => a.id))
+          .update({ source_estimate_id: linkedEstimateId });
+      } catch (e) {
+        logger.warn(`[schedule] could not link appointment to attached estimate ${linkedEstimateId}: ${e.message}`);
       }
     }
 
