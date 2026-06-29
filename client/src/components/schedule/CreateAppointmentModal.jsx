@@ -388,7 +388,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           if (r?.estimate) {
             list = [r.estimate, ...list];
             const c = r.contact || {};
-            if (!cancelled && !customerId && (c.firstName || c.phone || c.email)) {
+            // Only stage a new customer to create when the quote is genuinely
+            // unowned (r.customerId === null — a lead/standalone estimate). If it
+            // already belongs to a customer, never prefill quick-add: that would
+            // create a duplicate. (Current callers always pass an owned quote's
+            // customer as defaultCustomer, so this is a guard, not a path.)
+            if (!cancelled && !customerId && !r.customerId && (c.firstName || c.phone || c.email)) {
               setQuickAdd((prev) => ({
                 ...prev,
                 firstName: prev.firstName || c.firstName || '',

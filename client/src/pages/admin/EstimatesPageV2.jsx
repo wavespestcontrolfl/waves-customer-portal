@@ -2364,6 +2364,23 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                           </Button>
                         )}
 
+                        {/* Schedule a verbal "yes" before formal acceptance: books
+                            the visit and records the win on book (POST /admin/schedule
+                            accept-on-book). For a lead's quote (no customer yet) the
+                            modal stages the customer from the quote's contact and the
+                            estimate is attached to them on book. */}
+                        {(e.status === "sent" || e.status === "viewed") && !e.archivedAt && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={() => setScheduleEstimate(e)}
+                          >
+                            <CalendarPlus size={14} strokeWidth={1.75} className="mr-1" />
+                            Schedule
+                          </Button>
+                        )}
+
                         {canMarkEstimateWon(e) && (
                           <Button
                             size="sm"

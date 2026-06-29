@@ -296,12 +296,13 @@ async function findUnconvertedLeadsByContact(database, phone, email) {
 // then a lead estimate carries `customer_id = NULL` and is invisible to the
 // customer-keyed New Appointment "Estimate source" (which queries
 // `estimates.customer_id`) — and EstimateConverter refuses to convert it
-// ("has no linked customer"). Attach the lead's FK-linked estimate; if there's
-// no FK link (e.g. a public-quote lead mirrored only in `estimate_data.lead_id`),
-// fall back to the lead's contact among still-unowned estimates. Always guarded
-// to `customer_id IS NULL` so an estimate tied to another customer is never
-// re-homed. Best-effort: a failure here never breaks the conversion. Returns the
-// number of estimates attached.
+// ("has no linked customer"). Two PRECISE signals only, never a contact sweep
+// (a shared phone/email must not re-home an unrelated quote): the lead's
+// FK-linked estimate (`leads.estimate_id`), then estimates explicitly tagged
+// with this lead's id in `estimate_data.lead_id` (the public-quote mirror).
+// Always guarded to `customer_id IS NULL` so an estimate tied to another
+// customer is never re-homed. Best-effort: a failure here never breaks the
+// conversion. Returns the number of estimates attached.
 async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } = {}) {
   if (!customerId || !lead) return 0;
   try {
@@ -312,17 +313,22 @@ async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } =
         .whereNull('customer_id')
         .update({ customer_id: customerId, updated_at: new Date() });
     }
-    // Fallback: match the lead's contact among still-unowned estimates (mirrors
-    // findUnconvertedLeadsByContact's last-10-digit / lowercased-email matching).
-    const np = normalizePhone(lead.phone);
-    const ne = normalizeEmail(lead.email);
-    if (!np && !ne) return 0;
-    return await database('estimates')
+    // Fallback: estimates explicitly mirroring THIS lead's id in estimate_data
+    // (public-quote leads stamp `estimate_data.lead_id`, not `leads.estimate_id`).
+    // estimate_data is stored as JSON text, so prefilter with a LIKE on the
+    // lead-id substring (a UUID — no LIKE metacharacters) and confirm the exact
+    // value in JS. No phone/email matching — precise lead-id only.
+    const tagged = await database('estimates')
       .whereNull('customer_id')
-      .andWhere((qb) => {
-        if (np) qb.orWhereRaw("RIGHT(regexp_replace(COALESCE(customer_phone, ''), '\\D', '', 'g'), 10) = ?", [np]);
-        if (ne) qb.orWhereRaw("LOWER(COALESCE(customer_email, '')) = ?", [ne]);
-      })
+      .whereRaw('estimate_data::text LIKE ?', [`%${lead.id}%`])
+      .select('id', 'estimate_data');
+    const ids = tagged
+      .filter((e) => parseEstimateData(e.estimate_data)?.lead_id === lead.id)
+      .map((e) => e.id);
+    if (!ids.length) return 0;
+    return await database('estimates')
+      .whereIn('id', ids)
+      .whereNull('customer_id')
       .update({ customer_id: customerId, updated_at: new Date() });
   } catch (err) {
     logger.warn(`[lead-estimate-link] backfill estimate.customer_id failed for lead ${lead?.id} → customer ${customerId}: ${err.message}`);
