@@ -519,16 +519,17 @@ async function convertLeadFromEvent({
 const LEAD_CLICK_ID_MAX = { gclid: 200, wbraid: 255, gbraid: 255, fbclid: 255, fbc: 255, fbp: 255 };
 const LEAD_CLICK_ID_COLUMNS = Object.keys(LEAD_CLICK_ID_MAX);
 
-// An ad touch = a real UTM or a real click id. _fbc COUNTS: it is Meta's
-// persisted click id (fb.1.<ts>.<fbclid>) and is the match key when the URL
-// fbclid has fallen off by booking time — same rule as the lead-webhook's
-// determineLeadSource. A bare _fbp does NOT count (Meta sets it on every visit,
-// organic included), nor does a referrer/landing alone.
-function attributionHasAdTracking(attribution) {
+// A self-booking is minted as a paid lead ONLY on a deterministic paid click id:
+// Google gclid/wbraid/gbraid or Meta fbclid/_fbc — these are appended only on an
+// ad click. _fbc counts (Meta's persisted click id fb.1.<ts>.<fbclid>, the match
+// key when the URL fbclid has fallen off by booking time). A bare UTM is NOT
+// enough — newsletters/organic/referral links carry UTMs too — and the ambient
+// _fbp cookie (Meta sets it on every pixel visit, organic included) is NEVER a
+// trigger; it is kept only as an auxiliary CAPI match key alongside a real click
+// id. Mirrors the paid-click rule in the lead-webhook's determineLeadSource.
+function attributionHasPaidClickId(attribution) {
   if (!attribution || typeof attribution !== 'object') return false;
-  const utm = attribution.utm;
-  const hasUtm = utm && typeof utm === 'object' && Object.values(utm).some(Boolean);
-  return !!(hasUtm || attribution.gclid || attribution.wbraid || attribution.gbraid
+  return !!(attribution.gclid || attribution.wbraid || attribution.gbraid
     || attribution.fbclid || attribution.fbc);
 }
 
@@ -550,8 +551,8 @@ async function attributeSelfBooking({
   database = db,
 }) {
   try {
-    if (!customerId || !attributionHasAdTracking(attribution)) {
-      return { attributed: false, reason: 'no_ad_tracking' };
+    if (!customerId || !attributionHasPaidClickId(attribution)) {
+      return { attributed: false, reason: 'no_paid_click_id' };
     }
     const clickIds = clickIdColumnsFromAttribution(attribution);
     if (!Object.keys(clickIds).length) return { attributed: false, reason: 'no_click_ids' };

@@ -796,16 +796,31 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     expect(ppc.row.gclid).toHaveLength(200);
   });
 
-  test('does NOT mint when the touch carries no ad tracking (a bare _fbp cookie is not a tracked click)', async () => {
+  test('does NOT mint when the touch carries no deterministic click id (a bare _fbp cookie is not a click)', async () => {
     const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
 
     const result = await attributeSelfBooking({
       customerId: 'c1',
       attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fb.1.x.ambient' },
+      customerCreated: true,
       database,
     });
 
-    expect(result).toEqual({ attributed: false, reason: 'no_ad_tracking' });
+    expect(result).toEqual({ attributed: false, reason: 'no_paid_click_id' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('does NOT mint on a non-ad UTM + ambient _fbp (newsletter/organic must not become a paid won lead)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { utm: { source: 'newsletter', medium: 'email', campaign: 'june' }, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fb.1.x.ambient' },
+      customerCreated: true,
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'no_paid_click_id' });
     expect(database._inserted).toEqual([]);
   });
 
