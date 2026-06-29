@@ -6503,12 +6503,46 @@ router.put('/:token/accept', async (req, res, next) => {
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
     }
-    const effectiveMonthlyTotal = selectedFrequency?.monthly != null
-      ? Number(selectedFrequency.monthly)
-      : Number(estimate.monthly_total || 0);
-    const effectiveAnnualTotal = selectedFrequency?.annual != null
-      ? Number(selectedFrequency.annual)
-      : Number(estimate.annual_total || 0);
+    // Per-service cadence: in a bundle the customer may pick each selectable
+    // service's cadence independently. `serviceCadences` maps a service key to
+    // its chosen tier key; the matching precomputed combo carries the
+    // authoritative total (priced through the same shapeFromV1 path the view
+    // showed, so accepted == shown == billed — no client-trusted price).
+    const serviceCadences = (() => {
+      const raw = req.body?.serviceCadences;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+      const out = {};
+      for (const [k, v] of Object.entries(raw)) {
+        if (typeof v === 'string' && v.trim()) out[String(k)] = v.trim();
+      }
+      return Object.keys(out).length ? out : null;
+    })();
+    const serviceCadenceCombos = Array.isArray(pricingBundle?.serviceCadenceCombos)
+      ? pricingBundle.serviceCadenceCombos
+      : [];
+    let selectedCombo = null;
+    if (!treatAsOneTime && serviceCadences && serviceCadenceCombos.length) {
+      const requestedNonPest = Object.keys(serviceCadences);
+      selectedCombo = serviceCadenceCombos.find((c) => {
+        const sel = c.selection || {};
+        // Requested non-pest selections must match exactly (no more, no less).
+        const comboNonPest = Object.keys(sel).filter((k) => k !== 'pest_control');
+        if (comboNonPest.length !== requestedNonPest.length) return false;
+        if (!requestedNonPest.every((k) => sel[k] === serviceCadences[k])) return false;
+        // If the combo carries a pest axis, the chosen pest cadence must match.
+        if (sel.pest_control) return sel.pest_control === selectedFrequencyKey;
+        return true;
+      }) || null;
+      if (!selectedCombo) {
+        return res.status(400).json({ error: 'selected service cadence combination is not available for this estimate' });
+      }
+    }
+    const effectiveMonthlyTotal = selectedCombo?.monthly != null
+      ? Number(selectedCombo.monthly)
+      : (selectedFrequency?.monthly != null ? Number(selectedFrequency.monthly) : Number(estimate.monthly_total || 0));
+    const effectiveAnnualTotal = selectedCombo?.annual != null
+      ? Number(selectedCombo.annual)
+      : (selectedFrequency?.annual != null ? Number(selectedFrequency.annual) : Number(estimate.annual_total || 0));
     const annualPrepayInvoiceAmount = annualPrepaySelected
       ? resolveAnnualPrepayInvoiceAmount(effectiveAnnualTotal, effectiveMonthlyTotal)
       : null;
@@ -6528,12 +6562,29 @@ router.put('/:token/accept', async (req, res, next) => {
     const acceptedServiceTierKey = selectedFrequency?.billingFrequencyKey ? selectedFrequency.key : null;
     const acceptedSchedulingFrequencyKey = acceptedServiceTierKey || acceptedFrequencyKey;
     const selectedServiceTierBillsMonthly = !!acceptedServiceTierKey && acceptedFrequencyKey === 'monthly';
-    const acceptedEstDataForPricing = selectedFrequency
+    let acceptedEstDataForPricing = selectedFrequency
       ? applySelectedLawnTierToEstimateData(
           applySelectedTreeShrubTierToEstimateData(estData, selectedFrequency),
           selectedFrequency,
         )
       : estData;
+    // Per-service cadence: rewrite each independently-selected non-pest tier into
+    // the recurring rows so the converter schedules + bills each service at its
+    // chosen cadence (lawn / tree have apply-helpers; see NON_PEST_RESULT_ROWS).
+    if (selectedCombo && serviceCadences) {
+      const rDisc = Number(estData?.result?.recurring?.discount) || 0;
+      for (const [svcKey, tierKey] of Object.entries(serviceCadences)) {
+        const svcRow = recurringSvcList.find((s) => recurringServiceKey(s) === svcKey);
+        const ladder = bundleSectionLadderForService(svcKey, acceptedEstDataForPricing, svcRow || { service: svcKey }, rDisc);
+        const tierEntry = ladder && ladder.find((e) => e.key === tierKey);
+        if (!tierEntry) continue;
+        if (svcKey === 'lawn_care') {
+          acceptedEstDataForPricing = applySelectedLawnTierToEstimateData(acceptedEstDataForPricing, tierEntry);
+        } else if (svcKey === 'tree_shrub') {
+          acceptedEstDataForPricing = applySelectedTreeShrubTierToEstimateData(acceptedEstDataForPricing, tierEntry);
+        }
+      }
+    }
     if (acceptedEstDataForPricing !== estData) {
       const acceptedLists = acceptanceServiceLists(acceptedEstDataForPricing);
       recurringSvcList = acceptedLists.recurringSvcList;
@@ -6655,6 +6706,10 @@ router.put('/:token/accept', async (req, res, next) => {
           billingAmount: effectiveBillingCadence.amount,
           billingIntervalMonths: effectiveBillingCadence.intervalMonths,
           billingPeriodLabel: effectiveBillingCadence.periodLabel,
+          // Per-service cadence choices (lawn/tree) when the customer set them
+          // independently — recorded for the receipt/admin; the chosen tiers are
+          // already rewritten into the recurring rows for scheduling/billing.
+          ...(serviceCadences ? { serviceCadences } : {}),
           selectedAt: new Date().toISOString(),
         };
         const persistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData);
@@ -10501,10 +10556,14 @@ function buildServiceSection({ key, category, label, isRecurring, isPest, freque
 //
 // Non-pest per-tier prices come from the stored cost-floor tier rows
 // (result.results.lawn / .ts / .mq) — the same rows the cadence extractors read.
+// Only services with an applySelected*TierToEstimateData helper can be made
+// independently selectable — accept rewrites the chosen tier into the recurring
+// rows so the converter schedules + bills at that cadence. Lawn + Tree/Shrub
+// have that today; mosquito is a fast-follow (needs a mosquito apply-helper) and
+// keeps its current bundle behavior until then.
 const NON_PEST_RESULT_ROWS = {
   lawn_care: ['lawn', lawnTierKey],
   tree_shrub: ['ts', treeShrubTierKey],
-  mosquito: ['mq', mosquitoTierKey],
 };
 
 // serviceKey -> { tierKey -> { mo, ann, pa, v, recommended, selected } } from the
@@ -10624,7 +10683,6 @@ function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false } 
 const BUNDLE_SECTION_EXTRACTOR = {
   lawn_care: lawnFrequenciesFromResultStats,
   tree_shrub: treeShrubFrequenciesFromResultStats,
-  mosquito: mosquitoFrequenciesFromResultStats,
 };
 function bundleSectionLadderForService(serviceKey, estData, recurringService, recurringDiscount) {
   const extractor = BUNDLE_SECTION_EXTRACTOR[serviceKey];
