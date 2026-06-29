@@ -585,7 +585,12 @@ function generateEstimate(input) {
       // the "estimated, confirmed on site" disclaimer. FL-taxed. No size cap, no
       // manual-quote fallback. (One-time commercial pest stays manual below.)
       const result = priceCommercialPest(property, { commercialSubtype });
-      if (!lineItems.some((line) => line.service === result.service)) {
+      if (result.quoteRequired) {
+        // No real building footprint to size interior treatment — priceCommercialPest
+        // returns a manual quote. Route through the canonical manual path so it
+        // surfaces as a quote-required spec item (not a priced/active service).
+        addCommercialManualQuote('pest_control');
+      } else if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
         activeServiceKeys.push('commercial_pest');
       }

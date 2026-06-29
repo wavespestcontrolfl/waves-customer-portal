@@ -668,7 +668,11 @@ function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscount
   const invoiceTotal = rows.reduce((sum, svc) => sum + postDiscount(svc), 0);
   if (!(invoiceTotal > 0)) return 0;
   const taxableTotal = rows.filter(isTaxableCommercial).reduce((sum, svc) => sum + postDiscount(svc), 0);
-  return Math.round((taxableTotal * FL_COMMERCIAL_TAX_RATE) / invoiceTotal * 10000) / 10000;
+  // FULL precision — InvoiceService multiplies invoiceTotal by this rate and
+  // rounds the resulting tax DOLLARS to cents. Rounding the rate here (e.g. to 4
+  // dp) would drop the tax to $0 or drift by dollars when the taxable pest share
+  // is small, so don't.
+  return (taxableTotal * FL_COMMERCIAL_TAX_RATE) / invoiceTotal;
 }
 
 function isNonDiscountableRecurringLine(item = {}) {

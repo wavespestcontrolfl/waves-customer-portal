@@ -456,4 +456,16 @@ describe('commercial prepay blended tax rate (taxable pest share only)', () => {
     expect(resolveCommercialPrepayTaxRate([])).toBe(0);
     expect(resolveCommercialPrepayTaxRate([{ service: 'commercial_pest', annual: 0 }])).toBe(0);
   });
+
+  test('full-precision rate: a tiny taxable share still produces the right tax dollars', () => {
+    // pest $50 of $50,050 → share ~0.000999 → rate ~0.0000699. Rounding the rate
+    // to 4 dp would drop the tax; full precision keeps it. (Regression for the
+    // PR bot's rate-rounding P1.)
+    const rate = resolveCommercialPrepayTaxRate([
+      { service: 'commercial_pest', annual: 50, taxable: true },
+      { service: 'commercial_lawn', annual: 50000, taxable: false },
+    ]);
+    // InvoiceService computes tax = round(invoiceTotal * rate) → exactly 7% of $50.
+    expect(Math.round(50050 * rate * 100) / 100).toBe(3.5);
+  });
 });

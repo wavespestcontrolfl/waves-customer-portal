@@ -2504,16 +2504,47 @@ function resolveCommercialPestFootprint(property = {}) {
     footprint,
     perimeter,
     footprintSource: res.source,
-    // A defaulted footprint (no usable building size) is lower confidence but
-    // still prices — commercial is "confirmed on site" anyway.
-    estimated: res.wasDefaulted === true,
+    // True when resolvePestFootprint fell back to its 2,000 sqft default — i.e.
+    // NO usable building size was supplied. Commercial pest prices off the
+    // BUILDING footprint (interior treatment), which (unlike turf/bed) is NOT
+    // lot-derivable, so a defaulted footprint can't auto-price (see below).
+    defaulted: res.wasDefaulted === true,
   };
 }
 
 function priceCommercialPest(property = {}, options = {}) {
   const cfg = COMMERCIAL_PEST;
-  const { footprint, perimeter, footprintSource, estimated } = resolveCommercialPestFootprint(property);
+  const { footprint, perimeter, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
   const visits = cfg.programVisits;
+
+  // No real building size → DON'T auto-price (and bill/prepay) off the 2,000 sqft
+  // fallback, which is unrelated to the actual building. Fall back to a manual
+  // quote until a building/home/footprint sqft is provided. (Lawn/tree are
+  // lot-derivable so they still auto-price; pest is not.)
+  if (defaulted) {
+    return {
+      service: 'commercial_pest',
+      name: 'Commercial Pest Control',
+      originalRequestedService: 'pest_control',
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+      commercialPricingMode: 'manual_quote',
+      estimatedPricing: false,
+      quoteRequired: true,
+      requiresManualReview: true,
+      autoQuoteRequiresAdminApproval: true,
+      manualReviewReasons: ['commercial_pest_missing_building_footprint'],
+      detail: 'Commercial pest pricing needs the building size — your Waves account manager will confirm the quote.',
+      taxable: cfg.taxable,
+      taxCategory: cfg.taxCategory,
+      price: null,
+      monthly: null,
+      annual: null,
+      perApp: null,
+      pricingConfidence: 'LOW',
+    };
+  }
 
   const materialPerVisit = cfg.materialPerVisitBase
     + cfg.materialPerKSqFtPerVisit * (footprint / 1000);
@@ -2534,7 +2565,7 @@ function priceCommercialPest(property = {}, options = {}) {
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
-  const pricingConfidence = (footprint > cfg.lowConfidenceFootprintSf || estimated) ? 'LOW' : 'MEDIUM';
+  const pricingConfidence = footprint > cfg.lowConfidenceFootprintSf ? 'LOW' : 'MEDIUM';
 
   return {
     service: 'commercial_pest',
@@ -2557,7 +2588,7 @@ function priceCommercialPest(property = {}, options = {}) {
     footprint,
     footprintUsed: footprint,
     footprintSource,
-    footprintEstimated: estimated,
+    footprintEstimated: false,
     perimeter: roundMoney(perimeter),
     frequency: visits,
     visitsPerYear: visits,

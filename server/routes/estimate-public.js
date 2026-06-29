@@ -6713,7 +6713,10 @@ router.put('/:token/accept', async (req, res, next) => {
         const taxRate = isCommercialAccept
           ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0 })
           : 0;
-        return Math.round(base * (1 + taxRate) * 100) / 100;
+        // Mirror InvoiceService EXACTLY: tax dollars rounded to cents, then added
+        // to the base — so the messaged amount equals inv.total to the cent.
+        const tax = Math.round(base * taxRate * 100) / 100;
+        return Math.round((base + tax) * 100) / 100;
       })()
       : null;
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);

@@ -189,6 +189,31 @@ describe('priceCommercialPest — cost-buildup auto-pricer', () => {
     expect(pest.annual).toBeGreaterThan(0);
     expect(pest.footprint).toBeGreaterThan(0);
   });
+
+  test('falls back to a MANUAL quote when no real building footprint is available', () => {
+    // Direct call: no building/home/footprint → resolvePestFootprint defaults to
+    // 2,000 sqft, which must NOT auto-price (it would bill below the real
+    // building). (Regression for the PR bot's P0.)
+    const r = priceCommercialPest({ lotSqFt: 40000 });
+    expect(r.quoteRequired).toBe(true);
+    expect(r.requiresManualReview).toBe(true);
+    expect(r.estimatedPricing).toBe(false);
+    expect(r.annual).toBeNull();
+    expect(r.manualReviewReasons).toContain('commercial_pest_missing_building_footprint');
+  });
+
+  test('a lot-only commercial pest estimate routes to a manual quote, not a priced line', () => {
+    const est = generateEstimate({
+      propertyType: 'commercial',
+      lotSqFt: 40000,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const pest = est.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(pest).toBeTruthy();
+    expect(pest.quoteRequired).toBe(true);
+    // Not an active/priced service.
+    expect(est.waveGuard.activeServices).not.toContain('commercial_pest');
+  });
 });
 
 describe('generateEstimate — commercial integration', () => {
