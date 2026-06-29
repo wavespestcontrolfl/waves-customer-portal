@@ -22,7 +22,10 @@ const PRODUCT = {
   active: true,
   active_ingredient: 'Penthiopyrad',
   formulation: 'WDG',
-  epa_reg_number: '100-1241', // Syngenta Velista WDG (column is NOT NULL); verify
+  // products_catalog.epa_reg_number is NOT NULL. Seed the codebase placeholder
+  // ('N/A', the convention from 20260517000004) rather than an unverified reg on
+  // a compliance-output field; owner sets the label-verified reg in the catalog.
+  epa_reg_number: 'N/A',
   frac_group: '7',
   analysis_n: 0,
   analysis_p: 0,
@@ -66,17 +69,15 @@ exports.up = async function up(knex) {
   // never adopt or clobber a pre-existing mapping owned by another product).
   if (productId && (await knex.schema.hasTable('product_aliases'))) {
     for (const aliasName of ['Velista SC', 'Velista WDG']) {
-      const exists = await knex('product_aliases').where({ alias_name: aliasName }).first().catch(() => null);
+      const exists = await knex('product_aliases').where({ alias_name: aliasName }).first();
       if (!exists) {
-        await knex('product_aliases')
-          .insert({
-            product_id: productId,
-            alias_name: aliasName,
-            vendor_id: null,
-            created_at: knex.fn.now(),
-            updated_at: knex.fn.now(),
-          })
-          .catch(() => {});
+        await knex('product_aliases').insert({
+          product_id: productId,
+          alias_name: aliasName,
+          vendor_id: null,
+          created_at: knex.fn.now(),
+          updated_at: knex.fn.now(),
+        });
       }
     }
   }
@@ -87,8 +88,7 @@ exports.up = async function up(knex) {
     await knex('lawn_protocol_products')
       .where({ product_name: 'Velista' })
       .whereNull('product_id')
-      .update({ product_id: productId, updated_at: knex.fn.now() })
-      .catch(() => {});
+      .update({ product_id: productId, updated_at: knex.fn.now() });
   }
 
   // Backfill corrected FRAC groups on existing catalog rows (PR #2205 relabel):
@@ -96,8 +96,7 @@ exports.up = async function up(knex) {
   for (const [name, frac] of [['Medallion SC', '12'], ['Torque SC', '3']]) {
     await knex('products_catalog')
       .where({ name })
-      .update({ frac_group: frac, updated_at: knex.fn.now() })
-      .catch(() => {});
+      .update({ frac_group: frac, updated_at: knex.fn.now() });
   }
 };
 
