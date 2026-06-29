@@ -688,11 +688,14 @@ function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscount
 // the transaction connection when resolving inside the accept trx so the
 // just-written property_type='commercial' is visible. Fails soft to the FL
 // default so a lookup hiccup never blocks acceptance.
-async function resolveCommercialPrepayBaseRate(customerId, { database } = {}) {
+async function resolveCommercialPrepayBaseRate(customerId, { database, forceCommercial = true } = {}) {
   if (!customerId) return FL_COMMERCIAL_TAX_RATE;
   try {
     const TaxCalculator = require('./tax-calculator');
-    const result = await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 1, { database });
+    // forceCommercial: we KNOW this is a commercial accept; resolve the commercial
+    // rate even if the customer row isn't marked commercial yet (pre-accept
+    // display, or a residential→commercial upgrade), so display == invoice.
+    const result = await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 1, { database, isCommercial: forceCommercial });
     if (result && result.taxable === false) return 0; // exemption / non-taxable
     const rate = Number(result?.rate);
     return Number.isFinite(rate) && rate >= 0 ? rate : FL_COMMERCIAL_TAX_RATE;
@@ -1484,7 +1487,11 @@ const EstimateConverter = {
               prepayInvoiceId: draftInvoiceId,
               planLabel: `${prepayPlanPrefix} Annual Prepay`,
               monthlyRate: termMonthlyRate,
-              prepayAmount: annualAmount,
+              // The TAX-INCLUSIVE invoice total (what the customer actually pays).
+              // Admin/portal read the term's prepayAmount as the paid amount and
+              // coverage stamping splits it across visits. Residential is untaxed
+              // so draftInvoiceAmount === annualAmount there.
+              prepayAmount: draftInvoiceAmount,
               termStart: termStartDate || null,
               conn: database,
             });

@@ -36,8 +36,12 @@ const TaxCalculator = {
       return { rate: 0, amount: 0, taxable: false, county: null, reason: `Tax exempt — ${exemption.exemption_type} (${exemption.certificate_number})` };
     }
 
-    // 2. Check service taxability
-    const isCommercial = customer.property_type === 'commercial' || customer.property_type === 'business';
+    // 2. Check service taxability. opts.isCommercial forces commercial treatment
+    // for a customer who will be marked commercial at accept but whose row isn't
+    // updated yet (e.g. pre-accept prepay DISPLAY) — so the quoted rate matches
+    // the invoice the converter creates once the row is commercial.
+    const isCommercial = opts.isCommercial === true
+      || customer.property_type === 'commercial' || customer.property_type === 'business';
 
     if (serviceType) {
       // Normalize service type to key format
