@@ -100,4 +100,25 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     expect(deriveCallReviewBridge()).toEqual({ normalizedAddress: null, needsConfirmation: [] });
     expect(deriveCallReviewBridge({})).toEqual({ normalizedAddress: null, needsConfirmation: [] });
   });
+
+  test.each(['tenant', 'property_manager'])('caller relationship %s → rental_or_tenant_occupied', (rel) => {
+    const out = deriveCallReviewBridge({ extracted: { first_name: 'Sam', last_name: 'Lee', lead_quality: 'warm' }, callerRelationship: rel });
+    expect(out.needsConfirmation).toContain('rental_or_tenant_occupied');
+  });
+
+  test('owner calling about their tenants (Raymond call 1) → rental flag via text', () => {
+    const out = deriveCallReviewBridge({
+      extracted: { first_name: 'Raymond', last_name: 'Bivona', lead_quality: 'hot', pain_points: 'my tenants are having an ant problem' },
+      callerRelationship: 'owner',
+    });
+    expect(out.needsConfirmation).toContain('rental_or_tenant_occupied');
+  });
+
+  test('owner-occupied home, no tenant language → NOT flagged rental', () => {
+    const out = deriveCallReviewBridge({
+      extracted: { first_name: 'Raymond', last_name: 'Bivona', lead_quality: 'warm', pain_points: 'wants every-other-month maintenance at my house' },
+      callerRelationship: 'owner',
+    });
+    expect(out.needsConfirmation).not.toContain('rental_or_tenant_occupied');
+  });
 });

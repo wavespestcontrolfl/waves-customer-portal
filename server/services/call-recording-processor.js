@@ -74,8 +74,13 @@ const CONFIRM_REASON_TEXT = {
   out_of_service_area: 'address resolves outside the service area — verify the county',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
+  rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
+  second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
+// Normalized street comparison (case/space/punctuation-insensitive) — "12338
+// Amber Creek" != "12398 Amber Creek", but "Ambercreek" == "Amber Creek".
+const normStreet = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 function twilioClient() {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
@@ -1856,6 +1861,7 @@ const CallRecordingProcessor = {
           addressValidation: v2AddressValidation,
           extracted,
           v2TriageFlags: v2Result?.extraction?.triage_flags,
+          callerRelationship: v2Result?.extraction?.caller?.relationship_to_property,
         });
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
@@ -2012,6 +2018,27 @@ const CallRecordingProcessor = {
         }
       } else if (!extracted.first_name) {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
+      }
+    }
+
+    // Lightweight multi-property signal: a returning caller gave a service
+    // address that differs from the one already on their customer record (the
+    // one-address-per-customer model can't hold both, and the upsert above only
+    // fills an EMPTY address — so a second address would otherwise be dropped
+    // silently). We do NOT overwrite (can't tell which is primary) — flag it so
+    // the office can decide if it's a second property, e.g. a landlord's rental
+    // vs. their own home. Skips brand-new customers (their address IS this call's).
+    if (customerId && !createdCustomerFromCall && extracted.address_line1) {
+      try {
+        const existingCust = await db('customers').where({ id: customerId }).select('address_line1').first();
+        const onFile = normStreet(existingCust?.address_line1);
+        const fromCall = normStreet(extracted.address_line1);
+        if (onFile && fromCall && onFile !== fromCall && !bridgeNeedsConfirmation.includes('second_service_address')) {
+          bridgeNeedsConfirmation.push('second_service_address');
+          logger.info(`[call-proc-bridge] ${callSid} service address differs from customer record (possible second property)`);
+        }
+      } catch (e) {
+        logger.warn(`[call-proc-bridge] second-address check skipped for ${maskSid(callSid)}: ${e.message}`);
       }
     }
 

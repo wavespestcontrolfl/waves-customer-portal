@@ -332,7 +332,7 @@ function canAutoRoute(extraction, opts = {}) {
  *     missing surname on a real (hot/warm) prospect.
  * Pure: no side effects. The caller mutates `extracted` and persists the reasons.
  */
-function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [] } = {}) {
+function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [], callerRelationship = null } = {}) {
   const av = addressValidation || null;
   const status = av && av.status ? av.status : null;
   const hadStreet = !!String(extracted.address_line1 || '').trim();
@@ -359,6 +359,19 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   if (extracted.first_name && !String(extracted.last_name || '').trim()
       && (extracted.lead_quality === 'hot' || extracted.lead_quality === 'warm')) {
     needsConfirmation.push('missing_last_name');
+  }
+
+  // Rental / tenant-occupied property — a non-owner-occupant caller (tenant /
+  // property manager) OR an owner calling about their tenants ("my tenants have
+  // ants"). Flagged so the office can plan property access (occupant != owner)
+  // and decide whether to tag it a rental, since the customer model has no
+  // owner-occupied vs. rental field.
+  const rel = String(callerRelationship || '').toLowerCase();
+  const tenantText = /\b(tenants?|renters?|rental|landlord)\b/i.test(
+    `${extracted.pain_points || ''} ${extracted.call_summary || ''} ${extracted.requested_service || ''}`
+  );
+  if (rel === 'tenant' || rel === 'property_manager' || tenantText) {
+    needsConfirmation.push('rental_or_tenant_occupied');
   }
 
   return { normalizedAddress, needsConfirmation };

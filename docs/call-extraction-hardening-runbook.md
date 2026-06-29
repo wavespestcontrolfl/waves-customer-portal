@@ -30,6 +30,20 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
 - **Identity signals** on real (hot/warm) prospects — `caller_not_authorized`
   (caller arranging service for someone else, e.g. Elaine for her fiancé Martin)
   and a missing surname are added to the same `needs_confirmation` list.
+- **Multi-property / occupancy signals** (the customer model is one-address-per-
+  profile, with no rental/primary field):
+  - `rental_or_tenant_occupied` — a tenant / property-manager caller, or an owner
+    calling about their tenants ("my tenants have ants"). Office plans property
+    access and decides whether to tag it a rental.
+  - `second_service_address` — a returning caller gave a service address that
+    differs from the one on their customer record (e.g. a landlord's rental at
+    12338 vs. their own home at 12398). The address is NOT overwritten — flagged
+    so the office captures the second property instead of dropping it.
+
+Spelled-out names/emails are now authoritative in both extraction prompts: when a
+caller spells "B-I-V-O-N-A" / "V as in Victor", the spelled letters win over the
+phonetic word ("Bavona"), and "first name dot last name" emails are built from the
+spelled parts — so estimates stop bouncing on a misheard address.
 
 Decision logic is the pure, unit-tested `deriveCallReviewBridge()` in
 `server/services/call-triage-flags.js`. The bridge **auto-disables** the moment
