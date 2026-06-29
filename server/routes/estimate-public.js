@@ -6700,16 +6700,19 @@ router.put('/:token/accept', async (req, res, next) => {
     const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
       ? (() => {
         const converter = require('../services/estimate-converter');
-        const base = converter.resolveAnnualPrepayInvoiceTotal({
+        const resolved = converter.resolveAnnualPrepayInvoiceTotal({
           baseAnnual: annualPrepayInvoiceAmount,
           recurringServices: recurringSvcList,
           estimateData: estData,
-        }).amount;
+        });
+        const base = resolved.amount;
         // Commercial prepay is taxed on the taxable pest share — quote the
         // TAX-INCLUSIVE total so the customer/admin message matches the invoice
-        // + PaymentIntent the converter creates (uses the same blended rate).
-        // Residential prepay is untaxed (rate 0) → base is unchanged.
-        const taxRate = isCommercialAccept ? converter.resolveCommercialPrepayTaxRate(recurringSvcList) : 0;
+        // + PaymentIntent the converter creates (uses the same blended rate +
+        // post-discount allocation). Residential prepay is untaxed (rate 0).
+        const taxRate = isCommercialAccept
+          ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0 })
+          : 0;
         return Math.round(base * (1 + taxRate) * 100) / 100;
       })()
       : null;

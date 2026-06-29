@@ -647,19 +647,28 @@ const FL_COMMERCIAL_TAX_RATE = 0.07;
 // per-service taxability, and InvoiceService taxes the whole invoice at ONE
 // rate — but a commercial plan mixes TAXABLE pest (nonresidential_pest_control)
 // with NON-TAXABLE lawn/tree (lawn_spraying_or_treatment). Return a BLENDED rate
-// that taxes only the taxable share: pest-only → 0.07, lawn/tree-only → 0,
-// mixed → proportional. Keyed off the service (commercial_pest) as well as the
-// taxable flag so a dropped flag on a save-path still taxes correctly.
-function resolveCommercialPrepayTaxRate(recurringServices = []) {
+// (taxAmount = invoiceTotal × rate) that taxes only the taxable share: pest-only
+// → 0.07, lawn/tree-only → 0, mixed → proportional. Keyed off the service
+// (commercial_pest) as well as the taxable flag so a dropped flag on a save-path
+// still taxes correctly. The rate is computed against POST-DISCOUNT line
+// allocations: the prepay discount hits only discountable lines (a
+// non-discountable line like foam_recurring stays full price), so a pre-discount
+// ratio would mis-tax a mixed plan that includes one.
+function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscountApplied = false } = {}) {
   const rows = Array.isArray(recurringServices) ? recurringServices : [];
-  const totalAnnual = rows.reduce((sum, svc) => sum + recurringLineAnnualAmount(svc), 0);
-  if (!(totalAnnual > 0)) return 0;
+  const discountRate = prepayDiscountApplied ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
   const isTaxableCommercial = (svc) =>
     svc?.taxable === true || recurringServiceKey(svc) === 'commercial_pest';
-  const taxableAnnual = rows
-    .filter(isTaxableCommercial)
-    .reduce((sum, svc) => sum + recurringLineAnnualAmount(svc), 0);
-  return Math.round((taxableAnnual / totalAnnual) * FL_COMMERCIAL_TAX_RATE * 10000) / 10000;
+  // Each line's contribution to the post-discount invoice total: discountable
+  // lines take the prepay discount, non-discountable lines stay full price.
+  const postDiscount = (svc) => {
+    const annual = recurringLineAnnualAmount(svc);
+    return isNonDiscountableRecurringLine(svc) ? annual : annual * (1 - discountRate);
+  };
+  const invoiceTotal = rows.reduce((sum, svc) => sum + postDiscount(svc), 0);
+  if (!(invoiceTotal > 0)) return 0;
+  const taxableTotal = rows.filter(isTaxableCommercial).reduce((sum, svc) => sum + postDiscount(svc), 0);
+  return Math.round((taxableTotal * FL_COMMERCIAL_TAX_RATE) / invoiceTotal * 10000) / 10000;
 }
 
 function isNonDiscountableRecurringLine(item = {}) {
@@ -1408,7 +1417,7 @@ const EstimateConverter = {
           // → stays residential-exempt ($0). The customer was marked
           // property_type='commercial' above, so InvoiceService honors this rate.
           const prepayTaxRate = hasCommercialRecurring
-            ? resolveCommercialPrepayTaxRate(recurringServicesForConversion)
+            ? resolveCommercialPrepayTaxRate(recurringServicesForConversion, { prepayDiscountApplied })
             : undefined;
           const inv = await InvoiceService.create({
             database,

@@ -415,6 +415,35 @@ describe('commercial prepay blended tax rate (taxable pest share only)', () => {
     expect(Math.round(10000 * rate * 100) / 100).toBe(140);
   });
 
+  test('all-discountable mix: the prepay discount cancels out (same rate pre/post-discount)', () => {
+    // pest + lawn both discountable → both ×0.95, so the taxable share is
+    // unchanged by the discount. 2000/10000 → 0.014.
+    const rate = resolveCommercialPrepayTaxRate(
+      [
+        { service: 'commercial_pest', annual: 2000, taxable: true },
+        { service: 'commercial_lawn', annual: 8000, taxable: false },
+      ],
+      { prepayDiscountApplied: true },
+    );
+    expect(rate).toBeCloseTo(0.014, 4);
+  });
+
+  test('taxable pest + NON-discountable foam: rate uses post-discount allocation', () => {
+    // pest 2000 (discountable, taxable) + foam 2000 (non-discountable, non-taxable).
+    // Post-discount invoice = 2000*0.95 + 2000 = 1900 + 2000 = 3900.
+    // taxable post-discount = 1900. rate = 1900*0.07/3900 = 0.0341.
+    const rate = resolveCommercialPrepayTaxRate(
+      [
+        { service: 'commercial_pest', annual: 2000, taxable: true },
+        { service: 'foam_recurring', annual: 2000, taxable: false },
+      ],
+      { prepayDiscountApplied: true },
+    );
+    expect(rate).toBeCloseTo((1900 * 0.07) / 3900, 4);
+    // The tax on the $3,900 invoice is exactly 7% of the discounted $1,900 pest.
+    expect(Math.round(3900 * rate * 100) / 100).toBeCloseTo(133.0, 1);
+  });
+
   test('keys off the service even when the taxable flag was dropped on a save path', () => {
     // 50/50 pest+lawn, pest flag missing → still 0.5 * 0.07 = 0.035.
     expect(resolveCommercialPrepayTaxRate([
