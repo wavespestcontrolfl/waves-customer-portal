@@ -737,11 +737,15 @@ function generateEstimate(input) {
       // with NO outdoor-area data at all (no lot/treatable area, no lot category)
       // it falls back to a manual quote rather than auto-pricing off 0 sqft. FL-taxed.
       const result = priceCommercialMosquito(property, { commercialSubtype });
-      if (result.quoteRequired) {
-        addCommercialManualQuote('pest_control');
-      } else if (!lineItems.some((line) => line.service === result.service)) {
+      // Push the pricer's OWN line — priced or its service-specific manual quote.
+      // The manual line keeps service=commercial_mosquito / originalRequestedService=
+      // mosquito and the missing-area review reason; routing it through
+      // addCommercialManualQuote('pest_control') would collapse it to a generic
+      // commercial_pest quote (the v1 mapper flows any unpriced commercial_* line
+      // through the manual/specialty path). Only a PRICED line is an active service.
+      if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
-        activeServiceKeys.push('commercial_mosquito');
+        if (!result.quoteRequired) activeServiceKeys.push('commercial_mosquito');
       }
     } else {
       const result = priceMosquito(property, {
@@ -773,11 +777,13 @@ function generateEstimate(input) {
         footprintSqFt: termiteMeasurements.footprintSqFt,
         perimeterLF: termiteMeasurements.perimeterLF,
       });
-      if (result.quoteRequired) {
-        addCommercialManualQuote('pest_control');
-      } else if (!lineItems.some((line) => line.service === result.service)) {
+      // Push the pricer's own line — priced or its service-specific manual quote
+      // (keeps service=commercial_termite_bait / originalRequestedService=
+      // termite_bait + the missing-building reason rather than collapsing to a
+      // generic commercial_pest quote). Only a PRICED line is an active service.
+      if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
-        activeServiceKeys.push('commercial_termite_bait');
+        if (!result.quoteRequired) activeServiceKeys.push('commercial_termite_bait');
       }
     } else {
       const termiteOptions = serviceOptions(termiteBaitService);
@@ -805,11 +811,13 @@ function generateEstimate(input) {
         commercialSubtype,
         buildingSizeMeasured: input.buildingSizeMeasured,
       });
-      if (result.quoteRequired) {
-        addCommercialManualQuote('pest_control');
-      } else if (!lineItems.some((line) => line.service === result.service)) {
+      // Push the pricer's own line — priced or its service-specific manual quote
+      // (keeps service=commercial_rodent_bait / originalRequestedService=
+      // rodent_bait + the missing-building reason rather than collapsing to a
+      // generic commercial_pest quote). Only a PRICED line is an active service.
+      if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
-        activeServiceKeys.push('commercial_rodent_bait');
+        if (!result.quoteRequired) activeServiceKeys.push('commercial_rodent_bait');
       }
     } else {
       const result = priceRodentBait(property, { modifiers });

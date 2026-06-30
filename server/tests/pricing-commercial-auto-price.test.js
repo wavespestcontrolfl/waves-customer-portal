@@ -280,6 +280,7 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     const r = priceCommercialMosquito({ footprintSqFt: 3000 });
     expect(r).toMatchObject({
       service: 'commercial_mosquito',
+      originalRequestedService: 'mosquito',
       quoteRequired: true,
       annual: null,
       taxable: true,
@@ -344,6 +345,36 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     expect(byKey.termite_bait).toBeUndefined();
     expect(byKey.rodent_bait).toBeUndefined();
     expect(est.summary.recurringAnnualBeforeDiscount).toBeCloseTo(est.summary.recurringAnnualAfterDiscount, 0);
+  });
+
+  test('termite/rodent manual fallbacks keep their specific commercial service (not collapsed to commercial_pest)', () => {
+    // Lot-only commercial estimate (no building footprint) → termite & rodent fall
+    // to a manual quote. Each must keep its OWN service + originalRequestedService
+    // + review reason: the engine pushes the pricer's service-specific manual line
+    // rather than routing through the generic commercial_pest manual quote (which
+    // would mislabel a termite/rodent request as commercial pest). Mosquito is
+    // lot-derivable so it still prices.
+    const est = generateEstimate({
+      propertyType: 'commercial',
+      lotSqFt: 40000,
+      services: { mosquito: { tier: 'monthly12' }, termite: {}, rodentBait: {} },
+    });
+    const byKey = Object.fromEntries(est.lineItems.map((l) => [l.service, l]));
+    expect(byKey.commercial_termite_bait).toMatchObject({
+      quoteRequired: true,
+      originalRequestedService: 'termite_bait',
+      manualReviewReasons: ['commercial_termite_missing_building_footprint'],
+    });
+    expect(byKey.commercial_rodent_bait).toMatchObject({
+      quoteRequired: true,
+      originalRequestedService: 'rodent_bait',
+      manualReviewReasons: ['commercial_rodent_missing_building_footprint'],
+    });
+    // The termite/rodent manual lines did NOT collapse into a commercial_pest quote.
+    expect(byKey.commercial_pest).toBeUndefined();
+    // Mosquito stays auto-priced (treatable area is lot-derivable).
+    expect(byKey.commercial_mosquito).toMatchObject({ quoteRequired: false });
+    expect(byKey.commercial_mosquito.annual).toBeGreaterThan(0);
   });
 });
 

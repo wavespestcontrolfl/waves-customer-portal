@@ -61,9 +61,17 @@ function serviceKeysFromText(...parts) {
     .filter(([, pattern]) => pattern.test(text))
     .map(([key]) => key);
   return keys.filter((key) => {
+    // When a commercial key matched, drop its residential counterpart — the
+    // commercial patterns are a superset of the residential ones (e.g.
+    // 'Commercial Mosquito' matches both commercial_mosquito and mosquito), so
+    // without this the inferred serviceLines / newsletter segmentation get
+    // polluted with duplicate residential categories.
     if (key === 'pest' && keys.includes('commercial_pest')) return false;
     if (key === 'lawn' && keys.includes('commercial_lawn')) return false;
     if (key === 'tree_shrub' && keys.includes('commercial_tree_shrub')) return false;
+    if (key === 'mosquito' && keys.includes('commercial_mosquito')) return false;
+    if (key === 'termite' && keys.includes('commercial_termite_bait')) return false;
+    if (key === 'rodent' && keys.includes('commercial_rodent_bait')) return false;
     return true;
   });
 }

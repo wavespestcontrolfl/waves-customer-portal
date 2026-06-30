@@ -46,6 +46,11 @@ describe('estimate service line inference', () => {
     expect(serviceKeysFromText('Commercial Pest Control')).toEqual(['commercial_pest']);
     expect(serviceKeysFromText('Commercial Lawn Treatment')).toEqual(['commercial_lawn']);
     expect(serviceKeysFromText('Commercial Pest Control + Commercial Lawn')).toEqual(['commercial_pest', 'commercial_lawn']);
+    // Commercial pest-family text must NOT also emit its residential counterpart
+    // (the commercial patterns are a superset of the residential ones).
+    expect(serviceKeysFromText('Commercial Mosquito')).toEqual(['commercial_mosquito']);
+    expect(serviceKeysFromText('Commercial Termite Bait Monitoring')).toEqual(['commercial_termite_bait']);
+    expect(serviceKeysFromText('Commercial Rodent Bait Stations')).toEqual(['commercial_rodent_bait']);
     expect(serviceKeysFromText('Palm Injection')).toEqual(['palm_injection']);
     expect(serviceKeysFromText('Palms to treat')).toEqual(['palm_injection']);
     expect(serviceKeysFromText('Native / Palmetto / American roaches')).toEqual(['pest']);
