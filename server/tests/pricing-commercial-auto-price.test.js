@@ -273,10 +273,10 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     expect(r.annual).toBeGreaterThan(0);
   });
 
-  test('mosquito with a SYNTHETIC public lot (no real parcel) falls back to a MANUAL quote', () => {
+  test('mosquito with a SYNTHETIC public lot (lotSizeMeasured:false) falls back to a MANUAL quote', () => {
     // The public wizard synthesizes lotSqFt = sqft × 4 when no real parcel data
-    // exists, so the computed treatable area is fabricated. lotSizeMeasured:false
-    // marks it — don't auto-price off it.
+    // exists, so the whole treatable area is fabricated. lotSizeMeasured:false
+    // marks it — go manual regardless of how the area resolves.
     const synthetic = priceCommercialMosquito({ lotSqFt: 32000 }, { lotSizeMeasured: false });
     expect(synthetic).toMatchObject({
       service: 'commercial_mosquito',
@@ -284,11 +284,39 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
       annual: null,
       manualReviewReasons: ['commercial_mosquito_missing_treatable_area'],
     });
+    // The flag (not the area source) drives it: even a pre-resolved explicit
+    // treatable area is profile-derived from the synthetic lot, so it's manual too.
+    expect(priceCommercialMosquito({ mosquitoTreatableSqFt: 30000 }, { lotSizeMeasured: false }).quoteRequired).toBe(true);
     // A REAL lot (lotSizeMeasured true, or admin path where it's undefined) prices.
     expect(priceCommercialMosquito({ lotSqFt: 32000 }, { lotSizeMeasured: true }).quoteRequired).toBe(false);
     expect(priceCommercialMosquito({ lotSqFt: 32000 }).quoteRequired).toBe(false);
-    // An explicit treatable area is real input — prices even if the lot is synthetic.
-    expect(priceCommercialMosquito({ mosquitoTreatableSqFt: 30000 }, { lotSizeMeasured: false }).quoteRequired).toBe(false);
+  });
+
+  test('synthetic-lot guard fires through generateEstimate (profile pre-derives the treatable area)', () => {
+    // The real path: calculatePropertyProfile converts the synthetic lotSqFt into
+    // property.mosquitoTreatableSqFt BEFORE the pricer runs, so the area resolves
+    // as 'explicit' — the guard must key off lotSizeMeasured, not the area source,
+    // or it never fires here. (Regression for the PR bot's engine-path P2.)
+    const synthetic = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 8000,
+      lotSqFt: 32000,            // synthetic sqft × 4
+      lotSizeMeasured: false,
+      services: { mosquito: { tier: 'monthly12' } },
+    });
+    expect(synthetic.lineItems.find((l) => l.service === 'commercial_mosquito'))
+      .toMatchObject({ quoteRequired: true });
+    // A real parcel auto-prices through the same engine path.
+    const real = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 8000,
+      lotSqFt: 32000,
+      lotSizeMeasured: true,
+      services: { mosquito: { tier: 'monthly12' } },
+    });
+    const realMosq = real.lineItems.find((l) => l.service === 'commercial_mosquito');
+    expect(realMosq).toMatchObject({ quoteRequired: false });
+    expect(realMosq.annual).toBeGreaterThan(0);
   });
 
   test('mosquito with a building size but NO outdoor-area data falls back to a MANUAL quote', () => {
