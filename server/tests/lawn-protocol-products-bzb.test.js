@@ -31,7 +31,7 @@ function runMigration() {
       async first() {
         if (name === 'lawn_protocols') {
           const track = KEY_BY_PROTOCOL[ctx.cond.protocol_key];
-          return track && ctx.cond.status === 'active' ? { id: track, grass_track: track } : null;
+          return track && ctx.cond.version === '2026.06' ? { id: track, grass_track: track } : null;
         }
         return null; // products: not existing -> insert
       },

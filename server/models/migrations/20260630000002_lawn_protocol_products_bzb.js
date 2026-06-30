@@ -37,10 +37,11 @@ const PRODUCTS = {
     P('feb_greenup_n1', 'Armada 50 WDG', 'fungicide', 0.30, 'oz', 2, false, { frac: '7', trigger: 'sds_damage_jan' }),
     P('mar_pre_m_split_2_pgr', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
     P('mar_pre_m_split_2_pgr', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
-    P('apr_insect_preventive', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, { maxLabelRate: 0.46, annualMaxRate: 0.88 }),
+    P('apr_insect_preventive', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, {}),
     P('apr_insect_preventive', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 2, true, {}),
     P('may_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalNBeforeBlackout: true }),
     P('may_final_n', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
+    P('may_final_n', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, false, {}),
     P('jun_blackout', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
     P('jun_blackout', 'Bifen I/T', 'insect_curative', 0.25, 'fl_oz', 2, false, { trigger: 'armyworm_threshold_3_per_sqft', maxLabelRate: 1.0 }),
     P('jul_blackout_celsius', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
@@ -55,14 +56,16 @@ const PRODUCTS = {
   zoysia: [
     P('jan_pre_m_split_1', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
     P('jan_pre_m_split_1', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('jan_pre_m_split_1', 'SedgeHammer Plus', 'post_emergent_spot', 0.5, 'oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.5, annualMaxApps: 4, minIntervalDays: 14 }),
     P('feb_micros_frac', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
     P('feb_micros_frac', 'Medallion SC', 'fungicide', 1, 'fl_oz', 2, false, { frac: '12', trigger: 'large_patch_active' }),
     P('mar_n1_pre_m_pgr', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000' }),
     P('mar_n1_pre_m_pgr', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
     P('mar_n1_pre_m_pgr', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, { conservativeRate: true }),
-    P('apr_insect_preventive', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, { maxLabelRate: 0.46, annualMaxRate: 0.88 }),
+    P('apr_insect_preventive', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, {}),
     P('apr_insect_preventive', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 2, true, { conservativeRate: true }),
     P('may_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalNBeforeBlackout: true }),
+    P('may_final_n', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, false, {}),
     P('jun_blackout', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
     P('jul_blackout_celsius', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
     P('sep_blackout_lp_prep', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
@@ -77,12 +80,12 @@ const PRODUCTS = {
     P('feb_micros_mole_cricket', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
     P('mar_n1_pre_m', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000' }),
     P('mar_n1_pre_m', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
-    P('apr_insect_fire_ant', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, { maxLabelRate: 0.46, annualMaxRate: 0.88 }),
+    P('apr_insect_fire_ant', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, {}),
     P('apr_insect_fire_ant', 'TopChoice', 'fire_ant', 2, 'lb', 1, false, { trigger: 'documented_fire_ant_history', restrictedUse: true, annualMaxApps: 1 }),
     P('may_micros_crabgrass', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, { irrigatedOnly: false }),
+    P('may_micros_crabgrass', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { irrigatedOnly: true, soilKGatePpmBelow: 80 }),
     P('jun_blackout_mole_cricket', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, irrigatedOnly: true, soilKGatePpmBelow: 80 }),
     P('jun_blackout_mole_cricket', 'Dylox 420 SL', 'insect_curative', 6.9, 'fl_oz', 2, false, { trigger: 'mole_cricket_threshold_2_per_2sqft', maxLabelRate: 6.9, annualMaxApps: 3, minIntervalDays: 7, postAppIrrigation: true }),
-    P('jul_seed_head', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
     P('aug_scout_mole_cricket', 'Dylox 420 SL', 'insect_curative', 6.9, 'fl_oz', 2, false, { trigger: 'mole_cricket_threshold_2_per_2sqft', maxLabelRate: 6.9, annualMaxApps: 3, minIntervalDays: 7, postAppIrrigation: true }),
     P('sep_blackout_crabgrass', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, irrigatedOnly: true, soilKGatePpmBelow: 80 }),
     P('oct_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalN: true }),
@@ -113,13 +116,13 @@ function normalize(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-// Resolve the ACTIVE protocol for the track (never a draft/archived/older version),
-// matching getActiveLawnProtocol's ordering.
-function findActiveProtocol(knex, track) {
+// Target the exact protocol B1 (20260630000001) seeded — by version — so up() and
+// down() both act on the rows this migration is meant for, never a draft/archived
+// or newer admin-published version with the same key.
+const SEEDED_VERSION = '2026.06';
+function findSeededProtocol(knex, track) {
   return knex('lawn_protocols')
-    .where({ protocol_key: PROTOCOL_KEYS[track], grass_track: track, status: 'active' })
-    .orderBy('effective_from', 'desc')
-    .orderBy('created_at', 'desc')
+    .where({ protocol_key: PROTOCOL_KEYS[track], grass_track: track, version: SEEDED_VERSION })
     .first();
 }
 
@@ -137,7 +140,7 @@ exports.up = async function up(knex) {
   };
 
   for (const [track, products] of Object.entries(PRODUCTS)) {
-    const protocol = await findActiveProtocol(knex, track);
+    const protocol = await findSeededProtocol(knex, track);
     if (!protocol) continue; // B1 not applied yet — nothing to attach to
 
     const windows = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id }).select('id', 'window_key');
@@ -166,7 +169,7 @@ exports.down = async function down(knex) {
   // Remove only the products this migration inserted (by window + product_name),
   // scoped to the three parity protocols — never touch St-Augustine's products.
   for (const [track, products] of Object.entries(PRODUCTS)) {
-    const protocol = await findActiveProtocol(knex, track);
+    const protocol = await findSeededProtocol(knex, track);
     if (!protocol) continue;
     const windows = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id }).select('id', 'window_key');
     const windowIdByKey = new Map(windows.map((w) => [w.window_key, w.id]));
