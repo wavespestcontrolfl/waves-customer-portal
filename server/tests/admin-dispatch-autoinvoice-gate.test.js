@@ -1,4 +1,4 @@
-const { shouldAutoInvoiceCompletion } = require('../routes/admin-dispatch')._test;
+const { shouldAutoInvoiceCompletion, shouldConsultAnnualPrepayCoverage } = require('../routes/admin-dispatch')._test;
 
 const base = {
   recapReviewOnly: false,
@@ -73,40 +73,41 @@ describe('shouldAutoInvoiceCompletion', () => {
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: true, invoiceAmount: 0 })).toBe(false);
   });
 
-  describe('annual-prepay coverage suppression', () => {
-    // The double-bill shape: a WaveGuard customer who prepaid the year still
-    // gets an unpriced monthly visit auto-billed at monthly_rate on completion,
-    // because the per-visit prepaid_amount stamp was never written (term carried
-    // no coverage config). An active PAID term must suppress it.
-    test('suppresses the unpriced WaveGuard membership auto-bill', () => {
-      expect(shouldAutoInvoiceCompletion({
-        ...base, waveguardTier: 'Silver', invoiceAmount: 139.8, hasVisitPrice: false,
-        annualPrepayCoversRecurring: true,
-      })).toBe(false);
-    });
+  // Annual-prepay TERM coverage is folded into prepaidCovered (see
+  // shouldConsultAnnualPrepayCoverage + the completion handler), so the gate
+  // suppresses it via the existing prepaidCovered short-circuit — even for a
+  // WaveGuard / create_invoice_on_complete membership visit that would
+  // otherwise auto-bill at monthly_rate.
+  test('prepaidCovered (incl. annual-prepay term) suppresses the WaveGuard membership auto-bill', () => {
+    expect(shouldAutoInvoiceCompletion({
+      ...base, waveguardTier: 'Silver', invoiceAmount: 139.8, hasVisitPrice: false, prepaidCovered: true,
+    })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({
+      ...base, createInvoiceOnComplete: true, invoiceAmount: 139.8, hasVisitPrice: false, prepaidCovered: true,
+    })).toBe(false);
+  });
+});
 
-    test('suppresses an unpriced flagged (create_invoice_on_complete) membership visit too', () => {
-      expect(shouldAutoInvoiceCompletion({
-        ...base, createInvoiceOnComplete: true, invoiceAmount: 139.8, hasVisitPrice: false,
-        annualPrepayCoversRecurring: true,
-      })).toBe(false);
-    });
+describe('shouldConsultAnnualPrepayCoverage (over-suppress guards)', () => {
+  const membership = { alreadyStampedPrepaid: false, visitIsPayerBilled: false, hasVisitPrice: false, invoiceAmount: 139.8 };
 
-    test('does NOT over-suppress: a priced extra still bills during a prepay term', () => {
-      // A genuinely-priced add-on is not covered by the recurring prepay.
-      expect(shouldAutoInvoiceCompletion({
-        ...pricedSelfPay, waveguardTier: 'Silver', annualPrepayCoversRecurring: true,
-      })).toBe(true);
-      expect(shouldAutoInvoiceCompletion({
-        ...pricedSelfPay, autoInvoicePricedVisits: true, annualPrepayCoversRecurring: true,
-      })).toBe(true);
-    });
+  test('consults coverage for an unpriced, self-pay membership visit', () => {
+    expect(shouldConsultAnnualPrepayCoverage(membership)).toBe(true);
+  });
 
-    test('no coverage flag → WaveGuard membership visit bills as before (regression)', () => {
-      expect(shouldAutoInvoiceCompletion({
-        ...base, waveguardTier: 'Silver', invoiceAmount: 139.8, hasVisitPrice: false,
-        annualPrepayCoversRecurring: false,
-      })).toBe(true);
-    });
+  test('does NOT consult (so a priced extra still bills) when the visit has its own price', () => {
+    expect(shouldConsultAnnualPrepayCoverage({ ...membership, hasVisitPrice: true })).toBe(false);
+  });
+
+  test('does NOT consult for a payer-billed visit — the payer is owed regardless of homeowner prepay', () => {
+    expect(shouldConsultAnnualPrepayCoverage({ ...membership, visitIsPayerBilled: true })).toBe(false);
+  });
+
+  test('does NOT consult when already stamped-prepaid (no redundant lookup)', () => {
+    expect(shouldConsultAnnualPrepayCoverage({ ...membership, alreadyStampedPrepaid: true })).toBe(false);
+  });
+
+  test('does NOT consult a zero/absent amount (callback / nothing to bill)', () => {
+    expect(shouldConsultAnnualPrepayCoverage({ ...membership, invoiceAmount: 0 })).toBe(false);
   });
 });

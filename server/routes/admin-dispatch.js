@@ -4062,34 +4062,40 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
     // homeowner's prepay can't cover the payer's bill, so the AP invoice must
     // still be cut.
-    const prepaidCovered = !visitIsPayerBilled
+    let prepaidCovered = !visitIsPayerBilled
       && svc.prepaid_amount != null
       && Number(svc.prepaid_amount) > 0
       && Number(svc.prepaid_amount) >= invoiceAmount;
-    // A PAID annual-prepay term can cover this recurring visit even when the
+    // A PAID annual-prepay term covers this recurring visit even when the
     // per-visit prepaid_amount stamp above was never written — terms created by
     // the two-step / self-accept flow carry no coverage config, so the snapshot
-    // never stamps the visit, yet the customer HAS prepaid the year. Without
-    // this, their unpriced membership visit auto-bills at monthly_rate on the
-    // WaveGuard-tier path = a double-bill. Reuse the canonical coverage check
-    // (it handles payment-pending-but-paid, renewal lapses, and refund/void
-    // exclusions). Only run it for an unpriced, self-pay membership auto-bill —
-    // a priced extra is not covered by the recurring prepay, and a payer-billed
-    // visit is owed by the payer regardless of the homeowner's prepay.
-    let annualPrepayCoversRecurring = false;
-    if (!visitIsPayerBilled && !hasVisitPrice && Number(invoiceAmount) > 0) {
+    // never stamps the visit, yet the customer HAS prepaid the year. Fold it
+    // INTO prepaidCovered so the whole completion path treats it exactly like
+    // any other prepaid visit: invoice suppressed (gate), "paid" SMS framing,
+    // no pay link / no in-person payment sheet, and the review still requested.
+    // Scope (shouldConsultAnnualPrepayCoverage): only an UNPRICED, self-pay
+    // membership visit with a positive monthly-rate amount — a priced extra is
+    // NOT covered by the recurring prepay (avoids over-suppressing), and a
+    // payer-billed visit is owed by the payer regardless of the homeowner's
+    // prepay. Reuse the canonical coverage check (handles payment-pending-but-
+    // paid, renewal lapses, and refund/void exclusions).
+    if (shouldConsultAnnualPrepayCoverage({
+      alreadyStampedPrepaid: prepaidCovered,
+      visitIsPayerBilled,
+      hasVisitPrice,
+      invoiceAmount,
+    })) {
       try {
         const { getActivelyCoveredCustomerIds } = require('../services/annual-prepay-renewals');
         const coveredIds = await getActivelyCoveredCustomerIds(svc.scheduled_date, db);
-        annualPrepayCoversRecurring = coveredIds.has(String(svc.customer_id));
+        if (coveredIds.has(String(svc.customer_id))) prepaidCovered = true;
       } catch (e) {
         // FAIL CLOSED on this money path: if we cannot confirm the customer is
-        // NOT prepaid, do not auto-bill the unpriced membership visit. Double-
-        // billing a prepaid annual customer is a P0; a deferred monthly invoice
-        // is recoverable (admin / billing-recovery can re-cut it). Suppress and
-        // alert so the gap is visible.
-        annualPrepayCoversRecurring = true;
-        logger.warn(`[dispatch] annual-prepay coverage check failed on completion for service ${svc.id}; failing closed (suppressing auto-invoice): ${e.message}`);
+        // NOT prepaid, treat the unpriced membership visit as covered (don't
+        // auto-bill). Double-billing a prepaid annual customer is a P0; a
+        // deferred invoice is recoverable. Warn so the gap is visible.
+        prepaidCovered = true;
+        logger.warn(`[dispatch] annual-prepay coverage check failed on completion for service ${svc.id}; failing closed (treating as prepaid): ${e.message}`);
       }
     }
     // If the tech already minted an invoice for this visit pre-completion
@@ -4123,7 +4129,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
       serviceType: svc.service_type,
       isCallback: svc.is_callback,
-      annualPrepayCoversRecurring,
     });
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL was set to the Railway hostname on
@@ -6838,6 +6843,21 @@ router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
 // !hasVisitPrice, so a price-free autopay-covered visit is never billed here.
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 
+// Whether to consult an annual-prepay TERM to mark a completion prepaid-covered.
+// Centralises the over-suppress guards so they're testable in one place: only an
+// UNPRICED, self-pay membership visit with a positive (monthly-rate) amount that
+// isn't ALREADY stamped-prepaid qualifies. A priced extra (hasVisitPrice) is not
+// covered by the recurring prepay and must still bill; a payer-billed visit is
+// owed by the payer regardless of the homeowner's prepay.
+function shouldConsultAnnualPrepayCoverage({
+  alreadyStampedPrepaid,
+  visitIsPayerBilled,
+  hasVisitPrice,
+  invoiceAmount,
+}) {
+  return !alreadyStampedPrepaid && !visitIsPayerBilled && !hasVisitPrice && Number(invoiceAmount) > 0;
+}
+
 function shouldAutoInvoiceCompletion({
   recapReviewOnly,
   alreadyPaid,
@@ -6852,23 +6872,12 @@ function shouldAutoInvoiceCompletion({
   autoInvoicePricedVisits,
   serviceType,
   isCallback,
-  annualPrepayCoversRecurring,
 }) {
   if (recapReviewOnly || alreadyPaid || prepaidCovered || autopayCoversVisit
     || preMintedInvoice || existingCompletionInvoice) {
     return false;
   }
   if (!(Number(invoiceAmount) > 0)) return false;
-  // An active, PAID annual-prepay term already covers this recurring membership
-  // visit for the year — the monthly auto-bill must not fire or the prepaid
-  // customer is double-billed. This is a SEPARATE guard from prepaidCovered
-  // above: that one keys off the per-visit prepaid_amount stamp, which is only
-  // written when the term carries coverage config. Terms created by the
-  // two-step / self-accept flow leave coverage config NULL, so the stamp is
-  // never set and prepaidCovered misses them. Scope: only the UNPRICED
-  // membership dues — an explicitly-priced extra (hasVisitPrice) is not covered
-  // by the recurring prepay and must still bill (avoids over-suppressing).
-  if (annualPrepayCoversRecurring && !hasVisitPrice) return false;
   // Explicit scheduler flag / WaveGuard tier are the existing, unchanged paths.
   if (createInvoiceOnComplete || waveguardTier) return true;
   // GATED new path: a priced visit qualifies — but NEVER an always-free type
@@ -7032,4 +7041,5 @@ module.exports._test = {
   internalOnlyProductsBlockPayload,
   serviceReportEmailEligible,
   shouldAutoInvoiceCompletion,
+  shouldConsultAnnualPrepayCoverage,
 };
