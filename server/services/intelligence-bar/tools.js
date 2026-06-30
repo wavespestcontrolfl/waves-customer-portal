@@ -962,7 +962,36 @@ async function updateCustomer(customerId, updates) {
     clean.member_since = wasCustomer ? (before.member_since || etDateString()) : etDateString();
   }
 
-  await db('customers').where('id', customerId).update(clean);
+  // An address edit must stay consistent with the Customers route (PUT /:id):
+  // mirror the change onto the primary customer_properties row ATOMICALLY — so a
+  // unique address-index collision rolls the whole edit back with a clear error
+  // instead of desyncing customers.address_* from the property's dedup key — then
+  // re-geocode so the map pin and dispatch drive-time use the new location rather
+  // than the old coordinates. A plain update here previously left both stale.
+  const merged = { ...before, ...clean };
+  const addressChanged = ['address_line1', 'address_line2', 'city', 'state', 'zip']
+    .some((f) => clean[f] !== undefined && String(before[f] || '') !== String(merged[f] || ''));
+  try {
+    await db.transaction(async (trx) => {
+      await trx('customers').where('id', customerId).update(clean);
+      if (addressChanged) {
+        await require('../customer-properties').syncPrimaryAddress(merged, trx);
+      }
+    });
+  } catch (e) {
+    if (e && e.code === '23505') {
+      return { error: 'That address already exists as another property on this customer.' };
+    }
+    throw e;
+  }
+  if (addressChanged) {
+    // Coords now point at the old address — clear + re-geocode, then re-mirror the
+    // fresh coords onto the primary property (syncPrimaryAddress nulled them).
+    await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
+    void require('../geocoder').ensureCustomerGeocoded(customerId)
+      .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
+      .catch(() => {});
+  }
   const after = await db('customers').where('id', customerId).first();
 
   const changes = {};
