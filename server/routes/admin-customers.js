@@ -2272,25 +2272,38 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         });
       }
 
-      await db('customers').where({ id: req.params.id }).update(updates);
       const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'payer_id'];
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
+      const after = { ...before, ...updates };
+      const addressChanged = changed.some((f) => ['address_line1', 'address_line2', 'city', 'state', 'zip'].includes(f));
+      // Phase 1 multi-property: an admin address edit must reach the primary
+      // customer_properties row too — ATOMICALLY, so a unique address-index
+      // collision rolls back the customer edit (and surfaces a 409) instead of
+      // leaving customers.address_* and the property's dedup key desynced. NOT
+      // gated on GATE_CUSTOMER_PROPERTIES: the table is migration-backfilled
+      // regardless of the flag; syncPrimaryAddress is a no-op when no primary
+      // row exists.
+      try {
+        await db.transaction(async (trx) => {
+          await trx('customers').where({ id: req.params.id }).update(updates);
+          if (addressChanged) {
+            await require('../services/customer-properties').syncPrimaryAddress(after, trx);
+          }
+        });
+      } catch (e) {
+        if (e && e.code === '23505') {
+          return res.status(409).json({
+            error: 'address_matches_existing_property',
+            message: 'That address already exists as another property on this customer.',
+          });
+        }
+        return next(e);
+      }
       if (changed.some(field => sensitiveFields.includes(field))) {
         await auditCustomerMutation(req, 'customer.update_sensitive', req.params.id, {
           fields: changed,
           sensitiveFieldsChanged: changed.filter(field => sensitiveFields.includes(field)),
         }, true);
-      }
-      const after = { ...before, ...updates };
-      // Phase 1 multi-property: an admin address edit must reach the primary
-      // customer_properties row too — the mirror alone leaves its dedup key stale.
-      // NOT gated on GATE_CUSTOMER_PROPERTIES: the table is migration-backfilled
-      // (and lazily ensured by the /properties read) regardless of the feature
-      // flag, so the primary must stay synced even with the gate off.
-      // syncPrimaryAddress is a no-op when no primary row exists. Best-effort,
-      // address-only.
-      if (changed.some((f) => ['address_line1', 'address_line2', 'city', 'state', 'zip'].includes(f))) {
-        await require('../services/customer-properties').syncPrimaryAddress(after).catch(() => {});
       }
       const beforeHasMembership = hasMembership(before);
       const afterHasMembership = hasMembership(after);

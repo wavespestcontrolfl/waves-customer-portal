@@ -132,7 +132,7 @@ async function ensurePrimaryProperty(customerOrId, { occupancyType } = {}) {
     return { created: true, propertyId: row && (row.id || row) };
   } catch (e) {
     // Partial-unique race (another writer created the primary) — treat as exists.
-    logger.warn(`[customer-properties] ensurePrimaryProperty(${customer.id}) skipped: ${e.message}`);
+    logger.warn(`[customer-properties] ensurePrimaryProperty(${customer.id}) skipped: ${e.code || e.name || 'db_error'}`);
     return { created: false, propertyId: null };
   }
 }
@@ -217,7 +217,7 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
         zip: zip || null,
         updated_at: new Date(),
       })
-      .catch((e) => logger.warn(`[customer-properties] primary mirror sync failed for ${customerId}: ${e.message}`));
+      .catch((e) => logger.warn(`[customer-properties] primary mirror sync failed for ${customerId}: ${e.code || e.name || 'db_error'}`));
   }
 
   logger.info(`[customer-properties] recorded ${source} ${isPrimary ? 'primary' : 'secondary'} property ${propertyId} for customer ${customerId} (occupancy=${normalizeOccupancy(occupancyType)})`);
@@ -252,7 +252,7 @@ async function completePrimaryFromCall(customerId, call = {}) {
   if (gap(cust.zip) && call.zip) patch.zip = call.zip;
   if (Object.keys(patch).length) {
     await db('customers').where({ id: customerId }).update({ ...patch, updated_at: new Date() })
-      .catch((e) => logger.warn(`[customer-properties] mirror complete skipped for ${customerId}: ${e.message}`));
+      .catch((e) => logger.warn(`[customer-properties] mirror complete skipped for ${customerId}: ${e.code || e.name || 'db_error'}`));
   }
 
   const primary = await db('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
@@ -283,12 +283,12 @@ async function completePrimaryFromCall(customerId, call = {}) {
  * occupancy_type, label, or the property-grained attributes. No-op when the
  * primary already matches.
  */
-async function syncPrimaryAddress(customerOrId) {
+async function syncPrimaryAddress(customerOrId, conn = db) {
   const customer = typeof customerOrId === 'string'
-    ? await db('customers').where({ id: customerOrId }).first()
+    ? await conn('customers').where({ id: customerOrId }).first()
     : customerOrId;
   if (!customer || !customer.id) return;
-  const primary = await db('customer_properties')
+  const primary = await conn('customer_properties')
     .where({ customer_id: customer.id, is_primary: true, active: true }).first();
   if (!primary) return;
 
@@ -307,9 +307,10 @@ async function syncPrimaryAddress(customerOrId) {
     address_line1: next.address_line1, address_line2: next.address_line2, city: next.city, zip: next.zip,
   });
   next.updated_at = new Date();
-  await db('customer_properties').where({ id: primary.id }).update(next)
-    // Error CODE only — an address_key write error can echo the address (PII).
-    .catch((e) => logger.warn(`[customer-properties] primary address sync failed for ${customer.id}: ${e.code || e.name || 'db_error'}`));
+  // Errors PROPAGATE (no swallow) so a transactional caller can roll back the
+  // mirror edit + surface a 409 on a unique address-index collision rather than
+  // leaving customers.address_* and the property's dedup key desynced.
+  await conn('customer_properties').where({ id: primary.id }).update(next);
 }
 
 module.exports = {
