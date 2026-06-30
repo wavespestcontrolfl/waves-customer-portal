@@ -4083,7 +4083,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const coveredIds = await getActivelyCoveredCustomerIds(svc.scheduled_date, db);
         annualPrepayCoversRecurring = coveredIds.has(String(svc.customer_id));
       } catch (e) {
-        logger.warn(`[dispatch] annual-prepay coverage check failed on completion for service ${svc.id}: ${e.message}`);
+        // FAIL CLOSED on this money path: if we cannot confirm the customer is
+        // NOT prepaid, do not auto-bill the unpriced membership visit. Double-
+        // billing a prepaid annual customer is a P0; a deferred monthly invoice
+        // is recoverable (admin / billing-recovery can re-cut it). Suppress and
+        // alert so the gap is visible.
+        annualPrepayCoversRecurring = true;
+        logger.warn(`[dispatch] annual-prepay coverage check failed on completion for service ${svc.id}; failing closed (suppressing auto-invoice): ${e.message}`);
       }
     }
     // If the tech already minted an invoice for this visit pre-completion
