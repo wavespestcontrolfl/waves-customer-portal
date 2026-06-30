@@ -808,6 +808,7 @@ module.exports = {
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
+  resolveEstimateEventLeads,
   convertLeadFromEvent,
   findUnconvertedLeadsByContact,
   linkLeadEstimatesToCustomer,
