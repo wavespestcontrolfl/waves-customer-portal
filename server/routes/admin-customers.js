@@ -1357,10 +1357,17 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
     if (!String(city || '').trim() || !String(zip || '').trim()) {
       return res.status(400).json({ error: 'city and zip are required' });
     }
-    // Ensure the primary exists first, so the customer's current address is
-    // represented before we add a secondary. This also makes recordCallProperty's
-    // street-dedup reject a POST of the customer's own (primary) address (409)
-    // instead of creating a lone non-primary that a later read would duplicate.
+    // If this address is the customer's OWN primary that's only PARTIAL on file
+    // (same street, missing city/ZIP), complete that primary first — otherwise its
+    // partial address_key wouldn't match this full address and recordCallProperty
+    // would insert a duplicate of the primary. Complete → ensure → record mirrors
+    // the call pipeline. completePrimaryFromCall is a no-op for a genuinely
+    // different street (a real secondary).
+    await customerProperties.completePrimaryFromCall(req.params.id, { address_line1, address_line2, city, zip }).catch(() => {});
+    // Ensure the primary exists, so the customer's current address is represented
+    // before we add a secondary. This also makes recordCallProperty's dedup reject
+    // a POST of the customer's own (now-complete) primary address (409) instead of
+    // creating a lone non-primary that a later read would duplicate.
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const result = await customerProperties.recordCallProperty({
       customerId: req.params.id,

@@ -45,6 +45,17 @@ describe('customer-properties pure helpers', () => {
       .toBe(addressKey({ address_line1: '100 Main St', city: 'Bradenton' }));
   });
 
+  test('addressKey collapses interchangeable unit designators (Apt/Unit/Ste/# → same), keeps real units distinct', () => {
+    const base = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205' };
+    const k = (u) => addressKey({ ...base, address_line2: u });
+    expect(k('Apt 4')).toBe(k('Unit 4'));   // interchangeable designators
+    expect(k('Apt 4')).toBe(k('Ste 4'));
+    expect(k('Apt 4')).toBe(k('#4'));
+    expect(k('Apt 4')).toBe(k('4'));
+    expect(k('Apt 4')).not.toBe(k('Apt 5'));               // different unit stays distinct
+    expect(k('Apt 4')).not.toBe(addressKey(base));         // unit vs no-unit stays distinct
+  });
+
   test('addressKey canonicalizes street suffixes (St==Street) but keeps streets distinct (St!=Ave)', () => {
     const base = { city: 'Bradenton', zip: '34205' };
     expect(addressKey({ ...base, address_line1: '123 Main St' }))

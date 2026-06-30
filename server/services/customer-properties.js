@@ -42,6 +42,16 @@ const stripTrailingUnit = (s) => String(s || '').replace(/\s+(?:apt|apartment|un
 /** Suffix-canonical, unit-stripped street key — "123 Main St" == "123 Main Street", but != "123 Main Ave". */
 const streetKey = (s) => canonicalizeAddress(stripTrailingUnit(s)).replace(/[^a-z0-9]/g, '');
 
+// Interchangeable unit designators are written loosely for the SAME unit, so
+// normalize the designator OUT — "Apt 4" / "Unit 4" / "Ste 4" / "#4" / "4" all key
+// identically (else the same unit slips past dedup as a different address_key).
+// Same designator set stripTrailingUnit recognizes; the bare unit id is preserved.
+const normalizeUnit = (u) => String(u || '')
+  .replace(/[.,#]/g, ' ')
+  .replace(/\b(?:apt|apartment|unit|ste|suite)\b\.?/gi, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
 /**
  * Normalized key for the FULL service address — street + unit + city + ZIP — so
  * "100 Main St, Bradenton" and "100 Main St, Sarasota" are DISTINCT, and so are
@@ -51,7 +61,7 @@ const streetKey = (s) => canonicalizeAddress(stripTrailingUnit(s)).replace(/[^a-
  * uniqueness uses the SAME normalization as this helper (no JS/SQL drift).
  */
 function addressKey({ address_line1, address_line2, city, zip } = {}) {
-  return canonicalizeAddress([address_line1, address_line2, city, normalizeZip(zip)].filter(Boolean).join(' ')).replace(/[^a-z0-9]/g, '');
+  return canonicalizeAddress([address_line1, normalizeUnit(address_line2), city, normalizeZip(zip)].filter(Boolean).join(' ')).replace(/[^a-z0-9]/g, '');
 }
 
 /** Coerce to a known occupancy enum value (pure). */
