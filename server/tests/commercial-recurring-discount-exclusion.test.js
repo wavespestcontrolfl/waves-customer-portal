@@ -29,6 +29,20 @@ describe('commercial recurring lines are excluded from WaveGuard discounts on ac
     expect(recurringServiceKey({ name: 'Commercial Rodent Bait Stations' })).toBe('commercial_rodent_bait');
   });
 
+  test('commercial termite/rodent keys require a bait/monitoring/station term (not any commercial termite/rodent text)', () => {
+    // The recurring bait PROGRAMS classify as the bait key…
+    expect(recurringServiceKey({ name: 'Commercial Termite Bait Monitoring' })).toBe('commercial_termite_bait');
+    expect(recurringServiceKey({ name: 'Commercial Rodent Bait Stations' })).toBe('commercial_rodent_bait');
+    expect(recurringServiceKey({ service: 'commercial_termite_bait' })).toBe('commercial_termite_bait');
+    expect(recurringServiceKey({ service: 'commercial_rodent_bait' })).toBe('commercial_rodent_bait');
+    // …but non-bait commercial termite/rodent specialty work must NOT inherit the
+    // recurring bait key (else accept-discount/tax/scheduling treat it as the line).
+    expect(recurringServiceKey({ name: 'Commercial Termite Trenching' })).not.toBe('commercial_termite_bait');
+    expect(recurringServiceKey({ name: 'Commercial Termite WDO Inspection' })).not.toBe('commercial_termite_bait');
+    expect(recurringServiceKey({ name: 'Commercial Rodent Exclusion' })).not.toBe('commercial_rodent_bait');
+    expect(recurringServiceKey({ name: 'Commercial Rodent Trapping' })).not.toBe('commercial_rodent_bait');
+  });
+
   test('residential lawn_care / tree_shrub normalization is unchanged', () => {
     expect(recurringServiceKey({ service: 'lawn_care' })).toBe('lawn_care');
     expect(recurringServiceKey({ service: 'tree_shrub' })).toBe('tree_shrub');

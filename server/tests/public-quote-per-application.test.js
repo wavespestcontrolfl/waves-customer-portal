@@ -118,6 +118,12 @@ describe('resolveRealLotSqFt — trusted lot gate for commercial mosquito', () =
     expect(resolveRealLotSqFt({ enrichedLotSqFt: null, lotSqFt: 25000, lotSizeConfirmed: true })).toBe(25000);
   });
 
+  test('a customer-confirmed edit wins over a stale lookup parcel (used as the engine lot)', () => {
+    // The customer corrected the lookup on the confirm step — their value must be
+    // what we both trust AND feed to the pricer, not the stale enriched value.
+    expect(resolveRealLotSqFt({ enrichedLotSqFt: 20000, lotSqFt: 25000, lotSizeConfirmed: true })).toBe(25000);
+  });
+
   test('the synthetic default lot (posted but never measured/confirmed) is NOT trusted → null', () => {
     // The wizard seeds lotSqFt='8000' when the lookup has no parcel; without a
     // confirm flag this must NOT count as a measured lot (else commercial mosquito

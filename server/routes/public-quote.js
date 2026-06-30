@@ -38,8 +38,10 @@ const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
 // commercial mosquito from auto-pricing off a fabricated treatable area. Mirrors
 // the realFootprintSqFt / buildingSizeMeasured pattern.
 function resolveRealLotSqFt({ enrichedLotSqFt, lotSqFt, lotSizeConfirmed } = {}) {
-  if (Number(enrichedLotSqFt) > 0) return Number(enrichedLotSqFt);
+  // A customer-confirmed (hand-entered/edited) lot wins over the lookup — they may
+  // have corrected a stale parcel value (mirrors realFootprintSqFt + buildingSizeConfirmed).
   if (lotSizeConfirmed === true && Number(lotSqFt) > 0) return Number(lotSqFt);
+  if (Number(enrichedLotSqFt) > 0) return Number(enrichedLotSqFt);
   return null;
 }
 
@@ -412,7 +414,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const HOME_CAP = commercialDetected ? 5_000_000 : 20000;
     const LOT_CAP = commercialDetected ? 50_000_000 : 200000;
     const sqft = Math.max(500, Math.min(HOME_CAP, Number(homeSqFt) || 2000));
-    const lot = Math.max(500, Math.min(LOT_CAP, Number(lotSqFt) || sqft * 4));
+    // Resolve the TRUSTED lot once (lookup-measured or customer-confirmed) and use
+    // it for BOTH the measured flag AND the lot fed to the engine — otherwise we
+    // could mark the lot measured off enriched.lotSqFt while still pricing off the
+    // stale/synthetic top-level value. When there's no trusted lot, fall back to
+    // the synthetic sqft×4 default: lot-derived commercial lawn/tree still estimate
+    // off it, but commercial mosquito reads lotSizeMeasured and stays manual.
+    const realLotSqFt = resolveRealLotSqFt({ enrichedLotSqFt: ep.lotSqFt, lotSqFt, lotSizeConfirmed });
+    const lotSizeMeasured = realLotSqFt != null;
+    const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? (Number(lotSqFt) || sqft * 4)));
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
     // density, landscape complexity, near-water, large-driveway) flow into the
@@ -448,14 +458,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return null;
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
-    // Trust the lot ONLY when the lookup measured the parcel or the customer
-    // hand-confirmed it — the posted lotSqFt alone is a synthetic default when the
-    // lookup has no parcel. See resolveRealLotSqFt.
-    const lotSizeMeasured = resolveRealLotSqFt({
-      enrichedLotSqFt: ep.lotSqFt,
-      lotSqFt,
-      lotSizeConfirmed,
-    }) != null;
     const engineInput = {
       homeSqFt: sqft,
       // For COMMERCIAL, pass the resolved footprint explicitly (resolvePestFootprint

@@ -140,8 +140,12 @@ function recurringServiceKey(svc = {}) {
     if (raw.includes('lawn') || raw.includes('turf')) return 'commercial_lawn';
     if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'commercial_tree_shrub';
     if (raw.includes('mosquito')) return 'commercial_mosquito';
-    if (raw.includes('termite')) return 'commercial_termite_bait';
-    if (raw.includes('rodent')) return 'commercial_rodent_bait';
+    // Only the recurring BAIT/monitoring/station programs get the bait key —
+    // commercial termite trenching/WDO or rodent trapping/exclusion are one-time
+    // specialty work and must not inherit the recurring line's prepay/tax/schedule
+    // behavior (mirrors the residential rodent_bait gate).
+    if (raw.includes('termite') && /bait|station|monitor/.test(raw)) return 'commercial_termite_bait';
+    if (raw.includes('rodent') && /bait|station|monitor/.test(raw)) return 'commercial_rodent_bait';
     if (raw.includes('pest')) return 'commercial_pest';
   }
   if (raw.includes('pest')) return 'pest_control';

@@ -2129,9 +2129,31 @@ export default function EstimateToolViewV2({
     // (lawn, pest, tree/shrub, mosquito, termite-bait, rodent-bait). None collapse
     // to a manual commercial quote.
     const commercialAutoKeys = ["svcLawn", "svcPest", "svcTs", "svcMosquito", "svcTermiteBait", "svcRodentBait"];
-    const commercialAutoPricedCount =
-      commercialDetected ? commercialAutoKeys.filter((k) => form[k]).length : 0;
-    const commercialManualQuoteCount = 0;
+    // Mirror the server commercial pricers' real-size gates so the preview's
+    // auto-priced vs manual buckets match what Generate Estimate produces:
+    //   • lawn / tree → lot-derivable turf/bed, always auto-price.
+    //   • pest / termite-bait / rodent-bait → need a real BUILDING footprint
+    //     (else the pricer returns a quoteRequired manual line).
+    //   • mosquito → needs a real LOT (treatable outdoor area).
+    // Without this the sidebar would call a selection "ready as recurring" when
+    // Generate Estimate will actually produce a manual quote.
+    const hasCommercialBuildingSize =
+      Number(form.homeSqFt) > 0 ||
+      Number(form.termiteFootprintSqFt) > 0 ||
+      Number(form.termitePerimeterLF) > 0;
+    const hasCommercialLotSize = Number(form.lotSqFt) > 0;
+    const commercialKeyFallsToManual = (k) => {
+      if (k === "svcMosquito") return !hasCommercialLotSize;
+      if (k === "svcPest" || k === "svcTermiteBait" || k === "svcRodentBait")
+        return !hasCommercialBuildingSize;
+      return false; // lawn / tree are lot-derivable and always auto-price
+    };
+    const commercialAutoPricedCount = commercialDetected
+      ? commercialAutoKeys.filter((k) => form[k] && !commercialKeyFallsToManual(k)).length
+      : 0;
+    const commercialManualQuoteCount = commercialDetected
+      ? commercialAutoKeys.filter((k) => form[k] && commercialKeyFallsToManual(k)).length
+      : 0;
     // Commercial lines are FLAT / non-WaveGuard (excludeFromPctDiscount) — they
     // NEVER count toward the WaveGuard bundle tier or its % discount. So for a
     // commercial estimate the WaveGuard recurringCount is 0 and the preview shows
