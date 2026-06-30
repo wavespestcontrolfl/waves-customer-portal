@@ -3030,6 +3030,7 @@ router._private = {
   membershipDetailsChanged,
   parseAnnualPrepayAmount,
   parseAnnualPrepayVisitCount,
+  lockAndAssertNoAnnualPrepayOverlap,
   scheduleLinesFromEstimate,
   serviceCatalogMatch,
 };

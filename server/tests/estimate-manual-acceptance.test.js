@@ -5,6 +5,12 @@ jest.mock('../services/estimate-converter', () => ({
   resolveAnnualPrepayInvoiceTotal: jest.fn(() => ({ amount: 627, discount: 33, rate: 0.05 })),
 }));
 jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateAccepted: jest.fn() }));
+// markEstimateManuallyAccepted lazy-requires the shared annual-prepay overlap
+// lock from the admin-customers route only on the prepay-on-book path; mock it so
+// the unit test doesn't pull in the route (and its DB) or need trx.raw.
+jest.mock('../routes/admin-customers', () => ({
+  _private: { lockAndAssertNoAnnualPrepayOverlap: jest.fn().mockResolvedValue() },
+}));
 jest.mock('../services/account-membership-email', () => ({
   sendMembershipStarted: jest.fn().mockResolvedValue({ sent: true }),
 }));
@@ -276,6 +282,11 @@ describe('estimate manual acceptance', () => {
       coverageVisitCount: 4,
       coverageCadence: 'quarterly',
     }));
+    // The atomic overlap lock fires (inside the txn) before conversion.
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledWith(
+      database, 'customer-onbook', '2026-06-30', false, expect.any(String),
+    );
   });
 
   test('manual annual prepay rejects estimates without recurring value before marking accepted', async () => {

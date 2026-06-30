@@ -379,6 +379,20 @@ async function markEstimateManuallyAccepted({
             convertOptions.coverageServiceType = annualPrepayCoverage.coverageServiceType;
             convertOptions.coverageVisitCount = annualPrepayCoverage.coverageVisitCount;
             convertOptions.coverageCadence = annualPrepayCoverage.coverageCadence;
+            // ATOMIC overlap guard for prepay-on-book: take the SAME per-customer
+            // advisory lock Customer 360 uses and re-assert no overlapping term —
+            // inside THIS transaction, so two concurrent bookings can't both pass
+            // the route's preflight and mint duplicate prepay invoices/terms. The
+            // booked term starts at annualPrepayTermStart. Throws on overlap (the
+            // booking route catches it → books without prepay + a warning).
+            const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+            await lockAndAssertNoAnnualPrepayOverlap(
+              trx,
+              updatedEstimate.customer_id,
+              annualPrepayTermStart || null,
+              false,
+              'Customer already has an annual prepay term through',
+            );
           }
         }
         conversion = await estimateConverter.convertEstimate(updatedEstimate.id, convertOptions);

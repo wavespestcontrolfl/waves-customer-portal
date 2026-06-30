@@ -1766,11 +1766,33 @@ router.post('/', requireAdmin, async (req, res, next) => {
         bookingBillingTermEffective = 'standard';
         bookingWarnings.push('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit visit count).');
       } else {
-        annualPrepayCoverage = {
-          coverageServiceType: String(serviceType).slice(0, 100),
-          coverageVisitCount,
-          coverageCadence: recurringPattern || null,
-        };
+        // Don't mint a SECOND overlapping prepay term/invoice — mirror the
+        // Customer 360 overlap guard. If the customer already has an active /
+        // pending annual-prepay term covering on/after this visit, downgrade to
+        // a standard accept + warn (manage prepay from Customer 360 instead).
+        let overlapTerm = null;
+        try {
+          overlapTerm = await db('annual_prepay_terms')
+            .where({ customer_id: customerId })
+            .where(function overlapStatus() {
+              this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+                .orWhere(function lapsedRenewalStillInTerm() {
+                  this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+                });
+            })
+            .andWhere('term_end', '>=', scheduledDate)
+            .first('id', 'term_end');
+        } catch { overlapTerm = null; }
+        if (overlapTerm) {
+          bookingBillingTermEffective = 'standard';
+          bookingWarnings.push('Appointment booked as standard — this customer already has an annual prepay term. Manage prepay from Customer 360 to avoid a duplicate invoice/term.');
+        } else {
+          annualPrepayCoverage = {
+            coverageServiceType: String(serviceType).slice(0, 100),
+            coverageVisitCount,
+            coverageCadence: recurringPattern || null,
+          };
+        }
       }
     }
 
