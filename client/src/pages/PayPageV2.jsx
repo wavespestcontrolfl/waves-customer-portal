@@ -401,7 +401,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // Returns a status object so callers that must gate on the tender lock — the
   // ACH submit path — can act deterministically instead of reading async React
   // state. Fire-and-forget callers (method-switch, save-card toggle) ignore it.
-  //   { ok: true,  replaced: false } — PI is locked to `methodCategory`
+  //   { ok: true,  replaced: false, superseded: false } — PI locked to `methodCategory`
+  //   { ok: true,  replaced: false, superseded: true  } — locked, but a newer sync took over
   //   { ok: true,  replaced: true  } — a fresh PI was minted; Elements re-mount
   //   { ok: false }                 — lock failed (error already surfaced)
   const syncAmountForMethod = useCallback(async (methodCategory, saveCardOverride, options = {}) => {
@@ -445,15 +446,17 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           throw new Error(fetchError.message || 'Could not refresh the payment form');
         }
       }
-      // PI is locked to `methodCategory` server-side at this point; a superseding
-      // sync (or a tender switch) only skips the cosmetic amount refresh below.
+      // A superseding sync (or a tender switch) means this lock is no longer the
+      // authoritative one — a later request may still rewrite the PI. Report it
+      // (superseded) so the ACH submit path aborts instead of confirming, and
+      // skip the now-stale cosmetic amount refresh.
       if (syncSeq !== amountSyncSeqRef.current || selectedMethodRef.current !== methodCategory) {
-        return { ok: true, replaced: false };
+        return { ok: true, replaced: false, superseded: true };
       }
       setDisplayedBase(data.base);
       setDisplayedSurcharge(data.surcharge);
       setDisplayedTotal(data.total);
-      return { ok: true, replaced: false };
+      return { ok: true, replaced: false, superseded: false };
     } catch (err) {
       setAmountSyncError(true);
       const methodLabel = methodCategory === 'us_bank_account' ? 'bank-transfer' : 'card';
@@ -731,10 +734,17 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           setProcessing(false);
           return;
         }
-        if (lock.replaced || selectedMethodRef.current !== 'us_bank_account') {
-          // A fresh PI is being mounted, or the customer switched tenders
-          // mid-submit — don't confirm against a half-swapped intent. The
-          // re-mounted form lets them submit again cleanly.
+        if (lock.replaced) {
+          // A fresh PI was minted; Elements re-mount and the customer submits
+          // again cleanly — don't confirm against the dead intent.
+          setProcessing(false);
+          return;
+        }
+        if (lock.superseded || syncingAmountRef.current || selectedMethodRef.current !== 'us_bank_account') {
+          // Our lock was superseded by a newer sync, a sync is still in flight,
+          // or the tender changed mid-submit — any of these can rewrite the PI
+          // before confirm. Abort and let the customer retry from a settled state.
+          setElementError('Still updating your payment — please try again in a moment.');
           setProcessing(false);
           return;
         }
