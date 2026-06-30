@@ -1836,6 +1836,26 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // EVERY 30 MIN — Abandoned-booking recovery (1h SMS + 24h email)
+  //
+  // Chases /book drop-offs captured as booking_intents. 30-min cadence keeps the
+  // ~1h first-touch SMS responsive. Quiet hours + suppression are enforced in
+  // the service + the messaging validator. Ships LIVE; kill switch is
+  // GATE_BOOKING_ABANDON_RECOVERY=false (then it only shadow-logs counts).
+  // =========================================================================
+  cron.schedule('*/30 * * * *', async () => {
+    try {
+      await runExclusive('booking-abandon-recovery', async () => {
+        const BookingAbandonRecovery = require('./booking-abandon-recovery');
+        const result = await BookingAbandonRecovery.checkAbandoned();
+        if (result.sent > 0) logger.info(`Booking recovery: ${result.sms} SMS + ${result.email} email sent`);
+      });
+    } catch (err) {
+      logger.error(`Booking abandon recovery job failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Estimate extensions are manual-only. Do not auto-renew expired estimates
   // from cron; staff can extend deliberately through the admin estimate route.
 

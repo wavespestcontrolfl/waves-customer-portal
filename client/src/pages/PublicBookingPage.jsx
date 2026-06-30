@@ -113,6 +113,18 @@ export default function PublicBookingPage() {
   // Guards booking_availability_loaded against double-firing when a manually
   // typed address is geocoded server-side (setCoords re-runs loadAvailability).
   const availTrackedForRef = useRef(null);
+  // Proof-of-funnel token from the availability response; echoed to
+  // /capture-intent so the public capture endpoint can't be abused.
+  const captureTokenRef = useRef(null);
+  // Stable per /book session — the capture upsert key, so a corrected phone (after
+  // a mistyped first attempt) updates the SAME intent instead of orphaning the
+  // wrong number as its own recovery-eligible row.
+  const sessionIdRef = useRef(null);
+  if (!sessionIdRef.current) {
+    sessionIdRef.current = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `bk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
 
   const updateAddress = useCallback((updater) => {
     setAddress((current) => {
@@ -154,6 +166,7 @@ export default function PublicBookingPage() {
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not load availability');
+      if (data.capture_token) captureTokenRef.current = data.capture_token;
       setAvailability(data.days || []);
       // Fire once per resolved address: loadAvailability re-runs when the server
       // returns coords for a manually typed address (setCoords → new callback
@@ -246,6 +259,55 @@ export default function PublicBookingPage() {
       }
     } catch { /* best-effort */ }
   }, [address, applyCustomer]);
+
+  // Fire-and-forget partial capture: once a visitor has entered a phone + picked
+  // a slot, record a booking_intent so the recovery cron can follow up if they
+  // bail before confirming. keepalive so it survives the tab closing right after.
+  const captureBookingIntent = () => {
+    const digits = (contact.phone || '').replace(/\D/g, '');
+    if (digits.length !== 10 || !selectedSlot || !captureTokenRef.current) return;
+    try {
+      fetch(`${API_BASE}/booking/capture-intent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
+        body: JSON.stringify({
+          capture_token: captureTokenRef.current,
+          session_id: sessionIdRef.current,
+          capture_client_ts: Date.now(),
+          source,
+          service_id: service.id,
+          service_type: quotedServiceLabel || service.label,
+          quoted_service_label: quotedServiceLabel || null,
+          slot_date: selectedDate,
+          slot_start: selectedSlot.start_time,
+          slot_end: selectedSlot.end_time,
+          attribution: captureBookingAttribution() || undefined,
+          new_customer: {
+            first_name: contact.firstName,
+            last_name: contact.lastName,
+            phone: digits,
+            email: contact.email,
+            address_line1: address.line1,
+            city: address.city,
+            state: address.state,
+            zip: address.zip,
+            lat: coords?.lat,
+            lng: coords?.lng,
+          },
+        }),
+      }).catch(() => {});
+    } catch { /* never block the funnel */ }
+  };
+
+  // Keep the captured intent in sync with the booking context. The blur handlers
+  // only fire on contact edits, so a visitor who already entered a phone, then
+  // changed slot / service / address and abandoned without re-blurring would
+  // otherwise leave a STALE intent (recovery would name the wrong appointment).
+  useEffect(() => {
+    if ((contact.phone || '').replace(/\D/g, '').length === 10 && selectedSlot) captureBookingIntent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSlot?.start_time, selectedDate, service.id, address.line1]);
 
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
     ? null
@@ -340,6 +402,7 @@ export default function PublicBookingPage() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Search failed');
+    if (data.capture_token) captureTokenRef.current = data.capture_token;
     setPickedDate(null);
     setSelectedDate(null);
     setSelectedSlot(null);
@@ -373,6 +436,7 @@ export default function PublicBookingPage() {
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json();
       if (latestPickedDateRef.current !== date) return;
+      if (data.capture_token) captureTokenRef.current = data.capture_token;
       setBrowseDays(data.days || []);
     } catch {
       if (latestPickedDateRef.current !== date) return;
@@ -783,7 +847,7 @@ export default function PublicBookingPage() {
                   placeholder="(941) 555-1234"
                   value={contact.phone}
                   onChange={e => setContact(c => ({ ...c, phone: e.target.value }))}
-                  onBlur={() => checkExistingCustomer(contact.phone)}
+                  onBlur={() => { checkExistingCustomer(contact.phone); captureBookingIntent(); }}
                   style={inputStyle}
                   disabled={!!existingCustomerId}
                 />
@@ -814,6 +878,7 @@ export default function PublicBookingPage() {
                   type="email"
                   value={contact.email}
                   onChange={e => setContact(c => ({ ...c, email: e.target.value }))}
+                  onBlur={() => captureBookingIntent()}
                   style={inputStyle}
                 />
               </div>}

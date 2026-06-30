@@ -1,4 +1,6 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -341,6 +343,44 @@ router.get('/config', async (req, res, next) => {
 // explicitly picks a later date or searches via the Waves AI bar.
 const MAX_BOOKING_HORIZON_DAYS = 90;
 
+// Short-lived HMAC token minted in the availability response and REQUIRED by
+// /capture-intent. It proves the caller went through a real booking-availability
+// fetch (the funnel always does) rather than POSTing raw — so the public capture
+// endpoint can't be used to seed abandoned-booking recovery SMS/email to
+// arbitrary recipients. Bound to expiry (not to the phone, which the funnel
+// doesn't prove); combined with the per-IP limiter this caps abuse to the funnel
+// flow at ~12/min for the token's lifetime.
+const CAPTURE_TOKEN_SECRET = process.env.JWT_SECRET || process.env.BOOKING_CAPTURE_SECRET || 'waves-booking-capture-dev';
+const CAPTURE_TOKEN_TTL_MS = 30 * 60 * 1000;
+// Bind the token to the requesting IP (trust proxy is set, so req.ip is the
+// client). This stops "fetch one token, then POST many victim phones" — a
+// captured token is only usable from the IP that minted it, so reuse is bounded
+// by the same per-IP rate limiter. Hashed so the token never leaks the address.
+// (CGNAT/mobile IP rotation just fails closed → that capture is skipped, no error.)
+function captureIpKey(req) {
+  const xff = req && req.headers && typeof req.headers['x-forwarded-for'] === 'string'
+    ? req.headers['x-forwarded-for'].split(',')[0].trim() : '';
+  const ip = (req && req.ip) || xff || '';
+  return crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`ip:${ip}`).digest('base64url').slice(0, 16);
+}
+function mintCaptureToken(ipKey = '', now = Date.now()) {
+  const exp = now + CAPTURE_TOKEN_TTL_MS;
+  const sig = crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`capture:${exp}:${ipKey}`).digest('base64url');
+  return `${exp}.${sig}`;
+}
+function verifyCaptureToken(token, ipKey = '', now = Date.now()) {
+  if (!token || typeof token !== 'string' || !token.includes('.')) return false;
+  const [expStr, sig] = token.split('.');
+  const exp = parseInt(expStr, 10);
+  // Reject expired tokens and any exp implausibly far in the future (forged).
+  if (!Number.isFinite(exp) || now > exp || exp > now + CAPTURE_TOKEN_TTL_MS + 60000) return false;
+  const expected = crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`capture:${exp}:${ipKey}`).digest('base64url');
+  try {
+    return !!sig && sig.length === expected.length
+      && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  } catch { return false; }
+}
+
 // A slot counts as "nearby" (route-efficient) when its detour is small enough
 // to earn one of the proximity reasons — i.e. a tech is already working close
 // by. Drives the soft "no route near you that day yet" messaging downstream.
@@ -617,6 +657,8 @@ router.get('/availability', async (req, res, next) => {
       duration_minutes: duration,
       service_type: service_type || null,
       total_feasible: availability.total_feasible,
+      // Proof-of-funnel token the client echoes to /capture-intent.
+      capture_token: mintCaptureToken(captureIpKey(req)),
     });
   } catch (err) {
     logger.error('[booking:availability] failed:', err);
@@ -689,6 +731,7 @@ router.post('/find-slots', async (req, res, next) => {
       lng: resolvedLng,
       duration_minutes: duration,
       service_type: service_type || null,
+      capture_token: mintCaptureToken(captureIpKey(req)),
     });
   } catch (err) {
     logger.error('[booking:find-slots] failed:', err);
@@ -975,6 +1018,20 @@ async function createSelfBooking(payload = {}) {
         zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
       }).returning('*');
 
+      // Mark abandoned-booking recovery intents converted ATOMICALLY with the
+      // booking (same transaction), so converted_at is visible the instant the
+      // booking commits. A post-commit update would leave a window where the
+      // recovery cron — having SELECTed the intent before commit — could still
+      // win the claim and text "your spot isn't reserved yet" to someone who
+      // just booked.
+      const bookedTen = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+      if (bookedTen.length === 10) {
+        await trx('booking_intents')
+          .whereNull('converted_at')
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [bookedTen])
+          .update({ converted_at: trx.fn.now(), converted_booking_id: bookingRow.id, updated_at: trx.fn.now() });
+      }
+
       return { booking: bookingRow, serviceRow: scheduledRow };
       });
     } catch (txErr) {
@@ -997,7 +1054,25 @@ async function createSelfBooking(payload = {}) {
       throw txErr;
     }
 
+    // New bookings mark their recovery intents converted INSIDE the transaction
+    // above (atomic, race-free). This post-commit helper now only covers the
+    // double-submit REPLAY path — the existing booking committed in an earlier
+    // request, so a best-effort re-mark here closes out any intent captured since.
+    const markBookingIntentsConverted = async (bookingId) => {
+      try {
+        const ten = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+        if (ten.length !== 10) return;
+        await db('booking_intents')
+          .whereNull('converted_at')
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
+          .update({ converted_at: db.fn.now(), converted_booking_id: bookingId, updated_at: db.fn.now() });
+      } catch (err) {
+        logger.warn(`[booking:confirm] booking-intent conversion mark failed for customer=${custId}: ${err.message}`);
+      }
+    };
+
     if (txResult.existing) {
+      await markBookingIntentsConverted(txResult.existing.id);
       logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slotDateStr} ${slot_start} — returning existing booking ${txResult.existing.id}`);
       return { ok: true, body: {
         booking: txResult.existing,
@@ -1007,6 +1082,7 @@ async function createSelfBooking(payload = {}) {
     }
 
     const { booking, serviceRow } = txResult;
+    // (new-booking intents already converted in the transaction above)
 
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
     const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
@@ -1205,6 +1281,196 @@ router.post('/confirm', async (req, res, next) => {
   }
 });
 
+// Tight per-IP limiter: an intent row becomes send-eligible (the recovery cron
+// treats it as transactional consent), so the public endpoint must not be usable
+// to seed bulk outbound sends to arbitrary recipients.
+// Two per-IP layers — a real funnel only captures a handful of times per session,
+// so these are generous for genuine use but bound bulk abuse (the rows become
+// send-eligible). A short burst cap + an hourly ceiling. (Full recipient-binding
+// would need a Turnstile/OTP challenge — a deferred product decision.)
+const captureIntentLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, skipped: 'rate_limited' },
+});
+const captureIntentHourlyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, skipped: 'rate_limited' },
+});
+
+// Estimate-originated booking-link sources NOT covered by isOneTimeBookingSource
+// that the recovery lane must still skip (one-time semantics; handled by the
+// estimate follow-up lane). admin-manual-booking-resend = admin estimate resend.
+const RECOVERY_SKIP_SOURCES = new Set(['admin-manual-booking-resend']);
+
+// POST /api/booking/capture-intent — partial capture of a high-intent /book
+// visitor (entered contact + picked a slot, hasn't confirmed yet) so the
+// abandoned-booking recovery cron can follow up if they never finish. One OPEN
+// intent per phone (refreshed, not duplicated); booked phones are skipped.
+// Fire-and-forget: never returns a funnel-blocking error.
+router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter, async (req, res) => {
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('selfBooking')) return res.json({ ok: false, skipped: 'gate' });
+
+    const b = req.body || {};
+
+    // Proof the caller went through the real booking funnel: a token minted in the
+    // availability response (the funnel always fetches availability before the
+    // contact step), bound to the requesting IP. Without it this public,
+    // send-eligible endpoint could be used to seed recovery SMS/email to arbitrary
+    // recipients. Fail closed — no/invalid token, no send-eligible row.
+    if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
+      return res.json({ ok: true, skipped: 'unverified' });
+    }
+
+    // One-time / estimate-originated booking links are recovered by the estimate
+    // deposit-abandonment lane (services/estimate-follow-up.js), not here —
+    // capturing them would double-nudge AND a recovery link carrying source
+    // 'booking_recovery' would drop the one-time semantics, letting
+    // createSelfBooking seed a recurring series for a one-off visit. Skips the
+    // shared one-time sources PLUS the admin one-time estimate-resend link, which
+    // isn't in that helper (this is a recovery-lane guard only — it does not
+    // change createSelfBooking's recurring decision for those sources).
+    if (isOneTimeBookingSource(b.source) || RECOVERY_SKIP_SOURCES.has(String(b.source || '').trim())) {
+      return res.json({ ok: true, skipped: 'estimate_source' });
+    }
+
+    const nc = b.new_customer || b;
+    const phoneDigits = String(nc.phone || b.phone || '').replace(/\D/g, '');
+    if (phoneDigits.length < 10) return res.status(400).json({ error: 'valid phone required' });
+    const ten = phoneDigits.slice(-10);
+
+    const str = (v, n) => { const s = (v == null ? '' : String(v)).trim(); return s ? s.slice(0, n) : null; };
+    const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+    const sessionId = str(b.session_id, 80);
+    // Client capture time — used to reject a stale (out-of-order / slow keepalive)
+    // capture from overwriting a newer one for the same session.
+    const clientTs = Number.isFinite(Number(b.capture_client_ts)) ? Math.floor(Number(b.capture_client_ts)) : null;
+    const row = {
+      session_id: sessionId,
+      capture_client_ts: clientTs,
+      phone: phoneDigits,
+      first_name: str(nc.first_name, 120),
+      last_name: str(nc.last_name, 120),
+      email: str(nc.email, 200),
+      address_line1: str(nc.address_line1 || b.address, 250),
+      city: str(nc.city, 120),
+      state: str(nc.state, 40),
+      zip: str(nc.zip, 20),
+      lat: num(nc.lat),
+      lng: num(nc.lng),
+      service_type: cleanBookingServiceLabel(b.quoted_service_label) || cleanBookingServiceLabel(b.service_type) || str(b.service_type, 120),
+      service_id: str(b.service_id, 60),
+      slot_date: b.slot_date ? String(b.slot_date).split('T')[0].slice(0, 10) : null,
+      slot_start: str(b.slot_start, 10),
+      slot_end: str(b.slot_end, 10),
+      source: str(b.source, 60),
+      attribution: b.attribution ? JSON.stringify(b.attribution) : null,
+      last_activity_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    };
+
+    const tenMatch = (q) => q.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
+
+    // Already booked → nothing to recover. Check BOTH a recently-converted intent
+    // AND a recent self_booked_appointment for the phone: a fire-and-forget
+    // capture fired on the Confirm click can land AFTER /booking/confirm committed
+    // and marked intents converted, so a phone with a fresh booking but no prior
+    // intent would otherwise mint a new open row and get a "spot isn't reserved
+    // yet" nudge for a booking that already succeeded.
+    const booked = await tenMatch(db('booking_intents').whereNotNull('converted_at')
+      .where('converted_at', '>', new Date(Date.now() - 24 * 3600000))).first('id');
+    if (booked) return res.json({ ok: true, skipped: 'already_booked' });
+    const recentBooking = await db('self_booked_appointments as sba')
+      .leftJoin('customers as c', 'sba.customer_id', 'c.id')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
+      .where('sba.created_at', '>', new Date(Date.now() - 6 * 3600000))
+      .whereNot('sba.status', 'cancelled')
+      .first('sba.id');
+    if (recentBooking) return res.json({ ok: true, skipped: 'already_booked' });
+
+    // Revalidate the SUBMITTED booking context server-side. The IP-bound token
+    // proves the caller fetched availability, but not for THIS slot — so confirm
+    // the posted slot is a real, currently-offered opening for the resolved coords
+    // before making the row send-eligible. Combined with the token + per-IP
+    // limiter, this stops a single availability fetch from seeding recovery sends
+    // to arbitrary phones without a genuine bookable slot. Fail closed.
+    try {
+      const { lat, lng } = await resolveBookingCoords({ lat: row.lat, lng: row.lng, address: row.address_line1, city: row.city });
+      if (!lat || !lng || !row.slot_date || !row.slot_start) {
+        return res.json({ ok: true, skipped: 'unverified_slot' });
+      }
+      const cfg = (await db('booking_config').first()) || {};
+      const avail = await buildBookingAvailability({
+        lat, lng,
+        duration: cfg.slot_duration_minutes || 60,
+        rangeFrom: row.slot_date, rangeTo: row.slot_date,
+        config: cfg, today: new Date(), expandOpenDays: true,
+      });
+      const day = (avail.days || []).find((d) => String(d.date).slice(0, 10) === row.slot_date);
+      const offered = !!day && Array.isArray(day.slots)
+        && day.slots.some((s) => String(s.start_time).slice(0, 5) === String(row.slot_start).slice(0, 5));
+      if (!offered) return res.json({ ok: true, skipped: 'slot_unavailable' });
+      row.lat = lat;
+      row.lng = lng;
+    } catch (e) {
+      logger.warn(`[booking:capture-intent] slot revalidation failed: ${e.message}`);
+      return res.json({ ok: false, skipped: 'unverified' });
+    }
+
+    // Resolve an existing customer by phone so a recovery send to a known customer
+    // honors THEIR notification prefs (opt-out) via the customer-consent path,
+    // instead of falling through to lead transactional consent (which would let an
+    // opted-out customer still get the recovery SMS). Best-effort; new prospects
+    // simply resolve to null.
+    try {
+      const { findCustomerByPhone } = require('../services/lead-from-extraction');
+      const match = await findCustomerByPhone(phoneDigits);
+      row.customer_id = match && match.id ? match.id : null;
+    } catch (e) {
+      // FAIL CLOSED on a lookup ERROR (vs a clean no-match): leaving customer_id
+      // null would treat an existing OPTED-OUT customer as a lead and bypass their
+      // opt-out on the recovery send. A transient blip → skip this capture.
+      logger.warn(`[booking:capture-intent] customer lookup failed — skipping capture: ${e.message}`);
+      return res.json({ ok: false, skipped: 'lookup_failed' });
+    }
+
+    // Refresh the existing OPEN intent, keyed by session_id when the client sends
+    // one — so a corrected phone (after a mistyped first attempt) updates the SAME
+    // row instead of orphaning the wrong number as its own recovery-eligible
+    // intent. Fall back to the phone match for older clients with no session id.
+    let open = null;
+    if (sessionId) {
+      open = await db('booking_intents').where({ session_id: sessionId })
+        .whereNull('converted_at').where('suppressed', false)
+        .orderBy('captured_at', 'desc').first('id');
+    }
+    if (!open) {
+      open = await tenMatch(db('booking_intents').whereNull('converted_at').where('suppressed', false))
+        .orderBy('captured_at', 'desc').first('id');
+    }
+    if (open) {
+      // Guard against a stale capture overwriting corrected contact: only apply if
+      // this request's client timestamp is >= the stored one (or either is absent).
+      const upd = db('booking_intents').where({ id: open.id });
+      if (clientTs != null) upd.where((q) => q.whereNull('capture_client_ts').orWhere('capture_client_ts', '<=', clientTs));
+      const affected = await upd.update(row);
+      return res.json({ ok: true, intent_id: open.id, updated: affected === 1, stale: affected === 0 });
+    }
+    const [created] = await db('booking_intents').insert(row).returning('id');
+    return res.json({ ok: true, intent_id: created?.id || created, created: true });
+  } catch (err) {
+    logger.error(`[booking:capture-intent] failed: ${err.message}`);
+    return res.json({ ok: false }); // fire-and-forget — never block the funnel
+  }
+});
+
 // GET /api/booking/embed-snippet?source=xyz — returns copy-paste iframe HTML
 router.get('/embed-snippet', (req, res) => {
   const source = (req.query.source || 'site').replace(/[^a-z0-9_-]/gi, '');
@@ -1278,4 +1544,6 @@ module.exports._internals = {
   loadBookingConfig,
   createSelfBooking,
   MAX_BOOKING_HORIZON_DAYS,
+  mintCaptureToken,
+  verifyCaptureToken,
 };

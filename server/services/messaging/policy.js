@@ -88,6 +88,7 @@ const MESSAGE_PURPOSES = [
   'payment_link',
   'document_request',
   'estimate_followup',
+  'booking_abandonment_followup',
   'review_request',
   'referral',
   'retention',
@@ -279,6 +280,17 @@ const PURPOSE_POLICY = {
     requireIds: ['customerId'],
   },
   estimate_followup: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_provided_unverified',
+    requireIds: [],
+  },
+  // Abandoned-booking recovery — same shape as estimate_followup: a prospect who
+  // entered their phone into /book and picked a slot is a transactional contact.
+  booking_abandonment_followup: {
     allowEmoji: false,
     allowExactPrice: false,
     maxSegments: 2,

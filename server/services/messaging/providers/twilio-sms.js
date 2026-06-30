@@ -200,6 +200,7 @@ function mapPurposeToMessageType(purpose) {
     case 'autopay':             return 'autopay';
     case 'payment_link':        return 'payment_link';
     case 'estimate_followup':   return 'manual';
+    case 'booking_abandonment_followup': return 'manual';
     case 'review_request':      return 'review_request';
     case 'referral':            return 'referral';
     case 'retention':           return 'manual';
