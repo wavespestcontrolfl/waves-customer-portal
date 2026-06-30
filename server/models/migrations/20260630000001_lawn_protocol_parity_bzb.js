@@ -175,13 +175,17 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('lawn_protocols'))) return;
-  const keys = TURFS.map((t) => t.key);
-  const protocols = await knex('lawn_protocols').whereIn('protocol_key', keys).select('id');
-  const ids = protocols.map((p) => p.id);
-  if (ids.length) {
-    // windows/gates/products cascade on lawn_protocol_id FK, but delete explicitly to be safe.
-    await knex('lawn_protocol_windows').whereIn('lawn_protocol_id', ids).del().catch(() => {});
-    await knex('lawn_protocol_gates').whereIn('lawn_protocol_id', ids).del().catch(() => {});
+  // Remove ONLY the exact (protocol_key, version, grass_track) rows this migration
+  // seeded — never a draft/archived/newer-active version the admin draft→publish
+  // workflow may have created with the same key (up() skips an existing key).
+  for (const turf of TURFS) {
+    const rows = await knex('lawn_protocols')
+      .where({ protocol_key: turf.key, version: turf.version, grass_track: turf.track })
+      .select('id');
+    const ids = rows.map((r) => r.id);
+    if (!ids.length) continue;
+    await knex('lawn_protocol_windows').whereIn('lawn_protocol_id', ids).del();
+    await knex('lawn_protocol_gates').whereIn('lawn_protocol_id', ids).del();
     await knex('lawn_protocols').whereIn('id', ids).del();
   }
 };
