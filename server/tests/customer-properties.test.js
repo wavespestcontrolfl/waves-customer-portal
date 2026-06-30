@@ -1,4 +1,4 @@
-const { normStreet, addressKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES } = require('../services/customer-properties');
+const { normStreet, addressKey, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES } = require('../services/customer-properties');
 
 describe('address key normalization (suffix + ZIP)', () => {
   test('normalizeZip takes the 5-digit form (ZIP+4 insensitive)', () => {
@@ -70,6 +70,24 @@ describe('customer-properties pure helpers', () => {
       .toBe(addressKey({ ...base, address_line1: '123 Main Street' }));   // abbreviation == expansion
     expect(addressKey({ ...base, address_line1: '123 Main St' }))
       .not.toBe(addressKey({ ...base, address_line1: '123 Main Ave' }));  // different street, NOT merged
+  });
+
+  test('unitKey collapses designators; streetEmbeddedUnitKey extracts the trailing unit', () => {
+    // unit strings (line2): Apt/Unit/Ste/# variants of the SAME unit all collapse,
+    // matching addressKey — so the classifier can't disagree with the dedup key
+    expect(unitKey('Apt 4')).toBe('4');
+    expect(unitKey('Unit 4')).toBe('4');
+    expect(unitKey('#4')).toBe('4');
+    expect(unitKey('4')).toBe('4');
+    expect(unitKey('Apt 4')).toBe(unitKey('Unit 4'));   // the Codex case: Apt 4 == Unit 4
+    expect(unitKey('Apt 4')).not.toBe(unitKey('Apt 5')); // real units stay distinct
+    expect(unitKey('')).toBe('');
+    // embedded in a one-line street: extract the trailing unit, but NEVER pull a
+    // bare number out of the house number
+    expect(streetEmbeddedUnitKey('100 Main St Apt 4')).toBe('4');
+    expect(streetEmbeddedUnitKey('100 Main St #4')).toBe('4');
+    expect(streetEmbeddedUnitKey('14 Main St')).toBe('');
+    expect(unitKey('Apt 4')).toBe(streetEmbeddedUnitKey('100 Main St #4')); // line2 == embedded
   });
 
   test('normalizeOccupancy coerces unknown values', () => {

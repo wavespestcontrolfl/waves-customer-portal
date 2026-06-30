@@ -2356,7 +2356,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     const addressChanged = ['address_line1', 'city', 'state', 'zip'].some(f => updates[f] !== undefined);
     if (addressChanged) {
       await db('customers').where({ id: req.params.id }).update({ latitude: null, longitude: null });
-      require('../services/geocoder').ensureCustomerGeocoded(req.params.id).catch(() => {});
+      // Re-geocode the customer, then mirror the fresh coords onto the primary
+      // property — syncPrimaryAddress cleared them on the address edit, so without
+      // this the property row would stay permanently null after every address edit.
+      require('../services/geocoder').ensureCustomerGeocoded(req.params.id)
+        .then((coords) => coords && require('../services/customer-properties').syncPrimaryCoordsFromCustomer(req.params.id))
+        .catch(() => {});
     }
 
     // Fire-and-forget: trigger cancellation save when deactivating a customer

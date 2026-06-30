@@ -2087,7 +2087,7 @@ const CallRecordingProcessor = {
         // pull it from the V2 service_address when present — otherwise Unit A and
         // Unit B at one building collapse to the same address key.
         const callUnit = extracted.address_line2 || v2Result?.extraction?.property?.service_address?.street_line_2 || null;
-        const { addressKey, streetKey } = require('./customer-properties');
+        const { addressKey, streetKey, unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
         // When the multi-property table is live, an address already recorded there
         // (the primary OR a prior secondary) is NOT a new second address — don't
         // re-flag it, or the office is asked to confirm a place we already know.
@@ -2112,28 +2112,22 @@ const CallRecordingProcessor = {
         // adds one). One-sided: the caller omitting a unit they didn't mention is
         // NOT a change; and a unit already embedded in the stored street (legacy
         // "100 Main St Apt 4" with empty line2) is NOT a new unit.
-        // Extract the trailing unit token from a one-line street, e.g. legacy
-        // "100 Main St Apt 4" → "4". Anchored to a designator + end-of-string so a
-        // bare number is NOT pulled out of a house number ("14 Main St" → "").
-        // '#' is kept OUT of the \b group: \b is a word boundary and '#' is a
-        // non-word char, so "\b#" never matches "St #4" (space before '#') — leave
-        // '#' un-anchored so it matches wherever it appears.
-        const trailingUnitKey = (s) => {
-          const m = String(s || '').match(/(?:\b(?:apt|apartment|unit|ste|suite)|#)\.?\s*([a-z0-9-]+)\s*$/i);
-          return m ? normStreet(m[1]) : '';
-        };
+        // Normalize unit tokens with the SAME designator-stripping addressKey uses
+        // (unitKey/streetEmbeddedUnitKey, imported below) so this heuristic can't
+        // disagree with the dedup key — a raw normStreet keeps the designator word,
+        // making "Apt 4" and "Unit 4" compare as different units for the SAME unit.
         // The call's unit: its own line2 if present, else a unit embedded in its
         // one-line street ("100 Main St Apt 5" with empty line2) — otherwise a
         // different embedded unit at the same street is missed (streetKey strips the
         // trailing unit, so the street compare alone won't catch it).
-        const callUnitKey = normStreet(callUnit) || trailingUnitKey(extracted.address_line1);
+        const callUnitKey = unitKey(callUnit) || streetEmbeddedUnitKey(extracted.address_line1);
         // The unit (if any) ALREADY on file: its line2, or one embedded in the
         // stored street. Compare the call's unit to THESE exact units — not a raw
         // substring of the street, which falsely matches a bare unit "4" inside the
         // house number "14 Main St" and suppresses real second-property detection.
-        const storedEmbeddedUnit = trailingUnitKey(existingCust?.address_line1);
+        const storedEmbeddedUnit = streetEmbeddedUnitKey(existingCust?.address_line1);
         const callAddsDifferentUnit = !!callUnitKey
-          && callUnitKey !== normStreet(existingCust?.address_line2)
+          && callUnitKey !== unitKey(existingCust?.address_line2)
           && callUnitKey !== storedEmbeddedUnit;
         const locationDiffers = (onFileStreet !== fromCallStreet)
           || callAddsDifferentUnit
@@ -2192,20 +2186,25 @@ const CallRecordingProcessor = {
         const isRental = bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
           || detectRentalSignal({ extracted, callerRelationship: v2Result?.extraction?.caller?.relationship_to_property });
         // The rental signal is about THIS CALL's address. ensurePrimaryProperty
-        // creates the primary from customers.address_line1, which can be a DIFFERENT
+        // creates the primary from customers.address_*, which can be a DIFFERENT
         // address (the customer's own home) when the call is about a secondary
         // rental — so only let the primary inherit the rental occupancy when the
-        // call's street IS the primary's. Otherwise the rental rides the secondary
-        // (recordCallProperty below).
-        const custStreetRow = await db('customers').where({ id: customerId }).select('address_line1').first();
-        const callIsPrimaryStreet = !!customerProperties.streetKey(custStreetRow?.address_line1)
-          && customerProperties.streetKey(custStreetRow?.address_line1) === customerProperties.streetKey(extracted.address_line1);
+        // call IS the primary's full address. Compare STREET *and* UNIT: streetKey
+        // strips trailing units, so a tenant call for Unit B at the same street as
+        // the stored Unit A must NOT mark the primary Unit A rental — the rental
+        // rides the secondary (recordCallProperty below).
+        const custRow = await db('customers').where({ id: customerId }).select('address_line1', 'address_line2').first();
+        const callUnitKey = customerProperties.unitKey(callUnit) || customerProperties.streetEmbeddedUnitKey(extracted.address_line1);
+        const custUnitKey = customerProperties.unitKey(custRow?.address_line2) || customerProperties.streetEmbeddedUnitKey(custRow?.address_line1);
+        const callIsPrimaryAddress = !!customerProperties.streetKey(custRow?.address_line1)
+          && customerProperties.streetKey(custRow?.address_line1) === customerProperties.streetKey(extracted.address_line1)
+          && callUnitKey === custUnitKey;
         // propertyId is null only when the customer is addressless AND has no
         // primary yet — i.e. this call carries their FIRST service address (the
         // !customerId upsert above is skipped when the call is pre-linked, so
         // ensurePrimaryProperty has nothing to backfill from).
         const ensured = await customerProperties.ensurePrimaryProperty(customerId, {
-          occupancyType: (isRental && callIsPrimaryStreet) ? 'rental_investment' : undefined,
+          occupancyType: (isRental && callIsPrimaryAddress) ? 'rental_investment' : undefined,
         });
         const isFirstAddress = !ensured.propertyId;
         // A SECONDARY write needs a complete-enough address (city + ZIP) so its

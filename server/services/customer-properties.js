@@ -68,6 +68,28 @@ function addressKey({ address_line1, address_line2, city, zip } = {}) {
   return canonicalizeAddress([streetUnit, city, normalizeZip(zip)].filter(Boolean).join(' ')).replace(/[^a-z0-9]/g, '');
 }
 
+/**
+ * The bare unit token from a UNIT string (a line2 like "Apt 4" / "Unit 4" / "#4" /
+ * "4"), with interchangeable designators stripped, so they all collapse to "4" —
+ * the SAME normalization addressKey applies. Use this (not a raw normStreet, which
+ * keeps the designator word) when comparing two units for equality, so the
+ * classifier can't disagree with the dedup key. Pass a unit string, NOT a street.
+ */
+function unitKey(s) {
+  return normStreet(stripUnitDesignators(s));
+}
+
+/**
+ * The trailing unit embedded in a ONE-LINE street ("100 Main St Apt 4" → "4"),
+ * anchored to a designator + end-of-string so a bare number is NOT pulled out of a
+ * house number ("14 Main St" → ""). '#' is kept OUT of the \b group — \b is a word
+ * boundary and '#' is a non-word char, so "\b#" never matches "St #4".
+ */
+function streetEmbeddedUnitKey(s) {
+  const m = String(s || '').match(/(?:\b(?:apt|apartment|unit|ste|suite)|#)\.?\s*([a-z0-9-]+)\s*$/i);
+  return m ? normStreet(m[1]) : '';
+}
+
 /** Coerce to a known occupancy enum value (pure). */
 function normalizeOccupancy(v) {
   return OCCUPANCY_TYPES.includes(v) ? v : 'unknown';
@@ -317,8 +339,9 @@ async function syncPrimaryAddress(customerOrId, conn = db) {
     address_line1: next.address_line1, address_line2: next.address_line2, city: next.city, zip: next.zip,
   });
   // The address changed, so the old coordinates point at the wrong place — clear
-  // them (better NULL than wrong) so a downstream geocoder re-derives them, rather
-  // than leaving the primary routed to the previous address.
+  // them (better NULL than wrong). The route re-geocodes the customer after this and
+  // calls syncPrimaryCoordsFromCustomer to re-mirror the fresh coords onto the
+  // primary, so the row regains a location rather than staying permanently null.
   next.latitude = null;
   next.longitude = null;
   next.updated_at = new Date();
@@ -328,16 +351,34 @@ async function syncPrimaryAddress(customerOrId, conn = db) {
   await conn('customer_properties').where({ id: primary.id }).update(next);
 }
 
+/**
+ * Mirror the customer's CURRENT lat/lng onto their primary property. Called after a
+ * re-geocode (the address edit cleared the primary's coords in syncPrimaryAddress)
+ * so the primary regains its location instead of staying null. No-op when the
+ * customer has no coords yet or no primary row. Best-effort (caller fire-and-forgets).
+ */
+async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
+  if (!customerId) return;
+  const c = await conn('customers').where({ id: customerId }).select('latitude', 'longitude').first();
+  if (!c || c.latitude == null || c.longitude == null) return;
+  await conn('customer_properties')
+    .where({ customer_id: customerId, is_primary: true, active: true })
+    .update({ latitude: c.latitude, longitude: c.longitude, updated_at: new Date() });
+}
+
 module.exports = {
   OCCUPANCY_TYPES,
   normStreet,
   addressKey,
+  unitKey,
+  streetEmbeddedUnitKey,
   streetKey,
   normalizeZip,
   normalizeOccupancy,
   isNewAddress,
   completePrimaryFromCall,
   syncPrimaryAddress,
+  syncPrimaryCoordsFromCustomer,
   listProperties,
   ensurePrimaryProperty,
   recordCallProperty,
