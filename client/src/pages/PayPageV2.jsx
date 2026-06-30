@@ -398,8 +398,14 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     selectedMethodRef.current = selectedMethod;
   }, [selectedMethod]);
 
+  // Returns a status object so callers that must gate on the tender lock — the
+  // ACH submit path — can act deterministically instead of reading async React
+  // state. Fire-and-forget callers (method-switch, save-card toggle) ignore it.
+  //   { ok: true,  replaced: false } — PI is locked to `methodCategory`
+  //   { ok: true,  replaced: true  } — a fresh PI was minted; Elements re-mount
+  //   { ok: false }                 — lock failed (error already surfaced)
   const syncAmountForMethod = useCallback(async (methodCategory, saveCardOverride, options = {}) => {
-    if (!paymentIntentId || !token) return;
+    if (!paymentIntentId || !token) return { ok: false };
     const syncSeq = amountSyncSeqRef.current + 1;
     amountSyncSeqRef.current = syncSeq;
     syncingAmountRef.current = true;
@@ -431,7 +437,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           baseAmount: data.base,
           methodCategory,
         });
-        return;
+        return { ok: true, replaced: true };
       }
       if (!options.skipFetchUpdates && elementsRef.current?.fetchUpdates) {
         const { error: fetchError } = await elementsRef.current.fetchUpdates();
@@ -439,10 +445,15 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           throw new Error(fetchError.message || 'Could not refresh the payment form');
         }
       }
-      if (syncSeq !== amountSyncSeqRef.current || selectedMethodRef.current !== methodCategory) return;
+      // PI is locked to `methodCategory` server-side at this point; a superseding
+      // sync (or a tender switch) only skips the cosmetic amount refresh below.
+      if (syncSeq !== amountSyncSeqRef.current || selectedMethodRef.current !== methodCategory) {
+        return { ok: true, replaced: false };
+      }
       setDisplayedBase(data.base);
       setDisplayedSurcharge(data.surcharge);
       setDisplayedTotal(data.total);
+      return { ok: true, replaced: false };
     } catch (err) {
       setAmountSyncError(true);
       const methodLabel = methodCategory === 'us_bank_account' ? 'bank-transfer' : 'card';
@@ -454,6 +465,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId,
         }));
       }
+      return { ok: false, replaced: false };
     } finally {
       if (syncSeq === amountSyncSeqRef.current) {
         syncingAmountRef.current = false;
@@ -692,6 +704,41 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
     // ACH: use the existing confirmPayment flow (no surcharge)
     if (selectedMethodRef.current === 'us_bank_account') {
+      // The invoice PaymentIntent is locked to ONE tender family server-side,
+      // and reusing an open intent on a pay-page reload resets it to card-only.
+      // If we confirm a bank PaymentMethod against a still-card-only intent,
+      // Stripe rejects it ("The PaymentMethod provided (us_bank_account) is not
+      // allowed for this PaymentIntent") — the silent failure customers hit.
+      // Re-lock the intent to us_bank_account and wait for it before confirming.
+      try {
+        // Let any in-flight tender sync settle so we re-lock from a known state.
+        for (let i = 0; i < 100 && syncingAmountRef.current; i += 1) {
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((resolve) => { setTimeout(resolve, 50); });
+        }
+        const lock = await syncAmountForMethod('us_bank_account');
+        if (!lock || !lock.ok) {
+          // syncAmountForMethod already surfaced the error to the customer.
+          setProcessing(false);
+          return;
+        }
+        if (lock.replaced || selectedMethodRef.current !== 'us_bank_account') {
+          // A fresh PI is being mounted, or the customer switched tenders
+          // mid-submit — don't confirm against a half-swapped intent. The
+          // re-mounted form lets them submit again cleanly.
+          setProcessing(false);
+          return;
+        }
+      } catch (lockErr) {
+        setElementError(lockErr.message || 'Could not prepare the bank payment. Please try again.');
+        reportPaymentError(token, paymentErrorPayload(lockErr, {
+          phase: 'ach_tender_lock',
+          methodCategory: 'us_bank_account',
+          paymentIntentId,
+        }));
+        setProcessing(false);
+        return;
+      }
       try {
         const { error, paymentIntent: pi } = await stripeRef.current.confirmPayment({
           elements: elementsRef.current,
