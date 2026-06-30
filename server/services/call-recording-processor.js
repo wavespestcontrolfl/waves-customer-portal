@@ -2113,9 +2113,17 @@ const CallRecordingProcessor = {
         // NOT a change; and a unit already embedded in the stored street (legacy
         // "100 Main St Apt 4" with empty line2) is NOT a new unit.
         const callUnitKey = normStreet(callUnit);
+        // The unit (if any) ALREADY embedded in the stored street, e.g. legacy
+        // "100 Main St Apt 4" → "4". Compare the call's unit to THIS exact unit —
+        // not a raw substring of the street, which falsely matches a bare unit "4"
+        // inside the house number "14 Main St" and suppresses real second-property
+        // detection.
+        const storedEmbeddedUnitMatch = String(existingCust?.address_line1 || '')
+          .match(/\b(?:apt|apartment|unit|ste|suite|#)\.?\s*([a-z0-9-]+)\s*$/i);
+        const storedEmbeddedUnit = storedEmbeddedUnitMatch ? normStreet(storedEmbeddedUnitMatch[1]) : '';
         const callAddsDifferentUnit = !!callUnitKey
           && callUnitKey !== normStreet(existingCust?.address_line2)
-          && !normStreet(existingCust?.address_line1).includes(callUnitKey);
+          && callUnitKey !== storedEmbeddedUnit;
         const locationDiffers = (onFileStreet !== fromCallStreet)
           || callAddsDifferentUnit
           || bothPresentAndDiffer(existingCust?.city, extracted.city)

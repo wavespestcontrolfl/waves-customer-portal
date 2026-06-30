@@ -43,10 +43,11 @@ const stripTrailingUnit = (s) => String(s || '').replace(/\s+(?:apt|apartment|un
 const streetKey = (s) => canonicalizeAddress(stripTrailingUnit(s)).replace(/[^a-z0-9]/g, '');
 
 // Interchangeable unit designators are written loosely for the SAME unit, so
-// normalize the designator OUT — "Apt 4" / "Unit 4" / "Ste 4" / "#4" / "4" all key
-// identically (else the same unit slips past dedup as a different address_key).
-// Same designator set stripTrailingUnit recognizes; the bare unit id is preserved.
-const normalizeUnit = (u) => String(u || '')
+// strip the designator WORD wherever it appears (in line2 OR embedded in line1) —
+// "Apt 4" / "Unit 4" / "Ste 4" / "#4" / "4", and "100 Main St Apt 4" vs
+// "100 Main St" + "Apt 4", all key identically. The bare unit id is preserved so
+// different units stay distinct. Same designator set stripTrailingUnit recognizes.
+const stripUnitDesignators = (s) => String(s || '')
   .replace(/[.,#]/g, ' ')
   .replace(/\b(?:apt|apartment|unit|ste|suite)\b\.?/gi, ' ')
   .replace(/\s+/g, ' ')
@@ -61,7 +62,10 @@ const normalizeUnit = (u) => String(u || '')
  * uniqueness uses the SAME normalization as this helper (no JS/SQL drift).
  */
 function addressKey({ address_line1, address_line2, city, zip } = {}) {
-  return canonicalizeAddress([address_line1, normalizeUnit(address_line2), city, normalizeZip(zip)].filter(Boolean).join(' ')).replace(/[^a-z0-9]/g, '');
+  // Strip unit designators across the COMBINED street + unit so an embedded unit
+  // ("100 Main St Apt 4") keys the same as the split form ("100 Main St" + "Apt 4").
+  const streetUnit = stripUnitDesignators([address_line1, address_line2].filter(Boolean).join(' '));
+  return canonicalizeAddress([streetUnit, city, normalizeZip(zip)].filter(Boolean).join(' ')).replace(/[^a-z0-9]/g, '');
 }
 
 /** Coerce to a known occupancy enum value (pure). */
@@ -131,9 +135,15 @@ async function ensurePrimaryProperty(customerOrId, { occupancyType } = {}) {
     }).returning('id');
     return { created: true, propertyId: row && (row.id || row) };
   } catch (e) {
-    // Partial-unique race (another writer created the primary) — treat as exists.
-    logger.warn(`[customer-properties] ensurePrimaryProperty(${customer.id}) skipped: ${e.code || e.name || 'db_error'}`);
-    return { created: false, propertyId: null };
+    // ONLY the partial-unique primary race (another writer created the primary
+    // first, code 23505) means "already exists". Any OTHER DB error is a real
+    // failure — surface it rather than silently returning "no primary", which a
+    // caller would read as success.
+    if (e && e.code === '23505') {
+      logger.warn(`[customer-properties] ensurePrimaryProperty(${customer.id}) lost the primary race`);
+      return { created: false, propertyId: null };
+    }
+    throw e;
   }
 }
 
