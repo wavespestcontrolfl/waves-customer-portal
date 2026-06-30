@@ -75,6 +75,24 @@ test('a colliding address rolls back and returns a clear error, no geocode', asy
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
 });
 
+test('resubmitting the same address still syncs + re-geocodes (self-heals a stale row)', async () => {
+  // customers.address_* already equals the submitted value (a prior pre-fix IB edit
+  // updated the text but skipped the mirror/geocode). A diff-vs-customer-row check
+  // would skip the heal; presence-based must still run sync + geocode.
+  db.__qb.first
+    .mockResolvedValueOnce(baseRow) // before — address already matches what we submit
+    .mockResolvedValueOnce(baseRow); // after
+
+  const result = await executeTool('update_customer', {
+    customer_id: CUSTOMER_ID,
+    updates: { address_line1: '123 Old Street', city: 'Bradenton', state: 'FL', zip: '34205' },
+  });
+
+  expect(result.success).toBe(true);
+  expect(customerProperties.syncPrimaryAddress).toHaveBeenCalledTimes(1);
+  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith(CUSTOMER_ID);
+});
+
 test('a non-address change does not touch the property mirror or geocoder', async () => {
   db.__qb.first
     .mockResolvedValueOnce(baseRow) // before
