@@ -2156,11 +2156,11 @@ const CallRecordingProcessor = {
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
           } catch (triageErr) {
-            logger.warn(`[call-proc-bridge] second_service_address triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+            logger.warn(`[call-proc-bridge] second_service_address triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
           }
         }
       } catch (e) {
-        logger.warn(`[call-proc-bridge] second-address check skipped for ${maskSid(callSid)}: ${e.message}`);
+        logger.warn(`[call-proc-bridge] second-address check skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
       }
     }
 
@@ -2226,7 +2226,9 @@ const CallRecordingProcessor = {
           });
         }
       } catch (e) {
-        logger.warn(`[customer-properties] call-pipeline write skipped for ${maskSid(callSid)}: ${e.message}`);
+        // Log the error CODE/NAME only — a DB error message can echo the failing
+        // address (e.g. unique-constraint "Key (address_key)=(...) already exists").
+        logger.warn(`[customer-properties] call-pipeline write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
       }
     }
 
