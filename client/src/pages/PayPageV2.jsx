@@ -393,6 +393,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const selectedMethodRef = useRef('card');
   const syncingAmountRef = useRef(false);
   const amountSyncSeqRef = useRef(0);
+  // Counts ALL in-flight /update-amount requests, not just the latest sequence.
+  // syncingAmountRef must stay true until every overlapping request settles —
+  // otherwise an older (out-of-order) request can rewrite the PI's tender after
+  // a newer one cleared the flag, racing the ACH confirm lock.
+  const pendingSyncCountRef = useRef(0);
 
   useEffect(() => {
     selectedMethodRef.current = selectedMethod;
@@ -409,6 +414,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     if (!paymentIntentId || !token) return { ok: false };
     const syncSeq = amountSyncSeqRef.current + 1;
     amountSyncSeqRef.current = syncSeq;
+    pendingSyncCountRef.current += 1;
     syncingAmountRef.current = true;
     setSyncingAmount(true);
     setAmountSyncError(false);
@@ -470,7 +476,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       }
       return { ok: false, replaced: false };
     } finally {
-      if (syncSeq === amountSyncSeqRef.current) {
+      // Clear the in-flight flag only once EVERY overlapping request has
+      // settled, regardless of completion order — a stale older request that
+      // resolves after a newer one must not leave the flag falsely clear.
+      pendingSyncCountRef.current = Math.max(0, pendingSyncCountRef.current - 1);
+      if (pendingSyncCountRef.current === 0) {
         syncingAmountRef.current = false;
         setSyncingAmount(false);
       }
