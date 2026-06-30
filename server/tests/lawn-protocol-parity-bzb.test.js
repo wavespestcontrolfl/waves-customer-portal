@@ -59,6 +59,11 @@ describe('lawn protocol parity (Bermuda/Zoysia/Bahia) seed', () => {
         expect(tasks.length).toBeGreaterThanOrEqual(2);
         expect(typeof w.title).toBe('string');
         expect(typeof w.visit_type).toBe('string');
+        // month + sort_order are INTEGER columns — must be numeric 1-12, not 'Jan'
+        expect(typeof w.month).toBe('number');
+        expect(w.month).toBeGreaterThanOrEqual(1);
+        expect(w.month).toBeLessThanOrEqual(12);
+        expect(w.sort_order).toBe(w.month);
         JSON.parse(w.assessment_bridge); // valid JSON
       });
     });
@@ -72,10 +77,10 @@ describe('lawn protocol parity (Bermuda/Zoysia/Bahia) seed', () => {
     });
   });
 
-  test('blackout months (Jun/Jul/Sep) require blackout_zero_np on every turf', () => {
-    inserts.lawn_protocol_windows
-      .filter((w) => ['Jun', 'Jul', 'Sep'].includes(w.month))
-      .forEach((w) => expect(JSON.parse(w.required_tasks)).toContain('blackout_zero_np'));
+  test('blackout months (Jun/Jul/Sep = 6/7/9) require blackout_zero_np on every turf', () => {
+    const blackout = inserts.lawn_protocol_windows.filter((w) => [6, 7, 9].includes(w.month));
+    expect(blackout.length).toBe(9); // 3 months x 3 turf
+    blackout.forEach((w) => expect(JSON.parse(w.required_tasks)).toContain('blackout_zero_np'));
   });
 
   test('turf-specific product-restriction gates are present', () => {

@@ -18,9 +18,12 @@
  * Idempotent: skips a turf whose protocol_key already exists.
  */
 
+const MONTHS = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 };
+
 function windowRow(turfLabel, month, windowKey, title, visitType, carrier, goal, tasks) {
+  const monthNum = MONTHS[month] ?? month; // lawn_protocol_windows.month is an INTEGER column
   return {
-    month,
+    month: monthNum,
     window_key: windowKey,
     title,
     visit_type: visitType,
@@ -36,7 +39,7 @@ function windowRow(turfLabel, month, windowKey, title, visitType, carrier, goal,
     assessment_bridge: JSON.stringify({ writeExpectedWindow: true, writeWatchItems: true, requiredTasks: tasks }),
     inventory_bridge: JSON.stringify({ forecastProducts: true, deductActualsOnCompletion: true }),
     wiki_refs: JSON.stringify(tasks.map((task) => `protocols/lawn/${task}`)),
-    sort_order: month,
+    sort_order: monthNum,
   };
 }
 
