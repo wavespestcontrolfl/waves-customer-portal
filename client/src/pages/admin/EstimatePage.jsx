@@ -924,18 +924,21 @@ function EstimateToolView() {
     const commercialAutoKeys = ["svcLawn", "svcPest", "svcTs", "svcMosquito", "svcTermiteBait", "svcRodentBait"];
     // Mirror the server commercial pricers' real-size gates so the preview's
     // auto-priced vs manual buckets match what Generate Estimate produces:
-    // lawn/tree are lot-derivable (always auto); pest/termite-bait/rodent-bait
-    // need a real BUILDING footprint; mosquito needs a real LOT. Else the pricer
+    // lawn/tree are lot-derivable (always auto); pest/rodent-bait need a real
+    // BUILDING footprint (home size — the termite-specific measurements do NOT
+    // feed them); termite-bait accepts a home size OR an admin termite
+    // footprint/perimeter measurement; mosquito needs a real LOT. Else the pricer
     // returns a quoteRequired manual line and the warning below must surface.
-    const hasCommercialBuildingSize =
-      Number(form.homeSqFt) > 0 ||
+    const hasCommercialHomeSize = Number(form.homeSqFt) > 0;
+    const hasCommercialTermiteSize =
+      hasCommercialHomeSize ||
       Number(form.termiteFootprintSqFt) > 0 ||
       Number(form.termitePerimeterLF) > 0;
     const hasCommercialLotSize = Number(form.lotSqFt) > 0;
     const commercialKeyFallsToManual = (k) => {
       if (k === "svcMosquito") return !hasCommercialLotSize;
-      if (k === "svcPest" || k === "svcTermiteBait" || k === "svcRodentBait")
-        return !hasCommercialBuildingSize;
+      if (k === "svcTermiteBait") return !hasCommercialTermiteSize;
+      if (k === "svcPest" || k === "svcRodentBait") return !hasCommercialHomeSize;
       return false; // lawn / tree are lot-derivable and always auto-price
     };
     const commercialAutoPricedCount = commercialDetected

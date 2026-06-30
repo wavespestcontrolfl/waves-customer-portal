@@ -2790,7 +2790,14 @@ function priceCommercialTermiteBait(property = {}, options = {}) {
         // Set BOTH footprint aliases so the measurement wins over any existing
         // property.footprint (resolvePestFootprint reads `footprint` first).
         ...(hasMeasuredFootprint ? { footprint: measuredFootprint, footprintSqFt: measuredFootprint } : {}),
-        ...(hasMeasuredPerimeter ? { perimeter: measuredPerimeter } : {}),
+        // A measured perimeter wins. Otherwise, when only a measured FOOTPRINT is
+        // supplied, CLEAR any property.perimeter (computed from the top-level home
+        // size) so resolveCommercialPestFootprint re-derives the perimeter from the
+        // measured footprint (4·√area) — else a corrected footprint would still
+        // price the monitoring line off the stale home-derived perimeter.
+        ...(hasMeasuredPerimeter
+          ? { perimeter: measuredPerimeter }
+          : (hasMeasuredFootprint ? { perimeter: undefined, perimeterLF: undefined, perimeterLf: undefined } : {})),
       }
     : property);
   const { footprint, perimeter } = resolved;

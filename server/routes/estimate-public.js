@@ -9662,7 +9662,11 @@ function categoryForRecurringServiceKey(key) {
     case 'commercial_pest': return 'pest_control';
     case 'commercial_mosquito': return 'mosquito';
     case 'commercial_termite_bait': return 'termite_bait';
-    case 'commercial_rodent_bait': return 'rodent_bait';
+    // Match the residential rodent_bait → 'rodent' mapping above: the 'rodent_bait'
+    // category has no section copy/chips, so a single commercial rodent-bait quote
+    // would fall back to generic bundle copy (and one-time rodent rows wouldn't
+    // group with it). Use the 'rodent' category that actually has copy.
+    case 'commercial_rodent_bait': return 'rodent';
     default: return null;
   }
 }

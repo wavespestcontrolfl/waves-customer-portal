@@ -391,6 +391,20 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     expect(divergent.perimeter).toBe(400);
   });
 
+  test('a footprint-only termite measurement re-derives perimeter (ignores a stale home-derived perimeter)', () => {
+    // property.perimeter is stale (computed from the top-level home size). A
+    // measured footprint with NO perimeterLF must re-derive the perimeter from the
+    // footprint (4·√area), not price the monitoring line off the stale perimeter.
+    const r = priceCommercialTermiteBait(
+      { perimeter: 5000, footprint: 2000 },
+      { footprintSqFt: 10000 },
+    );
+    expect(r.quoteRequired).toBe(false);
+    // 4·√10000 = 400 → matches the {footprint:10000, perimeter:400} golden anchor.
+    expect(r.perimeter).toBe(400);
+    expect(r.annual).toBe(850.91);
+  });
+
   test('all three auto-price through the engine as taxable, flat, non-WaveGuard lines', () => {
     const est = generateEstimate({
       propertyType: 'commercial',
