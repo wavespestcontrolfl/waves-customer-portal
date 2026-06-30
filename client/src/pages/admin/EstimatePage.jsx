@@ -921,12 +921,19 @@ function EstimateToolView() {
     // ALL commercial services with an auto-pricer (lawn, pest, tree/shrub) now
     // price instantly as recurring lines. Commercial mosquito / termite-bait
     // have no pricer yet and collapse to a manual commercial quote.
+    const commercialAutoKeys = ["svcLawn", "svcPest", "svcTs"];
     const commercialManualKeys = ["svcMosquito", "svcTermiteBait"];
+    const commercialAutoPricedCount =
+      commercialDetected ? commercialAutoKeys.filter((k) => form[k]).length : 0;
     const commercialManualQuoteCount =
       commercialDetected ? commercialManualKeys.filter((k) => form[k]).length : 0;
-    const recurringCount = qualifyingRecurringKeys
-      .filter((k) => form[k] && !(commercialDetected && commercialManualKeys.includes(k)))
-      .length;
+    // Commercial lines are FLAT / non-WaveGuard (excludeFromPctDiscount) — they
+    // NEVER count toward the WaveGuard tier or its % discount. So a commercial
+    // estimate has a WaveGuard recurringCount of 0 and shows a commercial
+    // non-member state, not a fake Silver/Gold bundle discount.
+    const recurringCount = commercialDetected
+      ? 0
+      : qualifyingRecurringKeys.filter((k) => form[k]).length;
     const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
     // Tier logic
@@ -936,8 +943,9 @@ function EstimateToolView() {
       2: { name: "Silver", discount: 0.1 },
       3: { name: "Gold", discount: 0.15 },
     };
-    const tier =
-      recurringCount >= 4
+    const tier = commercialDetected
+      ? { name: "Commercial", discount: 0 }
+      : recurringCount >= 4
         ? { name: "Platinum", discount: 0.2 }
         : tierMap[recurringCount] || tierMap[0];
 
@@ -953,7 +961,7 @@ function EstimateToolView() {
         Math.round((sqft * 0.022 + 20) * (freqMult[form.pestFreq] || 1)),
       );
     }
-    if (form.svcTs)
+    if (form.svcTs && !commercialDetected)
       approx.ts = Math.max(
         45,
         Math.round((Number(form.bedArea) || lotSqft * 0.15) * 0.012 + 30),
@@ -1013,11 +1021,11 @@ function EstimateToolView() {
       "svcExclusion",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
-    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
+    const anySelected = recurringCount > 0 || commercialAutoPricedCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
 
     return {
       recurringCount,
-      totalRecurringCount: recurringCount + separateRecurringCount + commercialManualQuoteCount,
+      totalRecurringCount: recurringCount + commercialAutoPricedCount + separateRecurringCount + commercialManualQuoteCount,
       commercialManualQuoteCount,
       onetimeCount,
       tier,

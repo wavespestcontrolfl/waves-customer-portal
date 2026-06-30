@@ -2128,12 +2128,19 @@ export default function EstimateToolViewV2({
     // ALL commercial services with an auto-pricer (lawn, pest, tree/shrub) now
     // price instantly as recurring lines. Commercial mosquito / termite-bait
     // have no pricer yet and collapse to a manual commercial quote.
+    const commercialAutoKeys = ["svcLawn", "svcPest", "svcTs"];
     const commercialManualKeys = ["svcMosquito", "svcTermiteBait"];
+    const commercialAutoPricedCount =
+      commercialDetected ? commercialAutoKeys.filter((k) => form[k]).length : 0;
     const commercialManualQuoteCount =
       commercialDetected ? commercialManualKeys.filter((k) => form[k]).length : 0;
-    const recurringCount = qualifyingRecurringKeys
-      .filter((k) => form[k] && !(commercialDetected && commercialManualKeys.includes(k)))
-      .length;
+    // Commercial lines are FLAT / non-WaveGuard (excludeFromPctDiscount) — they
+    // NEVER count toward the WaveGuard bundle tier or its % discount. So for a
+    // commercial estimate the WaveGuard recurringCount is 0 and the preview shows
+    // a commercial non-member state, not a fake multi-service bundle discount.
+    const recurringCount = commercialDetected
+      ? 0
+      : qualifyingRecurringKeys.filter((k) => form[k]).length;
     const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
     const tierMap = {
@@ -2142,8 +2149,9 @@ export default function EstimateToolViewV2({
       2: { name: "2-service bundle", discount: 0.1 },
       3: { name: "3-service bundle", discount: 0.15 },
     };
-    const tier =
-      recurringCount >= 4
+    const tier = commercialDetected
+      ? { name: "Commercial — flat pricing (non-member)", discount: 0 }
+      : recurringCount >= 4
         ? { name: "4-service bundle", discount: 0.2 }
         : tierMap[recurringCount] || tierMap[0];
 
@@ -2158,7 +2166,7 @@ export default function EstimateToolViewV2({
         Math.round((sqft * 0.022 + 20) * (freqMult[form.pestFreq] || 1)),
       );
     }
-    if (form.svcTs)
+    if (form.svcTs && !commercialDetected)
       approx.ts = Math.max(
         45,
         Math.round((Number(form.bedArea) || lotSqft * 0.15) * 0.012 + 30),
@@ -2228,17 +2236,17 @@ export default function EstimateToolViewV2({
       "svcExclusion",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
-    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
+    const anySelected = recurringCount > 0 || commercialAutoPricedCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
 
     return {
       recurringCount,
       // totalRecurringCount includes services like Palm Injection /
-      // Rodent Bait that don't count toward the WaveGuard tier but are
-      // still recurring selections — display surfaces use this to avoid
-      // claiming "0 recurring selected" when only a non-qualifying
-      // service is chosen. Tier-discount math still keys off
+      // Rodent Bait (and commercial auto-priced lines) that don't count toward
+      // the WaveGuard tier but are still recurring selections — display surfaces
+      // use this to avoid claiming "0 recurring selected" when only a
+      // non-qualifying service is chosen. Tier-discount math still keys off
       // recurringCount alone.
-      totalRecurringCount: recurringCount + separateRecurringCount + commercialManualQuoteCount,
+      totalRecurringCount: recurringCount + commercialAutoPricedCount + separateRecurringCount + commercialManualQuoteCount,
       commercialManualQuoteCount,
       onetimeCount,
       tier,

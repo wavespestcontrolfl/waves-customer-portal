@@ -423,11 +423,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const storiesNum = Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1));
     const livingAreaFootprint = (v) => Math.max(1, Math.round(Number(v) / storiesNum));
     const realFootprintSqFt = (() => {
+      // A CONFIRMED building size (lookup-seeded, then possibly hand-corrected on
+      // the confirm step) wins over the enriched measurement — the customer may
+      // have corrected a stale lookup value (e.g. 5,000 → 20,000 sq ft).
+      if (buildingSizeConfirmed === true && Number(homeSqFt) > 0) return livingAreaFootprint(homeSqFt);
       if (Number(ep.footprintSqFt) > 0) return Number(ep.footprintSqFt);
       if (Number(ep.buildingSqFt) > 0) return Number(ep.buildingSqFt);
       if (Number(ep.homeSqFt) > 0) return livingAreaFootprint(ep.homeSqFt);
       if (Number(ep.livingAreaSqFt) > 0) return livingAreaFootprint(ep.livingAreaSqFt);
-      if (buildingSizeConfirmed === true && Number(homeSqFt) > 0) return livingAreaFootprint(homeSqFt);
       return null;
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
