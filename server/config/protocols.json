@@ -407,7 +407,7 @@
         "⚠ Large Patch (Rhizoctonia): Zoysia is HIGHLY susceptible. Preventive fungicide Oct-Mar with FRAC rotation.",
         "⚠ SpeedZone Southern: NEVER apply above 90°F. Use Celsius WG for Jul/Aug/Sep broadleaf.",
         "⚠ NO Atrazine on Zoysia. NO Anuew EZ on Zoysia.",
-        "★ NEW v4: Large Patch FRAC rotation calendar — Headway (11+3) Oct → Medallion (12) Nov → Velista (7) Dec/Jan. No more tri",
+        "★ NEW v4: Large Patch FRAC — preventive Headway (11+3) Oct → Medallion (12) Nov (base); Velista (FRAC 7) as the Dec rescue when large patch is active. Rotate MOA each app, no consecutive repeat. No more tri",
         "★ NEW v4: Large patch diagnostic criteria for techs — orange-brown rings with dark \"smoke ring\" advancing border.",
         "★ NEW v4: Thatch measurement V3+V10. Zoysia trigger: >0.5\" (lower than Bermuda 0.75\" — denser thatch per inch).",
         "★ NEW v4: SpeedZone April weather-gated at 90°F. Soil-test branching. PGR response documentation.",
@@ -592,7 +592,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "★ MAJOR: Basic/Std Dec touchpoint. ★ FRAC rotation: Headway (11+3) Oct → Medallion (12) Nov → Velista (7) Dec. Three different MOAs. Annual report optional on request."
+          "notes": "★ MAJOR: Basic/Std Dec touchpoint. ★ FRAC rotation: preventive Headway (11+3) Oct → Medallion (12) Nov; Velista (FRAC 7) as the Dec large-patch rescue when active — distinct MOA, no FRAC-3/11 repeat. Annual report optional on request."
         }
       ]
     },
