@@ -1,6 +1,9 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
-jest.mock('../services/estimate-converter', () => ({ convertEstimate: jest.fn() }));
+jest.mock('../services/estimate-converter', () => ({
+  convertEstimate: jest.fn(),
+  resolveAnnualPrepayInvoiceTotal: jest.fn(() => ({ amount: 627, discount: 33, rate: 0.05 })),
+}));
 jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateAccepted: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({
   sendMembershipStarted: jest.fn().mockResolvedValue({ sent: true }),
@@ -17,6 +20,7 @@ const proposalWin = require('../services/proposal-win');
 const {
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
+  prepayBookingEligibility,
   markEstimateManuallyAccepted,
 } = require('../services/estimate-manual-acceptance');
 
@@ -224,6 +228,54 @@ describe('estimate manual acceptance', () => {
       billingTerm: 'prepay_annual',
     }));
     expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
+  });
+
+  test('prepay-on-book threads the booked term start + coverage config to the converter (so the visit is stamped prepaid)', async () => {
+    const estimate = {
+      id: 'estimate-prepay-onbook',
+      status: 'viewed',
+      customer_id: 'customer-onbook',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      declined_at: null,
+      decline_reason: null,
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '99.00',
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-onbook', billingTerm: 'prepay_annual', draftInvoiceId: 'inv-onbook' }),
+    };
+
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-onbook',
+      source: 'verbal_annual_prepay_booking',
+      billingTerm: 'prepay_annual',
+      annualPrepayTermStart: '2026-06-30',
+      annualPrepayCoverage: {
+        coverageServiceType: 'Quarterly Pest Control Service',
+        coverageVisitCount: 4,
+        coverageCadence: 'quarterly',
+      },
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    });
+
+    expect(estimateConverter.convertEstimate).toHaveBeenCalledWith(estimate.id, expect.objectContaining({
+      billingTerm: 'prepay_annual',
+      skipAutoSchedule: true,
+      annualPrepayTermStart: '2026-06-30',
+      coverageServiceType: 'Quarterly Pest Control Service',
+      coverageVisitCount: 4,
+      coverageCadence: 'quarterly',
+    }));
   });
 
   test('manual annual prepay rejects estimates without recurring value before marking accepted', async () => {
@@ -910,5 +962,49 @@ describe('commercial proposal win paths (#1917)', () => {
     await expect(markEstimateManuallyAccepted({
       estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
     })).rejects.toThrow(/no billable line items/i);
+  });
+});
+
+describe('prepayBookingEligibility (one-step prepay gate)', () => {
+  const recurring = (services) => ({
+    monthly_total: '55.00',
+    annual_total: '660.00',
+    onetime_total: '99.00',
+    estimate_data: { recurring: { services } },
+  });
+
+  test('a single recurring service is eligible and returns the resolved invoice total', () => {
+    const r = prepayBookingEligibility(recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]));
+    expect(r.eligible).toBe(true);
+    expect(r.invoiceTotal).toBe(627); // from the mocked resolveAnnualPrepayInvoiceTotal
+  });
+
+  test('a bundled multi-recurring quote is NOT eligible (Phase 1: one covered service per term)', () => {
+    const r = prepayBookingEligibility(recurring([
+      { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' },
+      { service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' },
+    ]));
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('multi_service');
+  });
+
+  test('a commercial proposal is not eligible', () => {
+    const r = prepayBookingEligibility({
+      monthly_total: '55.00', annual_total: '660.00',
+      estimate_data: { proposal: { enabled: true }, recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] } },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('commercial_proposal');
+  });
+
+  test('invoice-mode and one-time-option quotes are not eligible', () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    expect(prepayBookingEligibility({ ...base, bill_by_invoice: true }).reason).toBe('invoice_mode');
+    expect(prepayBookingEligibility({ ...base, show_one_time_option: true }).reason).toBe('one_time_option');
+  });
+
+  test('a quote with no recurring annual is not eligible', () => {
+    const r = prepayBookingEligibility({ monthly_total: '0.00', annual_total: '0.00', onetime_total: '250.00', estimate_data: {} });
+    expect(r.eligible).toBe(false);
   });
 });

@@ -939,6 +939,21 @@ const EstimateConverter = {
     const annualPrepayTermStart = typeof opts.annualPrepayTermStart === 'string' && opts.annualPrepayTermStart
       ? opts.annualPrepayTermStart
       : null;
+    // Coverage config for a prepay accept made while booking — passed straight to
+    // createTermForAnnualPrepay so the term stamps the just-booked visit prepaid
+    // (and seeds the rest of the year). coverageServiceType must equal the booked
+    // service_type so serviceMatchesCoverage finds the row. Only set when the
+    // caller (admin-schedule prepay-on-book) supplies it; other callers are
+    // unchanged.
+    const annualPrepayCoverageServiceType = typeof opts.coverageServiceType === 'string' && opts.coverageServiceType
+      ? opts.coverageServiceType
+      : null;
+    const annualPrepayCoverageVisitCount = Number.isInteger(opts.coverageVisitCount) && opts.coverageVisitCount > 0
+      ? opts.coverageVisitCount
+      : null;
+    const annualPrepayCoverageCadence = typeof opts.coverageCadence === 'string' && opts.coverageCadence
+      ? opts.coverageCadence
+      : null;
     const deferFollowUpReminderRegistration = opts.deferFollowUpReminderRegistration === true;
     const usingCallerDatabase = !!opts.database;
     const database = opts.database || db;
@@ -1409,8 +1424,19 @@ const EstimateConverter = {
               prepayInvoiceId: draftInvoiceId,
               planLabel: `${prepayPlanPrefix} Annual Prepay`,
               monthlyRate: termMonthlyRate,
-              prepayAmount: annualAmount,
+              // When coverage is being materialized (prepay-on-book),
+              // applyPrepaidCoverageForTerm splits prepay_amount across the
+              // covered visits — use the TAX-INCLUSIVE invoice total so the
+              // coverage ledger matches what the customer actually pays (a
+              // pretax value would leave the tax portion uncredited). Falls back
+              // to the pretax annual when no invoice total / no coverage.
+              prepayAmount: (annualPrepayCoverageServiceType && inv?.total != null)
+                ? Number(inv.total)
+                : annualAmount,
               termStart: termStartDate || null,
+              coverageServiceType: annualPrepayCoverageServiceType || undefined,
+              coverageVisitCount: annualPrepayCoverageVisitCount || undefined,
+              coverageCadence: annualPrepayCoverageCadence || undefined,
               conn: database,
             });
             if (!annualPrepayTerm?.id) {

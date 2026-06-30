@@ -232,6 +232,21 @@ function formatMoney(value) {
   return Number.isFinite(n) ? `$${n.toFixed(2)}` : '';
 }
 
+// Default covered visits/year from a cadence (mirrors the server's
+// visitsPerYearForCadence). Used only to show the operator the default they can
+// override; the server re-derives it authoritatively from the booked cadence.
+function visitsPerYearForCadence(cadence) {
+  switch (String(cadence || '').trim().toLowerCase()) {
+    case 'monthly': return 12;
+    case 'bimonthly': return 6;
+    case 'quarterly': return 4;
+    case 'triannual': return 3;
+    case 'semiannual': case 'biannual': return 2;
+    case 'annual': case 'yearly': return 1;
+    default: return null;
+  }
+}
+
 export function formatScheduleEstimateAmount(estimate) {
   const onetime = Number(estimate?.onetimeTotal);
   if (Number.isFinite(onetime) && onetime > 0) return `${formatMoney(onetime)} one-time`;
@@ -461,6 +476,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // instead of the Annual Prepay button + Schedule dance). Distinct from
   // collectPrepay (cash/card in person) — mutually exclusive with it.
   const [billAsAnnualPrepay, setBillAsAnnualPrepay] = useState(false);
+  // Operator override for covered visits/year on an annual-prepay booking. Empty
+  // = let the server default from the booked cadence (visitsPerYearForCadence).
+  const [prepayVisitCount, setPrepayVisitCount] = useState('');
   const [discountPresets, setDiscountPresets] = useState([]);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
@@ -1117,6 +1135,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           billingTerm: (billAsAnnualPrepay && linkedEstimate && linkedEstimate.status !== 'accepted')
             ? 'prepay_annual'
             : undefined,
+          // Operator's covered-visits/year override (server defaults from the
+          // booked cadence when omitted). Only meaningful with prepay_annual.
+          prepayVisitCount: (billAsAnnualPrepay && linkedEstimate && linkedEstimate.status !== 'accepted' && prepayVisitCount)
+            ? Number(prepayVisitCount)
+            : undefined,
         };
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
         createdGroupKeysRef.current.add(key);
@@ -1529,21 +1552,23 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         style={{ marginTop: 10 }}
                       />
                       {/* Billing term for the accept-on-book. Annual prepay is
-                          offered only for a recurring quote (has an annual /
-                          monthly total) that isn't accepted yet — picking it
-                          makes the booking also create the pending prepay
-                          invoice + renewal term. */}
-                      {linkedEstimate.status !== 'accepted' && (() => {
+                          offered only when the SERVER says the quote is eligible
+                          (single recurring service, eligible mix, not a proposal/
+                          invoice-mode) and it isn't accepted yet — picking it makes
+                          the booking also create the pending prepay invoice +
+                          renewal term and mark the year's visits prepaid. */}
+                      {linkedEstimate.status !== 'accepted' && linkedEstimate.prepay?.eligible && (() => {
+                        // Exact amount the prepay invoice will bill (server applies
+                        // the discount + margin floor); fall back to the recurring
+                        // annual only if it wasn't resolved.
                         const annual = Number(linkedEstimate.annualTotal) > 0
                           ? Number(linkedEstimate.annualTotal)
                           : (Number(linkedEstimate.monthlyTotal) > 0 ? Number(linkedEstimate.monthlyTotal) * 12 : 0);
-                        if (!(annual > 0)) return null;
-                        // Show the exact amount the prepay invoice will bill
-                        // (server applies the prepay discount + margin floor);
-                        // fall back to the recurring annual if it wasn't resolved.
-                        const invoiceAmount = Number(linkedEstimate.prepayInvoiceTotal) > 0
-                          ? Number(linkedEstimate.prepayInvoiceTotal)
+                        const invoiceAmount = Number(linkedEstimate.prepay?.invoiceTotal) > 0
+                          ? Number(linkedEstimate.prepay.invoiceTotal)
                           : annual;
+                        const recurringSvc = services.find((s) => s.cadence && s.cadence !== 'one_time');
+                        const defaultVisits = visitsPerYearForCadence(recurringSvc?.cadence);
                         const segStyle = (active) => ({
                           flex: 1,
                           padding: '6px 10px',
@@ -1573,8 +1598,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                               </button>
                             </div>
                             {billAsAnnualPrepay && (
-                              <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-                                Booking creates a pending annual prepay invoice ({formatMoney(invoiceAmount)}) + renewal term. Send it from the customer&rsquo;s invoices.
+                              <div style={{ marginTop: 8 }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: D.muted }}>
+                                  <span>Covered visits / year</span>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max="24"
+                                    value={prepayVisitCount}
+                                    onChange={(e) => setPrepayVisitCount(e.target.value)}
+                                    placeholder={defaultVisits ? String(defaultVisits) : '—'}
+                                    style={{ width: 72, padding: '4px 8px', borderRadius: 6, border: `1px solid ${D.border}`, background: D.bg, color: D.text, fontSize: 12 }}
+                                  />
+                                </label>
+                                <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                                  Creates a pending annual prepay invoice ({formatMoney(invoiceAmount)}) + renewal term, and marks the {prepayVisitCount || defaultVisits || ''} covered visit{(Number(prepayVisitCount || defaultVisits) === 1) ? '' : 's'} prepaid for the year. Send the invoice from the customer&rsquo;s invoices.
+                                </div>
                               </div>
                             )}
                           </div>

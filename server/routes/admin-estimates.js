@@ -1348,7 +1348,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
       .first(
         'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
         'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-        'bill_by_invoice', 'created_at', 'accepted_at', 'expires_at',
+        'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'expires_at',
         'customer_name', 'customer_phone', 'customer_email', 'address',
       );
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -1407,12 +1407,15 @@ router.get('/:id/schedule-source', async (req, res, next) => {
     // only when there's no monthly) plus any one-time. annual_total is the
     // annualized monthly, so summing both would double-count.
     const quotedTotal = (monthlyTotal || annualTotal || 0) + (onetimeTotal || 0);
-    // Exact amount the annual-prepay invoice will bill (discount + floor applied),
-    // so the Schedule modal's prepay option doesn't show a pre-discount figure.
-    let prepayInvoiceTotal = null;
+    // Whether the Schedule modal may offer one-step annual prepay for this quote
+    // (single recurring service, eligible mix, etc.) + the exact amount the
+    // prepay invoice would bill (discount + floor applied, so no pre-discount
+    // drift). Gates the modal so it never offers what the server would reject.
+    let prepay = { eligible: false, invoiceTotal: null };
     try {
-      prepayInvoiceTotal = require('../services/estimate-manual-acceptance').annualPrepayInvoiceTotalForEstimate(estimate);
-    } catch { prepayInvoiceTotal = null; }
+      const e = require('../services/estimate-manual-acceptance').prepayBookingEligibility(estimate);
+      prepay = { eligible: !!e.eligible, invoiceTotal: e.invoiceTotal != null ? Number(e.invoiceTotal) : null };
+    } catch { prepay = { eligible: false, invoiceTotal: null }; }
 
     const nameParts = String(estimate.customer_name || '').trim().split(/\s+/).filter(Boolean);
 
@@ -1428,7 +1431,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
         annualTotal,
         onetimeTotal,
         quotedTotal,
-        prepayInvoiceTotal,
+        prepay,
         waveguardTier: estimate.waveguard_tier,
         lines,
         deposit,

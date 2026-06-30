@@ -1549,7 +1549,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         .select(
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'bill_by_invoice', 'created_at', 'accepted_at',
+          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
         ),
       db('services')
         .where({ is_active: true })
@@ -1601,12 +1601,14 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
           linked ? { scheduledServiceId: linked.id, useLinkedFallback: false } : {},
         );
       } catch { deposit = null; }
-      // Exact amount the annual-prepay invoice would bill (discount + floor
-      // applied), so the Schedule modal's prepay option matches the invoice.
-      let prepayInvoiceTotal = null;
+      // Whether the Schedule modal may offer one-step annual prepay for this
+      // quote + the exact amount the prepay invoice would bill (discount + floor
+      // applied). Gates the option so it never offers what the server rejects.
+      let prepay = { eligible: false, invoiceTotal: null };
       try {
-        prepayInvoiceTotal = require('../services/estimate-manual-acceptance').annualPrepayInvoiceTotalForEstimate(estimate);
-      } catch { prepayInvoiceTotal = null; }
+        const e = require('../services/estimate-manual-acceptance').prepayBookingEligibility(estimate);
+        prepay = { eligible: !!e.eligible, invoiceTotal: e.invoiceTotal != null ? Number(e.invoiceTotal) : null };
+      } catch { prepay = { eligible: false, invoiceTotal: null }; }
       return {
         id: estimate.id,
         token: estimate.token,
@@ -1618,7 +1620,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         annualTotal,
         onetimeTotal,
         quotedTotal,
-        prepayInvoiceTotal,
+        prepay,
         waveguardTier: estimate.waveguard_tier,
         lines,
         deposit,

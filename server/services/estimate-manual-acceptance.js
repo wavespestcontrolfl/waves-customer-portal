@@ -87,6 +87,31 @@ function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
   return resolved?.amount != null ? Number(resolved.amount) : null;
 }
 
+// Can this estimate be accepted as annual prepay WHILE booking, and shown that
+// option in the Schedule modal? Mirrors the guards markEstimateManuallyAccepted
+// enforces for billingTerm='prepay_annual' (so the modal never offers what the
+// server would reject), PLUS a Phase-1 restriction to a SINGLE recurring service
+// — the coverage subsystem tracks one coverage_service_type per term, so a
+// bundled multi-recurring quote can't be fully covered yet (multi-service
+// coverage is Phase 2). Returns { eligible, invoiceTotal, reason }.
+function prepayBookingEligibility(estimate = {}) {
+  const baseAnnual = resolveAnnualPrepayAmount(estimate);
+  if (!baseAnnual) return { eligible: false, invoiceTotal: null, reason: 'no_recurring_annual' };
+  if (isCommercialProposalEstimate(estimate)) return { eligible: false, invoiceTotal: null, reason: 'commercial_proposal' };
+  if (estimate.bill_by_invoice) return { eligible: false, invoiceTotal: null, reason: 'invoice_mode' };
+  if (estimate.show_one_time_option) return { eligible: false, invoiceTotal: null, reason: 'one_time_option' };
+  if (!hasManualAnnualPrepayRecurringRows(estimate)) return { eligible: false, invoiceTotal: null, reason: 'no_recurring_rows' };
+  if (!isManualAnnualPrepayEligibleServiceMix(estimate)) return { eligible: false, invoiceTotal: null, reason: 'ineligible_mix' };
+  const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  const { acceptanceServiceLists } = require('../routes/estimate-public');
+  const { recurringSvcList } = acceptanceServiceLists(data);
+  // Phase 1: one recurring service only (one coverage_service_type per term).
+  if (!Array.isArray(recurringSvcList) || recurringSvcList.length !== 1) {
+    return { eligible: false, invoiceTotal: null, reason: 'multi_service' };
+  }
+  return { eligible: true, invoiceTotal: annualPrepayInvoiceTotalForEstimate(estimate), reason: null };
+}
+
 function httpError(message, statusCode = 400) {
   const err = new Error(message);
   err.statusCode = statusCode;
@@ -128,6 +153,12 @@ async function markEstimateManuallyAccepted({
   // scheduling — anchors the renewal term to the actual first service instead of
   // today. Ignored for standard accepts and when not supplied.
   annualPrepayTermStart = null,
+  // Coverage config for an annual-prepay accept made WHILE scheduling, so the
+  // term stamps the booked visit prepaid (no completion double-bill) and seeds
+  // the rest of the year. coverageServiceType MUST be the booked service_type so
+  // the coverage match (serviceMatchesCoverage) finds the booked row. Ignored for
+  // standard accepts and when not supplied.
+  annualPrepayCoverage = null,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted },
   estimateConverter = EstimateConverter,
@@ -344,6 +375,11 @@ async function markEstimateManuallyAccepted({
           convertOptions.prepayInvoiceAmount = annualPrepayAmount;
           convertOptions.autoSendInvoice = false;
           if (annualPrepayTermStart) convertOptions.annualPrepayTermStart = annualPrepayTermStart;
+          if (annualPrepayCoverage && annualPrepayCoverage.coverageServiceType) {
+            convertOptions.coverageServiceType = annualPrepayCoverage.coverageServiceType;
+            convertOptions.coverageVisitCount = annualPrepayCoverage.coverageVisitCount;
+            convertOptions.coverageCadence = annualPrepayCoverage.coverageCadence;
+          }
         }
         conversion = await estimateConverter.convertEstimate(updatedEstimate.id, convertOptions);
         if (annualPrepaySelected && !conversion?.draftInvoiceId) {
@@ -448,6 +484,7 @@ module.exports = {
   normalizeManualBillingTerm,
   resolveAnnualPrepayAmount,
   annualPrepayInvoiceTotalForEstimate,
+  prepayBookingEligibility,
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
   isCommercialProposalEstimate,

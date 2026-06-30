@@ -64,6 +64,21 @@ function finiteNumber(value) {
   return Number.isFinite(num) ? num : null;
 }
 
+// Default covered visits/year for an annual-prepay term, from the booked
+// recurring cadence. Operator can override in the modal. Returns null for
+// non-recurring / unknown cadences (caller then requires an explicit count).
+function visitsPerYearForCadence(cadence) {
+  switch (String(cadence || '').trim().toLowerCase()) {
+    case 'monthly': return 12;
+    case 'bimonthly': case 'bi_monthly': return 6;
+    case 'quarterly': return 4;
+    case 'triannual': case 'every_4_months': return 3;
+    case 'semiannual': case 'biannual': return 2;
+    case 'annual': case 'yearly': return 1;
+    default: return null;
+  }
+}
+
 // Does an unowned (customer_id NULL) quote's captured contact match the customer
 // we're about to book it against? Compares the last 10 phone digits (phones are
 // stored mixed E.164 / 10-digit) or a lowercased email. Used to gate attaching a
@@ -1679,7 +1694,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (linkedEstimateId) {
       linkedEstimate = await db('estimates')
         .where({ id: linkedEstimateId })
-        .first('id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at');
+        .first(
+          'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
+          'monthly_total', 'annual_total', 'bill_by_invoice', 'show_one_time_option',
+        );
       if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
       // Reject only a genuine MISMATCH (estimate owned by a different customer).
       // A lead / standalone quote carries customer_id = NULL — that's bookable:
@@ -1725,6 +1743,37 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // unowned case, which acceptEstimateOnBook does not).
     const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
     const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
+
+    // Resolve the prepay-on-book decision now that the estimate is validated.
+    // Honor billingTerm='prepay_annual' ONLY for a server-eligible quote (single
+    // recurring service, eligible mix, not a proposal/invoice-mode) on a recurring
+    // booking — otherwise downgrade to a standard accept + warn, so we never
+    // half-apply prepay (book with no invoice). Coverage uses the BOOKED
+    // service_type (guarantees the coverage match stamps this visit) + the
+    // operator's visit count, defaulting to the booked cadence's visits/year.
+    let bookingBillingTermEffective = bookingBillingTerm;
+    let annualPrepayCoverage = null;
+    if (bookingBillingTerm === 'prepay_annual') {
+      const { prepayBookingEligibility } = require('../services/estimate-manual-acceptance');
+      const { parseAnnualPrepayVisitCount } = require('./admin-customers')._private;
+      const elig = linkedEstimate ? prepayBookingEligibility(linkedEstimate) : { eligible: false };
+      const visitOverride = parseAnnualPrepayVisitCount(req.body?.prepayVisitCount);
+      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(recurringPattern);
+      if (!elig.eligible) {
+        bookingBillingTermEffective = 'standard';
+        bookingWarnings.push('Appointment booked, but annual prepay was not applied — this quote is not prepay-eligible for one-step booking (needs a single recurring service). Use the estimate’s Annual Prepay action instead.');
+      } else if (!isRecurring || !coverageVisitCount) {
+        bookingBillingTermEffective = 'standard';
+        bookingWarnings.push('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit visit count).');
+      } else {
+        annualPrepayCoverage = {
+          coverageServiceType: String(serviceType).slice(0, 100),
+          coverageVisitCount,
+          coverageCadence: recurringPattern || null,
+        };
+      }
+    }
+
     const zone = getZone(customer?.city, customer?.zip);
     let duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
 
@@ -2086,11 +2135,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
         const acceptResult = await markEstimateManuallyAccepted({
           estimateId: linkedEstimateId,
           adminUserId: req.technicianId || null,
-          source: bookingBillingTerm === 'prepay_annual' ? 'verbal_annual_prepay_booking' : 'verbal_yes_booking',
-          billingTerm: bookingBillingTerm,
+          source: bookingBillingTermEffective === 'prepay_annual' ? 'verbal_annual_prepay_booking' : 'verbal_yes_booking',
+          billingTerm: bookingBillingTermEffective,
           // Anchor the prepay renewal term to the visit we just booked (the
           // converter can't see the row yet — it's linked after acceptance).
-          annualPrepayTermStart: bookingBillingTerm === 'prepay_annual' ? scheduledDate : null,
+          annualPrepayTermStart: bookingBillingTermEffective === 'prepay_annual' ? scheduledDate : null,
+          // Coverage so the term stamps THIS booked visit prepaid (no completion
+          // double-bill) and seeds the rest of the year. Uses the booked
+          // service_type so the coverage match finds the row.
+          annualPrepayCoverage: bookingBillingTermEffective === 'prepay_annual' ? annualPrepayCoverage : null,
         });
         estimateAutoAccepted = true;
         // A recurring conversion sends its own new-recurring welcome SMS
