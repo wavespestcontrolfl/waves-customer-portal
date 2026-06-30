@@ -43,7 +43,8 @@ function runMigration() {
       async first() {
         if (name === 'lawn_protocols') {
           const track = KEY_BY_PROTOCOL[ctx.cond.protocol_key];
-          return track && ctx.cond.version === '2026.06' ? { id: track, grass_track: track } : null;
+          // up() now selects the ACTIVE protocol (mirrors runtime), not a fixed version
+          return track && ctx.cond.status === 'active' ? { id: track, grass_track: track } : null;
         }
         return null; // products: not existing -> insert
       },
@@ -105,8 +106,11 @@ describe('B/Z/B structured product seed', () => {
       expect(p.default_in_plan).toBe(false);
       expect(JSON.parse(p.gates).soilPIndexBelow).toBe(80);
     });
-    byName('LESCO 24-0-11').filter(inMay).forEach((p) => {
-      expect(p.default_in_plan).toBe(true);
+    // both soil-P branches are conditional — neither fertilizer is forced pre soil test
+    const mayN = byName('LESCO 24-0-11').filter(inMay);
+    expect(mayN.length).toBe(2);
+    mayN.forEach((p) => {
+      expect(p.default_in_plan).toBe(false);
       expect(JSON.parse(p.gates).soilPIndexAtOrAbove).toBe(80);
     });
     // Aug premium add-ons: Hydretain (Bermuda+Zoysia) + Anuew EZ (Bermuda), all conditional
