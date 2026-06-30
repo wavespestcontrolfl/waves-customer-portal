@@ -10,21 +10,28 @@ const B1_WINDOW_KEYS = {
 };
 const KEY_BY_PROTOCOL = { swfl_bermuda_10_10: 'bermuda', swfl_zoysia_10_10: 'zoysia', swfl_bahia_10_10: 'bahia' };
 
+const CATALOG = [
+  'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG', 'LESCO 24-0-11', 'LESCO 0-0-18 Bio KMAG 1% Fe',
+  'Armada 50 WDG', 'Headway G', 'Medallion SC', 'Primo Maxx', 'SpeedZone Southern',
+  'LESCO 12-0-0 Chelated Iron Plus', 'LESCO K-Flow 0-0-25', 'Velista',
+].map((name, i) => ({ id: `cat-${i}`, name }));
+
 function runMigration() {
   const products = [];
   const knex = (name) => {
     const ctx = {};
     return {
-      where(cond) { ctx.cond = cond; return this; },
+      where(cond) { ctx.cond = { ...ctx.cond, ...cond }; return this; },
+      orderBy() { return this; },
       select() {
-        // windows lookup: return all B1 windows for the protocol id (= track)
-        const track = ctx.cond && ctx.cond.lawn_protocol_id;
+        if (name === 'products_catalog') return Promise.resolve(CATALOG);
+        const track = ctx.cond && ctx.cond.lawn_protocol_id; // windows lookup
         return Promise.resolve((B1_WINDOW_KEYS[track] || []).map((k) => ({ id: `${track}-${k}`, window_key: k })));
       },
       async first() {
         if (name === 'lawn_protocols') {
           const track = KEY_BY_PROTOCOL[ctx.cond.protocol_key];
-          return track ? { id: track, grass_track: track, protocol_key: ctx.cond.protocol_key } : null;
+          return track && ctx.cond.status === 'active' ? { id: track, grass_track: track } : null;
         }
         return null; // products: not existing -> insert
       },
@@ -73,6 +80,21 @@ describe('B/Z/B structured product seed', () => {
     expect(byName('Drive XLR8')).toHaveLength(0);
     // chlorantraniliprole dropped as redundant
     expect(byName('chlorantraniliprole')).toHaveLength(0);
+  });
+
+  test('default products map to a catalog product_id; un-catalogued curatives stay conditional', () => {
+    products.forEach((p) => {
+      if (p.default_in_plan) {
+        // a default product with no product_id is blocked by publish validation
+        expect(p.product_id).not.toBeNull();
+      }
+    });
+    // the curatives that aren't in the catalog must be conditional (default_in_plan=false)
+    ['Dylox 420 SL', 'TopChoice', 'Bifen I/T', 'SedgeHammer Plus', 'CarbonPro-L', 'T-Storm']
+      .forEach((n) => products.filter((p) => p.product_name === n).forEach((p) => {
+        expect(p.product_id).toBeNull();
+        expect(p.default_in_plan).toBe(false);
+      }));
   });
 
   test('blackout-window products never push N/P (requiresZeroNP or non-fertilizer)', () => {

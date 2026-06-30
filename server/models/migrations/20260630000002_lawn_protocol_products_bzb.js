@@ -109,11 +109,35 @@ function productRow(p) {
   };
 }
 
+function normalize(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Resolve the ACTIVE protocol for the track (never a draft/archived/older version),
+// matching getActiveLawnProtocol's ordering.
+function findActiveProtocol(knex, track) {
+  return knex('lawn_protocols')
+    .where({ protocol_key: PROTOCOL_KEYS[track], grass_track: track, status: 'active' })
+    .orderBy('effective_from', 'desc')
+    .orderBy('created_at', 'desc')
+    .first();
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('lawn_protocol_products'))) return;
 
+  // Map product_id by normalized name (same matcher as the St-Aug seed) so default
+  // products are publish-valid; unmatched products stay product_id null (the
+  // curatives that aren't in the catalog are all conditional, so that's fine).
+  const catalog = await knex('products_catalog').select('id', 'name').catch(() => []);
+  const matchProductId = (name) => {
+    const n = normalize(name);
+    const m = catalog.find((c) => normalize(c.name).includes(n) || n.includes(normalize(c.name)));
+    return m ? m.id : null;
+  };
+
   for (const [track, products] of Object.entries(PRODUCTS)) {
-    const protocol = await knex('lawn_protocols').where({ protocol_key: PROTOCOL_KEYS[track], grass_track: track }).first();
+    const protocol = await findActiveProtocol(knex, track);
     if (!protocol) continue; // B1 not applied yet — nothing to attach to
 
     const windows = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id }).select('id', 'window_key');
@@ -128,6 +152,7 @@ exports.up = async function up(knex) {
       if (exists) continue; // idempotent
       await knex('lawn_protocol_products').insert({
         ...productRow(p),
+        product_id: matchProductId(p.name),
         lawn_protocol_window_id: windowId,
         created_at: knex.fn.now(),
         updated_at: knex.fn.now(),
@@ -141,7 +166,7 @@ exports.down = async function down(knex) {
   // Remove only the products this migration inserted (by window + product_name),
   // scoped to the three parity protocols — never touch St-Augustine's products.
   for (const [track, products] of Object.entries(PRODUCTS)) {
-    const protocol = await knex('lawn_protocols').where({ protocol_key: PROTOCOL_KEYS[track], grass_track: track }).first();
+    const protocol = await findActiveProtocol(knex, track);
     if (!protocol) continue;
     const windows = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id }).select('id', 'window_key');
     const windowIdByKey = new Map(windows.map((w) => [w.window_key, w.id]));
