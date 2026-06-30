@@ -2115,8 +2115,11 @@ const CallRecordingProcessor = {
         // Extract the trailing unit token from a one-line street, e.g. legacy
         // "100 Main St Apt 4" → "4". Anchored to a designator + end-of-string so a
         // bare number is NOT pulled out of a house number ("14 Main St" → "").
+        // '#' is kept OUT of the \b group: \b is a word boundary and '#' is a
+        // non-word char, so "\b#" never matches "St #4" (space before '#') — leave
+        // '#' un-anchored so it matches wherever it appears.
         const trailingUnitKey = (s) => {
-          const m = String(s || '').match(/\b(?:apt|apartment|unit|ste|suite|#)\.?\s*([a-z0-9-]+)\s*$/i);
+          const m = String(s || '').match(/(?:\b(?:apt|apartment|unit|ste|suite)|#)\.?\s*([a-z0-9-]+)\s*$/i);
           return m ? normStreet(m[1]) : '';
         };
         // The call's unit: its own line2 if present, else a unit embedded in its

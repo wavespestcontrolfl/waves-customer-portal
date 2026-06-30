@@ -54,8 +54,10 @@ describe('customer-properties pure helpers', () => {
     expect(k('Apt 4')).toBe(k('4'));
     expect(k('Apt 4')).not.toBe(k('Apt 5'));               // different unit stays distinct
     expect(k('Apt 4')).not.toBe(addressKey(base));         // unit vs no-unit stays distinct
-    // a unit EMBEDDED in line1 keys the same as the split (line2) form
+    // a unit EMBEDDED in line1 keys the same as the split (line2) form (word + '#')
     expect(addressKey({ address_line1: '100 Main St Apt 4', city: 'Bradenton', zip: '34205' }))
+      .toBe(k('Apt 4'));
+    expect(addressKey({ address_line1: '100 Main St #4', city: 'Bradenton', zip: '34205' }))
       .toBe(k('Apt 4'));
     // a bare unit "4" is NOT confused with a digit inside the house number
     expect(addressKey({ address_line1: '14 Main St', city: 'Bradenton', zip: '34205' }))
