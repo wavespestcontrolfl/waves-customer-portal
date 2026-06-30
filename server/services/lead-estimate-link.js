@@ -192,28 +192,33 @@ async function resolveEstimateEventLeads(database, estimateId) {
 
 // Stamp `leads.estimate_id` onto a lead rescued by contact/mirror match and log
 // the link. Scoped to `estimate_id IS NULL` so a concurrent linker can't be
-// clobbered; the activity is only written when this call won the stamp.
+// clobbered. Returns whether THIS call won the stamp: if another process linked
+// the lead (to a different estimate) between resolution and here, the update
+// touches 0 rows and we return false so the caller skips advancing/logging the
+// lead for our estimate. The activity is written only on a win.
 async function linkRescuedLead(database, lead, estimate, performedBy) {
   const linked = await database('leads')
     .where({ id: lead.id })
     .whereNull('estimate_id')
     .update({ estimate_id: estimate.id, updated_at: new Date() });
-  if (linked) {
-    await database('lead_activities').insert({
-      lead_id: lead.id,
-      activity_type: 'estimate_created',
-      description: `Estimate linked to lead by contact match (${estimate.id})`,
-      performed_by: performedBy,
-      metadata: JSON.stringify({ estimateId: estimate.id, linkedBy: 'contact_match' }),
-    });
-  }
+  if (!linked) return false;
+  await database('lead_activities').insert({
+    lead_id: lead.id,
+    activity_type: 'estimate_created',
+    description: `Estimate linked to lead by contact match (${estimate.id})`,
+    performed_by: performedBy,
+    metadata: JSON.stringify({ estimateId: estimate.id, linkedBy: 'contact_match' }),
+  });
+  return true;
 }
 
 async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db }) {
   if (!estimateId) return;
   const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId);
   for (const lead of leads) {
-    if (rescued && estimate) await linkRescuedLead(database, lead, estimate, performedBy);
+    // Only advance a rescued lead if WE won the link stamp — otherwise another
+    // estimate claimed it between resolution and now, and it isn't ours to move.
+    if (rescued && estimate && !(await linkRescuedLead(database, lead, estimate, performedBy))) continue;
     if (!CLOSED_LEAD_STATUSES.has(lead.status) && ['new', 'contacted'].includes(lead.status)) {
       await database('leads').where({ id: lead.id }).update({
         status: 'estimate_sent',
@@ -235,7 +240,8 @@ async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system'
   if (!estimateId) return;
   const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId);
   for (const lead of leads) {
-    if (rescued && estimate) await linkRescuedLead(database, lead, estimate, performedBy);
+    // Only advance a rescued lead if WE won the link stamp (see send path).
+    if (rescued && estimate && !(await linkRescuedLead(database, lead, estimate, performedBy))) continue;
     if (!CLOSED_LEAD_STATUSES.has(lead.status) && ['new', 'contacted', 'estimate_sent'].includes(lead.status)) {
       await database('leads').where({ id: lead.id }).update({
         status: 'estimate_viewed',

@@ -1093,6 +1093,23 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(types(database)).toEqual(['estimate_created', 'estimate_viewed']);
   });
 
+  test('rescue stamp LOSES a concurrent race (0 rows linked) → does not advance or log for this estimate', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-9', estimate_data: null, customer_phone: '+19417452085' },
+      contactLeads: [{ id: 'L-race', status: 'new', customer_id: null }],
+      linkRows: 0, // another estimate claimed the lead between resolution and the stamp
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-9', sendMethod: 'sms', database });
+
+    // Only the (lost) stamp attempt ran — no status flip, no estimate_created, no estimate_sent.
+    expect(database._updates).toEqual([
+      { id: 'L-race', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-9' }) },
+    ]);
+    expect(database._activities).toEqual([]);
+  });
+
   test('no FK link and no contact match → advances nothing', async () => {
     const database = makeEventDb({
       linked: [],
