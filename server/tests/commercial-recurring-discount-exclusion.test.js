@@ -10,14 +10,23 @@ const {
 } = require('../routes/estimate-public');
 
 describe('commercial recurring lines are excluded from WaveGuard discounts on accept', () => {
-  test('commercial lawn/tree/pest keep a distinct service key (not normalized to residential)', () => {
+  test('commercial pest-family services keep a distinct service key (not normalized to residential)', () => {
     expect(recurringServiceKey({ service: 'commercial_lawn' })).toBe('commercial_lawn');
     expect(recurringServiceKey({ service: 'commercial_tree_shrub' })).toBe('commercial_tree_shrub');
     expect(recurringServiceKey({ service: 'commercial_pest' })).toBe('commercial_pest');
+    expect(recurringServiceKey({ service: 'commercial_mosquito' })).toBe('commercial_mosquito');
+    expect(recurringServiceKey({ service: 'commercial_termite_bait' })).toBe('commercial_termite_bait');
+    // commercial_rodent_bait is the trap case — the residential rodent check runs
+    // first, so this MUST keep its commercial key (else it reads as the
+    // WaveGuard-discountable residential rodent_bait).
+    expect(recurringServiceKey({ service: 'commercial_rodent_bait' })).toBe('commercial_rodent_bait');
     // Match by display name too (persisted rows may only carry a label).
     expect(recurringServiceKey({ name: 'Commercial Lawn Treatment' })).toBe('commercial_lawn');
     expect(recurringServiceKey({ name: 'Commercial Tree & Shrub' })).toBe('commercial_tree_shrub');
     expect(recurringServiceKey({ name: 'Commercial Pest Control' })).toBe('commercial_pest');
+    expect(recurringServiceKey({ name: 'Commercial Mosquito' })).toBe('commercial_mosquito');
+    expect(recurringServiceKey({ name: 'Commercial Termite Bait Monitoring' })).toBe('commercial_termite_bait');
+    expect(recurringServiceKey({ name: 'Commercial Rodent Bait Stations' })).toBe('commercial_rodent_bait');
   });
 
   test('residential lawn_care / tree_shrub normalization is unchanged', () => {
@@ -33,6 +42,12 @@ describe('commercial recurring lines are excluded from WaveGuard discounts on ac
     expect(recurringServiceReceivesTierDiscount({ service: 'commercial_lawn' })).toBe(false);
     expect(recurringServiceReceivesTierDiscount({ service: 'commercial_tree_shrub' })).toBe(false);
     expect(recurringServiceReceivesTierDiscount({ service: 'commercial_pest' })).toBe(false);
+    expect(recurringServiceReceivesTierDiscount({ service: 'commercial_mosquito' })).toBe(false);
+    expect(recurringServiceReceivesTierDiscount({ service: 'commercial_termite_bait' })).toBe(false);
+    expect(recurringServiceReceivesTierDiscount({ service: 'commercial_rodent_bait' })).toBe(false);
+    expect(recurringServiceCountsTowardTier({ service: 'commercial_mosquito' })).toBe(false);
+    expect(recurringServiceCountsTowardTier({ service: 'commercial_termite_bait' })).toBe(false);
+    expect(recurringServiceCountsTowardTier({ service: 'commercial_rodent_bait' })).toBe(false);
     // And with the carried exclusion flags.
     expect(recurringServiceReceivesTierDiscount({
       service: 'commercial_lawn', excludeFromPctDiscount: true, discountable: false,

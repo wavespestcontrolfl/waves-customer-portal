@@ -456,6 +456,9 @@ describe('commercial safety gate in generateEstimate', () => {
   });
 
   test('commercial out-of-scope pest specialty services return manual quote instead of residential pricing', () => {
+    // NOTE: commercial mosquito / termite-bait / rodent-bait now AUTO-PRICE (own
+    // lane) — these are the remaining specialty/one-time services with no
+    // commercial pricer, which still collapse to a manual commercial_pest quote.
     const pestSpecialtyRequests = [
       { germanRoach: true },
       { pestInitialRoach: { roachType: 'regular' } },
@@ -468,7 +471,6 @@ describe('commercial safety gate in generateEstimate', () => {
       { exclusion: true },
       { rodentTrapping: true },
       { rodentInspection: true },
-      { rodentBait: true },
       { rodentGuarantee: true },
       { rodentPlugging: true },
       { rodentGuaranteeCombo: true },
@@ -480,9 +482,7 @@ describe('commercial safety gate in generateEstimate', () => {
       { termiteFoam: true },
       { stingingV2: true },
       { exclusionV2: true },
-      { mosquito: { tier: 'monthly12' } },
       { oneTimeMosquito: true },
-      { termite: { system: 'advance' } },
     ];
 
     for (const services of pestSpecialtyRequests) {
@@ -636,11 +636,12 @@ describe('commercial safety gate in generateEstimate', () => {
     expect(titlecase.property.propertyType).toBe('commercial');
     expect(titlecase.property.hardscape).toBe(lowercase.property.hardscape);
     expect(titlecase.property.mosquitoTreatableSqFt).toBe(lowercase.property.mosquitoTreatableSqFt);
+    // Commercial mosquito now auto-prices (treatable area is lot-derivable).
     expect(titlecase.lineItems).toEqual([
-      expect.objectContaining({ service: 'commercial_pest', quoteRequired: true }),
+      expect.objectContaining({ service: 'commercial_mosquito', quoteRequired: false }),
     ]);
     expect(lowercase.lineItems).toEqual([
-      expect.objectContaining({ service: 'commercial_pest', quoteRequired: true }),
+      expect.objectContaining({ service: 'commercial_mosquito', quoteRequired: false }),
     ]);
   });
 
@@ -664,8 +665,8 @@ describe('commercial safety gate in generateEstimate', () => {
       expect(estimate.property.hardscape).toBe(3750);
       expect(estimate.property.mosquitoTreatableSqFt).toBe(16250);
       expect(estimate.lineItems[0]).toMatchObject({
-        service: 'commercial_pest',
-        quoteRequired: true,
+        service: 'commercial_mosquito',
+        quoteRequired: false,
       });
     }
   });
@@ -927,25 +928,13 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
   });
 
   test('legacy mapper zeroes recurring totals for an all-manual commercial estimate', () => {
-    // Commercial MOSQUITO has no auto-pricer yet — it collapses to a manual
-    // commercial_pest quote. With no priced recurring line, the recurring totals
-    // are suppressed and the estimate is quote-required.
-    const input = translateV2CallToV1Input(
-      {
-        propertyType: 'Commercial',
-        isCommercial: true,
-        commercialSubtype: 'office_retail',
-        homeSqFt: 5000,
-        lotSqFt: 12000,
-        stories: 1,
-        pool: 'NO',
-        poolCage: 'NO',
-      },
-      ['MOSQUITO'],
-      {}
-    );
-
-    const mapped = mapV1ToLegacyShape(generateEstimate(input));
+    // A specialty service (flea) has no commercial pricer — it collapses to a
+    // manual commercial_pest quote. With no priced recurring line, the recurring
+    // totals are suppressed and the estimate is quote-required.
+    const mapped = mapV1ToLegacyShape(generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { flea: true },
+    })));
 
     expect(mapped.recurring.services).toEqual([]);
     expect(mapped.quoteRequired).toBe(true);
@@ -959,14 +948,14 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
   });
 
   test('legacy mapper preserves priced recurring totals when a manual line coexists', () => {
-    // Mixed: commercial lawn (auto-priced) + commercial mosquito (no pricer yet →
+    // Mixed: commercial lawn (auto-priced) + a specialty (flea, no pricer →
     // manual commercial_pest quote). The priced lawn total must survive — only
-    // the manual mosquito row is quote-required. (Regression for Codex R5 —
-    // mixed quotes were zeroing priced totals.)
+    // the manual flea row is quote-required. (Regression for Codex R5 — mixed
+    // quotes were zeroing priced totals.)
     const estimate = generateEstimate(baseInput({
       propertyType: 'commercial',
       turfSf: 20000,
-      services: { lawn: { track: 'st_augustine' }, mosquito: { tier: 'monthly12' } },
+      services: { lawn: { track: 'st_augustine' }, flea: true },
     }));
     const mapped = mapV1ToLegacyShape(estimate);
 

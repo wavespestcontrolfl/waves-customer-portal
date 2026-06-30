@@ -7,6 +7,9 @@ const {
   priceCommercialLawn,
   priceCommercialTreeShrub,
   priceCommercialPest,
+  priceCommercialMosquito,
+  priceCommercialTermiteBait,
+  priceCommercialRodentBait,
 } = require('../services/pricing-engine/service-pricing');
 const { generateEstimate } = require('../services/pricing-engine');
 
@@ -243,6 +246,71 @@ describe('priceCommercialPest — cost-buildup auto-pricer', () => {
 
     // Direct-call: the option also forces manual even with a real footprint.
     expect(priceCommercialPest({ footprint: 2000 }, { buildingSizeMeasured: false }).quoteRequired).toBe(true);
+  });
+});
+
+describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup auto-pricers', () => {
+  test('mosquito golden anchor (treatable-area driven, 9 visits) + FL-taxed flat', () => {
+    const r = priceCommercialMosquito({ mosquitoTreatableSqFt: 40000 });
+    expect(r).toMatchObject({
+      service: 'commercial_mosquito',
+      annual: 1534.09,
+      monthly: 127.84,
+      visitsPerYear: 9,
+      quoteRequired: false,
+      taxable: true,
+      taxCategory: 'nonresidential_pest_control',
+      discountable: false,
+      excludeFromPctDiscount: true,
+      estimatedPricing: true,
+    });
+  });
+
+  test('mosquito always prices (treatable area is lot-derivable — no manual fallback)', () => {
+    // Lot-only (no building) still prices off lot − footprint − hardscape.
+    const r = priceCommercialMosquito({ lotSqFt: 60000 });
+    expect(r.quoteRequired).toBe(false);
+    expect(r.annual).toBeGreaterThan(0);
+  });
+
+  test('termite-bait golden anchor (perimeter-driven monitoring, 4 visits)', () => {
+    const r = priceCommercialTermiteBait({ footprint: 10000, perimeter: 400 });
+    expect(r).toMatchObject({ service: 'commercial_termite_bait', annual: 850.91, visitsPerYear: 4, taxable: true });
+  });
+
+  test('rodent-bait golden anchor (footprint-driven, 4 visits)', () => {
+    const r = priceCommercialRodentBait({ footprint: 10000 });
+    expect(r).toMatchObject({ service: 'commercial_rodent_bait', annual: 781.21, visitsPerYear: 4, taxable: true });
+  });
+
+  test('termite/rodent fall back to a MANUAL quote with no real building size', () => {
+    for (const fn of [priceCommercialTermiteBait, priceCommercialRodentBait]) {
+      const r = fn({ lotSqFt: 60000 }, { buildingSizeMeasured: false });
+      expect(r.quoteRequired).toBe(true);
+      expect(r.annual).toBeNull();
+      expect(r.taxable).toBe(true);
+    }
+  });
+
+  test('all three auto-price through the engine as taxable, flat, non-WaveGuard lines', () => {
+    const est = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 10000,
+      lotSqFt: 80000,
+      services: { mosquito: { tier: 'monthly12' }, termite: {}, rodentBait: {} },
+    });
+    const byKey = Object.fromEntries(est.lineItems.map((l) => [l.service, l]));
+    ['commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait'].forEach((k) => {
+      expect(byKey[k]).toBeTruthy();
+      expect(byKey[k].quoteRequired).toBe(false);
+      expect(byKey[k].annual).toBeGreaterThan(0);
+      expect(byKey[k].taxable).toBe(true);
+    });
+    // No residential pricers fired; flat (no WaveGuard discount on the recurring total).
+    expect(byKey.mosquito).toBeUndefined();
+    expect(byKey.termite_bait).toBeUndefined();
+    expect(byKey.rodent_bait).toBeUndefined();
+    expect(est.summary.recurringAnnualBeforeDiscount).toBeCloseTo(est.summary.recurringAnnualAfterDiscount, 0);
   });
 });
 

@@ -2,6 +2,9 @@ const SERVICE_LINE_LABELS = {
   commercial_pest: 'Commercial Pest Control',
   commercial_lawn: 'Commercial Lawn Treatment',
   commercial_tree_shrub: 'Commercial Tree & Shrub',
+  commercial_mosquito: 'Commercial Mosquito',
+  commercial_termite_bait: 'Commercial Termite Bait Monitoring',
+  commercial_rodent_bait: 'Commercial Rodent Bait Stations',
   pest: 'Pest Control',
   lawn: 'Lawn Care',
   mosquito: 'Mosquito',
@@ -15,6 +18,9 @@ const SERVICE_LINE_PATTERNS = [
   ['commercial_pest', /commercial.*pest|pest.*commercial|commercial_pest/],
   ['commercial_lawn', /commercial.*lawn|commercial.*turf|lawn.*commercial|commercial_lawn/],
   ['commercial_tree_shrub', /commercial.*(tree|shrub|ornamental)|(tree|shrub|ornamental).*commercial|commercial_tree_shrub/],
+  ['commercial_mosquito', /commercial.*mosquito|mosquito.*commercial|commercial_mosquito/],
+  ['commercial_termite_bait', /commercial.*termite|termite.*commercial|commercial_termite_bait/],
+  ['commercial_rodent_bait', /commercial.*rodent|rodent.*commercial|commercial_rodent_bait/],
   ['termite', /termite|foam|trench(?:ing)?|bora\s*care|boracare|termidor|trelona|advance|preslab|pre\s*slab|wdo/],
   ['mosquito', /mosquito/],
   ['rodent', /rodent|rat|mouse|mice/],
@@ -139,6 +145,9 @@ function commercialKeyFromService(service) {
   if (key === 'commercial_pest') return 'commercial_pest';
   if (key === 'commercial_lawn') return 'commercial_lawn';
   if (key === 'commercial_tree_shrub') return 'commercial_tree_shrub';
+  if (key === 'commercial_mosquito') return 'commercial_mosquito';
+  if (key === 'commercial_termite_bait') return 'commercial_termite_bait';
+  if (key === 'commercial_rodent_bait') return 'commercial_rodent_bait';
   return null;
 }
 

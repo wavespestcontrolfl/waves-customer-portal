@@ -918,15 +918,13 @@ function EstimateToolView() {
       "svcTermiteBait",
     ];
     const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
-    // ALL commercial services with an auto-pricer (lawn, pest, tree/shrub) now
-    // price instantly as recurring lines. Commercial mosquito / termite-bait
-    // have no pricer yet and collapse to a manual commercial quote.
-    const commercialAutoKeys = ["svcLawn", "svcPest", "svcTs"];
-    const commercialManualKeys = ["svcMosquito", "svcTermiteBait"];
+    // ALL commercial pest-family services now auto-price as recurring lines
+    // (lawn, pest, tree/shrub, mosquito, termite-bait, rodent-bait). None collapse
+    // to a manual commercial quote.
+    const commercialAutoKeys = ["svcLawn", "svcPest", "svcTs", "svcMosquito", "svcTermiteBait", "svcRodentBait"];
     const commercialAutoPricedCount =
       commercialDetected ? commercialAutoKeys.filter((k) => form[k]).length : 0;
-    const commercialManualQuoteCount =
-      commercialDetected ? commercialManualKeys.filter((k) => form[k]).length : 0;
+    const commercialManualQuoteCount = 0;
     // Commercial lines are FLAT / non-WaveGuard (excludeFromPctDiscount) — they
     // NEVER count toward the WaveGuard tier or its % discount. So a commercial
     // estimate has a WaveGuard recurringCount of 0 and shows a commercial
@@ -934,7 +932,11 @@ function EstimateToolView() {
     const recurringCount = commercialDetected
       ? 0
       : qualifyingRecurringKeys.filter((k) => form[k]).length;
-    const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
+    // For commercial, rodent-bait (a separate-recurring key) is now a commercial
+    // auto-priced line counted above — don't double-count it here.
+    const separateRecurringCount = separateRecurringKeys
+      .filter((k) => form[k] && !(commercialDetected && commercialAutoKeys.includes(k)))
+      .length;
 
     // Tier logic
     const tierMap = {
@@ -973,10 +975,10 @@ function EstimateToolView() {
         approx.injection = Math.round((Math.max(treatmentCount * 75, 75) * 2) / 12);
       }
     }
-    if (form.svcMosquito)
+    if (form.svcMosquito && !commercialDetected)
       approx.mosquito = Math.max(40, Math.round(lotSqft * 0.005 + 15));
-    if (form.svcTermiteBait) approx.termiteBait = 50;
-    if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 69 : 49;
+    if (form.svcTermiteBait && !commercialDetected) approx.termiteBait = 50;
+    if (form.svcRodentBait && !commercialDetected) approx.rodentBait = sqft > 2500 ? 69 : 49;
     if (form.svcFoamRecurring) {
       // Rough preview; engine is authoritative. One-time per-visit by tier
       // (no floor) × cadence multiplier × visits/yr ÷ 12.

@@ -124,10 +124,14 @@ function recurringServiceKey(svc = {}) {
     || raw.includes('palm_treatment')
     || /\bpalm injection\b|\bpalm tree\b|\bpalms?\b/.test(words)
   ) return 'palm_injection';
+  // NOT commercial — commercial_rodent_bait must reach the commercial block below
+  // and keep its distinct (non-WaveGuard-discountable) key.
   if (
-    raw.includes('rodent_bait')
-    || raw.includes('rodent_monitoring')
-    || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
+    !raw.includes('commercial') && (
+      raw.includes('rodent_bait')
+      || raw.includes('rodent_monitoring')
+      || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
+    )
   ) return 'rodent_bait';
   // Commercial auto-priced lines keep a DISTINCT key — they must never be
   // classified as residential lawn_care/tree_shrub, which are discountable for
@@ -135,6 +139,9 @@ function recurringServiceKey(svc = {}) {
   if (raw.includes('commercial')) {
     if (raw.includes('lawn') || raw.includes('turf')) return 'commercial_lawn';
     if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'commercial_tree_shrub';
+    if (raw.includes('mosquito')) return 'commercial_mosquito';
+    if (raw.includes('termite')) return 'commercial_termite_bait';
+    if (raw.includes('rodent')) return 'commercial_rodent_bait';
     if (raw.includes('pest')) return 'commercial_pest';
   }
   if (raw.includes('pest')) return 'pest_control';
@@ -527,6 +534,9 @@ const RECURRING_SERVICE_DISPLAY_NAMES = {
   commercial_lawn: 'Commercial Lawn Treatment',
   commercial_tree_shrub: 'Commercial Tree & Shrub',
   commercial_pest: 'Commercial Pest Control',
+  commercial_mosquito: 'Commercial Mosquito',
+  commercial_termite_bait: 'Commercial Termite Bait Monitoring',
+  commercial_rodent_bait: 'Commercial Rodent Bait Stations',
 };
 
 function recurringLinesFromEngineResult(data = {}) {
@@ -712,8 +722,9 @@ function isNonDiscountableRecurringLine(item = {}) {
   // excluded from the WaveGuard TIER % via excludeFromPctDiscount (see
   // recurringServiceReceivesTierDiscount), which is a separate path from this
   // prepay floor. So they are discountable HERE (return false) just like
-  // lawn_care. (commercial_pest is now an auto-priced recurring line too.)
-  if (key === 'commercial_lawn' || key === 'commercial_tree_shrub' || key === 'commercial_pest') return false;
+  // lawn_care. (commercial pest/mosquito/termite/rodent are auto-priced too.)
+  if (key === 'commercial_lawn' || key === 'commercial_tree_shrub' || key === 'commercial_pest'
+    || key === 'commercial_mosquito' || key === 'commercial_termite_bait' || key === 'commercial_rodent_bait') return false;
   if (key === 'lawn_care') return false;
   const annual = recurringLineAnnualAmount(item);
   if (!(annual > 0)) return false;
