@@ -393,15 +393,28 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const selectedMethodRef = useRef('card');
   const syncingAmountRef = useRef(false);
   const amountSyncSeqRef = useRef(0);
+  // Counts ALL in-flight /update-amount requests, not just the latest sequence.
+  // syncingAmountRef must stay true until every overlapping request settles —
+  // otherwise an older (out-of-order) request can rewrite the PI's tender after
+  // a newer one cleared the flag, racing the ACH confirm lock.
+  const pendingSyncCountRef = useRef(0);
 
   useEffect(() => {
     selectedMethodRef.current = selectedMethod;
   }, [selectedMethod]);
 
+  // Returns a status object so callers that must gate on the tender lock — the
+  // ACH submit path — can act deterministically instead of reading async React
+  // state. Fire-and-forget callers (method-switch, save-card toggle) ignore it.
+  //   { ok: true,  replaced: false, superseded: false } — PI locked to `methodCategory`
+  //   { ok: true,  replaced: false, superseded: true  } — locked, but a newer sync took over
+  //   { ok: true,  replaced: true  } — a fresh PI was minted; Elements re-mount
+  //   { ok: false }                 — lock failed (error already surfaced)
   const syncAmountForMethod = useCallback(async (methodCategory, saveCardOverride, options = {}) => {
-    if (!paymentIntentId || !token) return;
+    if (!paymentIntentId || !token) return { ok: false };
     const syncSeq = amountSyncSeqRef.current + 1;
     amountSyncSeqRef.current = syncSeq;
+    pendingSyncCountRef.current += 1;
     syncingAmountRef.current = true;
     setSyncingAmount(true);
     setAmountSyncError(false);
@@ -431,7 +444,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           baseAmount: data.base,
           methodCategory,
         });
-        return;
+        return { ok: true, replaced: true };
       }
       if (!options.skipFetchUpdates && elementsRef.current?.fetchUpdates) {
         const { error: fetchError } = await elementsRef.current.fetchUpdates();
@@ -439,10 +452,17 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           throw new Error(fetchError.message || 'Could not refresh the payment form');
         }
       }
-      if (syncSeq !== amountSyncSeqRef.current || selectedMethodRef.current !== methodCategory) return;
+      // A superseding sync (or a tender switch) means this lock is no longer the
+      // authoritative one — a later request may still rewrite the PI. Report it
+      // (superseded) so the ACH submit path aborts instead of confirming, and
+      // skip the now-stale cosmetic amount refresh.
+      if (syncSeq !== amountSyncSeqRef.current || selectedMethodRef.current !== methodCategory) {
+        return { ok: true, replaced: false, superseded: true };
+      }
       setDisplayedBase(data.base);
       setDisplayedSurcharge(data.surcharge);
       setDisplayedTotal(data.total);
+      return { ok: true, replaced: false, superseded: false };
     } catch (err) {
       setAmountSyncError(true);
       const methodLabel = methodCategory === 'us_bank_account' ? 'bank-transfer' : 'card';
@@ -454,8 +474,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId,
         }));
       }
+      return { ok: false, replaced: false };
     } finally {
-      if (syncSeq === amountSyncSeqRef.current) {
+      // Clear the in-flight flag only once EVERY overlapping request has
+      // settled, regardless of completion order — a stale older request that
+      // resolves after a newer one must not leave the flag falsely clear.
+      pendingSyncCountRef.current = Math.max(0, pendingSyncCountRef.current - 1);
+      if (pendingSyncCountRef.current === 0) {
         syncingAmountRef.current = false;
         setSyncingAmount(false);
       }
@@ -692,6 +717,57 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
     // ACH: use the existing confirmPayment flow (no surcharge)
     if (selectedMethodRef.current === 'us_bank_account') {
+      // The invoice PaymentIntent is locked to ONE tender family server-side,
+      // and reusing an open intent on a pay-page reload resets it to card-only.
+      // If we confirm a bank PaymentMethod against a still-card-only intent,
+      // Stripe rejects it ("The PaymentMethod provided (us_bank_account) is not
+      // allowed for this PaymentIntent") — the silent failure customers hit.
+      // Re-lock the intent to us_bank_account and wait for it before confirming.
+      try {
+        // Let any in-flight tender sync settle so we re-lock from a known state.
+        for (let i = 0; i < 100 && syncingAmountRef.current; i += 1) {
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((resolve) => { setTimeout(resolve, 50); });
+        }
+        // Still running after the wait: a slow prior /update-amount could land
+        // AFTER our bank lock but BEFORE confirmPayment and relock the PI to
+        // card, recreating the very failure we're closing. Abort and let the
+        // customer retry from a settled state rather than confirm into a race.
+        if (syncingAmountRef.current) {
+          setElementError('Still updating your payment — please try again in a moment.');
+          setProcessing(false);
+          return;
+        }
+        const lock = await syncAmountForMethod('us_bank_account');
+        if (!lock || !lock.ok) {
+          // syncAmountForMethod already surfaced the error to the customer.
+          setProcessing(false);
+          return;
+        }
+        if (lock.replaced) {
+          // A fresh PI was minted; Elements re-mount and the customer submits
+          // again cleanly — don't confirm against the dead intent.
+          setProcessing(false);
+          return;
+        }
+        if (lock.superseded || syncingAmountRef.current || selectedMethodRef.current !== 'us_bank_account') {
+          // Our lock was superseded by a newer sync, a sync is still in flight,
+          // or the tender changed mid-submit — any of these can rewrite the PI
+          // before confirm. Abort and let the customer retry from a settled state.
+          setElementError('Still updating your payment — please try again in a moment.');
+          setProcessing(false);
+          return;
+        }
+      } catch (lockErr) {
+        setElementError(lockErr.message || 'Could not prepare the bank payment. Please try again.');
+        reportPaymentError(token, paymentErrorPayload(lockErr, {
+          phase: 'ach_tender_lock',
+          methodCategory: 'us_bank_account',
+          paymentIntentId,
+        }));
+        setProcessing(false);
+        return;
+      }
       try {
         const { error, paymentIntent: pi } = await stripeRef.current.confirmPayment({
           elements: elementsRef.current,
