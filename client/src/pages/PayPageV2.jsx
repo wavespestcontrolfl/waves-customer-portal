@@ -716,6 +716,15 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           // eslint-disable-next-line no-await-in-loop
           await new Promise((resolve) => { setTimeout(resolve, 50); });
         }
+        // Still running after the wait: a slow prior /update-amount could land
+        // AFTER our bank lock but BEFORE confirmPayment and relock the PI to
+        // card, recreating the very failure we're closing. Abort and let the
+        // customer retry from a settled state rather than confirm into a race.
+        if (syncingAmountRef.current) {
+          setElementError('Still updating your payment — please try again in a moment.');
+          setProcessing(false);
+          return;
+        }
         const lock = await syncAmountForMethod('us_bank_account');
         if (!lock || !lock.ok) {
           // syncAmountForMethod already surfaced the error to the customer.
