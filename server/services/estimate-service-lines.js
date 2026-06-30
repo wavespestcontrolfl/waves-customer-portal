@@ -19,8 +19,14 @@ const SERVICE_LINE_PATTERNS = [
   ['commercial_lawn', /commercial.*lawn|commercial.*turf|lawn.*commercial|commercial_lawn/],
   ['commercial_tree_shrub', /commercial.*(tree|shrub|ornamental)|(tree|shrub|ornamental).*commercial|commercial_tree_shrub/],
   ['commercial_mosquito', /commercial.*mosquito|mosquito.*commercial|commercial_mosquito/],
-  ['commercial_termite_bait', /commercial.*termite|termite.*commercial|commercial_termite_bait/],
-  ['commercial_rodent_bait', /commercial.*rodent|rodent.*commercial|commercial_rodent_bait/],
+  // Match ONLY the recurring bait/monitoring/station programs — require a
+  // bait/monitor/station term alongside commercial + termite/rodent (order-
+  // independent; text is cleaned/lowercased). Otherwise broad commercial termite
+  // (trenching, WDO, boracare) or rodent (trapping, exclusion) specialty work
+  // would be misclassified as the recurring bait line, and the de-dupe + sellable
+  // aliases would then treat the customer as already holding that line.
+  ['commercial_termite_bait', /(?=.*commercial)(?=.*termite)(?=.*(?:bait|monitor|station))/],
+  ['commercial_rodent_bait', /(?=.*commercial)(?=.*(?:rodent|rat|mouse|mice))(?=.*(?:bait|station))/],
   ['termite', /termite|foam|trench(?:ing)?|bora\s*care|boracare|termidor|trelona|advance|preslab|pre\s*slab|wdo/],
   ['mosquito', /mosquito/],
   ['rodent', /rodent|rat|mouse|mice/],
