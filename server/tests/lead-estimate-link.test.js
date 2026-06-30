@@ -1033,7 +1033,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   test('standalone estimate: rescues a single contact-matched open lead — links it then flips to estimate_sent', async () => {
     const database = makeEventDb({
       linked: [],
-      estimate: { id: 'e-3', estimate_data: null, customer_phone: '+19417452085', customer_email: 'ljwilhelm1@verizon.net' },
+      estimate: { id: 'e-3', estimate_data: null, customer_phone: '+19415550142', customer_email: 'rescue@example.com' },
       contactLeads: [{ id: 'L-unlinked', status: 'new', customer_id: null }],
     });
 
@@ -1049,7 +1049,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   test('standalone estimate: AMBIGUOUS contact match (2+ open leads) advances nothing', async () => {
     const database = makeEventDb({
       linked: [],
-      estimate: { id: 'e-4', estimate_data: null, customer_phone: '+19417452085' },
+      estimate: { id: 'e-4', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [
         { id: 'L-a', status: 'new', customer_id: null },
         { id: 'L-b', status: 'contacted', customer_id: null },
@@ -1065,7 +1065,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   test('never steals a lead already linked to ANOTHER estimate', async () => {
     const database = makeEventDb({
       linked: [],
-      estimate: { id: 'e-5', estimate_data: null, customer_phone: '+19417452085' },
+      estimate: { id: 'e-5', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [{ id: 'L-other', status: 'new', customer_id: null, estimate_id: 'e-OTHER' }],
     });
 
@@ -1094,7 +1094,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   test('viewed: rescues a contact-matched lead — links it then flips to estimate_viewed (no first-response)', async () => {
     const database = makeEventDb({
       linked: [],
-      estimate: { id: 'e-7', estimate_data: null, customer_phone: '+19417452085' },
+      estimate: { id: 'e-7', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [{ id: 'L-view', status: 'estimate_sent', customer_id: null }],
     });
 
@@ -1110,7 +1110,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   test('rescue stamp loses to a DIFFERENT estimate (0 rows) → does not advance or log for this estimate', async () => {
     const database = makeEventDb({
       linked: [],
-      estimate: { id: 'e-9', estimate_data: null, customer_phone: '+19417452085' },
+      estimate: { id: 'e-9', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [{ id: 'L-race', status: 'new', customer_id: null }],
       linkRows: 0, // another estimate claimed the lead between resolution and the stamp
       leadsById: { 'L-race': { id: 'L-race', estimate_id: 'e-OTHER' } }, // re-read: now a different estimate
@@ -1128,7 +1128,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   test('rescue stamp loses to a concurrent SAME-estimate event (0 rows) → still records this event’s side effect', async () => {
     const database = makeEventDb({
       linked: [],
-      estimate: { id: 'e-10', estimate_data: null, customer_phone: '+19417452085' },
+      estimate: { id: 'e-10', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [{ id: 'L-same', status: 'new', customer_id: null }],
       linkRows: 0, // a simultaneous send + first view linked it first…
       leadsById: { 'L-same': { id: 'L-same', estimate_id: 'e-10' } }, // …to THIS same estimate
@@ -1148,7 +1148,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   test('contact-matched lead CONVERTED between read and stamp (now closed) → does not link or advance', async () => {
     const database = makeEventDb({
       linked: [],
-      estimate: { id: 'e-11', estimate_data: null, customer_phone: '+19417452085' },
+      estimate: { id: 'e-11', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [{ id: 'L-conv', status: 'new', customer_id: null }],
       linkRows: 0, // open-status guard makes the stamp no-op: the lead was just converted (status→won)
       leadsById: { 'L-conv': { id: 'L-conv', estimate_id: null, status: 'won' } }, // re-read: won, still unlinked
@@ -1166,7 +1166,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   test('no FK link and no contact match → advances nothing', async () => {
     const database = makeEventDb({
       linked: [],
-      estimate: { id: 'e-8', estimate_data: null, customer_phone: '+19417452085' },
+      estimate: { id: 'e-8', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [],
     });
 
