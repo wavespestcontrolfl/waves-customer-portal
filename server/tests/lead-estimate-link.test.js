@@ -1231,4 +1231,24 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
   });
+
+  test('respondedAt times first response from the historical send, not "now" (backfill KPI safety)', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-15', estimate_data: null, customer_phone: '+19415550142' },
+      // un-responded lead (response_time_minutes null) so recordFirstResponseIfNeeded fires
+      contactLeads: [{ id: 'L-hist', status: 'new', customer_id: null, first_contact_at: '2026-01-01T00:00:00Z', response_time_minutes: null }],
+    });
+
+    await markLinkedLeadEstimateSent({
+      estimateId: 'e-15', sendMethod: 'backfill', database,
+      originatingNotAfter: new Date('2026-01-01T00:30:00Z'),
+      respondedAt: new Date('2026-01-01T00:30:00Z'), // 30 min after first contact — NOT months (today)
+    });
+
+    // Response time reflects sent-minus-first-contact (30), not Date.now()-first-contact.
+    const responseUpdate = database._updates.find((u) => u.patch && 'response_time_minutes' in u.patch);
+    expect(responseUpdate.patch.response_time_minutes).toBe(30);
+    expect(types(database)).toEqual(['estimate_created', 'first_response', 'estimate_sent']);
+  });
 });

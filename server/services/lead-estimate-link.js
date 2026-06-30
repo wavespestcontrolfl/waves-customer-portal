@@ -72,10 +72,15 @@ function performedByFromTechnician(technician) {
   return name || 'system';
 }
 
-async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system') {
+// respondedAt: when the response actually happened. Live callers leave it null
+// (now); the one-off backfill passes the estimate's historical send time so an
+// old send is timed from first_contact_at → sent_at, not first_contact_at → today
+// (which would stamp a wildly inflated response_time_minutes onto the KPI).
+async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system', respondedAt = null) {
   if (!lead || lead.response_time_minutes != null || !lead.first_contact_at) return;
   const firstContact = new Date(lead.first_contact_at);
-  const minutes = Math.max(0, Math.round((Date.now() - firstContact.getTime()) / 60000));
+  const respondedMs = respondedAt ? new Date(respondedAt).getTime() : Date.now();
+  const minutes = Math.max(0, Math.round((respondedMs - firstContact.getTime()) / 60000));
   if (!Number.isFinite(minutes)) return;
 
   await database('leads').where({ id: lead.id }).update({
@@ -250,7 +255,7 @@ async function linkRescuedLead(database, lead, estimate, performedBy) {
   return current && String(current.estimate_id) === String(estimate.id) ? 'already_ours' : 'conflict';
 }
 
-async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db, originatingNotAfter = null }) {
+async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db, originatingNotAfter = null, respondedAt = null }) {
   if (!estimateId) return;
   const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId, { originatingNotAfter });
   for (const lead of leads) {
@@ -267,7 +272,7 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
       .where({ id: lead.id })
       .whereIn('status', ['new', 'contacted'])
       .update({ status: 'estimate_sent', updated_at: new Date() });
-    await recordFirstResponseIfNeeded(database, lead, performedBy);
+    await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt);
     await database('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'estimate_sent',

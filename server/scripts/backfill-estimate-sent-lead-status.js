@@ -102,7 +102,9 @@ async function main() {
           if (est.status === 'viewed') {
             await markLinkedLeadEstimateViewed({ estimateId: est.id, performedBy: PERFORMED_BY, database: trx, originatingNotAfter: eventTime });
           } else {
-            await markLinkedLeadEstimateSent({ estimateId: est.id, sendMethod: 'backfill', performedBy: PERFORMED_BY, database: trx, originatingNotAfter: eventTime });
+            // respondedAt: time the first response from first_contact_at → the
+            // estimate's historical send time, not "today", so the KPI isn't inflated.
+            await markLinkedLeadEstimateSent({ estimateId: est.id, sendMethod: 'backfill', performedBy: PERFORMED_BY, database: trx, originatingNotAfter: eventTime, respondedAt: eventTime });
           }
         });
       }
