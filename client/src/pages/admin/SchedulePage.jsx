@@ -13636,10 +13636,11 @@ const PRODUCT_DESCRIPTIONS = {
   headway:
     "dual-action fungicide for large patch and take-all root rot (FRAC 11+3)",
   "medallion sc":
-    "fungicide for large patch — different mode of action (FRAC 7)",
-  medallion: "fungicide for large patch — different mode of action (FRAC 7)",
-  "torque sc": "fungicide for fall disease prevention (FRAC 12)",
-  torque: "fungicide for fall disease prevention (FRAC 12)",
+    "fungicide for large patch — different mode of action (FRAC 12)",
+  medallion: "fungicide for large patch — different mode of action (FRAC 12)",
+  "torque sc": "fungicide for fall disease prevention (FRAC 3)",
+  torque: "fungicide for fall disease prevention (FRAC 3)",
+  velista: "fungicide for large patch rescue — SDHI mode of action (FRAC 7)",
   "sedgehammer plus": "kills nutsedge without damaging turf",
   sedgehammer: "kills nutsedge without damaging turf",
   dismiss: "fast-acting sedge control — visible results in days",

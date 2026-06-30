@@ -5,10 +5,10 @@
       "notes": [
         "⚠ PRODIAMINE TIMING: Apply Visit 1 by January 15. Soil temps can hit 55°F germination window by late Jan in Sarasota/Man",
         "⚠ CELSIUS CAP: Maximum 3 applications per property per year. Log every Celsius app. If maxed, use Blindside WDG or Three",
-        "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Jul = Ca supplement. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
+        "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
         "★ NEW v4: N RATE CONTROL — Explicit lb N/1,000 per visit in Notes. Annual target: Basic/Std 1.5 lb N, Enh/Prem 3.0 lb N.",
         "★ NEW v4: Soil-test branching — P index >80 skip 24-2-11, K >80 ppm skip K-Flow. Chinch IPM ≥20/sq ft threshold + MOA ro",
-        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (7) Feb → Torque (12) Oct. SpeedZone Apr weather-gated at 90°F.",
+        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Torque (3) Oct. SpeedZone Apr weather-gated at 90°F.",
         "★ NEW v4: Aug drive-by scout + Dec wellness touchpoint for Basic/Std. Thatch measurement V3+V10. Irrigation VWC audit V2",
         "★ ST. AUGUSTINE IS ONE TRACK: Do not split the protocol into full-sun vs shade programs. Use site observations only as condition checks for stress, disease, irrigation, and herbicide safety."
       ],
@@ -32,7 +32,7 @@
           "visit": 2,
           "month": "Feb",
           "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\nChelated Iron Plus foliar ($1.52)\nHigh Mn Combo micros ($1.33)",
-          "secondary": "★ Medallion SC (FRAC 7) if large patch active ($8.90)\nIRRIGATION AUDIT #1: probe 3\" depth, VWC >40% = reduce 20%",
+          "secondary": "★ Medallion SC (FRAC 12) if large patch active ($8.90)\nIRRIGATION AUDIT #1: probe 3\" depth, VWC >40% = reduce 20%",
           "material_cost": "25.71",
           "labor_cost": "26.96",
           "tiers": {
@@ -41,7 +41,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "N app 1/3 @ 0.75 lb N/1K. Enh/Prem only. ★ FRAC 7 (Medallion) replaces Artavia. ★ Irrigation VWC audit #1 documented on ticket."
+          "notes": "N app 1/3 @ 0.75 lb N/1K. Enh/Prem only. ★ FRAC 12 (Medallion) replaces Artavia. ★ Irrigation VWC audit #1 documented on ticket."
         },
         {
           "visit": 3,
@@ -91,9 +91,9 @@
         {
           "visit": 6,
           "month": "Jun",
-          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP K-Flow → Fe+micros only\nChelated Iron Plus ($1.52)\nHigh Mn Combo ($1.33)",
+          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP K-Flow → micros only\nHigh Mn Combo ($1.33)",
           "secondary": "★ CHINCH FLOAT TEST #1: threshold ≥20/sq ft\nTalstar P curative if threshold met ($3.82)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce 20%",
-          "material_cost": "8.15",
+          "material_cost": "6.63",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -106,9 +106,9 @@
         {
           "visit": 7,
           "month": "Jul",
-          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nGreen Flo 6-0-0 10% Ca ($1.39)\nGreen Flo Phyte Plus 0-0-26 ($4.45)",
+          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nGreen Flo Phyte Plus 0-0-26 ($4.45)",
           "secondary": "Moisture Manager ($7.45)\n★ Chinch re-check ≥20/sq ft threshold\n★ If Talstar failed Jun: Arena 50 WDG (Group 4A) ($5.20)",
-          "material_cost": "12.35",
+          "material_cost": "10.96",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -116,7 +116,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius app 2/3. ★ Ca replaces K-Flow (cation rotation). ★ Chinch MOA rotation: Talstar (3A) → Arena (4A) if no knockdown 7d."
+          "notes": "Celsius app 2/3. ★ Chinch MOA rotation: Talstar (3A) → Arena (4A) if no knockdown 7d."
         },
         {
           "visit": 8,
@@ -136,9 +136,9 @@
         {
           "visit": 9,
           "month": "Sep",
-          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP K-Flow\nSpeedZone Southern + NIS ($5.95)\nChelated Iron Plus ($1.52)",
+          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP K-Flow\nSpeedZone Southern + NIS ($5.95)",
           "secondary": "Dismiss for fall sedge ($4.36)\nPre-position for Oct N app",
-          "material_cost": "8.47",
+          "material_cost": "6.95",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -151,7 +151,7 @@
         {
           "visit": 10,
           "month": "Oct",
-          "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\n★ Torque SC (FRAC 12) fungicide ($7.50)\nChelated Iron Plus ($1.52)",
+          "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\n★ Torque SC (FRAC 3) fungicide ($7.50)\nChelated Iron Plus ($1.52)",
           "secondary": "Headway ONLY if severe ($26.13) — resets FRAC 11 clock\nSoil re-test problem props — OPTIONAL on request\n★ THATCH MEASUREMENT #2: compare to Mar",
           "material_cost": "39.69",
           "labor_cost": "26.96",
@@ -161,7 +161,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "N app final @ 0.75 lb N/1K. ★ FRAC FIX: Torque (FRAC 12) replaces T-Storm. ★ Thatch #2: if >0.75\" or +0.25\" since Mar → dethatch upsell."
+          "notes": "N app final @ 0.75 lb N/1K. ★ FRAC FIX: Torque (FRAC 3) replaces T-Storm. ★ Thatch #2: if >0.75\" or +0.25\" since Mar → dethatch upsell."
         },
         {
           "visit": 11,
@@ -214,7 +214,7 @@
         "★ NEW v4: Mole cricket curative defined — Dylox 420 SL for adult activity beyond Acelepryn residual.",
         "★ NEW v4: SpeedZone April weather-gated at 90°F. Soil-test branching. Thatch measurement V3+V10. Irrigation VWC audit.",
         "★ NEW v4: PGR response documentation at each PGR visit — calibrate rate per property. Aug/Dec all-tier touchpoints.",
-        "★ NEW v4: FRAC rotation fixed — Armada (7) Oct → Armada (7) Nov → Torque (12) spring SDS followup. No FRAC 11 stacking."
+        "★ NEW v4: FRAC rotation fixed — Armada (7) Oct → Armada (7) Nov → Torque (3) spring SDS followup. No FRAC 11 stacking."
       ],
       "visits": [
         {
@@ -295,9 +295,9 @@
         {
           "visit": 6,
           "month": "Jun",
-          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP → Fe+micros only\nChelated Iron Plus ($1.52)\nPrimo Maxx PGR ($1.91)",
+          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP → micros only\nPrimo Maxx PGR ($1.91)",
           "secondary": "★ ARMYWORM SOAP FLUSH — threshold ≥3/sq ft\n★ If threshold met: Bifen I/T curative (Group 3A) ($3.50)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce",
-          "material_cost": "15.57",
+          "material_cost": "14.05",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -310,9 +310,9 @@
         {
           "visit": 7,
           "month": "Jul",
-          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nGreen Flo 6-0-0 Ca ($1.39)\nPrimo Maxx PGR ($1.91)",
+          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nPrimo Maxx PGR ($1.91)",
           "secondary": "Moisture Manager ($7.45)\n★ Armyworm re-check — if Bifen failed Jun:\nrotate to chlorantraniliprole (Group 28) ($4.50)\n★ Document PGR response",
-          "material_cost": "13.82",
+          "material_cost": "12.43",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -320,7 +320,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius replaces SpeedZone (>90°F). PGR cycle 5. Ca replaces K-Flow. ★ Armyworm MOA rotation: Bifen (3A) → chlorantraniliprole (28)."
+          "notes": "Celsius replaces SpeedZone (>90°F). PGR cycle 5. ★ Armyworm MOA rotation: Bifen (3A) → chlorantraniliprole (28)."
         },
         {
           "visit": 8,
@@ -407,7 +407,7 @@
         "⚠ Large Patch (Rhizoctonia): Zoysia is HIGHLY susceptible. Preventive fungicide Oct-Mar with FRAC rotation.",
         "⚠ SpeedZone Southern: NEVER apply above 90°F. Use Celsius WG for Jul/Aug/Sep broadleaf.",
         "⚠ NO Atrazine on Zoysia. NO Anuew EZ on Zoysia.",
-        "★ NEW v4: Large Patch FRAC rotation calendar — Headway (11+3) Oct → Medallion (7) Nov → Torque (12) Dec/Jan. No more tri",
+        "★ NEW v4: Large Patch FRAC — preventive Headway (11+3) Oct → Medallion (12) Nov (base); Velista (FRAC 7) as the Dec rescue when large patch is active. Rotate MOA each app, no consecutive repeat. No more tri",
         "★ NEW v4: Large patch diagnostic criteria for techs — orange-brown rings with dark \"smoke ring\" advancing border.",
         "★ NEW v4: Thatch measurement V3+V10. Zoysia trigger: >0.5\" (lower than Bermuda 0.75\" — denser thatch per inch).",
         "★ NEW v4: SpeedZone April weather-gated at 90°F. Soil-test branching. PGR response documentation.",
@@ -433,7 +433,7 @@
           "visit": 2,
           "month": "Feb",
           "primary": "Chelated Iron Plus foliar ($1.52)\nHigh Mn Combo micros ($1.33)\nGreen Flo 6-0-0 Ca ($1.39)",
-          "secondary": "★ Medallion SC (FRAC 7) if large patch active ($8.90)\nOR Torque (FRAC 12) if Headway used Jan ($7.50)\n★ IRRIGATION AUDIT #1: VWC >40% = reduce 20%",
+          "secondary": "★ Medallion SC (FRAC 12) if large patch active ($8.90)\nOR Velista (FRAC 7) if Jan slot was FRAC 11+3 ($67.50)\n★ IRRIGATION AUDIT #1: VWC >40% = reduce 20%",
           "material_cost": "6.87",
           "labor_cost": "26.96",
           "tiers": {
@@ -492,9 +492,9 @@
         {
           "visit": 6,
           "month": "Jun",
-          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP → Fe+micros only\nChelated Iron Plus ($1.52)\nPrimo Maxx PGR conservative ($1.91)",
+          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP → micros only\nPrimo Maxx PGR conservative ($1.91)",
           "secondary": "Zoysia grows slower — PGR every 4-5 weeks not 3-4\n★ IRRIGATION AUDIT #2: VWC >40% = reduce\nWebworm check",
-          "material_cost": "15.57",
+          "material_cost": "14.05",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -507,9 +507,9 @@
         {
           "visit": 7,
           "month": "Jul",
-          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nGreen Flo 6-0-0 Ca ($1.39)\nPrimo Maxx PGR ($1.91)",
+          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nPrimo Maxx PGR ($1.91)",
           "secondary": "Celsius replaces SpeedZone — too hot (>90°F)\nMoisture Manager if needed ($7.45)\n★ Document PGR response — critical on Zoysia",
-          "material_cost": "13.82",
+          "material_cost": "12.43",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -517,7 +517,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius for summer. SpeedZone BANNED Jul-Sep. Ca replaces K-Flow. ★ PGR response doc — if turf thinning, reduce rate IMMEDIATELY."
+          "notes": "Celsius for summer. SpeedZone BANNED Jul-Sep. ★ PGR response doc — if turf thinning, reduce rate IMMEDIATELY."
         },
         {
           "visit": 8,
@@ -537,9 +537,9 @@
         {
           "visit": 9,
           "month": "Sep",
-          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nK-Flow 0-0-25 ($2.18)\nChelated Iron Plus ($1.52)",
+          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nK-Flow 0-0-25 ($2.18)",
           "secondary": "Dismiss for sedge ($4.36)\nCelsius — still too hot for SpeedZone\n★ Pre-position for Oct large patch fungicide",
-          "material_cost": "9.61",
+          "material_cost": "8.09",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -567,8 +567,8 @@
         {
           "visit": 11,
           "month": "Nov",
-          "primary": "SpeedZone Southern + NIS ($5.95)\nLESCO 0-0-18 Bio KMAG ($7.21)\n★ Medallion SC (FRAC 7) large patch #2 ($8.90)",
-          "secondary": "NO Atrazine on Zoysia\n★ FRAC ROTATION: Medallion (7) follows Headway (11+3)\n★ Large patch window continues Oct-Mar",
+          "primary": "SpeedZone Southern + NIS ($5.95)\nLESCO 0-0-18 Bio KMAG ($7.21)\n★ Medallion SC (FRAC 12) large patch #2 ($8.90)",
+          "secondary": "NO Atrazine on Zoysia\n★ FRAC ROTATION: Medallion (12) follows Headway (11+3)\n★ Large patch window continues Oct-Mar",
           "material_cost": "63.49",
           "labor_cost": "26.96",
           "tiers": {
@@ -577,14 +577,14 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "SpeedZone safe Nov. K winter hardening. ★ FRAC FIX: Medallion (7) replaces Headway repeat. Breaks FRAC 11 cycle."
+          "notes": "SpeedZone safe Nov. K winter hardening. ★ FRAC FIX: Medallion (12) replaces Headway repeat. Breaks FRAC 11 cycle."
         },
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)\n★ Torque SC (FRAC 12) large patch #3 ($7.50)",
-          "secondary": "★ OPTIONAL Basic/Std: Door hanger + irrigation winterize\n★ OPTIONAL: Annual report on request\n★ FRAC rotation: Torque (12) follows Medallion (7)\nThatch assessment for spring mechanical work",
-          "material_cost": "25.8",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)",
+          "secondary": "★ Velista (FRAC 7) large patch #3 if large patch active ($67.50)\n★ OPTIONAL Basic/Std: Door hanger + irrigation winterize\n★ OPTIONAL: Annual report on request\n★ FRAC rotation: Velista (7) follows Medallion (12)\nThatch assessment for spring mechanical work",
+          "material_cost": "18.3",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -592,7 +592,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "★ MAJOR: Basic/Std Dec touchpoint. ★ FRAC rotation: Headway (11+3) Oct → Medallion (7) Nov → Torque (12) Dec. Three different MOAs. Annual report optional on request."
+          "notes": "★ MAJOR: Basic/Std Dec touchpoint. ★ FRAC rotation: preventive Headway (11+3) Oct → Medallion (12) Nov; Velista (FRAC 7) as the Dec large-patch rescue when active — distinct MOA, no FRAC-3/11 repeat. Annual report optional on request."
         }
       ]
     },
@@ -691,9 +691,9 @@
         {
           "visit": 6,
           "month": "Jun",
-          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: skip K-Flow → Fe+micros only\nChelated Iron Plus ($1.52)\nHigh Mn Combo ($1.33)",
+          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: skip K-Flow → micros only\nHigh Mn Combo ($1.33)",
           "secondary": "★ MOLE CRICKET SOAP FLUSH #2:\nSame method as Feb (2 tbsp/gal, 2 sq ft)\nDamage shows as spongy/lifted turf\nIf ≥2 per 2 sq ft: Dylox 420 SL curative ($12.53)",
-          "material_cost": "8.15",
+          "material_cost": "6.63",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -706,9 +706,9 @@
         {
           "visit": 7,
           "month": "Jul",
-          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nGreen Flo 6-0-0 Ca ($1.39)",
-          "secondary": "★ Ca replaces K-Flow — cation rotation\n★ OPTIONAL CUSTOMER EXPECTATION TALK #2 — SEED HEADS:\n\"Bahia produces seed heads Jun-Aug. This is normal,\nhealthy biology — not a problem. Mowing frequency\ncontrols the l",
-          "material_cost": "5.07",
+          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)",
+          "secondary": "★ OPTIONAL CUSTOMER EXPECTATION TALK #2 — SEED HEADS:\n\"Bahia produces seed heads Jun-Aug. This is normal,\nhealthy biology — not a problem. Mowing frequency\ncontrols the l",
+          "material_cost": "3.68",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -716,7 +716,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius app 2. Ca replaces K-Flow. ★ Seed head customer talk STRUCTURED — proactive, not reactive. Mowing upsell opportunity if mowing division/partner available."
+          "notes": "Celsius app 2. ★ Seed head customer talk STRUCTURED — proactive, not reactive. Mowing upsell opportunity if mowing division/partner available."
         },
         {
           "visit": 8,
