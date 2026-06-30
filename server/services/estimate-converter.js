@@ -675,8 +675,16 @@ function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscount
   const effectiveBaseRate = Number.isFinite(baseRate) ? baseRate : FL_COMMERCIAL_TAX_RATE;
   if (!(effectiveBaseRate > 0)) return 0;
   const discountRate = prepayDiscountApplied ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
+  // Taxable commercial pest-FAMILY keys (pest / mosquito / termite-bait /
+  // rodent-bait → nonresidential_pest_control). Keyed off the service as well as
+  // the row's taxable flag so a save-path that drops the flag still taxes
+  // correctly. Commercial lawn/tree are NON-taxable (lawn_spraying_or_treatment)
+  // and are intentionally excluded.
+  const TAXABLE_COMMERCIAL_KEYS = new Set([
+    'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait',
+  ]);
   const isTaxableCommercial = (svc) =>
-    svc?.taxable === true || recurringServiceKey(svc) === 'commercial_pest';
+    svc?.taxable === true || TAXABLE_COMMERCIAL_KEYS.has(recurringServiceKey(svc));
   // Each line's contribution to the post-discount invoice total: discountable
   // lines take the prepay discount, non-discountable lines stay full price.
   const postDiscount = (svc) => {

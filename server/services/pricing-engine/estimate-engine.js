@@ -733,9 +733,13 @@ function generateEstimate(input) {
   if (services.mosquito) {
     if (propertyIsCommercial) {
       // Commercial auto-pricing (owner directive: ALL commercial auto). Treatable
-      // area is lot-derivable, so commercial mosquito always prices. FL-taxed.
+      // area is usually lot-derivable, so commercial mosquito prices instantly;
+      // with NO outdoor-area data at all (no lot/treatable area, no lot category)
+      // it falls back to a manual quote rather than auto-pricing off 0 sqft. FL-taxed.
       const result = priceCommercialMosquito(property, { commercialSubtype });
-      if (!lineItems.some((line) => line.service === result.service)) {
+      if (result.quoteRequired) {
+        addCommercialManualQuote('pest_control');
+      } else if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
         activeServiceKeys.push('commercial_mosquito');
       }
@@ -759,9 +763,15 @@ function generateEstimate(input) {
     if (propertyIsCommercial) {
       // Commercial termite bait MONITORING auto-prices off the building
       // perimeter; with no real building size it falls back to a manual quote.
+      // Admin-entered termite measurements (services.termite.measurements →
+      // footprintSqFt / perimeterLF) override the property-derived building size
+      // so a measured lot-only estimate auto-prices off the operator's numbers.
+      const termiteMeasurements = serviceOptions(termiteBaitService).measurements || {};
       const result = priceCommercialTermiteBait(property, {
         commercialSubtype,
         buildingSizeMeasured: input.buildingSizeMeasured,
+        footprintSqFt: termiteMeasurements.footprintSqFt,
+        perimeterLF: termiteMeasurements.perimeterLF,
       });
       if (result.quoteRequired) {
         addCommercialManualQuote('pest_control');

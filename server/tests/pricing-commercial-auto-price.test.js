@@ -266,11 +266,25 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     });
   });
 
-  test('mosquito always prices (treatable area is lot-derivable — no manual fallback)', () => {
+  test('mosquito prices off lot-derived treatable area (lot − footprint − hardscape)', () => {
     // Lot-only (no building) still prices off lot − footprint − hardscape.
     const r = priceCommercialMosquito({ lotSqFt: 60000 });
     expect(r.quoteRequired).toBe(false);
     expect(r.annual).toBeGreaterThan(0);
+  });
+
+  test('mosquito with a building size but NO outdoor-area data falls back to a MANUAL quote', () => {
+    // Footprint only, no lot/treatable area, no lot category → treatable resolves
+    // to 0 (missing_or_zero_fallback). Don't auto-price the bare account minimum
+    // off 0 sqft — require a lot / treatable-area input via a manual quote.
+    const r = priceCommercialMosquito({ footprintSqFt: 3000 });
+    expect(r).toMatchObject({
+      service: 'commercial_mosquito',
+      quoteRequired: true,
+      annual: null,
+      taxable: true,
+      manualReviewReasons: ['commercial_mosquito_missing_treatable_area'],
+    });
   });
 
   test('termite-bait golden anchor (perimeter-driven monitoring, 4 visits)', () => {
@@ -290,6 +304,25 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
       expect(r.annual).toBeNull();
       expect(r.taxable).toBe(true);
     }
+  });
+
+  test('termite measurements override the property building size and unlock auto-pricing', () => {
+    // Admin-measured perimeter on a lot-only estimate auto-prices (no manual quote)
+    // even under buildingSizeMeasured:false — the operator measured the building.
+    const measuredLotOnly = priceCommercialTermiteBait(
+      { lotSqFt: 60000 },
+      { buildingSizeMeasured: false, footprintSqFt: 10000, perimeterLF: 400 },
+    );
+    expect(measuredLotOnly).toMatchObject({ service: 'commercial_termite_bait', quoteRequired: false, annual: 850.91 });
+    expect(measuredLotOnly.footprintSource).toBe('termite_measurement');
+    // A divergent homeSqFt must NOT override the supplied termite measurement —
+    // price equals the golden anchor, not whatever the home size would derive.
+    const divergent = priceCommercialTermiteBait(
+      { homeSqFt: 99999, stories: 1 },
+      { footprintSqFt: 10000, perimeterLF: 400 },
+    );
+    expect(divergent.annual).toBe(850.91);
+    expect(divergent.perimeter).toBe(400);
   });
 
   test('all three auto-price through the engine as taxable, flat, non-WaveGuard lines', () => {

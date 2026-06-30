@@ -2239,6 +2239,13 @@ function recurringServicesWithSupplements(estResult = {}) {
         discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
         discountEligible: key === 'lawn_care' ? true : item.discountEligible,
         excludeFromPctDiscount: item.excludeFromPctDiscount,
+        // Carry the engine line's taxability so the annual-prepay blended rate
+        // (resolveCommercialPrepayTaxRate) taxes the taxable commercial pest /
+        // mosquito / termite / rodent share — engine-backed (quote-wizard) accepts
+        // source recurring rows from lineItems, and without these flags those
+        // newly-taxable commercial lines would prepay-tax as $0.
+        taxable: item.taxable,
+        taxCategory: item.taxCategory,
         discount: itemDiscount,
         pricingVersion: item.pricingVersion,
         pricingSource: item.pricingSource,

@@ -2720,6 +2720,24 @@ function priceCommercialMosquito(property = {}, options = {}) {
   const cfg = COMMERCIAL_MOSQUITO;
   const area = resolveMosquitoTreatableArea(property);
   const treatableSqFt = Math.max(0, Number(area.mosquitoTreatableSqFt) || 0);
+  // No usable outdoor area at all — no explicit treatable area, no lot size, and
+  // no lot category (resolveMosquitoTreatableArea → 'missing_or_zero_fallback',
+  // 0 sqft). A building size alone says nothing about the treatable mosquito
+  // area, so DON'T auto-price the bare account minimum off 0 sqft; fall back to a
+  // manual quote requiring a lot / treatable-area input (mirrors termite/rodent's
+  // missing-building fallback). A lot-category proxy yields a positive sqft and
+  // still auto-prices.
+  if (!(treatableSqFt > 0) || area.source === 'missing_or_zero_fallback') {
+    return commercialPestFamilyManualLine({
+      service: 'commercial_mosquito',
+      name: 'Commercial Mosquito',
+      originalRequestedService: 'mosquito',
+      cfg,
+      reason: 'commercial_mosquito_missing_treatable_area',
+      detail: 'Commercial mosquito pricing needs the lot or treatable outdoor area — your Waves account manager will confirm the quote.',
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype,
+    });
+  }
   return buildCommercialPestFamilyLine({
     cfg,
     materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (treatableSqFt / 1000),
@@ -2739,8 +2757,31 @@ function priceCommercialMosquito(property = {}, options = {}) {
 
 function priceCommercialTermiteBait(property = {}, options = {}) {
   const cfg = COMMERCIAL_TERMITE_BAIT;
-  const { footprint, perimeter, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
-  if (defaulted || options.buildingSizeMeasured === false) {
+  // Admin-entered termite measurements (services.termite.measurements →
+  // footprintSqFt / perimeterLF) take precedence over the property-derived
+  // building size: an operator who measured the building on a lot-only estimate
+  // must auto-price off that measurement (not fall to a manual quote), and a
+  // divergent homeSqFt must never override the supplied termite values. Perimeter
+  // is termite's cost driver; footprint only sets pricing confidence here.
+  const measuredFootprint = Number(options.footprintSqFt);
+  const measuredPerimeter = Number(options.perimeterLF);
+  const hasMeasuredFootprint = Number.isFinite(measuredFootprint) && measuredFootprint > 0;
+  const hasMeasuredPerimeter = Number.isFinite(measuredPerimeter) && measuredPerimeter > 0;
+  const hasTermiteMeasurement = hasMeasuredFootprint || hasMeasuredPerimeter;
+  const resolved = resolveCommercialPestFootprint(hasTermiteMeasurement
+    ? {
+        ...property,
+        // Set BOTH footprint aliases so the measurement wins over any existing
+        // property.footprint (resolvePestFootprint reads `footprint` first).
+        ...(hasMeasuredFootprint ? { footprint: measuredFootprint, footprintSqFt: measuredFootprint } : {}),
+        ...(hasMeasuredPerimeter ? { perimeter: measuredPerimeter } : {}),
+      }
+    : property);
+  const { footprint, perimeter } = resolved;
+  const footprintSource = hasMeasuredFootprint ? 'termite_measurement' : resolved.footprintSource;
+  // A supplied termite measurement means a real building exists — don't fall to a
+  // manual quote even on a lot-only estimate or under buildingSizeMeasured:false.
+  if (!hasTermiteMeasurement && (resolved.defaulted || options.buildingSizeMeasured === false)) {
     return commercialPestFamilyManualLine({
       service: 'commercial_termite_bait',
       name: 'Commercial Termite Bait Monitoring',
