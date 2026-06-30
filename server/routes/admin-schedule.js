@@ -1154,7 +1154,9 @@ router.get('/', async (req, res, next) => {
     let annualPrepayCoveredCustomerIds = new Set();
     try {
       const { getActivelyCoveredCustomerIds } = require('../services/annual-prepay-renewals');
-      annualPrepayCoveredCustomerIds = await getActivelyCoveredCustomerIds();
+      // onlyLegacyCoverage mirrors the completion gate: only legacy (no-config)
+      // terms lack per-visit stamps; configured terms stamp their capped rows.
+      annualPrepayCoveredCustomerIds = await getActivelyCoveredCustomerIds(undefined, undefined, { onlyLegacyCoverage: true });
     } catch (e) { logger.warn(`[admin-schedule] annual-prepay coverage hint failed: ${e.message}`); }
 
     // Enrich with property prefs and last service

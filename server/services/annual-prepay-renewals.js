@@ -879,11 +879,18 @@ async function activatePaidPendingTerms(conn = db) {
  * AND the prepay payment was not fully refunded. A refund (invoice flips to
  * refunded / payment refund_status='full') correctly re-enables monthly billing.
  */
-async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
+// onlyLegacyCoverage: restrict to terms with NO coverage config
+// (coverage_service_type AND coverage_visit_count both NULL). Those are never
+// materialised/stamped by applyPrepaidCoverageForTerm, so their paid visits
+// carry no per-visit prepaid_amount and the completion gate can't see the
+// coverage. Configured terms DO stamp their capped, service-typed rows, so an
+// unstamped visit under a configured term is out-of-scope/over-cap and must
+// still bill — excluding them here prevents underbilling.
+async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db, { onlyLegacyCoverage = false } = {}) {
   if (!(await annualPrepayTableExists())) return new Set();
   const coverageDate = dateOnly(asOf) || etDateString();
   const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
-  const rows = await conn('annual_prepay_terms as t')
+  let query = conn('annual_prepay_terms as t')
     .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
     .where('t.term_start', '<=', coverageDate)
     .where('t.term_end', '>=', coverageDate)
@@ -925,8 +932,11 @@ async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
             or (p.stripe_charge_id is not null and p.stripe_charge_id = i.stripe_charge_id)
           )
       )`,
-    )
-    .distinct('t.customer_id');
+    );
+  if (onlyLegacyCoverage) {
+    query = query.whereNull('t.coverage_service_type').whereNull('t.coverage_visit_count');
+  }
+  const rows = await query.distinct('t.customer_id');
   return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
 }
 

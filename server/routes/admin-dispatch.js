@@ -4087,7 +4087,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     })) {
       try {
         const { getActivelyCoveredCustomerIds } = require('../services/annual-prepay-renewals');
-        const coveredIds = await getActivelyCoveredCustomerIds(svc.scheduled_date, db);
+        // onlyLegacyCoverage: a CONFIGURED term stamps its capped, service-typed
+        // coverage rows, so an unstamped visit there is out-of-scope/over-cap and
+        // must still bill. Only legacy (no-config) terms — which never stamp — are
+        // the gap this fallback closes.
+        const coveredIds = await getActivelyCoveredCustomerIds(svc.scheduled_date, db, { onlyLegacyCoverage: true });
         if (coveredIds.has(String(svc.customer_id))) prepaidCovered = true;
       } catch (e) {
         // FAIL CLOSED on this money path: if we cannot confirm the customer is
