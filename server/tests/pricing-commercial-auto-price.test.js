@@ -319,6 +319,25 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     expect(realMosq.annual).toBeGreaterThan(0);
   });
 
+  test('mosquito off a lot-category BUCKET guess (no real lot) stays MANUAL', () => {
+    // A lot-category proxy is a size-bucket guess, not a measured area — commercial
+    // must not auto-bill off it. Direct: a gross-lot-category proxy.
+    const proxy = priceCommercialMosquito({ lotCategory: 'SMALL' });
+    expect(proxy).toMatchObject({ service: 'commercial_mosquito', quoteRequired: true, annual: null });
+    // Engine path: an admin/API estimate with a building but lotSqFt:0 →
+    // getLotCategory(0)='SMALL' → resolveMosquitoTreatableArea returns a positive
+    // 6k gross_lot_proxy, yet lotSizeMeasured is undefined (admin), so only the
+    // source allowlist (not the flag) keeps this out of auto-pricing.
+    const est = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 6000,
+      lotSqFt: 0,
+      services: { mosquito: { tier: 'monthly12' } },
+    });
+    expect(est.lineItems.find((l) => l.service === 'commercial_mosquito'))
+      .toMatchObject({ quoteRequired: true });
+  });
+
   test('mosquito with a building size but NO outdoor-area data falls back to a MANUAL quote', () => {
     // Footprint only, no lot/treatable area, no lot category → treatable resolves
     // to 0 (missing_or_zero_fallback). Don't auto-price the bare account minimum

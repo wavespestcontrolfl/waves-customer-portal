@@ -2720,25 +2720,30 @@ function priceCommercialMosquito(property = {}, options = {}) {
   const cfg = COMMERCIAL_MOSQUITO;
   const area = resolveMosquitoTreatableArea(property);
   const treatableSqFt = Math.max(0, Number(area.mosquitoTreatableSqFt) || 0);
-  // The public wizard synthesizes a lot (sqft × 4) when no real parcel/lot data
-  // exists (public-quote.js) and marks it lotSizeMeasured:false. The whole
-  // treatable area is then fabricated, so the commercial mosquito line must stay
-  // MANUAL (the lot-derived analogue of buildingSizeMeasured:false for pest).
-  // Key off the FLAG, not the area source: calculatePropertyProfile pre-derives
-  // property.mosquitoTreatableSqFt from input.lotSqFt, so by the time this pricer
-  // runs in the engine path resolveMosquitoTreatableArea reports
-  // 'explicit_mosquito_treatable_sqft' (NOT 'computed_lot_minus_footprint_hardscape')
-  // — a source check would never fire on the real path. A real parcel
-  // (lotSizeMeasured true) or the admin path (undefined) prices as usual.
-  const lotSizeSynthetic = options.lotSizeMeasured === false;
-  // No usable outdoor area at all — no explicit treatable area, no lot size, and
-  // no lot category (resolveMosquitoTreatableArea → 'missing_or_zero_fallback',
-  // 0 sqft). A building size alone says nothing about the treatable mosquito
-  // area, so DON'T auto-price the bare account minimum off 0 sqft; fall back to a
-  // manual quote requiring a lot / treatable-area input (mirrors termite/rodent's
-  // missing-building fallback). A lot-category proxy yields a positive sqft and
-  // still auto-prices.
-  if (!(treatableSqFt > 0) || area.source === 'missing_or_zero_fallback' || lotSizeSynthetic) {
+  // Commercial mosquito auto-prices ONLY off a REAL measured outdoor area: an
+  // explicit treatable area, or a positive area computed from a REAL lot. Any
+  // softer basis is a fabricated/guessed number and must go to MANUAL review —
+  // owner directive: never auto-BILL a commercial customer off a guessed area.
+  // The non-real bases this rejects:
+  //   • missing_or_zero_fallback → no area data at all.
+  //   • lot_category_proxy / gross_lot_proxy → a lot-size BUCKET guess.
+  //     getLotCategory() returns a category even for lotSqFt:0 (an admin/API
+  //     estimate with homeSqFt but no parcel), yielding e.g. a 'SMALL' 6k-sqft
+  //     proxy that is NOT a measurement.
+  //   • lotSizeMeasured:false → the public wizard's synthetic sqft×4 lot. NOTE
+  //     calculatePropertyProfile pre-derives property.mosquitoTreatableSqFt from
+  //     input.lotSqFt, so in the engine path resolveMosquitoTreatableArea reports
+  //     'explicit_mosquito_treatable_sqft' even for a synthetic lot — the FLAG
+  //     (not the source) is what distinguishes synthetic from real, so it's
+  //     checked separately from the source allowlist below.
+  const REAL_TREATABLE_AREA_SOURCES = new Set([
+    'explicit_mosquito_treatable_sqft',
+    'computed_lot_minus_footprint_hardscape',
+  ]);
+  const hasRealTreatableArea = treatableSqFt > 0
+    && REAL_TREATABLE_AREA_SOURCES.has(area.source)
+    && options.lotSizeMeasured !== false;
+  if (!hasRealTreatableArea) {
     return commercialPestFamilyManualLine({
       service: 'commercial_mosquito',
       name: 'Commercial Mosquito',
