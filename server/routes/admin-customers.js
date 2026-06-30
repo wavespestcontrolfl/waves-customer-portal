@@ -1332,6 +1332,81 @@ router.get('/:id/cards', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
+// Lazily backfills a primary property for customers created after the migration.
+router.get('/:id/properties', async (req, res, next) => {
+  try {
+    const customerProperties = require('../services/customer-properties');
+    await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
+    const properties = await customerProperties.listProperties(req.params.id);
+    res.json({ properties });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/customers/:id/properties — add a second (non-primary) property.
+router.post('/:id/properties', requireAdmin, async (req, res, next) => {
+  try {
+    const customerProperties = require('../services/customer-properties');
+    const { address_line1, address_line2, city, state, zip, occupancy_type, label } = req.body || {};
+    if (!String(address_line1 || '').trim()) {
+      return res.status(400).json({ error: 'address_line1 is required' });
+    }
+    // Require city + ZIP too: the full-address dedup key includes them, so a
+    // partial address (street only) would not match the existing primary's key
+    // and could slip a duplicate past the 409 / unique index.
+    if (!String(city || '').trim() || !String(zip || '').trim()) {
+      return res.status(400).json({ error: 'city and zip are required' });
+    }
+    // If this address is the customer's OWN primary that's only PARTIAL on file
+    // (same street, missing city/ZIP), complete that primary first — otherwise its
+    // partial address_key wouldn't match this full address and recordCallProperty
+    // would insert a duplicate of the primary. Complete → ensure → record mirrors
+    // the call pipeline. completePrimaryFromCall is a no-op for a genuinely
+    // different street (a real secondary).
+    await customerProperties.completePrimaryFromCall(req.params.id, { address_line1, address_line2, city, zip }).catch(() => {});
+    // Ensure the primary exists, so the customer's current address is represented
+    // before we add a secondary. This also makes recordCallProperty's dedup reject
+    // a POST of the customer's own (now-complete) primary address (409) instead of
+    // creating a lone non-primary that a later read would duplicate.
+    await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
+    const result = await customerProperties.recordCallProperty({
+      customerId: req.params.id,
+      address_line1, address_line2, city, state, zip,
+      occupancyType: occupancy_type,
+      label,
+      source: 'manual',
+    });
+    if (!result.created) {
+      return res.status(409).json({ error: 'A property with that street already exists for this customer' });
+    }
+    const properties = await customerProperties.listProperties(req.params.id);
+    return res.status(201).json({ propertyId: result.propertyId, properties });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/customers/:id/properties/:propertyId — edit occupancy/label.
+router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next) => {
+  try {
+    const { OCCUPANCY_TYPES, listProperties } = require('../services/customer-properties');
+    const updates = {};
+    if (req.body && req.body.occupancy_type !== undefined) {
+      if (!OCCUPANCY_TYPES.includes(req.body.occupancy_type)) {
+        return res.status(400).json({ error: 'invalid occupancy_type' });
+      }
+      updates.occupancy_type = req.body.occupancy_type;
+    }
+    if (req.body && req.body.label !== undefined) updates.label = req.body.label || null;
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'nothing to update' });
+    updates.updated_at = new Date();
+    const n = await db('customer_properties')
+      .where({ id: req.params.propertyId, customer_id: req.params.id })
+      .update(updates);
+    if (!n) return res.status(404).json({ error: 'property not found' });
+    const properties = await listProperties(req.params.id);
+    return res.json({ properties });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/customers/:id/timeline — unified customer timeline
 router.get('/:id/timeline', async (req, res, next) => {
   try {
@@ -2197,16 +2272,39 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         });
       }
 
-      await db('customers').where({ id: req.params.id }).update(updates);
       const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'payer_id'];
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
+      const after = { ...before, ...updates };
+      const addressChanged = changed.some((f) => ['address_line1', 'address_line2', 'city', 'state', 'zip'].includes(f));
+      // Phase 1 multi-property: an admin address edit must reach the primary
+      // customer_properties row too — ATOMICALLY, so a unique address-index
+      // collision rolls back the customer edit (and surfaces a 409) instead of
+      // leaving customers.address_* and the property's dedup key desynced. NOT
+      // gated on GATE_CUSTOMER_PROPERTIES: the table is migration-backfilled
+      // regardless of the flag; syncPrimaryAddress is a no-op when no primary
+      // row exists.
+      try {
+        await db.transaction(async (trx) => {
+          await trx('customers').where({ id: req.params.id }).update(updates);
+          if (addressChanged) {
+            await require('../services/customer-properties').syncPrimaryAddress(after, trx);
+          }
+        });
+      } catch (e) {
+        if (e && e.code === '23505') {
+          return res.status(409).json({
+            error: 'address_matches_existing_property',
+            message: 'That address already exists as another property on this customer.',
+          });
+        }
+        return next(e);
+      }
       if (changed.some(field => sensitiveFields.includes(field))) {
         await auditCustomerMutation(req, 'customer.update_sensitive', req.params.id, {
           fields: changed,
           sensitiveFieldsChanged: changed.filter(field => sensitiveFields.includes(field)),
         }, true);
       }
-      const after = { ...before, ...updates };
       const beforeHasMembership = hasMembership(before);
       const afterHasMembership = hasMembership(after);
       const membershipFieldChanged = membershipDetailsChanged(before, after);
@@ -2258,7 +2356,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     const addressChanged = ['address_line1', 'city', 'state', 'zip'].some(f => updates[f] !== undefined);
     if (addressChanged) {
       await db('customers').where({ id: req.params.id }).update({ latitude: null, longitude: null });
-      require('../services/geocoder').ensureCustomerGeocoded(req.params.id).catch(() => {});
+      // Re-geocode the customer, then mirror the fresh coords onto the primary
+      // property — syncPrimaryAddress cleared them on the address edit, so without
+      // this the property row would stay permanently null after every address edit.
+      void require('../services/geocoder').ensureCustomerGeocoded(req.params.id)
+        .then((coords) => coords && require('../services/customer-properties').syncPrimaryCoordsFromCustomer(req.params.id))
+        .catch(() => {});
     }
 
     // Fire-and-forget: trigger cancellation save when deactivating a customer
