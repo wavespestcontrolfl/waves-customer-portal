@@ -2730,12 +2730,19 @@ function priceCommercialMosquito(property = {}, options = {}) {
   //     getLotCategory() returns a category even for lotSqFt:0 (an admin/API
   //     estimate with homeSqFt but no parcel), yielding e.g. a 'SMALL' 6k-sqft
   //     proxy that is NOT a measurement.
-  //   • lotSizeMeasured:false → the public wizard's synthetic sqft×4 lot. NOTE
+  //   • lotSizeMeasured:false → a synthetic/default lot (the public wizard's
+  //     sqft×4, lead-automation's DEFAULT_LOT_SQFT, the IB tool's homeSqFt*4).
   //     calculatePropertyProfile pre-derives property.mosquitoTreatableSqFt from
   //     input.lotSqFt, so in the engine path resolveMosquitoTreatableArea reports
   //     'explicit_mosquito_treatable_sqft' even for a synthetic lot — the FLAG
   //     (not the source) is what distinguishes synthetic from real, so it's
   //     checked separately from the source allowlist below.
+  // CALLER CONTRACT: any caller that SYNTHESIZES a default lot when none was
+  // supplied MUST pass lotSizeMeasured:false (real lot → true/omit) so this never
+  // auto-bills off a guessed lot. public-quote / lead-estimate-automation /
+  // intelligence-bar estimate-tools all do; property-lookup-v2 + customer-pricing-ai
+  // pass a real-or-zero lot (no positive synthetic default), so a missing lot there
+  // resolves to a rejected proxy/zero source above.
   const REAL_TREATABLE_AREA_SOURCES = new Set([
     'explicit_mosquito_treatable_sqft',
     'computed_lot_minus_footprint_hardscape',

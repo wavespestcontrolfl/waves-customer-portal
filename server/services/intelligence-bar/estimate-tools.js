@@ -260,6 +260,10 @@ async function computeEstimate(input) {
   if (!homeSqFt) return { error: 'homeSqFt required and must be 500-20000' };
 
   const lotSqFt = Math.max(500, Math.min(200000, Number(input.lotSqFt) || homeSqFt * 4));
+  // Assert lot provenance: true only when a REAL lot was supplied, false when we
+  // synthesized homeSqFt*4. Commercial mosquito reads this and stays a manual
+  // quote rather than auto-pricing off the synthetic default.
+  const lotSizeMeasured = Number(input.lotSqFt) > 0;
   const stories = Number(input.stories) || 1;
   const propertyType = input.propertyType || 'Single Family';
   const services = input.services || {};
@@ -271,6 +275,7 @@ async function computeEstimate(input) {
   const engineInput = {
     homeSqFt,
     lotSqFt,
+    lotSizeMeasured,
     stories,
     propertyType,
     services,
