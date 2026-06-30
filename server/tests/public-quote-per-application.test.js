@@ -19,7 +19,7 @@
 const { generateEstimate } = require('../services/pricing-engine');
 const { _internals } = require('../routes/public-quote');
 
-const { derivePerApplication } = _internals;
+const { derivePerApplication, resolveRealLotSqFt } = _internals;
 
 const BASE_PROPERTY = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005 };
 
@@ -106,6 +106,28 @@ describe('derivePerApplication', () => {
     };
     // No visitsPerYear and non-numeric frequency → underivable, fall back.
     expect(derivePerApplication(estimate)).toBeNull();
+  });
+});
+
+describe('resolveRealLotSqFt — trusted lot gate for commercial mosquito', () => {
+  test('a lookup-measured parcel lot is trusted (enriched.lotSqFt)', () => {
+    expect(resolveRealLotSqFt({ enrichedLotSqFt: 32000, lotSqFt: 8000, lotSizeConfirmed: false })).toBe(32000);
+  });
+
+  test('a customer-confirmed (hand-edited) lot is trusted', () => {
+    expect(resolveRealLotSqFt({ enrichedLotSqFt: null, lotSqFt: 25000, lotSizeConfirmed: true })).toBe(25000);
+  });
+
+  test('the synthetic default lot (posted but never measured/confirmed) is NOT trusted → null', () => {
+    // The wizard seeds lotSqFt='8000' when the lookup has no parcel; without a
+    // confirm flag this must NOT count as a measured lot (else commercial mosquito
+    // auto-prices off a fabricated area). Regression for the PR bot's P1.
+    expect(resolveRealLotSqFt({ enrichedLotSqFt: undefined, lotSqFt: 8000, lotSizeConfirmed: false })).toBeNull();
+    expect(resolveRealLotSqFt({ enrichedLotSqFt: 0, lotSqFt: 8000, lotSizeConfirmed: undefined })).toBeNull();
+  });
+
+  test('a confirmed-but-zero lot is not trusted', () => {
+    expect(resolveRealLotSqFt({ enrichedLotSqFt: null, lotSqFt: 0, lotSizeConfirmed: true })).toBeNull();
   });
 });
 

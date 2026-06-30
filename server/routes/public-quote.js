@@ -29,6 +29,20 @@ const {
 
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
 
+// Resolve a TRUSTED lot size for the public quote, or null when none is known.
+// The posted lotSqFt is NOT trustworthy on its own: the wizard seeds a synthetic
+// 8,000 default when the lookup returns no parcel, and the customer may submit it
+// unedited. So trust the lot only when (a) the property lookup actually measured
+// the parcel (enriched.lotSqFt), or (b) the customer hand-confirmed/edited it on
+// the confirm step (lotSizeConfirmed). Drives lotSizeMeasured, which keeps
+// commercial mosquito from auto-pricing off a fabricated treatable area. Mirrors
+// the realFootprintSqFt / buildingSizeMeasured pattern.
+function resolveRealLotSqFt({ enrichedLotSqFt, lotSqFt, lotSizeConfirmed } = {}) {
+  if (Number(enrichedLotSqFt) > 0) return Number(enrichedLotSqFt);
+  if (lotSizeConfirmed === true && Number(lotSqFt) > 0) return Number(lotSqFt);
+  return null;
+}
+
 function isPublicCommercialQuote(body = {}, enriched = {}) {
   const enrichedCommercial = isCommercialProperty({
     propertyType: enriched.propertyType,
@@ -339,7 +353,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const {
       leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
       buildingSizeConfirmed,
-      lotSqFt, stories, propertyType, category, isCommercial, commercialSubtype,
+      lotSqFt, lotSizeConfirmed, stories, propertyType, category, isCommercial, commercialSubtype,
       enriched, services, attribution,
     } = req.body || {};
     const normalizedAddress = normalizeLeadAddress({
@@ -434,6 +448,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return null;
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
+    // Trust the lot ONLY when the lookup measured the parcel or the customer
+    // hand-confirmed it — the posted lotSqFt alone is a synthetic default when the
+    // lookup has no parcel. See resolveRealLotSqFt.
+    const lotSizeMeasured = resolveRealLotSqFt({
+      enrichedLotSqFt: ep.lotSqFt,
+      lotSqFt,
+      lotSizeConfirmed,
+    }) != null;
     const engineInput = {
       homeSqFt: sqft,
       // For COMMERCIAL, pass the resolved footprint explicitly (resolvePestFootprint
@@ -441,11 +463,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // win and there's no double ÷-stories). Residential is unchanged.
       ...(commercialDetected && realFootprintSqFt != null ? { footprintSqFt: realFootprintSqFt } : {}),
       buildingSizeMeasured,
-      // True only when a REAL parcel/lot size was supplied; when absent we pass
-      // the synthetic lot (sqft × 4, below) so lot-derived commercial lawn/tree
-      // can still estimate, but commercial mosquito must NOT auto-price off a
-      // fabricated treatable area — it reads this flag and falls back to manual.
-      lotSizeMeasured: Number(lotSqFt) > 0,
+      // True only for a REAL (lookup-measured or customer-confirmed) lot; when
+      // absent we still pass the synthetic lot (sqft × 4, below) so lot-derived
+      // commercial lawn/tree can estimate, but commercial mosquito reads this flag
+      // and falls back to manual rather than auto-pricing a fabricated area.
+      lotSizeMeasured,
       stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
       lotSqFt: lot,
       propertyType: commercialDetected ? 'commercial' : (propertyType || ep.propertyType || 'Single Family'),
@@ -1299,4 +1321,5 @@ module.exports._internals = {
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   shouldRefreshWizardDraft,
+  resolveRealLotSqFt,
 };
