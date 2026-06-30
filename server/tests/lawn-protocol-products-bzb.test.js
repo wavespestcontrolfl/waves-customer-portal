@@ -14,6 +14,7 @@ const CATALOG = [
   'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG', 'LESCO 24-0-11', 'LESCO 0-0-18 Bio KMAG 1% Fe',
   'Armada 50 WDG', 'Headway G', 'Medallion SC', 'Primo Maxx', 'SpeedZone Southern',
   'LESCO 12-0-0 Chelated Iron Plus', 'LESCO K-Flow 0-0-25', 'Velista',
+  'LESCO Chelated AM + Micros Turf & Ornamental',
 ].map((name, i) => ({ id: `cat-${i}`, name }));
 
 function runMigration() {

@@ -39,7 +39,7 @@ const PRODUCTS = {
     P('mar_pre_m_split_2_pgr', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
     P('apr_insect_preventive', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, {}),
     P('apr_insect_preventive', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 2, true, {}),
-    P('may_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalNBeforeBlackout: true }),
+    P('may_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalNBeforeBlackout: true, blockInOrdinanceZones: ['north_port'] }),
     P('may_final_n', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
     P('may_final_n', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, false, {}),
     P('jun_blackout', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
@@ -52,6 +52,10 @@ const PRODUCTS = {
     P('oct_final_n_sds_prevent', 'Armada 50 WDG', 'fungicide', 0.30, 'oz', 2, true, { frac: '7', sdsPreventive: true }),
     P('nov_sds_prevent_2_k', 'Armada 50 WDG', 'fungicide', 0.30, 'oz', 2, true, { frac: '7', sdsPreventive: true }),
     P('nov_sds_prevent_2_k', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, true, {}),
+    // primary broadleaf + potassium that the curated set omitted (parity with protocols.json)
+    P('apr_insect_preventive', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 2, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('apr_insect_preventive', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 2, false, { soilKGatePpmBelow: 80 }),
+    P('nov_sds_prevent_2_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
   ],
   zoysia: [
     P('jan_pre_m_split_1', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
@@ -64,7 +68,7 @@ const PRODUCTS = {
     P('mar_n1_pre_m_pgr', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, { conservativeRate: true }),
     P('apr_insect_preventive', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, {}),
     P('apr_insect_preventive', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 2, true, { conservativeRate: true }),
-    P('may_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalNBeforeBlackout: true }),
+    P('may_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalNBeforeBlackout: true, blockInOrdinanceZones: ['north_port'] }),
     P('may_final_n', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, false, {}),
     P('jun_blackout', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
     P('jul_blackout_celsius', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
@@ -74,6 +78,11 @@ const PRODUCTS = {
     P('nov_lp_frac_k', 'Medallion SC', 'fungicide', 1, 'fl_oz', 2, true, { frac: '12', largePatchFracRotation: true }),
     P('nov_lp_frac_k', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, true, {}),
     P('dec_touchpoint', 'Velista', 'fungicide', 0.50, 'oz', 2, false, { frac: '7', trigger: 'large_patch_active' }),
+    // primary broadleaf + micros + potassium the curated set omitted (parity with protocols.json)
+    P('apr_insect_preventive', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 2, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('apr_insect_preventive', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 2, false, { soilKGatePpmBelow: 80 }),
+    P('may_final_n', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('nov_lp_frac_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
   ],
   bahia: [
     P('jan_pre_m_irrigation_class', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
@@ -91,6 +100,14 @@ const PRODUCTS = {
     P('oct_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalN: true }),
     P('oct_final_n', 'T-Storm', 'fungicide', 1.75, 'fl_oz', 2, false, { frac: '1', trigger: 'active_dollar_spot', maxLabelRate: 1.75, seasonalMaxRate: 7 }),
     P('nov_winter_k', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, true, {}),
+    // primary broadleaf + micros the curated set omitted (parity with protocols.json).
+    // Bahia July stays empty on purpose: its only primary is Celsius WG, which the
+    // catalog excludes on bahiagrass (the protocols.json Bahia-Celsius use is a
+    // separate data-accuracy flag — no Bahia-safe broadleaf to substitute yet).
+    P('jan_pre_m_irrigation_class', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('jan_pre_m_irrigation_class', 'SedgeHammer Plus', 'post_emergent_spot', 0.5, 'oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.5, annualMaxApps: 4, minIntervalDays: 14 }),
+    P('may_micros_crabgrass', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('nov_winter_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
   ],
 };
 
