@@ -164,19 +164,10 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('lawn_protocol_products'))) return;
-  // Remove only the products this migration inserted (by window + product_name),
-  // scoped to the three parity protocols — never touch St-Augustine's products.
-  for (const [track, products] of Object.entries(PRODUCTS)) {
-    const protocol = await findSeededProtocol(knex, track);
-    if (!protocol) continue;
-    const windows = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id }).select('id', 'window_key');
-    const windowIdByKey = new Map(windows.map((w) => [w.window_key, w.id]));
-    for (const p of products) {
-      const windowId = windowIdByKey.get(p.windowKey);
-      if (!windowId) continue;
-      await knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId, product_name: p.name }).del();
-    }
-  }
+exports.down = async function down() {
+  // Non-destructive: this seed only adds product rows into B1's windows, which the
+  // admin draft/edit flow may later change. A (window, product_name) delete can't
+  // prove the row is the one this migration inserted vs. an admin-added/edited one,
+  // so rollback leaves the products in place. up() is idempotent (skips an existing
+  // window+product), so re-applying after a rollback never duplicates.
 };
