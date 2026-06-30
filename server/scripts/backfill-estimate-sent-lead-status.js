@@ -99,12 +99,15 @@ async function main() {
         // atomic: a mid-write failure rolls back rather than leaving a linked lead
         // with no status/activity (which the candidate query would then skip on rerun).
         await db.transaction(async (trx) => {
+          // Always replay the SENT marker first: it links the lead, records the
+          // estimate_sent activity, and stamps first-response from the historical
+          // send time (respondedAt) — not "today", so the KPI isn't inflated. The
+          // live view path assumes send already ran; a 'viewed' candidate then
+          // advances estimate_sent → estimate_viewed (the lead is now FK-linked, so
+          // the viewed marker resolves it via the FK branch within this txn).
+          await markLinkedLeadEstimateSent({ estimateId: est.id, sendMethod: 'backfill', performedBy: PERFORMED_BY, database: trx, originatingNotAfter: eventTime, respondedAt: eventTime });
           if (est.status === 'viewed') {
             await markLinkedLeadEstimateViewed({ estimateId: est.id, performedBy: PERFORMED_BY, database: trx, originatingNotAfter: eventTime });
-          } else {
-            // respondedAt: time the first response from first_contact_at → the
-            // estimate's historical send time, not "today", so the KPI isn't inflated.
-            await markLinkedLeadEstimateSent({ estimateId: est.id, sendMethod: 'backfill', performedBy: PERFORMED_BY, database: trx, originatingNotAfter: eventTime, respondedAt: eventTime });
           }
         });
       }
