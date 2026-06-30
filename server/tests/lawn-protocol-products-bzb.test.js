@@ -94,6 +94,30 @@ describe('B/Z/B structured product seed', () => {
     expect(byName('chlorantraniliprole')).toHaveLength(0);
   });
 
+  test('May soil-P branches + Aug premium add-ons are seeded with explicit gates', () => {
+    const byName = (n) => products.filter((p) => p.product_name === n);
+    const inMay = (p) => p.lawn_protocol_window_id.endsWith('may_final_n');
+    // both soil-P branches present for Bermuda + Zoysia May:
+    //  24-0-11 (P>=80) default + catalogued; 24-2-11 (P<80) conditional low-P branch.
+    const lowP = byName('LESCO 24-2-11');
+    expect(lowP.length).toBe(2);
+    lowP.forEach((p) => {
+      expect(p.default_in_plan).toBe(false);
+      expect(JSON.parse(p.gates).soilPIndexBelow).toBe(80);
+    });
+    byName('LESCO 24-0-11').filter(inMay).forEach((p) => {
+      expect(p.default_in_plan).toBe(true);
+      expect(JSON.parse(p.gates).soilPIndexAtOrAbove).toBe(80);
+    });
+    // Aug premium add-ons: Hydretain (Bermuda+Zoysia) + Anuew EZ (Bermuda), all conditional
+    expect(byName('Hydretain Liquid').length).toBe(2);
+    expect(byName('Anuew EZ Plant Growth Regulator').length).toBe(1);
+    byName('Hydretain Liquid').concat(byName('Anuew EZ Plant Growth Regulator')).forEach((p) => {
+      expect(p.default_in_plan).toBe(false);
+      expect(JSON.parse(p.gates).premiumTier).toBe(true);
+    });
+  });
+
   test('default products map to a catalog product_id; un-catalogued curatives stay conditional', () => {
     products.forEach((p) => {
       if (p.default_in_plan) {
