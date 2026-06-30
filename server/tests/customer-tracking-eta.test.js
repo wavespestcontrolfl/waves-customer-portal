@@ -79,7 +79,7 @@ describe('customer tracking ETA helper', () => {
     expect(eta).not.toHaveProperty('lng');
   });
 
-  test('times out slow ETA providers to keep tracker reads moving', async () => {
+  test('times out slow ETA providers but still returns a haversine estimate', async () => {
     const bouncie = {
       calculateETAFromCoords: jest.fn().mockImplementation(() => new Promise(() => {})),
     };
@@ -95,7 +95,37 @@ describe('customer tracking ETA helper', () => {
 
     jest.advanceTimersByTime(750);
 
-    await expect(pending).resolves.toBeNull();
+    // Provider timed out, but a fresh tech position + valid destination must
+    // still yield minutes so the customer page never shows the live map with
+    // a "—" ETA. Falls back to the synchronous haversine estimate.
+    await expect(pending).resolves.toEqual({
+      minutes: 26,
+      distanceMiles: 12.9,
+      source: 'haversine',
+      techUpdatedAt: '2026-05-05T11:59:00.000Z',
+    });
     expect(bouncie.calculateETAFromCoords).toHaveBeenCalledWith(27.1, -82.2, 27.2, -82.3);
+  });
+
+  test('falls back to a haversine estimate when the provider throws', async () => {
+    const bouncie = {
+      calculateETAFromCoords: jest.fn().mockRejectedValue(new Error('distance matrix 500')),
+    };
+
+    const eta = await calculateBoundedTrackingEta({
+      techLat: '27.1',
+      techLng: '-82.2',
+      customerLat: '27.2',
+      customerLng: '-82.3',
+      techUpdatedAt: '2026-05-05T11:59:00.000Z',
+      bouncieService: bouncie,
+    });
+
+    expect(eta).toEqual({
+      minutes: 26,
+      distanceMiles: 12.9,
+      source: 'haversine',
+      techUpdatedAt: '2026-05-05T11:59:00.000Z',
+    });
   });
 });

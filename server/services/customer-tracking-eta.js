@@ -18,6 +18,27 @@ function isFreshTimestamp(value, nowMs = Date.now(), staleMs = STALE_TECH_STATUS
     && nowMs - updatedMs <= staleMs;
 }
 
+// Synchronous straight-line ETA used as a guaranteed floor when the
+// provider (Google Distance Matrix) is slow or unavailable. Mirrors the
+// haversine fallback in bouncie.calculateETAFromCoords exactly (1.4x road
+// factor, 30mph average, 1-min minimum) so the customer page reads the
+// same whether the number came from the provider or this fallback.
+function haversineEtaFallback(fromLat, fromLng, toLat, toLng) {
+  const R = 3959;
+  const dLat = (toLat - fromLat) * Math.PI / 180;
+  const dLng = (toLng - fromLng) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(fromLat * Math.PI / 180) * Math.cos(toLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const roadDist = dist * 1.4;
+  const etaMin = Math.round((roadDist / 30) * 60);
+  return {
+    minutes: Math.max(1, etaMin),
+    distanceMiles: Math.round(roadDist * 10) / 10,
+    source: 'haversine',
+  };
+}
+
 async function calculateBoundedTrackingEta({
   techLat,
   techLng,
@@ -50,16 +71,23 @@ async function calculateBoundedTrackingEta({
     const eta = await Promise.race([etaPromise, timeoutPromise]).finally(() => {
       clearTimeout(timeoutId);
     });
-    if (!eta) return null;
+    // The provider can time out (slow Distance Matrix), throw, or omit the
+    // duration. In all of those cases we still have a fresh tech position
+    // and a valid destination, so fall back to a synchronous haversine
+    // estimate rather than dropping the ETA — otherwise the customer track
+    // page renders the live map with no minutes ("—" instead of a number).
+    if (!eta || eta.etaMinutes == null) {
+      return { ...haversineEtaFallback(fromLat, fromLng, toLat, toLng), techUpdatedAt };
+    }
     return {
-      minutes: eta.etaMinutes ?? null,
+      minutes: eta.etaMinutes,
       distanceMiles: eta.distanceMiles ?? null,
       source: eta.source || null,
       techUpdatedAt,
     };
   } catch (err) {
     logger.warn(`[${logPrefix}] ETA lookup failed: ${err.message}`);
-    return null;
+    return { ...haversineEtaFallback(fromLat, fromLng, toLat, toLng), techUpdatedAt };
   }
 }
 
