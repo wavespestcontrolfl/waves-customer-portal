@@ -65,18 +65,23 @@ async function main() {
     })
     .orderBy('created_at', 'asc')
     .limit(LIMIT)
-    .select('id', 'status');
+    .select('id', 'status', 'created_at', 'sent_at');
 
-  const summary = { scanned: candidates.length, advanced: 0, linkedOnly: 0, ambiguousOrNone: 0, errors: 0 };
+  const summary = { scanned: candidates.length, advanced: 0, linkedOnly: 0, noEligibleMatch: 0, errors: 0 };
   logger.info(`[backfill-2214] ${COMMIT ? 'COMMIT' : 'DRY-RUN'} — scanning ${candidates.length} standalone sent/viewed estimate(s) (limit ${LIMIT})`);
 
   for (const est of candidates) {
+    // Originating cutoff: the lead must pre-date the estimate going out, so a
+    // replay of an OLD estimate can't grab a NEWER same-contact inquiry. The
+    // mirror (precise lead-id) path ignores this; only the fuzzy contact match
+    // is gated (see resolveEstimateEventLeads).
+    const eventTime = est.sent_at || est.created_at;
     try {
-      // Read-only preview using the exact shipped resolver. Pre-filtered to
-      // estimates with no FK-linked lead, so a result here is always the
-      // mirror/contact rescue path: rescued=true + exactly one lead, or nothing.
-      const { leads, rescued } = await resolveEstimateEventLeads(db, est.id);
-      if (!rescued || leads.length !== 1) { summary.ambiguousOrNone += 1; continue; }
+      // Read-only preview using the exact shipped resolver (same cutoff as the
+      // commit). Pre-filtered to estimates with no FK-linked lead, so a result
+      // here is the mirror/contact rescue path: rescued=true + one lead, or none.
+      const { leads, rescued } = await resolveEstimateEventLeads(db, est.id, { originatingNotAfter: eventTime });
+      if (!rescued || leads.length !== 1) { summary.noEligibleMatch += 1; continue; }
       const lead = leads[0];
 
       // Mirror the SQL gate the mark fns apply, so the preview counts match the
@@ -90,25 +95,30 @@ async function main() {
       logger.info(`[backfill-2214] est ${shortId(est.id)} (${est.status}) → lead ${shortId(lead.id)} status=${lead.status} ${advanceable ? `=> ${target}` : '(link only — status not eligible)'}`);
 
       if (COMMIT) {
-        if (est.status === 'viewed') {
-          await markLinkedLeadEstimateViewed({ estimateId: est.id, performedBy: PERFORMED_BY });
-        } else {
-          await markLinkedLeadEstimateSent({ estimateId: est.id, sendMethod: 'backfill', performedBy: PERFORMED_BY });
-        }
+        // One transaction per estimate so the link + status + activity writes are
+        // atomic: a mid-write failure rolls back rather than leaving a linked lead
+        // with no status/activity (which the candidate query would then skip on rerun).
+        await db.transaction(async (trx) => {
+          if (est.status === 'viewed') {
+            await markLinkedLeadEstimateViewed({ estimateId: est.id, performedBy: PERFORMED_BY, database: trx, originatingNotAfter: eventTime });
+          } else {
+            await markLinkedLeadEstimateSent({ estimateId: est.id, sendMethod: 'backfill', performedBy: PERFORMED_BY, database: trx, originatingNotAfter: eventTime });
+          }
+        });
       }
       if (advanceable) summary.advanced += 1; else summary.linkedOnly += 1;
     } catch (err) {
       summary.errors += 1;
-      logger.warn(`[backfill-2214] est ${shortId(est.id)} failed: ${err.message}`);
+      logger.warn(`[backfill-2214] est ${shortId(est.id)} failed (rolled back): ${err.message}`);
     }
   }
 
-  logger.info(`[backfill-2214] done — scanned=${summary.scanned} advanced=${summary.advanced} linkedOnly=${summary.linkedOnly} ambiguousOrNone=${summary.ambiguousOrNone} errors=${summary.errors}${COMMIT ? '' : ' (DRY-RUN — no writes)'}`);
+  logger.info(`[backfill-2214] done — scanned=${summary.scanned} advanced=${summary.advanced} linkedOnly=${summary.linkedOnly} noEligibleMatch=${summary.noEligibleMatch} errors=${summary.errors}${COMMIT ? '' : ' (DRY-RUN — no writes)'}`);
+  return summary;
 }
 
 main()
-  .then(() => db.destroy())
-  .then(() => process.exit(0))
+  .then((summary) => db.destroy().then(() => process.exit(COMMIT && summary.errors > 0 ? 1 : 0)))
   .catch((err) => {
     logger.error(`[backfill-2214] fatal: ${err.message}`);
     return db.destroy().finally(() => process.exit(1));
