@@ -1,0 +1,154 @@
+/**
+ * Structured PRODUCTS for the Bermuda/Zoysia/Bahia operating-layer windows (B2).
+ *
+ * B1 (20260630000001) seeded the protocols + windows + gates but no products, so
+ * the Command Center / structured forecast showed 0 default products for these
+ * turf. This inserts the per-window products (rate/role/carrier/default/gates)
+ * into the existing windows, mirroring the St. Augustine seed (20260529000003).
+ *
+ * Rate sourcing (never invented):
+ *  - Base products: St-Augustine PROTOCOL rates first (so the 4 tracks stay
+ *    consistent) — Prodiamine 0.30 oz, Acelepryn Xtra 0.46 fl oz, Celsius 0.057 oz,
+ *    Velista 0.50 oz, etc.; otherwise the catalog rate seed (Armada 0.3, Headway 3,
+ *    Medallion 1, Primo Maxx 0.35, SpeedZone 1.1, LESCO 0-0-18 1.5 lb).
+ *  - Nutrition apps carry rate=null + a targetN gate (lb N/1,000), like St-Aug.
+ *  - Curatives: owner-supplied label rates (2026-06-30) — Dylox 6.9 fl oz (≤3/yr,
+ *    ≥7 days, post-app irrigation), TopChoice 2 lb (1×/yr, RUP), Bifen I/T 0.25
+ *    fl oz (max 1.0), SedgeHammer Plus 0.5 oz (≤4/yr, ≥14 days), CarbonPro-L 2 fl oz
+ *    (biostimulant, no over-app gate), T-Storm 1.75 fl oz (residential cap, dollar
+ *    spot only). chlorantraniliprole dropped (redundant with Acelepryn Xtra).
+ *    Drive XLR8 intentionally NOT seeded — it is contraindicated on bahiagrass
+ *    (owner), and protocols.json only references it for Bahia (flagged for a
+ *    separate data-accuracy fix).
+ *
+ * Idempotent: skips a window that already has products.
+ */
+
+// product(windowKey, name, role, rate, unit, carrier, defaultInPlan, gates)
+function P(windowKey, name, role, rate, unit, carrier, defaultInPlan, gates = {}) {
+  return { windowKey, name, role, rate, unit, carrier, defaultInPlan, gates };
+}
+
+const PRODUCTS = {
+  bermuda: [
+    P('jan_pre_m_split_1', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
+    P('jan_pre_m_split_1', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('feb_greenup_n1', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', blackoutSensitive: true }),
+    P('feb_greenup_n1', 'Armada 50 WDG', 'fungicide', 0.30, 'oz', 2, false, { frac: '7', trigger: 'sds_damage_jan' }),
+    P('mar_pre_m_split_2_pgr', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
+    P('mar_pre_m_split_2_pgr', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
+    P('apr_insect_preventive', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, { maxLabelRate: 0.46, annualMaxRate: 0.88 }),
+    P('apr_insect_preventive', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 2, true, {}),
+    P('may_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalNBeforeBlackout: true }),
+    P('may_final_n', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
+    P('jun_blackout', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
+    P('jun_blackout', 'Bifen I/T', 'insect_curative', 0.25, 'fl_oz', 2, false, { trigger: 'armyworm_threshold_3_per_sqft', maxLabelRate: 1.0 }),
+    P('jul_blackout_celsius', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
+    P('jul_blackout_celsius', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
+    P('aug_scout_peak', 'Dylox 420 SL', 'insect_curative', 6.9, 'fl_oz', 2, false, { trigger: 'mole_cricket_adults', maxLabelRate: 6.9, annualMaxApps: 3, minIntervalDays: 7, postAppIrrigation: true }),
+    P('sep_blackout_closeout', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
+    P('oct_final_n_sds_prevent', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalN: true }),
+    P('oct_final_n_sds_prevent', 'Armada 50 WDG', 'fungicide', 0.30, 'oz', 2, true, { frac: '7', sdsPreventive: true }),
+    P('nov_sds_prevent_2_k', 'Armada 50 WDG', 'fungicide', 0.30, 'oz', 2, true, { frac: '7', sdsPreventive: true }),
+    P('nov_sds_prevent_2_k', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, true, {}),
+  ],
+  zoysia: [
+    P('jan_pre_m_split_1', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
+    P('jan_pre_m_split_1', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('feb_micros_frac', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('feb_micros_frac', 'Medallion SC', 'fungicide', 1, 'fl_oz', 2, false, { frac: '12', trigger: 'large_patch_active' }),
+    P('mar_n1_pre_m_pgr', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000' }),
+    P('mar_n1_pre_m_pgr', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
+    P('mar_n1_pre_m_pgr', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, { conservativeRate: true }),
+    P('apr_insect_preventive', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, { maxLabelRate: 0.46, annualMaxRate: 0.88 }),
+    P('apr_insect_preventive', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 2, true, { conservativeRate: true }),
+    P('may_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalNBeforeBlackout: true }),
+    P('jun_blackout', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
+    P('jul_blackout_celsius', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
+    P('sep_blackout_lp_prep', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
+    P('oct_final_n_lp_required', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalN: true }),
+    P('oct_final_n_lp_required', 'Headway G', 'fungicide', 3, 'lb', 1, true, { frac: '11+3', largePatchRequired: true }),
+    P('nov_lp_frac_k', 'Medallion SC', 'fungicide', 1, 'fl_oz', 2, true, { frac: '12', largePatchFracRotation: true }),
+    P('nov_lp_frac_k', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, true, {}),
+    P('dec_touchpoint', 'Velista', 'fungicide', 0.50, 'oz', 2, false, { frac: '7', trigger: 'large_patch_active' }),
+  ],
+  bahia: [
+    P('jan_pre_m_irrigation_class', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
+    P('feb_micros_mole_cricket', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('mar_n1_pre_m', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000' }),
+    P('mar_n1_pre_m', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
+    P('apr_insect_fire_ant', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, { maxLabelRate: 0.46, annualMaxRate: 0.88 }),
+    P('apr_insect_fire_ant', 'TopChoice', 'fire_ant', 2, 'lb', 1, false, { trigger: 'documented_fire_ant_history', restrictedUse: true, annualMaxApps: 1 }),
+    P('may_micros_crabgrass', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, { irrigatedOnly: false }),
+    P('jun_blackout_mole_cricket', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, irrigatedOnly: true, soilKGatePpmBelow: 80 }),
+    P('jun_blackout_mole_cricket', 'Dylox 420 SL', 'insect_curative', 6.9, 'fl_oz', 2, false, { trigger: 'mole_cricket_threshold_2_per_2sqft', maxLabelRate: 6.9, annualMaxApps: 3, minIntervalDays: 7, postAppIrrigation: true }),
+    P('jul_seed_head', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
+    P('aug_scout_mole_cricket', 'Dylox 420 SL', 'insect_curative', 6.9, 'fl_oz', 2, false, { trigger: 'mole_cricket_threshold_2_per_2sqft', maxLabelRate: 6.9, annualMaxApps: 3, minIntervalDays: 7, postAppIrrigation: true }),
+    P('sep_blackout_crabgrass', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, irrigatedOnly: true, soilKGatePpmBelow: 80 }),
+    P('oct_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalN: true }),
+    P('oct_final_n', 'T-Storm', 'fungicide', 1.75, 'fl_oz', 2, false, { frac: '1', trigger: 'active_dollar_spot', maxLabelRate: 1.75, seasonalMaxRate: 7 }),
+    P('nov_winter_k', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, true, {}),
+  ],
+};
+
+const PROTOCOL_KEYS = { bermuda: 'swfl_bermuda_10_10', zoysia: 'swfl_zoysia_10_10', bahia: 'swfl_bahia_10_10' };
+
+function productRow(p) {
+  return {
+    product_name: p.name,
+    role: p.role,
+    application_mode: p.role.includes('spot') ? 'spot' : 'broadcast',
+    rate_per_1000: p.rate,
+    rate_unit: p.unit,
+    carrier_gal_per_1000: p.carrier,
+    default_in_plan: p.defaultInPlan,
+    gates: JSON.stringify(p.gates),
+    annual_counter: JSON.stringify(p.gates.annualCounter ? { counter: p.gates.annualCounter } : {}),
+    mixing: JSON.stringify({}),
+    report_copy: JSON.stringify({ role: p.role }),
+  };
+}
+
+exports.up = async function up(knex) {
+  if (!(await knex.schema.hasTable('lawn_protocol_products'))) return;
+
+  for (const [track, products] of Object.entries(PRODUCTS)) {
+    const protocol = await knex('lawn_protocols').where({ protocol_key: PROTOCOL_KEYS[track], grass_track: track }).first();
+    if (!protocol) continue; // B1 not applied yet — nothing to attach to
+
+    const windows = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id }).select('id', 'window_key');
+    const windowIdByKey = new Map(windows.map((w) => [w.window_key, w.id]));
+
+    for (const p of products) {
+      const windowId = windowIdByKey.get(p.windowKey);
+      if (!windowId) continue; // unknown window_key — skip rather than fail
+      const exists = await knex('lawn_protocol_products')
+        .where({ lawn_protocol_window_id: windowId, product_name: p.name })
+        .first();
+      if (exists) continue; // idempotent
+      await knex('lawn_protocol_products').insert({
+        ...productRow(p),
+        lawn_protocol_window_id: windowId,
+        created_at: knex.fn.now(),
+        updated_at: knex.fn.now(),
+      });
+    }
+  }
+};
+
+exports.down = async function down(knex) {
+  if (!(await knex.schema.hasTable('lawn_protocol_products'))) return;
+  // Remove only the products this migration inserted (by window + product_name),
+  // scoped to the three parity protocols — never touch St-Augustine's products.
+  for (const [track, products] of Object.entries(PRODUCTS)) {
+    const protocol = await knex('lawn_protocols').where({ protocol_key: PROTOCOL_KEYS[track], grass_track: track }).first();
+    if (!protocol) continue;
+    const windows = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id }).select('id', 'window_key');
+    const windowIdByKey = new Map(windows.map((w) => [w.window_key, w.id]));
+    for (const p of products) {
+      const windowId = windowIdByKey.get(p.windowKey);
+      if (!windowId) continue;
+      await knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId, product_name: p.name }).del();
+    }
+  }
+};
