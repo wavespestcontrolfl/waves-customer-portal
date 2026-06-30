@@ -72,10 +72,15 @@ function performedByFromTechnician(technician) {
   return name || 'system';
 }
 
-async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system') {
+// respondedAt: when the response actually happened. Live callers leave it null
+// (now); the one-off backfill passes the estimate's historical send time so an
+// old send is timed from first_contact_at → sent_at, not first_contact_at → today
+// (which would stamp a wildly inflated response_time_minutes onto the KPI).
+async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system', respondedAt = null) {
   if (!lead || lead.response_time_minutes != null || !lead.first_contact_at) return;
   const firstContact = new Date(lead.first_contact_at);
-  const minutes = Math.max(0, Math.round((Date.now() - firstContact.getTime()) / 60000));
+  const respondedMs = respondedAt ? new Date(respondedAt).getTime() : Date.now();
+  const minutes = Math.max(0, Math.round((respondedMs - firstContact.getTime()) / 60000));
   if (!Number.isFinite(minutes)) return;
 
   await database('leads').where({ id: lead.id }).update({
@@ -149,8 +154,27 @@ async function attachLeadToEstimate({
 //   2. else a SINGLE unambiguous open, never-linked, never-converted lead matched
 //      on normalized phone/email. 0 or 2+ matches → none.
 // Every rescued candidate must still pass the contact-match check and be open and
+// Backfill-safety: is this lead old enough to be the estimate's ORIGINATING lead?
+// No cutoff → always true (the live path). With a cutoff, the lead must have been
+// first contacted (else created) on/before it; an unknown timestamp fails closed
+// (excluded), so we never advance a lead we can't prove pre-dates the estimate.
+function leadOriginatedOnOrBefore(lead, cutoff) {
+  if (!cutoff) return true;
+  const t = lead.first_contact_at || lead.created_at;
+  if (!t) return false;
+  return new Date(t).getTime() <= new Date(cutoff).getTime();
+}
+
 // unlinked. Returns { leads, rescued, estimate }.
-async function resolveEstimateEventLeads(database, estimateId) {
+//
+// opts.originatingNotAfter (Date|null): when set, the FUZZY contact fallback only
+// matches a lead first-contacted on/before that instant — never the authoritative
+// FK or public-quote-mirror paths. The live send/view callers leave it null (the
+// event is happening now, so the matched lead is current by definition). The
+// one-off backfill passes the estimate's send time so replaying an OLD estimate
+// can't grab a NEWER same-contact inquiry that post-dates it (mirrors the
+// `enforceOriginating` guard convertLeadFromEvent uses for its backfill).
+async function resolveEstimateEventLeads(database, estimateId, { originatingNotAfter = null } = {}) {
   const linked = await database('leads').where({ estimate_id: estimateId });
   if (linked.length) return { leads: linked, rescued: false };
 
@@ -179,7 +203,8 @@ async function resolveEstimateEventLeads(database, estimateId) {
   //    the extra `!estimate_id` guard ensures we never steal a lead already tied
   //    to a different estimate.
   const matches = (await findUnconvertedLeadsByContact(database, estimate.customer_phone, estimate.customer_email))
-    .filter((lead) => !lead.estimate_id && !CLOSED_LEAD_STATUSES.has(lead.status));
+    .filter((lead) => !lead.estimate_id && !CLOSED_LEAD_STATUSES.has(lead.status))
+    .filter((lead) => leadOriginatedOnOrBefore(lead, originatingNotAfter));
   if (matches.length === 1) return { leads: matches, rescued: true, estimate };
   if (matches.length > 1) {
     logger.warn(`[lead-estimate-link] estimate ${estimateId} send/view: ambiguous contact match (${matches.length} open leads) — not advancing`, {
@@ -230,9 +255,9 @@ async function linkRescuedLead(database, lead, estimate, performedBy) {
   return current && String(current.estimate_id) === String(estimate.id) ? 'already_ours' : 'conflict';
 }
 
-async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db }) {
+async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db, originatingNotAfter = null, respondedAt = null }) {
   if (!estimateId) return;
-  const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId);
+  const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId, { originatingNotAfter });
   for (const lead of leads) {
     // Advance a rescued lead only while it is linked to THIS estimate. A 'conflict'
     // means another estimate claimed it between resolution and now; 'already_ours'
@@ -247,7 +272,7 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
       .where({ id: lead.id })
       .whereIn('status', ['new', 'contacted'])
       .update({ status: 'estimate_sent', updated_at: new Date() });
-    await recordFirstResponseIfNeeded(database, lead, performedBy);
+    await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt);
     await database('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'estimate_sent',
@@ -258,9 +283,9 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
   }
 }
 
-async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system', database = db }) {
+async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system', database = db, originatingNotAfter = null }) {
   if (!estimateId) return;
-  const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId);
+  const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId, { originatingNotAfter });
   for (const lead of leads) {
     // Advance only while linked to THIS estimate (see send path for the states).
     if (rescued && estimate && (await linkRescuedLead(database, lead, estimate, performedBy)) === 'conflict') continue;
@@ -808,6 +833,7 @@ module.exports = {
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
+  resolveEstimateEventLeads,
   convertLeadFromEvent,
   findUnconvertedLeadsByContact,
   linkLeadEstimatesToCustomer,

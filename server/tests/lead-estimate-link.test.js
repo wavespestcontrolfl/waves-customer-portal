@@ -1175,4 +1175,80 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(database._updates).toEqual([]);
     expect(database._activities).toEqual([]);
   });
+
+  // originatingNotAfter — backfill safety: the fuzzy contact match must not grab a
+  // lead created AFTER the estimate went out (a newer same-contact inquiry).
+  test('originatingNotAfter excludes a contact match first contacted AFTER the cutoff (newer inquiry)', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-12', estimate_data: null, customer_phone: '+19415550142' },
+      contactLeads: [{ id: 'L-newer', status: 'new', customer_id: null, first_contact_at: '2026-06-30T12:00:00Z' }],
+    });
+
+    await markLinkedLeadEstimateSent({
+      estimateId: 'e-12', sendMethod: 'sms', database,
+      originatingNotAfter: new Date('2026-01-01T00:00:00Z'), // estimate went out months before this lead existed
+    });
+
+    expect(database._updates).toEqual([]);
+    expect(database._activities).toEqual([]);
+  });
+
+  test('originatingNotAfter keeps a contact match first contacted ON/BEFORE the cutoff', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-13', estimate_data: null, customer_phone: '+19415550142' },
+      contactLeads: [{ id: 'L-older', status: 'new', customer_id: null, first_contact_at: '2025-12-15T10:00:00Z', response_time_minutes: 5 }],
+    });
+
+    await markLinkedLeadEstimateSent({
+      estimateId: 'e-13', sendMethod: 'sms', database,
+      originatingNotAfter: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    expect(database._updates).toEqual([
+      { id: 'L-older', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-13' }) },
+      { id: 'L-older', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+    ]);
+    expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
+  });
+
+  test('originatingNotAfter does NOT gate the public-quote mirror (authoritative lead-id link)', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-14', estimate_data: { lead_id: 'L-mirror' }, customer_id: 'c1' },
+      leadsById: { 'L-mirror': { id: 'L-mirror', status: 'new', customer_id: 'c1', first_contact_at: '2026-06-30T12:00:00Z', response_time_minutes: 5 } },
+    });
+
+    await markLinkedLeadEstimateSent({
+      estimateId: 'e-14', sendMethod: 'sms', database,
+      originatingNotAfter: new Date('2026-01-01T00:00:00Z'), // newer than the lead, but mirror is precise → still advances
+    });
+
+    expect(database._updates).toEqual([
+      { id: 'L-mirror', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-14' }) },
+      { id: 'L-mirror', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+    ]);
+    expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
+  });
+
+  test('respondedAt times first response from the historical send, not "now" (backfill KPI safety)', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-15', estimate_data: null, customer_phone: '+19415550142' },
+      // un-responded lead (response_time_minutes null) so recordFirstResponseIfNeeded fires
+      contactLeads: [{ id: 'L-hist', status: 'new', customer_id: null, first_contact_at: '2026-01-01T00:00:00Z', response_time_minutes: null }],
+    });
+
+    await markLinkedLeadEstimateSent({
+      estimateId: 'e-15', sendMethod: 'backfill', database,
+      originatingNotAfter: new Date('2026-01-01T00:30:00Z'),
+      respondedAt: new Date('2026-01-01T00:30:00Z'), // 30 min after first contact — NOT months (today)
+    });
+
+    // Response time reflects sent-minus-first-contact (30), not Date.now()-first-contact.
+    const responseUpdate = database._updates.find((u) => u.patch && 'response_time_minutes' in u.patch);
+    expect(responseUpdate.patch.response_time_minutes).toBe(30);
+    expect(types(database)).toEqual(['estimate_created', 'first_response', 'estimate_sent']);
+  });
 });
