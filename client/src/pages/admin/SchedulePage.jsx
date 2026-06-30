@@ -7257,8 +7257,10 @@ export function CompletionPanel({
     // An active annual-prepay term covers this unpriced membership visit even
     // when the per-visit prepaid_amount stamp was never written — mirrors the
     // server completion gate (which folds the same term coverage into
-    // prepaidCovered). A priced extra is not covered by the recurring prepay.
-    (!!service.annualPrepayCovered && !hasVisitPrice);
+    // prepaidCovered). A priced extra is not covered by the recurring prepay,
+    // and a payer-billed visit is owed by the payer regardless of the
+    // homeowner's prepay (mirrors the gate's visitIsPayerBilled guard).
+    (!!service.annualPrepayCovered && !hasVisitPrice && !service.payerId);
   const invoiceAlreadyPaid =
     service.checkoutInvoiceStatus === "paid" ||
     service.invoiceStatus === "paid";
