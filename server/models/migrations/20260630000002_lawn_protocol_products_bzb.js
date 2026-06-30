@@ -14,12 +14,22 @@
  *  - Nutrition apps carry rate=null + a targetN gate (lb N/1,000), like St-Aug.
  *  - Curatives: owner-supplied label rates (2026-06-30) — Dylox 6.9 fl oz (≤3/yr,
  *    ≥7 days, post-app irrigation), TopChoice 2 lb (1×/yr, RUP), Bifen I/T 0.25
- *    fl oz (max 1.0), SedgeHammer Plus 0.5 oz (≤4/yr, ≥14 days), CarbonPro-L 2 fl oz
- *    (biostimulant, no over-app gate), T-Storm 1.75 fl oz (residential cap, dollar
- *    spot only). chlorantraniliprole dropped (redundant with Acelepryn Xtra).
- *    Drive XLR8 intentionally NOT seeded — it is contraindicated on bahiagrass
- *    (owner), and protocols.json only references it for Bahia (flagged for a
- *    separate data-accuracy fix).
+ *    fl oz (max 1.0), SedgeHammer Plus 0.5 oz (≤4/yr, ≥14 days), T-Storm 1.75 fl oz
+ *    (residential cap, dollar spot only). chlorantraniliprole dropped (redundant
+ *    with Acelepryn Xtra). Drive XLR8 + Celsius WG intentionally NOT seeded on
+ *    bahiagrass — both are catalog-excluded on bahia (flagged for a separate
+ *    data-accuracy fix; no Bahia-safe substitute yet).
+ *
+ * Full parity: every primary product in protocols.json for each B/Z/B window is
+ * seeded (default_in_plan true, product_id mapped from the catalog) so the
+ * structured forecast / Command Center / inventory context matches the program.
+ * Two exceptions, both intentional and consistent with the publish-validity rule
+ * (a default product must map to a catalog row):
+ *  - CarbonPro-L is in the catalog ("CarbonPro-L w/ MobilEX"), so where the
+ *    protocol lists it as primary (Bermuda Dec, Zoysia May) it is a mapped default.
+ *  - High Mn Combo has NO catalog row yet, so it is seeded conditional
+ *    (default_in_plan false, product_id null) and tagged uncataloguedPendingCatalogRow;
+ *    add a catalog row (a small B3) to promote it to a mapped default.
  *
  * Idempotent: skips a window that already has products.
  */
@@ -41,7 +51,7 @@ const PRODUCTS = {
     P('apr_insect_preventive', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 2, true, {}),
     P('may_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalNBeforeBlackout: true, blockInOrdinanceZones: ['north_port'] }),
     P('may_final_n', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
-    P('may_final_n', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, false, {}),
+    P('may_final_n', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, true, {}),
     P('jun_blackout', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
     P('jun_blackout', 'Bifen I/T', 'insect_curative', 0.25, 'fl_oz', 2, false, { trigger: 'armyworm_threshold_3_per_sqft', maxLabelRate: 1.0 }),
     P('jul_blackout_celsius', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
@@ -56,6 +66,20 @@ const PRODUCTS = {
     P('apr_insect_preventive', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 2, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
     P('apr_insect_preventive', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 2, false, { soilKGatePpmBelow: 80 }),
     P('nov_sds_prevent_2_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    // full-parity pass: every remaining protocols.json primary, mapped to catalog.
+    P('feb_greenup_n1', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('feb_greenup_n1', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { uncataloguedPendingCatalogRow: true }),
+    P('mar_pre_m_split_2_pgr', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000' }),
+    P('jun_blackout', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
+    P('aug_scout_peak', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('aug_scout_peak', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
+    P('sep_blackout_closeout', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
+    P('sep_blackout_closeout', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
+    P('oct_final_n_sds_prevent', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 2, true, {}),
+    P('oct_final_n_sds_prevent', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 2, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('dec_dormancy_touchpoint', 'LESCO Elite 0-0-28', 'potassium', 3.6, 'lb', 1, true, {}),
+    P('dec_dormancy_touchpoint', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('dec_dormancy_touchpoint', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, true, {}),
   ],
   zoysia: [
     P('jan_pre_m_split_1', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
@@ -69,7 +93,7 @@ const PRODUCTS = {
     P('apr_insect_preventive', 'Acelepryn Xtra', 'insect_preventive', 0.46, 'fl_oz', 2, true, {}),
     P('apr_insect_preventive', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 2, true, { conservativeRate: true }),
     P('may_final_n', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000', finalNBeforeBlackout: true, blockInOrdinanceZones: ['north_port'] }),
-    P('may_final_n', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, false, {}),
+    P('may_final_n', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, true, {}),
     P('jun_blackout', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
     P('jul_blackout_celsius', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
     P('sep_blackout_lp_prep', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 1, false, { requiresZeroNP: true, soilKGatePpmBelow: 80 }),
@@ -83,6 +107,17 @@ const PRODUCTS = {
     P('apr_insect_preventive', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 2, false, { soilKGatePpmBelow: 80 }),
     P('may_final_n', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
     P('nov_lp_frac_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    // full-parity pass: every remaining protocols.json primary, mapped to catalog.
+    P('feb_micros_frac', 'LESCO Green Flo 6-0-0 10% Ca', 'nutrition', null, 'lb_n', 1, true, { targetN: 'spoon-feed green-up; verify rate by lot' }),
+    P('feb_micros_frac', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { uncataloguedPendingCatalogRow: true }),
+    P('jun_blackout', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
+    P('jul_blackout_celsius', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
+    P('aug_scout', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('aug_scout', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { uncataloguedPendingCatalogRow: true }),
+    P('sep_blackout_lp_prep', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
+    P('oct_final_n_lp_required', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('dec_touchpoint', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('dec_touchpoint', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, true, {}),
   ],
   bahia: [
     P('jan_pre_m_irrigation_class', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
@@ -108,6 +143,18 @@ const PRODUCTS = {
     P('jan_pre_m_irrigation_class', 'SedgeHammer Plus', 'post_emergent_spot', 0.5, 'oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.5, annualMaxApps: 4, minIntervalDays: 14 }),
     P('may_micros_crabgrass', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, true, {}),
     P('nov_winter_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    // full-parity pass: every remaining protocols.json primary, mapped to catalog.
+    // (Celsius WG and Drive XLR8 stay omitted on bahiagrass — both catalog-excluded.)
+    P('feb_micros_mole_cricket', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { uncataloguedPendingCatalogRow: true }),
+    P('apr_insect_fire_ant', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 2, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('apr_insect_fire_ant', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 2, false, { irrigatedOnly: true, soilKGatePpmBelow: 80 }),
+    P('jun_blackout_mole_cricket', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { requiresZeroNP: true, uncataloguedPendingCatalogRow: true }),
+    P('aug_scout_mole_cricket', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('aug_scout_mole_cricket', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { uncataloguedPendingCatalogRow: true }),
+    P('sep_blackout_crabgrass', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('oct_final_n', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('dec_dormancy_touchpoint', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
+    P('dec_dormancy_touchpoint', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, true, {}),
   ],
 };
 

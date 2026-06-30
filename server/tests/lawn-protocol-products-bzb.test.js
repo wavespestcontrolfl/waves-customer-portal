@@ -15,6 +15,9 @@ const CATALOG = [
   'Armada 50 WDG', 'Headway G', 'Medallion SC', 'Primo Maxx', 'SpeedZone Southern',
   'LESCO 12-0-0 Chelated Iron Plus', 'LESCO K-Flow 0-0-25', 'Velista',
   'LESCO Chelated AM + Micros Turf & Ornamental',
+  'CarbonPro-L w/ MobilEX Biostimulant Liquid Soil Amendment',
+  'LESCO Green Flo 6-0-0 10% Ca Turfgrass Liquid Fertilizer',
+  'LESCO Elite 0-0-28 AM 7.5% Fe 6.5% Mn 9% S Turfgrass Granular Fertilizer',
 ].map((name, i) => ({ id: `cat-${i}`, name }));
 
 function runMigration() {
@@ -90,12 +93,24 @@ describe('B/Z/B structured product seed', () => {
         expect(p.product_id).not.toBeNull();
       }
     });
-    // the curatives that aren't in the catalog must be conditional (default_in_plan=false)
-    ['Dylox 420 SL', 'TopChoice', 'Bifen I/T', 'SedgeHammer Plus', 'CarbonPro-L', 'T-Storm']
+    // the curatives that aren't in the catalog must be conditional (default_in_plan=false).
+    // CarbonPro-L IS catalogued now, so it's a mapped default where the protocol makes
+    // it primary — it's no longer in this conditional-only list.
+    ['Dylox 420 SL', 'TopChoice', 'Bifen I/T', 'SedgeHammer Plus', 'T-Storm']
       .forEach((n) => products.filter((p) => p.product_name === n).forEach((p) => {
         expect(p.product_id).toBeNull();
         expect(p.default_in_plan).toBe(false);
       }));
+    // High Mn Combo has no catalog row yet -> seeded conditional + null (pending a catalog row)
+    products.filter((p) => p.product_name === 'High Mn Combo').forEach((p) => {
+      expect(p.product_id).toBeNull();
+      expect(p.default_in_plan).toBe(false);
+      expect(JSON.parse(p.gates).uncataloguedPendingCatalogRow).toBe(true);
+    });
+    // CarbonPro-L, where seeded, is a mapped default (catalogued)
+    const carbon = products.filter((p) => p.product_name === 'CarbonPro-L');
+    expect(carbon.length).toBeGreaterThan(0);
+    carbon.forEach((p) => { expect(p.product_id).not.toBeNull(); expect(p.default_in_plan).toBe(true); });
   });
 
   test('blackout-window products never push N/P (requiresZeroNP or non-fertilizer)', () => {
