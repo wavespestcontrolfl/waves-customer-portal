@@ -2720,6 +2720,15 @@ function priceCommercialMosquito(property = {}, options = {}) {
   const cfg = COMMERCIAL_MOSQUITO;
   const area = resolveMosquitoTreatableArea(property);
   const treatableSqFt = Math.max(0, Number(area.mosquitoTreatableSqFt) || 0);
+  // The public wizard synthesizes a lot (sqft × 4) when no real parcel/lot data
+  // exists (public-quote.js), so the computed treatable area is fabricated. It
+  // marks that with lotSizeMeasured:false — treat a lot-derived area as missing
+  // then (the building-size analogue of buildingSizeMeasured:false for pest), so
+  // a no-real-area commercial mosquito quote stays MANUAL instead of auto-pricing
+  // off the synthetic lot. An explicit treatable area or a lot-category proxy is
+  // real input and still prices.
+  const areaFromSyntheticLot = options.lotSizeMeasured === false
+    && area.source === 'computed_lot_minus_footprint_hardscape';
   // No usable outdoor area at all — no explicit treatable area, no lot size, and
   // no lot category (resolveMosquitoTreatableArea → 'missing_or_zero_fallback',
   // 0 sqft). A building size alone says nothing about the treatable mosquito
@@ -2727,7 +2736,7 @@ function priceCommercialMosquito(property = {}, options = {}) {
   // manual quote requiring a lot / treatable-area input (mirrors termite/rodent's
   // missing-building fallback). A lot-category proxy yields a positive sqft and
   // still auto-prices.
-  if (!(treatableSqFt > 0) || area.source === 'missing_or_zero_fallback') {
+  if (!(treatableSqFt > 0) || area.source === 'missing_or_zero_fallback' || areaFromSyntheticLot) {
     return commercialPestFamilyManualLine({
       service: 'commercial_mosquito',
       name: 'Commercial Mosquito',

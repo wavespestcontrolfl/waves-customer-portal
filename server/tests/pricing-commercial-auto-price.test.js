@@ -273,6 +273,24 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     expect(r.annual).toBeGreaterThan(0);
   });
 
+  test('mosquito with a SYNTHETIC public lot (no real parcel) falls back to a MANUAL quote', () => {
+    // The public wizard synthesizes lotSqFt = sqft × 4 when no real parcel data
+    // exists, so the computed treatable area is fabricated. lotSizeMeasured:false
+    // marks it — don't auto-price off it.
+    const synthetic = priceCommercialMosquito({ lotSqFt: 32000 }, { lotSizeMeasured: false });
+    expect(synthetic).toMatchObject({
+      service: 'commercial_mosquito',
+      quoteRequired: true,
+      annual: null,
+      manualReviewReasons: ['commercial_mosquito_missing_treatable_area'],
+    });
+    // A REAL lot (lotSizeMeasured true, or admin path where it's undefined) prices.
+    expect(priceCommercialMosquito({ lotSqFt: 32000 }, { lotSizeMeasured: true }).quoteRequired).toBe(false);
+    expect(priceCommercialMosquito({ lotSqFt: 32000 }).quoteRequired).toBe(false);
+    // An explicit treatable area is real input — prices even if the lot is synthetic.
+    expect(priceCommercialMosquito({ mosquitoTreatableSqFt: 30000 }, { lotSizeMeasured: false }).quoteRequired).toBe(false);
+  });
+
   test('mosquito with a building size but NO outdoor-area data falls back to a MANUAL quote', () => {
     // Footprint only, no lot/treatable area, no lot category → treatable resolves
     // to 0 (missing_or_zero_fallback). Don't auto-price the bare account minimum

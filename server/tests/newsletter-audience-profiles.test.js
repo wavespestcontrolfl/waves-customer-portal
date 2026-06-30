@@ -50,6 +50,18 @@ describe('newsletter audience profiles — service-line classification', () => {
     expect(lines.sort()).toEqual(['pest', 'tree_shrub']);
   });
 
+  test('folds commercial mosquito/termite/rodent into their sellable line (not segmented as missing)', () => {
+    // estimate-service-lines now suppresses the residential alias when the
+    // commercial key is present, so these must alias to their sellable line here
+    // or a covered commercial customer would be cross-sold a line they hold.
+    const { lines } = linesFromScheduledServices([
+      { service_type: 'Commercial Mosquito', status: 'confirmed', is_recurring: true },
+      { service_type: 'Commercial Termite Bait Monitoring', status: 'confirmed', is_recurring: true },
+      { service_type: 'Commercial Rodent Bait Stations', status: 'confirmed', is_recurring: true },
+    ]);
+    expect(lines.sort()).toEqual(['mosquito', 'rodent', 'termite']);
+  });
+
   test('missingLines is the sellable universe minus held lines', () => {
     expect(missingLines(['pest']).sort()).toEqual(
       ['lawn', 'mosquito', 'rodent', 'termite', 'tree_shrub'],

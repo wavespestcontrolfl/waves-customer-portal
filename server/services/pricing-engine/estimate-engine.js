@@ -736,7 +736,13 @@ function generateEstimate(input) {
       // area is usually lot-derivable, so commercial mosquito prices instantly;
       // with NO outdoor-area data at all (no lot/treatable area, no lot category)
       // it falls back to a manual quote rather than auto-pricing off 0 sqft. FL-taxed.
-      const result = priceCommercialMosquito(property, { commercialSubtype });
+      const result = priceCommercialMosquito(property, {
+        commercialSubtype,
+        // Public quotes set this false when the lot is the synthetic sqft×4
+        // default (no real parcel) — mosquito can't auto-price a fabricated
+        // treatable area. Undefined (admin / measured) → auto-price as usual.
+        lotSizeMeasured: input.lotSizeMeasured,
+      });
       // Push the pricer's OWN line — priced or its service-specific manual quote.
       // The manual line keeps service=commercial_mosquito / originalRequestedService=
       // mosquito and the missing-area review reason; routing it through

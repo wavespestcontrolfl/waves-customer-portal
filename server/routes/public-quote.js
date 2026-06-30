@@ -441,6 +441,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // win and there's no double ÷-stories). Residential is unchanged.
       ...(commercialDetected && realFootprintSqFt != null ? { footprintSqFt: realFootprintSqFt } : {}),
       buildingSizeMeasured,
+      // True only when a REAL parcel/lot size was supplied; when absent we pass
+      // the synthetic lot (sqft × 4, below) so lot-derived commercial lawn/tree
+      // can still estimate, but commercial mosquito must NOT auto-price off a
+      // fabricated treatable area — it reads this flag and falls back to manual.
+      lotSizeMeasured: Number(lotSqFt) > 0,
       stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
       lotSqFt: lot,
       propertyType: commercialDetected ? 'commercial' : (propertyType || ep.propertyType || 'Single Family'),

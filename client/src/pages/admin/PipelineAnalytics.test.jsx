@@ -310,6 +310,27 @@ describe("aggregateServiceLineRows", () => {
       avgTicket: 0,
     });
   });
+
+  it("keeps auto-priced commercial mosquito/termite/rodent service lines (not bucketed unknown)", () => {
+    const rows = aggregateServiceLineRows([
+      estimate({
+        id: "commercial-pest-family",
+        status: "sent",
+        serviceInterest: "",
+        monthlyTotal: 0,
+        serviceLines: [
+          { key: "commercial_mosquito", amount: 128, amountBasis: "monthly" },
+          { key: "commercial_termite_bait", amount: 71, amountBasis: "monthly" },
+          { key: "commercial_rodent_bait", amount: 65, amountBasis: "monthly" },
+        ],
+      }),
+    ]);
+    const byKey = Object.fromEntries(rows.map((row) => [row.key, row]));
+    expect(byKey.commercial_mosquito).toMatchObject({ label: "Commercial mosquito", sent: 1 });
+    expect(byKey.commercial_termite_bait).toMatchObject({ label: "Commercial termite bait", sent: 1 });
+    expect(byKey.commercial_rodent_bait).toMatchObject({ label: "Commercial rodent bait", sent: 1 });
+    expect(byKey.unknown).toBeUndefined();
+  });
 });
 
 describe("engagement-based idle checks", () => {
