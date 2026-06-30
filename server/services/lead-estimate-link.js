@@ -202,9 +202,17 @@ async function resolveEstimateEventLeads(database, estimateId) {
 //   'conflict'      — the lead is now linked to a DIFFERENT estimate; it isn't
 //                     ours to advance. Skip.
 async function linkRescuedLead(database, lead, estimate, performedBy) {
+  // Stamp only while the lead is still UNLINKED and OPEN. The open-status guard
+  // closes the read→stamp window: if the lead was converted (→ won) or otherwise
+  // closed after resolveEstimateEventLeads read it, the stamp no-ops rather than
+  // linking a closed/converted lead to this standalone estimate and logging
+  // estimate_created/sent for it (which would corrupt attribution). A converted
+  // lead lands in CLOSED_LEAD_STATUSES ('won'), so this also covers the
+  // contact-fallback "now-converted" race.
   const linked = await database('leads')
     .where({ id: lead.id })
     .whereNull('estimate_id')
+    .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
     .update({ estimate_id: estimate.id, updated_at: new Date() });
   if (linked) {
     await database('lead_activities').insert({

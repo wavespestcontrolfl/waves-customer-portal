@@ -979,10 +979,12 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
           return {
             first: async () => leadsById[clause.id] || null,
             whereNull: (col) => ({
-              update: async (patch) => {
-                updates.push({ id: clause.id, whereNull: col, patch });
-                return opts.linkRows == null ? 1 : opts.linkRows;
-              },
+              whereNotIn: (statusCol, vals) => ({
+                update: async (patch) => {
+                  updates.push({ id: clause.id, whereNull: col, whereNotIn: vals, patch });
+                  return opts.linkRows == null ? 1 : opts.linkRows;
+                },
+              }),
             }),
             whereIn: (col, vals) => ({
               update: async (patch) => {
@@ -1012,6 +1014,8 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   }
 
   const types = (db) => db._activities.map((a) => a.row.activity_type);
+  // The open-status guard the rescue stamp applies (CLOSED_LEAD_STATUSES order).
+  const CLOSED = ['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'];
 
   test('FK-linked send is unchanged — flips status, no contact-match link activity', async () => {
     const database = makeEventDb({
@@ -1036,7 +1040,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateSent({ estimateId: 'e-3', sendMethod: 'both', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-unlinked', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-3' }) },
+      { id: 'L-unlinked', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-3' }) },
       { id: 'L-unlinked', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
@@ -1081,7 +1085,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateSent({ estimateId: 'e-6', sendMethod: 'email', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-qw', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-6' }) },
+      { id: 'L-qw', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-6' }) },
       { id: 'L-qw', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
@@ -1097,7 +1101,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateViewed({ estimateId: 'e-7', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-view', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-7' }) },
+      { id: 'L-view', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-7' }) },
       { id: 'L-view', whereIn: ['new', 'contacted', 'estimate_sent'], patch: expect.objectContaining({ status: 'estimate_viewed' }) },
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_viewed']);
@@ -1116,7 +1120,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
     // Only the (lost) stamp attempt ran — no status flip, no estimate_created, no estimate_sent.
     expect(database._updates).toEqual([
-      { id: 'L-race', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-9' }) },
+      { id: 'L-race', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-9' }) },
     ]);
     expect(database._activities).toEqual([]);
   });
@@ -1135,10 +1139,28 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     // Link already won by the concurrent event (no estimate_created re-log), but
     // this send's status flip + estimate_sent activity must NOT be dropped.
     expect(database._updates).toEqual([
-      { id: 'L-same', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-10' }) },
+      { id: 'L-same', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-10' }) },
       { id: 'L-same', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
     ]);
     expect(types(database)).toEqual(['estimate_sent']);
+  });
+
+  test('contact-matched lead CONVERTED between read and stamp (now closed) → does not link or advance', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-11', estimate_data: null, customer_phone: '+19417452085' },
+      contactLeads: [{ id: 'L-conv', status: 'new', customer_id: null }],
+      linkRows: 0, // open-status guard makes the stamp no-op: the lead was just converted (status→won)
+      leadsById: { 'L-conv': { id: 'L-conv', estimate_id: null, status: 'won' } }, // re-read: won, still unlinked
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-11', sendMethod: 'sms', database });
+
+    // Only the guarded (no-op) stamp attempt ran — no link, no status flip, no activity.
+    expect(database._updates).toEqual([
+      { id: 'L-conv', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-11' }) },
+    ]);
+    expect(database._activities).toEqual([]);
   });
 
   test('no FK link and no contact match → advances nothing', async () => {
