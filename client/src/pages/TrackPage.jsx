@@ -3,7 +3,7 @@ import { COLORS, FONTS } from '../theme-brand';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
-import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
+import { GoogleMap, useJsApiLoader, Marker, Polyline } from '@react-google-maps/api';
 import { WavesShell } from '../components/brand';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -222,6 +222,22 @@ function EtaHero({ minutes, techFirst, source }) {
   );
 }
 
+// Light, on-brand map style — softens Google's default greens/greys into
+// the sand → white → Waves-blue customer palette (water = softBorder,
+// land = warm off-white, clean white roads) and drops POI/transit/label
+// clutter so the tech + home markers and the connector read clearly.
+const TRACK_MAP_STYLE = [
+  { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+  { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+  { featureType: 'road', elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
+  { featureType: 'administrative', elementType: 'labels', stylers: [{ visibility: 'simplified' }] },
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#CFE7F5' }] },
+  { featureType: 'landscape', elementType: 'geometry', stylers: [{ color: '#F6F3EC' }] },
+  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#FFFFFF' }] },
+  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#E7E2D7' }] },
+  { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: '#D8D2C4' }] },
+];
+
 function TrackerMap({ tech, property }) {
   const { isLoaded, loadError } = useJsApiLoader({
     id: 'waves-track-map',
@@ -253,20 +269,18 @@ function TrackerMap({ tech, property }) {
 
   return (
     <div style={{
-      borderRadius: 8, overflow: 'hidden', marginTop: 20,
-      boxShadow: '0 2px 12px rgba(15, 23, 42, 0.08)',
+      borderRadius: 12, overflow: 'hidden', marginTop: 20,
+      border: `1px solid ${TRACK_SURFACE.border}`,
+      boxShadow: '0 6px 20px rgba(27, 44, 91, 0.10)',
     }}>
       <GoogleMap
         center={center}
         zoom={12}
-        mapContainerStyle={{ width: '100%', height: 320 }}
+        mapContainerStyle={{ width: '100%', height: 340 }}
         options={{
           disableDefaultUI: true, zoomControl: true,
           gestureHandling: 'cooperative', clickableIcons: false,
-          styles: [
-            { featureType: 'poi', stylers: [{ visibility: 'off' }] },
-            { featureType: 'transit', stylers: [{ visibility: 'off' }] },
-          ],
+          styles: TRACK_MAP_STYLE,
         }}
         onLoad={(map) => {
           const bounds = new window.google.maps.LatLngBounds();
@@ -275,16 +289,29 @@ function TrackerMap({ tech, property }) {
           map.fitBounds(bounds, 80);
         }}
       >
-        <Marker
-          position={tech}
-          icon={{
-            path: window.google.maps.SymbolPath.CIRCLE,
-            scale: 11, fillColor: COLORS.wavesBlue, fillOpacity: 1,
-            strokeColor: COLORS.white, strokeWeight: 4,
+        {/* Dashed "on the way" connector from the tech to the home, in
+            Waves Blue. strokeOpacity:0 + a repeating dot icon renders it
+            as a dashed line. */}
+        <Polyline
+          path={[tech, property]}
+          options={{
+            geodesic: true,
+            strokeOpacity: 0,
+            zIndex: 1,
+            icons: [{
+              icon: {
+                path: 'M 0,-1 0,1',
+                strokeColor: COLORS.wavesBlue,
+                strokeOpacity: 0.9,
+                strokeWeight: 3,
+                scale: 3,
+              },
+              offset: '0',
+              repeat: '14px',
+            }],
           }}
-          title="Your Waves tech"
-          zIndex={2}
         />
+        {/* Customer's home. */}
         <Marker
           position={property}
           icon={{
@@ -293,7 +320,20 @@ function TrackerMap({ tech, property }) {
             strokeColor: COLORS.white, strokeWeight: 2,
           }}
           title="Your property"
-          zIndex={1}
+          zIndex={2}
+        />
+        {/* Tech location — the Waves mascot mark (same icon the admin
+            dispatch map uses for tech vehicles). Anchored center over the
+            lat/lng. */}
+        <Marker
+          position={tech}
+          icon={{
+            url: '/waves-logo.png',
+            scaledSize: new window.google.maps.Size(52, 52),
+            anchor: new window.google.maps.Point(26, 26),
+          }}
+          title="Your Waves tech"
+          zIndex={3}
         />
       </GoogleMap>
     </div>
