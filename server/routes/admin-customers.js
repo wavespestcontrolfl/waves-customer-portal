@@ -2359,7 +2359,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // Re-geocode the customer, then mirror the fresh coords onto the primary
       // property — syncPrimaryAddress cleared them on the address edit, so without
       // this the property row would stay permanently null after every address edit.
-      require('../services/geocoder').ensureCustomerGeocoded(req.params.id)
+      void require('../services/geocoder').ensureCustomerGeocoded(req.params.id)
         .then((coords) => coords && require('../services/customer-properties').syncPrimaryCoordsFromCustomer(req.params.id))
         .catch(() => {});
     }

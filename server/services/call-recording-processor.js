@@ -2189,16 +2189,18 @@ const CallRecordingProcessor = {
         // creates the primary from customers.address_*, which can be a DIFFERENT
         // address (the customer's own home) when the call is about a secondary
         // rental — so only let the primary inherit the rental occupancy when the
-        // call IS the primary's full address. Compare STREET *and* UNIT: streetKey
-        // strips trailing units, so a tenant call for Unit B at the same street as
-        // the stored Unit A must NOT mark the primary Unit A rental — the rental
-        // rides the secondary (recordCallProperty below).
-        const custRow = await db('customers').where({ id: customerId }).select('address_line1', 'address_line2').first();
-        const callUnitKey = customerProperties.unitKey(callUnit) || customerProperties.streetEmbeddedUnitKey(extracted.address_line1);
-        const custUnitKey = customerProperties.unitKey(custRow?.address_line2) || customerProperties.streetEmbeddedUnitKey(custRow?.address_line1);
-        const callIsPrimaryAddress = !!customerProperties.streetKey(custRow?.address_line1)
-          && customerProperties.streetKey(custRow?.address_line1) === customerProperties.streetKey(extracted.address_line1)
-          && callUnitKey === custUnitKey;
+        // call IS the primary's FULL address. Compare the full addressKey (street +
+        // unit + city + ZIP), the same key the dedup uses: street/unit alone would
+        // tag a same-street call in a different city, and streetKey strips units so a
+        // tenant call for Unit B at the stored Unit A's street would wrongly mark the
+        // primary rental. completePrimaryFromCall above already filled any city/ZIP
+        // gaps on the customer, so a genuine same-address call matches.
+        const custRow = await db('customers').where({ id: customerId })
+          .select('address_line1', 'address_line2', 'city', 'zip').first();
+        const callAddrKey = customerProperties.addressKey({
+          address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
+        });
+        const callIsPrimaryAddress = !!callAddrKey && callAddrKey === customerProperties.addressKey(custRow || {});
         // propertyId is null only when the customer is addressless AND has no
         // primary yet — i.e. this call carries their FIRST service address (the
         // !customerId upsert above is skipped when the call is pre-linked, so
