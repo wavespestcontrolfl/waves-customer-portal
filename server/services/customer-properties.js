@@ -316,6 +316,11 @@ async function syncPrimaryAddress(customerOrId, conn = db) {
   next.address_key = addressKey({
     address_line1: next.address_line1, address_line2: next.address_line2, city: next.city, zip: next.zip,
   });
+  // The address changed, so the old coordinates point at the wrong place — clear
+  // them (better NULL than wrong) so a downstream geocoder re-derives them, rather
+  // than leaving the primary routed to the previous address.
+  next.latitude = null;
+  next.longitude = null;
   next.updated_at = new Date();
   // Errors PROPAGATE (no swallow) so a transactional caller can roll back the
   // mirror edit + surface a 409 on a unique address-index collision rather than

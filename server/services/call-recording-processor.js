@@ -2112,15 +2112,23 @@ const CallRecordingProcessor = {
         // adds one). One-sided: the caller omitting a unit they didn't mention is
         // NOT a change; and a unit already embedded in the stored street (legacy
         // "100 Main St Apt 4" with empty line2) is NOT a new unit.
-        const callUnitKey = normStreet(callUnit);
-        // The unit (if any) ALREADY embedded in the stored street, e.g. legacy
-        // "100 Main St Apt 4" → "4". Compare the call's unit to THIS exact unit —
-        // not a raw substring of the street, which falsely matches a bare unit "4"
-        // inside the house number "14 Main St" and suppresses real second-property
-        // detection.
-        const storedEmbeddedUnitMatch = String(existingCust?.address_line1 || '')
-          .match(/\b(?:apt|apartment|unit|ste|suite|#)\.?\s*([a-z0-9-]+)\s*$/i);
-        const storedEmbeddedUnit = storedEmbeddedUnitMatch ? normStreet(storedEmbeddedUnitMatch[1]) : '';
+        // Extract the trailing unit token from a one-line street, e.g. legacy
+        // "100 Main St Apt 4" → "4". Anchored to a designator + end-of-string so a
+        // bare number is NOT pulled out of a house number ("14 Main St" → "").
+        const trailingUnitKey = (s) => {
+          const m = String(s || '').match(/\b(?:apt|apartment|unit|ste|suite|#)\.?\s*([a-z0-9-]+)\s*$/i);
+          return m ? normStreet(m[1]) : '';
+        };
+        // The call's unit: its own line2 if present, else a unit embedded in its
+        // one-line street ("100 Main St Apt 5" with empty line2) — otherwise a
+        // different embedded unit at the same street is missed (streetKey strips the
+        // trailing unit, so the street compare alone won't catch it).
+        const callUnitKey = normStreet(callUnit) || trailingUnitKey(extracted.address_line1);
+        // The unit (if any) ALREADY on file: its line2, or one embedded in the
+        // stored street. Compare the call's unit to THESE exact units — not a raw
+        // substring of the street, which falsely matches a bare unit "4" inside the
+        // house number "14 Main St" and suppresses real second-property detection.
+        const storedEmbeddedUnit = trailingUnitKey(existingCust?.address_line1);
         const callAddsDifferentUnit = !!callUnitKey
           && callUnitKey !== normStreet(existingCust?.address_line2)
           && callUnitKey !== storedEmbeddedUnit;
