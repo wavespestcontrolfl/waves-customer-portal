@@ -72,4 +72,41 @@ describe('shouldAutoInvoiceCompletion', () => {
     expect(shouldAutoInvoiceCompletion({ ...base, createInvoiceOnComplete: true, invoiceAmount: 0 })).toBe(false);
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: true, invoiceAmount: 0 })).toBe(false);
   });
+
+  describe('annual-prepay coverage suppression', () => {
+    // The double-bill shape: a WaveGuard customer who prepaid the year still
+    // gets an unpriced monthly visit auto-billed at monthly_rate on completion,
+    // because the per-visit prepaid_amount stamp was never written (term carried
+    // no coverage config). An active PAID term must suppress it.
+    test('suppresses the unpriced WaveGuard membership auto-bill', () => {
+      expect(shouldAutoInvoiceCompletion({
+        ...base, waveguardTier: 'Silver', invoiceAmount: 139.8, hasVisitPrice: false,
+        annualPrepayCoversRecurring: true,
+      })).toBe(false);
+    });
+
+    test('suppresses an unpriced flagged (create_invoice_on_complete) membership visit too', () => {
+      expect(shouldAutoInvoiceCompletion({
+        ...base, createInvoiceOnComplete: true, invoiceAmount: 139.8, hasVisitPrice: false,
+        annualPrepayCoversRecurring: true,
+      })).toBe(false);
+    });
+
+    test('does NOT over-suppress: a priced extra still bills during a prepay term', () => {
+      // A genuinely-priced add-on is not covered by the recurring prepay.
+      expect(shouldAutoInvoiceCompletion({
+        ...pricedSelfPay, waveguardTier: 'Silver', annualPrepayCoversRecurring: true,
+      })).toBe(true);
+      expect(shouldAutoInvoiceCompletion({
+        ...pricedSelfPay, autoInvoicePricedVisits: true, annualPrepayCoversRecurring: true,
+      })).toBe(true);
+    });
+
+    test('no coverage flag → WaveGuard membership visit bills as before (regression)', () => {
+      expect(shouldAutoInvoiceCompletion({
+        ...base, waveguardTier: 'Silver', invoiceAmount: 139.8, hasVisitPrice: false,
+        annualPrepayCoversRecurring: false,
+      })).toBe(true);
+    });
+  });
 });
