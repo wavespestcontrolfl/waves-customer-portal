@@ -128,18 +128,127 @@ async function attachLeadToEstimate({
   return { ...lead, ...updates };
 }
 
-async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system' }) {
-  if (!estimateId) return;
-  const leads = await db('leads').where({ estimate_id: estimateId });
-  for (const lead of leads) {
-    if (!CLOSED_LEAD_STATUSES.has(lead.status) && ['new', 'contacted'].includes(lead.status)) {
-      await db('leads').where({ id: lead.id }).update({
-        status: 'estimate_sent',
-        updated_at: new Date(),
-      });
+// Resolve which lead(s) an estimate "sent"/"viewed" event should advance.
+//
+// Primary: FK-linked leads (`leads.estimate_id`) — the authoritative tie, of
+// which there may be several (re-sends, manually linked rows). Behavior for this
+// case is unchanged.
+//
+// When NO FK-linked lead exists, rescue the originating lead so a STANDALONE
+// estimate — one built outside the lead's "Create Estimate" button (e.g. from the
+// Estimates tab, or after Convert to Customer), which never got `leads.estimate_id`
+// — still advances its lead on send/view. This mirrors the fallbacks the
+// acceptance path (`markLinkedLeadEstimateAccepted`) already uses, so the pipeline
+// stays consistent: an estimate that can mark a lead "won" on acceptance can also
+// mark it "estimate_sent"/"viewed".
+//
+// Rescue is deliberately conservative — it never guesses which deal an event
+// belongs to:
+//   1. the public-quote mirror (`estimate_data.lead_id`) — that lead carries a
+//      customer_id, so the contact fallback's `customer_id IS NULL` guard misses it.
+//   2. else a SINGLE unambiguous open, never-linked, never-converted lead matched
+//      on normalized phone/email. 0 or 2+ matches → none.
+// Every rescued candidate must still pass the contact-match check and be open and
+// unlinked. Returns { leads, rescued, estimate }.
+async function resolveEstimateEventLeads(database, estimateId) {
+  const linked = await database('leads').where({ estimate_id: estimateId });
+  if (linked.length) return { leads: linked, rescued: false };
+
+  const estimate = await database('estimates').where({ id: estimateId }).first();
+  if (!estimate) return { leads: [], rescued: false };
+
+  // 1. Public-quote mirror — match the named lead by id, then re-validate it is
+  //    open, not already linked to another estimate, and a genuine contact match.
+  const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id || null;
+  if (dataLeadId) {
+    const lead = await database('leads').where({ id: dataLeadId }).first();
+    if (
+      lead
+      && !lead.estimate_id
+      && !CLOSED_LEAD_STATUSES.has(lead.status)
+      && leadMatchesEstimateContact(lead, estimate)
+    ) {
+      return { leads: [lead], rescued: true, estimate };
     }
-    await recordFirstResponseIfNeeded(db, lead, performedBy);
-    await db('lead_activities').insert({
+    return { leads: [], rescued: false };
+  }
+
+  // 2. Contact fallback — a single open, never-linked, never-converted lead whose
+  //    normalized phone/email matches the estimate's contact. `findUnconverted-
+  //    LeadsByContact` already restricts to `customer_id IS NULL` + not-closed;
+  //    the extra `!estimate_id` guard ensures we never steal a lead already tied
+  //    to a different estimate.
+  const matches = (await findUnconvertedLeadsByContact(database, estimate.customer_phone, estimate.customer_email))
+    .filter((lead) => !lead.estimate_id && !CLOSED_LEAD_STATUSES.has(lead.status));
+  if (matches.length === 1) return { leads: matches, rescued: true, estimate };
+  if (matches.length > 1) {
+    logger.warn(`[lead-estimate-link] estimate ${estimateId} send/view: ambiguous contact match (${matches.length} open leads) — not advancing`, {
+      estimateId,
+      leadIds: matches.map((lead) => lead.id),
+    });
+  }
+  return { leads: [], rescued: false };
+}
+
+// Stamp `leads.estimate_id` onto a lead rescued by contact/mirror match and log
+// the link. Scoped to `estimate_id IS NULL` so a concurrent linker can't be
+// clobbered. Returns one of:
+//   'won'           — this call stamped the link (and logged the estimate_created
+//                     activity); proceed.
+//   'already_ours'  — the stamp touched 0 rows because a concurrent event (e.g.
+//                     a simultaneous send + first view of the SAME standalone
+//                     estimate) already linked the lead to THIS estimate. Proceed
+//                     and record our side effect, but do NOT re-log the link.
+//   'conflict'      — the lead is now linked to a DIFFERENT estimate; it isn't
+//                     ours to advance. Skip.
+async function linkRescuedLead(database, lead, estimate, performedBy) {
+  // Stamp only while the lead is still UNLINKED and OPEN. The open-status guard
+  // closes the read→stamp window: if the lead was converted (→ won) or otherwise
+  // closed after resolveEstimateEventLeads read it, the stamp no-ops rather than
+  // linking a closed/converted lead to this standalone estimate and logging
+  // estimate_created/sent for it (which would corrupt attribution). A converted
+  // lead lands in CLOSED_LEAD_STATUSES ('won'), so this also covers the
+  // contact-fallback "now-converted" race.
+  const linked = await database('leads')
+    .where({ id: lead.id })
+    .whereNull('estimate_id')
+    .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
+    .update({ estimate_id: estimate.id, updated_at: new Date() });
+  if (linked) {
+    await database('lead_activities').insert({
+      lead_id: lead.id,
+      activity_type: 'estimate_created',
+      description: `Estimate linked to lead by contact match (${estimate.id})`,
+      performed_by: performedBy,
+      metadata: JSON.stringify({ estimateId: estimate.id, linkedBy: 'contact_match' }),
+    });
+    return 'won';
+  }
+  // 0 rows — a concurrent stamp won the race. Re-read to see whether it landed on
+  // THIS estimate (still ours → proceed) or a different one (not ours → skip).
+  const current = await database('leads').where({ id: lead.id }).first('estimate_id');
+  return current && String(current.estimate_id) === String(estimate.id) ? 'already_ours' : 'conflict';
+}
+
+async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db }) {
+  if (!estimateId) return;
+  const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId);
+  for (const lead of leads) {
+    // Advance a rescued lead only while it is linked to THIS estimate. A 'conflict'
+    // means another estimate claimed it between resolution and now; 'already_ours'
+    // means a concurrent same-estimate event linked it first — still ours, so we
+    // record this event's side effect.
+    if (rescued && estimate && (await linkRescuedLead(database, lead, estimate, performedBy)) === 'conflict') continue;
+    // Gate the transition in SQL on the CURRENT status, not the stale loaded row:
+    // a concurrent first-view may already have advanced the lead to estimate_viewed,
+    // and this predicate prevents a stale 'new' read from downgrading it back to
+    // estimate_sent. The status whitelist also subsumes the closed-status guard.
+    await database('leads')
+      .where({ id: lead.id })
+      .whereIn('status', ['new', 'contacted'])
+      .update({ status: 'estimate_sent', updated_at: new Date() });
+    await recordFirstResponseIfNeeded(database, lead, performedBy);
+    await database('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'estimate_sent',
       description: `Estimate sent via ${sendMethod || 'both'} (${estimateId})`,
@@ -149,17 +258,19 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
   }
 }
 
-async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system' }) {
+async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system', database = db }) {
   if (!estimateId) return;
-  const leads = await db('leads').where({ estimate_id: estimateId });
+  const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId);
   for (const lead of leads) {
-    if (!CLOSED_LEAD_STATUSES.has(lead.status) && ['new', 'contacted', 'estimate_sent'].includes(lead.status)) {
-      await db('leads').where({ id: lead.id }).update({
-        status: 'estimate_viewed',
-        updated_at: new Date(),
-      });
-    }
-    await db('lead_activities').insert({
+    // Advance only while linked to THIS estimate (see send path for the states).
+    if (rescued && estimate && (await linkRescuedLead(database, lead, estimate, performedBy)) === 'conflict') continue;
+    // Conditional in SQL on the current status (estimate_viewed is the terminal of
+    // these three, so this is monotonic and races can't move the lead backward).
+    await database('leads')
+      .where({ id: lead.id })
+      .whereIn('status', ['new', 'contacted', 'estimate_sent'])
+      .update({ status: 'estimate_viewed', updated_at: new Date() });
+    await database('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'estimate_viewed',
       description: `Estimate viewed by customer (${estimateId})`,
