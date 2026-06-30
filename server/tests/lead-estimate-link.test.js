@@ -1093,12 +1093,13 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(types(database)).toEqual(['estimate_created', 'estimate_viewed']);
   });
 
-  test('rescue stamp LOSES a concurrent race (0 rows linked) → does not advance or log for this estimate', async () => {
+  test('rescue stamp loses to a DIFFERENT estimate (0 rows) → does not advance or log for this estimate', async () => {
     const database = makeEventDb({
       linked: [],
       estimate: { id: 'e-9', estimate_data: null, customer_phone: '+19417452085' },
       contactLeads: [{ id: 'L-race', status: 'new', customer_id: null }],
       linkRows: 0, // another estimate claimed the lead between resolution and the stamp
+      leadsById: { 'L-race': { id: 'L-race', estimate_id: 'e-OTHER' } }, // re-read: now a different estimate
     });
 
     await markLinkedLeadEstimateSent({ estimateId: 'e-9', sendMethod: 'sms', database });
@@ -1108,6 +1109,26 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
       { id: 'L-race', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-9' }) },
     ]);
     expect(database._activities).toEqual([]);
+  });
+
+  test('rescue stamp loses to a concurrent SAME-estimate event (0 rows) → still records this event’s side effect', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-10', estimate_data: null, customer_phone: '+19417452085' },
+      contactLeads: [{ id: 'L-same', status: 'new', customer_id: null }],
+      linkRows: 0, // a simultaneous send + first view linked it first…
+      leadsById: { 'L-same': { id: 'L-same', estimate_id: 'e-10' } }, // …to THIS same estimate
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-10', sendMethod: 'sms', database });
+
+    // Link already won by the concurrent event (no estimate_created re-log), but
+    // this send's status flip + estimate_sent activity must NOT be dropped.
+    expect(database._updates).toEqual([
+      { id: 'L-same', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-10' }) },
+      { id: 'L-same', patch: expect.objectContaining({ status: 'estimate_sent' }) },
+    ]);
+    expect(types(database)).toEqual(['estimate_sent']);
   });
 
   test('no FK link and no contact match → advances nothing', async () => {

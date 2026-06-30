@@ -192,33 +192,45 @@ async function resolveEstimateEventLeads(database, estimateId) {
 
 // Stamp `leads.estimate_id` onto a lead rescued by contact/mirror match and log
 // the link. Scoped to `estimate_id IS NULL` so a concurrent linker can't be
-// clobbered. Returns whether THIS call won the stamp: if another process linked
-// the lead (to a different estimate) between resolution and here, the update
-// touches 0 rows and we return false so the caller skips advancing/logging the
-// lead for our estimate. The activity is written only on a win.
+// clobbered. Returns one of:
+//   'won'           — this call stamped the link (and logged the estimate_created
+//                     activity); proceed.
+//   'already_ours'  — the stamp touched 0 rows because a concurrent event (e.g.
+//                     a simultaneous send + first view of the SAME standalone
+//                     estimate) already linked the lead to THIS estimate. Proceed
+//                     and record our side effect, but do NOT re-log the link.
+//   'conflict'      — the lead is now linked to a DIFFERENT estimate; it isn't
+//                     ours to advance. Skip.
 async function linkRescuedLead(database, lead, estimate, performedBy) {
   const linked = await database('leads')
     .where({ id: lead.id })
     .whereNull('estimate_id')
     .update({ estimate_id: estimate.id, updated_at: new Date() });
-  if (!linked) return false;
-  await database('lead_activities').insert({
-    lead_id: lead.id,
-    activity_type: 'estimate_created',
-    description: `Estimate linked to lead by contact match (${estimate.id})`,
-    performed_by: performedBy,
-    metadata: JSON.stringify({ estimateId: estimate.id, linkedBy: 'contact_match' }),
-  });
-  return true;
+  if (linked) {
+    await database('lead_activities').insert({
+      lead_id: lead.id,
+      activity_type: 'estimate_created',
+      description: `Estimate linked to lead by contact match (${estimate.id})`,
+      performed_by: performedBy,
+      metadata: JSON.stringify({ estimateId: estimate.id, linkedBy: 'contact_match' }),
+    });
+    return 'won';
+  }
+  // 0 rows — a concurrent stamp won the race. Re-read to see whether it landed on
+  // THIS estimate (still ours → proceed) or a different one (not ours → skip).
+  const current = await database('leads').where({ id: lead.id }).first('estimate_id');
+  return current && String(current.estimate_id) === String(estimate.id) ? 'already_ours' : 'conflict';
 }
 
 async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db }) {
   if (!estimateId) return;
   const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId);
   for (const lead of leads) {
-    // Only advance a rescued lead if WE won the link stamp — otherwise another
-    // estimate claimed it between resolution and now, and it isn't ours to move.
-    if (rescued && estimate && !(await linkRescuedLead(database, lead, estimate, performedBy))) continue;
+    // Advance a rescued lead only while it is linked to THIS estimate. A 'conflict'
+    // means another estimate claimed it between resolution and now; 'already_ours'
+    // means a concurrent same-estimate event linked it first — still ours, so we
+    // record this event's side effect.
+    if (rescued && estimate && (await linkRescuedLead(database, lead, estimate, performedBy)) === 'conflict') continue;
     if (!CLOSED_LEAD_STATUSES.has(lead.status) && ['new', 'contacted'].includes(lead.status)) {
       await database('leads').where({ id: lead.id }).update({
         status: 'estimate_sent',
@@ -240,8 +252,8 @@ async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system'
   if (!estimateId) return;
   const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId);
   for (const lead of leads) {
-    // Only advance a rescued lead if WE won the link stamp (see send path).
-    if (rescued && estimate && !(await linkRescuedLead(database, lead, estimate, performedBy))) continue;
+    // Advance only while linked to THIS estimate (see send path for the states).
+    if (rescued && estimate && (await linkRescuedLead(database, lead, estimate, performedBy)) === 'conflict') continue;
     if (!CLOSED_LEAD_STATUSES.has(lead.status) && ['new', 'contacted', 'estimate_sent'].includes(lead.status)) {
       await database('leads').where({ id: lead.id }).update({
         status: 'estimate_viewed',
