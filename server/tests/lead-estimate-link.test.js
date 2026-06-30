@@ -143,11 +143,13 @@ describe('lead-estimate link service', () => {
         if (table === 'leads' && clause.estimate_id === 'estimate-1') {
           return Promise.resolve([lead]);
         }
+        const update = async (patch) => {
+          updates.push({ table, clause, patch });
+          return 1;
+        };
         return {
-          update: async (patch) => {
-            updates.push({ table, clause, patch });
-            return 1;
-          },
+          whereIn: () => ({ update }),
+          update,
         };
       },
       insert: async (row) => {
@@ -982,6 +984,12 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
                 return opts.linkRows == null ? 1 : opts.linkRows;
               },
             }),
+            whereIn: (col, vals) => ({
+              update: async (patch) => {
+                updates.push({ id: clause.id, whereIn: vals, patch });
+                return 1;
+              },
+            }),
             update: async (patch) => {
               updates.push({ id: clause.id, patch });
               return 1;
@@ -1012,7 +1020,9 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
     await markLinkedLeadEstimateSent({ estimateId: 'e-1', sendMethod: 'sms', database });
 
-    expect(database._updates).toEqual([{ id: 'L1', patch: expect.objectContaining({ status: 'estimate_sent' }) }]);
+    expect(database._updates).toEqual([
+      { id: 'L1', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+    ]);
     expect(types(database)).toEqual(['estimate_sent']);
   });
 
@@ -1027,7 +1037,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
     expect(database._updates).toEqual([
       { id: 'L-unlinked', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-3' }) },
-      { id: 'L-unlinked', patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      { id: 'L-unlinked', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
   });
@@ -1072,7 +1082,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
     expect(database._updates).toEqual([
       { id: 'L-qw', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-6' }) },
-      { id: 'L-qw', patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      { id: 'L-qw', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
   });
@@ -1088,7 +1098,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
     expect(database._updates).toEqual([
       { id: 'L-view', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-7' }) },
-      { id: 'L-view', patch: expect.objectContaining({ status: 'estimate_viewed' }) },
+      { id: 'L-view', whereIn: ['new', 'contacted', 'estimate_sent'], patch: expect.objectContaining({ status: 'estimate_viewed' }) },
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_viewed']);
   });
@@ -1126,7 +1136,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     // this send's status flip + estimate_sent activity must NOT be dropped.
     expect(database._updates).toEqual([
       { id: 'L-same', whereNull: 'estimate_id', patch: expect.objectContaining({ estimate_id: 'e-10' }) },
-      { id: 'L-same', patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      { id: 'L-same', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
     ]);
     expect(types(database)).toEqual(['estimate_sent']);
   });

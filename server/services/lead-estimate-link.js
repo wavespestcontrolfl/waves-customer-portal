@@ -231,12 +231,14 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
     // means a concurrent same-estimate event linked it first — still ours, so we
     // record this event's side effect.
     if (rescued && estimate && (await linkRescuedLead(database, lead, estimate, performedBy)) === 'conflict') continue;
-    if (!CLOSED_LEAD_STATUSES.has(lead.status) && ['new', 'contacted'].includes(lead.status)) {
-      await database('leads').where({ id: lead.id }).update({
-        status: 'estimate_sent',
-        updated_at: new Date(),
-      });
-    }
+    // Gate the transition in SQL on the CURRENT status, not the stale loaded row:
+    // a concurrent first-view may already have advanced the lead to estimate_viewed,
+    // and this predicate prevents a stale 'new' read from downgrading it back to
+    // estimate_sent. The status whitelist also subsumes the closed-status guard.
+    await database('leads')
+      .where({ id: lead.id })
+      .whereIn('status', ['new', 'contacted'])
+      .update({ status: 'estimate_sent', updated_at: new Date() });
     await recordFirstResponseIfNeeded(database, lead, performedBy);
     await database('lead_activities').insert({
       lead_id: lead.id,
@@ -254,12 +256,12 @@ async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system'
   for (const lead of leads) {
     // Advance only while linked to THIS estimate (see send path for the states).
     if (rescued && estimate && (await linkRescuedLead(database, lead, estimate, performedBy)) === 'conflict') continue;
-    if (!CLOSED_LEAD_STATUSES.has(lead.status) && ['new', 'contacted', 'estimate_sent'].includes(lead.status)) {
-      await database('leads').where({ id: lead.id }).update({
-        status: 'estimate_viewed',
-        updated_at: new Date(),
-      });
-    }
+    // Conditional in SQL on the current status (estimate_viewed is the terminal of
+    // these three, so this is monotonic and races can't move the lead backward).
+    await database('leads')
+      .where({ id: lead.id })
+      .whereIn('status', ['new', 'contacted', 'estimate_sent'])
+      .update({ status: 'estimate_viewed', updated_at: new Date() });
     await database('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'estimate_viewed',
