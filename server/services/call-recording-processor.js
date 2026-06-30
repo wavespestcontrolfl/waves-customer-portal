@@ -205,6 +205,73 @@ function shouldCreateCallLeadForCustomer(customer, { createdCustomerFromCall = f
   return LEAD_PIPELINE_STAGES.has(String(customer.pipeline_stage || '').toLowerCase());
 }
 
+// Coarse account classification of a phone-matched caller, used only to give the
+// extraction model context ("this caller is already a Waves customer"). Mirrors
+// shouldCreateCallLeadForCustomer's stage split: a customer still in a pipeline
+// stage is an open lead; anything else (won / active_customer / churned …) is an
+// established customer whose routine coordination/complaint/billing calls are not
+// new leads.
+function classifyCallerAccount(pipelineStage) {
+  const stage = String(pipelineStage || '').trim().toLowerCase();
+  if (!stage) return 'unknown';
+  return LEAD_PIPELINE_STAGES.has(stage) ? 'open_lead' : 'established_customer';
+}
+
+// Short, PII-light caller hint for the extraction prompt. Returns null when the
+// inbound number doesn't map to a single known customer.
+function summarizeKnownCaller(customer) {
+  if (!customer) return null;
+  const name = [customer.first_name, customer.last_name]
+    .map((s) => String(s || '').trim())
+    .filter(Boolean)
+    .join(' ');
+  return {
+    name: name || null,
+    accountType: classifyCallerAccount(customer.pipeline_stage),
+  };
+}
+
+// Call types that are NOT new sales leads. spam/voicemail are handled by their
+// own booleans + early return; these are the existing-customer/non-sales calls
+// the classifier now labels so they stop spawning leads. Kept narrow on purpose:
+// a genuine new prospect is `new_inquiry`, so vetoing on these never drops a real
+// lead, it only stops re-triaging people who already bought or aren't buying.
+const NON_LEAD_CALL_TYPES = new Set([
+  'existing_customer_scheduling',
+  'existing_customer_service',
+  'complaint',
+  'billing',
+  'wrong_number',
+]);
+
+// Content-based veto: the call is not a new lead when the model explicitly says
+// so (is_lead === false) or labels it a non-lead call_type. Both signals are
+// optional — when the model omits them (or extraction fell back), this returns
+// false so behavior matches the legacy pipeline-stage-only gate.
+function isNonLeadCallContent(extracted = {}) {
+  if (extracted && extracted.is_lead === false) return true;
+  const callType = String(extracted?.call_type || '').trim().toLowerCase();
+  return NON_LEAD_CALL_TYPES.has(callType);
+}
+
+// A lead is "qualified" only once we've actually captured the contact info the
+// office needs to work it: first + last name, a service street address, and an
+// email. Phone is implicit (caller ID). Evaluate against the MERGED record
+// (this call's extraction OR what a prior call already stored), so a follow-up
+// call that restates nothing doesn't un-qualify an already-complete lead.
+const QUALIFYING_CONTACT_FIELDS = ['first_name', 'last_name', 'service_address', 'email'];
+const QUALIFYING_CONTACT_LABELS = {
+  first_name: 'first name',
+  last_name: 'last name',
+  service_address: 'service address',
+  email: 'email',
+};
+function leadContactCompleteness(fields = {}) {
+  const present = (v) => !!String(v == null ? '' : v).trim();
+  const missing = QUALIFYING_CONTACT_FIELDS.filter((key) => !present(fields[key]));
+  return { complete: missing.length === 0, missing };
+}
+
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
@@ -1168,13 +1235,24 @@ async function extractCallData(transcription, callerPhone, opts = {}) {
   }
   const callDateET = etDateString(opts.callStartedAt || new Date());
 
-  const prompt = `Analyze this phone call transcript for Waves Pest Control (pest control + lawn care, SW Florida).
+  // Known-caller context: when the inbound number maps to a single existing
+  // customer we tell the model who's calling, so it can tell a NEW prospect
+  // (a lead) apart from an existing customer coordinating a visit, reporting a
+  // problem, or asking about billing (not leads).
+  const knownCaller = opts.knownCaller || null;
+  const knownCallerBlock = knownCaller
+    ? `\nKNOWN CALLER: This phone number matches an EXISTING Waves ${
+        knownCaller.accountType === 'established_customer' ? 'customer' : 'contact'
+      }${knownCaller.name ? ` (${knownCaller.name})` : ''}. They are already in our system — treat coordination of an existing/scheduled visit, "are you coming today?", arrival check-ins, complaints about work already done, reschedules, and billing/invoice questions as NOT a new lead (is_lead=false). Only treat a brand-new service request they haven't bought yet as a lead.\n`
+    : '';
+
+  const prompt = `Analyze this phone call transcript for Waves Pest Control (pest control + lawn care, SW Florida). Waves is an established company with many existing customers, so not every call is a new sales lead — some are existing customers coordinating service, complaints, or billing.
 
 Waves only schedules pest control, lawn care, mosquito, termite, rodent, bed bug, WDO, and tree/shrub services. Calls about unrelated work such as website SEO, organic traffic, marketing, advertising, or a construction company are not Waves appointments.
 
 Caller phone: ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}
-
+${knownCallerBlock}
 Transcript:
 ${transcription}
 
@@ -1193,12 +1271,33 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
   "is_voicemail": true/false,
   "is_spam": true/false,
+  "is_lead": true/false,
+  "call_type": "one of: new_inquiry, existing_customer_scheduling, existing_customer_service, complaint, billing, spam, wrong_number, voicemail, other",
   "sentiment": "positive/neutral/negative/frustrated",
   "pain_points": "brief summary of customer concerns or pest issues",
   "call_summary": "2-3 sentence summary of the call",
   "lead_quality": "hot/warm/cold/spam",
   "matched_service": "best match from: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, or null"
 }
+
+IMPORTANT — is this a new lead? Set call_type and is_lead together:
+- "new_inquiry" (is_lead=true): a NEW prospective customer asking about service, pricing, availability, or booking for the first time. This is the ONLY call_type that is a lead.
+- "existing_customer_scheduling" (is_lead=false): an existing customer confirming, coordinating, rescheduling, or asking about an already-scheduled or in-progress visit — e.g. "are you coming today?", "what time will the tech arrive?", a tech-arrival check-in.
+- "existing_customer_service" (is_lead=false): an existing customer with a question or problem about service already performed, or a general account question that is not a new purchase.
+- "complaint" (is_lead=false): a complaint about service quality, a missed or late appointment, or a technician issue.
+- "billing" (is_lead=false): an invoice, payment, receipt, refund, or account-balance question.
+- "spam" (is_lead=false): a solicitor, vendor pitch, robocall, or marketing call (also set is_spam=true).
+- "wrong_number" (is_lead=false): a misdial or a call clearly not meant for Waves.
+- "voicemail" (is_lead=false): no live two-way conversation took place (also set is_voicemail=true).
+- "other" (is_lead=false): none of the above.
+An EXISTING customer requesting a NEW, different service they have not purchased is still a lead (new_inquiry, is_lead=true).
+
+IMPORTANT — lead_quality (only meaningful when is_lead=true; use "cold" otherwise):
+- "hot": ready to buy now — asking to book, requesting the soonest opening, an urgent active infestation, or explicitly says "sign me up".
+- "warm": genuinely interested but not urgent — wants a quote, is deciding, will likely move forward soon.
+- "cold": just shopping or researching — comparing providers, gathering info, "I'll call you back", "getting a few quotes", price-checking with no commitment.
+- "spam": not a real prospect (solicitor / robocall / wrong number).
+Do not inflate quality: a caller who is still comparing companies or said they'd call back is "cold", not "warm".
 
 IMPORTANT — appointment_confirmed rules:
 - Only set appointment_confirmed to true if BOTH a specific DATE and a specific TIME were explicitly agreed to by the caller.
@@ -1630,9 +1729,22 @@ const CallRecordingProcessor = {
     }
 
     // Step 2: AI extraction
+    // Resolve a lightweight known-caller hint FIRST (read-only, phone-only) so the
+    // classifier knows whether it's talking to an existing customer. This does NOT
+    // change the canonical customer resolution in Step 3 below — it only gives the
+    // model the context to tell a new-prospect lead apart from an existing customer
+    // coordinating a visit, complaining, or asking about billing.
+    let knownCaller = null;
+    try {
+      const knownCustomer = await findCustomerForCallContact(contactPhone, {});
+      knownCaller = summarizeKnownCaller(knownCustomer);
+    } catch (e) {
+      logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
+    }
+
     let extracted;
     try {
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       await db('call_log').where({ id: call.id }).update({
@@ -2269,9 +2381,19 @@ const CallRecordingProcessor = {
     const leadCustomer = customerId
       ? await db('customers').where({ id: customerId }).select('id', 'pipeline_stage').first().catch(() => null)
       : null;
-    const shouldCreateLead = customerId && !extracted.is_spam && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall });
+    // A new lead requires BOTH a customer record we can attach to AND call
+    // content that is actually a new-sales inquiry. The content veto stops
+    // existing-customer scheduling/complaint/billing calls (and the model's
+    // explicit is_lead=false) from spawning leads, even when the caller is still
+    // mid-pipeline (so the pipeline-stage gate alone wouldn't catch them).
+    const nonLeadCall = isNonLeadCallContent(extracted);
+    const shouldCreateLead = customerId && !extracted.is_spam && !nonLeadCall
+      && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall });
     if (!shouldCreateLead && customerId && !extracted.is_spam) {
-      logger.info(`[call-proc] Skipping lead creation for existing customer ${customerId} (${leadCustomer?.pipeline_stage || 'unknown'})`);
+      const skipReason = nonLeadCall
+        ? `non-lead call (${extracted.call_type || (extracted.is_lead === false ? 'is_lead=false' : 'unknown')})`
+        : `existing customer (${leadCustomer?.pipeline_stage || 'unknown'})`;
+      logger.info(`[call-proc] Skipping lead creation for ${skipReason}, customer ${customerId}`);
     }
     if (shouldCreateLead) {
       try {
@@ -2409,15 +2531,28 @@ const CallRecordingProcessor = {
           // Always refresh the rolling AI-derived fields — they're a snapshot
           // of the latest call, not user-curated content.
           if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
+          // Qualification now requires BOTH buying intent (hot/warm) AND the
+          // contact info the office needs to work the lead: first + last name,
+          // a service street address, and an email. Evaluate against the MERGED
+          // record (this call OR what a prior call already stored) so a follow-up
+          // call that restates nothing doesn't un-qualify a complete lead.
+          const mergedContact = {
+            first_name: leadUpdates.first_name ?? current?.first_name,
+            last_name: leadUpdates.last_name ?? current?.last_name,
+            service_address: leadUpdates.address ?? current?.address,
+            email: leadUpdates.email ?? current?.email,
+          };
+          const contact = leadContactCompleteness(mergedContact);
           leadUpdates.extracted_data = JSON.stringify({
             pain_points: extracted.pain_points,
             preferred_date_time: extracted.preferred_date_time,
             sentiment: extracted.sentiment,
+            call_type: extracted.call_type || null,
+            ...(contact.missing.length ? { missing_for_qualification: contact.missing } : {}),
             ...(bridgeNeedsConfirmation.length ? { needs_confirmation: bridgeNeedsConfirmation } : {}),
           });
-          // is_qualified: hot/warm only. Spam was already early-returned, so
-          // checking != 'spam' would mark cold leads qualified.
-          leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality);
+          // hot/warm AND complete contact. Spam was already early-returned.
+          leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
           leadUpdates.customer_id = customerId;
           leadUpdates.updated_at = new Date();
           await db('leads').where({ id: leadId }).update(leadUpdates);
@@ -2426,9 +2561,14 @@ const CallRecordingProcessor = {
           // plain-language "confirm before dispatch" line so it's visible on the
           // lead timeline Virginia works, not just in extracted_data.
           const triageBase = `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`;
-          const triageDesc = bridgeNeedsConfirmation.length
-            ? `${triageBase} — ⚠ CONFIRM BEFORE DISPATCH: ${bridgeNeedsConfirmation.map(describeConfirmReason).join('; ')}`
-            : triageBase;
+          const triageNotes = [];
+          if (contact.missing.length) {
+            triageNotes.push(`needs for qualification: ${contact.missing.map((f) => QUALIFYING_CONTACT_LABELS[f] || f).join(', ')}`);
+          }
+          if (bridgeNeedsConfirmation.length) {
+            triageNotes.push(`⚠ CONFIRM BEFORE DISPATCH: ${bridgeNeedsConfirmation.map(describeConfirmReason).join('; ')}`);
+          }
+          const triageDesc = triageNotes.length ? `${triageBase} — ${triageNotes.join(' — ')}` : triageBase;
           await db('lead_activities').insert({
             lead_id: leadId,
             activity_type: 'ai_triage',
@@ -2438,6 +2578,9 @@ const CallRecordingProcessor = {
               call_summary: extracted.call_summary,
               pain_points: extracted.pain_points,
               sentiment: extracted.sentiment,
+              call_type: extracted.call_type || null,
+              is_qualified: leadUpdates.is_qualified,
+              ...(contact.missing.length ? { missing_for_qualification: contact.missing } : {}),
               ...(bridgeNeedsConfirmation.length
                 ? { needs_confirmation: bridgeNeedsConfirmation, address_validation_status: v2AddressValidation?.status || null }
                 : {}),
@@ -3256,6 +3399,10 @@ CallRecordingProcessor._test = {
   findCustomerForCallContact,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
+  classifyCallerAccount,
+  summarizeKnownCaller,
+  isNonLeadCallContent,
+  leadContactCompleteness,
   transcribeRecording,
   extractCallDataV2,
   normalizeOpenAISegments,

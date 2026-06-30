@@ -99,6 +99,35 @@ function normalizeCallState(value) {
   return null;
 }
 
+// Strict tri-state for the model's is_lead flag: a real boolean, the strings
+// "true"/"false", else null (absent/unparseable). null means "model didn't say"
+// so the downstream content gate falls back to legacy behavior rather than
+// treating a missing flag as a non-lead.
+function normalizeIsLead(value) {
+  if (value === true || value === false) return value;
+  const raw = cleanText(value).toLowerCase();
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  return null;
+}
+
+const CALL_TYPES = new Set([
+  'new_inquiry',
+  'existing_customer_scheduling',
+  'existing_customer_service',
+  'complaint',
+  'billing',
+  'spam',
+  'wrong_number',
+  'voicemail',
+  'other',
+]);
+
+function normalizeCallType(value) {
+  const raw = cleanText(value).toLowerCase().replace(/[\s-]+/g, '_');
+  return CALL_TYPES.has(raw) ? raw : null;
+}
+
 function normalizeE164Phone(value) {
   const phoneCandidate = cleanText(value);
   if (!phoneCandidate) return null;
@@ -134,6 +163,8 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     call_summary: cleanNullableText(source.call_summary),
     lead_quality: cleanNullableText(source.lead_quality),
     matched_service: cleanNullableText(source.matched_service),
+    is_lead: normalizeIsLead(source.is_lead),
+    call_type: normalizeCallType(source.call_type),
   };
 }
 

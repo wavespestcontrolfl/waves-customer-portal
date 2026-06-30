@@ -931,3 +931,81 @@ describe('call recording appointment guardrails', () => {
     expect(complete).toMatchObject({ ok: true, missing: [] });
   });
 });
+
+describe('call lead classification (what is / isn\'t a lead)', () => {
+  const {
+    classifyCallerAccount,
+    summarizeKnownCaller,
+    isNonLeadCallContent,
+    leadContactCompleteness,
+    normalizeCallExtraction,
+  } = CallRecordingProcessor._test;
+
+  test('classifies a phone-matched caller by pipeline stage', () => {
+    expect(classifyCallerAccount('new_lead')).toBe('open_lead');
+    expect(classifyCallerAccount('estimate_sent')).toBe('open_lead');
+    expect(classifyCallerAccount('won')).toBe('established_customer');
+    expect(classifyCallerAccount('active_customer')).toBe('established_customer');
+    expect(classifyCallerAccount('')).toBe('unknown');
+    expect(classifyCallerAccount(null)).toBe('unknown');
+  });
+
+  test('summarizes a known caller for the extraction prompt', () => {
+    expect(summarizeKnownCaller({ first_name: 'Uma', last_name: 'Satyendra', pipeline_stage: 'won' }))
+      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer' });
+    expect(summarizeKnownCaller({ first_name: 'Jake', pipeline_stage: 'new_lead' }))
+      .toEqual({ name: 'Jake', accountType: 'open_lead' });
+    expect(summarizeKnownCaller(null)).toBeNull();
+  });
+
+  // The four owner-reported false leads, plus the genuine-but-early prospect.
+  test('vetoes existing-customer / non-sales calls, keeps genuine new inquiries', () => {
+    // Martin Max + Uma — "are you coming today?" / arrival check-in.
+    expect(isNonLeadCallContent({ call_type: 'existing_customer_scheduling', is_lead: false })).toBe(true);
+    // Missed 8 AM appointment — a complaint, not a new lead.
+    expect(isNonLeadCallContent({ call_type: 'complaint', is_lead: false })).toBe(true);
+    // Invoice/billing question.
+    expect(isNonLeadCallContent({ call_type: 'billing' })).toBe(true);
+    // Wrong number / misdial.
+    expect(isNonLeadCallContent({ call_type: 'wrong_number' })).toBe(true);
+    // Model's explicit no-lead verdict alone is enough.
+    expect(isNonLeadCallContent({ is_lead: false })).toBe(true);
+    // call_type wins even if the model contradicts itself with is_lead=true.
+    expect(isNonLeadCallContent({ is_lead: true, call_type: 'existing_customer_service' })).toBe(true);
+
+    // Genuine new prospect (the rodent shopper) — still a lead, just cold.
+    expect(isNonLeadCallContent({ call_type: 'new_inquiry', is_lead: true })).toBe(false);
+    // Missing/legacy signals fall back to the pipeline-stage gate (no veto).
+    expect(isNonLeadCallContent({})).toBe(false);
+    expect(isNonLeadCallContent({ is_lead: null })).toBe(false);
+  });
+
+  test('qualification requires full name + service address + email', () => {
+    expect(leadContactCompleteness({
+      first_name: 'Jesse', last_name: 'Smith', service_address: '123 Main St', email: 'jesse@example.com',
+    })).toEqual({ complete: true, missing: [] });
+
+    // Rodent shopper gave no email → not qualified, missing surfaced.
+    expect(leadContactCompleteness({
+      first_name: 'Martin', last_name: 'Lee', service_address: '7 Oak St', email: '',
+    })).toEqual({ complete: false, missing: ['email'] });
+
+    expect(leadContactCompleteness({ first_name: 'Sam' }))
+      .toEqual({ complete: false, missing: ['last_name', 'service_address', 'email'] });
+  });
+
+  test('normalizeCallExtraction carries is_lead + call_type through', () => {
+    const out = normalizeCallExtraction({
+      first_name: 'Martin', lead_quality: 'cold', is_lead: true, call_type: 'New Inquiry',
+    }, { callerPhone: '+19415551212' });
+    expect(out.is_lead).toBe(true);
+    expect(out.call_type).toBe('new_inquiry');
+    expect(out.lead_quality).toBe('cold');
+
+    // String booleans and unknown call types are coerced/dropped.
+    expect(normalizeCallExtraction({ is_lead: 'false' }).is_lead).toBe(false);
+    expect(normalizeCallExtraction({ call_type: 'banana' }).call_type).toBeNull();
+    expect(normalizeCallExtraction({}).is_lead).toBeNull();
+    expect(normalizeCallExtraction({}).call_type).toBeNull();
+  });
+});
