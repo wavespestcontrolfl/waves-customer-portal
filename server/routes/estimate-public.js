@@ -3615,7 +3615,21 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     && (annualPrepayWaivesMembership || prepayDiscountAmount > 0);
   const prepayInvoiceTotal = annualPrepayWaivesMembership
     ? annualTotal
-    : Math.max(0, prepayResolved.amount);
+    : (() => {
+      const base = Math.max(0, prepayResolved.amount);
+      // Commercial prepay is taxed on the taxable pest share — quote the
+      // TAX-INCLUSIVE total here so the page matches the invoice/PaymentIntent
+      // the converter creates (same blended rate + post-discount allocation +
+      // the customer's effective rate resolved in handleEstimateView). Mirror
+      // InvoiceService's rounding (tax dollars to cents, then add).
+      if (!commercialManualAccept) return base;
+      const taxRate = require('../services/estimate-converter').resolveCommercialPrepayTaxRate(recurring, {
+        prepayDiscountApplied: prepayResolved.discount > 0,
+        baseRate: opts.prepayBaseRate,
+      });
+      const tax = Math.round(base * taxRate * 100) / 100;
+      return Math.round((base + tax) * 100) / 100;
+    })();
   const existingAppointment = est.existingAppointment || null;
   const prepayMembershipSummaryHtml = annualPrepayWaivesMembership
     ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
@@ -6260,6 +6274,14 @@ async function handleEstimateView(req, res, next) {
       showYourWork = await buildShowYourWork(estimate, estData);
     }
 
+    // Commercial prepay is taxed — resolve the customer's effective rate
+    // (exemptions + county, forced commercial) so the estimate PAGE's prepay
+    // total matches the tax-inclusive invoice the converter creates. Async, so
+    // resolve here and pass into the (sync) renderPage. Non-commercial → 0.
+    const prepayBaseRate = isCommercialAutoAcceptEstimate(estimate)
+      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, { forceCommercial: true })
+      : 0;
+
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
       status: estimate.status === 'accepted'
@@ -6302,7 +6324,7 @@ async function handleEstimateView(req, res, next) {
         noShowFeeAmount: cardHoldOneTimePolicyForView.noShowFeeAmount || CardHolds.cardHoldNoShowFee(),
         cancelWindowHours: cardHoldOneTimePolicyForView.cancelWindowHours || CardHolds.cardHoldCancelWindowHours(),
       } : { enforced: false, requiredForOneTime: false },
-    }, estData, membership, { showYourWork });
+    }, estData, membership, { showYourWork, prepayBaseRate });
   } catch (err) { next(err); }
 }
 
