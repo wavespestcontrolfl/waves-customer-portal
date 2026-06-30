@@ -18,7 +18,14 @@ const CATALOG = [
   'CarbonPro-L w/ MobilEX Biostimulant Liquid Soil Amendment',
   'LESCO Green Flo 6-0-0 10% Ca Turfgrass Liquid Fertilizer',
   'LESCO Elite 0-0-28 AM 7.5% Fe 6.5% Mn 9% S Turfgrass Granular Fertilizer',
+  'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer',
 ].map((name, i) => ({ id: `cat-${i}`, name }));
+
+// High Mn Combo's catalog name doesn't contain "high mn combo", so it only resolves
+// through product_aliases — mirror that so the matcher's alias fallback is exercised.
+const ALIASES = [
+  { product_id: 'cat-highmn', alias_name: 'High Mn Combo' },
+];
 
 function runMigration() {
   const products = [];
@@ -29,6 +36,7 @@ function runMigration() {
       orderBy() { return this; },
       select() {
         if (name === 'products_catalog') return Promise.resolve(CATALOG);
+        if (name === 'product_aliases') return Promise.resolve(ALIASES);
         const track = ctx.cond && ctx.cond.lawn_protocol_id; // windows lookup
         return Promise.resolve((B1_WINDOW_KEYS[track] || []).map((k) => ({ id: `${track}-${k}`, window_key: k })));
       },
@@ -101,16 +109,20 @@ describe('B/Z/B structured product seed', () => {
         expect(p.product_id).toBeNull();
         expect(p.default_in_plan).toBe(false);
       }));
-    // High Mn Combo has no catalog row yet -> seeded conditional + null (pending a catalog row)
-    products.filter((p) => p.product_name === 'High Mn Combo').forEach((p) => {
-      expect(p.product_id).toBeNull();
-      expect(p.default_in_plan).toBe(false);
-      expect(JSON.parse(p.gates).uncataloguedPendingCatalogRow).toBe(true);
-    });
-    // CarbonPro-L, where seeded, is a mapped default (catalogued)
+    // High Mn Combo resolves through product_aliases (its catalog name differs), so it
+    // must be MAPPED, never tagged uncatalogued. Base windows default; Premium conditional.
+    const highMn = products.filter((p) => p.product_name === 'High Mn Combo');
+    expect(highMn.length).toBeGreaterThan(0);
+    highMn.forEach((p) => expect(p.product_id).not.toBeNull());
+    // CarbonPro-L is catalogued -> always mapped (default where primary, conditional where Premium)
     const carbon = products.filter((p) => p.product_name === 'CarbonPro-L');
     expect(carbon.length).toBeGreaterThan(0);
-    carbon.forEach((p) => { expect(p.product_id).not.toBeNull(); expect(p.default_in_plan).toBe(true); });
+    carbon.forEach((p) => expect(p.product_id).not.toBeNull());
+    // every Premium-tier row is conditional, so non-premium jobs don't show it as required
+    products.filter((p) => JSON.parse(p.gates).premiumTier)
+      .forEach((p) => expect(p.default_in_plan).toBe(false));
+    // nothing is left tagged uncatalogued (alias resolution replaced that)
+    products.forEach((p) => expect(JSON.parse(p.gates).uncataloguedPendingCatalogRow).toBeUndefined());
   });
 
   test('blackout-window products never push N/P (requiresZeroNP or non-fertilizer)', () => {

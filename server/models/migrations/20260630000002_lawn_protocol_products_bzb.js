@@ -21,15 +21,20 @@
  *    data-accuracy fix; no Bahia-safe substitute yet).
  *
  * Full parity: every primary product in protocols.json for each B/Z/B window is
- * seeded (default_in_plan true, product_id mapped from the catalog) so the
- * structured forecast / Command Center / inventory context matches the program.
- * Two exceptions, both intentional and consistent with the publish-validity rule
- * (a default product must map to a catalog row):
- *  - CarbonPro-L is in the catalog ("CarbonPro-L w/ MobilEX"), so where the
- *    protocol lists it as primary (Bermuda Dec, Zoysia May) it is a mapped default.
- *  - High Mn Combo has NO catalog row yet, so it is seeded conditional
- *    (default_in_plan false, product_id null) and tagged uncataloguedPendingCatalogRow;
- *    add a catalog row (a small B3) to promote it to a mapped default.
+ * seeded so the structured forecast / Command Center / inventory context matches
+ * the program. default_in_plan follows the protocol-text tier:
+ *  - Base primaries -> default_in_plan true (closeout treats these as required
+ *    disposition), product_id mapped from the catalog (publish-valid).
+ *  - "Premium:" / "★ OPTIONAL" tier add-ons (Aug/Dec micros, potassium, CarbonPro-L
+ *    Dec, High Mn Aug) -> default_in_plan false + a { premiumTier: true } gate, so
+ *    non-premium jobs don't show them as required; still product_id-mapped so the
+ *    upsell carries inventory context when taken.
+ *  - Weather/disease/soil-gated primaries keep default_in_plan true with their
+ *    existing gate (maxTempF / sdsPreventive / largePatch / soilKGate), as in the
+ *    St-Augustine seed — the gate, not the default flag, encodes the conditionality.
+ * product_id resolves via products_catalog name first, then product_aliases, so
+ * canonical-but-aliased rows map too (e.g. "High Mn Combo" -> "LESCO High Manganese
+ * Combo AM ...", "CarbonPro-L" -> "CarbonPro-L w/ MobilEX").
  *
  * Idempotent: skips a window that already has products.
  */
@@ -68,18 +73,18 @@ const PRODUCTS = {
     P('nov_sds_prevent_2_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
     // full-parity pass: every remaining protocols.json primary, mapped to catalog.
     P('feb_greenup_n1', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
-    P('feb_greenup_n1', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { uncataloguedPendingCatalogRow: true }),
+    P('feb_greenup_n1', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, true, {}),
     P('mar_pre_m_split_2_pgr', 'LESCO 24-0-11', 'nutrition', null, 'lb_n', 1, true, { targetN: '0.75 lb N/1000' }),
     P('jun_blackout', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
-    P('aug_scout_peak', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, true, {}),
-    P('aug_scout_peak', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
+    P('aug_scout_peak', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, false, { premiumTier: true }),
+    P('aug_scout_peak', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, false, { premiumTier: true }),
     P('sep_blackout_closeout', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
     P('sep_blackout_closeout', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
     P('oct_final_n_sds_prevent', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 2, true, {}),
     P('oct_final_n_sds_prevent', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 2, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
-    P('dec_dormancy_touchpoint', 'LESCO Elite 0-0-28', 'potassium', 3.6, 'lb', 1, true, {}),
-    P('dec_dormancy_touchpoint', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
-    P('dec_dormancy_touchpoint', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, true, {}),
+    P('dec_dormancy_touchpoint', 'LESCO Elite 0-0-28', 'potassium', 3.6, 'lb', 1, false, { premiumTier: true }),
+    P('dec_dormancy_touchpoint', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, false, { premiumTier: true }),
+    P('dec_dormancy_touchpoint', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, false, { premiumTier: true }),
   ],
   zoysia: [
     P('jan_pre_m_split_1', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
@@ -109,15 +114,15 @@ const PRODUCTS = {
     P('nov_lp_frac_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
     // full-parity pass: every remaining protocols.json primary, mapped to catalog.
     P('feb_micros_frac', 'LESCO Green Flo 6-0-0 10% Ca', 'nutrition', null, 'lb_n', 1, true, { targetN: 'spoon-feed green-up; verify rate by lot' }),
-    P('feb_micros_frac', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { uncataloguedPendingCatalogRow: true }),
+    P('feb_micros_frac', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, true, {}),
     P('jun_blackout', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
     P('jul_blackout_celsius', 'Primo Maxx', 'pgr', 0.35, 'fl_oz', 1, true, {}),
-    P('aug_scout', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, true, {}),
-    P('aug_scout', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { uncataloguedPendingCatalogRow: true }),
+    P('aug_scout', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, false, { premiumTier: true }),
+    P('aug_scout', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { premiumTier: true }),
     P('sep_blackout_lp_prep', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { requiresZeroNP: true, annualCounter: 'celsius_oz_per_1000' }),
     P('oct_final_n_lp_required', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
-    P('dec_touchpoint', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
-    P('dec_touchpoint', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, true, {}),
+    P('dec_touchpoint', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, false, { premiumTier: true }),
+    P('dec_touchpoint', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, false, { premiumTier: true }),
   ],
   bahia: [
     P('jan_pre_m_irrigation_class', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
@@ -145,16 +150,16 @@ const PRODUCTS = {
     P('nov_winter_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
     // full-parity pass: every remaining protocols.json primary, mapped to catalog.
     // (Celsius WG and Drive XLR8 stay omitted on bahiagrass — both catalog-excluded.)
-    P('feb_micros_mole_cricket', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { uncataloguedPendingCatalogRow: true }),
+    P('feb_micros_mole_cricket', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, true, {}),
     P('apr_insect_fire_ant', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 2, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
     P('apr_insect_fire_ant', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 2, false, { irrigatedOnly: true, soilKGatePpmBelow: 80 }),
-    P('jun_blackout_mole_cricket', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { requiresZeroNP: true, uncataloguedPendingCatalogRow: true }),
-    P('aug_scout_mole_cricket', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, true, {}),
-    P('aug_scout_mole_cricket', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { uncataloguedPendingCatalogRow: true }),
+    P('jun_blackout_mole_cricket', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, true, { requiresZeroNP: true }),
+    P('aug_scout_mole_cricket', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, false, { premiumTier: true }),
+    P('aug_scout_mole_cricket', 'High Mn Combo', 'micronutrients', 2, 'fl_oz', 1, false, { premiumTier: true }),
     P('sep_blackout_crabgrass', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
     P('oct_final_n', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
-    P('dec_dormancy_touchpoint', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, true, {}),
-    P('dec_dormancy_touchpoint', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, true, {}),
+    P('dec_dormancy_touchpoint', 'Chelated Iron Plus', 'micronutrients', 2, 'fl_oz', 1, false, { premiumTier: true }),
+    P('dec_dormancy_touchpoint', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, false, { premiumTier: true }),
   ],
 };
 
@@ -193,14 +198,19 @@ function findSeededProtocol(knex, track) {
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('lawn_protocol_products'))) return;
 
-  // Map product_id by normalized name (same matcher as the St-Aug seed) so default
-  // products are publish-valid; unmatched products stay product_id null (the
-  // curatives that aren't in the catalog are all conditional, so that's fine).
+  // Map product_id by normalized name (same matcher as the St-Aug seed), then fall
+  // back to product_aliases so canonical-but-differently-named catalog rows still
+  // resolve (e.g. "High Mn Combo" -> "LESCO High Manganese Combo AM ..."). Unmatched
+  // products stay product_id null (the curatives that aren't in the catalog at all
+  // are conditional, so that's fine).
   const catalog = await knex('products_catalog').select('id', 'name').catch(() => []);
+  const aliases = await knex('product_aliases').select('product_id', 'alias_name').catch(() => []);
   const matchProductId = (name) => {
     const n = normalize(name);
     const m = catalog.find((c) => normalize(c.name).includes(n) || n.includes(normalize(c.name)));
-    return m ? m.id : null;
+    if (m) return m.id;
+    const a = aliases.find((x) => normalize(x.alias_name) === n);
+    return a ? a.product_id : null;
   };
 
   for (const [track, products] of Object.entries(PRODUCTS)) {
