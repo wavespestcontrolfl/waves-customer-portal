@@ -84,6 +84,39 @@ describe('commercial auto-priced estimate page is approval-only', () => {
     expect(html).toMatch(/confirmed on site/i);
   });
 
+  test('a commercial PEST estimate is also approval-only (no booking form)', () => {
+    const pestData = {
+      commercialEstimatedPricing: true,
+      result: {
+        recurring: {
+          discount: 0,
+          annualBeforeDiscount: 2280,
+          annualAfterDiscount: 2280,
+          services: [{
+            name: 'Commercial Pest Control', service: 'commercial_pest',
+            mo: 190, annual: 2280, estimatedPricing: true,
+            disclaimer: 'Estimated from property data — final price confirmed on site.',
+            discountable: false, excludeFromPctDiscount: true,
+            taxable: true, taxCategory: 'nonresidential_pest_control',
+          }],
+        },
+        oneTime: { items: [], membershipFee: 0 },
+      },
+      engineResult: {
+        lineItems: [{
+          service: 'commercial_pest', name: 'Commercial Pest Control',
+          monthly: 190, annual: 2280, estimatedPricing: true,
+          discountable: false, excludeFromPctDiscount: true,
+        }],
+      },
+    };
+    const est = commercialEstimate({ monthlyTotal: 190, annualTotal: 2280 });
+    const html = renderPage('commercial-pest-token', est, pestData);
+    expect(html).toContain('id="commercial-accept-card"');
+    expect(html).not.toContain('id="booking-card"');
+    expect(html).not.toContain('id="slot-area"');
+  });
+
   test('does not present WaveGuard membership branding (non-member commercial plan)', () => {
     const html = renderPage('commercial-token-wg', commercialEstimate(), commercialEstimateData());
     // The hero tier label reads "Commercial", never "WaveGuard Bronze".

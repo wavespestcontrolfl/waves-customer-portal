@@ -1077,7 +1077,12 @@ function intervalPriceFromMonthly(monthlyAmount, frequencyKey) {
 // preference toggles are applied — used together with the engine's
 // PEST.floor to cap how much the toggles can discount.
 function detectPestRecurring(recurring) {
-  const pest = (recurring || []).filter((s) => /pest/i.test(String(s.name || '')));
+  // RESIDENTIAL pest only. The interior-spray / exterior-eave-sweep opt-out
+  // ($10/visit each) is a residential-pest preference; commercial_pest is FLAT.
+  // Match by the normalized service KEY, NOT a /pest/i name substring — which
+  // also matches "Commercial Pest Control" and would let a customer subtract the
+  // residential opt-out discounts from (and persist a lower) commercial price.
+  const pest = (recurring || []).filter((s) => recurringServiceKey(s) === 'pest_control');
   if (!pest.length) return null;
   const vpy = pest.reduce((acc, s) => Math.max(acc, visitsPerYearFromFrequency(s.frequency || s.billing || s.cadence)), 0) || 4;
   const monthlyBase = pest.reduce((acc, s) => acc + Number(s.mo || s.monthly || 0), 0);
@@ -1090,6 +1095,9 @@ function detectPestRecurring(recurring) {
 // so only a general one-time pest line should surface them.
 function isGeneralPestOneTimeItem(it = {}) {
   const service = String(it.service || '').toLowerCase();
+  // Commercial pest is flat (no interior/exterior opt-out) — never a general
+  // residential pest item, even though its name contains "Pest".
+  if (service.startsWith('commercial_')) return false;
   if (service === 'one_time_pest' || service === 'pest_control') return true;
   if (service === 'german_roach') return false; // specialty cleanout (handled separately)
   const name = String(it.name || it.displayName || it.label || '').toLowerCase();
@@ -1894,6 +1902,7 @@ function recurringServiceDisplayName(key) {
     case 'rodent': return 'Rodent Remediation';
     case 'commercial_lawn': return 'Commercial Lawn Treatment';
     case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
+    case 'commercial_pest': return 'Commercial Pest Control';
     default: return null;
   }
 }
@@ -2176,7 +2185,7 @@ function recurringServicesWithSupplements(estResult = {}) {
     indexByKey.set(key, services.length - 1);
   };
 
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest']);
   if (Array.isArray(estResult.lineItems)) {
     estResult.lineItems.forEach((item) => {
       const key = recurringServiceKey(item);
@@ -3332,7 +3341,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     estData?.commercialEstimatedPricing === true
     || recurring.some((s) => {
       const k = String(recurringServiceKey(s) || s.service || s.name || '').toLowerCase();
-      return k.includes('commercial_lawn') || k.includes('commercial_tree');
+      return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest');
     })
   );
 
@@ -3606,7 +3615,21 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     && (annualPrepayWaivesMembership || prepayDiscountAmount > 0);
   const prepayInvoiceTotal = annualPrepayWaivesMembership
     ? annualTotal
-    : Math.max(0, prepayResolved.amount);
+    : (() => {
+      const base = Math.max(0, prepayResolved.amount);
+      // Commercial prepay is taxed on the taxable pest share — quote the
+      // TAX-INCLUSIVE total here so the page matches the invoice/PaymentIntent
+      // the converter creates (same blended rate + post-discount allocation +
+      // the customer's effective rate resolved in handleEstimateView). Mirror
+      // InvoiceService's rounding (tax dollars to cents, then add).
+      if (!commercialManualAccept) return base;
+      const taxRate = require('../services/estimate-converter').resolveCommercialPrepayTaxRate(recurring, {
+        prepayDiscountApplied: prepayResolved.discount > 0,
+        baseRate: opts.prepayBaseRate,
+      });
+      const tax = Math.round(base * taxRate * 100) / 100;
+      return Math.round((base + tax) * 100) / 100;
+    })();
   const existingAppointment = est.existingAppointment || null;
   const prepayMembershipSummaryHtml = annualPrepayWaivesMembership
     ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
@@ -6251,6 +6274,14 @@ async function handleEstimateView(req, res, next) {
       showYourWork = await buildShowYourWork(estimate, estData);
     }
 
+    // Commercial prepay is taxed — resolve the customer's effective rate
+    // (exemptions + county, forced commercial) so the estimate PAGE's prepay
+    // total matches the tax-inclusive invoice the converter creates. Async, so
+    // resolve here and pass into the (sync) renderPage. Non-commercial → 0.
+    const prepayBaseRate = isCommercialAutoAcceptEstimate(estimate)
+      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, { forceCommercial: true })
+      : 0;
+
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
       status: estimate.status === 'accepted'
@@ -6293,7 +6324,7 @@ async function handleEstimateView(req, res, next) {
         noShowFeeAmount: cardHoldOneTimePolicyForView.noShowFeeAmount || CardHolds.cardHoldNoShowFee(),
         cancelWindowHours: cardHoldOneTimePolicyForView.cancelWindowHours || CardHolds.cardHoldCancelWindowHours(),
       } : { enforced: false, requiredForOneTime: false },
-    }, estData, membership, { showYourWork });
+    }, estData, membership, { showYourWork, prepayBaseRate });
   } catch (err) { next(err); }
 }
 
@@ -6312,7 +6343,7 @@ function isCommercialAutoAcceptEstimate(estimate = {}) {
   if (data.commercialEstimatedPricing === true) return true;
   const isCommercialSvc = (s) => {
     const k = String(s?.service || s?.serviceKey || s?.name || '').toLowerCase();
-    return k.includes('commercial_lawn') || k.includes('commercial_tree');
+    return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest');
   };
   const lineItems = Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems : [];
   if (lineItems.some((li) => li && li.estimatedPricing === true && isCommercialSvc(li) && Number(li.annual) > 0)) return true;
@@ -6696,12 +6727,35 @@ router.put('/:token/accept', async (req, res, next) => {
     // converter needs). For post-accept customer/admin messaging AND the API
     // response we must quote the amount actually invoiced — the converter's shared
     // calc applies the discount and the margin-floor clamp, so this always matches.
+    // Commercial prepay tax is the customer's EFFECTIVE rate (exemptions +
+    // county), not a hardcoded 7% — resolve it for the display so the quoted
+    // amount matches the invoice the converter creates. A linked customer
+    // resolves their real rate; a brand-new one (no row yet) defaults to the FL
+    // rate, which is also what the converter's new-customer invoice resolves.
+    const prepayDisplayBaseRate = annualPrepaySelected && isCommercialAccept
+      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, {})
+      : 0;
     const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
-      ? require('../services/estimate-converter').resolveAnnualPrepayInvoiceTotal({
-        baseAnnual: annualPrepayInvoiceAmount,
-        recurringServices: recurringSvcList,
-        estimateData: estData,
-      }).amount
+      ? (() => {
+        const converter = require('../services/estimate-converter');
+        const resolved = converter.resolveAnnualPrepayInvoiceTotal({
+          baseAnnual: annualPrepayInvoiceAmount,
+          recurringServices: recurringSvcList,
+          estimateData: estData,
+        });
+        const base = resolved.amount;
+        // Commercial prepay is taxed on the taxable pest share — quote the
+        // TAX-INCLUSIVE total so the customer/admin message matches the invoice
+        // + PaymentIntent the converter creates (uses the same blended rate +
+        // post-discount allocation). Residential prepay is untaxed (rate 0).
+        const taxRate = isCommercialAccept
+          ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0, baseRate: prepayDisplayBaseRate })
+          : 0;
+        // Mirror InvoiceService EXACTLY: tax dollars rounded to cents, then added
+        // to the base — so the messaged amount equals inv.total to the cent.
+        const tax = Math.round(base * taxRate * 100) / 100;
+        return Math.round((base + tax) * 100) / 100;
+      })()
       : null;
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
     const acceptedFrequencyKey = selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || selectedFrequencyKey;
@@ -7495,7 +7549,12 @@ router.put('/:token/accept', async (req, res, next) => {
           skipSetupInvoice: billByInvoice || isCommercialAccept,
           skipAutoSchedule: isCommercialAccept,
           prepayInvoiceAmount: annualPrepayInvoiceAmount,
-          firstApplicationAmount: firstApplicationInvoiceAmount,
+          // Commercial (standard) bills manually — create NO auto first-
+          // application invoice (which would also mis-tax a mixed plan); the team
+          // invoices after on-site confirmation. The commercial customer is
+          // marked property_type='commercial' by the converter so that manual
+          // invoice taxes the taxable services (pest) correctly.
+          firstApplicationAmount: isCommercialAccept ? null : firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
           autoSendInvoice: !isCommercialAccept,
         });
@@ -7826,6 +7885,13 @@ router.put('/:token/preferences', async (req, res, next) => {
     const pestRecurring = detectPestRecurring(recurring);
     const hasPestOneTime = detectPestOneTime(oneTimeItems);
     const pestOneTimeTotal = hasPestOneTime ? pestOneTimeBase(oneTimeItems) : 0;
+    // The interior-spray / exterior-sweep preferences only apply to RESIDENTIAL
+    // pest (recurring or one-time). With no residential pest line there's nothing
+    // to discount — no-op so a commercial-only estimate can't persist a lower
+    // total via these toggles. (The pref card isn't rendered for it either.)
+    if (!pestRecurring && !hasPestOneTime) {
+      return res.status(400).json({ error: 'Service preferences are not available for this estimate' });
+    }
 
     // baseMonthly resolution via shared helper (see resolveBaseMonthly).
     // Persisted back to estimate_data.baseMonthly below so subsequent
@@ -8117,7 +8183,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   // (mosquito uses `visits`, T&S uses `frequency`; palm and rodent bait
   // are separate recurring lines that do not receive WaveGuard percentage
   // discounts).
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest']);
   const labelForRecurring = (svc) => {
     switch (svc) {
       case 'pest_control': return 'Pest Control';
@@ -9572,6 +9638,7 @@ function categoryForRecurringServiceKey(key) {
     // copy/ask chips for a commercial lawn or tree quote.
     case 'commercial_lawn': return 'lawn_care';
     case 'commercial_tree_shrub': return 'tree_shrub';
+    case 'commercial_pest': return 'pest_control';
     default: return null;
   }
 }
@@ -12095,6 +12162,7 @@ module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;

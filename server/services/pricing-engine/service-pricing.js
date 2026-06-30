@@ -4,7 +4,7 @@
 const {
   GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
-  TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
+  TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
 const {
@@ -2474,6 +2474,145 @@ function priceCommercialLawn(property = {}, options = {}) {
       annualCallbackReserve: roundMoney(floor.annualCallbackReserve),
       annualAdmin: roundMoney(floor.annualAdmin),
       total: roundMoney(floor.annualCost),
+    },
+    margin,
+    marginFloorOk: margin >= cfg.targetGrossMargin - 0.01,
+  };
+}
+
+// ============================================================
+// COMMERCIAL PEST — cost-buildup auto-pricer (COMMERCIAL_PEST)
+// ============================================================
+// Building footprint (interior treatment) + perimeter (exterior barrier) drive
+// the cost. Perimeter is taken from the profile when present, else derived from
+// the footprint (square approximation) so the pricer is self-contained. Unlike
+// commercial lawn/tree, commercial pest is TAXED in FL (the line carries
+// taxable:true / taxCategory:'nonresidential_pest_control'; tax-calculator also
+// applies 7% to commercial pest off isCommercial). Monthly is the commercial
+// baseline cadence — the rep confirms the actual frequency on site.
+function resolveCommercialPestFootprint(property = {}) {
+  const res = resolvePestFootprint(property);
+  const footprint = Number(res.footprint) || 0;
+  // Perimeter: honor the profile-computed perimeter when positive, else derive
+  // from the footprint (a square's perimeter = 4·√area) so a missing perimeter
+  // never zeroes the exterior-barrier labor.
+  const explicitPerimeter = Number(property.perimeter ?? property.perimeterLF ?? property.perimeterLf);
+  const perimeter = Number.isFinite(explicitPerimeter) && explicitPerimeter > 0
+    ? explicitPerimeter
+    : (footprint > 0 ? 4 * Math.sqrt(footprint) : 0);
+  return {
+    footprint,
+    perimeter,
+    footprintSource: res.source,
+    // True when resolvePestFootprint fell back to its 2,000 sqft default — i.e.
+    // NO usable building size was supplied. Commercial pest prices off the
+    // BUILDING footprint (interior treatment), which (unlike turf/bed) is NOT
+    // lot-derivable, so a defaulted footprint can't auto-price (see below).
+    defaulted: res.wasDefaulted === true,
+  };
+}
+
+function priceCommercialPest(property = {}, options = {}) {
+  const cfg = COMMERCIAL_PEST;
+  const { footprint, perimeter, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
+  const visits = cfg.programVisits;
+
+  // No real building size → DON'T auto-price (and bill/prepay) off the 2,000 sqft
+  // fallback, which is unrelated to the actual building. Fall back to a manual
+  // quote until a building/home/footprint sqft is provided. (Lawn/tree are
+  // lot-derivable so they still auto-price; pest is not.) A caller can also force
+  // this via buildingSizeMeasured:false — the public wizard sets it when the
+  // building size is its synthetic confirm-step default, which would otherwise
+  // resolve as a real footprint.
+  if (defaulted || options.buildingSizeMeasured === false) {
+    return {
+      service: 'commercial_pest',
+      name: 'Commercial Pest Control',
+      originalRequestedService: 'pest_control',
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+      commercialPricingMode: 'manual_quote',
+      estimatedPricing: false,
+      quoteRequired: true,
+      requiresManualReview: true,
+      autoQuoteRequiresAdminApproval: true,
+      manualReviewReasons: ['commercial_pest_missing_building_footprint'],
+      detail: 'Commercial pest pricing needs the building size — your Waves account manager will confirm the quote.',
+      taxable: cfg.taxable,
+      taxCategory: cfg.taxCategory,
+      price: null,
+      monthly: null,
+      annual: null,
+      perApp: null,
+      pricingConfidence: 'LOW',
+    };
+  }
+
+  const materialPerVisit = cfg.materialPerVisitBase
+    + cfg.materialPerKSqFtPerVisit * (footprint / 1000);
+  const onSiteMin = cfg.laborMinutesBase
+    + cfg.laborMinutesPerKSqFt * (footprint / 1000)
+    + cfg.laborMinutesPerimeterPer100Lf * (perimeter / 100);
+  const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + cfg.laborOverheadMinutesPerVisit) / 60);
+  const drivePerVisit = GLOBAL.LABOR_RATE * (cfg.routeDriveMinutes / 60);
+
+  const annualMaterial = materialPerVisit * visits;
+  const annualLabor = laborPerVisit * visits;
+  const annualDrive = drivePerVisit * visits;
+  const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
+
+  const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
+  const minApplied = computedAnnual < cfg.minAnnual;
+  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const monthly = roundMoney(annual / 12);
+  const perApp = roundMoney(annual / visits);
+  const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
+  const pricingConfidence = footprint > cfg.lowConfidenceFootprintSf ? 'LOW' : 'MEDIUM';
+
+  return {
+    service: 'commercial_pest',
+    name: 'Commercial Pest Control',
+    originalRequestedService: 'pest_control',
+    propertyType: 'commercial',
+    isCommercial: true,
+    commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+    commercialPricingMode: 'auto_estimate',
+    estimatedPricing: true,
+    // Flat commercial pricing — never WaveGuard/recurring-discountable. Carried
+    // so the accept/recurring helpers exclude it from % discounts even where a
+    // service key normalizes to "pest".
+    discountable: false,
+    excludeFromPctDiscount: true,
+    quoteRequired: false,
+    requiresManualReview: false,
+    detail: 'Commercial pest program (interior treatment + exterior barrier + monitoring). Estimated from property data — final price confirmed on site.',
+    disclaimer: 'Estimated from property data — final price confirmed on site.',
+    footprint,
+    footprintUsed: footprint,
+    footprintSource,
+    footprintEstimated: false,
+    perimeter: roundMoney(perimeter),
+    frequency: visits,
+    visitsPerYear: visits,
+    onSiteMin: roundMoney(onSiteMin),
+    monthly,
+    annual,
+    perApp,
+    internalPerVisitRevenue: perApp,
+    perVisit: perApp,
+    pricingBasis: 'COMMERCIAL_COST_BUILDUP',
+    pricingConfidence,
+    minApplied,
+    taxable: cfg.taxable,
+    taxCategory: cfg.taxCategory,
+    costs: {
+      materialCost: roundMoney(annualMaterial),
+      laborCost: roundMoney(annualLabor),
+      driveCost: roundMoney(annualDrive),
+      adminCost: cfg.adminAnnual,
+      directCost: roundMoney(annualMaterial + annualLabor + annualDrive),
+      total: roundMoney(annualCost),
     },
     margin,
     marginFloorOk: margin >= cfg.targetGrossMargin - 0.01,
@@ -7039,7 +7178,7 @@ function applyRodentBundle(componentTotal, bundle) {
 
 module.exports = {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
-  priceCommercialLawn, priceCommercialTreeShrub, pricePalmInjection,
+  priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,

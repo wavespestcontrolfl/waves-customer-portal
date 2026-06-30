@@ -15,12 +15,17 @@ const TaxCalculator = {
    *
    * Returns { rate, amount, taxable, county, reason }
    */
-  async calculateTax(customerId, serviceType, subtotal) {
-    const customer = await db('customers').where({ id: customerId }).first();
+  async calculateTax(customerId, serviceType, subtotal, opts = {}) {
+    // Optional transaction connection: when an invoice is created INSIDE the
+    // accept transaction, the customer's just-written property_type='commercial'
+    // (and any in-flight rows) are only visible on that connection — the global
+    // db would still read the pre-commit (residential) row and zero the tax.
+    const conn = opts.database || db;
+    const customer = await conn('customers').where({ id: customerId }).first();
     if (!customer) return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Customer not found' };
 
     // 1. Check tax exemption
-    const exemption = await db('tax_exemptions')
+    const exemption = await conn('tax_exemptions')
       .where({ customer_id: customerId, active: true, verified: true })
       .where(function () {
         this.whereNull('expiry_date').orWhere('expiry_date', '>=', todayET());
@@ -31,13 +36,17 @@ const TaxCalculator = {
       return { rate: 0, amount: 0, taxable: false, county: null, reason: `Tax exempt — ${exemption.exemption_type} (${exemption.certificate_number})` };
     }
 
-    // 2. Check service taxability
-    const isCommercial = customer.property_type === 'commercial' || customer.property_type === 'business';
+    // 2. Check service taxability. opts.isCommercial forces commercial treatment
+    // for a customer who will be marked commercial at accept but whose row isn't
+    // updated yet (e.g. pre-accept prepay DISPLAY) — so the quoted rate matches
+    // the invoice the converter creates once the row is commercial.
+    const isCommercial = opts.isCommercial === true
+      || customer.property_type === 'commercial' || customer.property_type === 'business';
 
     if (serviceType) {
       // Normalize service type to key format
       const serviceKey = serviceType.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_');
-      const taxability = await db('service_taxability')
+      const taxability = await conn('service_taxability')
         .where(function () {
           this.where('service_key', serviceKey)
             .orWhere('service_key', 'ilike', `%${serviceKey}%`)
@@ -66,7 +75,7 @@ const TaxCalculator = {
       return { rate: defaultRate, amount, taxable: true, county: 'unknown', reason: 'Default FL rate (county could not be inferred from ZIP)' };
     }
 
-    const taxRate = await db('tax_rates')
+    const taxRate = await conn('tax_rates')
       .where({ county, active: true })
       .whereNull('expiry_date')
       .orderBy('effective_date', 'desc')

@@ -6,6 +6,7 @@
 const {
   priceCommercialLawn,
   priceCommercialTreeShrub,
+  priceCommercialPest,
 } = require('../services/pricing-engine/service-pricing');
 const { generateEstimate } = require('../services/pricing-engine');
 
@@ -142,6 +143,109 @@ describe('priceCommercialTreeShrub — cost-buildup auto-pricer', () => {
   });
 });
 
+describe('priceCommercialPest — cost-buildup auto-pricer', () => {
+  test('golden anchors by building footprint + perimeter (monthly cadence)', () => {
+    expect(priceCommercialPest({ footprint: 3000, perimeter: 220 })).toMatchObject({
+      service: 'commercial_pest',
+      annual: 1424.73,
+      monthly: 118.73,
+      perApp: 118.73,
+      visitsPerYear: 12,
+    });
+    expect(priceCommercialPest({ footprint: 10000, perimeter: 400 }).annual).toBe(2280);
+    expect(priceCommercialPest({ footprint: 20000, perimeter: 600 }).annual).toBe(3472.73);
+  });
+
+  test('is FL-taxed and flat (never WaveGuard/recurring-% discountable)', () => {
+    const r = priceCommercialPest({ footprint: 5000, perimeter: 280 });
+    expect(r.taxable).toBe(true);
+    expect(r.taxCategory).toBe('nonresidential_pest_control');
+    expect(r.discountable).toBe(false);
+    expect(r.excludeFromPctDiscount).toBe(true);
+    expect(r.estimatedPricing).toBe(true);
+    expect(r.quoteRequired).toBe(false);
+    expect(r.requiresManualReview).toBe(false);
+    expect(r.disclaimer).toMatch(/confirmed on site/i);
+    expect(r.margin).toBeCloseTo(0.45, 2);
+  });
+
+  test('derives perimeter from footprint when none is supplied (square approximation)', () => {
+    // perimeter = 4·√10000 = 400, so the priced result matches the explicit case.
+    const derived = priceCommercialPest({ footprint: 10000 });
+    expect(derived.perimeter).toBe(400);
+    expect(derived.annual).toBe(2280);
+  });
+
+  test('prices off the building footprint resolved from homeSqFt through the engine', () => {
+    const est = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 8000,
+      lotSqFt: 40000,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const pest = est.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(pest).toBeTruthy();
+    expect(pest.quoteRequired).toBe(false);
+    expect(pest.annual).toBeGreaterThan(0);
+    expect(pest.footprint).toBeGreaterThan(0);
+  });
+
+  test('falls back to a MANUAL quote when no real building footprint is available', () => {
+    // Direct call: no building/home/footprint → resolvePestFootprint defaults to
+    // 2,000 sqft, which must NOT auto-price (it would bill below the real
+    // building). (Regression for the PR bot's P0.)
+    const r = priceCommercialPest({ lotSqFt: 40000 });
+    expect(r.quoteRequired).toBe(true);
+    expect(r.requiresManualReview).toBe(true);
+    expect(r.estimatedPricing).toBe(false);
+    expect(r.annual).toBeNull();
+    expect(r.manualReviewReasons).toContain('commercial_pest_missing_building_footprint');
+  });
+
+  test('a lot-only commercial pest estimate routes to a manual quote, not a priced line', () => {
+    const est = generateEstimate({
+      propertyType: 'commercial',
+      lotSqFt: 40000,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const pest = est.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(pest).toBeTruthy();
+    expect(pest.quoteRequired).toBe(true);
+    // Not an active/priced service.
+    expect(est.waveGuard.activeServices).not.toContain('commercial_pest');
+  });
+
+  test('buildingSizeMeasured:false (public synthetic 2,000 sqft) forces a manual pest quote', () => {
+    // The public wizard seeds homeSqFt=2000 when the lookup found no building —
+    // a real-looking footprint that must NOT auto-price commercial pest. The
+    // public-quote route flags it via buildingSizeMeasured:false. (Regression for
+    // the PR bot's synthetic-footprint P1.)
+    const synthetic = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 2000,
+      lotSqFt: 40000,
+      buildingSizeMeasured: false,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const sPest = synthetic.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(sPest.quoteRequired).toBe(true);
+    expect(synthetic.waveGuard.activeServices).not.toContain('commercial_pest');
+
+    // A MEASURED 2,000 sqft building (flag true / admin undefined) still prices.
+    const measured = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 2000,
+      lotSqFt: 40000,
+      buildingSizeMeasured: true,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    expect(measured.lineItems.find((l) => l.service === 'commercial_pest').quoteRequired).toBe(false);
+
+    // Direct-call: the option also forces manual even with a real footprint.
+    expect(priceCommercialPest({ footprint: 2000 }, { buildingSizeMeasured: false }).quoteRequired).toBe(true);
+  });
+});
+
 describe('generateEstimate — commercial integration', () => {
   const commercialInput = {
     propertyType: 'commercial',
@@ -157,7 +261,7 @@ describe('generateEstimate — commercial integration', () => {
     },
   };
 
-  test('prices commercial lawn + tree/shrub, keeps commercial pest manual', () => {
+  test('prices commercial lawn + tree/shrub + pest (ALL commercial auto-prices)', () => {
     const est = generateEstimate(commercialInput);
     const byService = Object.fromEntries(est.lineItems.map((l) => [l.service, l]));
 
@@ -165,9 +269,12 @@ describe('generateEstimate — commercial integration', () => {
     expect(byService.commercial_lawn.annual).toBeGreaterThan(0);
     expect(byService.commercial_tree_shrub.quoteRequired).toBe(false);
     expect(byService.commercial_tree_shrub.annual).toBeGreaterThan(0);
-    // Pest still manual.
-    expect(byService.commercial_pest.quoteRequired).toBe(true);
-    expect(byService.commercial_pest.annual).toBeFalsy();
+    // Pest now auto-prices too (owner directive 2026-06-29: ALL commercial auto).
+    expect(byService.commercial_pest.quoteRequired).toBe(false);
+    expect(byService.commercial_pest.annual).toBeGreaterThan(0);
+    // Commercial pest is FL-taxed (nonresidential_pest_control), unlike lawn/tree.
+    expect(byService.commercial_pest.taxable).toBe(true);
+    expect(byService.commercial_pest.taxCategory).toBe('nonresidential_pest_control');
     // No residential pricers fired.
     expect(byService.lawn_care).toBeUndefined();
     expect(byService.tree_shrub).toBeUndefined();
@@ -178,13 +285,14 @@ describe('generateEstimate — commercial integration', () => {
     const est = generateEstimate(commercialInput);
     const lawn = est.lineItems.find((l) => l.service === 'commercial_lawn');
     const ts = est.lineItems.find((l) => l.service === 'commercial_tree_shrub');
+    const pest = est.lineItems.find((l) => l.service === 'commercial_pest');
 
-    expect(est.summary.recurringAnnualAfterDiscount).toBeCloseTo(lawn.annual + ts.annual, 0);
+    expect(est.summary.recurringAnnualAfterDiscount).toBeCloseTo(lawn.annual + ts.annual + pest.annual, 0);
     // Flat pricing — before == after (no WaveGuard / recurring-customer discount).
     expect(est.summary.recurringAnnualBeforeDiscount).toBeCloseTo(est.summary.recurringAnnualAfterDiscount, 0);
     expect(est.summary.waveGuardSavings).toBe(0);
     expect(est.waveGuard.activeServices).toEqual(
-      expect.arrayContaining(['commercial_lawn', 'commercial_tree_shrub'])
+      expect.arrayContaining(['commercial_lawn', 'commercial_tree_shrub', 'commercial_pest'])
     );
   });
 

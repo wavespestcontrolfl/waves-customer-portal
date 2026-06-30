@@ -69,11 +69,11 @@ function numberOrNull(...values) {
 
 function isManualQuoteLine(line = {}) {
   if (line?.quoteRequired === true || line?.requiresManualReview === true) return true;
-  // Priced commercial programs (commercial_lawn / commercial_tree_shrub
-  // auto_estimate, owner directive 2026-06-28) carry an annual and flow as
-  // normal priced recurring lines shown to the lead. Only a commercial line
-  // with NO auto price (e.g. commercial pest, which stays manual) is a manual
-  // quote line.
+  // Priced commercial programs (commercial_lawn / commercial_tree_shrub /
+  // commercial_pest auto_estimate — owner directive: ALL commercial auto-prices)
+  // carry an annual and flow as normal priced recurring lines shown to the lead.
+  // Only a commercial line with NO auto price (e.g. a mosquito/termite/rodent
+  // service that collapses to a manual commercial_pest quote) is a manual line.
   if (String(line?.service || '').startsWith('commercial_')) {
     const hasAutoPrice = Number(line?.annual) > 0 || Number(line?.monthly) > 0 || Number(line?.price) > 0;
     return !hasAutoPrice;
@@ -338,6 +338,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
     const {
       leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
+      buildingSizeConfirmed,
       lotSqFt, stories, propertyType, category, isCommercial, commercialSubtype,
       enriched, services, attribution,
     } = req.body || {};
@@ -408,8 +409,38 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // sees a ±5% range (variance_low/high below) so AI misclassification has
     // headroom. Zero retroactive impact: no quote_wizard leads existed when
     // this landed.
+    // The confirm step seeds homeSqFt to a synthetic 2,000 default when the
+    // lookup didn't measure the building (QuotePage.jsx). Commercial PEST prices
+    // off the BUILDING footprint (not lot-derivable), so flag whether we have a
+    // MEASURED building size — priceCommercialPest falls back to a manual quote
+    // when false rather than auto-pricing off the synthetic default. (Residential
+    // and commercial lawn/tree ignore this flag.)
+    // Commercial pest prices off the building FOOTPRINT. Resolve a real footprint
+    // with correct per-source semantics — footprintSqFt/buildingSqFt are already
+    // a footprint; homeSqFt/livingArea (and a user-CONFIRMED client homeSqFt) are
+    // living area ÷ stories (mirrors resolvePestFootprint + livingAreaToFootprint).
+    // Only the untouched synthetic 2,000 confirm default leaves this null → manual.
+    const storiesNum = Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1));
+    const livingAreaFootprint = (v) => Math.max(1, Math.round(Number(v) / storiesNum));
+    const realFootprintSqFt = (() => {
+      // A CONFIRMED building size (lookup-seeded, then possibly hand-corrected on
+      // the confirm step) wins over the enriched measurement — the customer may
+      // have corrected a stale lookup value (e.g. 5,000 → 20,000 sq ft).
+      if (buildingSizeConfirmed === true && Number(homeSqFt) > 0) return livingAreaFootprint(homeSqFt);
+      if (Number(ep.footprintSqFt) > 0) return Number(ep.footprintSqFt);
+      if (Number(ep.buildingSqFt) > 0) return Number(ep.buildingSqFt);
+      if (Number(ep.homeSqFt) > 0) return livingAreaFootprint(ep.homeSqFt);
+      if (Number(ep.livingAreaSqFt) > 0) return livingAreaFootprint(ep.livingAreaSqFt);
+      return null;
+    })();
+    const buildingSizeMeasured = realFootprintSqFt != null;
     const engineInput = {
       homeSqFt: sqft,
+      // For COMMERCIAL, pass the resolved footprint explicitly (resolvePestFootprint
+      // reads footprintSqFt BEFORE homeSqFt, so the synthetic confirm default can't
+      // win and there's no double ÷-stories). Residential is unchanged.
+      ...(commercialDetected && realFootprintSqFt != null ? { footprintSqFt: realFootprintSqFt } : {}),
+      buildingSizeMeasured,
       stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
       lotSqFt: lot,
       propertyType: commercialDetected ? 'commercial' : (propertyType || ep.propertyType || 'Single Family'),
@@ -1096,8 +1127,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
 
     // has_setup_fee flags the $99 WaveGuard initial fee (recurring pest only).
-    // UI notes this is waivable with annual prepay.
-    const hasSetupFee = !!services.pest;
+    // UI notes this is waivable with annual prepay. Commercial accounts are
+    // non-members with NO WaveGuard setup fee (owner directive), so suppress it
+    // even though commercial pest sets services.pest.
+    const hasSetupFee = !!services.pest && !commercialDetected;
 
     // Confidence flag: when satellite enrichment came back empty (new construction,
     // missing imagery, AI couldn't classify), widen the customer-facing range from

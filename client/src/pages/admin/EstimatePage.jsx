@@ -918,13 +918,22 @@ function EstimateToolView() {
       "svcTermiteBait",
     ];
     const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
-    // Commercial LAWN now auto-prices (a priced recurring line); only commercial
-    // PEST stays a manual quote. So lawn counts toward recurring, not manual.
+    // ALL commercial services with an auto-pricer (lawn, pest, tree/shrub) now
+    // price instantly as recurring lines. Commercial mosquito / termite-bait
+    // have no pricer yet and collapse to a manual commercial quote.
+    const commercialAutoKeys = ["svcLawn", "svcPest", "svcTs"];
+    const commercialManualKeys = ["svcMosquito", "svcTermiteBait"];
+    const commercialAutoPricedCount =
+      commercialDetected ? commercialAutoKeys.filter((k) => form[k]).length : 0;
     const commercialManualQuoteCount =
-      commercialDetected ? ["svcPest"].filter((k) => form[k]).length : 0;
-    const recurringCount = qualifyingRecurringKeys
-      .filter((k) => form[k] && !(commercialDetected && k === "svcPest"))
-      .length;
+      commercialDetected ? commercialManualKeys.filter((k) => form[k]).length : 0;
+    // Commercial lines are FLAT / non-WaveGuard (excludeFromPctDiscount) — they
+    // NEVER count toward the WaveGuard tier or its % discount. So a commercial
+    // estimate has a WaveGuard recurringCount of 0 and shows a commercial
+    // non-member state, not a fake Silver/Gold bundle discount.
+    const recurringCount = commercialDetected
+      ? 0
+      : qualifyingRecurringKeys.filter((k) => form[k]).length;
     const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
     // Tier logic
@@ -934,8 +943,9 @@ function EstimateToolView() {
       2: { name: "Silver", discount: 0.1 },
       3: { name: "Gold", discount: 0.15 },
     };
-    const tier =
-      recurringCount >= 4
+    const tier = commercialDetected
+      ? { name: "Commercial", discount: 0 }
+      : recurringCount >= 4
         ? { name: "Platinum", discount: 0.2 }
         : tierMap[recurringCount] || tierMap[0];
 
@@ -951,7 +961,7 @@ function EstimateToolView() {
         Math.round((sqft * 0.022 + 20) * (freqMult[form.pestFreq] || 1)),
       );
     }
-    if (form.svcTs)
+    if (form.svcTs && !commercialDetected)
       approx.ts = Math.max(
         45,
         Math.round((Number(form.bedArea) || lotSqft * 0.15) * 0.012 + 30),
@@ -1011,11 +1021,11 @@ function EstimateToolView() {
       "svcExclusion",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
-    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
+    const anySelected = recurringCount > 0 || commercialAutoPricedCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
 
     return {
       recurringCount,
-      totalRecurringCount: recurringCount + separateRecurringCount + commercialManualQuoteCount,
+      totalRecurringCount: recurringCount + commercialAutoPricedCount + separateRecurringCount + commercialManualQuoteCount,
       commercialManualQuoteCount,
       onetimeCount,
       tier,
@@ -1567,6 +1577,12 @@ function EstimateToolView() {
       enrichedProfile ||
       (form.svcBedbug && (bedBugOnlyManual || hasManualPropertyDimensions));
     const hasServerOnlyService = !!form.svcWdo;
+    // Commercial estimates are server-priced: the cost-buildup commercial
+    // pricers (lawn / tree / pest) live ONLY in the server engine. Force
+    // commercial through the server calculator whenever we have a lookup or
+    // manual dimensions, so a commercial estimate never falls back to the
+    // deprecated client engine (which would persist a $0 manual quote).
+    const canUseServerForCommercial = formIsCommercial && (enrichedProfile || hasManualPropertyDimensions);
 
     if (form.svcBedbug && hasLawnPricedService && !enrichedProfile && !hasManualLawnDimensions) {
       alert("Enter lot size or run Property Lookup before generating a bed bug estimate with lawn services.");
@@ -1578,9 +1594,16 @@ function EstimateToolView() {
       return;
     }
 
+    // Without dimensions or a lookup the server can't size a commercial job —
+    // block (with guidance) rather than fall through to the client engine.
+    if (formIsCommercial && !canUseServerForCommercial) {
+      alert("Enter home or lot sq ft, or run Property Lookup, to price a commercial estimate.");
+      return;
+    }
+
     // Bed bug pricing is server-only. Without lookup data, keep the legacy
     // dimension guard for any non-bed-bug services still selected.
-    if (enrichedProfile || canUseServerForBedBug || hasServerOnlyService) {
+    if (enrichedProfile || canUseServerForBedBug || hasServerOnlyService || canUseServerForCommercial) {
       try {
         // Don't overwrite lookup status — keep property specs visible
 
@@ -2996,12 +3019,12 @@ function EstimateToolView() {
               {form.svcPest && commercialDetected && (
                 <div style={{
                   ...sSubOpts,
-                  background: "rgba(245,158,11,0.12)",
-                  border: "1px solid rgba(245,158,11,0.45)",
-                  color: C.amber,
+                  background: "rgba(113,113,122,0.10)",
+                  border: "1px solid rgba(113,113,122,0.30)",
+                  color: C.textBody || C.muted,
                   fontSize: 13,
                 }}>
-                  Commercial pest is set to manual quote. Residential pest pricing is suppressed.
+                  Commercial pest is auto-priced (estimated — confirmed on site). Residential pest pricing is suppressed.
                 </div>
               )}
               {form.svcPest && !commercialDetected && (
@@ -3131,8 +3154,8 @@ function EstimateToolView() {
                     color: C.amber,
                   }}
                 >
-                  {livePreview.commercialManualQuoteCount} commercial lawn/pest selection
-                  {livePreview.commercialManualQuoteCount > 1 ? "s" : ""} set to manual quote.
+                  {livePreview.commercialManualQuoteCount} commercial selection
+                  {livePreview.commercialManualQuoteCount > 1 ? "s" : ""} (mosquito / termite) set to manual quote.
                 </div>
               )}
               <div style={sSvcSection}>One-Time Services</div>

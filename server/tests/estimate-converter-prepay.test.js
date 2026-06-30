@@ -13,6 +13,7 @@ const {
   shouldIncludeWaveGuardSetupFeeForRecurring,
   shouldCreateDraftInvoiceForRecurring,
   shouldSuppressRecurringConversion,
+  resolveCommercialPrepayTaxRate,
 } = require('../services/estimate-converter');
 
 describe('estimate converter annual prepay amount', () => {
@@ -386,5 +387,98 @@ describe('estimate converter annual prepay amount', () => {
       firstScheduledServiceId: null,
       firstApplicationAmount: 128.45,
     })).toBe(false);
+  });
+});
+
+describe('commercial prepay blended tax rate (taxable pest share only)', () => {
+  test('pest-only commercial prepay is fully taxable (7%)', () => {
+    expect(resolveCommercialPrepayTaxRate([
+      { service: 'commercial_pest', annual: 2280, taxable: true },
+    ])).toBeCloseTo(0.07, 4);
+  });
+
+  test('lawn/tree-only commercial prepay is NOT taxed (lawn_spraying_or_treatment exempt)', () => {
+    expect(resolveCommercialPrepayTaxRate([
+      { service: 'commercial_lawn', annual: 4689, taxable: false },
+      { service: 'commercial_tree_shrub', annual: 2412, taxable: false },
+    ])).toBe(0);
+  });
+
+  test('mixed plan blends the rate to the taxable (pest) share only', () => {
+    // pest 2000 of 10000 total → 20% taxable → 0.20 * 0.07 = 0.014.
+    const rate = resolveCommercialPrepayTaxRate([
+      { service: 'commercial_pest', annual: 2000, taxable: true },
+      { service: 'commercial_lawn', annual: 8000, taxable: false },
+    ]);
+    expect(rate).toBeCloseTo(0.014, 4);
+    // Applied to the $10k prepay this yields $140 tax = exactly 7% of the $2k pest.
+    expect(Math.round(10000 * rate * 100) / 100).toBe(140);
+  });
+
+  test('all-discountable mix: the prepay discount cancels out (same rate pre/post-discount)', () => {
+    // pest + lawn both discountable → both ×0.95, so the taxable share is
+    // unchanged by the discount. 2000/10000 → 0.014.
+    const rate = resolveCommercialPrepayTaxRate(
+      [
+        { service: 'commercial_pest', annual: 2000, taxable: true },
+        { service: 'commercial_lawn', annual: 8000, taxable: false },
+      ],
+      { prepayDiscountApplied: true },
+    );
+    expect(rate).toBeCloseTo(0.014, 4);
+  });
+
+  test('taxable pest + NON-discountable foam: rate uses post-discount allocation', () => {
+    // pest 2000 (discountable, taxable) + foam 2000 (non-discountable, non-taxable).
+    // Post-discount invoice = 2000*0.95 + 2000 = 1900 + 2000 = 3900.
+    // taxable post-discount = 1900. rate = 1900*0.07/3900 = 0.0341.
+    const rate = resolveCommercialPrepayTaxRate(
+      [
+        { service: 'commercial_pest', annual: 2000, taxable: true },
+        { service: 'foam_recurring', annual: 2000, taxable: false },
+      ],
+      { prepayDiscountApplied: true },
+    );
+    expect(rate).toBeCloseTo((1900 * 0.07) / 3900, 4);
+    // The tax on the $3,900 invoice is exactly 7% of the discounted $1,900 pest.
+    expect(Math.round(3900 * rate * 100) / 100).toBeCloseTo(133.0, 1);
+  });
+
+  test('keys off the service even when the taxable flag was dropped on a save path', () => {
+    // 50/50 pest+lawn, pest flag missing → still 0.5 * 0.07 = 0.035.
+    expect(resolveCommercialPrepayTaxRate([
+      { service: 'commercial_pest', annual: 1000 },
+      { service: 'commercial_lawn', annual: 1000 },
+    ])).toBeCloseTo(0.035, 4);
+  });
+
+  test('empty / zero-total recurring set yields a 0 rate (no divide-by-zero)', () => {
+    expect(resolveCommercialPrepayTaxRate([])).toBe(0);
+    expect(resolveCommercialPrepayTaxRate([{ service: 'commercial_pest', annual: 0 }])).toBe(0);
+  });
+
+  test('baseRate honors exemptions and non-7% counties (not hardcoded)', () => {
+    const rows = [
+      { service: 'commercial_pest', annual: 2000, taxable: true },
+      { service: 'commercial_lawn', annual: 8000, taxable: false },
+    ];
+    // Tax-exempt customer → effective baseRate 0 → no tax at all.
+    expect(resolveCommercialPrepayTaxRate(rows, { baseRate: 0 })).toBe(0);
+    // A 6.5% county (e.g. Lee) → blended on the 20% pest share = 0.013, not 0.014.
+    expect(resolveCommercialPrepayTaxRate(rows, { baseRate: 0.065 })).toBeCloseTo(0.2 * 0.065, 4);
+    // Default (no baseRate) still falls back to the FL 7%.
+    expect(resolveCommercialPrepayTaxRate(rows)).toBeCloseTo(0.2 * 0.07, 4);
+  });
+
+  test('full-precision rate: a tiny taxable share still produces the right tax dollars', () => {
+    // pest $50 of $50,050 → share ~0.000999 → rate ~0.0000699. Rounding the rate
+    // to 4 dp would drop the tax; full precision keeps it. (Regression for the
+    // PR bot's rate-rounding P1.)
+    const rate = resolveCommercialPrepayTaxRate([
+      { service: 'commercial_pest', annual: 50, taxable: true },
+      { service: 'commercial_lawn', annual: 50000, taxable: false },
+    ]);
+    // InvoiceService computes tax = round(invoiceTotal * rate) → exactly 7% of $50.
+    expect(Math.round(50050 * rate * 100) / 100).toBe(3.5);
   });
 });

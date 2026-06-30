@@ -20,7 +20,7 @@ const RECURRING_SERVICES = new Set([
   // commercial_lawn line (quoteRequired, no annual) is still possible for
   // lawn-adjacent one-time services, so the recurring svcAdd below guards on
   // .annual to only pick up the priced line.
-  'commercial_lawn', 'commercial_tree_shrub',
+  'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest',
 ]);
 
 const ONE_TIME_SERVICES = new Set([
@@ -388,6 +388,7 @@ function mapV1ToLegacyShape(v1Result) {
   // commercial_lawn quote line is never mistaken for the priced program).
   const commLawnLI = lineItems.find(l => l.service === 'commercial_lawn' && l.annual);
   const commTsLI = lineItems.find(l => l.service === 'commercial_tree_shrub' && l.annual);
+  const commPestLI = lineItems.find(l => l.service === 'commercial_pest' && l.annual);
 
   // Pest → R.pest, R.pestTiers
   if (pestLI) {
@@ -661,6 +662,7 @@ function mapV1ToLegacyShape(v1Result) {
   };
   commAdd('Commercial Lawn Treatment', commLawnLI, 'commercial_lawn');
   commAdd('Commercial Tree & Shrub', commTsLI, 'commercial_tree_shrub');
+  commAdd('Commercial Pest Control', commPestLI, 'commercial_pest');
 
   // One-time + specialty split
   const v1OtItems = [];
