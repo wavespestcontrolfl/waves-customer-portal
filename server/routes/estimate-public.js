@@ -57,7 +57,9 @@ const {
 const {
   estimateDataHasUnresolvedManagerApproval,
   commercialRiskTypeReviewNeeded,
+  commercialLowConfidenceRange,
   commercialLowConfidenceRequiresSiteQuote,
+  COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT,
 } = require('../services/estimate-delivery-options');
 const {
   createEstimateAddServiceRequest,
@@ -11421,8 +11423,22 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
 }
 
 function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) {
+  // A NARROW low-confidence commercial estimate (LOW pricing confidence, ±20%
+  // band ≤ $300/mo swing) stays self-serve approvable, but the customer sees the
+  // price as a "$X–$Y/mo, confirmed on site" range instead of a false-precision
+  // number. The WIDE case is already force-converted to a site-confirmation quote
+  // (resolveEstimateQuoteRequirement), so gate the range marker on !forceSiteQuote.
+  // PriceCard derives the band from the displayed price using this pct, so the
+  // range tracks whatever cadence the customer selects (no stale fixed bounds).
+  const lowConfidenceRange = commercialLowConfidenceRange(estData);
+  const markLowConfidenceRange = lowConfidenceRange.hasLowConfidence && !lowConfidenceRange.forceSiteQuote;
+  const withRangeMarker = (frequency) => (
+    markLowConfidenceRange && frequency && frequency.quoteRequired !== true
+      ? { ...frequency, lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT }
+      : frequency
+  );
   const contractPayload = Array.isArray(payload.frequencies)
-    ? { ...payload, frequencies: payload.frequencies.map(normalizePricingFrequencyTotals) }
+    ? { ...payload, frequencies: payload.frequencies.map((frequency) => withRangeMarker(normalizePricingFrequencyTotals(frequency))) }
     : payload;
   const services = buildPricingServices(contractPayload, estimate, estData);
   const combinedRecurring = buildCombinedRecurring(contractPayload, estimate, estData, services);

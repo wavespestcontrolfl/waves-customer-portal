@@ -113,6 +113,17 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const savings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
   // True daily rate: annual cost / 365 (monthly * 12 / 365).
   const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;
+  // A narrow low-confidence commercial line prices as a ±pct RANGE tied to the
+  // displayed cadence price ("$X–$Y/mo, confirmed on site"). The server flags the
+  // frequency with lowConfidenceRangePct; the WIDE case is already quote-required
+  // upstream (site-confirmation), so this only fires for the self-serve narrow band.
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const lowConfidenceRangePct = quoteRequired ? 0 : Number(frequency.lowConfidenceRangePct) || 0;
+  const showLowConfidenceRange = lowConfidenceRangePct > 0 && cadencePrice != null && cadencePrice > 0;
+  const rangeLow = showLowConfidenceRange ? round2(cadencePrice * (1 - lowConfidenceRangePct)) : null;
+  const rangeHigh = showLowConfidenceRange ? round2(cadencePrice * (1 + lowConfidenceRangePct)) : null;
+  const annualRangeLow = showLowConfidenceRange && annual ? round2(Number(annual) * (1 - lowConfidenceRangePct)) : null;
+  const annualRangeHigh = showLowConfidenceRange && annual ? round2(Number(annual) * (1 + lowConfidenceRangePct)) : null;
   const manualDiscount = frequency.manualDiscount && Number(frequency.manualDiscount.amount) > 0
     ? frequency.manualDiscount
     : null;
@@ -136,7 +147,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       marginBottom: 6,
     }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginTop: 8 }}>
-        {savings > 0 ? (
+        {savings > 0 && !showLowConfidenceRange ? (
           <span style={{
             fontFamily: "'Source Serif 4', Georgia, serif",
             fontSize: 26,
@@ -149,12 +160,16 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         ) : null}
         <span style={{
           fontFamily: "'Source Serif 4', Georgia, serif",
-          fontSize: quoteRequired ? 42 : 58,
+          fontSize: quoteRequired ? 42 : showLowConfidenceRange ? 40 : 58,
           fontWeight: 500,
           color: W.blueDeeper,
           lineHeight: 1,
         }}>
-        {quoteRequired ? 'Quote required' : fmtMoney(cadencePrice)}
+        {quoteRequired
+          ? 'Quote required'
+          : showLowConfidenceRange
+          ? `${fmtMoney(rangeLow)}–${fmtMoney(rangeHigh)}`
+          : fmtMoney(cadencePrice)}
         </span>
         {!quoteRequired ? (
           <span style={{ fontSize: 24, fontWeight: 500, color: '#6B7280' }}>{periodLabel}</span>
@@ -175,7 +190,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         ) : null}
       </div>
 
-      {savings > 0 && waveGuardTier ? (
+      {savings > 0 && waveGuardTier && !showLowConfidenceRange ? (
         <div style={{ marginTop: 12, color: W.green, fontSize: 16, fontWeight: 800 }}>
           You save {fmtMoney(savings)}{periodLabel} with WaveGuard {waveGuardTier}
         </div>
@@ -183,7 +198,15 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
 
       {!quoteRequired && annual ? (
         <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8 }}>
-          {fmtMoney(annual)} / year
+          {showLowConfidenceRange
+            ? `${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`
+            : `${fmtMoney(annual)} / year`}
+        </div>
+      ) : null}
+
+      {showLowConfidenceRange ? (
+        <div style={{ fontSize: 14, color: '#475569', marginTop: 10, lineHeight: 1.5, fontWeight: 600 }}>
+          Estimated range — we confirm your exact price with a quick site visit before your first service.
         </div>
       ) : null}
 
@@ -220,7 +243,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </div>
       ) : null}
 
-      {dayPrice ? (
+      {dayPrice && !showLowConfidenceRange ? (
         <div style={{ fontSize: 15, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
           {(wording?.dayLine || DEFAULT_WORDING.dayLine).replace('{amount}', fmtMoney(dayPrice))}
         </div>

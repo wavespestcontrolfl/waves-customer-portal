@@ -11,7 +11,7 @@ const {
   commercialLowConfidenceRange,
   commercialLowConfidenceRequiresSiteQuote,
 } = require('../services/estimate-delivery-options');
-const { resolveEstimateQuoteRequirement, renderPage } = require('../routes/estimate-public');
+const { resolveEstimateQuoteRequirement, renderPage, attachPublicPricingContract } = require('../routes/estimate-public');
 const { generateEstimate } = require('../services/pricing-engine');
 
 const recurring = (services) => ({ result: { recurring: { services } } });
@@ -97,6 +97,37 @@ describe('resolveEstimateQuoteRequirement — low-confidence backstop', () => {
   test('wide low-confidence → quote-required, reason commercial_low_confidence_site_confirmation', () => {
     expect(resolveEstimateQuoteRequirement(null, recurring([LOW(12000)])))
       .toEqual(expect.objectContaining({ quoteRequired: true, reason: 'commercial_low_confidence_site_confirmation' }));
+  });
+});
+
+describe('attachPublicPricingContract — narrow low-confidence range marker (React price cards)', () => {
+  // A NARROW low-confidence commercial line stays self-serve approvable but its
+  // frequencies get lowConfidenceRangePct so PriceCard shows a "$X–$Y/mo" band.
+  const estData = (annual) => ({
+    result: { recurring: { services: [
+      { service: 'commercial_lawn', name: 'Commercial Turf Treatment Program', pricingConfidence: 'LOW', mo: annual / 12, annual, estimatedPricing: true },
+    ] } },
+  });
+  const payload = (annual) => ({ frequencies: [{ key: 'monthly', label: 'Commercial Turf Treatment Program', monthly: annual / 12, annual }] });
+  const firstFreq = (contract) => contract.services?.[0]?.frequencies?.[0] || {};
+
+  test('narrow LOW commercial → frequencies carry lowConfidenceRangePct 0.20', () => {
+    // $400/mo → swing $160 (< $300) → narrow, approvable, ranged
+    const contract = attachPublicPricingContract(payload(4800), {}, estData(4800));
+    expect(firstFreq(contract).lowConfidenceRangePct).toBe(0.2);
+    expect(contract.quoteRequired).not.toBe(true);
+  });
+
+  test('wide LOW commercial → NO range marker (force-manual handled upstream)', () => {
+    // $1000/mo → swing $400 (> $300) → forceSiteQuote, no self-serve range
+    const contract = attachPublicPricingContract(payload(12000), {}, estData(12000));
+    expect(firstFreq(contract).lowConfidenceRangePct).toBeUndefined();
+  });
+
+  test('non-commercial LOW line → no range marker', () => {
+    const resiData = { result: { recurring: { services: [{ service: 'lawn_care', pricingConfidence: 'LOW', mo: 50, annual: 600 }] } } };
+    const contract = attachPublicPricingContract({ frequencies: [{ key: 'monthly', monthly: 50, annual: 600 }] }, {}, resiData);
+    expect(firstFreq(contract).lowConfidenceRangePct).toBeUndefined();
   });
 });
 
