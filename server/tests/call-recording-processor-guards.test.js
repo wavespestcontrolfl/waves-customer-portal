@@ -938,6 +938,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     summarizeKnownCaller,
     isNonLeadCallContent,
     leadContactCompleteness,
+    hasWorkableLeadSignal,
     normalizeCallExtraction,
   } = CallRecordingProcessor._test;
 
@@ -992,6 +993,60 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
 
     expect(leadContactCompleteness({ first_name: 'Sam' }))
       .toEqual({ complete: false, missing: ['last_name', 'service_address', 'email'] });
+  });
+
+  test('creates a customer-less lead for a nameless new prospect (no first name spoken)', () => {
+    // The dropped-call scenario: caller asked for a termite estimate, gave an
+    // address + email + service intent, but never stated a name — so the
+    // customer upsert (gated on first_name) was skipped. Before this fix that
+    // was a silent no_op / no_customer_match; now it's a workable lead.
+    // (Fictional PII: example.com + a 555-0100 reserved number.)
+    expect(hasWorkableLeadSignal({
+      extracted: {
+        matched_service: 'Liquid Termite Perimeter',
+        requested_service: 'termite prevention services',
+        email: 'prospect@example.com',
+        address_line1: '100 Example Loop',
+      },
+      phone: '+19415550100',
+    })).toBe(true);
+
+    // Address-only (no email) still reaches/locates them → workable.
+    expect(hasWorkableLeadSignal({
+      extracted: { requested_service: 'mosquito control', address_line1: '100 Example Loop' },
+      phone: '+19415550100',
+    })).toBe(true);
+
+    // Email-only (no address) also workable.
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'Pest Control', email: 'prospect@example.com' },
+      phone: '+19415550100',
+    })).toBe(true);
+  });
+
+  test('does NOT create a nameless lead without phone, service intent, or a reachback', () => {
+    const base = {
+      matched_service: 'Pest Control',
+      email: 'prospect@example.com',
+      address_line1: '100 Example Loop',
+    };
+    // No callback number → can't work it.
+    expect(hasWorkableLeadSignal({ extracted: base, phone: null })).toBe(false);
+    // No service intent → not a sales inquiry we can act on.
+    expect(hasWorkableLeadSignal({
+      extracted: { email: 'prospect@example.com', address_line1: '100 Example Loop' },
+      phone: '+19415550100',
+    })).toBe(false);
+    // Service intent but no email AND no address → nothing to reach/locate.
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'Pest Control' },
+      phone: '+19415550100',
+    })).toBe(false);
+    // Whitespace-only fields don't count.
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: '   ', email: '  ' },
+      phone: '+19415550100',
+    })).toBe(false);
   });
 
   test('normalizeCallExtraction carries is_lead + call_type through', () => {

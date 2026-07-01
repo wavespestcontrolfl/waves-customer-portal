@@ -199,6 +199,15 @@ const LEAD_PIPELINE_STAGES = new Set([
   'negotiating',
 ]);
 
+// Terminal lead statuses (`leads.status`). Mirrors admin-leads.js's own
+// "active lead" definition (status NOT IN these). The customer-less recovery
+// path reuses only ACTIVE leads — a denylist of these terminal outcomes rather
+// than an open-status allowlist, so every open pipeline status (estimate_sent /
+// estimate_viewed / estimate_drafted / awaiting_address / …) is covered without
+// enumerating a growing set, while won/lost/disqualified/duplicate rows fall
+// through to a fresh insert instead of hiding the inquiry on a closed lead.
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
+
 function shouldCreateCallLeadForCustomer(customer, { createdCustomerFromCall = false } = {}) {
   if (!customer) return false;
   if (createdCustomerFromCall) return true;
@@ -270,6 +279,24 @@ function leadContactCompleteness(fields = {}) {
   const present = (v) => !!String(v == null ? '' : v).trim();
   const missing = QUALIFYING_CONTACT_FIELDS.filter((key) => !present(fields[key]));
   return { complete: missing.length === 0, missing };
+}
+
+// A real new-sales prospect we can still work even though the customer upsert
+// was skipped — almost always because the caller never stated a name (the
+// customer create is gated on first_name). We still have a lead worth chasing
+// when there's a callback number, a concrete service interest, and at least one
+// way to reach or locate them (email or service address). Such leads are created
+// customer-less and UNqualified so they land in Needs Review for the office to
+// complete — they are never auto-converted to a customer and, because Step 6 and
+// the newsletter subscribe stay gated on `customerId`, never trigger outbound.
+// Spam/voicemail are early-returned before this runs; the caller still guards
+// is_spam + the non-lead content veto (isNonLeadCallContent) at the gate.
+function hasWorkableLeadSignal({ extracted = {}, phone = null } = {}) {
+  if (!phone) return false;
+  const text = (v) => String(v == null ? '' : v).trim();
+  const hasServiceIntent = !!(text(extracted.matched_service) || text(extracted.requested_service));
+  const hasReachback = !!(text(extracted.email) || text(extracted.address_line1));
+  return hasServiceIntent && hasReachback;
 }
 
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
@@ -2351,7 +2378,11 @@ const CallRecordingProcessor = {
     // had a chance to land, so a crash cannot mark the call processed early.
     const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam);
     const customerLanded = !!customerId;
-    const finalStatus = (customerExpected && !customerLanded) ? 'customer_creation_failed' : 'processed';
+    // Downgraded below if a customer-less recovery lead was expected but its
+    // insert failed — that lead is the only durable record for this call, and
+    // customerExpected is false, so a swallowed failure would otherwise look
+    // fully 'processed'.
+    let finalStatus = (customerExpected && !customerLanded) ? 'customer_creation_failed' : 'processed';
     await db('call_log').where({ id: call.id }).update({
       customer_id: customerId || call.customer_id,
       ai_extraction: JSON.stringify(extracted),
@@ -2381,24 +2412,46 @@ const CallRecordingProcessor = {
     const leadCustomer = customerId
       ? await db('customers').where({ id: customerId }).select('id', 'pipeline_stage').first().catch(() => null)
       : null;
-    // A new lead requires BOTH a customer record we can attach to AND call
-    // content that is actually a new-sales inquiry. The content veto stops
-    // existing-customer scheduling/complaint/billing calls (and the model's
-    // explicit is_lead=false) from spawning leads, even when the caller is still
-    // mid-pipeline (so the pipeline-stage gate alone wouldn't catch them).
+    // A customer-attached lead requires BOTH a customer record we can attach to
+    // AND call content that is actually a new-sales inquiry. The content veto
+    // stops existing-customer scheduling/complaint/billing calls (and the
+    // model's explicit is_lead=false) from spawning leads, even when the caller
+    // is still mid-pipeline (so the pipeline-stage gate alone wouldn't catch
+    // them).
     const nonLeadCall = isNonLeadCallContent(extracted);
-    const shouldCreateLead = customerId && !extracted.is_spam && !nonLeadCall
-      && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall });
-    if (!shouldCreateLead && customerId && !extracted.is_spam) {
+    // ...but a genuine new-sales inquiry we couldn't attach to a customer —
+    // because the caller never stated a name, so the customer upsert was skipped
+    // — is still a real lead the office must work. Create it customer-less so it
+    // lands in Needs Review (UNqualified: missing name) instead of being dropped
+    // to a silent no_op. Still gated by the non-lead content veto, so existing-
+    // customer / spam / wrong-number calls never take this path.
+    const workableUnnamedLead = !customerId && !nonLeadCall
+      && hasWorkableLeadSignal({ extracted, phone });
+    const shouldCreateLead = !extracted.is_spam && !nonLeadCall
+      && (
+        (customerId && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall }))
+        || workableUnnamedLead
+      );
+    if (!shouldCreateLead && !extracted.is_spam && (customerId || nonLeadCall)) {
       const skipReason = nonLeadCall
         ? `non-lead call (${extracted.call_type || (extracted.is_lead === false ? 'is_lead=false' : 'unknown')})`
         : `existing customer (${leadCustomer?.pipeline_stage || 'unknown'})`;
-      logger.info(`[call-proc] Skipping lead creation for ${skipReason}, customer ${customerId}`);
+      logger.info(`[call-proc] Skipping lead creation for ${skipReason}, customer ${customerId || 'none'}`);
     }
     if (shouldCreateLead) {
       try {
-        // Check if lead already exists for this phone
-        const existingLead = phone ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first() : null;
+        // Check if lead already exists for this phone. On the customer-less
+        // recovery path, reuse only an ACTIVE lead (status not terminal, not
+        // converted) so a recovered inquiry lands on an open row or a fresh one
+        // — never silently attached to a won/lost/disqualified/duplicate lead
+        // where it would not surface. The customer-attached path is unchanged —
+        // its shouldCreateCallLeadForCustomer gate already limits it to
+        // open-lead / newly-created customers.
+        let existingLeadQuery = phone ? db('leads').where('phone', phone) : null;
+        if (existingLeadQuery && workableUnnamedLead) {
+          existingLeadQuery = existingLeadQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
+        }
+        const existingLead = existingLeadQuery ? await existingLeadQuery.orderBy('created_at', 'desc').first() : null;
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -2435,8 +2488,11 @@ const CallRecordingProcessor = {
             lead_source_id: leadSourceId,
             customer_id: customerId,
             phone,
-            first_name: capitalizeName(extracted.first_name),
-            last_name: capitalizeName(extracted.last_name || ''),
+            // A name may be absent (caller never stated it) — store null, not an
+            // empty string, so leadContactCompleteness reads it as missing and
+            // the lead surfaces UNqualified for the office to complete.
+            first_name: capitalizeName(extracted.first_name) || null,
+            last_name: capitalizeName(extracted.last_name) || null,
             email: extracted.email || null,
             lead_type: 'inbound_call',
             first_contact_at: new Date(),
@@ -2447,7 +2503,7 @@ const CallRecordingProcessor = {
             status: 'new',
           }).returning('*');
           leadId = newLead.id;
-          logger.info(`[call-proc] Created new lead ${leadId} for ${extracted.first_name} ${extracted.last_name}`);
+          logger.info(`[call-proc] Created new lead ${leadId} (${maskPhone(phone)})${extracted.first_name ? '' : ' — no name captured'}`);
 
           // Untracked inbound call → no lead_source matched (caller reached the
           // main line / caller-ID didn't match a tracking number). These are the
@@ -2486,6 +2542,11 @@ const CallRecordingProcessor = {
         // conversion still counts). recordCallPpcAttribution dedupes by lead_id and
         // respects first-touch (a web-attributed lead keeps its source), so this
         // never double-counts.
+        // NOTE: stays gated on customerId, so a customer-less recovery lead from
+        // a paid tracking number gets no ad_service_attribution row yet — the
+        // lead keeps its lead_source_id and is attributed when it converts to a
+        // customer. Lead-only PPC attribution needs schema work on the
+        // customer-keyed ad_service_attribution table; deferred out of this PR.
         if (leadId && customerId && leadSourceRow
             && ['google_ads', 'facebook'].includes(leadSourceRow.source_type)) {
           require('./ads/call-attribution').recordCallPpcAttribution({
@@ -2553,7 +2614,12 @@ const CallRecordingProcessor = {
           });
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
-          leadUpdates.customer_id = customerId;
+          // Only ever SET the customer link, never clear it. The unnamed-lead
+          // path runs with customerId null and can reuse an existing lead found
+          // by phone — writing customer_id = null there would detach a lead
+          // already linked to a customer. Attach when we have one; otherwise
+          // leave whatever link the lead already had.
+          if (customerId) leadUpdates.customer_id = customerId;
           leadUpdates.updated_at = new Date();
           await db('leads').where({ id: leadId }).update(leadUpdates);
 
@@ -2589,6 +2655,28 @@ const CallRecordingProcessor = {
         }
       } catch (leadErr) {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
+      }
+    }
+
+    // A customer-less recovery lead is the ONLY durable record for this call, so
+    // a swallowed insert failure must not read as a clean 'processed'. Mark it
+    // failed, open review_status, AND write a triage_items row — the Needs Review
+    // inbox (admin-triage) is driven by triage_items, not review_status alone, so
+    // without this the failed recovery call would never surface for a human.
+    if (workableUnnamedLead && !leadId) {
+      finalStatus = 'lead_creation_failed';
+      logger.error(`[call-proc] Customer-less recovery lead did not persist for ${callSid} — flagged lead_creation_failed`);
+      try {
+        const failTriageItem = buildTriageItem({
+          callLogId: call.id,
+          flag: 'lead_creation_failed',
+          extraction: { meta: { call_summary: extracted.call_summary || null } },
+        });
+        await db('triage_items').insert(failTriageItem)
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore();
+      } catch (triageErr) {
+        logger.warn(`[call-proc] lead_creation_failed triage item insert skipped for ${callSid}: ${triageErr.message}`);
       }
     }
 
@@ -3153,9 +3241,10 @@ const CallRecordingProcessor = {
         processing_status: finalStatus,
         processing_token: null,
         processing_started_at: null,
-        // Address unverifiable / caller-not-owner / missing surname → open the
-        // call for human review instead of letting it look fully processed.
-        ...(bridgeNeedsConfirmation.length ? { review_status: 'open' } : {}),
+        // Address unverifiable / caller-not-owner / missing surname, or a
+        // customer-less recovery lead that failed to persist → open the call for
+        // human review instead of letting it look fully processed.
+        ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' ? { review_status: 'open' } : {}),
         updated_at: new Date(),
       });
     if (finalized === 0) {
@@ -3403,6 +3492,7 @@ CallRecordingProcessor._test = {
   summarizeKnownCaller,
   isNonLeadCallContent,
   leadContactCompleteness,
+  hasWorkableLeadSignal,
   transcribeRecording,
   extractCallDataV2,
   normalizeOpenAISegments,

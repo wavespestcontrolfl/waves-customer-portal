@@ -119,15 +119,21 @@ function buildLegacyShadowRouteDecision({
     }
   }
 
-  if (!customerId && !extracted.is_spam && !extracted.is_voicemail) {
+  // A customer-less recovery lead is still a real canonical write — only flag
+  // "no customer match" when we also created no lead, so lead-only recovery
+  // isn't recorded as a dropped call.
+  if (!customerId && !leadId && !extracted.is_spam && !extracted.is_voicemail) {
     addReason(blockedReasons, 'no_customer_match');
   }
+  if (leadId && !customerId) addReason(allowedReasons, 'lead_created_without_customer');
 
   let validatorRecommendation = 'needs_review';
   if (scheduleAccepted) {
     validatorRecommendation = 'auto_create_appointment';
   } else if (!blockedReasons.length && customerId) {
     validatorRecommendation = 'upsert_customer_only';
+  } else if (!blockedReasons.length && leadId) {
+    validatorRecommendation = 'create_lead';
   } else if (!appointmentDiscussed && !blockedReasons.length) {
     validatorRecommendation = 'upsert_customer_only';
   }
@@ -138,6 +144,7 @@ function buildLegacyShadowRouteDecision({
   else if (appointmentDiscussed && blockedReasons.length) finalActionTaken = 'needs_review';
   else if (createdCustomerFromCall) finalActionTaken = 'create_customer';
   else if (customerId) finalActionTaken = 'upsert_customer_only';
+  else if (leadId) finalActionTaken = 'create_lead';
   else if (extracted.is_spam) finalActionTaken = 'no_op_spam';
   else if (extracted.is_voicemail) finalActionTaken = 'no_op_voicemail';
 
