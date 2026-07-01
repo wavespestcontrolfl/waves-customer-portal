@@ -199,13 +199,14 @@ const LEAD_PIPELINE_STAGES = new Set([
   'negotiating',
 ]);
 
-// Active/workable lead statuses (`leads.status`) the customer-less recovery
-// path may reuse when it finds a lead by phone. An ALLOWLIST (not a closed-set
-// denylist) is deliberate: terminal statuses are open-ended (won/lost/converted
-// /disqualified/duplicate/unresponsive), so an unrecognized status falls through
-// to a fresh insert rather than silently attaching the recovered inquiry to a
-// closed row where it would never surface.
-const ACTIVE_LEAD_STATUSES = ['new', 'contacted', 'qualified'];
+// Terminal lead statuses (`leads.status`). Mirrors admin-leads.js's own
+// "active lead" definition (status NOT IN these). The customer-less recovery
+// path reuses only ACTIVE leads — a denylist of these terminal outcomes rather
+// than an open-status allowlist, so every open pipeline status (estimate_sent /
+// estimate_viewed / estimate_drafted / awaiting_address / …) is covered without
+// enumerating a growing set, while won/lost/disqualified/duplicate rows fall
+// through to a fresh insert instead of hiding the inquiry on a closed lead.
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
 
 function shouldCreateCallLeadForCustomer(customer, { createdCustomerFromCall = false } = {}) {
   if (!customer) return false;
@@ -2440,14 +2441,15 @@ const CallRecordingProcessor = {
     if (shouldCreateLead) {
       try {
         // Check if lead already exists for this phone. On the customer-less
-        // recovery path, reuse only an ACTIVE lead so a recovered inquiry lands
-        // as fresh, workable work instead of silently attaching to a terminal
-        // (won/lost/converted/disqualified/…) row. The customer-attached path is
-        // unchanged — its shouldCreateCallLeadForCustomer gate already limits it
-        // to open-lead / newly-created customers.
+        // recovery path, reuse only an ACTIVE lead (status not terminal, not
+        // converted) so a recovered inquiry lands on an open row or a fresh one
+        // — never silently attached to a won/lost/disqualified/duplicate lead
+        // where it would not surface. The customer-attached path is unchanged —
+        // its shouldCreateCallLeadForCustomer gate already limits it to
+        // open-lead / newly-created customers.
         let existingLeadQuery = phone ? db('leads').where('phone', phone) : null;
         if (existingLeadQuery && workableUnnamedLead) {
-          existingLeadQuery = existingLeadQuery.whereIn('status', ACTIVE_LEAD_STATUSES).whereNull('converted_at');
+          existingLeadQuery = existingLeadQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
         }
         const existingLead = existingLeadQuery ? await existingLeadQuery.orderBy('created_at', 'desc').first() : null;
 
