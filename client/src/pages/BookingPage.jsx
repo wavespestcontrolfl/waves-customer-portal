@@ -20,11 +20,14 @@ async function fetchEstimate(token) {
   return res.json();
 }
 
-async function confirmBooking(estimateId, customerId, date, startTime, notes) {
+async function confirmBooking(estimateId, estimateShareToken, customerId, date, startTime, notes) {
   const res = await fetch(`${API_BASE}/booking/confirm`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ estimate_id: estimateId, customer_id: customerId, slot_date: date, slot_start: startTime, customer_notes: notes }),
+    // estimate_share_token proves we hold the share link this estimate was
+    // loaded from — required for identity when the estimate is a quote-wizard
+    // one (raw wizard ids are public via the quote flow; share tokens are not).
+    body: JSON.stringify({ estimate_id: estimateId, estimate_share_token: estimateShareToken || undefined, customer_id: customerId, slot_date: date, slot_start: startTime, customer_notes: notes }),
   });
   return res.json();
 }
@@ -96,7 +99,7 @@ export default function BookingPage() {
     setLoading(true);
     try {
       const result = await confirmBooking(
-        estimate?.id, estimate?.customer_id,
+        estimate?.id, estimateToken, estimate?.customer_id,
         selectedDate, selectedSlot?.startTime24 || selectedSlot?.start,
         notes
       );

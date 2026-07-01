@@ -748,7 +748,7 @@ router.post('/find-slots', async (req, res, next) => {
 // { ok:true, body } | { ok:false, status, error }; throws on unexpected errors.
 async function createSelfBooking(payload = {}) {
     const {
-      estimate_id, pricing_estimate_id, estimate_token, customer_id, lead_id,
+      estimate_id, estimate_share_token, pricing_estimate_id, estimate_token, customer_id, lead_id,
       slot_date, slot_start, slot_end,
       technician_id,
       service_type,
@@ -798,6 +798,19 @@ async function createSelfBooking(payload = {}) {
       // source !== 'quote_wizard') resolve identity; quote handoffs are used for
       // PRICING only, via pricing_estimate_id.
       if (!custId && estimate && estimate.source !== 'quote_wizard') custId = estimate.customer_id;
+      // A quote-wizard estimate still resolves identity when the caller proves
+      // possession of its SHARE token (the legacy /book/:estimateToken page
+      // posts the token it loaded the estimate with). Share tokens are
+      // staff/system-issued to the estimate's own contact and are NEVER exposed
+      // by the public quote flow — unlike the raw id, which /public/quote/calculate
+      // returns to whoever ran the quote — so this keeps the legacy linked-booking
+      // path working for promoted wizard estimates without re-opening the
+      // forged-estimate_id identity hole.
+      if (!custId && estimate && estimate.source === 'quote_wizard'
+          && estimate.token && estimate_share_token
+          && String(estimate.token) === String(estimate_share_token)) {
+        custId = estimate.customer_id;
+      }
     }
     // NB: ?lead=<lead_id> is NOT trusted for identity. A lead_id is mintable
     // from a known phone/email via the public quote flow, so using it to resolve
