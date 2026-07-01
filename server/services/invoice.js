@@ -3260,4 +3260,10 @@ InvoiceService._internals = {
   isInvoiceNumberCollision,
 };
 
+// Exported for callers of voidOpenInvoicesForCancelledService that need to
+// post-check its silent skips: the sweep intentionally leaves money-in-flight /
+// manual-review invoices open without throwing, so a caller reporting an
+// auto-processing outcome must re-query with the same status set.
+InvoiceService.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
+
 module.exports = InvoiceService;
