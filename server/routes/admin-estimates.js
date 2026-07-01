@@ -11,6 +11,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
+  commercialRiskTypeReviewNeeded,
   validateEstimateDeliveryOptions,
 } = require('../services/estimate-delivery-options');
 const EmailTemplateLibrary = require('../services/email-template-library');
@@ -285,6 +286,11 @@ function assertEstimateSendable(estimate) {
     throw err;
   }
   assertEstimateManagerApprovalResolved(estimate);
+  if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
+    const err = new Error('Set the commercial business type before sending — it sets the pest/rodent service cadence.');
+    err.statusCode = 400;
+    throw err;
+  }
   if (estimateSendableAmount(estimate) <= 0) {
     const err = new Error('Estimate must have a positive monthly or one-time total before it can be sent.');
     err.statusCode = 400;
@@ -1189,6 +1195,7 @@ router.get('/', async (req, res, next) => {
           confirmedAppointment,
           automation: leadEstimateAutomationSummary(estData),
           pricingRisk: pricingRiskById.get(e.id) || null,
+          riskTypeNeedsReview: commercialRiskTypeReviewNeeded(estData),
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
         };
       }),

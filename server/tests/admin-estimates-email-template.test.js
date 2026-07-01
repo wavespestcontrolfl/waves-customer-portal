@@ -28,6 +28,7 @@ jest.mock('../services/estimate-delivery-options', () => ({
       item.managerApprovalSatisfied !== true
     ));
   }),
+  commercialRiskTypeReviewNeeded: jest.fn(() => false),
   validateEstimateDeliveryOptions: jest.fn(),
 }));
 jest.mock('../services/estimate-pricing-audit', () => ({

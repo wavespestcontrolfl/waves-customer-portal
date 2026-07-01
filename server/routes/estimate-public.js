@@ -56,6 +56,7 @@ const {
 } = require('../services/estimate-pricing-bundle-utils');
 const {
   estimateDataHasUnresolvedManagerApproval,
+  commercialRiskTypeReviewNeeded,
 } = require('../services/estimate-delivery-options');
 const {
   createEstimateAddServiceRequest,
@@ -1604,9 +1605,19 @@ function isPresent(value) {
   return value !== undefined && value !== null && String(value).trim() !== '';
 }
 
+// Reason tokens that get purpose-written customer copy instead of a humanized
+// token (mirrors client/src/lib/quoteDisplay). "commercial_risk_type_review"
+// would otherwise read "Commercial risk type review" (internal jargon).
+const FRIENDLY_QUOTE_REASONS = {
+  commercial_risk_type_review:
+    'Your Waves account manager will confirm this commercial service plan with you before it’s finalized.',
+};
+
 function humanizeQuoteReason(value) {
   if (!isPresent(value)) return '';
   const raw = String(value).trim();
+  const friendly = FRIENDLY_QUOTE_REASONS[raw.toLowerCase()];
+  if (friendly) return friendly;
   const looksLikeToken = raw.includes('_') || /^[A-Z0-9-]+$/.test(raw);
   if (!looksLikeToken) return raw;
   const sentence = raw
@@ -3346,7 +3357,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // emailed PDF the customer never received.
   const proposalPdfEmailed = estData?.proposalDelivery?.pdfEmailed === true;
   const quoteRequirementForDisplay = quoteRequired ? resolveEstimateQuoteRequirement(null, estData) : { reason: null };
-  const quoteDisplayReason = quoteRequired
+  // A commercial risk-type hold is an internal classification step (the account
+  // manager sets the business type), not a customer inspection — its banner/card
+  // copy is account-manager follow-up, like a proposal.
+  const commercialRiskType = quoteRequired
+    && (est.quoteRequiredReason || quoteRequirementForDisplay.reason) === 'commercial_risk_type_review';
+  const quoteDisplayReason = quoteRequired && !commercialRiskType
     ? quoteRequiredReasonText({ reason: est.quoteRequiredReason || quoteRequirementForDisplay.reason })
     : '';
   const locked = est.status === 'accepted' || quoteRequired;
@@ -4421,6 +4437,8 @@ ${shellTopBar()}
     ? `<div class="quote-required-banner">${proposalPdfEmailed
         ? 'Your formal proposal is attached as a PDF to the email we sent.'
         : 'Your Waves account manager has your formal proposal and will share the PDF with you directly.'} There\u2019s no online checkout for a commercial bid \u2014 your account manager will follow up to finalize. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
+    : commercialRiskType
+    ? `<div class="quote-required-banner">This is a commercial service plan \u2014 your Waves account manager will confirm the details with you and finalize it directly, so there\u2019s no online checkout for this one. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
     : `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.${quoteDisplayReason ? `<div style="margin-top:8px;font-weight:700">${escapeHtml(quoteDisplayReason)}</div>` : ''}</div>`) : ''}
 
   <div class="hero">
@@ -4633,8 +4651,10 @@ ${shellTopBar()}
     </div>
   </div>` : `
   <div class="final">
-    <h2>Inspection required to finish this quote</h2>
-    <p>${escapeHtml(quoteDisplayReason || 'This treatment needs a field review before we can finalize pricing or book it online.')}</p>
+    <h2>${commercialRiskType ? 'Your account manager will finalize this' : 'Inspection required to finish this quote'}</h2>
+    <p>${commercialRiskType
+      ? 'This is a commercial service plan. Your Waves account manager will confirm the details with you and finalize it directly, so there’s no online checkout for this one.'
+      : escapeHtml(quoteDisplayReason || 'This treatment needs a field review before we can finalize pricing or book it online.')}</p>
     <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
@@ -6508,11 +6528,14 @@ router.put('/:token/accept', async (req, res, next) => {
     if (quoteRequirement.quoteRequired) {
       const needsManagerApproval = quoteRequirement.reason === 'st_augustine_dethatching';
       const commercialProposal = quoteRequirement.reason === 'commercial_proposal';
+      const commercialRiskType = quoteRequirement.reason === 'commercial_risk_type_review';
       return res.status(409).json({
         error: needsManagerApproval
           ? 'Manager approval is required before this estimate can be accepted online'
           : commercialProposal
           ? 'This is a custom commercial proposal — your Waves account manager will finalize acceptance with you directly.'
+          : commercialRiskType
+          ? 'Your Waves account manager will confirm this commercial service plan with you before it’s finalized.'
           : 'This estimate requires an inspection before it can be accepted online',
         quoteRequired: true,
         managerApprovalRequired: needsManagerApproval,
@@ -8886,18 +8909,29 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   // the public view shows the formal-proposal state and the accept endpoint
   // refuses online acceptance.
   const commercialProposal = estData?.proposal?.enabled === true;
+  // A commercial pest/rodent estimate with no classified business type can't be
+  // self-serve accepted — the risk type drives the service cadence and the
+  // customer can't set it. Surface it as quote-required so the public view shows
+  // the "account manager will finalize" state and the accept endpoint refuses
+  // online acceptance (the admin classifies + accepts manually). See
+  // commercialRiskTypeReviewNeeded.
+  const commercialRiskTypeReview = commercialRiskTypeReviewNeeded(
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  );
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
     || managerApprovalRequired
-    || commercialProposal;
+    || commercialProposal
+    || commercialRiskTypeReview;
 
   return {
     quoteRequired,
     reason: managerApprovalRequired
       ? 'st_augustine_dethatching'
       : (quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason
-        || (commercialProposal ? 'commercial_proposal' : null)),
+        || (commercialProposal ? 'commercial_proposal' : null)
+        || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)),
     items: quoteRequiredItems,
   };
 }

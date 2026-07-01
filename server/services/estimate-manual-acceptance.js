@@ -7,6 +7,7 @@ const { normalizeProposal } = require('./estimate-proposal');
 const proposalWin = require('./proposal-win');
 const {
   estimateDataHasUnresolvedManagerApproval,
+  commercialRiskTypeReviewNeeded,
 } = require('./estimate-delivery-options');
 
 const MANUAL_ACCEPTABLE_STATUSES = new Set(['sent', 'viewed']);
@@ -133,6 +134,9 @@ async function markEstimateManuallyAccepted({
 
     if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) {
       throw httpError('Manager approval is required before this estimate can be manually accepted.', 400);
+    }
+    if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
+      throw httpError('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
     }
 
     const isCommercialProposal = isCommercialProposalEstimate(estimate);

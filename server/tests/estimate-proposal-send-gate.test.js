@@ -156,3 +156,32 @@ describe('assertEstimateSendable proposal exemption', () => {
     }))).not.toThrow();
   });
 });
+
+describe('assertEstimateSendable commercial risk-type gate', () => {
+  // A commercial pest/rodent estimate must have its business type classified
+  // before it can be sent — the risk type drives the service cadence.
+  const commercialPestRow = (riskType) => ({
+    status: 'sent',
+    monthly_total: 200,
+    estimate_data: {
+      result: { lineItems: [{ service: 'commercial_pest', annual: 2400, estimatedPricing: true }] },
+      ...(riskType ? { engineRequest: { options: { commercialRiskType: riskType } } } : {}),
+    },
+  });
+
+  it('blocks a commercial pest/rodent estimate with no business type set', () => {
+    expect(() => assertEstimateSendable(commercialPestRow())).toThrow(/business type/i);
+  });
+
+  it('allows it once a valid business type is set', () => {
+    expect(() => assertEstimateSendable(commercialPestRow('restaurant_food'))).not.toThrow();
+  });
+
+  it('does not block a commercial estimate without a cadence-relevant line', () => {
+    expect(() => assertEstimateSendable({
+      status: 'sent',
+      monthly_total: 200,
+      estimate_data: { result: { lineItems: [{ service: 'commercial_lawn', annual: 1200 }] } },
+    })).not.toThrow();
+  });
+});

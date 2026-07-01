@@ -1,3 +1,5 @@
+const { isCommercialRiskType } = require('./pricing-engine/commercial-risk-type');
+
 function validateEstimateDeliveryOptions({
   showOneTimeOption,
   billByInvoice,
@@ -222,6 +224,121 @@ function estimateDataHasUnresolvedManagerApproval(estimateData) {
   const data = parseEstimateData(estimateData);
   return containsUnresolvedManagerApproval(data, data) ||
     rootRequiresLegacyStAugustineDethatchingApproval(data);
+}
+
+// Commercial risk-type (business-type) review gate. The risk type drives the
+// commercial pest/rodent cadence, so an estimate that has a commercial pest or
+// rodent line must be classified before it can be sent/accepted — a NULL default
+// would silently under/over-cadence restaurants/hotels vs offices (owner-locked
+// risk-type lane, decision 1). Only cadence-relevant lines gate: a commercial
+// lawn/tree/mosquito/termite-only estimate does not need a risk type.
+const CADENCE_COMMERCIAL_SERVICES = new Set(['commercial_pest', 'commercial_rodent_bait']);
+const RECURRING_PEST_RODENT_SELECTIONS = new Set(['PEST', 'RODENT_BAIT']);
+
+// An engine-PRICED commercial pest/rodent recurring line — the only line whose
+// cadence the risk type drives. Detected by a positive `annual` with no
+// `quoteRequired`, which holds for BOTH the raw pricer shape AND the legacy
+// mapped save shape (v1-legacy-mapper's commAdd drops commercialPricingMode but
+// keeps service + annual, and is only emitted for priced recurring lines). A
+// manual quote (quoteRequired / null annual) and one-time items (no `annual`) are
+// excluded — the quote-required gate handles those.
+function containsAutoPricedCadenceLine(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) return value.some((item) => containsAutoPricedCadenceLine(item, depth + 1));
+  if (typeof value !== 'object') return false;
+  if (
+    typeof value.service === 'string'
+    && CADENCE_COMMERCIAL_SERVICES.has(value.service)
+    && value.quoteRequired !== true
+    && Number(value.annual) > 0
+  ) return true;
+  return Object.values(value).some((item) => containsAutoPricedCadenceLine(item, depth + 1));
+}
+
+// Any materialized commercial pest/rodent line (regardless of pricing mode). When
+// one exists, the pricing mode decides the gate (auto → gate; manual → the
+// quote-required gate handles it) and the raw selectedServices fallback is NOT
+// consulted — a saved manual/one-time estimate still carries selectedServices.
+function containsCommercialCadenceServiceLine(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) return value.some((item) => containsCommercialCadenceServiceLine(item, depth + 1));
+  if (typeof value !== 'object') return false;
+  if (typeof value.service === 'string' && CADENCE_COMMERCIAL_SERVICES.has(value.service)) return true;
+  return Object.values(value).some((item) => containsCommercialCadenceServiceLine(item, depth + 1));
+}
+
+// A recurring pest / rodent-bait selection — true for either the uppercase
+// selectedServices tokens (admin engineRequest) OR a v1 `services` map that
+// selects pest / rodentBait (engineInputs snapshot). A services selection is a
+// config object or boolean `true`, NOT a results.pest[] stat array, so this does
+// not collide with priced-result stats.
+function isServiceSelection(v) {
+  return v === true || (!!v && typeof v === 'object' && !Array.isArray(v));
+}
+function selectsRecurringPestOrRodent(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) {
+    if (value.some((v) => RECURRING_PEST_RODENT_SELECTIONS.has(v))) return true;
+    return value.some((item) => selectsRecurringPestOrRodent(item, depth + 1));
+  }
+  if (typeof value !== 'object') return false;
+  if (isServiceSelection(value.pest) || isServiceSelection(value.rodentBait)) return true;
+  return Object.values(value).some((item) => selectsRecurringPestOrRodent(item, depth + 1));
+}
+
+function isCommercialEstimateData(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) return value.some((item) => isCommercialEstimateData(item, depth + 1));
+  if (typeof value !== 'object') return false;
+  if (value.commercialEstimatedPricing === true || value.isCommercial === true) return true;
+  if (typeof value.propertyType === 'string' && value.propertyType.toLowerCase() === 'commercial') return true;
+  if (typeof value.category === 'string' && value.category.toLowerCase() === 'commercial') return true;
+  if (typeof value.commercialSubtype === 'string' && value.commercialSubtype.trim()) return true;
+  if (typeof value.service === 'string' && value.service.startsWith('commercial_')) return true;
+  return Object.values(value).some((item) => isCommercialEstimateData(item, depth + 1));
+}
+
+function firstCommercialRiskType(value, depth = 0) {
+  if (!value || depth > 12) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = firstCommercialRiskType(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== 'object') return null;
+  if (typeof value.commercialRiskType === 'string' && value.commercialRiskType.trim()) {
+    return value.commercialRiskType.trim();
+  }
+  for (const item of Object.values(value)) {
+    const found = firstCommercialRiskType(item, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function commercialRiskTypeReviewNeeded(estimateData) {
+  const data = parseEstimateData(estimateData);
+  if (!data) return false;
+  // Authored commercial proposals are hand-priced (the line items ARE the quote);
+  // their cadence is not engine-risk-type driven, so they are NEVER risk-type
+  // gated — even if a stale riskTypeNeedsReview flag is still on the row (an
+  // operator can resolve the flag by authoring the proposal). Checked first.
+  if (data.proposal && data.proposal.enabled === true) return false;
+  // Explicit flag — the public "Other / skipped" business-type path sets this
+  // (Phase 3) so a defaulted-but-unconfirmed bucket still surfaces for review.
+  if (data.riskTypeNeedsReview === true) return true;
+  // A materialized commercial pest/rodent line decides on its own pricing mode:
+  // gate only an AUTO-priced one (a manual quote is handled by the quote-required
+  // gate, not this one). Only when NO such line is materialized do we fall back to
+  // the raw selectedServices (engineInputs-only rows) so a saved manual estimate
+  // that still carries selectedServices is not spuriously gated.
+  const cadenceRelevant = containsCommercialCadenceServiceLine(data)
+    ? containsAutoPricedCadenceLine(data)
+    : (isCommercialEstimateData(data) && selectsRecurringPestOrRodent(data));
+  if (!cadenceRelevant) return false;
+  return !isCommercialRiskType(firstCommercialRiskType(data));
 }
 
 function cloneEstimateData(data) {
@@ -718,6 +835,7 @@ function nonPestRecurringServicesForOneTimeOption(estimateData) {
 module.exports = {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
+  commercialRiskTypeReviewNeeded,
   hasDerivableOneTimePestChoicePricing,
   hasPestRecurringServiceForOneTimeOption,
   normalizeEstimateDethatchingManagerApproval,
