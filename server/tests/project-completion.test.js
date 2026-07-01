@@ -1,3 +1,13 @@
+// The completion billing resolver lazy-requires annual-prepay-renewals for the
+// term-link coverage gate; mock it so these tests drive the gate boolean directly
+// (annualPrepayCoversVisit's own decision logic is unit-tested separately in
+// annual-prepay-coverage-gate.test.js). Default (unset) return is falsy, so every
+// other test in this file falls through to the legacy numeric/invoice path.
+jest.mock('../services/annual-prepay-renewals', () => ({ annualPrepayCoversVisit: jest.fn() }));
+// Payer lookup is mocked so the resolver's third-party Bill-To guard is driven
+// directly (default: no payer → self-pay). Keeps these tests off the real DB.
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn() }));
+
 const {
   buildProjectCloseoutPreview,
   buildServiceRecordInsert,
@@ -10,6 +20,18 @@ const {
   serviceRecordMatchesScheduledService,
   shouldAttachProjectToPortal,
 } = require('../services/project-completion');
+
+// Minimal knex whose invoice lookup finds nothing (so the resolver's terminal
+// branch is "invoice_required" unless a coverage gate fires first).
+function knexNoExistingInvoice() {
+  const chain = {
+    whereNot: jest.fn(() => chain),
+    where: jest.fn(() => chain),
+    orderBy: jest.fn(() => chain),
+    first: jest.fn(async () => null),
+  };
+  return jest.fn(() => chain);
+}
 
 function previewKnexForRoutineLinkedProject() {
   const calls = [];
@@ -142,6 +164,11 @@ describe('project completion helpers', () => {
     })).toBe(75);
     expect(prepaidCoversAmount({ prepaid_amount: '350.00' }, 350)).toBe(true);
     expect(prepaidCoversAmount({ prepaid_amount: '100.00' }, 350)).toBe(false);
+    // annual-prepay stamps are governed by annualPrepayCoversVisit, NOT the amount:
+    // a stale annual_prepay_invoice stamp must not suppress here even if it covers.
+    expect(prepaidCoversAmount({ prepaid_amount: '350.00', prepaid_method: 'annual_prepay_invoice' }, 350)).toBe(false);
+    // other out-of-band methods still covered numerically.
+    expect(prepaidCoversAmount({ prepaid_amount: '350.00', prepaid_method: 'cash' }, 350)).toBe(true);
   });
 
   test('project follow-up suggestion uses profile policy and default interval', () => {
@@ -515,5 +542,108 @@ describe('project completion helpers', () => {
         findings: { traps_set: 'Attic' },
       },
     });
+  });
+});
+
+describe('resolveProjectCompletionBilling — annual-prepay term-link coverage', () => {
+  // Earlier tests in this file call jest.resetModules(), which orphans the
+  // top-level mock/resolve captures from the module instance resolve lazy-requires.
+  // Re-require BOTH from one fresh registry per test so resolve's lazy
+  // require('./annual-prepay-renewals') is the same mocked fn we drive here.
+  let resolveBilling;
+  let coversVisit;
+  let payerResolve;
+  beforeEach(() => {
+    jest.resetModules();
+    coversVisit = require('../services/annual-prepay-renewals').annualPrepayCoversVisit;
+    payerResolve = require('../services/payer').resolveForInvoice;
+    resolveBilling = require('../services/project-completion').resolveProjectCompletionBilling;
+  });
+
+  test('discounted annual-prepay visit: term-link coverage suppresses billing even though the slice < undiscounted price', async () => {
+    // The numeric gate (prepaid 52.25 < price 55) would FAIL and re-bill — the
+    // term-link gate must win and mark it covered.
+    expect(jest.isMockFunction(coversVisit)).toBe(true);
+    coversVisit.mockResolvedValue(true);
+    const scheduledService = {
+      id: 'ss-1',
+      estimated_price: '55.00',
+      prepaid_method: 'annual_prepay_invoice',
+      prepaid_amount: '52.25',
+      annual_prepay_term_id: 'term-1',
+    };
+    const result = await resolveBilling({
+      scheduledService,
+      customer: {},
+      knex: knexNoExistingInvoice(),
+    });
+    expect(result).toMatchObject({ required: true, resolved: true, reason: 'prepaid_covered', amount: 55 });
+  });
+
+  test('non-prepay recurring visit: bills normally (gate false, no existing invoice)', async () => {
+    coversVisit.mockResolvedValue(false);
+    const scheduledService = { id: 'ss-2', estimated_price: '55.00' };
+    const result = await resolveBilling({
+      scheduledService,
+      customer: {},
+      knex: knexNoExistingInvoice(),
+    });
+    expect(result).toMatchObject({ required: true, resolved: false, reason: 'invoice_required', amount: 55 });
+  });
+
+  test('other-method prepayment (cash) still covered via the numeric gate', async () => {
+    coversVisit.mockResolvedValue(false); // not an annual-prepay stamp
+    const scheduledService = {
+      id: 'ss-3',
+      estimated_price: '55.00',
+      prepaid_method: 'cash',
+      prepaid_amount: '55.00',
+    };
+    const result = await resolveBilling({
+      scheduledService,
+      customer: {},
+      knex: knexNoExistingInvoice(),
+    });
+    expect(result).toMatchObject({ required: true, resolved: true, reason: 'prepaid_covered', amount: 55 });
+  });
+
+  test('payer-billed (third-party Bill-To) visit: annual-prepay coverage must NOT suppress the payer invoice', async () => {
+    // Even with a LIVE annual-prepay stamp, a payer-billed visit is owed by the
+    // payer — the homeowner's prepay can't cover it, so it must still require the invoice.
+    coversVisit.mockResolvedValue(true);
+    payerResolve.mockResolvedValue({ payerId: 'payer-1' });
+    const scheduledService = {
+      id: 'ss-5',
+      estimated_price: '55.00',
+      prepaid_method: 'annual_prepay_invoice',
+      prepaid_amount: '55.00',
+      annual_prepay_term_id: 'term-1',
+    };
+    const result = await resolveBilling({
+      scheduledService,
+      customer: {},
+      knex: knexNoExistingInvoice(),
+    });
+    expect(result).toMatchObject({ required: true, resolved: false, reason: 'invoice_required', amount: 55 });
+  });
+
+  test('stale annual-prepay stamp on a dead (refunded/voided) term: bills — the numeric fallback must NOT suppress it', async () => {
+    // The term-link gate says NOT covered (term refunded/voided), but the visit
+    // still carries a stale annual_prepay_invoice stamp whose amount WOULD cover.
+    // It must bill anyway — annual-prepay stamps never fall through to the amount gate.
+    coversVisit.mockResolvedValue(false);
+    const scheduledService = {
+      id: 'ss-4',
+      estimated_price: '55.00',
+      prepaid_method: 'annual_prepay_invoice',
+      prepaid_amount: '55.00',
+      annual_prepay_term_id: 'term-1',
+    };
+    const result = await resolveBilling({
+      scheduledService,
+      customer: {},
+      knex: knexNoExistingInvoice(),
+    });
+    expect(result).toMatchObject({ required: true, resolved: false, reason: 'invoice_required', amount: 55 });
   });
 });

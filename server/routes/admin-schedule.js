@@ -3931,10 +3931,27 @@ router.post('/:id/invoice', async (req, res, next) => {
       logger.warn(`[admin-schedule] payer resolve failed on charge-now for service ${svc.id}: ${e.message}`);
     }
 
+    // Block Charge Now for an annual-prepay-COVERED visit: the work is already paid
+    // on the annual prepay invoice, so minting/returning a collectible invoice here
+    // would double-bill at the door. Fail-closed (a stale/refunded stamp is NOT
+    // covered and still bills). Charging add-ons on a covered visit is part of the
+    // deferred annual-prepay settlement/split-billing follow-up.
+    if (await require('../services/annual-prepay-renewals').annualPrepayCoversVisit(svc)) {
+      return res.status(409).json({ error: 'Visit is covered by an active annual prepay — no charge is due at the door.' });
+    }
+
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
     const applyPrepaidCredit = async (invoice) => {
-      const prepaidCents = svc.prepaid_amount != null ? toCents(svc.prepaid_amount) : 0;
+      // Applying annual-prepay coverage to a Charge-Now invoice is deferred to a
+      // dedicated follow-up (it needs non-cash accounting, an idempotency marker,
+      // and add-on split-billing). This path only applies out-of-band prepayments
+      // (cash/Zelle): skip annual_prepay_invoice stamps so we never credit a
+      // discounted slice, book a non-cash payment as revenue, or credit a
+      // stale/refunded stamp.
+      const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+      const prepaidCents = (svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
+        && svc.prepaid_amount != null) ? toCents(svc.prepaid_amount) : 0;
       if (!(prepaidCents > 0)) {
         return { invoice, prepaidCredit: 0 };
       }
