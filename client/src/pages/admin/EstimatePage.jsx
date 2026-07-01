@@ -50,6 +50,8 @@ const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   // Commercial cadence: changing the business type re-prices pest/rodent, so it
   // must invalidate a generated estimate (else Save persists stale totals).
   "commercialRiskType",
+  "treeShrubDensity",
+  "mosquitoPressure",
 ]);
 
 const TRENCHING_PRODUCT_OPTIONS = [
@@ -799,6 +801,8 @@ function EstimateToolView() {
     isCommercial: "NO",
     commercialSubtype: "",
     commercialRiskType: "",
+    treeShrubDensity: "",
+    mosquitoPressure: "",
     commercialPricingMode: "manual_quote",
     hasPool: "NO",
     hasPoolCage: "NO",
@@ -1799,6 +1803,8 @@ function EstimateToolView() {
           commercialPricingMode: form.commercialPricingMode || "manual_quote",
           commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
           commercialRiskType: formIsCommercial ? form.commercialRiskType || "" : "",
+          treeShrubDensity: formIsCommercial ? form.treeShrubDensity || "" : "",
+          mosquitoPressure: formIsCommercial ? form.mosquitoPressure || "" : "",
         };
         if (form.svcInjection) {
           options.palmInjection = {
@@ -1863,6 +1869,8 @@ function EstimateToolView() {
         profile.isCommercial = formIsCommercial;
         profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
         profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
+        profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
+        profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
 
         const r = await fetch("/api/admin/estimator/calculate-estimate", {
           method: "POST",
@@ -2194,6 +2202,8 @@ function EstimateToolView() {
       isCommercial: "NO",
       commercialSubtype: "",
       commercialRiskType: "",
+      treeShrubDensity: "",
+      mosquitoPressure: "",
       commercialPricingMode: "manual_quote",
       hasPool: "NO",
       hasPoolCage: "NO",
@@ -2442,6 +2452,8 @@ function EstimateToolView() {
                       isCommercial: "NO",
                       commercialSubtype: "",
                       commercialRiskType: "",
+                      treeShrubDensity: "",
+                      mosquitoPressure: "",
                       commercialPricingMode: "manual_quote",
                       hasPool: "NO",
                       hasPoolCage: "NO",
@@ -2855,6 +2867,34 @@ function EstimateToolView() {
                       { value: "healthcare_childcare", label: "Healthcare / childcare" },
                       { value: "hotel_resort", label: "Hotel / resort" },
                       { value: "multifamily", label: "Multifamily" },
+                    ]}
+                  />
+                </Field>
+              )}
+              {commercialDetected && form.svcTs && (
+                <Field label="Tree & Shrub density">
+                  <Select
+                    k="treeShrubDensity"
+                    options={[
+                      { value: "", label: "Normal (default)" },
+                      { value: "low", label: "Low / sparse (0.75×)" },
+                      { value: "normal", label: "Normal (1.0×)" },
+                      { value: "high", label: "High / dense (1.5×)" },
+                      { value: "very_high", label: "Very high — manual quote" },
+                    ]}
+                  />
+                </Field>
+              )}
+              {commercialDetected && form.svcMosquito && (
+                <Field label="Mosquito pressure">
+                  <Select
+                    k="mosquitoPressure"
+                    options={[
+                      { value: "", label: "Normal (default)" },
+                      { value: "low", label: "Low (0.85×)" },
+                      { value: "normal", label: "Normal (1.0×)" },
+                      { value: "high", label: "High (1.35×)" },
+                      { value: "severe", label: "Severe — manual quote" },
                     ]}
                   />
                 </Field>

@@ -2292,6 +2292,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // Risk-type bucket (drives commercial pest/rodent cadence). Admin-set; persisted
   // on the raw engineRequest options/profile → replays on re-price.
   const commercialRiskType = commercialProfile ? (o.commercialRiskType || p.commercialRiskType || null) : null;
+  // Rep-set commercial multipliers (T&S plant density, mosquito pressure). Admin-
+  // set; ride the raw engineRequest options/profile → replay on re-price.
+  const treeShrubDensity = commercialProfile ? (o.treeShrubDensity || p.treeShrubDensity || null) : null;
+  const mosquitoPressure = commercialProfile ? (o.mosquitoPressure || p.mosquitoPressure || null) : null;
   // Grass track — v2 accepts old A/B/C1/C2/D letters AND new keys.
   const TRACK_MAP = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
   const rawGrass = o.grassType || 'st_augustine';
@@ -2763,6 +2767,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     isCommercial: commercialProfile,
     commercialSubtype,
     commercialRiskType,
+    treeShrubDensity,
+    mosquitoPressure,
     measuredTurfSf: p.measuredTurfSf,
     estimatedTurfSf: p.estimatedTurfSf,
     imperviousSurfacePercent: p.imperviousSurfacePercent,
