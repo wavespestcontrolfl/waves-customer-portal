@@ -156,15 +156,34 @@ function maskPhone(value) {
   return digits ? `***${digits.slice(-4)}` : 'unknown';
 }
 
+// Return the first candidate that is a real EXTERNAL number — i.e. not one of our
+// own lines AND not a staff forward/CSR cell. An INTERNAL number appearing as the
+// caller/callee is a call-forwarding artifact (a DNI tracking number masking the
+// true caller, or the staff cell the inbound <Dial> forwarded to), never a real
+// customer; keying a lead/customer on it collapses many callers onto one phantom
+// record (or onto a CSR). Skipping internal candidates (and returning null when
+// every candidate is internal) stops that at the source.
+function firstExternalPhone(...candidates) {
+  for (const c of candidates) {
+    const v = c && String(c).trim();
+    if (v && !TWILIO_NUMBERS.isInternalNumber(v)) return v;
+  }
+  return null;
+}
+
 function resolveCallContactPhone(call = {}, extractedPhone = null) {
   const extracted = String(extractedPhone || '').trim();
   if (isOutboundCall(call)) {
-    if (extracted && !samePhone(extracted, call.from_phone)) return extracted;
-    return call.to_phone || extracted || call.from_phone || null;
+    if (extracted && !samePhone(extracted, call.from_phone)) {
+      return firstExternalPhone(extracted, call.to_phone, call.from_phone);
+    }
+    return firstExternalPhone(call.to_phone, extracted, call.from_phone);
   }
 
-  if (extracted && !samePhone(extracted, call.to_phone)) return extracted;
-  return call.from_phone || extracted || call.to_phone || null;
+  if (extracted && !samePhone(extracted, call.to_phone)) {
+    return firstExternalPhone(extracted, call.from_phone, call.to_phone);
+  }
+  return firstExternalPhone(call.from_phone, extracted, call.to_phone);
 }
 
 function normalizeNamePart(value) {
@@ -1650,6 +1669,42 @@ const CallRecordingProcessor = {
     // immediately and the real error reaches the caller.
     try {
     const contactPhone = resolveCallContactPhone(call);
+    // Forwarding-masked call: the inbound leg recorded one of our own internal
+    // numbers (a tracking number, or the staff cell it forwarded to) as the caller,
+    // so there's no recoverable external contact. We still transcribe/extract + log
+    // the call, but won't key a lead/customer on the masked number (that's what
+    // created the phantom "collapsed" leads).
+    if (!contactPhone && !isOutboundCall(call) && TWILIO_NUMBERS.isInternalNumber(call.from_phone)) {
+      logger.warn(`[call-proc] ${maskSid(callSid)}: caller ID is an internal Waves number (${maskPhone(call.from_phone)}) — forwarding-masked; no lead/customer will be keyed on it`);
+    }
+
+    // Guard against a pre-linked PHANTOM customer. The voice webhook (and the
+    // recording-status orphan insert) auto-links an inbound row to a customer by the
+    // From number; a prior forwarding-masked call created phantom customers whose
+    // phone IS one of our internal numbers. Honoring that link would re-collapse
+    // many callers onto the phantom and spawn a lead/appointment on it — the exact
+    // failure this fix exists to stop, and one resolveCallContactPhone alone can't
+    // prevent because processRecording seeds customerId from call.customer_id below.
+    // Only inbound legs whose From is itself internal can carry such a link (that's
+    // how the phantom got matched), so the DB lookup is skipped on normal calls.
+    // Clearing call.customer_id here also stops the call_log / candidate-staging
+    // fallbacks (customerId || call.customer_id) from resurrecting the phantom; the
+    // call then falls through to real phone-based resolution, or stays unkeyed when
+    // fully masked. (Cleanup of the already-created phantom rows is handled separately.)
+    if (call.customer_id && !isOutboundCall(call) && TWILIO_NUMBERS.isInternalNumber(call.from_phone)) {
+      const linked = await db('customers').where({ id: call.customer_id }).select('phone').first().catch(() => null);
+      if (linked && TWILIO_NUMBERS.isInternalNumber(linked.phone)) {
+        logger.warn(`[call-proc] ${maskSid(callSid)}: pre-linked customer ${call.customer_id} is keyed on an internal number (${maskPhone(linked.phone)}) — phantom from forwarding-masked linking; treating call as unlinked`);
+        call.customer_id = null;
+        // Persist the unlink now, not just in memory: the terminal early exits
+        // below (no_transcription / extraction_failed / spam / voicemail / v2
+        // hard veto) write processing_status without touching customer_id, so an
+        // in-memory-only clear would leave the phantom link on the row for any
+        // call that takes one of those paths. The happy path re-stamps the real
+        // resolved customer in Step 4 (customer_id: customerId || call.customer_id).
+        await db('call_log').where({ id: call.id }).update({ customer_id: null, updated_at: new Date() });
+      }
+    }
 
     // Step 1: Transcribe — OpenAI is the source of record. Gemini and Twilio are fallbacks only.
     let transcription = null;

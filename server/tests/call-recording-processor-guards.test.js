@@ -1064,3 +1064,108 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(normalizeCallExtraction({}).call_type).toBeNull();
   });
 });
+
+describe('DNI-forwarding caller-ID guard', () => {
+  const { resolveCallContactPhone } = CallRecordingProcessor._test;
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const BRADENTON = '+19413187612'; // a Waves tracking/location number
+  const MAIN = '+19412975749';      // Waves main line
+  const EXTERNAL = '+19415551234';  // a real customer
+
+  test('isOwnedNumber matches our lines on last-10, rejects external', () => {
+    expect(TWILIO_NUMBERS.isOwnedNumber(BRADENTON)).toBe(true);
+    expect(TWILIO_NUMBERS.isOwnedNumber('9413187612')).toBe(true);       // 10-digit
+    expect(TWILIO_NUMBERS.isOwnedNumber('(941) 318-7612')).toBe(true);   // formatted
+    expect(TWILIO_NUMBERS.isOwnedNumber(MAIN)).toBe(true);
+    expect(TWILIO_NUMBERS.isOwnedNumber(EXTERNAL)).toBe(false);
+    expect(TWILIO_NUMBERS.isOwnedNumber('')).toBe(false);
+    expect(TWILIO_NUMBERS.isOwnedNumber(null)).toBe(false);
+  });
+
+  test('inbound: keeps a real external caller', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: EXTERNAL, to_phone: BRADENTON }))
+      .toBe(EXTERNAL);
+  });
+
+  test('inbound: forwarding-masked (caller is our tracking number) resolves to null, not a phantom', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: BRADENTON, to_phone: BRADENTON })).toBeNull();
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: BRADENTON, to_phone: MAIN })).toBeNull();
+  });
+
+  test('inbound: a real extracted callback number wins over a masked from_phone', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: BRADENTON, to_phone: BRADENTON }, '+19415559999'))
+      .toBe('+19415559999');
+  });
+
+  test('inbound: an extracted Waves number is ignored, real from_phone is used', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: EXTERNAL, to_phone: BRADENTON }, '+19413265011'))
+      .toBe(EXTERNAL);
+  });
+
+  test('outbound: returns the external customer, never our own line', () => {
+    expect(resolveCallContactPhone({ direction: 'outbound', from_phone: MAIN, to_phone: EXTERNAL }))
+      .toBe(EXTERNAL);
+  });
+});
+
+describe('DNI-forwarding: staff forward / CSR numbers are internal, never keyed', () => {
+  const { resolveCallContactPhone } = CallRecordingProcessor._test;
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const BRADENTON = '+19413187612'; // a Waves tracking/location number
+  const EXTERNAL = '+19415551234';  // a real customer
+  const STAFF_FWD = '+19415550000'; // a staff cell the inbound <Dial> forwards to
+  const CSR_CELL = '+19415557777';  // a CSR cell from WAVES_CSR_NUMBER_MAP
+
+  const ENV_KEYS = ['WAVES_FALLBACK_FORWARD_NUMBERS', 'WAVES_CSR_NUMBER_MAP', 'VIRGINIA_PHONE'];
+  let saved;
+  beforeEach(() => {
+    saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+    process.env.WAVES_FALLBACK_FORWARD_NUMBERS = STAFF_FWD;
+    process.env.WAVES_CSR_NUMBER_MAP = `${CSR_CELL}:Virginia`;
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test('isStaffForwardNumber matches configured staff/CSR numbers, rejects external', () => {
+    expect(TWILIO_NUMBERS.isStaffForwardNumber(STAFF_FWD)).toBe(true);
+    expect(TWILIO_NUMBERS.isStaffForwardNumber('9415550000')).toBe(true);   // last-10 match
+    expect(TWILIO_NUMBERS.isStaffForwardNumber(CSR_CELL)).toBe(true);        // from CSR map
+    expect(TWILIO_NUMBERS.isStaffForwardNumber(EXTERNAL)).toBe(false);
+    expect(TWILIO_NUMBERS.isStaffForwardNumber(BRADENTON)).toBe(false);      // a line, not a staff cell
+    expect(TWILIO_NUMBERS.isStaffForwardNumber(null)).toBe(false);
+  });
+
+  test('isInternalNumber is true for both our lines AND staff cells', () => {
+    expect(TWILIO_NUMBERS.isInternalNumber(BRADENTON)).toBe(true);
+    expect(TWILIO_NUMBERS.isInternalNumber(STAFF_FWD)).toBe(true);
+    expect(TWILIO_NUMBERS.isInternalNumber(CSR_CELL)).toBe(true);
+    expect(TWILIO_NUMBERS.isInternalNumber(EXTERNAL)).toBe(false);
+  });
+
+  test('named staff env (VIRGINIA_PHONE) is treated as internal when no explicit forward list', () => {
+    delete process.env.WAVES_FALLBACK_FORWARD_NUMBERS;
+    process.env.VIRGINIA_PHONE = STAFF_FWD;
+    expect(TWILIO_NUMBERS.isStaffForwardNumber(STAFF_FWD)).toBe(true);
+  });
+
+  test('inbound forwarding leg (tracking From, staff cell To) resolves to null, not the CSR', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: BRADENTON, to_phone: STAFF_FWD }))
+      .toBeNull();
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: BRADENTON, to_phone: CSR_CELL }))
+      .toBeNull();
+  });
+
+  test('inbound forwarding leg to a staff cell still keeps a real extracted callback', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: BRADENTON, to_phone: STAFF_FWD }, EXTERNAL))
+      .toBe(EXTERNAL);
+  });
+
+  test('a genuine call TO a staff cell from a real customer is unaffected (external From wins)', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: EXTERNAL, to_phone: STAFF_FWD }))
+      .toBe(EXTERNAL);
+  });
+});
