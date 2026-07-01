@@ -266,6 +266,10 @@ describe('deprecated client estimator pricing drift guards', () => {
     // the estimate was built in.
     expect(legacyAdminSource).toContain('commercialRiskType: formIsCommercial');
     expect(adminToolViewSource).toContain('commercialRiskType: formIsCommercial');
+    // Changing the business type must invalidate a generated estimate on BOTH
+    // forms (else Save persists stale pest/rodent totals) — it's in the reset set.
+    expect(legacyAdminSource).toContain('"commercialRiskType",');
+    expect(adminToolViewSource).toContain('"commercialRiskType",');
   });
 
   test('commercial termite scope rides in BOTH admin payloads (liability gate stays in sync)', () => {

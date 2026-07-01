@@ -47,6 +47,9 @@ const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   "thatchProbe3Inches",
   "thatchDepthInches",
   "thatchMeasurementSource",
+  // Commercial cadence: changing the business type re-prices pest/rodent, so it
+  // must invalidate a generated estimate (else Save persists stale totals).
+  "commercialRiskType",
 ]);
 
 const TRENCHING_PRODUCT_OPTIONS = [
