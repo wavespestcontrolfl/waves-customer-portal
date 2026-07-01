@@ -1669,6 +1669,13 @@ const CallRecordingProcessor = {
       if (linked && TWILIO_NUMBERS.isInternalNumber(linked.phone)) {
         logger.warn(`[call-proc] ${maskSid(callSid)}: pre-linked customer ${call.customer_id} is keyed on an internal number (${maskPhone(linked.phone)}) — phantom from forwarding-masked linking; treating call as unlinked`);
         call.customer_id = null;
+        // Persist the unlink now, not just in memory: the terminal early exits
+        // below (no_transcription / extraction_failed / spam / voicemail / v2
+        // hard veto) write processing_status without touching customer_id, so an
+        // in-memory-only clear would leave the phantom link on the row for any
+        // call that takes one of those paths. The happy path re-stamps the real
+        // resolved customer in Step 4 (customer_id: customerId || call.customer_id).
+        await db('call_log').where({ id: call.id }).update({ customer_id: null, updated_at: new Date() });
       }
     }
 
