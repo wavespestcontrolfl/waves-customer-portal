@@ -856,6 +856,7 @@ function EstimateToolView() {
     termiteBaitComplexity: "",
     termiteBaitSystem: "advance",
     termiteMonitoringTier: "basic",
+    termiteScope: "bait_monitoring_no_warranty",
     trenchingPerimeterLF: "",
     trenchingConcreteLF: "",
     trenchingDirtLF: "",
@@ -935,9 +936,13 @@ function EstimateToolView() {
       Number(form.termiteFootprintSqFt) > 0 ||
       Number(form.termitePerimeterLF) > 0;
     const hasCommercialLotSize = Number(form.lotSqFt) > 0;
+    // Mirror of the server termiteScope gate: auto-price ONLY a recognized auto
+    // scope — bond / warranty / initial-install AND any unrecognized value fail
+    // closed to a manual quote regardless of building size.
+    const COMMERCIAL_TERMITE_AUTO_SCOPES = new Set(["inspection_only", "monitoring_only", "bait_monitoring_no_warranty"]);
     const commercialKeyFallsToManual = (k) => {
       if (k === "svcMosquito") return !hasCommercialLotSize;
-      if (k === "svcTermiteBait") return !hasCommercialTermiteSize;
+      if (k === "svcTermiteBait") return !hasCommercialTermiteSize || !COMMERCIAL_TERMITE_AUTO_SCOPES.has(form.termiteScope || "bait_monitoring_no_warranty");
       if (k === "svcPest" || k === "svcRodentBait") return !hasCommercialHomeSize;
       return false; // lawn / tree are lot-derivable and always auto-price
     };
@@ -1746,6 +1751,7 @@ function EstimateToolView() {
           termiteBaitSystem: form.termiteBaitSystem || "advance",
           termiteMonitoringTier: form.termiteMonitoringTier || "basic",
           termiteBaitComplexity: form.termiteBaitComplexity || "",
+          termiteScope: form.termiteScope || "bait_monitoring_no_warranty",
           termiteFootprintSqFt,
           termitePerimeterLF,
           trenchingPerimeterLF,
@@ -2212,6 +2218,7 @@ function EstimateToolView() {
       termiteBaitComplexity: "",
       termiteBaitSystem: "advance",
       termiteMonitoringTier: "basic",
+      termiteScope: "bait_monitoring_no_warranty",
       trenchingPerimeterLF: "",
       trenchingConcreteLF: "",
       trenchingDirtLF: "",
@@ -3399,6 +3406,24 @@ function EstimateToolView() {
                           ]}
                         />
                       </Field>
+                      {/* Scope-split is commercial-only — the residential termite
+                          pricer ignores termiteScope, so hide it there to avoid a
+                          "Bond — manual quote" label that still auto-prices. */}
+                      {isCommercialEstimateInput(form) && (
+                        <Field label="Scope (liability)">
+                          <Select
+                            k="termiteScope"
+                            options={[
+                              { value: "inspection_only", label: "Inspection only" },
+                              { value: "monitoring_only", label: "Monitoring only" },
+                              { value: "bait_monitoring_no_warranty", label: "Bait monitoring (no warranty)" },
+                              { value: "bond_manual", label: "Bond — manual quote" },
+                              { value: "warranty_manual", label: "Warranty — manual quote" },
+                              { value: "initial_install_manual", label: "Initial install — manual quote" },
+                            ]}
+                          />
+                        </Field>
+                      )}
                     </>
                   )}
                   {form.svcTrenching && (

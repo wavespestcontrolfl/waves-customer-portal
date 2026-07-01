@@ -2459,6 +2459,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       system: o.termiteBaitSystem || 'advance',
       monitoringTier: o.termiteMonitoringTier || 'basic',
       ...(o.termiteBaitComplexity ? { complexity: o.termiteBaitComplexity } : {}),
+      // Liability scope-split (bond/warranty/install → manual quote); admin-set.
+      // Persisted in engineInputs.services.termite so it replays on re-price.
+      ...(o.termiteScope ? { scope: o.termiteScope } : {}),
       measurements: termiteBaitMeasurements,
     };
   }

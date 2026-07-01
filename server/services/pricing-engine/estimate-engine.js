@@ -782,6 +782,8 @@ function generateEstimate(input) {
         buildingSizeMeasured: input.buildingSizeMeasured,
         footprintSqFt: termiteMeasurements.footprintSqFt,
         perimeterLF: termiteMeasurements.perimeterLF,
+        // Liability scope-split (bond/warranty/install → manual quote); admin-set.
+        termiteScope: serviceOptions(termiteBaitService).scope,
       });
       // Push the pricer's own line — priced or its service-specific manual quote
       // (keeps service=commercial_termite_bait / originalRequestedService=

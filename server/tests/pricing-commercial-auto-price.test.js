@@ -10,6 +10,7 @@ const {
   priceCommercialMosquito,
   priceCommercialTermiteBait,
   priceCommercialRodentBait,
+  normalizeCommercialTermiteScope,
 } = require('../services/pricing-engine/service-pricing');
 const { generateEstimate } = require('../services/pricing-engine');
 
@@ -411,6 +412,63 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     // 4·√22500 = 600 → matches the {footprint:22500, perimeter:600} golden anchor.
     expect(r.perimeter).toBe(600);
     expect(r.annual).toBe(1014.55);
+  });
+
+  // Termite SCOPE-split (owner 2026-07-01, liability control). bond / warranty /
+  // initial-install always require a site inspection + written proposal → manual
+  // quote regardless of building size. inspection / monitoring / bait-monitoring
+  // (no warranty) auto-price. Default when unset = bait_monitoring_no_warranty.
+  describe('commercial termite scope-split (liability manual gate)', () => {
+    const MEASURED = { footprint: 22500, perimeter: 600 };
+
+    test.each(['bond_manual', 'warranty_manual', 'initial_install_manual'])(
+      'scope %s forces a manual quote even WITH a full building measurement',
+      (scope) => {
+        const r = priceCommercialTermiteBait(MEASURED, { termiteScope: scope });
+        expect(r).toMatchObject({
+          service: 'commercial_termite_bait',
+          quoteRequired: true,
+          requiresManualReview: true,
+          annual: null,
+          taxable: true,
+        });
+        expect(r.manualReviewReasons).toContain('commercial_termite_scope_requires_manual_quote');
+      },
+    );
+
+    test.each(['inspection_only', 'monitoring_only', 'bait_monitoring_no_warranty'])(
+      'scope %s auto-prices via the perimeter cost-buildup (golden anchor)',
+      (scope) => {
+        const r = priceCommercialTermiteBait(MEASURED, { termiteScope: scope });
+        expect(r).toMatchObject({ quoteRequired: false, annual: 1014.55, termiteScope: scope });
+      },
+    );
+
+    test('unset scope stays auto (backward compatible); unknown scope FAILS CLOSED to manual', () => {
+      // Empty/undefined → the auto default (public path + pre-scope estimates).
+      expect(normalizeCommercialTermiteScope('')).toBe('bait_monitoring_no_warranty');
+      expect(normalizeCommercialTermiteScope(undefined)).toBe('bait_monitoring_no_warranty');
+      expect(priceCommercialTermiteBait(MEASURED).annual).toBe(1014.55);
+      expect(normalizeCommercialTermiteScope('BOND_MANUAL')).toBe('bond_manual'); // case-insensitive
+      // A typo / tampered / not-yet-whitelisted liability scope must NOT auto-price.
+      const unknown = priceCommercialTermiteBait(MEASURED, { termiteScope: 'nonsense' });
+      expect(unknown).toMatchObject({ quoteRequired: true, annual: null });
+      expect(unknown.manualReviewReasons).toContain('commercial_termite_scope_requires_manual_quote');
+    });
+
+    test('scope threads through generateEstimate (services.termite.scope)', () => {
+      const line = (scope) => generateEstimate({
+        propertyType: 'commercial',
+        isCommercial: true,
+        footprintSqFt: 22500,
+        services: { termite: { scope, measurements: { footprintSqFt: 22500, perimeterLF: 600 } } },
+      }).lineItems.find((l) => l.service === 'commercial_termite_bait');
+
+      expect(line('bond_manual')).toMatchObject({ quoteRequired: true, annual: null });
+      expect(line('warranty_manual')).toMatchObject({ quoteRequired: true, annual: null });
+      // Default (no scope) still auto-prices — a bond scope must not leak across.
+      expect(line(undefined)).toMatchObject({ quoteRequired: false, annual: 1014.55 });
+    });
   });
 
   test('all three auto-price through the engine as taxable, flat, non-WaveGuard lines', () => {
