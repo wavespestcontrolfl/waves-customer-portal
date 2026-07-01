@@ -480,6 +480,17 @@ function fmtMoney(v) {
         })
     : "--";
 }
+// Like fmtMoney but preserves cents — use for exact per-lead figures
+// (e.g. monthly value) where whole-dollar rounding would misstate the amount.
+function fmtMoneyExact(v) {
+  return v != null
+    ? "$" +
+        Number(v).toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+    : "--";
+}
 function fmtPct(v) {
   return v != null ? v.toFixed(1) + "%" : "--";
 }
@@ -1614,7 +1625,7 @@ export function LeadsSection() {
                                           <span
                                             style={{ color: C.green, ...mono }}
                                           >
-                                            {fmtMoney(lead.monthly_value)}
+                                            {fmtMoneyExact(lead.monthly_value)}
                                           </span>
                                         </div>
                                       )}
