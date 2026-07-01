@@ -53,6 +53,15 @@ describe('price-sync auto-map helpers', () => {
       expect(out.matched).toBe(false);
     });
 
+    test('rejects a stringy found value ("false"/"no") even with an identifier', () => {
+      expect(buildAutoMapRow({ product, proposal: { productId: 'prod-1', found: 'false', vendorSku: 'X' }, ...base }).matched).toBe(false);
+      expect(buildAutoMapRow({ product, proposal: { productId: 'prod-1', found: 'no', vendorSku: 'X' }, ...base }).matched).toBe(false);
+    });
+
+    test('requires a strict boolean true (found:"true" string is not a match)', () => {
+      expect(buildAutoMapRow({ product, proposal: { productId: 'prod-1', found: 'true', vendorSku: 'X' }, ...base }).matched).toBe(false);
+    });
+
     test('matches on a vendor SKU and writes an unverified row with package + notes', () => {
       const proposal = {
         productId: 'prod-1', found: true, vendorSku: 'SO-12345',

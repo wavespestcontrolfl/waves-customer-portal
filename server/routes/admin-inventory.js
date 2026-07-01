@@ -1775,7 +1775,9 @@ function parseAutoMapResponse(responseText) {
 // (vendor SKU or product URL); everything is written mapped_unverified downstream.
 function buildAutoMapRow({ product, proposal, vendorId, vendorName, connectionId }) {
   const hasIdentifier = proposal && (cleanString(proposal.vendorSku) || cleanString(proposal.productUrl));
-  if (!proposal || !proposal.found || !hasIdentifier) {
+  // Require an explicit boolean true — a model reply of found:"false"/"no" (string) must
+  // not be treated as a match just because it also carried a candidate URL/SKU.
+  if (!proposal || proposal.found !== true || !hasIdentifier) {
     return { matched: false, note: cleanString(proposal?.notes) || 'No confident match found' };
   }
   const row = {
@@ -1878,13 +1880,14 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
   return mappings;
 }
 
-// Count active products that still have no active mapping to this vendor.
+// Count active products that still have NO mapping row (of any status) to this vendor —
+// i.e. products a subsequent auto-map batch would still attempt. Mirrors the selection
+// predicate so a "loop until remaining === 0" actually terminates.
 async function countUnmappedForVendor(vendorId) {
   const [row] = await db('products_catalog as pc')
     .leftJoin('distributor_product_map as dpm', function joinMaps() {
       this.on('dpm.product_id', '=', 'pc.id')
-        .andOn('dpm.vendor_id', '=', db.raw('?', [vendorId]))
-        .andOn('dpm.active', '=', db.raw('true'));
+        .andOn('dpm.vendor_id', '=', db.raw('?', [vendorId]));
     })
     .where(function activeProducts() { this.where('pc.active', true).orWhereNull('pc.active'); })
     .whereNull('dpm.id')
@@ -1921,12 +1924,13 @@ router.post('/price-sync/auto-map', async (req, res, next) => {
     const rank = (t) => { const i = pref.indexOf(t); return i === -1 ? pref.length : i; };
     const connection = connections.slice().sort((a, b) => rank(a.connection_type) - rank(b.connection_type))[0] || null;
 
-    // Products with no active mapping to THIS vendor yet.
+    // Products with NO mapping row to THIS vendor yet (active OR an inactive
+    // "attempted, no match" marker) — so each processed product drops out of the next
+    // batch instead of being re-selected forever by the ORDER BY name / limit window.
     const products = await db('products_catalog as pc')
       .leftJoin('distributor_product_map as dpm', function joinMaps() {
         this.on('dpm.product_id', '=', 'pc.id')
-          .andOn('dpm.vendor_id', '=', db.raw('?', [vendorId]))
-          .andOn('dpm.active', '=', db.raw('true'));
+          .andOn('dpm.vendor_id', '=', db.raw('?', [vendorId]));
       })
       .where(function activeProducts() { this.where('pc.active', true).orWhereNull('pc.active'); })
       .whereNull('dpm.id')
@@ -1938,7 +1942,10 @@ router.post('/price-sync/auto-map', async (req, res, next) => {
       return res.json({ vendorId, vendorName: vendor.name, processed: 0, mapped: 0, remaining: 0, proposals: [], message: `No unmapped products for ${vendor.name}.` });
     }
 
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    // maxRetries: 0 — an SDK retry re-runs the whole web_search budget; avoid the
+    // duplicated search cost/latency on a transient 429/5xx (same rule as the other
+    // web_search clients, e.g. property-lookup).
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
     const proposals = await aiProposeVendorMappings(anthropic, vendor, products);
 
     const results = [];
@@ -1947,7 +1954,26 @@ router.post('/price-sync/auto-map', async (req, res, next) => {
       const proposal = proposals.find((p) => String(p.productId) === String(product.id));
       const built = buildAutoMapRow({ product, proposal, vendorId, vendorName: vendor.name, connectionId: connection?.id });
       if (!built.matched) {
-        results.push({ productId: product.id, productName: product.name, found: false, note: built.note });
+        // Persist an inactive "attempted, no match" marker ONLY when the model actually
+        // returned a decision for this product, so it drops out of the next batch. A
+        // product the model omitted entirely (e.g. a transient/truncated response) has no
+        // proposal and stays retryable. Inactive => never counts toward the board.
+        const recorded = Boolean(!dryRun && proposal);
+        if (recorded) {
+          await db('distributor_product_map').insert({
+            product_id: product.id,
+            vendor_id: vendorId,
+            vendor_connection_id: connection?.id || null,
+            mapping_status: 'rejected',
+            mapping_confidence: 0,
+            active: false,
+            notes: `AI auto-map: no confident match — ${built.note}`,
+            last_checked_at: new Date(),
+            created_at: new Date(),
+            updated_at: new Date(),
+          });
+        }
+        results.push({ productId: product.id, productName: product.name, found: false, note: built.note, recorded });
         continue;
       }
 

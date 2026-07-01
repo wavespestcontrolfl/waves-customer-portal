@@ -932,7 +932,7 @@ function PriceSyncTab({ showToast }) {
   const [loginDiscoveryLimit, setLoginDiscoveryLimit] = useState(50);
   const [loginDiscoveryQueueing, setLoginDiscoveryQueueing] = useState(false);
   const [loginDiscoveryResult, setLoginDiscoveryResult] = useState(null);
-  const [autoMapId, setAutoMapId] = useState(null);
+  const [autoMapIds, setAutoMapIds] = useState(() => new Set());
   const showToastRef = useRef(showToast);
 
   useEffect(() => {
@@ -1004,7 +1004,8 @@ function PriceSyncTab({ showToast }) {
   };
 
   const autoMapVendor = async (vendorId) => {
-    setAutoMapId(vendorId);
+    if (autoMapIds.has(vendorId)) return;
+    setAutoMapIds((prev) => new Set(prev).add(vendorId));
     try {
       const result = await adminFetch("/admin/inventory/price-sync/auto-map", {
         method: "POST",
@@ -1015,7 +1016,11 @@ function PriceSyncTab({ showToast }) {
     } catch (e) {
       showToast?.(`Auto-map failed: ${e.message}`);
     } finally {
-      setAutoMapId(null);
+      setAutoMapIds((prev) => {
+        const next = new Set(prev);
+        next.delete(vendorId);
+        return next;
+      });
     }
   };
 
@@ -1195,17 +1200,17 @@ function PriceSyncTab({ showToast }) {
                       {(vendor.nextAction === "Needs mapping" || vendor.nextAction === "Verify mappings") && (
                         <button
                           onClick={() => autoMapVendor(vendor.id)}
-                          disabled={autoMapId === vendor.id}
+                          disabled={autoMapIds.has(vendor.id)}
                           title="AI-propose vendor SKUs/URLs for this vendor's unmapped products (writes unverified — review before pricing)"
                           style={{
                             ...sBtn(D.teal, D.white),
                             padding: "4px 10px",
                             fontSize: 11,
-                            opacity: autoMapId === vendor.id ? 0.6 : 1,
-                            cursor: autoMapId === vendor.id ? "default" : "pointer",
+                            opacity: autoMapIds.has(vendor.id) ? 0.6 : 1,
+                            cursor: autoMapIds.has(vendor.id) ? "default" : "pointer",
                           }}
                         >
-                          {autoMapId === vendor.id ? "Mapping…" : "Auto-map"}
+                          {autoMapIds.has(vendor.id) ? "Mapping…" : "Auto-map"}
                         </button>
                       )}
                     </div>
