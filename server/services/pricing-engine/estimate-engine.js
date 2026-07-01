@@ -694,7 +694,9 @@ function generateEstimate(input) {
       });
       if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
-        activeServiceKeys.push('commercial_tree_shrub');
+        // very_high density returns a quote-required manual line — don't mark it
+        // active/priced (mirrors the pest/mosquito/termite/rodent branches).
+        if (!result.quoteRequired) activeServiceKeys.push('commercial_tree_shrub');
       }
     } else {
       const result = priceTreeShrub(property, {

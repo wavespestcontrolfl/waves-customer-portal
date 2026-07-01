@@ -49,10 +49,16 @@ describe('multipliers through generateEstimate', () => {
     [norm, high, low].forEach((r) => expect(r.margin).toBeCloseTo(0.45, 2));
   });
 
-  test('T&S very_high → manual quote', () => {
-    const r = line({ treeShrubDensity: 'very_high' }, 'commercial_tree_shrub');
+  test('T&S very_high → manual quote, NOT counted as an active/priced service', () => {
+    const est = generateEstimate({ ...base, services: { treeShrub: {} }, treeShrubDensity: 'very_high' });
+    const r = est.lineItems.find((l) => l.service === 'commercial_tree_shrub');
     expect(r).toMatchObject({ service: 'commercial_tree_shrub', quoteRequired: true, annual: null });
     expect(r.manualReviewReasons).toContain('commercial_tree_shrub_very_high_density_manual_quote');
+    // The manual line must not be marked active (mirrors pest/mosquito/etc.).
+    expect(est.waveGuard.activeServices).not.toContain('commercial_tree_shrub');
+    // …a normal-density T&S IS active.
+    const normal = generateEstimate({ ...base, services: { treeShrub: {} }, treeShrubDensity: 'normal' });
+    expect(normal.waveGuard.activeServices).toContain('commercial_tree_shrub');
   });
 
   test('mosquito pressure scales the price and preserves margin', () => {
