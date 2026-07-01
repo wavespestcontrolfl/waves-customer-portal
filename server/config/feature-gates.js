@@ -239,9 +239,14 @@ const gates = {
   // "live on merge", one env flip). Off → the cron only shadow-logs candidates.
   bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY === 'true',
 
-  // Booking "pay per application" — when a self-booking can be priced from a
-  // linked estimate OR the resolved customer's own recent quote-wizard draft
-  // (both service-bound, single-match), stamp the per-application price +
+  // Booking "pay per application" — PEST-ONLY BY DESIGN: this route only ever
+  // seeds a recurring series for quarterly pest_control (the quarterly-pest
+  // follow-up seeder is the sole exception; lawn/mosquito/tree bookings are
+  // single visits), so per-application pricing is bound to that quarterly series
+  // and every other booking fails closed to today's price-less behavior.
+  // When a self-booking can be priced from a linked estimate OR the resolved
+  // customer's own recent quote-wizard draft (both service-bound, single-match,
+  // cadence-matched), stamp the per-application price +
   // payment_method_preference='pay_at_visit' + create_invoice_on_complete onto
   // the booked visit (and its inherited recurring follow-ups) so completion
   // invoicing bills each visit from estimated_price. Self-booked customers carry

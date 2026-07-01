@@ -105,6 +105,11 @@ describe('resolveBookingVisitPrice — linked estimate (shapes, service + cadenc
     expect(resolveBookingVisitPrice({ estimate, bookingVisits: Q })).toBeNull();
   });
 
+  test('no booking cadence (non-pest / no series seeded) → null (pest-only scope)', () => {
+    const estimate = { id: 'e7', annual_total: 387.96, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] } } };
+    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control' })).toBeNull(); // bookingVisits omitted
+  });
+
   test('supplemental program in EITHER recurring container → null', () => {
     const rootOnly = { id: 'e5', annual_total: 500, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] }, recurring: { rodentBaitMo: 49 } } };
     const nestedOnly = { id: 'e6', annual_total: 500, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] }, recurring: {}, result: { recurring: { palmInjectionMo: 39 } } } };
