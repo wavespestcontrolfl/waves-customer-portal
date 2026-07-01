@@ -12,6 +12,7 @@ const {
   commercialLowConfidenceRequiresSiteQuote,
 } = require('../services/estimate-delivery-options');
 const { resolveEstimateQuoteRequirement, renderPage } = require('../routes/estimate-public');
+const { generateEstimate } = require('../services/pricing-engine');
 
 const recurring = (services) => ({ result: { recurring: { services } } });
 const LOW = (annual) => ({ service: 'commercial_lawn', pricingConfidence: 'LOW', annual, estimatedPricing: true });
@@ -60,6 +61,31 @@ describe('commercialLowConfidenceRange', () => {
     expect(commercialLowConfidenceRange(recurring([{ service: 'commercial_pest', pricingConfidence: 'LOW', quoteRequired: true, annual: null }]))).toEqual({ hasLowConfidence: false });
     expect(commercialLowConfidenceRange(recurring([{ service: 'pest_control', pricingConfidence: 'LOW', annual: 600 }]))).toEqual({ hasLowConfidence: false });
     expect(commercialLowConfidenceRange(null)).toEqual({ hasLowConfidence: false });
+  });
+});
+
+describe('public /calculate quoteRequired wiring (real engine lines)', () => {
+  // The public calculator computes quoteRequired from the SAME call this asserts:
+  //   commercialLowConfidenceRequiresSiteQuote({ engineResult: { lineItems: estimate.lineItems } })
+  // A wide LOW commercial line must force the site-confirmation (quote-required)
+  // response instead of returning monthly_total/variance for an unusable band.
+  const commercialLawn = (lotSqFt) => generateEstimate({
+    homeSqFt: 3000, lotSqFt, stories: 1, propertyType: 'commercial', lotSqFtEstimated: true,
+    services: { lawn: { track: 'st_augustine', tier: 'enhanced' } },
+  });
+
+  test('large commercial turf → wide LOW band forces a site quote', () => {
+    const estimate = commercialLawn(400000);
+    const lawn = estimate.lineItems.find((l) => l.service === 'commercial_lawn');
+    expect(lawn.pricingConfidence).toBe('LOW');
+    expect(commercialLowConfidenceRequiresSiteQuote({ engineResult: { lineItems: estimate.lineItems } })).toBe(true);
+  });
+
+  test('small commercial turf → narrow LOW band still prices instantly (no force)', () => {
+    const estimate = commercialLawn(12000);
+    const lawn = estimate.lineItems.find((l) => l.service === 'commercial_lawn');
+    expect(lawn.pricingConfidence).toBe('LOW');
+    expect(commercialLowConfidenceRequiresSiteQuote({ engineResult: { lineItems: estimate.lineItems } })).toBe(false);
   });
 });
 

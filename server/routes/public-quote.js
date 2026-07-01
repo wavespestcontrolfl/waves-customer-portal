@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { generateEstimate } = require('../services/pricing-engine');
+const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
@@ -631,12 +632,23 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       isManualQuoteLine(line)
     );
     const manualQuoteLine = manualQuoteLines[0] || null;
+    // A commercial auto-priced line whose driving area is estimated carries a LOW
+    // pricing confidence. When the aggregate ±20% band is too wide to show a
+    // useful number (> $300/mo swing), the quote is force-converted to a
+    // site-confirmed manual quote — same customer contract as any other manual
+    // quote (no price, account-manager follow-up), which is correct here because
+    // commercial estimates are re-confirmed by the account manager anyway.
+    const lowConfidenceForcesSiteQuote = commercialLowConfidenceRequiresSiteQuote({
+      engineResult: { lineItems: estimate?.lineItems || [] },
+    });
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
     // all assume the quote is wholly priced or wholly manual. A lawn-only or
     // tree-only commercial quote has no manual line, so it prices instantly.
-    const quoteRequired = !!manualQuoteLine;
+    const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote;
+    const quoteRequiredReason = manualQuoteLine?.reason
+      || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     const oneTimeTotal = quoteRequired ? 0 : (
@@ -684,7 +696,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       oneTimeTotal: oneTimeTotal || 0,
       isOneTimeOnly,
       quoteRequired,
-      quoteRequiredReason: manualQuoteLine?.reason || null,
+      quoteRequiredReason,
       quoteRequiredService: manualQuoteLine?.service || null,
       manualQuoteLines,
       commercialEstimatedPricing: !!commercialDisclaimer,
@@ -875,7 +887,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         isOneTimeOnly,
         enriched: ep,
         quoteRequired,
-        quoteRequiredReason: manualQuoteLine?.reason || null,
+        quoteRequiredReason,
         quoteRequiredService: manualQuoteLine?.service || null,
         manualQuoteLines,
         engineResult: {
@@ -1177,9 +1189,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         lead_id: lead.id,
         quote_required: true,
         service: manualQuoteLine?.service || null,
-        reason: manualQuoteLine?.reason || 'commercial_property_manual_quote_required',
+        reason: quoteRequiredReason || 'commercial_property_manual_quote_required',
         service_interest: serviceInterest,
-        message: 'Commercial properties require a manual quote. The Waves team has been notified.',
+        message: lowConfidenceForcesSiteQuote && !manualQuoteLine
+          ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
+          : 'Commercial properties require a manual quote. The Waves team has been notified.',
       });
     }
 
