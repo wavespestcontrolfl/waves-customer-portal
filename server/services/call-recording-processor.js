@@ -957,23 +957,60 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 // existing retry paths (manual reprocess / 5-min cron) can recover the row.
 const PROVIDER_FETCH_TIMEOUT_MS = Number(process.env.CALL_PROC_FETCH_TIMEOUT_MS) || 180000;
 
-async function fetchWithTimeout(url, options = {}, { timeoutMs = PROVIDER_FETCH_TIMEOUT_MS, label = 'provider' } = {}) {
+// Overall provider-time budget for one processRecording run. Per-call timeouts
+// bound a single stalled request, but a run makes several sequential provider
+// calls (download → transcribe → label → Gemini fallback → extract), and the
+// sum of their per-call caps could exceed the 10-min stale-lock reclaim window.
+// If it does, a peer cron/admin run can reclaim the row (overwrite the
+// processing_token) while this run is still going, and both runs then execute
+// customer/lead/appointment side effects. Bounding total provider time below
+// the stale window keeps this run's token-guarded terminal write authoritative.
+// Kept under 10 min with margin; env-overridable.
+const PROVIDER_RUN_DEADLINE_MS = Number(process.env.CALL_PROC_RUN_DEADLINE_MS) || 480000;
+
+// fetch() with a hard deadline that stays armed through BODY consumption.
+// fetch() resolves as soon as response headers arrive, so a provider that
+// streams (or stalls) the body afterwards would slip past a timer cleared at
+// header time — the row would still hang mid-body with the lock held. Reading
+// the whole body here, before the finally clears the timer, closes that gap;
+// callers get a response-like object whose .json()/.text()/.arrayBuffer() read
+// the already-buffered bytes. An optional shared `deadlineSignal` (the run
+// budget above) aborts the call early so cumulative provider time is bounded.
+async function fetchWithTimeout(url, options = {}, { timeoutMs = PROVIDER_FETCH_TIMEOUT_MS, label = 'provider', deadlineSignal = null } = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let deadlineHit = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  const onDeadline = () => { deadlineHit = true; controller.abort(); };
+  if (deadlineSignal) {
+    if (deadlineSignal.aborted) { deadlineHit = true; controller.abort(); }
+    else deadlineSignal.addEventListener('abort', onDeadline, { once: true });
+  }
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    // Drain the body while the abort deadline is still armed.
+    const body = Buffer.from(await res.arrayBuffer());
+    return {
+      ok: res.ok,
+      status: res.status,
+      headers: res.headers,
+      arrayBuffer: async () => body,
+      text: async () => body.toString('utf8'),
+      json: async () => JSON.parse(body.toString('utf8')),
+    };
   } catch (err) {
-    if (err?.name === 'AbortError') {
-      throw new Error(`${label} request timed out after ${timeoutMs}ms`);
+    if (deadlineHit || timedOut || err?.name === 'AbortError') {
+      throw new Error(`${label} request timed out (${deadlineHit ? 'run deadline' : `${timeoutMs}ms`})`);
     }
     throw err;
   } finally {
     clearTimeout(timer);
+    if (deadlineSignal) deadlineSignal.removeEventListener('abort', onDeadline);
   }
 }
 
 // ── Download Twilio recording (authenticated) ──
-async function downloadRecording(mp3Url) {
+async function downloadRecording(mp3Url, { deadlineSignal = null } = {}) {
   const twilioAuth = Buffer.from(
     `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
   ).toString('base64');
@@ -981,7 +1018,7 @@ async function downloadRecording(mp3Url) {
   const res = await fetchWithTimeout(mp3Url, {
     headers: { Authorization: `Basic ${twilioAuth}` },
     redirect: 'follow',
-  }, { label: 'twilio recording download' });
+  }, { label: 'twilio recording download', deadlineSignal });
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
 }
@@ -1098,7 +1135,7 @@ Rules:
 Transcript:
 ${text}`,
       }),
-    }, { label: 'openai transcript labeling' });
+    }, { label: 'openai transcript labeling', deadlineSignal: opts.deadlineSignal });
 
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
@@ -1120,7 +1157,7 @@ ${text}`,
 }
 
 // ── Primary transcription via OpenAI (multipart upload) ──
-async function transcribeWithOpenAI(audioBuffer) {
+async function transcribeWithOpenAI(audioBuffer, { deadlineSignal = null } = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
 
@@ -1142,7 +1179,7 @@ async function transcribeWithOpenAI(audioBuffer) {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
-    }, { label: 'openai transcription' });
+    }, { label: 'openai transcription', deadlineSignal });
 
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
@@ -1200,7 +1237,7 @@ Rules:
           generationConfig: { temperature: 0 },
         }),
       },
-      { label: 'gemini fallback transcription' }
+      { label: 'gemini fallback transcription', deadlineSignal: opts.deadlineSignal }
     );
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
@@ -1221,10 +1258,10 @@ Rules:
 async function transcribeRecording(mp3Url, opts = {}) {
   try {
     logger.info(`[call-proc] Downloading recording for transcription: ${mp3Url}`);
-    const audioBuffer = await downloadRecording(mp3Url);
+    const audioBuffer = await downloadRecording(mp3Url, { deadlineSignal: opts.deadlineSignal });
     logger.info(`[call-proc] Downloaded ${Math.round(audioBuffer.length / 1024)}KB audio`);
 
-    const openai = await transcribeWithOpenAI(audioBuffer);
+    const openai = await transcribeWithOpenAI(audioBuffer, { deadlineSignal: opts.deadlineSignal });
     const openaiTranscript = openai?.text || null;
     // Raw diarized segments (speaker + timestamps) — preserved alongside the
     // text so a future re-extraction has word-level/speaker structure without
@@ -1438,7 +1475,7 @@ Return ONLY valid JSON.`;
         },
       }),
     },
-    { label: 'gemini extraction' }
+    { label: 'gemini extraction', deadlineSignal: opts.deadlineSignal }
   );
 
   if (!res.ok) {
@@ -1552,7 +1589,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
           },
         }),
       },
-      { label: 'gemini v2 extraction' }
+      { label: 'gemini v2 extraction', deadlineSignal: opts.deadlineSignal }
     );
 
     if (!res.ok) {
@@ -1760,12 +1797,18 @@ const CallRecordingProcessor = {
       }
     }
 
+    // Shared provider deadline for this run — bounds the SUM of the sequential
+    // provider calls below to under the 10-min stale-lock window, so a peer
+    // can't reclaim this row (and duplicate side effects) while it's still
+    // transcribing/extracting. Threaded into every provider fetch via opts.
+    const runDeadlineSignal = AbortSignal.timeout(PROVIDER_RUN_DEADLINE_MS);
+
     // Step 1: Transcribe — OpenAI is the source of record. Gemini and Twilio are fallbacks only.
     let transcription = null;
     let transcriptionProvenance = null;
 
     if (call.recording_url) {
-      const result = await transcribeRecording(call.recording_url, { call, contactPhone });
+      const result = await transcribeRecording(call.recording_url, { call, contactPhone, deadlineSignal: runDeadlineSignal });
       transcription = result.transcription;
       if (transcription) {
         transcriptionProvenance = {
@@ -1880,7 +1923,7 @@ const CallRecordingProcessor = {
 
     let extracted;
     try {
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, deadlineSignal: runDeadlineSignal });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       await db('call_log').where({ id: call.id }).update({
@@ -1900,6 +1943,7 @@ const CallRecordingProcessor = {
         v2Result = await extractCallDataV2(transcription, contactPhone, {
           callStartedAt: call.created_at,
           callId: call.id,
+          deadlineSignal: runDeadlineSignal,
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -3438,6 +3482,10 @@ const CallRecordingProcessor = {
     //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
     //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
     //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly)
+    //   - processing_status='extraction_failed' but stale > 10 min. A provider TIMEOUT during
+    //     extraction lands here (transient), so it must re-enter the retry path to self-heal;
+    //     the 10-min age gate keeps a deterministically-failing transcript from re-billing the
+    //     extraction model every 5-min cron pass.
     //   - processing_status='processing' but stale > 10 min (orphaned claim from crash/hang)
     // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
     // with duration_seconds fallback, since the call-status webhook may not have populated
@@ -3462,6 +3510,10 @@ const CallRecordingProcessor = {
           .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
         .orWhere('processing_status', 'no_transcription')
+        .orWhere(function () {
+          this.where('processing_status', 'extraction_failed')
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        })
         .orWhere(function () {
           this.where('processing_status', 'processing')
             .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
@@ -3633,6 +3685,7 @@ CallRecordingProcessor._test = {
   transcribeRecording,
   extractCallDataV2,
   normalizeOpenAISegments,
+  fetchWithTimeout,
 };
 
 module.exports = CallRecordingProcessor;
