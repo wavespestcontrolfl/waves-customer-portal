@@ -465,12 +465,14 @@ async function fetchChannelAttribution(since, months = 1) {
   // its converted (completed) referral customers in the window, so the card divides
   // by the same count → a true CAC (default $25 + $25 = $50). Guarded / no-op.
   try {
-    let perConversion = 50; // $25 referrer + $25 referee — the settings' default
+    let perConversion = 50; // fallback ONLY if the settings row can't be read
     try {
       const s = await require('../services/referral-engine').getSettings();
-      const cents = (Number(s?.referrer_reward_cents) || 0) + (Number(s?.referee_discount_cents) || 0);
-      if (cents > 0) perConversion = cents / 100;
-    } catch { /* engine/settings unreadable — keep the default */ }
+      // Trust the configured reward even when it's a deliberate $0 (incentives off) —
+      // that's free acquisition, not "no settings". Only the catch (unreadable
+      // settings) keeps the $25+$25 default.
+      perConversion = ((Number(s?.referrer_reward_cents) || 0) + (Number(s?.referee_discount_cents) || 0)) / 100;
+    } catch { /* settings unreadable — keep the default */ }
     const [{ n }] = await db('ad_service_attribution')
       .where({ lead_source: 'referral', funnel_stage: 'completed' })
       .where('lead_date', '>=', since)
