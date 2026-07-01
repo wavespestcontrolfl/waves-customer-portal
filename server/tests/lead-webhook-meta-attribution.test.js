@@ -121,3 +121,23 @@ describe('determineLeadSource — spoke fleet (single-sourced from SPOKE_SITES)'
     expect(r.source).toBe('waves_website');
   });
 });
+
+describe('determineLeadSource — hub city detection (waves_website area)', () => {
+  const ds = (url) => determineLeadSource(url, '', '', '', '', '');
+  test('quote pages resolve the right city (was falling to "Main site" / Bradenton)', () => {
+    const r = ds('https://www.wavespestcontrol.com/pest-control-quote-parrish-fl/');
+    expect(r).toMatchObject({ source: 'waves_website', area: 'Parrish', channel: 'organic' });
+    expect(r.detail).toContain('parrish');
+  });
+  test('city pages, lawn city pages, and north-port all resolve their area', () => {
+    expect(ds('https://wavespestcontrol.com/pest-control-bradenton-fl/').area).toBe('Bradenton');
+    expect(ds('https://wavespestcontrol.com/pest-control-sarasota-fl/').area).toBe('Sarasota');
+    expect(ds('https://wavespestcontrol.com/lawn-care-venice-fl/').area).toBe('Venice');
+    expect(ds('https://wavespestcontrol.com/pest-control-north-port-fl/').area).toBe('North Port');
+    expect(ds('https://wavespestcontrol.com/pest-control-lakewood-ranch/').area).toBe('Lakewood Ranch');
+  });
+  test('non-city hub pages stay waves_website with no area (not mislabeled)', () => {
+    expect(ds('https://wavespestcontrol.com/lawn-care/')).toMatchObject({ source: 'waves_website', area: undefined });
+    expect(ds('https://wavespestcontrol.com/')).toMatchObject({ source: 'waves_website', detail: 'Main site', area: undefined });
+  });
+});
