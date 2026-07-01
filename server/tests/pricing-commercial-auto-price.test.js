@@ -444,13 +444,16 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
       },
     );
 
-    test('unset and unrecognized scopes default to bait_monitoring_no_warranty (auto)', () => {
+    test('unset scope stays auto (backward compatible); unknown scope FAILS CLOSED to manual', () => {
+      // Empty/undefined → the auto default (public path + pre-scope estimates).
       expect(normalizeCommercialTermiteScope('')).toBe('bait_monitoring_no_warranty');
       expect(normalizeCommercialTermiteScope(undefined)).toBe('bait_monitoring_no_warranty');
-      expect(normalizeCommercialTermiteScope('nonsense')).toBe('bait_monitoring_no_warranty');
-      expect(normalizeCommercialTermiteScope('BOND_MANUAL')).toBe('bond_manual'); // case-insensitive
-      // No scope → priced exactly as before this feature (backward compatible).
       expect(priceCommercialTermiteBait(MEASURED).annual).toBe(1014.55);
+      expect(normalizeCommercialTermiteScope('BOND_MANUAL')).toBe('bond_manual'); // case-insensitive
+      // A typo / tampered / not-yet-whitelisted liability scope must NOT auto-price.
+      const unknown = priceCommercialTermiteBait(MEASURED, { termiteScope: 'nonsense' });
+      expect(unknown).toMatchObject({ quoteRequired: true, annual: null });
+      expect(unknown.manualReviewReasons).toContain('commercial_termite_scope_requires_manual_quote');
     });
 
     test('scope threads through generateEstimate (services.termite.scope)', () => {

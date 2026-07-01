@@ -266,9 +266,10 @@ describe('deprecated client estimator pricing drift guards', () => {
     // not the other.
     expect(legacyAdminSource).toContain('termiteScope: form.termiteScope');
     expect(adminToolViewSource).toContain('termiteScope: form.termiteScope');
-    // And both must apply the same client-side manual-scope preview set.
-    expect(legacyAdminSource).toContain('COMMERCIAL_TERMITE_MANUAL_SCOPES');
-    expect(adminToolViewSource).toContain('COMMERCIAL_TERMITE_MANUAL_SCOPES');
+    // And both must apply the same fail-closed client-side preview set (auto
+    // scopes only; everything else previews as a manual quote, mirroring server).
+    expect(legacyAdminSource).toContain('COMMERCIAL_TERMITE_AUTO_SCOPES');
+    expect(adminToolViewSource).toContain('COMMERCIAL_TERMITE_AUTO_SCOPES');
   });
 
   test('client fallback quote-required trenching does not add renewal', () => {

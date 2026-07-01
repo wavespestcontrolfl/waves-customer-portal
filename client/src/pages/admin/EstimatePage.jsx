@@ -936,12 +936,13 @@ function EstimateToolView() {
       Number(form.termiteFootprintSqFt) > 0 ||
       Number(form.termitePerimeterLF) > 0;
     const hasCommercialLotSize = Number(form.lotSqFt) > 0;
-    // Mirror of the server termiteScope gate: bond / warranty / initial-install
-    // are a liability manual quote regardless of building size.
-    const COMMERCIAL_TERMITE_MANUAL_SCOPES = new Set(["bond_manual", "warranty_manual", "initial_install_manual"]);
+    // Mirror of the server termiteScope gate: auto-price ONLY a recognized auto
+    // scope — bond / warranty / initial-install AND any unrecognized value fail
+    // closed to a manual quote regardless of building size.
+    const COMMERCIAL_TERMITE_AUTO_SCOPES = new Set(["inspection_only", "monitoring_only", "bait_monitoring_no_warranty"]);
     const commercialKeyFallsToManual = (k) => {
       if (k === "svcMosquito") return !hasCommercialLotSize;
-      if (k === "svcTermiteBait") return !hasCommercialTermiteSize || COMMERCIAL_TERMITE_MANUAL_SCOPES.has(form.termiteScope);
+      if (k === "svcTermiteBait") return !hasCommercialTermiteSize || !COMMERCIAL_TERMITE_AUTO_SCOPES.has(form.termiteScope || "bait_monitoring_no_warranty");
       if (k === "svcPest" || k === "svcRodentBait") return !hasCommercialHomeSize;
       return false; // lawn / tree are lot-derivable and always auto-price
     };
