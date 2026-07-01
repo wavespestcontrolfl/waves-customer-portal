@@ -94,6 +94,17 @@ function formatCustomerAddress(customer) {
     .trim();
 }
 
+// Which finding field holds the service/treatment address for a project type.
+// WDO inspections use `property_address` (handled by its own richer effect); the
+// pre-treatment certificate uses a `treatment_address` autocomplete. Any future
+// `type: 'address'` field is picked up automatically so the generic customer-
+// address prefill stays type-agnostic.
+function getProjectAddressFieldKey(fields) {
+  if (!Array.isArray(fields)) return null;
+  const match = fields.find((f) => f?.type === 'address' || f?.key === 'property_address');
+  return match ? match.key : null;
+}
+
 function formatCustomerName(customer) {
   if (!customer) return '';
   const first = customer.firstName || customer.first_name || '';
@@ -234,6 +245,11 @@ export default function CreateProjectModal({
   // cleared so the previous customer's address/contacts never carry over
   // onto the new customer's FDACS-13645 form.
   const wdoAutoFillRef = useRef(null);
+  // For non-WDO types with a single address field (e.g. the pre-treatment
+  // certificate's `treatment_address`): the last customer-derived address we
+  // auto-filled, so a customer switch re-syncs it and un-picking clears it,
+  // while a hand-typed/autocompleted address the tech chose is never clobbered.
+  const projectAddressAutoFillRef = useRef({ key: null, value: '' });
   const [projectDate, setProjectDate] = useState(
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
@@ -406,6 +422,7 @@ export default function CreateProjectModal({
   }, [serviceSearch]);
 
   const typeCfg = typesRegistry && projectType ? typesRegistry[projectType] : null;
+  const addressFieldKey = getProjectAddressFieldKey(typeCfg?.findingsFields);
   // appointmentManaged types complete through the standard appointment flow
   // now — they're not creatable as projects (server 422s them too). An
   // explicit allowedProjectTypes prop (the special-project dispatch path)
@@ -472,6 +489,33 @@ export default function CreateProjectModal({
     });
   }, [projectType, selectedCustomer]);
 
+  // Prefill the address field from the selected customer for every OTHER project
+  // type that has one (the pre-treatment certificate's `treatment_address`, and
+  // any future `type: 'address'` field). WDO keeps its dedicated multi-field
+  // effect above. Blank-fills, re-syncs when the customer changes, and clears on
+  // un-pick — but only ever touches the value it auto-filled, so an address the
+  // tech typed or picked from the autocomplete is preserved.
+  useEffect(() => {
+    if (projectType === 'wdo_inspection' || !addressFieldKey) return;
+    const address = formatCustomerAddress(selectedCustomer);
+    setFindings(prev => {
+      const current = prev[addressFieldKey] || '';
+      const auto = projectAddressAutoFillRef.current;
+      const isAutoFilled = auto.key === addressFieldKey && current === auto.value;
+      // Never overwrite an address the tech owns (typed or autocompleted).
+      if (hasMeaningfulValue(current) && !isAutoFilled) return prev;
+      if (!address) {
+        // Customer un-picked: drop only what we auto-filled.
+        if (!isAutoFilled) return prev;
+        projectAddressAutoFillRef.current = { key: null, value: '' };
+        return { ...prev, [addressFieldKey]: '' };
+      }
+      if (current === address) return prev;
+      projectAddressAutoFillRef.current = { key: addressFieldKey, value: address };
+      return { ...prev, [addressFieldKey]: address };
+    });
+  }, [projectType, selectedCustomer, addressFieldKey]);
+
   function handleFindingChange(key, value) {
     setFindings(prev => ({ ...prev, [key]: value }));
   }
@@ -500,6 +544,16 @@ export default function CreateProjectModal({
       wdoAutoFillRef.current = recordAppliedAutoFill(prev, next, selectedCustomer, { overwrite: true });
       return next;
     });
+  }
+
+  // Explicit "Fill from customer" for a non-WDO address field — overwrites and
+  // marks the value as auto-filled so a later customer switch still re-syncs it.
+  function fillAddressFromCustomer() {
+    if (!addressFieldKey) return;
+    const address = formatCustomerAddress(selectedCustomer);
+    if (!address) return;
+    projectAddressAutoFillRef.current = { key: addressFieldKey, value: address };
+    setFindings(prev => ({ ...prev, [addressFieldKey]: address }));
   }
 
   // Called when the tech un-picks the customer ("Change"): drop the WDO fields
@@ -977,6 +1031,24 @@ export default function CreateProjectModal({
                       <button
                         type="button"
                         onClick={fillWdoAddressFromCustomer}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: P.accent,
+                          fontSize: 11,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                          padding: 0,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Fill from customer
+                      </button>
+                    )}
+                    {projectType !== 'wdo_inspection' && field.key === addressFieldKey && formatCustomerAddress(selectedCustomer) && (
+                      <button
+                        type="button"
+                        onClick={fillAddressFromCustomer}
                         style={{
                           background: 'transparent',
                           border: 'none',
