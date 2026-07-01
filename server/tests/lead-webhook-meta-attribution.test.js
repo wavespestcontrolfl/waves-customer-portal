@@ -5,6 +5,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { _test } = require('../routes/lead-webhook');
 const { buildLeadWebhookIntake, determineLeadSource } = _test;
+const { SPOKE_SITES } = require('../services/content-astro/spoke-sites');
 
 describe('buildLeadWebhookIntake — Meta click ids', () => {
   test('captures fbclid/fbc/fbp from a nested attribution object', () => {
@@ -88,6 +89,35 @@ describe('determineLeadSource — gclid (Google auto-tagging)', () => {
 
   test('a Waves page WITHOUT a click id stays organic waves_website (unchanged)', () => {
     const r = determineLeadSource('https://wavespestcontrol.com/pest-control-lakewood', '', '', '', '', '');
+    expect(r.source).toBe('waves_website');
+  });
+});
+
+describe('determineLeadSource — spoke fleet (single-sourced from SPOKE_SITES)', () => {
+  const spokeKeys = SPOKE_SITES.filter((s) => s.group !== 'Hub').map((s) => s.key);
+
+  test('DRIFT GUARD: every spoke in the fleet attributes to organic domain_website', () => {
+    // Adding a spoke to SPOKE_SITES must auto-attribute here. If this fails, that
+    // spoke's inbound form leads are silently dropping to 'Unattributed (web)'.
+    expect(spokeKeys.length).toBeGreaterThanOrEqual(16);
+    for (const key of spokeKeys) {
+      const r = determineLeadSource(`https://www.${key}/`, '', '', '', '', '');
+      expect(r).toMatchObject({ source: 'domain_website', detail: key, channel: 'organic' });
+    }
+  });
+
+  test('matches on the landing URL and carries the spoke area', () => {
+    const r = determineLeadSource('', 'https://www.bradentonflpestcontrol.com/', '', '', '', '');
+    expect(r).toMatchObject({ source: 'domain_website', detail: 'bradentonflpestcontrol.com', area: 'Bradenton' });
+  });
+
+  test('the brand-wide lawn spoke maps to the SW Florida area', () => {
+    const r = determineLeadSource('https://www.waveslawncare.com/', '', '', '', '', '');
+    expect(r).toMatchObject({ source: 'domain_website', detail: 'waveslawncare.com', area: 'SW Florida' });
+  });
+
+  test('the hub is NOT treated as a spoke (resolves to waves_website)', () => {
+    const r = determineLeadSource('https://www.wavespestcontrol.com/', '', '', '', '', '');
     expect(r.source).toBe('waves_website');
   });
 });

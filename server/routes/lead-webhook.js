@@ -61,6 +61,26 @@ function capitalizeName(name) {
   return properCase(name);
 }
 const leadAttribution = require('../services/lead-attribution');
+const { SPOKE_SITES } = require('../services/content-astro/spoke-sites');
+
+// Single source of truth for the spoke fleet: the domains determineLeadSource()
+// matches for organic domain_website attribution are derived from SPOKE_SITES (the
+// same canonical list the Astro build + content filter use) — so adding a spoke
+// there auto-attributes its inbound form leads here instead of dropping to the
+// 'Unattributed (web)' fallback. The hub (group 'Hub') is excluded — it resolves
+// to waves_website. `area` is optional display/location enrichment (used for
+// location resolution + stored on the lead); a spoke absent from SPOKE_AREA still
+// attributes correctly as domain_website, just with a null area.
+const SPOKE_DOMAIN_KEYS = SPOKE_SITES.filter((s) => s.group !== 'Hub').map((s) => s.key);
+const SPOKE_AREA = {
+  'bradentonflexterminator.com': 'Bradenton', 'bradentonflpestcontrol.com': 'Bradenton', 'bradentonfllawncare.com': 'Bradenton',
+  'palmettoexterminator.com': 'Palmetto', 'palmettoflpestcontrol.com': 'Palmetto',
+  'parrishexterminator.com': 'Parrish', 'parrishpestcontrol.com': 'Parrish', 'parrishfllawncare.com': 'Parrish',
+  'sarasotaflexterminator.com': 'Sarasota', 'sarasotaflpestcontrol.com': 'Sarasota', 'sarasotafllawncare.com': 'Sarasota',
+  'veniceexterminator.com': 'Venice', 'veniceflpestcontrol.com': 'Venice', 'venicelawncare.com': 'Venice',
+  'northportflpestcontrol.com': 'North Port',
+  'waveslawncare.com': 'SW Florida',
+};
 
 // Adam's personal cell for new-lead alerts — must be a real cell, never one
 // of our own Twilio numbers (same-from/to sends fail with Twilio error 21266).
@@ -1154,33 +1174,14 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
   // (_fbp alone is NOT counted — Meta sets it on every visit, organic included.)
   if (fbclid || fbc) return { source: 'facebook', detail: fbclid ? 'Meta click (fbclid)' : 'Meta click (_fbc)', channel: 'paid' };
 
-  // Domain-based attribution. Must mirror the spoke fleet in
-  // wavespestcontrol-astro-/src/data/domains.json — each spoke domain that
-  // serves form-capture pages needs a row here so determineLeadSource() can
-  // attribute its inbound leads. Missing domains fall through to generic
-  // 'website' source (the bug PR #264 originally tried to fix on the
-  // exterminator/pestcontrol fleet — same fix needs the lawn + brand spokes).
-  const domains = {
-    // Pest spokes (city)
-    'bradentonflexterminator.com': { area: 'Bradenton' }, 'bradentonflpestcontrol.com': { area: 'Bradenton' },
-    'palmettoexterminator.com': { area: 'Palmetto' }, 'palmettoflpestcontrol.com': { area: 'Palmetto' },
-    'parrishexterminator.com': { area: 'Parrish' }, 'parrishpestcontrol.com': { area: 'Parrish' },
-    'sarasotaflexterminator.com': { area: 'Sarasota' }, 'sarasotaflpestcontrol.com': { area: 'Sarasota' },
-    'veniceexterminator.com': { area: 'Venice' }, 'veniceflpestcontrol.com': { area: 'Venice' },
-    // Pest spokes (newer)
-    'northportflpestcontrol.com': { area: 'North Port' },
-    // Lawn spokes (city)
-    'bradentonfllawncare.com': { area: 'Bradenton' },
-    'parrishfllawncare.com': { area: 'Parrish' },
-    'sarasotafllawncare.com': { area: 'Sarasota' },
-    'venicelawncare.com': { area: 'Venice' },
-    // Lawn brand-wide (no single city)
-    'waveslawncare.com': { area: 'SW Florida' },
-  };
-
-  for (const [domain, info] of Object.entries(domains)) {
-    if (url.includes(domain)) return { source: 'domain_website', detail: domain, channel: 'organic', area: info.area };
-  }
+  // Domain-based attribution. The spoke fleet is single-sourced from SPOKE_SITES
+  // (see SPOKE_DOMAIN_KEYS / SPOKE_AREA above) so it can't drift from the Astro
+  // build's domain list — a spoke added there attributes here automatically. A
+  // domain not in the fleet falls through to the 'website' fallback below, which
+  // the dashboard surfaces as "Unattributed (web)" — a visible signal to map it,
+  // not a silent miss (the class of bug PR #264 fixed piecemeal).
+  const spokeDomain = SPOKE_DOMAIN_KEYS.find((domain) => url.includes(domain));
+  if (spokeDomain) return { source: 'domain_website', detail: spokeDomain, channel: 'organic', area: SPOKE_AREA[spokeDomain] || null };
 
   // Waves main site pages
   if (url.includes('wavespestcontrol.com')) {
