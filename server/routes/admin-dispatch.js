@@ -4371,24 +4371,45 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       else invoiceCreated = true;
     }
 
-    // A live annual-prepay-COVERED visit must never carry a collectible invoice: the
-    // work is already paid on the annual prepay invoice. The suppression gate stops
-    // NEW invoices, but a pre-existing / pre-minted invoice would otherwise be
-    // attached here as AR (a duplicate bill). Void it (voidInvoice cancels any open
-    // PaymentIntent and refuses to void a paid/in-flight one) and treat the visit as
-    // settled. Only suppress if the void succeeds, so a genuinely paid invoice stays
-    // handled normally. Full non-cash settlement / add-on split-billing is deferred.
+    // A live annual-prepay-COVERED visit must never carry a collectible invoice for
+    // the covered work: it's already paid on the annual prepay invoice. The
+    // suppression gate stops NEW invoices; a pre-existing / pre-minted invoice with NO
+    // add-ons is SETTLED here as non-cash annual-prepay coverage → 'prepaid'
+    // (non-collectible, no pay link, books no payments row → no revenue double-count).
+    // An invoice WITH add-ons (or applied account credit) is VOIDED for now — same as
+    // before this PR, money-safe (no double-bill), but it drops the add-on AR until
+    // the base-covered / add-ons-collectible SPLIT ships as the fast-follow. Fails
+    // closed: a cash-paid / in-flight invoice is left for normal handling.
     if (annualPrepayCovered && invoice?.id
       && !['paid', 'prepaid', 'void'].includes(String(invoice.status || '').toLowerCase())) {
       try {
         const InvoiceService = require('../services/invoice');
-        await InvoiceService.voidInvoice(invoice.id);
-        invoice = null;
-        invoiceCreated = false;
-        payUrl = null;
-        alreadyPaid = true;
-      } catch (voidErr) {
-        logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: could not void pre-existing invoice ${invoice.id}: ${voidErr.message}`);
+        // Named settleRes, NOT res — `res` here would shadow the Express response
+        // for the rest of this block (the isOutboundCall TDZ-shadow failure class).
+        const settleRes = await InvoiceService.settleInvoiceAsAnnualPrepayCovered(
+          invoice.id, svc.annual_prepay_term_id, { recordedBy: 'system:annual_prepay_completion' },
+        );
+        if (settleRes.settled) {
+          // Fully covered → settled non-cash 'prepaid' (invoice + service record kept,
+          // no revenue double-count) — non-collectible, no pay link.
+          invoice = settleRes.invoice;
+          invoiceCreated = false;
+          payUrl = null;
+          alreadyPaid = true;
+        } else if (['has_add_ons', 'has_applied_credit', 'has_deposit_credit'].includes(settleRes.reason)) {
+          // Covered visit whose invoice can't be plain-settled here (positive extras, or
+          // applied account/deposit credit that voidInvoice must restore): fall back to
+          // the pre-split void (money-safe — voidInvoice restores any credit + cancels
+          // the PI; the extras-collectible split is the fast-follow). No double-bill.
+          await InvoiceService.voidInvoice(invoice.id);
+          invoice = null;
+          invoiceCreated = false;
+          payUrl = null;
+          alreadyPaid = true;
+        }
+        // else (payer_billed / already_settled / processing): leave for normal handling.
+      } catch (settleErr) {
+        logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: could not settle pre-existing invoice ${invoice.id}: ${settleErr.message}`);
       }
     }
 

@@ -901,6 +901,16 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // whereNull guard leaves `updated` undefined and we don't clear.
       if (updated && updated.status === 'cancelled') {
         await clearPrepaidStampsForTerm(term.id, conn);
+        // Also reopen any per-visit invoices this term settled as NON-CASH coverage
+        // (status='prepaid' by this term, or a partial with a coverage line) — the
+        // prepay was refunded, so the covered work is owed again. Mirrors the stamp
+        // clear; best-effort (never blocks the refund sync), and never reopens a
+        // cash-paid invoice.
+        try {
+          await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(term.id, conn);
+        } catch (err) {
+          logger.warn(`[annual-prepay] invoice coverage reopen skipped for term ${term.id}: ${err.message}`);
+        }
       }
     }
 
@@ -931,6 +941,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       .select('id');
     for (const decided of decidedCoveredTerms) {
       await clearPrepaidStampsForTerm(decided.id, conn);
+      // Same as the active loop: reopen any visit invoices this term settled as
+      // non-cash coverage — the refund voids their coverage too.
+      try {
+        await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(decided.id, conn);
+      } catch (err) {
+        logger.warn(`[annual-prepay] invoice coverage reopen skipped for decided term ${decided.id}: ${err.message}`);
+      }
     }
   }
 
