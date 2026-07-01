@@ -286,10 +286,19 @@ function isNonLeadCallContent(extracted = {}) {
 // referred_by to the referrer's name (or 'unnamed') ONLY on an explicit referral.
 // Returns that name, or '' when there's no referral — used to override the dialed-
 // number source with the 'referral' channel so word-of-mouth is attributed.
+const REFERRAL_PLACEHOLDER_VALUES = new Set([
+  'null', 'none', 'n/a', 'na', 'no', 'false', 'true', 'unknown', 'undefined',
+  'not mentioned', 'not stated', 'not specified', 'not provided', 'nobody', 'no one',
+]);
 function referrerNameFromExtracted(extracted = {}) {
-  const raw = String(extracted?.referred_by || '').trim();
-  if (!raw || ['null', 'none', 'n/a', 'no'].includes(raw.toLowerCase())) return '';
-  return raw;
+  // Model-generated JSON has no schema enforcement — fail CLOSED: a non-string
+  // sentinel (e.g. boolean false) or a placeholder phrase must NOT be read as a
+  // referrer name and flip a normal call to lead_source='referral'.
+  const v = extracted?.referred_by;
+  if (typeof v !== 'string') return '';
+  const raw = v.trim();
+  if (!raw || REFERRAL_PLACEHOLDER_VALUES.has(raw.toLowerCase())) return '';
+  return raw.slice(0, 100); // sane cap for a name/'unnamed' (detail is clamped again at write)
 }
 
 // A lead is "qualified" only once we've actually captured the contact info the
@@ -2218,7 +2227,10 @@ const CallRecordingProcessor = {
         const referredByName = referrerNameFromExtracted(extracted);
         if (referredByName) {
           leadSource.source = 'referral';
-          leadSource.detail = referredByName.toLowerCase() === 'unnamed' ? 'Referral (unnamed)' : `Referred by ${referredByName}`;
+          // Clamp to customers.lead_source_detail's varchar(200) so a verbose
+          // model phrase can't overflow the column and break the customer insert.
+          leadSource.detail = (referredByName.toLowerCase() === 'unnamed'
+            ? 'Referral (unnamed)' : `Referred by ${referredByName}`).slice(0, 200);
         }
 
         try {
