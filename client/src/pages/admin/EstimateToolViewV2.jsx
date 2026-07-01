@@ -434,6 +434,9 @@ const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   "thatchProbe3Inches",
   "thatchDepthInches",
   "thatchMeasurementSource",
+  // Commercial cadence: changing the business type re-prices pest/rodent, so it
+  // must invalidate a generated estimate (else Save persists stale totals).
+  "commercialRiskType",
 ]);
 
 const MOSQUITO_PROTOCOL_STEPS = [
@@ -1914,6 +1917,7 @@ export default function EstimateToolViewV2({
     propertyType: "Single Family",
     isCommercial: "NO",
     commercialSubtype: "",
+    commercialRiskType: "",
     commercialPricingMode: "manual_quote",
     hasPool: "NO",
     hasPoolCage: "NO",
@@ -3187,6 +3191,7 @@ export default function EstimateToolViewV2({
         onetimeLawnType: form.otLawnType || "FERT",
         commercialPricingMode: form.commercialPricingMode || "manual_quote",
         commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
+        commercialRiskType: formIsCommercial ? form.commercialRiskType || "" : "",
         fleaOfferKey: form.fleaOfferKey || "flea_elimination_two_visit",
         fleaComplexity: form.fleaComplexity || "light",
         fleaExteriorSourceSuspected: !!form.fleaExteriorSourceSuspected,
@@ -3316,6 +3321,7 @@ export default function EstimateToolViewV2({
       profile.propertyType = form.propertyType || profile.propertyType;
       profile.isCommercial = formIsCommercial;
       profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
+      profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
@@ -3673,6 +3679,7 @@ export default function EstimateToolViewV2({
       propertyType: "Single Family",
       isCommercial: "NO",
       commercialSubtype: "",
+      commercialRiskType: "",
       commercialPricingMode: "manual_quote",
       hasPool: "NO",
       hasPoolCage: "NO",
@@ -4177,6 +4184,7 @@ export default function EstimateToolViewV2({
                       propertyType: "Single Family",
                       isCommercial: "NO",
                       commercialSubtype: "",
+                      commercialRiskType: "",
                       commercialPricingMode: "manual_quote",
                       hasPool: "NO",
                       hasPoolCage: "NO",
@@ -4493,6 +4501,24 @@ export default function EstimateToolViewV2({
               {(commercialDetected || form.commercialSubtype) && (
                 <FieldV2 label="Commercial Subtype">
                   <InputV2 k="commercialSubtype" placeholder="Optional" />
+                </FieldV2>
+              )}
+              {(commercialDetected || form.commercialRiskType) && (
+                <FieldV2 label="Business type (cadence)">
+                  <SelectV2
+                    k="commercialRiskType"
+                    options={[
+                      { value: "", label: "— Select business type —" },
+                      { value: "office_low", label: "Office / low-traffic" },
+                      { value: "retail_standard", label: "Retail / standard" },
+                      { value: "hoa_common_area", label: "HOA / common area" },
+                      { value: "warehouse_distribution", label: "Warehouse / distribution" },
+                      { value: "restaurant_food", label: "Restaurant / food service" },
+                      { value: "healthcare_childcare", label: "Healthcare / childcare" },
+                      { value: "hotel_resort", label: "Hotel / resort" },
+                      { value: "multifamily", label: "Multifamily" },
+                    ]}
+                  />
                 </FieldV2>
               )}
               {commercialDetected && (
