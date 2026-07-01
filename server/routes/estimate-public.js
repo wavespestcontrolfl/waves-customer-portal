@@ -11630,7 +11630,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   };
 }
 
-function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, siteConfirmationHold = false } = {}) {
+function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, commercialNoSlotAccept = false } = {}) {
   if (quoteRequirement.quoteRequired) {
     return {
       mode: 'quote_required',
@@ -11646,13 +11646,14 @@ function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppoin
       appointment: shapeLinkedAppointment(existingAppointment),
     };
   }
-  // A held (site-confirmation) commercial estimate has no self-servable slots —
-  // the slots endpoints return an empty commercial-manual list — so a slot-pick
-  // acceptance would show the price range with no way to approve it. Accept
-  // WITHOUT a slot: the team schedules the visit after approval (the accept
-  // handler already supports slotless accepts; the converter skips
-  // auto-scheduling for these).
-  if (siteConfirmationHold) {
+  // A ranged narrow low-confidence commercial estimate has no self-servable
+  // slots — the slots endpoints return an empty commercial-manual list for all
+  // commercial autos, whatever the billing mode — so a slot-pick acceptance
+  // would show the price range with no way to approve it. Accept WITHOUT a
+  // slot: the team schedules the visit after approval (the accept handler
+  // already supports slotless accepts; the converter skips auto-scheduling for
+  // commercial). Invoice-specific payment copy stays on siteConfirmationHold.
+  if (commercialNoSlotAccept) {
     return {
       mode: 'commercial_site_confirmation',
       ctaLabel: 'Approve estimate',
@@ -12185,19 +12186,23 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
     const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence);
-    // Narrow low-confidence commercial recurring estimate → its first invoice is
-    // held for on-site price confirmation at accept (no immediate invoice).
-    // Computed here (before the acceptance contract) so a held estimate with no
-    // linked appointment gets a no-slot accept mode — the slots endpoints return
-    // an empty commercial-manual list for these, so a slot-pick acceptance would
-    // leave the customer with a visible range but no way to approve it. Matches
-    // the accept-handler hold predicate.
-    const siteConfirmationHold = estimate.bill_by_invoice === true
-      && defaultServiceMode !== 'one_time'
+    // Narrow low-confidence commercial recurring estimate (the population whose
+    // price renders as a "$X–$Y/mo, confirmed on site" range).
+    const narrowLowConfidenceCommercial = defaultServiceMode !== 'one_time'
       && (() => {
         const lc = commercialLowConfidenceRange(estimateDataForIntelligence);
         return lc.hasLowConfidence && !lc.forceSiteQuote;
       })();
+    // Its first invoice is held for on-site price confirmation at accept (no
+    // immediate invoice) — invoice-mode only; drives the payment copy/deposit
+    // overrides below. Matches the accept-handler hold predicate.
+    const siteConfirmationHold = estimate.bill_by_invoice === true && narrowLowConfidenceCommercial;
+    // No-slot accept mode: the slots endpoints return an empty commercial-manual
+    // list for EVERY commercial auto estimate regardless of billing mode, so a
+    // slot-pick acceptance would leave ANY ranged narrow-LOW estimate (invoice
+    // mode or not) with a visible range but no way to approve it. Broader than
+    // the hold on purpose — the payment behavior stays keyed to the hold flag.
+    const commercialNoSlotAccept = narrowLowConfidenceCommercial;
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
@@ -12206,7 +12211,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       recurringServicesForIntelligence,
       pricingBundle?.oneTimeBreakdown?.items || []
     );
-    const acceptance = buildEstimateAcceptanceContract({ quoteRequirement, existingAppointment: linkedAppointment, siteConfirmationHold });
+    const acceptance = buildEstimateAcceptanceContract({ quoteRequirement, existingAppointment: linkedAppointment, commercialNoSlotAccept });
     const intelligence = buildWaveGuardIntelligencePayload(
       {
         ...estimate,

@@ -202,24 +202,26 @@ describe('attachPublicPricingContract — narrow low-confidence range marker (Re
   });
 });
 
-describe('buildEstimateAcceptanceContract — held estimates accept without a slot', () => {
-  // The slots endpoints return an empty commercial-manual list for these, so a
-  // slot-pick acceptance mode would leave the customer with a visible range but
-  // no way to approve it.
-  test('site-confirmation hold + no linked appointment → no-slot accept mode', () => {
-    expect(buildEstimateAcceptanceContract({ quoteRequirement: { quoteRequired: false }, siteConfirmationHold: true }))
+describe('buildEstimateAcceptanceContract — ranged narrow-LOW estimates accept without a slot', () => {
+  // The slots endpoints return an empty commercial-manual list for every
+  // commercial auto estimate (invoice mode or not), so a slot-pick acceptance
+  // mode would leave the customer with a visible range but no way to approve
+  // it. commercialNoSlotAccept covers the whole ranged narrow-LOW recurring
+  // population; invoice-only payment behavior stays on siteConfirmationHold.
+  test('narrow-LOW commercial + no linked appointment → no-slot accept mode', () => {
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: { quoteRequired: false }, commercialNoSlotAccept: true }))
       .toMatchObject({ mode: 'commercial_site_confirmation' });
   });
-  test('an existing linked appointment still wins over the hold (its flow already accepts)', () => {
+  test('an existing linked appointment still wins (its flow already accepts)', () => {
     const appt = { id: 'ss1', scheduled_date: '2026-07-10', status: 'pending' };
-    expect(buildEstimateAcceptanceContract({ quoteRequirement: {}, existingAppointment: appt, siteConfirmationHold: true }).mode)
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: {}, existingAppointment: appt, commercialNoSlotAccept: true }).mode)
       .toBe('existing_appointment');
   });
-  test('quote-required still wins over the hold (not self-serve at all)', () => {
-    expect(buildEstimateAcceptanceContract({ quoteRequirement: { quoteRequired: true, reason: 'x' }, siteConfirmationHold: true }).mode)
+  test('quote-required still wins (not self-serve at all)', () => {
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: { quoteRequired: true, reason: 'x' }, commercialNoSlotAccept: true }).mode)
       .toBe('quote_required');
   });
-  test('no hold → standard slot pick (unchanged)', () => {
+  test('not narrow-LOW → standard slot pick (unchanged)', () => {
     expect(buildEstimateAcceptanceContract({ quoteRequirement: {} }).mode).toBe('standard_slot_pick');
   });
 });
