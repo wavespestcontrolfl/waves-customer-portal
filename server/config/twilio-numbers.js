@@ -137,6 +137,51 @@ const TWILIO_NUMBERS = {
     return this._ownedLast10.has(last10);
   },
 
+  // Staff cell / forward numbers the inbound <Dial> simul-rings for call
+  // forwarding. These are NOT Twilio lines, but they ARE internal: on a forwarded
+  // leg Twilio can report a staff number as From OR To, and we must never key a
+  // customer/lead on a CSR's personal cell. Env-driven — mirrors the exact forward
+  // config in twilio-voice-webhook.js: WAVES_FALLBACK_FORWARD_NUMBERS, the named
+  // staff env fallbacks, and the WAVES_CSR_NUMBER_MAP keys. Re-read on each call
+  // (env is static in prod; deliberately NOT cached so tests can vary env per case).
+  staffForwardLast10() {
+    const set = new Set();
+    const add = (raw) => {
+      const d = String(raw == null ? '' : raw).replace(/\D/g, '').slice(-10);
+      if (d.length === 10) set.add(d);
+    };
+    String(process.env.WAVES_FALLBACK_FORWARD_NUMBERS || '').split(',').forEach(add);
+    [
+      process.env.OWNER_PHONE,
+      process.env.ADAM_PHONE,
+      process.env.VIRGINIA_PHONE,
+      process.env.OFFICE_MANAGER_PHONE,
+      process.env.WAVES_OFFICE_MANAGER_PHONE,
+    ].forEach(add);
+    // WAVES_CSR_NUMBER_MAP entries are "<number>:<name>" — the key is the number.
+    String(process.env.WAVES_CSR_NUMBER_MAP || '').split(',').forEach((pair) => {
+      const p = pair.trim();
+      if (!p) return;
+      const idx = p.lastIndexOf(':');
+      add(idx > 0 ? p.slice(0, idx) : p);
+    });
+    return set;
+  },
+
+  isStaffForwardNumber(phoneNumber) {
+    const digits = String(phoneNumber == null ? '' : phoneNumber).replace(/\D/g, '');
+    const last10 = digits.slice(-10);
+    if (last10.length !== 10) return false;
+    return this.staffForwardLast10().has(last10);
+  },
+
+  // Internal = one of our Twilio lines OR a staff forward / CSR cell. An internal
+  // number is never a real external customer contact — on a forwarding leg Twilio
+  // can surface either as From/To, so we must not key a lead/customer on it.
+  isInternalNumber(phoneNumber) {
+    return this.isOwnedNumber(phoneNumber) || this.isStaffForwardNumber(phoneNumber);
+  },
+
   findByNumber(phoneNumber) {
     // Location lines
     for (const [locId, loc] of Object.entries(this.locations)) {
