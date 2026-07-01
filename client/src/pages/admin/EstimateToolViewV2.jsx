@@ -2153,13 +2153,20 @@ export default function EstimateToolViewV2({
   useEffect(() => {
     if (rgIdentityRef.current === rgIdentityKey) return;
     rgIdentityRef.current = rgIdentityKey;
+    // Only act when confirmations were actually set, so a plain address/contact
+    // edit on a non-guarantee estimate never needlessly wipes a valid quote.
+    if (!RODENT_GUARANTEE_ELIGIBILITY_KEYS.some((k) => form[k])) return;
     setForm((f) => {
-      if (!RODENT_GUARANTEE_ELIGIBILITY_KEYS.some((k) => f[k])) return f;
       const next = { ...f };
       for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
       return next;
     });
-  }, [rgIdentityKey]);
+    // The generated estimate baked the (now-reset) flags into its engineRequest;
+    // invalidate it so a stale guarantee line can't be saved or sent.
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }, [rgIdentityKey, form]);
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
