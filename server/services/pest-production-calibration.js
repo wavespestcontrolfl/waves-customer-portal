@@ -275,6 +275,10 @@ function applyPestOnlyServiceFilters(q, alias = 's') {
   return q
     .whereILike(`${alias}.service_type`, '%pest%')
     .whereNot(`${alias}.service_type`, 'ilike', '%lawn%')
+    // "turf": commercial lawn persists as "Commercial Turf Treatment Program";
+    // exclude it from pest calibration just like %lawn% (guards a combined
+    // turf+pest name from polluting the pest production rate).
+    .whereNot(`${alias}.service_type`, 'ilike', '%turf%')
     .whereNot(`${alias}.service_type`, 'ilike', '%tree%')
     .whereNot(`${alias}.service_type`, 'ilike', '%shrub%')
     .whereNot(`${alias}.service_type`, 'ilike', '%mosquito%')

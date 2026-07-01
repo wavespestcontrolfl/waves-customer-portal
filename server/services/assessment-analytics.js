@@ -338,7 +338,10 @@ async function computeROI() {
       .distinct('customer_id')
       .where(function () {
         this.where('service_type', 'ilike', '%lawn%')
-          .orWhere('service_type', 'ilike', '%fertiliz%');
+          .orWhere('service_type', 'ilike', '%fertiliz%')
+          // "turf": commercial lawn persists as "Commercial Turf Treatment
+          // Program" (mirrors computeCompletionRates so ROI includes turf accounts).
+          .orWhere('service_type', 'ilike', '%turf%');
       })
       .pluck('customer_id');
 
