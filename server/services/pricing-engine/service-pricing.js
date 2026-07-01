@@ -2783,8 +2783,42 @@ function priceCommercialMosquito(property = {}, options = {}) {
   });
 }
 
+// Commercial termite SCOPE-split (owner 2026-07-01 — liability control). Bond,
+// warranty, and initial-install scopes carry liability that must be quoted from a
+// site inspection + written proposal — never auto-billed. Inspection / monitoring
+// / bait-monitoring (no warranty) auto-price via the perimeter cost-buildup below.
+// Default when unset = bait_monitoring_no_warranty (auto). Admin-only in Phase 1b.
+const COMMERCIAL_TERMITE_MANUAL_SCOPES = new Set(['bond_manual', 'warranty_manual', 'initial_install_manual']);
+const COMMERCIAL_TERMITE_AUTO_SCOPES = new Set(['inspection_only', 'monitoring_only', 'bait_monitoring_no_warranty']);
+const DEFAULT_COMMERCIAL_TERMITE_SCOPE = 'bait_monitoring_no_warranty';
+const COMMERCIAL_TERMITE_SCOPE_MANUAL_DETAIL = 'Termite bond, warranty, or bait-system installation requires a site inspection and written proposal — your Waves account manager will confirm the quote.';
+const COMMERCIAL_TERMITE_SCOPE_AUTO_NOTE = 'Treatment, bait-system installation, bond, warranty, or damage coverage require a site inspection and written proposal.';
+
+// Empty/unset or an unrecognized value → the safe auto default (the admin dropdown
+// constrains inputs; the public path never sends a scope). Only the three explicit
+// liability scopes force a manual quote.
+function normalizeCommercialTermiteScope(scope) {
+  const s = String(scope || '').trim().toLowerCase();
+  if (COMMERCIAL_TERMITE_MANUAL_SCOPES.has(s) || COMMERCIAL_TERMITE_AUTO_SCOPES.has(s)) return s;
+  return DEFAULT_COMMERCIAL_TERMITE_SCOPE;
+}
+
 function priceCommercialTermiteBait(property = {}, options = {}) {
   const cfg = COMMERCIAL_TERMITE_BAIT;
+  // Liability gate takes priority over building-size auto-pricing: bond / warranty
+  // / initial-install always require a site inspection + written proposal.
+  const termiteScope = normalizeCommercialTermiteScope(options.termiteScope);
+  if (COMMERCIAL_TERMITE_MANUAL_SCOPES.has(termiteScope)) {
+    return commercialPestFamilyManualLine({
+      service: 'commercial_termite_bait',
+      name: 'Commercial Termite Bait Monitoring',
+      originalRequestedService: 'termite_bait',
+      cfg,
+      reason: 'commercial_termite_scope_requires_manual_quote',
+      detail: COMMERCIAL_TERMITE_SCOPE_MANUAL_DETAIL,
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype,
+    });
+  }
   // Admin-entered termite measurements (services.termite.measurements →
   // footprintSqFt / perimeterLF) take precedence over the property-derived
   // building size: an operator who measured the building on a lot-only estimate
@@ -2834,9 +2868,10 @@ function priceCommercialTermiteBait(property = {}, options = {}) {
     service: 'commercial_termite_bait',
     name: 'Commercial Termite Bait Monitoring',
     originalRequestedService: 'termite_bait',
-    detail: 'Commercial termite bait-station monitoring (quarterly). Estimated from property data — final price confirmed on site.',
+    detail: `Commercial termite bait-station monitoring (quarterly). ${COMMERCIAL_TERMITE_SCOPE_AUTO_NOTE} Estimated from property data — final price confirmed on site.`,
     extra: {
       commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+      termiteScope,
       footprint,
       perimeter: roundMoney(perimeter),
       footprintSource,
@@ -7437,6 +7472,7 @@ module.exports = {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
+  normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_MANUAL_SCOPES,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,

@@ -856,6 +856,7 @@ function EstimateToolView() {
     termiteBaitComplexity: "",
     termiteBaitSystem: "advance",
     termiteMonitoringTier: "basic",
+    termiteScope: "bait_monitoring_no_warranty",
     trenchingPerimeterLF: "",
     trenchingConcreteLF: "",
     trenchingDirtLF: "",
@@ -935,9 +936,12 @@ function EstimateToolView() {
       Number(form.termiteFootprintSqFt) > 0 ||
       Number(form.termitePerimeterLF) > 0;
     const hasCommercialLotSize = Number(form.lotSqFt) > 0;
+    // Mirror of the server termiteScope gate: bond / warranty / initial-install
+    // are a liability manual quote regardless of building size.
+    const COMMERCIAL_TERMITE_MANUAL_SCOPES = new Set(["bond_manual", "warranty_manual", "initial_install_manual"]);
     const commercialKeyFallsToManual = (k) => {
       if (k === "svcMosquito") return !hasCommercialLotSize;
-      if (k === "svcTermiteBait") return !hasCommercialTermiteSize;
+      if (k === "svcTermiteBait") return !hasCommercialTermiteSize || COMMERCIAL_TERMITE_MANUAL_SCOPES.has(form.termiteScope);
       if (k === "svcPest" || k === "svcRodentBait") return !hasCommercialHomeSize;
       return false; // lawn / tree are lot-derivable and always auto-price
     };
@@ -1746,6 +1750,7 @@ function EstimateToolView() {
           termiteBaitSystem: form.termiteBaitSystem || "advance",
           termiteMonitoringTier: form.termiteMonitoringTier || "basic",
           termiteBaitComplexity: form.termiteBaitComplexity || "",
+          termiteScope: form.termiteScope || "bait_monitoring_no_warranty",
           termiteFootprintSqFt,
           termitePerimeterLF,
           trenchingPerimeterLF,
@@ -2212,6 +2217,7 @@ function EstimateToolView() {
       termiteBaitComplexity: "",
       termiteBaitSystem: "advance",
       termiteMonitoringTier: "basic",
+      termiteScope: "bait_monitoring_no_warranty",
       trenchingPerimeterLF: "",
       trenchingConcreteLF: "",
       trenchingDirtLF: "",
@@ -3396,6 +3402,19 @@ function EstimateToolView() {
                           options={[
                             { value: "basic", label: "Basic" },
                             { value: "premier", label: "Premier" },
+                          ]}
+                        />
+                      </Field>
+                      <Field label="Scope (liability)">
+                        <Select
+                          k="termiteScope"
+                          options={[
+                            { value: "inspection_only", label: "Inspection only" },
+                            { value: "monitoring_only", label: "Monitoring only" },
+                            { value: "bait_monitoring_no_warranty", label: "Bait monitoring (no warranty)" },
+                            { value: "bond_manual", label: "Bond — manual quote" },
+                            { value: "warranty_manual", label: "Warranty — manual quote" },
+                            { value: "initial_install_manual", label: "Initial install — manual quote" },
                           ]}
                         />
                       </Field>

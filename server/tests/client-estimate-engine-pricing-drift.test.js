@@ -260,6 +260,17 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(adminToolViewSource).not.toContain('profile.footprint = termiteFootprintSqFt');
   });
 
+  test('commercial termite scope rides in BOTH admin payloads (liability gate stays in sync)', () => {
+    // Both admin surfaces must forward termiteScope to the server so the
+    // bond/warranty/install → manual-quote gate can never fire on one form but
+    // not the other.
+    expect(legacyAdminSource).toContain('termiteScope: form.termiteScope');
+    expect(adminToolViewSource).toContain('termiteScope: form.termiteScope');
+    // And both must apply the same client-side manual-scope preview set.
+    expect(legacyAdminSource).toContain('COMMERCIAL_TERMITE_MANUAL_SCOPES');
+    expect(adminToolViewSource).toContain('COMMERCIAL_TERMITE_MANUAL_SCOPES');
+  });
+
   test('client fallback quote-required trenching does not add renewal', () => {
     const estimate = calculateEstimate({
       homeSqFt: 2400,
