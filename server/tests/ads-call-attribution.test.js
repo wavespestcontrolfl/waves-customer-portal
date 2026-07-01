@@ -76,13 +76,16 @@ describe('attributionForSourceType', () => {
     expect(CallAttribution.attributionForSourceType('main_site')).toEqual({ leadSource: 'waves_website', isPaid: false });
     expect(CallAttribution.attributionForSourceType('gbp')).toEqual({ leadSource: 'google_business', isPaid: false });
     expect(CallAttribution.attributionForSourceType('website_organic')).toEqual({ leadSource: 'google_business', isPaid: false });
+    // Van wrap: offline advertising on a dedicated number → its own no-spend channel
+    // (is_paid=false; the wrap's amortized cost lives in channel_fixed_costs).
+    expect(CallAttribution.attributionForSourceType('vehicle')).toEqual({ leadSource: 'van_wrap', isPaid: false });
     // NB: main_site maps to waves_website, but the caller suppresses the single
     // shared bridge-target number via google-call-bridge.isBridgeTargetNumber (so
     // paid Google calls on that line aren't pre-locked organic). The other
     // main_site city-page numbers attribute organic normally.
   });
-  test('offline / word-of-mouth / unknown sources are not attributed (null)', () => {
-    for (const t of ['referral', 'walk_in', 'vehicle', 'tollfree', 'direct', 'marketplace', 'unknown', undefined, null]) {
+  test('word-of-mouth / offline / unknown sources are not attributed (null)', () => {
+    for (const t of ['referral', 'walk_in', 'tollfree', 'direct', 'marketplace', 'unknown', undefined, null]) {
       expect(CallAttribution.attributionForSourceType(t)).toBeNull();
     }
   });

@@ -48,6 +48,11 @@ const SOURCE_TYPE_ATTRIBUTION = {
   main_site:       { leadSource: 'waves_website',   isPaid: false },
   gbp:             { leadSource: 'google_business', isPaid: false },
   website_organic: { leadSource: 'google_business', isPaid: false },
+  // Van wrap — offline advertising on a dedicated tracking number. Not click-paid
+  // (is_paid=false, so it stays out of the paid ad-platform ratio), but it IS a
+  // real cost: the card divides its lifetime value by the wrap's amortized cost
+  // (a channel_fixed_costs row for 'van_wrap') to give it an honest LTV:CAC.
+  vehicle:         { leadSource: 'van_wrap',        isPaid: false },
 };
 
 /**

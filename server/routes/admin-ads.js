@@ -600,6 +600,7 @@ function formatSourceName(key) {
     facebook: 'Facebook',
     facebook_organic: 'Facebook (organic)',
     nextdoor: 'Nextdoor',
+    van_wrap: 'Van Wrap',
     // Fallback bucket from the lead webhook (lead-webhook.js) when a form URL
     // matches no known domain/UTM — includes UNMAPPED spoke domains. NOT the Waves
     // hub (that's always waves_website). Label it distinctly so it doesn't read as
