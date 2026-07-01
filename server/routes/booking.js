@@ -914,12 +914,45 @@ async function createSelfBooking(payload = {}) {
     if (payAtVisit) {
       try {
         const { resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
-        // Bind the price to the booked SERVICE: only stamp when the linked
-        // estimate's recurring line is the same service that was booked, so a
+        // Bind the price to the booked SERVICE: only stamp when the priced
+        // estimate's recurring service is the same service that was booked, so a
         // crafted/stale payload can't pair one service's booking with another
         // service's price. service_type is client-influenced, hence the bind.
         const bookedServiceKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
-        const priced = resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey });
+        // Prefer the estimate this booking is explicitly linked to.
+        let priced = estimate
+          ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey })
+          : null;
+        // Fallback: the customer's own recent quote-wizard drafts — the common
+        // quote→book path carries no estimate_id. STRICTLY gated to a
+        // PHONE-VERIFIED booker (a new_customer phone that matches the resolved
+        // customer's phone), NEVER an address-only / client-supplied-id / or
+        // estimate-only resolution — those are not proof of identity and could
+        // otherwise let a visitor who knows an address bill an existing customer
+        // from that customer's own quote. Bound to the booked service, and used
+        // only when exactly one draft matches (enforced by resolveBookingVisitPrice).
+        const bookerLast10 = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+        const phoneVerifiedBooker = phoneDigits.length >= 10 && bookerLast10 === phoneDigits.slice(-10);
+        // Only when NO estimate is explicitly linked — a booking tied to an
+        // estimate_id must never silently fall back to a different quote.
+        if (!estimate_id && !priced && custId && phoneVerifiedBooker) {
+          // No LIMIT — the single-match guard must see ALL recent candidates, or
+          // a second matching draft beyond the window would let it price when it
+          // should fail closed. The customer + source + 14-day filter bounds it.
+          const candidateEstimates = await db('estimates')
+            .where({ customer_id: custId, source: 'quote_wizard' })
+            .whereIn('status', ['draft', 'sent', 'viewed'])
+            .whereRaw("created_at > NOW() - INTERVAL '14 days'")
+            .orderBy('created_at', 'desc')
+            .catch(() => []);
+          // Candidates must also match the booked address (fail-closed) so a
+          // second property's quote for the same customer can't be picked up.
+          priced = resolveBookingVisitPrice({
+            candidateEstimates,
+            serviceKey: bookedServiceKey,
+            bookingAddress: { line1: new_customer?.address_line1, zip: new_customer?.zip },
+          });
+        }
         if (priced) {
           visitPrice = priced.amount;
           paymentPref = 'pay_at_visit';

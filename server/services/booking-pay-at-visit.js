@@ -1,109 +1,151 @@
-// Booking "pay per application" (Phase 1) — resolve a per-application price for
-// a self-booking from the estimate it is EXPLICITLY linked to, so the booked
-// visit can be stamped with `estimated_price` + payment_method_preference=
-// 'pay_at_visit'. Those are the exact two fields an estimate accept sets on its
-// recurring visits, so the existing completion → invoice → /pay → save-card
-// machinery bills a self-booking identically. No charge/card capture here.
+// Booking "pay per application" — resolve a per-application price for a
+// self-booking, bound to the booked service, so the visit can be stamped with
+// estimated_price + payment_method_preference='pay_at_visit' +
+// create_invoice_on_complete (see booking.js). No charge/card capture here;
+// billing rides the existing completion → invoice → /pay path.
 //
-// Two hard safety rails on the money path:
-//  - STRICT source binding: the amount comes ONLY from the estimate the booking
-//    carries (estimate_id) — never guessed from a customer's other quotes.
-//  - SERVICE binding: it is stamped ONLY when the estimate's recurring line is
-//    the same service that was booked (service_type is client-influenced), so a
-//    crafted/stale payload can't pair one service with another's price.
-// Anything ambiguous or mismatched → null, and the booking stays price-less.
+// Price sources, both service-bound and never a mischarge:
+//   1. the estimate the booking is explicitly linked to (estimate_id), or
+//   2. the RESOLVED customer's own recent quote-wizard drafts (passed in by the
+//      caller) — used only when EXACTLY ONE matches the booked service AND
+//      address. Bound to the verified customer (not a forgeable id).
+//
+// AMOUNT is the estimate-level NET recurring annual (estimate.annual_total,
+// falling back to monthly_total × 12) ÷ cadence — authoritative and
+// shape-independent. Line-item fields are NOT used for the amount: discounts
+// live in different places across shapes (line-level for engine lineItems,
+// estimate-level for mapped result.recurring.services), so only the estimate
+// total is reliably net. The recurring service line is used solely for
+// eligibility (a single per-application-billable line), cadence, and the key.
+//
+// Recurring-service extraction reuses the converter's authoritative multi-shape
+// reader so every estimate shape is covered. The service key comes from the
+// seeder's serviceKeyFor on BOTH sides (estimate service AND booked
+// service_type) so the binding compares one vocabulary.
 const logger = require('./logger');
 
-// The quote-wizard / pricing engine stores priced lines under
-// estimate_data.engineResult.lineItems (public-quote.js) or .result.lineItems
-// (V2 engine); the converter reads both. Accept those, plus a live estimate
-// object's top-level .lineItems.
-function lineItemsFromEstimate(estimate) {
-  if (!estimate) return [];
-  if (Array.isArray(estimate.lineItems)) return estimate.lineItems;
-  const data = estimate.estimate_data || {};
-  if (Array.isArray(data.result?.lineItems)) return data.result.lineItems;
-  if (Array.isArray(data.engineResult?.lineItems)) return data.engineResult.lineItems;
-  if (Array.isArray(data.lineItems)) return data.lineItems;
-  return [];
+// A recurring line's monthly price (any positive value across shape aliases) —
+// used ONLY to identify a priced recurring line, never as the billed amount.
+function lineMonthlyOf(s) {
+  return Number(s.monthlyAfterCredits ?? s.monthlyAfterDiscount ?? s.monthly ?? s.mo);
+}
+function perAppOf(s) {
+  return Number(s.perApp ?? s.perTreatment);
 }
 
-// Visits/year per canonical recurring pattern — mirrors the seeder's
-// DEFAULT_ONE_YEAR_COUNTS (which is not exported).
 const VISITS_PER_YEAR_BY_PATTERN = {
   weekly: 52, biweekly: 26, monthly: 12, bimonthly: 6,
   quarterly: 4, triannual: 3, semiannual: 2, biannual: 2, annual: 1, yearly: 1,
 };
-
-// Resolve visits/year for a line: a numeric visitsPerYear/frequency, else a
-// STRING cadence normalized via the seeder's canonical mapper. Quote-wizard pest
-// lines persist frequency:'quarterly' with no numeric visitsPerYear
-// (public-quote.js), so string cadences must be handled or the common pest case
-// silently stays price-less.
-function resolveVisitsPerYear(line) {
-  if (Number(line.visitsPerYear) > 0) return Number(line.visitsPerYear);
-  if (Number(line.frequency) > 0) return Number(line.frequency);
+function resolveVisitsPerYear(s) {
+  if (Number(s.visitsPerYear) > 0) return Number(s.visitsPerYear);
+  if (Number(s.frequency) > 0) return Number(s.frequency);
   const { normalizeRecurringPattern } = require('./recurring-appointment-seeder');
-  const pattern = normalizeRecurringPattern(line.frequency ?? line.cadence);
+  const pattern = normalizeRecurringPattern(s.frequency ?? s.cadence);
   return (pattern && VISITS_PER_YEAR_BY_PATTERN[pattern]) || null;
 }
 
-// Pick the single per-application-billable recurring line, or null. Eligibility:
-// exactly one recurring line (positive net monthly), a positive `perApp` caption
-// (signals per-visit billing, not a monthly-only tier), and a resolvable cadence.
-function pickRecurringLine(lineItems) {
-  const recurring = (Array.isArray(lineItems) ? lineItems : []).filter(
-    (item) => Number(item?.monthlyAfterDiscount ?? item?.monthly) > 0,
-  );
-  if (recurring.length !== 1) return null;
-  const line = recurring[0];
-  if (!(Number(line.perApp) > 0)) return null;
-  const visits = resolveVisitsPerYear(line);
-  if (!visits) return null;
-  return { line, visits };
-}
-
-// Billed amount = NET (after-discount) annual ÷ cadence, using the codebase's
-// net-field precedence (annualAfterCredits → annualAfterDiscount → annual, then
-// the monthly equivalents). `perApp` is stored raw/gross by the quote, so it is
-// NEVER the billed amount — billing it would overcharge a discounted plan. Cents
-// preserved (this is the billable estimated_price, not a display figure).
-function netPerVisit(line, visits) {
-  const netAnnual = Number(line.annualAfterCredits ?? line.annualAfterDiscount ?? line.annual);
-  const netMonthly = Number(line.monthlyAfterCredits ?? line.monthlyAfterDiscount ?? line.monthly);
-  const perVisit = netAnnual > 0
-    ? netAnnual / visits
-    : (netMonthly > 0 ? (netMonthly * 12) / visits : null);
-  if (!(perVisit > 0)) return null;
-  return Math.round(perVisit * 100) / 100;
-}
-
-// Exposed for tests: net per-application amount from a set of line items.
-function derivePerApplicationAmount(lineItems) {
-  const picked = pickRecurringLine(lineItems);
-  return picked ? netPerVisit(picked.line, picked.visits) : null;
-}
-
-// Resolve a per-application price for a booking from its LINKED estimate, bound
-// to the booked service. Returns { amount, sourceEstimateId, serviceKey } or
-// null. `serviceKey` is the canonical key of the booked service; the price is
-// returned only when the estimate line resolves to the same key. Never throws.
-function resolveBookingVisitPrice({ estimate = null, serviceKey = null } = {}) {
+// Extract recurring services from ANY estimate shape via the converter's
+// authoritative extractor. Accepts a DB row (.estimate_data) or a live estimate
+// object (.lineItems, wrapped so the engineResult path finds them).
+function recurringServicesFromEstimate(estimate) {
+  if (!estimate) return [];
+  const { recurringServicesFromEstimateData } = require('./estimate-converter');
+  const data = estimate.estimate_data
+    || (Array.isArray(estimate.lineItems) ? { engineResult: { lineItems: estimate.lineItems } } : {});
   try {
-    if (!estimate) return null;
-    const picked = pickRecurringLine(lineItemsFromEstimate(estimate));
-    if (!picked) return null;
-    const { serviceKeyFor } = require('./recurring-appointment-seeder');
-    const lineKey = serviceKeyFor(picked.line);
-    // Fail closed: only stamp when the priced line is the booked service.
-    if (!serviceKey || lineKey !== serviceKey) return null;
-    const amount = netPerVisit(picked.line, picked.visits);
-    if (!amount) return null;
-    return { amount, sourceEstimateId: estimate.id || null, serviceKey: lineKey };
+    return recurringServicesFromEstimateData(data) || [];
+  } catch (err) {
+    logger.warn(`[booking-pay-at-visit] recurring-service extraction failed: ${err.message}`);
+    return [];
+  }
+}
+
+// The single per-application-billable recurring service + its cadence, or null.
+// Eligibility: exactly one priced recurring line, a positive per-app caption
+// (signals per-visit billing, not a monthly-only tier), and a resolvable cadence.
+function pickRecurringService(services) {
+  const priced = (Array.isArray(services) ? services : []).filter((s) => lineMonthlyOf(s) > 0);
+  if (priced.length !== 1) return null;
+  const svc = priced[0];
+  if (!(perAppOf(svc) > 0)) return null;
+  const visits = resolveVisitsPerYear(svc);
+  if (!visits) return null;
+  return { svc, visits };
+}
+
+// Per-visit NET amount = estimate-level net recurring annual ÷ cadence, cents
+// preserved. Uses the authoritative estimate total, not line fields.
+function perVisitAmountForEstimate(estimate, picked) {
+  const netAnnual = Number(estimate.annual_total) > 0
+    ? Number(estimate.annual_total)
+    : (Number(estimate.monthly_total) > 0 ? Number(estimate.monthly_total) * 12 : 0);
+  if (!(netAnnual > 0)) return null;
+  const perVisit = Math.round((netAnnual / picked.visits) * 100) / 100;
+  return perVisit > 0 ? perVisit : null;
+}
+
+// Exposed for tests: net per-application amount for an estimate.
+function derivePerApplicationAmount(estimate) {
+  const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
+  return picked ? perVisitAmountForEstimate(estimate, picked) : null;
+}
+
+function serviceKeyOf(svc) {
+  const { serviceKeyFor } = require('./recurring-appointment-seeder');
+  return serviceKeyFor(svc);
+}
+
+function normalizeAddr(v) {
+  return String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Fail-CLOSED address bind for the candidate (fallback) path: the candidate
+// quote's street line and 5-digit zip must match the booked address EXACTLY
+// (normalized). Substring matching is deliberately avoided so "112 Main St"
+// can't match a booking for "12 Main St". Not applied to a linked estimate.
+function estimateAddressMatches(estimate, bookingAddress) {
+  const bookStreet = normalizeAddr(bookingAddress?.line1);
+  const bookZip = String(bookingAddress?.zip || '').replace(/\D/g, '');
+  if (!bookStreet || bookZip.length !== 5) return false;
+  const estStreet = normalizeAddr(String(estimate?.address || '').split(',')[0]);
+  // The zip is the LAST 5-digit group — a 5-digit street number (e.g. "15715")
+  // must not be mistaken for it.
+  const estZips = String(estimate?.address || '').match(/\b\d{5}\b/g) || [];
+  const estZip = estZips.length ? estZips[estZips.length - 1] : '';
+  return !!estStreet && estStreet === bookStreet && estZip === bookZip;
+}
+
+// Price from a single estimate, only when its recurring service matches the
+// booked service key. Returns { amount, sourceEstimateId, serviceKey } or null.
+function priceFromEstimate(estimate, serviceKey) {
+  const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
+  if (!picked) return null;
+  if (!serviceKey || serviceKeyOf(picked.svc) !== serviceKey) return null;
+  const amount = perVisitAmountForEstimate(estimate, picked);
+  return amount ? { amount, sourceEstimateId: estimate.id || null, serviceKey } : null;
+}
+
+// Resolve a per-application price bound to the booked service. Prefer the linked
+// estimate (explicitly chosen — no address bind needed); else the customer's
+// recent quote-wizard drafts (candidateEstimates), which must ALSO match the
+// booked address, pricing only when EXACTLY ONE such candidate matches the
+// booked service. Never throws.
+function resolveBookingVisitPrice({ estimate = null, candidateEstimates = [], serviceKey = null, bookingAddress = null } = {}) {
+  try {
+    if (estimate) {
+      const linked = priceFromEstimate(estimate, serviceKey);
+      if (linked) return linked;
+    }
+    const matches = (Array.isArray(candidateEstimates) ? candidateEstimates : [])
+      .filter((e) => estimateAddressMatches(e, bookingAddress))
+      .map((e) => priceFromEstimate(e, serviceKey))
+      .filter(Boolean);
+    if (matches.length === 1) return matches[0];
   } catch (err) {
     logger.warn(`[booking-pay-at-visit] price resolution failed: ${err.message}`);
-    return null;
   }
+  return null;
 }
 
 module.exports = { derivePerApplicationAmount, resolveBookingVisitPrice };
