@@ -253,6 +253,18 @@ function containsAutoPricedCadenceLine(value, depth = 0) {
   return Object.values(value).some((item) => containsAutoPricedCadenceLine(item, depth + 1));
 }
 
+// Any materialized commercial pest/rodent line (regardless of pricing mode). When
+// one exists, the pricing mode decides the gate (auto → gate; manual → the
+// quote-required gate handles it) and the raw selectedServices fallback is NOT
+// consulted — a saved manual/one-time estimate still carries selectedServices.
+function containsCommercialCadenceServiceLine(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) return value.some((item) => containsCommercialCadenceServiceLine(item, depth + 1));
+  if (typeof value !== 'object') return false;
+  if (typeof value.service === 'string' && CADENCE_COMMERCIAL_SERVICES.has(value.service)) return true;
+  return Object.values(value).some((item) => containsCommercialCadenceServiceLine(item, depth + 1));
+}
+
 // engineInputs-only fallback: some rows store only the engine request (the public
 // pricing path replays it) with no materialized result line yet. Detect the raw
 // selectedServices choosing recurring pest / rodent-bait so the gate still fails
@@ -304,16 +316,22 @@ function firstCommercialRiskType(value, depth = 0) {
 function commercialRiskTypeReviewNeeded(estimateData) {
   const data = parseEstimateData(estimateData);
   if (!data) return false;
+  // Authored commercial proposals are hand-priced (the line items ARE the quote);
+  // their cadence is not engine-risk-type driven, so they are NEVER risk-type
+  // gated — even if a stale riskTypeNeedsReview flag is still on the row (an
+  // operator can resolve the flag by authoring the proposal). Checked first.
+  if (data.proposal && data.proposal.enabled === true) return false;
   // Explicit flag — the public "Other / skipped" business-type path sets this
   // (Phase 3) so a defaulted-but-unconfirmed bucket still surfaces for review.
   if (data.riskTypeNeedsReview === true) return true;
-  // Authored commercial proposals are hand-priced (the line items ARE the quote);
-  // their cadence is not engine-risk-type driven, so they are never risk-type gated.
-  if (data.proposal && data.proposal.enabled === true) return false;
-  // Gate only when a commercial pest/rodent CADENCE line exists (auto-priced) OR
-  // will be produced from an engineInputs-only commercial pest/rodent selection.
-  const cadenceRelevant = containsAutoPricedCadenceLine(data)
-    || (isCommercialEstimateData(data) && selectsRecurringPestOrRodent(data));
+  // A materialized commercial pest/rodent line decides on its own pricing mode:
+  // gate only an AUTO-priced one (a manual quote is handled by the quote-required
+  // gate, not this one). Only when NO such line is materialized do we fall back to
+  // the raw selectedServices (engineInputs-only rows) so a saved manual estimate
+  // that still carries selectedServices is not spuriously gated.
+  const cadenceRelevant = containsCommercialCadenceServiceLine(data)
+    ? containsAutoPricedCadenceLine(data)
+    : (isCommercialEstimateData(data) && selectsRecurringPestOrRodent(data));
   if (!cadenceRelevant) return false;
   return !isCommercialRiskType(firstCommercialRiskType(data));
 }

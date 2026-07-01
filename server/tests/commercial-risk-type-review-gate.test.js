@@ -57,6 +57,28 @@ describe('commercialRiskTypeReviewNeeded', () => {
       proposal: { enabled: true },
       result: { lineItems: [autoPest] },
     }))).toBe(false);
+    // …even when a stale riskTypeNeedsReview flag is still on the row (the operator
+    // resolved it by authoring the proposal). Proposal exemption runs first.
+    expect(commercialRiskTypeReviewNeeded(data({
+      riskTypeNeedsReview: true,
+      proposal: { enabled: true },
+      result: { lineItems: [autoPest] },
+    }))).toBe(false);
+  });
+
+  test('a saved manual estimate that still carries selectedServices is not gated', () => {
+    // The stored blob keeps engineRequest.selectedServices from the calculator
+    // payload; a materialized manual_quote line must NOT be overridden by that
+    // fallback (the quote-required gate handles the manual line).
+    expect(commercialRiskTypeReviewNeeded(data({
+      engineRequest: { profile: { isCommercial: true }, selectedServices: ['PEST'] },
+      result: { lineItems: [{ service: 'commercial_pest', commercialPricingMode: 'manual_quote', quoteRequired: true, annual: null }] },
+    }))).toBe(false);
+    // …but a real auto-priced line with the same selectedServices still gates.
+    expect(commercialRiskTypeReviewNeeded(data({
+      engineRequest: { profile: { isCommercial: true }, selectedServices: ['PEST'] },
+      result: { lineItems: [autoPest] },
+    }))).toBe(true);
   });
 
   test('engineInputs-only commercial pest/rodent selection still fails closed', () => {
