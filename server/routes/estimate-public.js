@@ -3891,7 +3891,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ` : `
       <div class="big-price" data-mode-only="recurring">
         ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
-        <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
+        <span class="num" id="monthly-display">${commercialPriceRange.hasLowConfidence
+          ? `${fmtMoney(commercialPriceRange.rangeLowMonthly)}&ndash;${fmtMoney(commercialPriceRange.rangeHighMonthly)}`
+          : fmtMoney(recurringDisplayTotal)}</span>
         <span class="per">${escapeHtml(recurringPricePeriodWord)}</span>
         <span class="tier-lbl">${commercialManualAccept ? 'Commercial' : `WaveGuard ${escapeHtml(tier)}`}</span>
       </div>
@@ -4522,8 +4524,9 @@ ${shellTopBar()}
   <section class="card booking-card" id="commercial-accept-card">
     <h2 id="booking-title">Approve your commercial service</h2>
     <p class="card-sub">This is a commercial service plan. Approve your estimate and a Waves account manager will schedule your visits and send your invoice &mdash; no card or deposit needed now.</p>
-    <p class="card-sub" style="font-style:italic">Pricing is estimated from your property details and confirmed on site before your first visit.</p>
-    ${commercialPriceRange.hasLowConfidence ? `<p class="card-sub" style="font-weight:700">Estimated range: ${fmtMoney(commercialPriceRange.rangeLowMonthly)}&ndash;${fmtMoney(commercialPriceRange.rangeHighMonthly)}/mo &mdash; final price confirmed on site.</p>` : ''}
+    <p class="card-sub" style="font-style:italic">${commercialPriceRange.hasLowConfidence
+      ? 'The price above is an estimated range from your property details — your final price is confirmed on site before your first visit.'
+      : 'Pricing is estimated from your property details and confirmed on site before your first visit.'}</p>
     <div class="pay-pref-grid options">
       <div class="pay-pref-choice">
         <button type="button" class="pay-pref-btn primary" id="commercial-approve-btn" data-commercial-mode="monthly"><span class="pay-pref-title">Approve &amp; pay monthly</span></button>

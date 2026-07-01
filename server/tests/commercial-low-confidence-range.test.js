@@ -85,9 +85,12 @@ describe('renderPage — low-confidence commercial estimate', () => {
     return renderPage('tok', est, data);
   };
 
-  test('narrow low-confidence shows the ±20% range + keeps the approval card', () => {
-    const out = html(4800);
-    expect(out).toMatch(/Estimated range:/);
+  test('narrow low-confidence leads with the ±20% range (not an exact price) + keeps the approval card', () => {
+    const out = html(4800).replace(/&ndash;/g, '-'); // $400/mo → 320–480
+    // The range is the PRIMARY hero price, not a single figure.
+    expect(out).toMatch(/id="monthly-display">\$320-\$480</);
+    expect(out).not.toMatch(/id="monthly-display">\$400</);
+    expect(out).toMatch(/estimated range from your property details/i);
     expect(out).toContain('id="commercial-accept-card"');
   });
 
