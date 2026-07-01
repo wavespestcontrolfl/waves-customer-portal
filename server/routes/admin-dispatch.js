@@ -4122,21 +4122,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const dupStatus = String(dupInvoice?.status || '').toLowerCase();
         if (dupInvoice?.id && !['paid', 'prepaid', 'void'].includes(dupStatus)) {
           try {
-            const voided = await db('invoices').where({ id: dupInvoice.id })
-              .whereNotIn('status', ['paid', 'prepaid', 'void'])
-              .update({ status: 'void', updated_at: new Date() });
-            if (voided) {
-              try {
-                const CardHolds = require('../services/estimate-card-holds');
-                await CardHolds.chargeCardHoldOnCompletion({ scheduledServiceId: svc.id, invoiceId: dupInvoice.id });
-              } catch (e) { logger.warn(`[dispatch] card-hold release on prepay-covered void failed for ${dupInvoice.id}: ${e.message}`); }
-              invoice = null;
-              existingCompletionInvoice = null;
-              invoiceCreated = false;
-              payUrl = null;
-              logger.info(`[dispatch] voided duplicate invoice ${dupInvoice.id} on annual-prepay-covered completion for service ${svc.id}`);
-            }
-          } catch (e) { logger.warn(`[dispatch] duplicate-invoice void on prepay-covered completion failed for ${dupInvoice.id}: ${e.message}`); }
+            // Use InvoiceService.voidInvoice — NOT a raw status='void' — so the
+            // live PaymentIntent is cancelled first, applied credit is restored,
+            // and payer statements re-roll. A raw void could leave a stale /pay
+            // or ACH PI able to settle against a voided invoice (ledger mismatch,
+            // PI↔invoice↔webhook agreement). voidInvoice THROWS when money is
+            // genuinely in flight / already applied / on a finalized statement;
+            // in that rare case leave the invoice for manual handling (a forced
+            // void would be worse than an open duplicate).
+            const InvoiceService = require('../services/invoice');
+            await InvoiceService.voidInvoice(dupInvoice.id);
+            // Release any estimate card hold — a void invoice hits
+            // chargeCardHoldOnCompletion's non-collectible branch (release, never charge).
+            try {
+              const CardHolds = require('../services/estimate-card-holds');
+              await CardHolds.chargeCardHoldOnCompletion({ scheduledServiceId: svc.id, invoiceId: dupInvoice.id });
+            } catch (e) { logger.warn(`[dispatch] card-hold release on prepay-covered void failed for ${dupInvoice.id}: ${e.message}`); }
+            invoice = null;
+            existingCompletionInvoice = null;
+            invoiceCreated = false;
+            payUrl = null;
+            logger.info(`[dispatch] voided duplicate invoice ${dupInvoice.id} on annual-prepay-covered completion for service ${svc.id}`);
+          } catch (e) {
+            // Refused (live PI / payment applied / finalized statement) — leave the
+            // invoice intact and alert; this needs a human (likely a refund, not a void).
+            logger.error(`[dispatch] could not void duplicate invoice ${dupInvoice.id} on annual-prepay-covered completion for service ${svc.id}: ${e.message}`);
+          }
         }
       }
     }
