@@ -272,6 +272,24 @@ function leadContactCompleteness(fields = {}) {
   return { complete: missing.length === 0, missing };
 }
 
+// A real new-sales prospect we can still work even though the customer upsert
+// was skipped — almost always because the caller never stated a name (the
+// customer create is gated on first_name). We still have a lead worth chasing
+// when there's a callback number, a concrete service interest, and at least one
+// way to reach or locate them (email or service address). Such leads are created
+// customer-less and UNqualified so they land in Needs Review for the office to
+// complete — they are never auto-converted to a customer and, because Step 6 and
+// the newsletter subscribe stay gated on `customerId`, never trigger outbound.
+// Spam/voicemail are early-returned before this runs; the caller still guards
+// is_spam + the non-lead content veto (isNonLeadCallContent) at the gate.
+function hasWorkableLeadSignal({ extracted = {}, phone = null } = {}) {
+  if (!phone) return false;
+  const text = (v) => String(v == null ? '' : v).trim();
+  const hasServiceIntent = !!(text(extracted.matched_service) || text(extracted.requested_service));
+  const hasReachback = !!(text(extracted.email) || text(extracted.address_line1));
+  return hasServiceIntent && hasReachback;
+}
+
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
@@ -2381,19 +2399,31 @@ const CallRecordingProcessor = {
     const leadCustomer = customerId
       ? await db('customers').where({ id: customerId }).select('id', 'pipeline_stage').first().catch(() => null)
       : null;
-    // A new lead requires BOTH a customer record we can attach to AND call
-    // content that is actually a new-sales inquiry. The content veto stops
-    // existing-customer scheduling/complaint/billing calls (and the model's
-    // explicit is_lead=false) from spawning leads, even when the caller is still
-    // mid-pipeline (so the pipeline-stage gate alone wouldn't catch them).
+    // A customer-attached lead requires BOTH a customer record we can attach to
+    // AND call content that is actually a new-sales inquiry. The content veto
+    // stops existing-customer scheduling/complaint/billing calls (and the
+    // model's explicit is_lead=false) from spawning leads, even when the caller
+    // is still mid-pipeline (so the pipeline-stage gate alone wouldn't catch
+    // them).
     const nonLeadCall = isNonLeadCallContent(extracted);
-    const shouldCreateLead = customerId && !extracted.is_spam && !nonLeadCall
-      && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall });
-    if (!shouldCreateLead && customerId && !extracted.is_spam) {
+    // ...but a genuine new-sales inquiry we couldn't attach to a customer —
+    // because the caller never stated a name, so the customer upsert was skipped
+    // — is still a real lead the office must work. Create it customer-less so it
+    // lands in Needs Review (UNqualified: missing name) instead of being dropped
+    // to a silent no_op. Still gated by the non-lead content veto, so existing-
+    // customer / spam / wrong-number calls never take this path.
+    const workableUnnamedLead = !customerId && !nonLeadCall
+      && hasWorkableLeadSignal({ extracted, phone });
+    const shouldCreateLead = !extracted.is_spam && !nonLeadCall
+      && (
+        (customerId && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall }))
+        || workableUnnamedLead
+      );
+    if (!shouldCreateLead && !extracted.is_spam && (customerId || nonLeadCall)) {
       const skipReason = nonLeadCall
         ? `non-lead call (${extracted.call_type || (extracted.is_lead === false ? 'is_lead=false' : 'unknown')})`
         : `existing customer (${leadCustomer?.pipeline_stage || 'unknown'})`;
-      logger.info(`[call-proc] Skipping lead creation for ${skipReason}, customer ${customerId}`);
+      logger.info(`[call-proc] Skipping lead creation for ${skipReason}, customer ${customerId || 'none'}`);
     }
     if (shouldCreateLead) {
       try {
@@ -2435,8 +2465,11 @@ const CallRecordingProcessor = {
             lead_source_id: leadSourceId,
             customer_id: customerId,
             phone,
-            first_name: capitalizeName(extracted.first_name),
-            last_name: capitalizeName(extracted.last_name || ''),
+            // A name may be absent (caller never stated it) — store null, not an
+            // empty string, so leadContactCompleteness reads it as missing and
+            // the lead surfaces UNqualified for the office to complete.
+            first_name: capitalizeName(extracted.first_name) || null,
+            last_name: capitalizeName(extracted.last_name) || null,
             email: extracted.email || null,
             lead_type: 'inbound_call',
             first_contact_at: new Date(),
@@ -2447,7 +2480,7 @@ const CallRecordingProcessor = {
             status: 'new',
           }).returning('*');
           leadId = newLead.id;
-          logger.info(`[call-proc] Created new lead ${leadId} for ${extracted.first_name} ${extracted.last_name}`);
+          logger.info(`[call-proc] Created new lead ${leadId} (${maskPhone(phone)})${extracted.first_name ? '' : ' — no name captured'}`);
 
           // Untracked inbound call → no lead_source matched (caller reached the
           // main line / caller-ID didn't match a tracking number). These are the
@@ -2553,7 +2586,12 @@ const CallRecordingProcessor = {
           });
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
-          leadUpdates.customer_id = customerId;
+          // Only ever SET the customer link, never clear it. The unnamed-lead
+          // path runs with customerId null and can reuse an existing lead found
+          // by phone — writing customer_id = null there would detach a lead
+          // already linked to a customer. Attach when we have one; otherwise
+          // leave whatever link the lead already had.
+          if (customerId) leadUpdates.customer_id = customerId;
           leadUpdates.updated_at = new Date();
           await db('leads').where({ id: leadId }).update(leadUpdates);
 
@@ -3403,6 +3441,7 @@ CallRecordingProcessor._test = {
   summarizeKnownCaller,
   isNonLeadCallContent,
   leadContactCompleteness,
+  hasWorkableLeadSignal,
   transcribeRecording,
   extractCallDataV2,
   normalizeOpenAISegments,
