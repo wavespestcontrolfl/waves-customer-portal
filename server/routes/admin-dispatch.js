@@ -4073,10 +4073,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // INTO prepaidCovered so the SERVER completion path treats it like any other
     // prepaid visit: invoice suppressed (gate), "paid" SMS framing, and no pay
     // link / no in-person payment sheet — stopping the double-bill. (The tech
-    // CompletionPanel's willInvoice/review PREDICTION and settling any existing
-    // pre-minted invoice are NOT mirrored here — deferred to the coverage-config
-    // backfill, which stamps prepaid_amount and engages the fully-correct
-    // stamped-prepay machinery across every entry point.)
+    // CompletionPanel's willInvoice/review PREDICTION is not mirrored here —
+    // deferred to the coverage-config backfill, which stamps prepaid_amount and
+    // engages the fully-correct stamped-prepay machinery across every entry point.)
     // Scope (shouldConsultAnnualPrepayCoverage): only an UNPRICED, self-pay
     // membership visit with a positive monthly-rate amount — a priced extra is
     // NOT covered by the recurring prepay (avoids over-suppressing), and a
@@ -4089,6 +4088,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       hasVisitPrice,
       invoiceAmount,
     })) {
+      let annualPrepayConfirmed = false;
       try {
         const { getActivelyCoveredCustomerIds } = require('../services/annual-prepay-renewals');
         // onlyLegacyCoverage: a CONFIGURED term stamps its capped, service-typed
@@ -4096,14 +4096,48 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // must still bill. Only legacy (no-config) terms — which never stamp — are
         // the gap this fallback closes.
         const coveredIds = await getActivelyCoveredCustomerIds(svc.scheduled_date, db, { onlyLegacyCoverage: true });
-        if (coveredIds.has(String(svc.customer_id))) prepaidCovered = true;
+        annualPrepayConfirmed = coveredIds.has(String(svc.customer_id));
+        if (annualPrepayConfirmed) prepaidCovered = true;
       } catch (e) {
         // FAIL CLOSED on this money path: if we cannot confirm the customer is
         // NOT prepaid, treat the unpriced membership visit as covered (don't
         // auto-bill). Double-billing a prepaid annual customer is a P0; a
-        // deferred invoice is recoverable. Warn so the gap is visible.
+        // deferred invoice is recoverable. Warn so the gap is visible. NOTE: we
+        // do NOT void an existing invoice on this path — coverage is unverified,
+        // so voiding could destroy a legitimate invoice.
         prepaidCovered = true;
         logger.warn(`[dispatch] annual-prepay coverage check failed on completion for service ${svc.id}; failing closed (treating as prepaid): ${e.message}`);
+      }
+      // On CONFIRMED coverage, any invoice ALREADY minted for this visit (a
+      // leftover completion draft, or a Charge-now pre-mint) is a duplicate of
+      // the prepaid coverage. Legacy terms carry no prepaid_amount stamp, so
+      // applyPrepaidCreditToInvoice can't settle it — and merely suppressing the
+      // pay link leaves it open/dunnable, preserving the double-bill. VOID it
+      // (reversible; mirrors the one-off orphan-draft remediation) and release
+      // any card hold (a void invoice hits chargeCardHoldOnCompletion's
+      // non-collectible branch, which releases, never charges). Never a
+      // paid/prepaid invoice — a real double-payment is a manual refund, not a void.
+      if (annualPrepayConfirmed) {
+        const dupInvoice = invoice || existingCompletionInvoice;
+        const dupStatus = String(dupInvoice?.status || '').toLowerCase();
+        if (dupInvoice?.id && !['paid', 'prepaid', 'void'].includes(dupStatus)) {
+          try {
+            const voided = await db('invoices').where({ id: dupInvoice.id })
+              .whereNotIn('status', ['paid', 'prepaid', 'void'])
+              .update({ status: 'void', updated_at: new Date() });
+            if (voided) {
+              try {
+                const CardHolds = require('../services/estimate-card-holds');
+                await CardHolds.chargeCardHoldOnCompletion({ scheduledServiceId: svc.id, invoiceId: dupInvoice.id });
+              } catch (e) { logger.warn(`[dispatch] card-hold release on prepay-covered void failed for ${dupInvoice.id}: ${e.message}`); }
+              invoice = null;
+              existingCompletionInvoice = null;
+              invoiceCreated = false;
+              payUrl = null;
+              logger.info(`[dispatch] voided duplicate invoice ${dupInvoice.id} on annual-prepay-covered completion for service ${svc.id}`);
+            }
+          } catch (e) { logger.warn(`[dispatch] duplicate-invoice void on prepay-covered completion failed for ${dupInvoice.id}: ${e.message}`); }
+        }
       }
     }
     // If the tech already minted an invoice for this visit pre-completion
