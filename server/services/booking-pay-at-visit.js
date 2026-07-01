@@ -41,10 +41,11 @@ function perAppOf(s) {
 // is present so we never divide a combined total by one service's cadence.
 function hasSupplementalRecurring(estimate) {
   const data = estimate.estimate_data || {};
-  const rec = data.recurring || data.result?.recurring || {};
-  const res = data.results || data.result?.results || {};
-  return Number(rec.rodentBaitMo) > 0 || Number(rec.palmInjectionMo) > 0
-    || Number(res.rodBaitMo) > 0 || Number(res.palmInjectionMo) > 0;
+  // Both a root `recurring` AND a nested `result.recurring` can be persisted;
+  // supplemental amounts may live in EITHER, so check every container (not the
+  // first truthy one) or a supplement hiding in result.recurring slips through.
+  const containers = [data.recurring, data.result?.recurring, data.results, data.result?.results].filter(Boolean);
+  return containers.some((c) => Number(c.rodentBaitMo) > 0 || Number(c.palmInjectionMo) > 0 || Number(c.rodBaitMo) > 0);
 }
 
 const VISITS_PER_YEAR_BY_PATTERN = {
@@ -89,20 +90,25 @@ function pickRecurringService(services) {
 }
 
 // Per-visit NET amount = estimate-level net recurring annual ÷ cadence, cents
-// preserved. Uses the authoritative estimate total, not line fields.
-function perVisitAmountForEstimate(estimate, picked) {
+// preserved. Uses the authoritative estimate total, not line fields. Requires
+// the estimate's cadence to equal the booking's series cadence (bookingVisits):
+// annual_total is priced for the quote's cadence, so dividing it by a different
+// number of visits (e.g. a monthly quote's annual over a quarterly series) would
+// mis-bill → fail closed on any mismatch.
+function perVisitAmountForEstimate(estimate, picked, bookingVisits) {
+  if (!(bookingVisits > 0) || picked.visits !== bookingVisits) return null;
   const netAnnual = Number(estimate.annual_total) > 0
     ? Number(estimate.annual_total)
     : (Number(estimate.monthly_total) > 0 ? Number(estimate.monthly_total) * 12 : 0);
   if (!(netAnnual > 0)) return null;
-  const perVisit = Math.round((netAnnual / picked.visits) * 100) / 100;
+  const perVisit = Math.round((netAnnual / bookingVisits) * 100) / 100;
   return perVisit > 0 ? perVisit : null;
 }
 
-// Exposed for tests: net per-application amount for an estimate.
-function derivePerApplicationAmount(estimate) {
+// Exposed for tests: net per-application amount for an estimate at a cadence.
+function derivePerApplicationAmount(estimate, bookingVisits) {
   const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
-  return picked ? perVisitAmountForEstimate(estimate, picked) : null;
+  return picked ? perVisitAmountForEstimate(estimate, picked, bookingVisits) : null;
 }
 
 function serviceKeyOf(svc) {
@@ -110,14 +116,14 @@ function serviceKeyOf(svc) {
   return serviceKeyFor(svc);
 }
 
-// Canonical street suffixes (mirrors booking.js's address normalization) so
-// "Main Street" == "Main St", "8th Place" == "8th Pl", etc.
+// Canonical street suffixes — mirrors booking.js's ADDRESS_SUFFIXES exactly
+// (incl. way→wy, cove→cv, terr→ter) so this matcher agrees with the route's
+// own normalization; a divergent alias would reject the customer's own quote.
 const STREET_SUFFIXES = {
-  street: 'st', st: 'st', avenue: 'ave', ave: 'ave', av: 'ave', road: 'rd', rd: 'rd',
-  drive: 'dr', dr: 'dr', lane: 'ln', ln: 'ln', court: 'ct', ct: 'ct', place: 'pl', pl: 'pl',
-  boulevard: 'blvd', blvd: 'blvd', circle: 'cir', cir: 'cir', terrace: 'ter', ter: 'ter',
-  way: 'way', trail: 'trl', trl: 'trl', parkway: 'pkwy', pkwy: 'pkwy', highway: 'hwy', hwy: 'hwy',
-  square: 'sq', sq: 'sq',
+  avenue: 'ave', ave: 'ave', boulevard: 'blvd', blvd: 'blvd', circle: 'cir', cir: 'cir',
+  court: 'ct', ct: 'ct', cove: 'cv', cv: 'cv', drive: 'dr', dr: 'dr', lane: 'ln', ln: 'ln',
+  parkway: 'pkwy', pkwy: 'pkwy', place: 'pl', pl: 'pl', road: 'rd', rd: 'rd', street: 'st', st: 'st',
+  terrace: 'ter', terr: 'ter', ter: 'ter', trail: 'trl', trl: 'trl', way: 'wy', wy: 'wy',
 };
 function normalizeAddr(v) {
   return String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
@@ -142,16 +148,24 @@ function estimateAddressMatches(estimate, bookingAddress) {
   return !!estStreet && estStreet === bookStreet && estZip === bookZip;
 }
 
+// True when the estimate's single recurring service is the booked service — a
+// service match WITHOUT pricing, so ambiguity can be counted before priceability.
+function candidateMatchesService(estimate, serviceKey) {
+  const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
+  return !!(picked && serviceKey && serviceKeyOf(picked.svc) === serviceKey);
+}
+
 // Price from a single estimate, only when its recurring service matches the
-// booked service key. Returns { amount, sourceEstimateId, serviceKey } or null.
-function priceFromEstimate(estimate, serviceKey) {
+// booked service key AND cadence. Returns { amount, sourceEstimateId, serviceKey }
+// or null.
+function priceFromEstimate(estimate, serviceKey, bookingVisits) {
   const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
   if (!picked) return null;
   if (!serviceKey || serviceKeyOf(picked.svc) !== serviceKey) return null;
   // annual_total (the amount basis) would also cover any supplemental recurring
   // program, so pricing a single service off it would overbill → fail closed.
   if (hasSupplementalRecurring(estimate)) return null;
-  const amount = perVisitAmountForEstimate(estimate, picked);
+  const amount = perVisitAmountForEstimate(estimate, picked, bookingVisits);
   return amount ? { amount, sourceEstimateId: estimate.id || null, serviceKey } : null;
 }
 
@@ -160,17 +174,19 @@ function priceFromEstimate(estimate, serviceKey) {
 // recent quote-wizard drafts (candidateEstimates), which must ALSO match the
 // booked address, pricing only when EXACTLY ONE such candidate matches the
 // booked service. Never throws.
-function resolveBookingVisitPrice({ estimate = null, candidateEstimates = [], serviceKey = null, bookingAddress = null } = {}) {
+function resolveBookingVisitPrice({ estimate = null, candidateEstimates = [], serviceKey = null, bookingAddress = null, bookingVisits = null } = {}) {
   try {
     if (estimate) {
-      const linked = priceFromEstimate(estimate, serviceKey);
+      const linked = priceFromEstimate(estimate, serviceKey, bookingVisits);
       if (linked) return linked;
     }
-    const matches = (Array.isArray(candidateEstimates) ? candidateEstimates : [])
-      .filter((e) => estimateAddressMatches(e, bookingAddress))
-      .map((e) => priceFromEstimate(e, serviceKey))
-      .filter(Boolean);
-    if (matches.length === 1) return matches[0];
+    // Count service+address matches BEFORE pricing: a same-service/same-address
+    // draft that fails closed (supplemental, cadence mismatch) still counts for
+    // ambiguity, so we don't silently price an older draft when a newer matching
+    // one the customer may have booked from is present-but-unpriceable.
+    const contenders = (Array.isArray(candidateEstimates) ? candidateEstimates : [])
+      .filter((e) => estimateAddressMatches(e, bookingAddress) && candidateMatchesService(e, serviceKey));
+    if (contenders.length === 1) return priceFromEstimate(contenders[0], serviceKey, bookingVisits);
   } catch (err) {
     logger.warn(`[booking-pay-at-visit] price resolution failed: ${err.message}`);
   }

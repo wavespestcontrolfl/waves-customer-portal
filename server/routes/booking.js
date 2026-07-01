@@ -919,9 +919,20 @@ async function createSelfBooking(payload = {}) {
         // crafted/stale payload can't pair one service's booking with another
         // service's price. service_type is client-influenced, hence the bind.
         const bookedServiceKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
+        // Bind the pricing cadence to the ACTUAL series this route creates, NOT
+        // the client's recurring_pattern: a quarterly (4-visit) pest series is
+        // seeded ONLY under this exact condition (mirrors
+        // shouldSeedQuarterlyPestFollowUps below); every other booking creates a
+        // single visit with no recurring series → no cadence → fail closed. So a
+        // crafted recurring_pattern:'monthly' can't inflate the divisor and
+        // underbill — bookingVisits is 4 or nothing.
+        const willSeedQuarterlyPestSeries = !isOneTimeBookingSource(source)
+          && RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern) === 'quarterly'
+          && bookedServiceKey === 'pest_control';
+        const bookingVisits = willSeedQuarterlyPestSeries ? 4 : null;
         // Prefer the estimate this booking is explicitly linked to.
         let priced = estimate
-          ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey })
+          ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey, bookingVisits })
           : null;
         // Fallback: the customer's own recent quote-wizard drafts — the common
         // quote→book path carries no estimate_id. STRICTLY gated to a
@@ -953,6 +964,7 @@ async function createSelfBooking(payload = {}) {
             candidateEstimates,
             serviceKey: bookedServiceKey,
             bookingAddress: { line1: new_customer?.address_line1, zip: new_customer?.zip },
+            bookingVisits,
           });
         }
         if (priced) {
