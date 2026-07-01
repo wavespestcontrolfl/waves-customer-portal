@@ -607,7 +607,7 @@
         "★ NEW v4: Mole cricket IPM — soapy water flush method defined. Threshold ≥2 per 2 sq ft. Acelepryn preventive + Dylox cu",
         "★ NEW v4: T-Storm removed from Oct default — fungicide now conditional on active dollar spot only. Low-input = no \"just ",
         "★ NEW v4: Fire ant protocol — Topchoice broadcast ONCE/yr at V4 for documented history. 12-month control. Prevents callb",
-        "★ NEW v4: Crabgrass breakthrough curative defined — Drive XLR8 (quinclorac), labeled for Bahia.",
+        "★ NEW v4: Crabgrass — NO bahia-safe post-emergent curative (Drive/quinclorac NOT labeled for bahia); rely on pre-emergent timing + scout/manual, nonselective spot only where turf loss is acceptable.",
         "★ NEW v4: SpeedZone Sep weather-gated at 90°F. Soil-test branching. Explicit N rates (0.75 lb N/1K per app).",
         "★ NEW v4: Seed head customer communication at V1+V7. Aug all-tier scout. Dec all-tier touchpoint. $60 conditional ceilin",
         "★ NEW v4: Customer expectation framework structured at V1, V7 (seed heads), V12 (dormancy). Reduces cancellations."
@@ -647,7 +647,7 @@
           "visit": 3,
           "month": "Mar",
           "primary": "Prodiamine 65 WDG split 2 ($3.51)\nLESCO 24-0-11 PolyPlus fert ($8.68)",
-          "secondary": "Celsius WG if broadleaf heavy ($3.84)\n★ Soil sample OPTIONAL if requested — $15\n★ Mole cricket adult flight season — re-flush if Feb was borderline",
+          "secondary": "SpeedZone Southern if broadleaf heavy — established turf, <90°F ($5.95)\n★ Soil sample OPTIONAL if requested — $15\n★ Mole cricket adult flight season — re-flush if Feb was borderline",
           "material_cost": "24.28",
           "labor_cost": "26.96",
           "tiers": {
@@ -662,7 +662,7 @@
           "visit": 4,
           "month": "Apr",
           "primary": "Acelepryn Xtra preventive ($6.78)\n★ SpeedZone Southern WEATHER-GATED ($5.95)\nK-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: skip K-Flow (needs water to activate)",
-          "secondary": "★ Topchoice BROADCAST if fire ant history ($8.22)\n— provides 12-month control, prevents callbacks\n★ IF forecast >90°F → Celsius WG instead of SpeedZone\nMole cricket: Acelepryn covers nymphs",
+          "secondary": "★ Topchoice BROADCAST if fire ant history ($8.22)\n— provides 12-month control, prevents callbacks\n★ IF forecast >90°F → DEFER broadleaf (no bahia-safe herbicide when hot)\nMole cricket: Acelepryn covers nymphs",
           "material_cost": "27.38",
           "labor_cost": "26.96",
           "tiers": {
@@ -677,7 +677,7 @@
           "visit": 5,
           "month": "May",
           "primary": "Chelated Iron Plus ($1.52)\nChelated AM + Micros ($1.40)\n★ IRRIGATED: K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: Fe+micros only, skip K-Flow",
-          "secondary": "Dismiss if sedge ($4.36)\n★ Crabgrass check — if pre-em breaking down:\nDrive XLR8 (quinclorac) spot treatment ($5.50)\nLabeled for Bahia, effective on crabgrass",
+          "secondary": "Dismiss if sedge ($4.36)\n★ Crabgrass check — if pre-em breaking down:\nNO bahia-safe post-emergent curative for crabgrass\nRely on pre-em timing + scout/manual; nonselective spot only where turf loss is acceptable",
           "material_cost": "9.12",
           "labor_cost": "26.96",
           "tiers": {
@@ -686,7 +686,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "No fert — only 2 N apps/yr. Micros + K (irrigated only). ★ Crabgrass curative DEFINED: Drive XLR8 (quinclorac). ★ K-Flow conditional on irrigation status."
+          "notes": "No fert — only 2 N apps/yr. Micros + K (irrigated only). ★ Crabgrass: NO bahia-safe curative (Drive/quinclorac NOT labeled for bahia) — pre-em reliance + manual/nonselective spot. ★ K-Flow conditional on irrigation status."
         },
         {
           "visit": 6,
@@ -706,9 +706,9 @@
         {
           "visit": 7,
           "month": "Jul",
-          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)",
+          "primary": "BLACKOUT — broadleaf: SpeedZone Southern only if <90°F on established turf ($5.95); DEFER when hot (no bahia-safe hot-weather fallback)",
           "secondary": "★ OPTIONAL CUSTOMER EXPECTATION TALK #2 — SEED HEADS:\n\"Bahia produces seed heads Jun-Aug. This is normal,\nhealthy biology — not a problem. Mowing frequency\ncontrols the l",
-          "material_cost": "3.68",
+          "material_cost": "0.00",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -716,7 +716,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius app 2. ★ Seed head customer talk STRUCTURED — proactive, not reactive. Mowing upsell opportunity if mowing division/partner available."
+          "notes": "No Celsius (not labeled for bahia). ★ Seed head customer talk STRUCTURED — proactive, not reactive. Mowing upsell opportunity if mowing division/partner available."
         },
         {
           "visit": 8,
@@ -736,8 +736,8 @@
         {
           "visit": 9,
           "month": "Sep",
-          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: skip K-Flow\n★ SpeedZone Southern WEATHER-GATED ($5.95)\n★ IF >90°F → Celsius WG instead",
-          "secondary": "Dismiss for sedge ($4.36)\n★ Crabgrass breakthrough: Drive XLR8 spot ($5.50)\n★ Early Sep SWFL can still hit 90°F+",
+          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: skip K-Flow\n★ SpeedZone Southern WEATHER-GATED ($5.95)\n★ IF >90°F → DEFER broadleaf (no bahia-safe herbicide when hot)",
+          "secondary": "Dismiss for sedge ($4.36)\n★ Crabgrass breakthrough: NO bahia-safe curative — pre-em reliance + manual/nonselective spot\n★ Early Sep SWFL can still hit 90°F+",
           "material_cost": "5.21",
           "labor_cost": "26.96",
           "tiers": {
@@ -746,7 +746,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "K-Flow returns (irrigated only). ★ SpeedZone NOW WEATHER-GATED same as all other tracks. ★ Crabgrass curative defined: Drive XLR8. Blackout ends Sep 30."
+          "notes": "K-Flow returns (irrigated only). ★ SpeedZone NOW WEATHER-GATED same as all other tracks. ★ Crabgrass: no bahia-safe curative (Drive/quinclorac not for bahia). Blackout ends Sep 30."
         },
         {
           "visit": 10,
