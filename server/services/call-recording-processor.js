@@ -2534,13 +2534,16 @@ const CallRecordingProcessor = {
         // it in the PPC funnel (ad_service_attribution) so it buckets into the same
         // channel as a web-form lead from that source. attributionForSourceType maps
         // the lead_sources.source_type to the funnel channel key + paid flag: PAID
-        // numbers (google_ads/facebook) stay paid; ORGANIC marketing sources (spoke
-        // domains -> domain_website, hub -> waves_website, GBP -> google_business)
+        // numbers (google_ads/facebook) stay paid; ORGANIC marketing sources on
+        // DEDICATED numbers (spoke domains -> domain_website, GBP -> google_business)
         // are is_paid=false so they show as their own no-spend channels instead of
         // being invisible (an organic call otherwise makes a lead but no funnel row,
-        // hiding whole channels from the LTV:CAC surfaces). Offline / word-of-mouth
-        // sources map to null and get no row (unchanged). campaign_id is null here
-        // (the Google call-reporting bridge backfills it later for paid Google).
+        // hiding whole channels from the LTV:CAC surfaces). main_site + offline /
+        // word-of-mouth sources map to null and get no row: the main_site location
+        // numbers are SHARED with the Google Ads call-bridge target, so pre-writing
+        // an organic row there would block the bridge from later marking the call
+        // paid google_ads. campaign_id is null here (the Google call-reporting
+        // bridge backfills it later for paid Google).
         // recordCallPpcAttribution dedupes by lead_id and respects first-touch (a
         // web-attributed lead keeps its source), so this never double-counts.
         // NOTE: stays gated on customerId, so a customer-less recovery lead gets no

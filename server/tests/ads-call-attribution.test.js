@@ -71,11 +71,15 @@ describe('attributionForSourceType', () => {
     expect(CallAttribution.attributionForSourceType('google_ads')).toEqual({ leadSource: 'google_ads', isPaid: true });
     expect(CallAttribution.attributionForSourceType('facebook')).toEqual({ leadSource: 'facebook', isPaid: true });
   });
-  test('organic marketing sources map to their funnel channel, is_paid=false', () => {
+  test('organic marketing sources (dedicated numbers) map to their funnel channel, is_paid=false', () => {
     expect(CallAttribution.attributionForSourceType('spoke_site')).toEqual({ leadSource: 'domain_website', isPaid: false });
-    expect(CallAttribution.attributionForSourceType('main_site')).toEqual({ leadSource: 'waves_website', isPaid: false });
     expect(CallAttribution.attributionForSourceType('gbp')).toEqual({ leadSource: 'google_business', isPaid: false });
     expect(CallAttribution.attributionForSourceType('website_organic')).toEqual({ leadSource: 'google_business', isPaid: false });
+  });
+  test('main_site is NOT attributed — its shared location number is the Google Ads call-bridge target', () => {
+    // Pre-attributing it organic (waves_website) would lock the row and block the
+    // call-reporting bridge from later marking those calls paid google_ads.
+    expect(CallAttribution.attributionForSourceType('main_site')).toBeNull();
   });
   test('offline / word-of-mouth / unknown sources are not attributed (null)', () => {
     for (const t of ['referral', 'walk_in', 'vehicle', 'tollfree', 'direct', 'marketplace', 'unknown', undefined, null]) {
