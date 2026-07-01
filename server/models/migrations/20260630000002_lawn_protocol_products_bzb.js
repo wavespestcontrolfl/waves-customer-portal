@@ -16,9 +16,12 @@
  *    ≥7 days, post-app irrigation), TopChoice 2 lb (1×/yr, RUP), Bifen I/T 0.25
  *    fl oz (max 1.0), SedgeHammer Plus 0.5 oz (≤4/yr, ≥14 days), T-Storm 1.75 fl oz
  *    (residential cap, dollar spot only). chlorantraniliprole dropped (redundant
- *    with Acelepryn Xtra). Drive XLR8 + Celsius WG intentionally NOT seeded on
- *    bahiagrass — both are catalog-excluded on bahia (flagged for a separate
- *    data-accuracy fix; no Bahia-safe substitute yet).
+ *    with Acelepryn Xtra). BAHIAGRASS CATALOG-LABEL EXCLUSIONS (data-accuracy
+ *    follow-up): Drive XLR8 + Celsius WG are omitted on bahia entirely (no Bahia-safe
+ *    broadleaf substitute yet); SpeedZone Southern is seeded on bahia but forced
+ *    CONDITIONAL (default_in_plan false, { bahiaLabelUnverified: true }) because the
+ *    catalog labels it Bermuda/Zoysia/St-Aug only though protocols.json prescribes it
+ *    as the bahia broadleaf — owner to confirm the bahia label or pick an alternative.
  *
  * Full parity: every primary product in protocols.json for each B/Z/B window is
  * seeded so the structured forecast / Command Center / inventory context matches
@@ -95,6 +98,14 @@ const PRODUCTS = {
     P('dec_dormancy_touchpoint', 'LESCO Elite 0-0-28', 'potassium', 3.6, 'lb', 1, false, { premiumTier: true }),
     P('dec_dormancy_touchpoint', 'Chelated Iron Plus', 'micronutrients', 3.0, 'fl_oz', 1, false, { premiumTier: true }),
     P('dec_dormancy_touchpoint', 'CarbonPro-L', 'biostimulant', 2, 'fl_oz', 1, false, { premiumTier: true }),
+    // protocols.json `secondary` conditionals — seeded so recordLawnProtocolCompletion
+    // can match a triggered application to a protocol product (else it logs off-protocol).
+    P('jan_pre_m_split_1', 'SedgeHammer Plus', 'post_emergent_spot', 0.5, 'oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.5, annualMaxApps: 4, minIntervalDays: 14 }),
+    P('apr_insect_preventive', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { trigger: 'heat_above_90_speedzone_substitute', annualCounter: 'celsius_oz_per_1000' }),
+    P('apr_insect_preventive', 'Anuew EZ Plant Growth Regulator', 'pgr', 0.6, 'fl_oz', 2, false, { premiumTier: true, minLabelRate: 0.2, maxLabelRate: 0.8 }),
+    P('may_final_n', 'Dismiss NXT', 'post_emergent_spot', 0.184, 'fl_oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.275 }),
+    P('jul_blackout_celsius', 'Bifen I/T', 'insect_curative', 0.25, 'fl_oz', 2, false, { trigger: 'armyworm_retreat_jun_failed', maxLabelRate: 1.0 }),
+    P('sep_blackout_closeout', 'Dismiss NXT', 'post_emergent_spot', 0.184, 'fl_oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.275 }),
   ],
   zoysia: [
     P('jan_pre_m_split_1', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
@@ -138,6 +149,13 @@ const PRODUCTS = {
     P('oct_final_n_lp_required', 'Chelated Iron Plus', 'micronutrients', 3.0, 'fl_oz', 1, true, {}),
     P('dec_touchpoint', 'Chelated Iron Plus', 'micronutrients', 3.0, 'fl_oz', 1, false, { premiumTier: true }),
     P('dec_touchpoint', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, false, { premiumTier: true }),
+    // protocols.json `secondary` conditionals (completion-matcher parity).
+    P('jan_pre_m_split_1', 'Headway G', 'fungicide', 3, 'lb', 1, false, { frac: '11+3', trigger: 'large_patch_active_winter' }),
+    P('feb_micros_frac', 'Velista', 'fungicide', 0.50, 'oz', 2, false, { frac: '7', trigger: 'large_patch_frac_rotation_after_jan_11_3' }),
+    P('mar_n1_pre_m_pgr', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { trigger: 'broadleaf_heavy', annualCounter: 'celsius_oz_per_1000' }),
+    P('apr_insect_preventive', 'Celsius WG', 'post_emergent_spot', 0.057, 'oz', 1, false, { trigger: 'heat_above_90_speedzone_substitute', annualCounter: 'celsius_oz_per_1000' }),
+    P('may_final_n', 'Dismiss NXT', 'post_emergent_spot', 0.184, 'fl_oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.275 }),
+    P('sep_blackout_lp_prep', 'Dismiss NXT', 'post_emergent_spot', 0.184, 'fl_oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.275 }),
   ],
   bahia: [
     P('jan_pre_m_irrigation_class', 'Prodiamine 65 WDG', 'pre_emergent', 0.30, 'oz', 1, true, { annualCounter: 'prodiamine_oz_per_1000' }),
@@ -159,22 +177,27 @@ const PRODUCTS = {
     // Bahia July stays empty on purpose: its only primary is Celsius WG, which the
     // catalog excludes on bahiagrass (the protocols.json Bahia-Celsius use is a
     // separate data-accuracy flag — no Bahia-safe broadleaf to substitute yet).
-    P('jan_pre_m_irrigation_class', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('jan_pre_m_irrigation_class', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, false, { gateProduct: 'SpeedZone', maxTempF: 90, bahiaLabelUnverified: true }),
     P('jan_pre_m_irrigation_class', 'SedgeHammer Plus', 'post_emergent_spot', 0.5, 'oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.5, annualMaxApps: 4, minIntervalDays: 14 }),
     P('may_micros_crabgrass', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, true, {}),
-    P('nov_winter_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('nov_winter_k', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, false, { gateProduct: 'SpeedZone', maxTempF: 90, bahiaLabelUnverified: true }),
     // full-parity pass: every remaining protocols.json primary, mapped to catalog.
     // (Celsius WG and Drive XLR8 stay omitted on bahiagrass — both catalog-excluded.)
     P('feb_micros_mole_cricket', 'High Mn Combo', 'micronutrients', 0.1975, 'fl_oz', 1, true, {}),
-    P('apr_insect_fire_ant', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 2, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('apr_insect_fire_ant', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 2, false, { gateProduct: 'SpeedZone', maxTempF: 90, bahiaLabelUnverified: true }),
     P('apr_insect_fire_ant', 'K-Flow 0-0-25', 'potassium', 3.0, 'fl_oz', 2, false, { irrigatedOnly: true, soilKGatePpmBelow: 80 }),
     P('jun_blackout_mole_cricket', 'High Mn Combo', 'micronutrients', 0.1975, 'fl_oz', 1, true, { requiresZeroNP: true }),
     P('aug_scout_mole_cricket', 'Chelated AM + Micros', 'micronutrients', 2, 'fl_oz', 1, false, { premiumTier: true }),
     P('aug_scout_mole_cricket', 'High Mn Combo', 'micronutrients', 0.1975, 'fl_oz', 1, false, { premiumTier: true }),
-    P('sep_blackout_crabgrass', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, true, { gateProduct: 'SpeedZone', maxTempF: 90 }),
+    P('sep_blackout_crabgrass', 'SpeedZone Southern + NIS', 'post_emergent', 1.1, 'fl_oz', 1, false, { gateProduct: 'SpeedZone', maxTempF: 90, bahiaLabelUnverified: true }),
     P('oct_final_n', 'Chelated Iron Plus', 'micronutrients', 3.0, 'fl_oz', 1, true, {}),
     P('dec_dormancy_touchpoint', 'Chelated Iron Plus', 'micronutrients', 3.0, 'fl_oz', 1, false, { premiumTier: true }),
     P('dec_dormancy_touchpoint', 'LESCO 0-0-18 Bio KMAG', 'potassium', 1.5, 'lb', 1, false, { premiumTier: true }),
+    // protocols.json `secondary` conditionals (completion-matcher parity).
+    P('may_micros_crabgrass', 'Dismiss NXT', 'post_emergent_spot', 0.184, 'fl_oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.275 }),
+    P('sep_blackout_crabgrass', 'Dismiss NXT', 'post_emergent_spot', 0.184, 'fl_oz', 1, false, { trigger: 'nutsedge_present', maxLabelRate: 0.275 }),
+    P('oct_final_n', 'Dylox 420 SL', 'insect_curative', 6.9, 'fl_oz', 2, false, { trigger: 'mole_cricket_fall_curative', maxLabelRate: 6.9, annualMaxApps: 3, minIntervalDays: 7, postAppIrrigation: true }),
+    P('oct_final_n', 'TopChoice', 'fire_ant', 2, 'lb', 1, false, { trigger: 'fall_fire_ant_no_spring_topchoice', restrictedUse: true, annualMaxApps: 1 }),
   ],
 };
 

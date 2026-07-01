@@ -115,10 +115,31 @@ describe('B/Z/B structured product seed', () => {
     });
     // Aug premium add-ons: Hydretain (Bermuda+Zoysia) + Anuew EZ (Bermuda), all conditional
     expect(byName('Hydretain Liquid').length).toBe(2);
-    expect(byName('Anuew EZ Plant Growth Regulator').length).toBe(1);
+    // Anuew EZ: Bermuda Aug premium + Bermuda Apr premium conditional
+    expect(byName('Anuew EZ Plant Growth Regulator').length).toBe(2);
     byName('Hydretain Liquid').concat(byName('Anuew EZ Plant Growth Regulator')).forEach((p) => {
       expect(p.default_in_plan).toBe(false);
       expect(JSON.parse(p.gates).premiumTier).toBe(true);
+    });
+  });
+
+  test('conditional-secondary products are seeded (completion-matcher parity)', () => {
+    const has = (track, wk, name) => products.some((p) =>
+      p.lawn_protocol_window_id === `${track}-${wk}` && p.product_name === name && p.default_in_plan === false);
+    // Codex-flagged conditionals now present + conditional in their window
+    expect(has('bermuda', 'jan_pre_m_split_1', 'SedgeHammer Plus')).toBe(true);
+    expect(has('zoysia', 'jan_pre_m_split_1', 'Headway G')).toBe(true);
+    expect(has('bermuda', 'may_final_n', 'Dismiss NXT')).toBe(true);
+    expect(has('zoysia', 'sep_blackout_lp_prep', 'Dismiss NXT')).toBe(true);
+    expect(has('bahia', 'oct_final_n', 'Dylox 420 SL')).toBe(true);
+    expect(has('bahia', 'oct_final_n', 'TopChoice')).toBe(true);
+    // bahia SpeedZone is catalog-excluded on bahiagrass -> conditional, never a default
+    const bahiaSpeed = products.filter((p) => p.product_name === 'SpeedZone Southern + NIS'
+      && p.lawn_protocol_window_id.startsWith('bahia-'));
+    expect(bahiaSpeed.length).toBe(4);
+    bahiaSpeed.forEach((p) => {
+      expect(p.default_in_plan).toBe(false);
+      expect(JSON.parse(p.gates).bahiaLabelUnverified).toBe(true);
     });
   });
 
