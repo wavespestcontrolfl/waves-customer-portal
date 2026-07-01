@@ -1,27 +1,15 @@
 // Booking "pay per application" — resolve a per-application price for a
-// self-booking, bound to the booked service, so the visit can be stamped with
-// estimated_price + payment_method_preference='pay_at_visit' +
-// create_invoice_on_complete (see booking.js). No charge/card capture here;
-// billing rides the existing completion → invoice → /pay path.
+// self-booking from the estimate it is EXPLICITLY linked to (estimate_id),
+// bound to the booked service AND the booking's series cadence, so the visit can
+// be stamped with estimated_price + payment_method_preference='pay_at_visit' +
+// create_invoice_on_complete (booking.js). No charge/card capture here; billing
+// rides the existing completion → invoice → /pay path.
 //
-// Price sources, both service-bound and never a mischarge:
-//   1. the estimate the booking is explicitly linked to (estimate_id), or
-//   2. the RESOLVED customer's own recent quote-wizard drafts (passed in by the
-//      caller) — used only when EXACTLY ONE matches the booked service AND
-//      address. Bound to the verified customer (not a forgeable id).
-//
-// AMOUNT is the estimate-level NET recurring annual (estimate.annual_total,
-// falling back to monthly_total × 12) ÷ cadence — authoritative and
-// shape-independent. Line-item fields are NOT used for the amount: discounts
-// live in different places across shapes (line-level for engine lineItems,
-// estimate-level for mapped result.recurring.services), so only the estimate
-// total is reliably net. The recurring service line is used solely for
-// eligibility (a single per-application-billable line), cadence, and the key.
-//
-// Recurring-service extraction reuses the converter's authoritative multi-shape
-// reader so every estimate shape is covered. The service key comes from the
-// seeder's serviceKeyFor on BOTH sides (estimate service AND booked
-// service_type) so the binding compares one vocabulary.
+// Scope: LINKED estimates only. Lighting up the common quote-wizard booking
+// (which carries no estimate_id) is a separate follow-up that passes a
+// server-trusted estimate reference from the quote flow into /book — inferring
+// which quote a booking came from proved unsafe/ineffective (the real /book UI
+// is address-prelinked and sends no phone to verify identity).
 const logger = require('./logger');
 
 // A recurring line's monthly price (any positive value across shape aliases) —
@@ -38,12 +26,10 @@ function perAppOf(s) {
 // and NOT surfaced by recurringServicesFromEstimateData — but estimate.annual_total
 // still includes them. So a pest+rodent quote could show a single pest service
 // row while annual_total covers both. Fail closed when any supplemental program
-// is present so we never divide a combined total by one service's cadence.
+// is present (in ANY recurring container) so we never divide a combined total by
+// one service's cadence.
 function hasSupplementalRecurring(estimate) {
   const data = estimate.estimate_data || {};
-  // Both a root `recurring` AND a nested `result.recurring` can be persisted;
-  // supplemental amounts may live in EITHER, so check every container (not the
-  // first truthy one) or a supplement hiding in result.recurring slips through.
   const containers = [data.recurring, data.result?.recurring, data.results, data.result?.results].filter(Boolean);
   return containers.some((c) => Number(c.rodentBaitMo) > 0 || Number(c.palmInjectionMo) > 0 || Number(c.rodBaitMo) > 0);
 }
@@ -116,48 +102,9 @@ function serviceKeyOf(svc) {
   return serviceKeyFor(svc);
 }
 
-// Canonical street suffixes — mirrors booking.js's ADDRESS_SUFFIXES exactly
-// (incl. way→wy, cove→cv, terr→ter) so this matcher agrees with the route's
-// own normalization; a divergent alias would reject the customer's own quote.
-const STREET_SUFFIXES = {
-  avenue: 'ave', ave: 'ave', boulevard: 'blvd', blvd: 'blvd', circle: 'cir', cir: 'cir',
-  court: 'ct', ct: 'ct', cove: 'cv', cv: 'cv', drive: 'dr', dr: 'dr', lane: 'ln', ln: 'ln',
-  parkway: 'pkwy', pkwy: 'pkwy', place: 'pl', pl: 'pl', road: 'rd', rd: 'rd', street: 'st', st: 'st',
-  terrace: 'ter', terr: 'ter', ter: 'ter', trail: 'trl', trl: 'trl', way: 'wy', wy: 'wy',
-};
-function normalizeAddr(v) {
-  return String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-    .split(' ').filter(Boolean).map((t) => STREET_SUFFIXES[t] || t).join(' ');
-}
-
-// Fail-CLOSED address bind for the candidate (fallback) path: the candidate
-// quote's street line and 5-digit zip must match the booked address after
-// suffix canonicalization (so "St"/"Street" variants and ZIP+4 are treated as
-// equal, consistent with booking.js). Substring matching is deliberately
-// avoided so "112 Main St" can't match a booking for "12 Main St". Not applied
-// to an explicitly-linked estimate.
-function estimateAddressMatches(estimate, bookingAddress) {
-  const bookStreet = normalizeAddr(bookingAddress?.line1);
-  const bookZip = String(bookingAddress?.zip || '').replace(/\D/g, '').slice(0, 5); // ZIP+4 → first 5
-  if (!bookStreet || bookZip.length !== 5) return false;
-  const estStreet = normalizeAddr(String(estimate?.address || '').split(',')[0]);
-  // The zip is the LAST 5-digit group — a 5-digit street number (e.g. "15715")
-  // must not be mistaken for it.
-  const estZips = String(estimate?.address || '').match(/\b\d{5}\b/g) || [];
-  const estZip = estZips.length ? estZips[estZips.length - 1] : '';
-  return !!estStreet && estStreet === bookStreet && estZip === bookZip;
-}
-
-// True when the estimate's single recurring service is the booked service — a
-// service match WITHOUT pricing, so ambiguity can be counted before priceability.
-function candidateMatchesService(estimate, serviceKey) {
-  const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
-  return !!(picked && serviceKey && serviceKeyOf(picked.svc) === serviceKey);
-}
-
 // Price from a single estimate, only when its recurring service matches the
-// booked service key AND cadence. Returns { amount, sourceEstimateId, serviceKey }
-// or null.
+// booked service key AND cadence, and it carries no supplemental program.
+// Returns { amount, sourceEstimateId, serviceKey } or null.
 function priceFromEstimate(estimate, serviceKey, bookingVisits) {
   const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
   if (!picked) return null;
@@ -169,24 +116,11 @@ function priceFromEstimate(estimate, serviceKey, bookingVisits) {
   return amount ? { amount, sourceEstimateId: estimate.id || null, serviceKey } : null;
 }
 
-// Resolve a per-application price bound to the booked service. Prefer the linked
-// estimate (explicitly chosen — no address bind needed); else the customer's
-// recent quote-wizard drafts (candidateEstimates), which must ALSO match the
-// booked address, pricing only when EXACTLY ONE such candidate matches the
-// booked service. Never throws.
-function resolveBookingVisitPrice({ estimate = null, candidateEstimates = [], serviceKey = null, bookingAddress = null, bookingVisits = null } = {}) {
+// Resolve a per-application price from the estimate the booking is LINKED to
+// (estimate_id), bound to the booked service + series cadence. Never throws.
+function resolveBookingVisitPrice({ estimate = null, serviceKey = null, bookingVisits = null } = {}) {
   try {
-    if (estimate) {
-      const linked = priceFromEstimate(estimate, serviceKey, bookingVisits);
-      if (linked) return linked;
-    }
-    // Count service+address matches BEFORE pricing: a same-service/same-address
-    // draft that fails closed (supplemental, cadence mismatch) still counts for
-    // ambiguity, so we don't silently price an older draft when a newer matching
-    // one the customer may have booked from is present-but-unpriceable.
-    const contenders = (Array.isArray(candidateEstimates) ? candidateEstimates : [])
-      .filter((e) => estimateAddressMatches(e, bookingAddress) && candidateMatchesService(e, serviceKey));
-    if (contenders.length === 1) return priceFromEstimate(contenders[0], serviceKey, bookingVisits);
+    if (estimate) return priceFromEstimate(estimate, serviceKey, bookingVisits);
   } catch (err) {
     logger.warn(`[booking-pay-at-visit] price resolution failed: ${err.message}`);
   }

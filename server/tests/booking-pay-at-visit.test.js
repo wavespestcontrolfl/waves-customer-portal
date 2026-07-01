@@ -1,18 +1,15 @@
 /**
- * Booking "pay per application" price resolution (coverage + customer lookup).
+ * Booking "pay per application" — LINKED-estimate price resolution.
  *
  * Money-path contract:
  *  - AMOUNT = estimate-level NET recurring annual (annual_total, else
  *    monthly_total×12) ÷ the BOOKING'S cadence — and only when the estimate's
  *    cadence equals the booking series cadence (else fail closed, so a monthly
- *    quote isn't billed onto a quarterly series);
- *  - price stamped ONLY from the linked estimate, or the customer's recent
- *    quote-wizard drafts, and only when EXACTLY ONE matches service + address
- *    (ambiguity counted BEFORE priceability);
- *  - fail closed on any supplemental recurring program (rodent/palm) in EITHER
- *    recurring container, since annual_total would cover it;
- *  - service binding via serviceKeyFor on both sides; address bind exact
- *    (street + zip) with suffix/ZIP+4 canonicalization; all fail closed.
+ *    quote isn't billed onto a quarterly series, and non-pest/no-series bookings
+ *    stay price-less);
+ *  - service binding via serviceKeyFor; fail closed on any supplemental
+ *    recurring program (rodent/palm) in EITHER recurring container;
+ *  - all estimate shapes read via the converter's extractor.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/recurring-appointment-seeder', () => ({
@@ -59,15 +56,11 @@ describe('derivePerApplicationAmount — estimate-level net ÷ booking cadence',
     expect(derivePerApplicationAmount(est(387.96, [{ monthly_total: 32.33, pa: 96.99, visitsPerYear: 4 }]), Q)).toBe(96.99);
   });
 
-  test('numeric-frequency cadence (lawn) when it matches booking visits', () => {
-    expect(derivePerApplicationAmount(est(600, [{ monthly: 50, perApp: 60, frequency: 10 }]), 10)).toBe(60);
-  });
-
   test('CADENCE MISMATCH → null (monthly quote, quarterly booking)', () => {
     expect(derivePerApplicationAmount(est(387.96, [pest({ visitsPerYear: 12 })]), Q)).toBeNull();
   });
 
-  test('no booking cadence → null (fail closed)', () => {
+  test('no booking cadence → null (fail closed — non-pest / no series seeded)', () => {
     expect(derivePerApplicationAmount(est(387.96, [pest()]))).toBeNull();
     expect(derivePerApplicationAmount(est(387.96, [pest()]), 0)).toBeNull();
   });
@@ -99,73 +92,22 @@ describe('resolveBookingVisitPrice — linked estimate (shapes, service + cadenc
     expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: Q })).toBeNull();
   });
 
-  test('service MISMATCH / missing serviceKey → null', () => {
+  test('no booking cadence (non-pest / no series) → null', () => {
     const estimate = { id: 'e4', annual_total: 387.96, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] } } };
-    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'lawn_care', bookingVisits: Q })).toBeNull();
-    expect(resolveBookingVisitPrice({ estimate, bookingVisits: Q })).toBeNull();
+    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control' })).toBeNull();
   });
 
-  test('no booking cadence (non-pest / no series seeded) → null (pest-only scope)', () => {
-    const estimate = { id: 'e7', annual_total: 387.96, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] } } };
-    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control' })).toBeNull(); // bookingVisits omitted
+  test('service MISMATCH / missing serviceKey / no estimate → null', () => {
+    const estimate = { id: 'e5', annual_total: 387.96, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] } } };
+    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'lawn_care', bookingVisits: Q })).toBeNull();
+    expect(resolveBookingVisitPrice({ estimate, bookingVisits: Q })).toBeNull();
+    expect(resolveBookingVisitPrice({ serviceKey: 'pest_control', bookingVisits: Q })).toBeNull();
   });
 
   test('supplemental program in EITHER recurring container → null', () => {
-    const rootOnly = { id: 'e5', annual_total: 500, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] }, recurring: { rodentBaitMo: 49 } } };
-    const nestedOnly = { id: 'e6', annual_total: 500, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] }, recurring: {}, result: { recurring: { palmInjectionMo: 39 } } } };
+    const rootOnly = { id: 'e6', annual_total: 500, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] }, recurring: { rodentBaitMo: 49 } } };
+    const nestedOnly = { id: 'e7', annual_total: 500, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] }, recurring: {}, result: { recurring: { palmInjectionMo: 39 } } } };
     expect(resolveBookingVisitPrice({ estimate: rootOnly, serviceKey: 'pest_control', bookingVisits: Q })).toBeNull();
     expect(resolveBookingVisitPrice({ estimate: nestedOnly, serviceKey: 'pest_control', bookingVisits: Q })).toBeNull();
-  });
-});
-
-describe('resolveBookingVisitPrice — customer recent-draft fallback (bound)', () => {
-  const ADDR = '15715 8th Place East, Bradenton, FL 34212';
-  const BOOK_ADDR = { line1: '15715 8th Place East', zip: '34212' };
-  const draft = (id, service, { annual_total = 387.96, extra = {}, address = ADDR } = {}) =>
-    ({ id, annual_total, address, estimate_data: { services: [{ service, monthly: 32.33, perApp: 96.99, visitsPerYear: 4, ...extra }] } });
-  const resolve = (candidateEstimates, opts = {}) =>
-    resolveBookingVisitPrice({ candidateEstimates, serviceKey: 'pest_control', bookingAddress: BOOK_ADDR, bookingVisits: Q, ...opts });
-
-  test('single matching draft (service + address + cadence) prices', () => {
-    expect(resolve([draft('c1', 'pest_control')]))
-      .toEqual({ amount: 96.99, sourceEstimateId: 'c1', serviceKey: 'pest_control' });
-  });
-
-  test('filters candidates by booked service (one of two matches)', () => {
-    expect(resolve([draft('c1', 'pest_control'), draft('c2', 'lawn_care', { annual_total: 480 })]).sourceEstimateId).toBe('c1');
-  });
-
-  test('suffix + ZIP+4 variants still match ("8th Pl" vs "8th Place East", 34212-1234)', () => {
-    expect(resolve([draft('c1', 'pest_control')], { bookingAddress: { line1: '15715 8th Pl East', zip: '34212-1234' } }).sourceEstimateId).toBe('c1');
-  });
-
-  test('substring street is NOT a match ("112 Main" vs booked "12 Main")', () => {
-    expect(resolve([draft('c1', 'pest_control', { address: '112 Main St, Bradenton, FL 34212' })], { bookingAddress: { line1: '12 Main St', zip: '34212' } })).toBeNull();
-  });
-
-  test('cadence-mismatched single candidate → null', () => {
-    expect(resolve([draft('c1', 'pest_control', { extra: { visitsPerYear: 12 } })])).toBeNull();
-  });
-
-  test('two same-service/same-address drafts → null even if one is unpriceable (ambiguity before priceability)', () => {
-    // c2 is unpriceable (supplemental) but still counts for ambiguity, so we do
-    // NOT silently price c1.
-    const c2 = draft('c2', 'pest_control');
-    c2.estimate_data.result = { recurring: { rodentBaitMo: 49 } };
-    expect(resolve([draft('c1', 'pest_control'), c2])).toBeNull();
-  });
-
-  test('different property / no match / missing address → null (fail closed)', () => {
-    expect(resolve([draft('c1', 'pest_control', { address: '999 Elsewhere Ave, Bradenton, FL 34212' })])).toBeNull();
-    expect(resolve([draft('c1', 'lawn_care')])).toBeNull();
-    expect(resolve([])).toBeNull();
-    expect(resolveBookingVisitPrice({ candidateEstimates: [draft('c1', 'pest_control')], serviceKey: 'pest_control', bookingVisits: Q })).toBeNull();
-  });
-
-  test('linked estimate takes precedence over candidates', () => {
-    const estimate = { id: 'linked', annual_total: 600, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 50, perApp: 150, visitsPerYear: 4 }] } } };
-    const res = resolveBookingVisitPrice({ estimate, candidateEstimates: [draft('c1', 'pest_control')], serviceKey: 'pest_control', bookingAddress: BOOK_ADDR, bookingVisits: Q });
-    expect(res.sourceEstimateId).toBe('linked');
-    expect(res.amount).toBe(150); // 600 / 4
   });
 });
