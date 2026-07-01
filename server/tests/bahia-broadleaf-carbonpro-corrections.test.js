@@ -25,6 +25,7 @@ function makeKnex(state) {
       first() { return Promise.resolve(rows()[0] || null); },
       update(u) { const m = rows(); m.forEach((r) => Object.assign(r, u)); return Promise.resolve(m.length); },
       insert(row) { state[table].push({ id: `new-${state[table].length}`, ...row }); return Promise.resolve([1]); },
+      del() { const m = rows(); const ids = new Set(m.map((r) => r.id)); state[table] = (state[table] || []).filter((r) => !ids.has(r.id)); return Promise.resolve(m.length); },
       then(res, rej) { return Promise.resolve(rows()).then(res, rej); },
     };
     return b;
@@ -36,9 +37,22 @@ function makeKnex(state) {
 }
 
 function seed() {
-  const bahiaWindows = ['jan_pre_m_irrigation_class', 'mar_n1_pre_m', 'apr_insect_fire_ant', 'sep_blackout_crabgrass', 'nov_winter_k']
-    .map((k) => ({ id: `w-${k}`, window_key: k, lawn_protocol_id: 'bahia-p' }));
+  // stale B1 goals that still name Drive XLR8 / Celsius (Part E must rewrite these)
+  const STALE_GOALS = {
+    may_micros_crabgrass: 'No fert; micros + K (irrigated only); crabgrass curative Drive XLR8 if breakthrough.',
+    jul_seed_head: 'Celsius app 2; structured seed-head talk; mowing upsell if available.',
+    sep_blackout_crabgrass: 'K-Flow returns; SpeedZone weather-gated; crabgrass curative Drive XLR8.',
+  };
+  const bahiaWindows = ['jan_pre_m_irrigation_class', 'mar_n1_pre_m', 'apr_insect_fire_ant', 'may_micros_crabgrass', 'jul_seed_head', 'sep_blackout_crabgrass', 'nov_winter_k']
+    .map((k) => ({
+      id: `w-${k}`, window_key: k, lawn_protocol_id: 'bahia-p',
+      goal: STALE_GOALS[k] || 'goal', service_report_context: JSON.stringify({ title: k, goal: STALE_GOALS[k] || 'goal' }),
+    }));
   return {
+    lawn_protocol_gates: [
+      { id: 'g-heat', lawn_protocol_id: 'bahia-p', gate_key: 'speedzone_heat_gate', rule_text: 'Do not apply SpeedZone Southern above 90°F; use Celsius WG for hot-season broadleaf.' },
+      { id: 'g-cel', lawn_protocol_id: 'bahia-p', gate_key: 'celsius_annual_rate', rule_text: 'Track total Celsius WG per 365 days; block when annual maximum would be exceeded.' },
+    ],
     products_catalog: [{ id: 'sz', name: 'SpeedZone Southern', labeled_turf_species: JSON.stringify(['bermuda', 'zoysia', 'st_augustine_select_cultivars']) }],
     lawn_protocols: [{ id: 'bahia-p', grass_track: 'bahia', status: 'active', effective_from: '2026-06-30', created_at: '2026-06-30' }],
     lawn_protocol_windows: bahiaWindows,
@@ -98,5 +112,22 @@ describe('bahia broadleaf + CarbonPro correction migration', () => {
     expect(mar.rate_per_1000).toBe(1.0);
     expect(JSON.parse(mar.gates).trigger).toBe('broadleaf_heavy');
     expect(JSON.parse(mar.gates).spotAreaCapSqFtPerAcre).toBe(1000);
+  });
+
+  test('E) bahia window goals no longer name Drive/Celsius (goal + service_report_context)', () => {
+    ['may_micros_crabgrass', 'jul_seed_head', 'sep_blackout_crabgrass'].forEach((wk) => {
+      const w = state.lawn_protocol_windows.find((r) => r.window_key === wk);
+      expect(w.goal).not.toMatch(/Drive XLR8|Celsius/i);
+      expect(JSON.parse(w.service_report_context).goal).toBe(w.goal); // copy kept in sync
+    });
+    // untouched windows keep their goal
+    expect(state.lawn_protocol_windows.find((r) => r.window_key === 'jan_pre_m_irrigation_class').goal).toBe('goal');
+  });
+
+  test('F) bahia SpeedZone heat gate defers (no Celsius fallback); Celsius annual gate removed', () => {
+    const heat = state.lawn_protocol_gates.find((g) => g.gate_key === 'speedzone_heat_gate');
+    expect(heat.rule_text).not.toMatch(/use Celsius|Celsius WG/i);
+    expect(heat.rule_text).toMatch(/DEFER/i);
+    expect(state.lawn_protocol_gates.find((g) => g.gate_key === 'celsius_annual_rate')).toBeUndefined();
   });
 });

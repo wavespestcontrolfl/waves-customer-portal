@@ -131,6 +131,42 @@ exports.up = async function up(knex) {
       });
     }
   }
+
+  // ── E) Correct stale bahia window goals — B1 seeded Drive XLR8 / Celsius text in
+  //       the goal (and the copy inside service_report_context.goal), which
+  //       getProtocolWindowContext exposes to the Tech Treatment Plan.
+  const BAHIA_WINDOW_GOALS = {
+    may_micros_crabgrass: 'No fert (only 2 N/yr); micros + K (irrigated only); NO bahia-safe crabgrass curative — rely on pre-emergent timing + scout/manual, nonselective spot only where turf loss is acceptable.',
+    jul_seed_head: 'No broadleaf herbicide labeled on bahiagrass (defer when hot); structured seed-head customer talk (proactive, not reactive); mowing upsell if available.',
+    sep_blackout_crabgrass: 'K-Flow returns (irrigated); SpeedZone weather-gated broadleaf; NO bahia-safe crabgrass curative — rely on pre-emergent timing + scout/manual, nonselective spot only where turf loss is acceptable.',
+  };
+  const bahiaWindowRows = await knex('lawn_protocol_windows')
+    .where({ lawn_protocol_id: bahiaProtocol.id })
+    .select('id', 'window_key', 'service_report_context');
+  for (const row of bahiaWindowRows) {
+    const goal = BAHIA_WINDOW_GOALS[row.window_key];
+    if (!goal) continue;
+    const src = parseJson(row.service_report_context, {});
+    src.goal = goal;
+    await knex('lawn_protocol_windows')
+      .where({ id: row.id })
+      .update({ goal, service_report_context: JSON.stringify(src), updated_at: knex.fn.now() });
+  }
+
+  // ── F) bahia gates: the shared SpeedZone heat gate recommends Celsius as the
+  //       hot-season broadleaf fallback (not labeled for bahia) -> defer instead;
+  //       the Celsius annual-rate gate is inert on bahia (Celsius is never applied).
+  if (await knex.schema.hasTable('lawn_protocol_gates')) {
+    await knex('lawn_protocol_gates')
+      .where({ lawn_protocol_id: bahiaProtocol.id, gate_key: 'speedzone_heat_gate' })
+      .update({
+        rule_text: 'Do not apply SpeedZone Southern above 90°F; DEFER broadleaf when hot — no bahia-safe hot-season herbicide (do not substitute a non-bahia-labeled product).',
+        updated_at: knex.fn.now(),
+      });
+    await knex('lawn_protocol_gates')
+      .where({ lawn_protocol_id: bahiaProtocol.id, gate_key: 'celsius_annual_rate' })
+      .del();
+  }
 };
 
 exports.down = async function down() {
