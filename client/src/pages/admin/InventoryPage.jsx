@@ -932,6 +932,7 @@ function PriceSyncTab({ showToast }) {
   const [loginDiscoveryLimit, setLoginDiscoveryLimit] = useState(50);
   const [loginDiscoveryQueueing, setLoginDiscoveryQueueing] = useState(false);
   const [loginDiscoveryResult, setLoginDiscoveryResult] = useState(null);
+  const [autoMapIds, setAutoMapIds] = useState(() => new Set());
   const showToastRef = useRef(showToast);
 
   useEffect(() => {
@@ -999,6 +1000,27 @@ function PriceSyncTab({ showToast }) {
       await load();
     } catch (e) {
       showToast?.(`Import failed: ${e.message}`);
+    }
+  };
+
+  const autoMapVendor = async (vendorId) => {
+    if (autoMapIds.has(vendorId)) return;
+    setAutoMapIds((prev) => new Set(prev).add(vendorId));
+    try {
+      const result = await adminFetch("/admin/inventory/price-sync/auto-map", {
+        method: "POST",
+        body: JSON.stringify({ vendorId, limit: 8 }),
+      });
+      showToast?.(result.message || `Auto-mapped ${result.mapped || 0} products`);
+      await load();
+    } catch (e) {
+      showToast?.(`Auto-map failed: ${e.message}`);
+    } finally {
+      setAutoMapIds((prev) => {
+        const next = new Set(prev);
+        next.delete(vendorId);
+        return next;
+      });
     }
   };
 
@@ -1172,7 +1194,27 @@ function PriceSyncTab({ showToast }) {
                   <td style={tdS}>{vendor.currentPrices}</td>
                   <td style={tdS}>{vendor.bestPrices}</td>
                   <td style={tdS}>{vendor.pendingApprovals}</td>
-                  <td style={{ ...tdS, color: D.muted }}>{vendor.nextAction}</td>
+                  <td style={{ ...tdS, color: D.muted }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span>{vendor.nextAction}</span>
+                      {(vendor.nextAction === "Needs mapping" || vendor.nextAction === "Verify mappings") && (
+                        <button
+                          onClick={() => autoMapVendor(vendor.id)}
+                          disabled={autoMapIds.has(vendor.id)}
+                          title="AI-propose vendor SKUs/URLs for this vendor's unmapped products (writes unverified — review before pricing)"
+                          style={{
+                            ...sBtn(D.teal, D.white),
+                            padding: "4px 10px",
+                            fontSize: 11,
+                            opacity: autoMapIds.has(vendor.id) ? 0.6 : 1,
+                            cursor: autoMapIds.has(vendor.id) ? "default" : "pointer",
+                          }}
+                        >
+                          {autoMapIds.has(vendor.id) ? "Mapping…" : "Auto-map"}
+                        </button>
+                      )}
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>

@@ -311,6 +311,120 @@ function calculateMappingConfidenceCap(row, verified) {
   return 1.00;
 }
 
+// Validate + upsert a single distributor_product_map row. Shared by the CSV mapping
+// import endpoint and the AI bulk auto-mapper so both write through one gated path.
+// Returns { ok: true, id, action, confidence, status } or { ok: false, errors: [] }.
+async function applyMappingRow(row, adminId) {
+  const productId = cleanString(row.internal_product_id || row.product_id);
+  const vendorId = cleanString(row.vendor_id);
+  const vendorConnectionId = cleanString(row.vendor_connection_id);
+  const verified = truthy(row.verified) || cleanString(row.mapping_status) === 'verified';
+  const requestedStatus = cleanString(row.mapping_status) || (verified ? 'verified' : 'mapped_unverified');
+  const mappingStatus = verified ? 'verified' : requestedStatus;
+  const errors = [];
+
+  if (!productId) errors.push('internal_product_id is required');
+  if (!vendorId) errors.push('vendor_id is required');
+  if (verified && !vendorConnectionId) errors.push('vendor_connection_id is required for verified mappings');
+
+  const identifiers = [
+    cleanString(row.vendor_sku),
+    cleanString(row.product_url),
+    cleanString(row.manufacturer_sku),
+    cleanString(row.upc),
+    cleanString(row.asin),
+  ].filter(Boolean);
+  if (!identifiers.length) errors.push('At least one identifier is required: vendor_sku, product_url, manufacturer_sku, upc, or asin');
+
+  const packageSize = parseDecimalOrNull(row.package_size_value);
+  const packageSizeUnit = cleanString(row.package_size_unit);
+  const purchaseUom = cleanString(row.purchase_uom);
+  if (verified) {
+    if (packageSize == null) errors.push('package_size_value is required for verified mappings');
+    if (!packageSizeUnit) errors.push('package_size_unit is required for verified mappings');
+    if (!purchaseUom) errors.push('purchase_uom is required for verified mappings');
+  }
+
+  const requestedConfidence = parseDecimalOrNull(row.mapping_confidence);
+  const confidenceCap = calculateMappingConfidenceCap(row, verified);
+  const mappingConfidence = Math.min(
+    requestedConfidence == null ? (verified ? 0.90 : 0.50) : requestedConfidence,
+    confidenceCap,
+  );
+
+  if (mappingConfidence < 0 || mappingConfidence > 1) errors.push('mapping_confidence must be between 0 and 1');
+  if (verified && mappingConfidence < 0.80) errors.push('verified mappings require confidence >= 0.80 after server-side caps');
+  if (!['needs_mapping', 'mapped_unverified', 'verified', 'rejected', 'inactive'].includes(mappingStatus)) {
+    errors.push(`Invalid mapping_status: ${mappingStatus}`);
+  }
+
+  if (errors.length) return { ok: false, errors };
+
+  const [product, vendor, connection] = await Promise.all([
+    db('products_catalog').where({ id: productId }).first(),
+    db('vendors').where({ id: vendorId }).first(),
+    vendorConnectionId ? db('vendor_connections').where({ id: vendorConnectionId, vendor_id: vendorId }).first() : null,
+  ]);
+  if (!product) errors.push('Product not found');
+  if (!vendor) errors.push('Vendor not found');
+  if (vendorConnectionId && !connection) errors.push('Vendor connection not found for vendor');
+  if (verified && !connection) errors.push('Verified mapping requires a valid vendor connection');
+  if (errors.length) return { ok: false, errors };
+
+  const data = {
+    product_id: productId,
+    vendor_id: vendorId,
+    vendor_connection_id: vendorConnectionId || null,
+    distributor_sku: cleanString(row.vendor_sku),
+    product_url: cleanString(row.product_url),
+    source_url: cleanString(row.product_url),
+    vendor_product_name: cleanString(row.vendor_product_name),
+    manufacturer_sku: cleanString(row.manufacturer_sku),
+    upc: cleanString(row.upc),
+    asin: cleanString(row.asin),
+    epa_registration_number: cleanString(row.epa_registration_number),
+    package_size_value: packageSize,
+    package_size_unit: packageSizeUnit,
+    purchase_uom: purchaseUom,
+    content_quantity: parseDecimalOrNull(row.content_quantity),
+    content_uom: cleanString(row.content_uom),
+    case_quantity: parseDecimalOrNull(row.case_quantity) ?? 1,
+    pack_count: parseDecimalOrNull(row.pack_count) ?? 1,
+    branch_id: cleanString(row.branch_id),
+    branch_name: cleanString(row.branch_name),
+    mapping_status: mappingStatus,
+    mapping_confidence: mappingConfidence,
+    verified_by: verified ? adminId : null,
+    verified_at: verified ? new Date() : null,
+    notes: cleanString(row.notes),
+    active: mappingStatus !== 'inactive',
+    updated_at: new Date(),
+  };
+
+  const existingQuery = db('distributor_product_map')
+    .where({ product_id: productId, vendor_id: vendorId })
+    .modify((query) => {
+      if (data.distributor_sku) query.where({ distributor_sku: data.distributor_sku });
+      else if (data.product_url) query.where(function byUrl() {
+        this.where({ product_url: data.product_url }).orWhere({ source_url: data.product_url });
+      });
+      else if (data.manufacturer_sku) query.where({ manufacturer_sku: data.manufacturer_sku });
+      else if (data.upc) query.where({ upc: data.upc });
+      else if (data.asin) query.where({ asin: data.asin });
+    });
+  const existing = await existingQuery.first();
+
+  if (existing) {
+    await db('distributor_product_map').where({ id: existing.id }).update(data);
+    return { ok: true, id: existing.id, action: 'updated', confidence: mappingConfidence, status: mappingStatus };
+  }
+  const [inserted] = await db('distributor_product_map').insert({
+    ...data,
+    created_at: new Date(),
+  }).returning('id');
+  return { ok: true, id: inserted?.id || inserted, action: 'created', confidence: mappingConfidence, status: mappingStatus };
+}
+
 function normalizeAvailabilityStatus(value) {
   const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
   if (['in_stock', 'limited', 'out_of_stock', 'backorder', 'unknown'].includes(normalized)) {
@@ -1230,11 +1344,17 @@ router.get('/price-sync/vendors', async (req, res, next) => {
           vendor.loginDiscoveryResult = loginDiscovery.outcome || loginDiscovery.result || null;
         }
       }
+      // Missing feed/API/portal credentials is only the *primary* next action when the
+      // vendor has nothing better to show. A vendor that is already producing prices
+      // through another connection (e.g. SiteOne via manual_seed) must not be relabeled
+      // "Needs credentials/feed approval" just because a secondary connector lacks creds.
+      const hasMissingFeedCreds = vendor.connections.some(
+        (c) => c.credentialStatus === 'missing'
+          && ['api', 'approved_feed', 'portal_connector', 'workwave_marketplace'].includes(c.type),
+      );
       if (vendor.verifiedMappings > 0 && vendor.currentPrices > 0) vendor.nextAction = 'Ready for manual seed review';
       else if (vendor.mappedProducts > 0 && vendor.verifiedMappings === 0) vendor.nextAction = 'Verify mappings';
-      if (vendor.connections.some((c) => c.credentialStatus === 'missing' && ['api', 'approved_feed', 'portal_connector', 'workwave_marketplace'].includes(c.type))) {
-        vendor.nextAction = 'Needs credentials/feed approval';
-      }
+      else if (hasMissingFeedCreds) vendor.nextAction = 'Needs credentials/feed approval';
     }
 
     for (const vendor of grouped.values()) {
@@ -1611,121 +1731,17 @@ router.post('/price-sync/mappings/import', async (req, res, next) => {
 
     for (const [index, row] of rows.entries()) {
       const rowNumber = index + 1;
-      const productId = cleanString(row.internal_product_id || row.product_id);
-      const vendorId = cleanString(row.vendor_id);
-      const vendorConnectionId = cleanString(row.vendor_connection_id);
-      const verified = truthy(row.verified) || cleanString(row.mapping_status) === 'verified';
-      const requestedStatus = cleanString(row.mapping_status) || (verified ? 'verified' : 'mapped_unverified');
-      const mappingStatus = verified ? 'verified' : requestedStatus;
-      const errors = [];
-
-      if (!productId) errors.push('internal_product_id is required');
-      if (!vendorId) errors.push('vendor_id is required');
-      if (verified && !vendorConnectionId) errors.push('vendor_connection_id is required for verified mappings');
-
-      const identifiers = [
-        cleanString(row.vendor_sku),
-        cleanString(row.product_url),
-        cleanString(row.manufacturer_sku),
-        cleanString(row.upc),
-        cleanString(row.asin),
-      ].filter(Boolean);
-      if (!identifiers.length) errors.push('At least one identifier is required: vendor_sku, product_url, manufacturer_sku, upc, or asin');
-
-      const packageSize = parseDecimalOrNull(row.package_size_value);
-      const packageSizeUnit = cleanString(row.package_size_unit);
-      const purchaseUom = cleanString(row.purchase_uom);
-      if (verified) {
-        if (packageSize == null) errors.push('package_size_value is required for verified mappings');
-        if (!packageSizeUnit) errors.push('package_size_unit is required for verified mappings');
-        if (!purchaseUom) errors.push('purchase_uom is required for verified mappings');
-      }
-
-      const requestedConfidence = parseDecimalOrNull(row.mapping_confidence);
-      const confidenceCap = calculateMappingConfidenceCap(row, verified);
-      const mappingConfidence = Math.min(
-        requestedConfidence == null ? (verified ? 0.90 : 0.50) : requestedConfidence,
-        confidenceCap,
-      );
-
-      if (mappingConfidence < 0 || mappingConfidence > 1) errors.push('mapping_confidence must be between 0 and 1');
-      if (verified && mappingConfidence < 0.80) errors.push('verified mappings require confidence >= 0.80 after server-side caps');
-      if (!['needs_mapping', 'mapped_unverified', 'verified', 'rejected', 'inactive'].includes(mappingStatus)) {
-        errors.push(`Invalid mapping_status: ${mappingStatus}`);
-      }
-
-      if (errors.length) {
-        rowErrors.push({ row: rowNumber, productId, vendorId, errors });
-        continue;
-      }
-
-      const [product, vendor, connection] = await Promise.all([
-        db('products_catalog').where({ id: productId }).first(),
-        db('vendors').where({ id: vendorId }).first(),
-        vendorConnectionId ? db('vendor_connections').where({ id: vendorConnectionId, vendor_id: vendorId }).first() : null,
-      ]);
-      if (!product) errors.push('Product not found');
-      if (!vendor) errors.push('Vendor not found');
-      if (vendorConnectionId && !connection) errors.push('Vendor connection not found for vendor');
-      if (verified && !connection) errors.push('Verified mapping requires a valid vendor connection');
-      if (errors.length) {
-        rowErrors.push({ row: rowNumber, productId, vendorId, errors });
-        continue;
-      }
-
-      const data = {
-        product_id: productId,
-        vendor_id: vendorId,
-        vendor_connection_id: vendorConnectionId || null,
-        distributor_sku: cleanString(row.vendor_sku),
-        product_url: cleanString(row.product_url),
-        source_url: cleanString(row.product_url),
-        vendor_product_name: cleanString(row.vendor_product_name),
-        manufacturer_sku: cleanString(row.manufacturer_sku),
-        upc: cleanString(row.upc),
-        asin: cleanString(row.asin),
-        epa_registration_number: cleanString(row.epa_registration_number),
-        package_size_value: packageSize,
-        package_size_unit: packageSizeUnit,
-        purchase_uom: purchaseUom,
-        content_quantity: parseDecimalOrNull(row.content_quantity),
-        content_uom: cleanString(row.content_uom),
-        case_quantity: parseDecimalOrNull(row.case_quantity) ?? 1,
-        pack_count: parseDecimalOrNull(row.pack_count) ?? 1,
-        branch_id: cleanString(row.branch_id),
-        branch_name: cleanString(row.branch_name),
-        mapping_status: mappingStatus,
-        mapping_confidence: mappingConfidence,
-        verified_by: verified ? adminId : null,
-        verified_at: verified ? new Date() : null,
-        notes: cleanString(row.notes),
-        active: mappingStatus !== 'inactive',
-        updated_at: new Date(),
-      };
-
-      const existingQuery = db('distributor_product_map')
-        .where({ product_id: productId, vendor_id: vendorId })
-        .modify((query) => {
-          if (data.distributor_sku) query.where({ distributor_sku: data.distributor_sku });
-          else if (data.product_url) query.where(function byUrl() {
-            this.where({ product_url: data.product_url }).orWhere({ source_url: data.product_url });
-          });
-          else if (data.manufacturer_sku) query.where({ manufacturer_sku: data.manufacturer_sku });
-          else if (data.upc) query.where({ upc: data.upc });
-          else if (data.asin) query.where({ asin: data.asin });
+      const result = await applyMappingRow(row, adminId);
+      if (!result.ok) {
+        rowErrors.push({
+          row: rowNumber,
+          productId: cleanString(row.internal_product_id || row.product_id),
+          vendorId: cleanString(row.vendor_id),
+          errors: result.errors,
         });
-      const existing = await existingQuery.first();
-
-      if (existing) {
-        await db('distributor_product_map').where({ id: existing.id }).update(data);
-        imported.push({ row: rowNumber, id: existing.id, action: 'updated', confidence: mappingConfidence });
-      } else {
-        const [inserted] = await db('distributor_product_map').insert({
-          ...data,
-          created_at: new Date(),
-        }).returning('id');
-        imported.push({ row: rowNumber, id: inserted?.id || inserted, action: 'created', confidence: mappingConfidence });
+        continue;
       }
+      imported.push({ row: rowNumber, id: result.id, action: result.action, confidence: result.confidence });
     }
 
     res.json({
@@ -1738,6 +1754,265 @@ router.post('/price-sync/mappings/import', async (req, res, next) => {
       message: `${imported.length} mapping row${imported.length === 1 ? '' : 's'} imported. ${rowErrors.length} row${rowErrors.length === 1 ? '' : 's'} rejected.`,
     });
   } catch (err) { next(err); }
+});
+
+// Parse the AI mapping response text into an array of proposals. Tolerates markdown
+// fences / preamble. Pure + never throws (returns []) so it is unit-testable.
+function parseAutoMapResponse(responseText) {
+  try {
+    const clean = String(responseText || '').replace(/```json|```/g, '').trim();
+    const match = clean.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(match ? match[0] : clean);
+    return Array.isArray(parsed.mappings) ? parsed.mappings : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// Turn one product + its AI proposal into a distributor_product_map import row, or a
+// "not matched" decision. Pure (no DB / no AI) so it is unit-testable. A proposal only
+// maps when the model reported found=true AND supplied at least one identifier
+// (vendor SKU or product URL); everything is written mapped_unverified downstream.
+function buildAutoMapRow({ product, proposal, vendorId, vendorName, connectionId }) {
+  const hasIdentifier = proposal && (cleanString(proposal.vendorSku) || cleanString(proposal.productUrl));
+  // Require an explicit boolean true — a model reply of found:"false"/"no" (string) must
+  // not be treated as a match just because it also carried a candidate URL/SKU.
+  if (!proposal || proposal.found !== true || !hasIdentifier) {
+    return { matched: false, note: cleanString(proposal?.notes) || 'No confident match found' };
+  }
+  const row = {
+    internal_product_id: product.id,
+    vendor_id: vendorId,
+    vendor_connection_id: connectionId || '',
+    vendor_sku: cleanString(proposal.vendorSku),
+    product_url: cleanString(proposal.productUrl),
+    vendor_product_name: cleanString(proposal.vendorProductName),
+    epa_registration_number: product.epa_reg_number || '',
+    package_size_value: proposal.packageSizeValue ?? '',
+    package_size_unit: cleanString(proposal.packageSizeUnit),
+    purchase_uom: cleanString(proposal.purchaseUom),
+    mapping_status: 'mapped_unverified',
+    mapping_confidence: proposal.confidence,
+    notes: [`AI auto-map (${vendorName})`, proposal.price ? `~$${proposal.price}` : null, cleanString(proposal.notes)]
+      .filter(Boolean).join(' · '),
+  };
+  return { matched: true, row };
+}
+
+// AI research pass: ask Claude (FLAGSHIP + web_search) to locate each internal product
+// on a single vendor's website and return that vendor's catalog identity for it.
+// Returns an array of proposal objects keyed by productId. Never throws — returns [] on
+// parse failure. Mirrors the tool-use scaffold used by /ai-price-lookup.
+async function aiProposeVendorMappings(anthropic, vendor, products) {
+  const productLines = products
+    .map((p) => `- id=${p.id} | name=${p.name}${p.container_size ? ` | size=${p.container_size}` : ''}${p.epa_reg_number ? ` | EPA=${p.epa_reg_number}` : ''}`)
+    .join('\n');
+
+  const prompt = `You are a procurement catalog-mapping agent for a pest control and lawn care company. For the vendor below, find each internal product on THIS VENDOR'S website and return the vendor's catalog identity for it.
+
+VENDOR: ${vendor.name}${vendor.website ? ` (${vendor.website})` : ''}
+
+INTERNAL PRODUCTS:
+${productLines}
+
+INSTRUCTIONS:
+1. For each product, search the vendor's own website for the exact product (match brand, active ingredient, EPA reg #, and package/container size).
+2. Only return found=true when you locate a specific vendor product PAGE for that exact item. Do NOT guess. A category or search-results page is NOT a match.
+3. Provide the vendor's product URL and, when visible, the vendor SKU/item number, the vendor's product name, and the package size split into a numeric value + unit (e.g. "32 oz" -> value 32, unit "oz") plus the purchase unit of measure (e.g. "each", "case", "jug").
+4. confidence is 0.0-1.0: how sure you are this is the exact same product (same brand, active ingredient, size). Be conservative.
+5. If you find a price, include it (number only). Price is optional.
+
+RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
+{
+  "mappings": [
+    {
+      "productId": "<echo the id from the list>",
+      "found": true,
+      "vendorSku": "string or null",
+      "productUrl": "https://... or null",
+      "vendorProductName": "string or null",
+      "packageSizeValue": 32,
+      "packageSizeUnit": "oz",
+      "purchaseUom": "each",
+      "price": 99.99,
+      "confidence": 0.0,
+      "notes": "brief reasoning"
+    }
+  ]
+}`;
+
+  const tools = [{ type: 'web_search_20250305', name: 'web_search' }];
+  let responseText = '';
+  let msg = await anthropic.messages.create({
+    model: MODELS.FLAGSHIP,
+    max_tokens: 4000,
+    tools,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  for (const block of msg.content) if (block.type === 'text') responseText += block.text;
+
+  let loops = 0;
+  while (msg.stop_reason === 'tool_use' && loops < 12) {
+    loops += 1;
+    const toolUses = msg.content.filter((b) => b.type === 'tool_use');
+    const toolResults = toolUses.map((tb) => ({
+      type: 'tool_result',
+      tool_use_id: tb.id,
+      content: 'Search completed. Continue analyzing results and provide your final JSON response.',
+    }));
+    msg = await anthropic.messages.create({
+      model: MODELS.FLAGSHIP,
+      max_tokens: 4000,
+      tools,
+      messages: [
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: msg.content },
+        { role: 'user', content: toolResults },
+      ],
+    });
+    for (const block of msg.content) if (block.type === 'text') responseText += block.text;
+  }
+
+  const mappings = parseAutoMapResponse(responseText);
+  if (!mappings.length && responseText.trim()) {
+    logger.warn(`[auto-map] No parseable mappings in AI response for ${vendor.name}`);
+  }
+  return mappings;
+}
+
+// Count active products that still have NO mapping row (of any status) to this vendor —
+// i.e. products a subsequent auto-map batch would still attempt. Mirrors the selection
+// predicate so a "loop until remaining === 0" actually terminates.
+async function countUnmappedForVendor(vendorId) {
+  const [row] = await db('products_catalog as pc')
+    .leftJoin('distributor_product_map as dpm', function joinMaps() {
+      this.on('dpm.product_id', '=', 'pc.id')
+        .andOn('dpm.vendor_id', '=', db.raw('?', [vendorId]));
+    })
+    .where(function activeProducts() { this.where('pc.active', true).orWhereNull('pc.active'); })
+    .whereNull('dpm.id')
+    .count('pc.id as count');
+  return Number(row?.count || 0);
+}
+
+// =========================================================================
+// POST /price-sync/auto-map — AI bulk mapper for one vendor.
+// Writes distributor_product_map rows as mapped_unverified ONLY (never auto-
+// verified, never priced) so nothing counts toward the board until a human
+// verifies it. Bounded by `limit` per call; returns `remaining` so the UI or a
+// script can loop. Set dryRun to preview proposals without writing.
+// =========================================================================
+router.post('/price-sync/auto-map', async (req, res, next) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured — set ANTHROPIC_API_KEY' });
+    const Anthropic = require('@anthropic-ai/sdk');
+
+    const vendorId = cleanString(req.body?.vendorId);
+    if (!vendorId) return res.status(400).json({ error: 'vendorId is required' });
+    const limit = Math.min(Math.max(parseInt(req.body?.limit, 10) || 8, 1), 25);
+    const dryRun = truthy(req.body?.dryRun);
+    const adminId = req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || 'admin';
+
+    const vendor = await db('vendors').where({ id: vendorId }).first();
+    if (!vendor) return res.status(404).json({ error: 'Vendor not found' });
+
+    // Prefer a credential-free public_scraper connection, then manual_seed, then anything active.
+    const connections = await db('vendor_connections')
+      .where({ vendor_id: vendorId })
+      .andWhere(function activeConn() { this.where('is_active', true).orWhereNull('is_active'); });
+    const pref = ['public_scraper', 'manual_seed', 'manual_csv', 'approved_feed', 'portal_connector', 'api', 'workwave_marketplace'];
+    const rank = (t) => { const i = pref.indexOf(t); return i === -1 ? pref.length : i; };
+    const connection = connections.slice().sort((a, b) => rank(a.connection_type) - rank(b.connection_type))[0] || null;
+
+    // Products with NO mapping row to THIS vendor yet (active OR an inactive
+    // "attempted, no match" marker) — so each processed product drops out of the next
+    // batch instead of being re-selected forever by the ORDER BY name / limit window.
+    const products = await db('products_catalog as pc')
+      .leftJoin('distributor_product_map as dpm', function joinMaps() {
+        this.on('dpm.product_id', '=', 'pc.id')
+          .andOn('dpm.vendor_id', '=', db.raw('?', [vendorId]));
+      })
+      .where(function activeProducts() { this.where('pc.active', true).orWhereNull('pc.active'); })
+      .whereNull('dpm.id')
+      .select('pc.id', 'pc.name', 'pc.category', 'pc.sku', 'pc.container_size', 'pc.epa_reg_number')
+      .orderBy('pc.name')
+      .limit(limit);
+
+    if (!products.length) {
+      return res.json({ vendorId, vendorName: vendor.name, processed: 0, mapped: 0, remaining: 0, proposals: [], message: `No unmapped products for ${vendor.name}.` });
+    }
+
+    // maxRetries: 0 — an SDK retry re-runs the whole web_search budget; avoid the
+    // duplicated search cost/latency on a transient 429/5xx (same rule as the other
+    // web_search clients, e.g. property-lookup).
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
+    const proposals = await aiProposeVendorMappings(anthropic, vendor, products);
+
+    const results = [];
+    let mapped = 0;
+    for (const product of products) {
+      const proposal = proposals.find((p) => String(p.productId) === String(product.id));
+      const built = buildAutoMapRow({ product, proposal, vendorId, vendorName: vendor.name, connectionId: connection?.id });
+      if (!built.matched) {
+        // Persist an inactive "attempted, no match" marker ONLY when the model actually
+        // returned a decision for this product, so it drops out of the next batch. A
+        // product the model omitted entirely (e.g. a transient/truncated response) has no
+        // proposal and stays retryable. Inactive => never counts toward the board.
+        const recorded = Boolean(!dryRun && proposal);
+        if (recorded) {
+          await db('distributor_product_map').insert({
+            product_id: product.id,
+            vendor_id: vendorId,
+            vendor_connection_id: connection?.id || null,
+            mapping_status: 'rejected',
+            mapping_confidence: 0,
+            active: false,
+            notes: `AI auto-map: no confident match — ${built.note}`,
+            last_checked_at: new Date(),
+            created_at: new Date(),
+            updated_at: new Date(),
+          });
+        }
+        results.push({ productId: product.id, productName: product.name, found: false, note: built.note, recorded });
+        continue;
+      }
+
+      if (dryRun) {
+        results.push({
+          productId: product.id, productName: product.name, found: true, dryRun: true,
+          vendorSku: built.row.vendor_sku, productUrl: built.row.product_url, confidence: proposal.confidence,
+        });
+        continue;
+      }
+
+      const applied = await applyMappingRow(built.row, adminId);
+      if (applied.ok) {
+        mapped += 1;
+        results.push({ productId: product.id, productName: product.name, found: true, action: applied.action, confidence: applied.confidence, vendorSku: built.row.vendor_sku, productUrl: built.row.product_url });
+      } else {
+        results.push({ productId: product.id, productName: product.name, found: true, error: applied.errors.join('; ') });
+      }
+    }
+
+    const remaining = await countUnmappedForVendor(vendorId);
+    const matchedCount = results.filter((r) => r.found).length;
+    res.json({
+      vendorId,
+      vendorName: vendor.name,
+      connectionType: connection?.connection_type || null,
+      processed: products.length,
+      mapped,
+      remaining,
+      dryRun,
+      proposals: results,
+      message: dryRun
+        ? `Dry run: ${matchedCount}/${products.length} products matched for ${vendor.name} (nothing written).`
+        : `Auto-mapped ${mapped}/${products.length} products for ${vendor.name} as unverified — review + verify before pricing. ${remaining} unmapped remaining.`,
+    });
+  } catch (err) {
+    logger.error(`[auto-map] Error: ${err.message}`);
+    next(err);
+  }
 });
 
 router.post('/price-sync/manual-seed/import', async (req, res) => {
@@ -3378,6 +3653,9 @@ router.post('/ai-price-lookup/bulk', async (req, res, next) => {
 });
 
 router._test = {
+  parseAutoMapResponse,
+  buildAutoMapRow,
+  calculateMappingConfidenceCap,
   findOpenLoginDiscoveryConnection,
   hasTerminalLoginDiscoveryResult,
   isOpenLoginDiscoveryJob,
