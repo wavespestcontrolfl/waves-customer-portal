@@ -495,12 +495,18 @@ function fmtTime(min) {
     .map((value) => String(value).padStart(2, "0"))
     .join(":");
 }
-// Short "M/D" for the Speed-to-Lead fresh-start baseline label.
+// Short "M/D" for the Speed-to-Lead fresh-start baseline label. Pinned to ET:
+// speedToLeadSince is an ET-midnight cutoff, so a non-ET browser would otherwise
+// render 2026-07-01 as 6/30 (ET wall-clock discipline).
 function fmtShortDate(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("en-US", { month: "numeric", day: "numeric" });
+  return d.toLocaleDateString("en-US", {
+    month: "numeric",
+    day: "numeric",
+    timeZone: "America/New_York",
+  });
 }
 function roiColor(roi) {
   return roi >= 0 ? C.heading : C.red;
