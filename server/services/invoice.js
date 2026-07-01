@@ -42,6 +42,41 @@ const CANCELLED_SERVICE_VOIDABLE_STATUSES = [
 // authorized — an invoice attached to one of these must never be auto-voided.
 const PI_MONEY_IN_FLIGHT_STATUSES = ["processing", "succeeded", "requires_capture"];
 
+// line_items is JSONB (array when read from PG, string on some paths).
+function parseInvoiceLineItems(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+// Fail-closed: does the invoice carry ANY positive charge beyond the covered base
+// visit line (client_id `…_primary`)? Add-ons are tagged `…_addon_`, but pre-minted
+// mobile-checkout invoices can add positive `extraLineItems` with no such id — so we
+// treat any positive NON-primary line as "not fully covered" and defer to the caller
+// (void today; the base-covered/extras-collectible SPLIT is a dedicated follow-up).
+// Negative lines (discounts, deposit_credit) are handled elsewhere.
+function invoiceHasNonBaseCharges(invoice) {
+  return parseInvoiceLineItems(invoice.line_items).some(
+    (li) => Number(li.amount) > 0 && !String(li.client_id || "").includes("_primary"),
+  );
+}
+
+// Ledger-backed estimate deposit credit rides as a `deposit_credit` line; voidInvoice
+// restores it (restoreDepositCreditForVoidedInvoice). Settling 'prepaid' would strand
+// it, so these defer to the caller's void.
+function invoiceHasDepositCreditLine(invoice) {
+  return parseInvoiceLineItems(invoice.line_items).some(
+    (li) => String(li.category || "") === "deposit_credit",
+  );
+}
+
 function appendPayUrlParams(url, params = null) {
   if (!params || typeof params !== "object") return url;
   try {
@@ -3030,6 +3065,191 @@ const InvoiceService = {
   },
 
   /**
+   * Settle a covered visit's PRE-EXISTING invoice as NON-CASH annual-prepay
+   * coverage — the money was already collected on the term's own prepay invoice,
+   * so this books NO `payments` row (which would double-count revenue; every
+   * revenue rollup keys on payments.status='paid'). Mirrors the account-credit
+   * `prepaid` close-out (status='prepaid' + paid_at leaves AR and is excluded from
+   * collected-revenue), anchored on the DEDICATED invoices.annual_prepay_covered_term_id
+   * (NOT annual_prepay_term_id, which means "this IS the term's prepay invoice").
+   * Replaces void-on-covered, which loses the invoice + service record.
+   *
+   * FULL COVERAGE ONLY (invoice has no add-ons): an invoice with tech-added add-on
+   * lines is left for the caller (the base-covered / add-ons-collectible SPLIT is a
+   * dedicated follow-up). Fail-closed like void: refuses if a payment is applied
+   * (refund instead) or money is in flight; cancels an open PaymentIntent first.
+   * Returns { settled, reason, invoice } — settled=true only when marked prepaid.
+   */
+  async settleInvoiceAsAnnualPrepayCovered(id, termId, { recordedBy = "system:annual_prepay" } = {}) {
+    if (!id || !termId) return { settled: false, reason: "bad_args", invoice: null };
+    const current = await db("invoices").where({ id }).first();
+    if (!current) return { settled: false, reason: "not_found", invoice: null };
+    const status = String(current.status || "").toLowerCase();
+    // Refuse non-collectible / money-in-flight statuses (matches
+    // INVOICE_UNCOLLECTIBLE_STATUSES) — 'processing' is ACH in flight and must never
+    // be flipped to prepaid; the rest are already terminal/settled.
+    if (["paid", "prepaid", "processing", "void", "refunded", "canceled", "cancelled"].includes(status)) {
+      return { settled: false, reason: "already_settled", invoice: current };
+    }
+    // Already coverage-settled by THIS term (dedicated marker) — no-op.
+    if (String(current.annual_prepay_covered_term_id || "") === String(termId)) {
+      return { settled: false, reason: "already_covered", invoice: current };
+    }
+    // The homeowner's prepay can never settle a third-party payer invoice.
+    if (current.payer_id) return { settled: false, reason: "payer_billed", invoice: current };
+    // Applied account credit: voidInvoice RESTORES credit_applied to the customer's
+    // balance before closing; settling 'prepaid' here would consume that credit while
+    // the prepay also covers the work. Defer to the caller's void (which restores it).
+    if (Number(current.credit_applied) > 0) return { settled: false, reason: "has_applied_credit", invoice: current };
+    // Ledger-backed estimate deposit credit → voidInvoice restores it; defer.
+    if (invoiceHasDepositCreditLine(current)) return { settled: false, reason: "has_deposit_credit", invoice: current };
+    // Any positive non-base charge (add-ons / checkout extras) → the base-covered /
+    // extras-collectible split is a follow-up; the caller voids so nothing double-bills.
+    if (invoiceHasNonBaseCharges(current)) return { settled: false, reason: "has_add_ons", invoice: current };
+    // A cash-backed invoice (payment applied) must be refunded, not settled away.
+    const appliedPayment = await db("payments")
+      .whereIn("status", ["paid", "processing"])
+      .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [current.id])
+      .first("id");
+    if (current.payment_recorded_at || appliedPayment) {
+      throw new Error("Cannot annual-prepay-settle an invoice with a payment applied — issue a refund instead");
+    }
+    // Cancel any open PaymentIntent first (same triage as voidInvoice): the visit is
+    // covered, so a live client secret must not still charge the card.
+    const triagedPiId = current.stripe_payment_intent_id || null;
+    if (triagedPiId) {
+      const StripeService = require("./stripe");
+      let pi;
+      try {
+        pi = await StripeService.retrievePaymentIntent(triagedPiId);
+      } catch (e) {
+        throw new Error(`Open payment session ${triagedPiId} could not be verified (${e.message}); resolve it before settling`);
+      }
+      if (!pi) throw new Error(`Open payment session ${triagedPiId} could not be verified (payment service unavailable); resolve it before settling`);
+      if (PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
+        throw new Error(`A payment is already in flight (${pi.status}); wait for it to settle or refund it before settling`);
+      }
+      if (pi.status !== "canceled") {
+        try {
+          await StripeService.cancelPaymentIntent(triagedPiId, { cancellation_reason: "abandoned" });
+        } catch (e) {
+          throw new Error(`Couldn't cancel the open payment session ${triagedPiId} (${e.message}); resolve it before settling`);
+        }
+      }
+    }
+    let settled = null;
+    await db.transaction(async (trx) => {
+      const locked = await trx("invoices").where({ id, status: current.status }).forUpdate().first();
+      if (!locked) throw new Error("Invoice status changed while settling — re-check and retry");
+      // Re-run the pre-lock business guards against the LOCKED row: a concurrent
+      // account-credit apply, add-on add, or payer attach that kept the same status
+      // would otherwise be overwritten (consuming credit / settling a payer or add-on
+      // invoice as prepay). Aborting rolls back; the caller leaves it for normal handling.
+      if (locked.payer_id) throw new Error("Invoice became payer-billed while settling — aborting");
+      if (Number(locked.credit_applied) > 0) throw new Error("Account credit was applied while settling — aborting (void restores it)");
+      if (invoiceHasDepositCreditLine(locked)) throw new Error("Deposit credit present while settling — aborting (void restores it)");
+      if (invoiceHasNonBaseCharges(locked)) throw new Error("Extra charges were added while settling — aborting");
+      if ((locked.stripe_payment_intent_id || null) !== triagedPiId) {
+        throw new Error("A new payment session started for this invoice — re-check and retry the settlement");
+      }
+      const lockedApplied = await trx("payments")
+        .whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [locked.id])
+        .first("id");
+      if (locked.payment_recorded_at || lockedApplied) {
+        throw new Error("A payment was applied to this invoice while settling — issue a refund instead");
+      }
+      const stamp = etDateString();
+      const noteLine = `[${stamp}] Covered by annual prepay (term ${termId}) — non-cash, no charge due`;
+      const [updated] = await trx("invoices").where({ id, status: current.status }).update({
+        status: "prepaid",
+        prepaid_prev_status: String(locked.status || "").toLowerCase() === "sending" ? "sent" : locked.status,
+        prepaid_at: trx.fn.now(),
+        prepaid_by: recordedBy,
+        paid_at: trx.fn.now(),
+        annual_prepay_covered_term_id: termId,
+        notes: locked.notes ? `${locked.notes}\n${noteLine}` : noteLine,
+        updated_at: trx.fn.now(),
+      }).returning("*");
+      if (!updated) throw new Error("Invoice status changed while settling — re-check and retry");
+      settled = updated;
+    });
+    // Terminally close any dunning sequence, matching voidInvoice and the
+    // account-credit close-out. The runner would skip 'prepaid' anyway
+    // (TERMINAL_INVOICE_STATUSES), but leaving the sequence row 'active'
+    // misreports its outcome. Best-effort (the wrapper swallows errors).
+    await stopInvoiceFollowupSequence(id, "annual_prepay_covered");
+    logger.info(`[invoice] Annual-prepay settled ${settled.invoice_number} (full: prepaid, non-cash)`);
+    return { settled: true, invoice: settled };
+  },
+
+  /**
+   * Reverse annual-prepay coverage settlements when a term's prepay is
+   * refunded/cancelled (mirrors clearPrepaidStampsForTerm for the visit stamps).
+   * Full-covered invoices (status='prepaid' via annual_prepay_covered_term_id)
+   * reopen to their pre-settlement collectible status so the work is owed again.
+   * NEVER reopens a cash-paid invoice. Best-effort per invoice.
+   */
+  async reopenAnnualPrepayCoveredInvoicesForTerm(termId, conn = db) {
+    if (!termId) return 0;
+    let reopened = 0;
+    const reopenedIds = [];
+    const rows = await conn("invoices")
+      .where({ annual_prepay_covered_term_id: termId, status: "prepaid" });
+    for (const inv of rows) {
+      // A cash payment landed after settlement → don't reopen (refund handles it).
+      if (inv.payment_recorded_at) continue;
+      const paidPayment = await conn("payments")
+        .whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [inv.id])
+        .first("id");
+      if (paidPayment) continue;
+      try {
+        const updated = await conn("invoices").where({ id: inv.id, status: "prepaid" }).update({
+          status: inv.prepaid_prev_status || "sent",
+          paid_at: null,
+          prepaid_at: null,
+          prepaid_prev_status: null,
+          prepaid_by: null,
+          // Clear the coverage marker: the settlement is undone, so a stale
+          // "settled by term X" claim must not survive (it would no-op a future
+          // legitimate re-settlement by the same term as `already_covered`).
+          annual_prepay_covered_term_id: null,
+          updated_at: conn.fn.now(),
+        });
+        if (updated) {
+          reopened += 1;
+          reopenedIds.push(inv.id);
+        }
+      } catch (err) {
+        logger.warn(`[invoice] annual-prepay coverage reopen skipped for ${inv.invoice_number || inv.id}: ${err.message}`);
+      }
+    }
+    // The reopened invoices are collectible again, but settlement terminally
+    // STOPPED their dunning sequences — re-arm reminders, mirroring the admin
+    // reverse-prepaid flow (resumeSequence reactivates an existing row;
+    // scheduleForInvoice creates one if none exists). Both read committed state
+    // via the global db, so this only works outside a caller transaction —
+    // every current caller passes the default db; if a future caller wraps this
+    // in a trx, warn loudly (re-arm must then run post-commit) instead of
+    // silently leaving reminders dead. Best-effort: never blocks the refund sync.
+    if (reopenedIds.length && conn.isTransaction) {
+      logger.warn(`[invoice] annual-prepay reopen ran inside a transaction — follow-up re-arm skipped for ${reopenedIds.length} invoice(s); re-arm post-commit`);
+    } else {
+      for (const invId of reopenedIds) {
+        try {
+          const FollowUps = require("./invoice-followups");
+          await FollowUps.resumeSequence(invId);
+          await FollowUps.scheduleForInvoice(invId);
+        } catch (err) {
+          logger.warn(`[invoice] annual-prepay reopen follow-up re-arm failed for ${invId}: ${err.message}`);
+        }
+      }
+    }
+    return reopened;
+  },
+
+  /**
    * Void any still-open invoices minted for a now-cancelled scheduled
    * service ("Charge now" pre-mints, completion mints) so dunning doesn't
    * chase a cancelled job. Shared by every admin cancellation surface
@@ -3272,3 +3492,7 @@ InvoiceService._internals = {
 InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
 
 module.exports = InvoiceService;
+// Exposed for unit tests (pure helpers).
+module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
+module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
+module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
