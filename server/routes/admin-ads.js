@@ -600,6 +600,12 @@ function formatSourceName(key) {
     facebook: 'Facebook',
     facebook_organic: 'Facebook (organic)',
     nextdoor: 'Nextdoor',
+    // Fallback bucket from the lead webhook (lead-webhook.js) when a form URL
+    // matches no known domain/UTM — includes UNMAPPED spoke domains. NOT the Waves
+    // hub (that's always waves_website). Label it distinctly so it doesn't read as
+    // a duplicate "Website" next to "Waves Website" and so unattributed volume is a
+    // visible signal to map its source, not silently folded into the hub.
+    website: 'Unattributed (web)',
   };
   return names[key] || formatServiceName(key);
 }

@@ -26,32 +26,7 @@
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function round1(n) { return Math.round((Number(n) || 0) * 10) / 10; }
 
-// Some lead_source spellings denote the SAME acquisition channel — e.g. a legacy
-// 'website' value predates the 'waves_website'/'domain_website' split. Left raw,
-// they fragment one channel into two rows, which splits its customer count and
-// makes each fragment look like a smaller, noisier (lower-confidence) sample.
-// Canonicalize before the group-by. Applied to lead_source AND to the spend/
-// fixed-cost map keys so a merged channel keeps its costs.
-const CANONICAL_SOURCE = {
-  website: 'waves_website',
-};
-function canonicalSource(src) {
-  const s = src || 'unknown';
-  return CANONICAL_SOURCE[s] || s;
-}
-// Collapse a { source: amount } map onto canonical keys, summing merged spellings.
-function canonicalizeAmounts(map = {}) {
-  const out = {};
-  for (const [k, v] of Object.entries(map)) {
-    const key = CANONICAL_SOURCE[k] || k;
-    out[key] = (out[key] || 0) + (Number(v) || 0);
-  }
-  return out;
-}
-
 function buildChannelAttribution(completedRows = [], platformSpendBySource = {}, fixedCostBySource = {}) {
-  const spendBySource = canonicalizeAmounts(platformSpendBySource);
-  const fixedBySource = canonicalizeAmounts(fixedCostBySource);
   const bySource = {};
   const ensure = (src) => {
     if (!bySource[src]) bySource[src] = { revenue: 0, grossProfit: 0, lifetimeValue: 0, customers: new Set() };
@@ -59,7 +34,7 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {},
   };
 
   for (const a of completedRows) {
-    const s = ensure(canonicalSource(a.lead_source));
+    const s = ensure(a.lead_source || 'unknown');
     const gp = Number(a.gross_profit) || 0;
     const proj = Number(a.projected_ltv_12mo) || 0;
     s.revenue += Number(a.completed_revenue) || 0;
@@ -69,14 +44,13 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {},
     if (a.customer_id) s.customers.add(a.customer_id);
   }
   // Seed channels that had spend (ad OR fixed) but no completed leads, so a
-  // money-losing channel shows up instead of vanishing. Use the canonicalized maps
-  // so a merged channel isn't re-seeded under a legacy spelling.
-  for (const src of Object.keys(spendBySource)) ensure(src);
-  for (const src of Object.keys(fixedBySource)) ensure(src);
+  // money-losing channel shows up instead of vanishing.
+  for (const src of Object.keys(platformSpendBySource)) ensure(src);
+  for (const src of Object.keys(fixedCostBySource)) ensure(src);
 
   const sources = Object.entries(bySource).map(([sourceKey, s]) => {
-    const adSpend = round2(spendBySource[sourceKey] || 0); // platform ad spend (display)
-    const fixedCost = round2(fixedBySource[sourceKey] || 0); // SEO retainer / mgmt fees etc.
+    const adSpend = round2(platformSpendBySource[sourceKey] || 0); // platform ad spend (display)
+    const fixedCost = round2(fixedCostBySource[sourceKey] || 0); // SEO retainer / mgmt fees etc.
     const allInSpend = round2(adSpend + fixedCost); // true cost to acquire — ratios divide by this
     const revenue = round2(s.revenue);
     const grossProfit = round2(s.grossProfit);

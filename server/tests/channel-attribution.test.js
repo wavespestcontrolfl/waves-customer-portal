@@ -104,34 +104,6 @@ describe('buildChannelAttribution', () => {
     expect(out.totalFixedCost).toBe(250);
     expect(out.totalAllInSpend).toBe(350);
   });
-
-  test('canonicalizes equivalent lead_source spellings into one channel (website → waves_website)', () => {
-    const completed = [
-      row('waves_website', 300, 180, 'c1'),
-      row('website', 200, 120, 'c2'), // legacy spelling of the same site channel
-      row('waves_website', 100, 60, 'c1'), // same customer, another visit
-    ];
-    const out = buildChannelAttribution(completed, {}, { waves_website: 150 });
-    // one bucket, not two — the fragmented 'website' row is folded in
-    expect(out.sources.filter((s) => s.sourceKey === 'waves_website')).toHaveLength(1);
-    expect(out.sources.some((s) => s.sourceKey === 'website')).toBe(false);
-    const w = out.sources.find((s) => s.sourceKey === 'waves_website');
-    expect(w.customers).toBe(2); // c1 + c2, deduped across both spellings
-    expect(w.revenue).toBe(600); // 300 + 200 + 100
-    expect(w.grossProfit).toBe(360);
-  });
-
-  test('canonicalizes spend/fixed-cost keys too, so a merged channel keeps its costs', () => {
-    const out = buildChannelAttribution(
-      [row('website', 500, 300, 'c1')],
-      {},
-      { website: 100, waves_website: 50 }, // legacy + current spelling both carry a retainer
-    );
-    expect(out.sources.some((s) => s.sourceKey === 'website')).toBe(false);
-    const w = out.sources.find((s) => s.sourceKey === 'waves_website');
-    expect(w.fixedCost).toBe(150); // 100 + 50 merged onto the canonical key
-    expect(w.allInSpend).toBe(150);
-  });
 });
 
 describe('splitFacebookByPaid', () => {
