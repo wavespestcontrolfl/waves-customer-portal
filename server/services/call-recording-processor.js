@@ -199,11 +199,13 @@ const LEAD_PIPELINE_STAGES = new Set([
   'negotiating',
 ]);
 
-// Terminal lead statuses (`leads.status`). The customer-less recovery path must
-// not resurrect one of these when it reuses an existing lead by phone — a won /
-// lost / converted row would keep its closed status and the recovered inquiry
-// would never surface as new work.
-const CLOSED_LEAD_STATUSES = ['won', 'lost', 'converted'];
+// Active/workable lead statuses (`leads.status`) the customer-less recovery
+// path may reuse when it finds a lead by phone. An ALLOWLIST (not a closed-set
+// denylist) is deliberate: terminal statuses are open-ended (won/lost/converted
+// /disqualified/duplicate/unresponsive), so an unrecognized status falls through
+// to a fresh insert rather than silently attaching the recovered inquiry to a
+// closed row where it would never surface.
+const ACTIVE_LEAD_STATUSES = ['new', 'contacted', 'qualified'];
 
 function shouldCreateCallLeadForCustomer(customer, { createdCustomerFromCall = false } = {}) {
   if (!customer) return false;
@@ -2438,14 +2440,14 @@ const CallRecordingProcessor = {
     if (shouldCreateLead) {
       try {
         // Check if lead already exists for this phone. On the customer-less
-        // recovery path, ignore closed (won/lost/converted) leads so a recovered
-        // inquiry lands as a fresh, workable lead instead of silently attaching
-        // to a terminal row. The customer-attached path is unchanged — its
-        // shouldCreateCallLeadForCustomer gate already limits it to open-lead /
-        // newly-created customers.
+        // recovery path, reuse only an ACTIVE lead so a recovered inquiry lands
+        // as fresh, workable work instead of silently attaching to a terminal
+        // (won/lost/converted/disqualified/…) row. The customer-attached path is
+        // unchanged — its shouldCreateCallLeadForCustomer gate already limits it
+        // to open-lead / newly-created customers.
         let existingLeadQuery = phone ? db('leads').where('phone', phone) : null;
         if (existingLeadQuery && workableUnnamedLead) {
-          existingLeadQuery = existingLeadQuery.whereNotIn('status', CLOSED_LEAD_STATUSES).whereNull('converted_at');
+          existingLeadQuery = existingLeadQuery.whereIn('status', ACTIVE_LEAD_STATUSES).whereNull('converted_at');
         }
         const existingLead = existingLeadQuery ? await existingLeadQuery.orderBy('created_at', 'desc').first() : null;
 
@@ -2656,10 +2658,24 @@ const CallRecordingProcessor = {
 
     // A customer-less recovery lead is the ONLY durable record for this call, so
     // a swallowed insert failure must not read as a clean 'processed'. Mark it
-    // failed and open it for review so the work surfaces instead of vanishing.
+    // failed, open review_status, AND write a triage_items row — the Needs Review
+    // inbox (admin-triage) is driven by triage_items, not review_status alone, so
+    // without this the failed recovery call would never surface for a human.
     if (workableUnnamedLead && !leadId) {
       finalStatus = 'lead_creation_failed';
       logger.error(`[call-proc] Customer-less recovery lead did not persist for ${callSid} — flagged lead_creation_failed`);
+      try {
+        const failTriageItem = buildTriageItem({
+          callLogId: call.id,
+          flag: 'lead_creation_failed',
+          extraction: { meta: { call_summary: extracted.call_summary || null } },
+        });
+        await db('triage_items').insert(failTriageItem)
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore();
+      } catch (triageErr) {
+        logger.warn(`[call-proc] lead_creation_failed triage item insert skipped for ${callSid}: ${triageErr.message}`);
+      }
     }
 
     // ── Finding 2: when V2 drives routing and approved, schedule from the
