@@ -325,6 +325,22 @@ describe('TerminalStateCard', () => {
     // never surfaces the raw internal token as a reason badge
     expect(screen.queryByText('Commercial risk type review')).not.toBeInTheDocument();
   });
+
+  it('renders site-confirmation copy for a commercial low-confidence hold', () => {
+    render(
+      <TerminalStateCard
+        state="quote_required"
+        customerFirstName="Pat"
+        address="123 Main St"
+        quoteReason="commercial_low_confidence_site_confirmation"
+      />,
+    );
+
+    expect(screen.getByText('Your account manager will finalize this.')).toBeInTheDocument();
+    expect(screen.queryByText('This treatment needs an inspection.')).not.toBeInTheDocument();
+    expect(screen.getByText(/quick site confirmation/i)).toBeInTheDocument();
+    expect(screen.queryByText('Commercial low confidence site confirmation')).not.toBeInTheDocument();
+  });
 });
 
 describe('getServiceLabel', () => {

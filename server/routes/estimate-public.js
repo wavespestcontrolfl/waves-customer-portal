@@ -57,6 +57,8 @@ const {
 const {
   estimateDataHasUnresolvedManagerApproval,
   commercialRiskTypeReviewNeeded,
+  commercialLowConfidenceRange,
+  commercialLowConfidenceRequiresSiteQuote,
 } = require('../services/estimate-delivery-options');
 const {
   createEstimateAddServiceRequest,
@@ -1611,6 +1613,8 @@ function isPresent(value) {
 const FRIENDLY_QUOTE_REASONS = {
   commercial_risk_type_review:
     'Your Waves account manager will confirm this commercial service plan with you before it’s finalized.',
+  commercial_low_confidence_site_confirmation:
+    'This commercial estimate needs a quick site confirmation — your Waves account manager will confirm the price with you before it’s finalized.',
 };
 
 function humanizeQuoteReason(value) {
@@ -3346,7 +3350,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const monthlyTotal = Math.max(0, Math.round((recurringMonthlyBeforeDiscounts - manualDiscountMonthly - prefMonthlyOff) * 100) / 100);
   const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
   const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
-  const quoteRequired = est.quoteRequired === true || est.status === 'quote_required';
+  // A wide low-confidence commercial estimate is force-manual: the customer view
+  // must show the "site confirmation" state (not an approve button that the
+  // accept endpoint would 409). Detected from estData here since the persisted
+  // est.quoteRequired flag was set at auto-price time (before this backstop).
+  const quoteRequired = est.quoteRequired === true || est.status === 'quote_required'
+    || commercialLowConfidenceRequiresSiteQuote(estData);
   // An authored commercial proposal is quote-required by design (manual
   // acceptance), but its public copy must describe the emailed PDF + account-
   // manager follow-up, NOT the generic "inspection required" field-review state.
@@ -3362,10 +3371,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // copy is account-manager follow-up, like a proposal.
   const commercialRiskType = quoteRequired
     && (est.quoteRequiredReason || quoteRequirementForDisplay.reason) === 'commercial_risk_type_review';
-  const quoteDisplayReason = quoteRequired && !commercialRiskType
+  // A commercial low-confidence hold (the ±20% range is too wide to show) is a
+  // site-confirmation step, not a customer inspection — account-manager copy.
+  const commercialLowConfidence = quoteRequired
+    && (est.quoteRequiredReason || quoteRequirementForDisplay.reason) === 'commercial_low_confidence_site_confirmation';
+  const quoteDisplayReason = quoteRequired && !commercialRiskType && !commercialLowConfidence
     ? quoteRequiredReasonText({ reason: est.quoteRequiredReason || quoteRequirementForDisplay.reason })
     : '';
   const locked = est.status === 'accepted' || quoteRequired;
+  // Narrow low-confidence estimate (not forced to a site quote): show the ±20%
+  // price range + a "confirmed on site" note instead of a single figure.
+  const commercialPriceRange = quoteRequired ? { hasLowConfidence: false } : commercialLowConfidenceRange(estData);
 
   // Commercial auto-priced lawn/tree estimates are approval-only: no booking
   // form, no billing/payment-setup card, no slots. The customer approves and a
@@ -4439,6 +4455,8 @@ ${shellTopBar()}
         : 'Your Waves account manager has your formal proposal and will share the PDF with you directly.'} There\u2019s no online checkout for a commercial bid \u2014 your account manager will follow up to finalize. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
     : commercialRiskType
     ? `<div class="quote-required-banner">This is a commercial service plan \u2014 your Waves account manager will confirm the details with you and finalize it directly, so there\u2019s no online checkout for this one. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
+    : commercialLowConfidence
+    ? `<div class="quote-required-banner">We just need a quick site confirmation to finalize this commercial estimate \u2014 your Waves account manager will confirm the price with you directly, so there\u2019s no online checkout for this one. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
     : `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.${quoteDisplayReason ? `<div style="margin-top:8px;font-weight:700">${escapeHtml(quoteDisplayReason)}</div>` : ''}</div>`) : ''}
 
   <div class="hero">
@@ -4505,6 +4523,7 @@ ${shellTopBar()}
     <h2 id="booking-title">Approve your commercial service</h2>
     <p class="card-sub">This is a commercial service plan. Approve your estimate and a Waves account manager will schedule your visits and send your invoice &mdash; no card or deposit needed now.</p>
     <p class="card-sub" style="font-style:italic">Pricing is estimated from your property details and confirmed on site before your first visit.</p>
+    ${commercialPriceRange.hasLowConfidence ? `<p class="card-sub" style="font-weight:700">Estimated range: ${fmtMoney(commercialPriceRange.rangeLowMonthly)}&ndash;${fmtMoney(commercialPriceRange.rangeHighMonthly)}/mo &mdash; final price confirmed on site.</p>` : ''}
     <div class="pay-pref-grid options">
       <div class="pay-pref-choice">
         <button type="button" class="pay-pref-btn primary" id="commercial-approve-btn" data-commercial-mode="monthly"><span class="pay-pref-title">Approve &amp; pay monthly</span></button>
@@ -4651,9 +4670,11 @@ ${shellTopBar()}
     </div>
   </div>` : `
   <div class="final">
-    <h2>${commercialRiskType ? 'Your account manager will finalize this' : 'Inspection required to finish this quote'}</h2>
+    <h2>${commercialRiskType || commercialLowConfidence ? 'Your account manager will finalize this' : 'Inspection required to finish this quote'}</h2>
     <p>${commercialRiskType
       ? 'This is a commercial service plan. Your Waves account manager will confirm the details with you and finalize it directly, so there’s no online checkout for this one.'
+      : commercialLowConfidence
+      ? 'We just need a quick site confirmation to finalize this commercial estimate. Your Waves account manager will confirm the price with you directly, so there’s no online checkout for this one.'
       : escapeHtml(quoteDisplayReason || 'This treatment needs a field review before we can finalize pricing or book it online.')}</p>
     <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
     <div style="margin-top:20px;font-size:14px">
@@ -6529,6 +6550,7 @@ router.put('/:token/accept', async (req, res, next) => {
       const needsManagerApproval = quoteRequirement.reason === 'st_augustine_dethatching';
       const commercialProposal = quoteRequirement.reason === 'commercial_proposal';
       const commercialRiskType = quoteRequirement.reason === 'commercial_risk_type_review';
+      const commercialLowConfidence = quoteRequirement.reason === 'commercial_low_confidence_site_confirmation';
       return res.status(409).json({
         error: needsManagerApproval
           ? 'Manager approval is required before this estimate can be accepted online'
@@ -6536,6 +6558,8 @@ router.put('/:token/accept', async (req, res, next) => {
           ? 'This is a custom commercial proposal — your Waves account manager will finalize acceptance with you directly.'
           : commercialRiskType
           ? 'Your Waves account manager will confirm this commercial service plan with you before it’s finalized.'
+          : commercialLowConfidence
+          ? 'This estimate needs a quick site confirmation before it’s finalized — your Waves account manager will confirm the price with you.'
           : 'This estimate requires an inspection before it can be accepted online',
         quoteRequired: true,
         managerApprovalRequired: needsManagerApproval,
@@ -8918,12 +8942,20 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const commercialRiskTypeReview = commercialRiskTypeReviewNeeded(
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   );
+  // A commercial estimate whose low-confidence ±20% range is too wide (> $300/mo
+  // swing) can't be shown as a usable range — force a site-confirmed manual quote
+  // (decision 7 backstop). Narrower low-confidence estimates keep their range and
+  // stay self-serve approvable.
+  const commercialLowConfidenceSiteQuote = commercialLowConfidenceRequiresSiteQuote(
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  );
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
     || managerApprovalRequired
     || commercialProposal
-    || commercialRiskTypeReview;
+    || commercialRiskTypeReview
+    || commercialLowConfidenceSiteQuote;
 
   return {
     quoteRequired,
@@ -8931,7 +8963,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
       ? 'st_augustine_dethatching'
       : (quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason
         || (commercialProposal ? 'commercial_proposal' : null)
-        || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)),
+        || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)
+        || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)),
     items: quoteRequiredItems,
   };
 }

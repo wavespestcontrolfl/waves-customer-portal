@@ -8,6 +8,8 @@ function isPresent(value) {
 const FRIENDLY_QUOTE_REASONS = {
   commercial_risk_type_review:
     "Your Waves account manager will confirm this commercial service plan with you before it’s finalized.",
+  commercial_low_confidence_site_confirmation:
+    "This commercial estimate needs a quick site confirmation — your Waves account manager will confirm the price with you before it’s finalized.",
 };
 
 export function humanizeQuoteReason(value) {

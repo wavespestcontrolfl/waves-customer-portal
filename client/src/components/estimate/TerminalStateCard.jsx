@@ -22,11 +22,15 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
   // manager sets the business type that drives the service cadence), NOT a
   // customer inspection — so it gets account-manager copy, like a proposal.
   const isRiskTypeReview = !isProposal && quoteReason === 'commercial_risk_type_review';
+  // A commercial low-confidence hold (the ±20% range is too wide to show) is a
+  // site-confirmation step, not a customer inspection — also account-manager copy.
+  const isLowConfidence = !isProposal && quoteReason === 'commercial_low_confidence_site_confirmation';
+  const isAccountManagerFinalize = isRiskTypeReview || isLowConfidence;
   // A commercial proposal is quote-required by design, but its copy is a formal
   // proposal + account-manager follow-up — not the generic "inspection required"
   // field-review state. Suppress the humanized reason badge for it (and the
-  // risk-type hold, whose custom copy already explains the state).
-  const quoteReasonText = isProposal || isRiskTypeReview || !quoteReason
+  // account-manager holds, whose custom copy already explains the state).
+  const quoteReasonText = isProposal || isAccountManagerFinalize || !quoteReason
     ? ''
     : quoteRequiredReasonText({ reason: quoteReason }, '');
 
@@ -80,7 +84,7 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
         <div style={{ fontSize: 20, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
           {isProposal
             ? 'Your formal proposal is ready.'
-            : isRiskTypeReview
+            : isAccountManagerFinalize
             ? 'Your account manager will finalize this.'
             : 'This treatment needs an inspection.'}
         </div>
@@ -91,6 +95,12 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
                 ? 'your formal proposal is attached as a PDF to the email we sent.'
                 : 'your Waves account manager has your formal proposal and will share the PDF with you directly.'}{' '}
               There's no online checkout for a commercial bid — your account manager will follow up to finalize.
+              Questions? Call <a href={`tel:${WAVES_TEL}`} style={{ color: W.blue }}>{WAVES_PHONE}</a>.
+            </>
+          ) : isLowConfidence ? (
+            <>
+              Hi {who} — we just need a quick site confirmation to finalize this commercial estimate. Your Waves
+              account manager will confirm the price with you directly, so there's no online checkout for this one.
               Questions? Call <a href={`tel:${WAVES_TEL}`} style={{ color: W.blue }}>{WAVES_PHONE}</a>.
             </>
           ) : isRiskTypeReview ? (
