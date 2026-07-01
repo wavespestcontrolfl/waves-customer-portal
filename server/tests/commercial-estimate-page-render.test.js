@@ -33,7 +33,7 @@ function commercialEstimateData(extra = {}) {
         annualBeforeDiscount: 4689,
         annualAfterDiscount: 4689,
         services: [{
-          name: 'Commercial Lawn Treatment',
+          name: 'Commercial Turf Treatment Program',
           service: 'commercial_lawn',
           mo: 390.75,
           annual: 4689,
@@ -48,7 +48,7 @@ function commercialEstimateData(extra = {}) {
     engineResult: {
       lineItems: [{
         service: 'commercial_lawn',
-        name: 'Commercial Lawn Treatment',
+        name: 'Commercial Turf Treatment Program',
         monthly: 390.75,
         annual: 4689,
         estimatedPricing: true,

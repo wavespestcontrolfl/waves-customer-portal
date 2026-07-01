@@ -66,7 +66,7 @@ function toQualifyingKey(raw) {
   if (s.includes('rodent') || s.includes('palm')) return null;
   if (/one[\s_-]?time|onetime/.test(s)) return null;
   // Commercial auto-priced plans are FLAT and never count toward a WaveGuard
-  // tier — otherwise an accepted "Commercial Lawn Treatment" would feed
+  // tier — otherwise an accepted "Commercial Turf Treatment Program" would feed
   // priorQualifyingServices and unlock WaveGuard discounts on future estimates.
   if (s.includes('commercial')) return null;
   if (s.includes('pest')) return 'pest_control';

@@ -283,7 +283,7 @@ function commercialManualQuoteItem(service, input = {}) {
     : "Commercial pest requires manual quote or commercial pilot pricing.";
   return {
     service: canonical,
-    name: isLawn ? "Commercial Lawn Treatment" : "Commercial Pest Control",
+    name: isLawn ? "Commercial Turf Treatment Program" : "Commercial Pest Control",
     price: null,
     det: reason,
     detail: reason,

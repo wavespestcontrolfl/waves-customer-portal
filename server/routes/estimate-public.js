@@ -1911,7 +1911,7 @@ function recurringServiceDisplayName(key) {
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
-    case 'commercial_lawn': return 'Commercial Lawn Treatment';
+    case 'commercial_lawn': return 'Commercial Turf Treatment Program';
     case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
     case 'commercial_pest': return 'Commercial Pest Control';
     case 'commercial_mosquito': return 'Commercial Mosquito';
