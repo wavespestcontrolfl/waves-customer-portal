@@ -2289,6 +2289,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   const v1PropertyType = normalizePropertyType(p.propertyType);
   const commercialProfile = isCommercialProfile(p, o);
   const commercialSubtype = commercialProfile ? (o.commercialSubtype || p.commercialSubtype || null) : null;
+  // Risk-type bucket (drives commercial pest/rodent cadence). Admin-set; persisted
+  // on the raw engineRequest options/profile → replays on re-price.
+  const commercialRiskType = commercialProfile ? (o.commercialRiskType || p.commercialRiskType || null) : null;
   // Grass track — v2 accepts old A/B/C1/C2/D letters AND new keys.
   const TRACK_MAP = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
   const rawGrass = o.grassType || 'st_augustine';
@@ -2759,6 +2762,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     grassType: track,
     isCommercial: commercialProfile,
     commercialSubtype,
+    commercialRiskType,
     measuredTurfSf: p.measuredTurfSf,
     estimatedTurfSf: p.estimatedTurfSf,
     imperviousSurfacePercent: p.imperviousSurfacePercent,

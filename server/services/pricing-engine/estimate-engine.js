@@ -49,6 +49,7 @@ const {
   isCommercialProperty,
   buildCommercialManualQuoteResult,
 } = require('./commercial-helpers');
+const { resolveCommercialCadence } = require('./commercial-risk-type');
 
 function serviceSelected(value) {
   if (value === true) return true;
@@ -428,6 +429,10 @@ function stripBedBugInternalPricing(result) {
 function generateEstimate(input) {
   const services = input.services || {};
   const commercialSubtype = commercialSubtypeFromInput(input, services);
+  // Risk-type CADENCE (owner-locked): the commercial business-type bucket drives
+  // pest/rodent visits-per-year. NULL/unrecognized → nulls, so the pricers keep
+  // their program defaults (pest 12 / rodent 4) — backward compatible.
+  const { pestVisits: commercialPestVisits, rodentVisits: commercialRodentVisits } = resolveCommercialCadence(input.commercialRiskType);
   const hasExplicitCommercialFlag = hasCommercialFlagInput(input.isCommercial);
   const inputIsCommercial = normalizeCommercialFlag(input.isCommercial);
   const commercialContext = {
@@ -591,6 +596,8 @@ function generateEstimate(input) {
         // confirm-step default (no measured building) — pest can't auto-price
         // off it. Undefined (admin / measured) → auto-price as usual.
         buildingSizeMeasured: input.buildingSizeMeasured,
+        // Risk-type cadence override (null → program default 12).
+        pestVisits: commercialPestVisits,
       });
       if (result.quoteRequired) {
         // No real building footprint to size interior treatment — priceCommercialPest
@@ -818,6 +825,8 @@ function generateEstimate(input) {
       const result = priceCommercialRodentBait(property, {
         commercialSubtype,
         buildingSizeMeasured: input.buildingSizeMeasured,
+        // Risk-type cadence override (null → program default 4).
+        rodentVisits: commercialRodentVisits,
       });
       // Push the pricer's own line — priced or its service-specific manual quote
       // (keeps service=commercial_rodent_bait / originalRequestedService=

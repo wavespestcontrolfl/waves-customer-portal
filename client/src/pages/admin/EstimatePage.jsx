@@ -795,6 +795,7 @@ function EstimateToolView() {
     propertyType: "Single Family",
     isCommercial: "NO",
     commercialSubtype: "",
+    commercialRiskType: "",
     commercialPricingMode: "manual_quote",
     hasPool: "NO",
     hasPoolCage: "NO",
@@ -1794,6 +1795,7 @@ function EstimateToolView() {
           onetimeLawnType: form.otLawnType || "FERT",
           commercialPricingMode: form.commercialPricingMode || "manual_quote",
           commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
+          commercialRiskType: formIsCommercial ? form.commercialRiskType || "" : "",
         };
         if (form.svcInjection) {
           options.palmInjection = {
@@ -1857,6 +1859,7 @@ function EstimateToolView() {
         profile.propertyType = form.propertyType || profile.propertyType;
         profile.isCommercial = formIsCommercial;
         profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
+        profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
 
         const r = await fetch("/api/admin/estimator/calculate-estimate", {
           method: "POST",
@@ -2187,6 +2190,7 @@ function EstimateToolView() {
       propertyType: "Single Family",
       isCommercial: "NO",
       commercialSubtype: "",
+      commercialRiskType: "",
       commercialPricingMode: "manual_quote",
       hasPool: "NO",
       hasPoolCage: "NO",
@@ -2434,6 +2438,7 @@ function EstimateToolView() {
                       propertyType: "Single Family",
                       isCommercial: "NO",
                       commercialSubtype: "",
+                      commercialRiskType: "",
                       commercialPricingMode: "manual_quote",
                       hasPool: "NO",
                       hasPoolCage: "NO",
@@ -2831,6 +2836,24 @@ function EstimateToolView() {
               {(commercialDetected || form.commercialSubtype) && (
                 <Field label="Commercial Subtype">
                   <Input k="commercialSubtype" placeholder="Optional" />
+                </Field>
+              )}
+              {(commercialDetected || form.commercialRiskType) && (
+                <Field label="Business type (cadence)">
+                  <Select
+                    k="commercialRiskType"
+                    options={[
+                      { value: "", label: "— Select business type —" },
+                      { value: "office_low", label: "Office / low-traffic" },
+                      { value: "retail_standard", label: "Retail / standard" },
+                      { value: "hoa_common_area", label: "HOA / common area" },
+                      { value: "warehouse_distribution", label: "Warehouse / distribution" },
+                      { value: "restaurant_food", label: "Restaurant / food service" },
+                      { value: "healthcare_childcare", label: "Healthcare / childcare" },
+                      { value: "hotel_resort", label: "Hotel / resort" },
+                      { value: "multifamily", label: "Multifamily" },
+                    ]}
+                  />
                 </Field>
               )}
               {commercialDetected && (

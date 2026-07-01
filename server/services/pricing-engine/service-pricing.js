@@ -2522,7 +2522,8 @@ function resolveCommercialPestFootprint(property = {}) {
 function priceCommercialPest(property = {}, options = {}) {
   const cfg = COMMERCIAL_PEST;
   const { footprint, perimeter, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
-  const visits = cfg.programVisits;
+  // Risk-type cadence override (office 4/yr … restaurant 12/yr); default 12.
+  const visits = Number.isFinite(options.pestVisits) && options.pestVisits > 0 ? options.pestVisits : cfg.programVisits;
 
   // No real building size → DON'T auto-price (and bill/prepay) off the 2,000 sqft
   // fallback, which is unrelated to the actual building. Fall back to a manual
@@ -2639,8 +2640,10 @@ function priceCommercialPest(property = {}, options = {}) {
 // Build a priced commercial pest-family line from the supplied per-visit
 // material $ and on-site minutes. Identical buildup/margin/shape across the
 // three services (45% target margin, account minimum, FL-taxed).
-function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, service, name, originalRequestedService, detail, extra = {} }) {
-  const visits = cfg.programVisits;
+function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, service, name, originalRequestedService, detail, extra = {}, visits: visitsOverride }) {
+  // Risk-type cadence override (commercial pest/rodent visits-per-year vary by
+  // business type). Falls back to the program default when not supplied.
+  const visits = Number.isFinite(visitsOverride) && visitsOverride > 0 ? visitsOverride : cfg.programVisits;
   const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + cfg.laborOverheadMinutesPerVisit) / 60);
   const drivePerVisit = GLOBAL.LABOR_RATE * (cfg.routeDriveMinutes / 60);
   const annualMaterial = materialPerVisit * visits;
@@ -2902,6 +2905,8 @@ function priceCommercialRodentBait(property = {}, options = {}) {
   }
   return buildCommercialPestFamilyLine({
     cfg,
+    // Risk-type cadence override (warehouse/restaurant rodent 12/yr); default 4.
+    visits: options.rodentVisits,
     materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (footprint / 1000),
     onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPerKSqFt * (footprint / 1000),
     service: 'commercial_rodent_bait',
