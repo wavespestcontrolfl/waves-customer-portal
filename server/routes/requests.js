@@ -151,13 +151,16 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     try {
       const urgencyTag = validUrgency === 'urgent' ? '🚨 URGENT ' : '';
       const title = isCancellation
-        ? `⚠️ Cancellation request from ${customerName}`
+        ? `⚠️ ${urgencyTag}Cancellation request from ${customerName}`
         : `${urgencyTag}New service request from ${customerName}`;
       const cancellationSummary = isCancellation
-        ? (cancellationResult
+        ? (cancellationResult && cancellationResult.ok
             ? `\n\nAuto-processed: ${cancellationResult.cancelledCount} upcoming visit(s) pulled, ` +
-              `recurrence stopped, account ${cancellationResult.churned ? 'marked churned' : 'left as-is (already churned)'}.`
-            : '\n\n⚠️ Auto-processing did not complete — review the calendar/account manually.')
+              'recurrence stopped, account churned + billing stopped.'
+            : '\n\n⚠️ Auto-processing did not fully complete — review the calendar/account manually.' +
+              (cancellationResult && cancellationResult.errors && cancellationResult.errors.length
+                ? ` (failed: ${cancellationResult.errors.join(', ')})`
+                : ''))
         : '';
       const notif = await NotificationService.notifyAdmin(
         'service',
@@ -179,9 +182,10 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
             photoCount,
             ...(isCancellation
               ? {
-                  autoProcessed: !!cancellationResult,
+                  autoProcessed: !!(cancellationResult && cancellationResult.ok),
                   visitsPulled: cancellationResult ? cancellationResult.cancelledCount : 0,
                   churned: cancellationResult ? cancellationResult.churned : false,
+                  processingErrors: cancellationResult ? cancellationResult.errors : ['processor_threw'],
                 }
               : {}),
           },

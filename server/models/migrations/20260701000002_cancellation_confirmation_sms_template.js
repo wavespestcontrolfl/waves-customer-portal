@@ -7,7 +7,7 @@ const TEMPLATE = {
   template_key: 'service_cancellation_confirmation',
   name: 'Service Cancellation Confirmation',
   category: 'service',
-  body: 'Hi {first_name}! We received your cancellation request and paused your upcoming visits. Our team will follow up to confirm. Questions? Reply here.',
+  body: 'Hi {first_name}! We received your cancellation request. Our team will process it and follow up to confirm. Questions? Reply here.',
   variables: ['first_name'],
   sort_order: 32,
 };
