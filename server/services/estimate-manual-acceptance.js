@@ -330,6 +330,14 @@ async function markEstimateManuallyAccepted({
         }
       } catch (err) {
         logger.warn(`[estimate-manual-acceptance] EstimateConverter failed for estimate ${updatedEstimate.id}: ${err.message}`);
+        // Surface the converter's fail-closed annual-prepay guards (multi-service
+        // unsupported / coverage underivable) as their clear, operator-actionable
+        // message (convert monthly or bill the prepay manually) rather than a
+        // generic 500. The trx rolls back either way, so no partial
+        // customer/visit/term/invoice is left behind.
+        if (err && err.isOperational && err.statusCode === 422) {
+          throw httpError(err.message, 422);
+        }
         throw httpError('Customer conversion did not complete; estimate was not marked accepted.', 500);
       }
     }

@@ -4062,10 +4062,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
     // homeowner's prepay can't cover the payer's bill, so the AP invoice must
     // still be cut.
-    const prepaidCovered = !visitIsPayerBilled
-      && svc.prepaid_amount != null
-      && Number(svc.prepaid_amount) > 0
-      && Number(svc.prepaid_amount) >= invoiceAmount;
+    // Annual-prepay coverage is validated by the term link, NOT the per-visit
+    // amount: a discounted plan stamps each visit LESS than its undiscounted
+    // estimated_price, so an amount-only gate would re-bill an already-prepaid
+    // visit. annualPrepayCoversVisit is fail-closed (explicit annual_prepay_invoice
+    // stamp AND a still-live, non-refunded term). The numeric fallback covers ONLY
+    // out-of-band methods (cash/Zelle) — an annual_prepay_invoice stamp is governed
+    // EXCLUSIVELY by that gate, so a STALE annual-prepay stamp (left by a
+    // best-effort void/refund clear) must NOT suppress here via its amount.
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const annualPrepayCovered = !visitIsPayerBilled
+      && await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db);
+    const prepaidCovered = annualPrepayCovered
+      || (!visitIsPayerBilled
+        && svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
+        && svc.prepaid_amount != null
+        && Number(svc.prepaid_amount) > 0
+        && Number(svc.prepaid_amount) >= invoiceAmount);
     // If the tech already minted an invoice for this visit pre-completion
     // (Charge now → Tap-to-Pay flow), reuse it instead of cutting a second one.
     let preMintedInvoice = null;
@@ -4214,7 +4227,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
     const applyPrepaidCreditToInvoice = async (invoiceRow) => {
-      const prepaidCents = svc.prepaid_amount != null ? toCents(svc.prepaid_amount) : 0;
+      // An annual_prepay_invoice stamp may credit an invoice ONLY when the live-term
+      // gate passed (annualPrepayCovered). A stale stamp left by a best-effort
+      // void/refund clear must NOT credit/mark-paid a freshly-cut invoice with
+      // money that was refunded — mirror the suppression gate's fallback rule.
+      // Other methods (cash/Zelle) credit as before.
+      const isAnnualPrepayStamp = svc.prepaid_method === AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD;
+      const annualPrepayStampCredits = !isAnnualPrepayStamp || annualPrepayCovered;
+      const prepaidCents = (svc.prepaid_amount != null && annualPrepayStampCredits) ? toCents(svc.prepaid_amount) : 0;
       if (!(prepaidCents > 0) || !invoiceRow?.id) return invoiceRow;
       // Third-party Bill-To: never credit the homeowner's prepaid amount against
       // a payer-billed invoice — that money isn't owed by the payer. The invoice
@@ -4264,7 +4284,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .first('id');
         if (existingCredit) return lockedInvoice;
 
-        const creditCents = Math.min(prepaidCents, invoiceTotalCents);
+        // A LIVE-covered annual prepay covers the whole visit CHARGE inclusive of
+        // tax (the prepay invoice total is tax-inclusive), not the discounted
+        // per-visit slice — crediting only the slice/pre-tax base here would leave an
+        // OPEN residual (the tax on a commercial invoice, or the whole undiscounted
+        // charge) on a pre-existing/pre-minted (Charge Now) invoice while the pay
+        // link is suppressed, stranding the customer. When the invoice is JUST the
+        // covered visit (subtotal within the covered base), settle it in FULL
+        // (tax included); when it carries more than the covered visit, credit the
+        // covered base + its tax so genuine add-ons keep their remainder. Non-annual
+        // methods keep the slice credit.
+        let targetCreditCents = prepaidCents;
+        if (isAnnualPrepayStamp && annualPrepayCovered) {
+          const coveredBaseCents = toCents(invoiceAmount);
+          const invoiceContainsOnlyCoveredVisit = toCents(lockedInvoice.subtotal) <= coveredBaseCents + 1;
+          if (invoiceContainsOnlyCoveredVisit || coveredBaseCents <= 0) {
+            targetCreditCents = invoiceTotalCents; // settle the whole covered-visit invoice, tax included
+          } else {
+            const taxRate = Number(lockedInvoice.tax_rate) || 0;
+            targetCreditCents = Math.round(coveredBaseCents * (1 + taxRate)); // covered base + its tax; add-ons remain
+          }
+        }
+        const creditCents = Math.min(targetCreditCents, invoiceTotalCents);
         const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
         const prepaidCredit = centsToDollars(creditCents);
         const remainingTotal = centsToDollars(remainingCents);

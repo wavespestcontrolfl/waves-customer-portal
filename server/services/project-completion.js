@@ -128,6 +128,12 @@ function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {} }
 }
 
 function prepaidCoversAmount(scheduledService = {}, amount = 0) {
+  // annual-prepay stamps are governed EXCLUSIVELY by annualPrepayCoversVisit
+  // (which revalidates the term/invoice against refunds). A STALE
+  // annual_prepay_invoice stamp — left by a best-effort void/refund clear — must
+  // not suppress billing here via its amount; exclude it so refunded prepays bill
+  // again. Other methods (cash/Zelle) keep the numeric coverage.
+  if (scheduledService.prepaid_method === 'annual_prepay_invoice') return false;
   const prepaid = positiveMoney(scheduledService.prepaid_amount);
   return amount > 0 && prepaid >= amount;
 }
@@ -172,6 +178,15 @@ async function resolveProjectCompletionBilling({
   const invoiceAmount = projectCompletionInvoiceAmount({ scheduledService, customer });
   if (!(invoiceAmount > 0)) {
     return { required: false, resolved: true, amount: 0, reason: 'not_billable' };
+  }
+  // Annual-prepay coverage is a term-link fact, not an amount comparison: a
+  // discounted plan stamps each visit below its undiscounted estimated_price, so
+  // the numeric prepaidCoversAmount check below would wrongly re-bill an already-
+  // prepaid visit. annualPrepayCoversVisit is fail-closed (explicit stamp + live
+  // term). Lazy-require to avoid a load-time cycle with annual-prepay-renewals.
+  const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
+  if (await annualPrepayCoversVisit(scheduledService, knex)) {
+    return { required: true, resolved: true, amount: invoiceAmount, reason: 'prepaid_covered' };
   }
   if (prepaidCoversAmount(scheduledService, invoiceAmount)) {
     return { required: true, resolved: true, amount: invoiceAmount, reason: 'prepaid_covered' };

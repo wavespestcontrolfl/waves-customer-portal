@@ -1065,6 +1065,41 @@ const EstimateConverter = {
       estimateData,
     });
     const recurringServicesForConversion = suppressRecurringConversion ? [] : recurringServices;
+    // FAIL-CLOSED money guard: annual-prepay coverage is a per-TERM fact and an
+    // annual_prepay_terms row carries exactly ONE coverage service
+    // (coverage_service_type / coverage_visit_count / coverage_cadence). A
+    // multi-recurring-service annual prepay cannot stamp prepaid_amount for every
+    // covered service, so the un-stamped services' visits complete-bill again
+    // (double bill). This counts BOTH the recurring.services lines AND any
+    // supplemental companion (e.g. rodentBaitMo) that rides OUTSIDE
+    // recurring.services yet combines with a matching primary into ONE visit
+    // relabelled combo.route.name (e.g. "Pest & Rodent Control"): single-service
+    // coverage keyed on the raw primary name ("Pest Control") can't match that
+    // combined service_type, so the combined visit would go unstamped (and a
+    // duplicate primary series would be seeded) → the same double bill. Refuse the
+    // automatic conversion up front — BEFORE any customer/visit/term/invoice write
+    // — and route to manual until the price-free coverage redesign (Phase 2)
+    // supports multi-service. Blocking here (not at the term-creation site
+    // downstream) guarantees no partial rows are created; all three convertEstimate
+    // entrypoints run inside a transaction, so a throw rolls back cleanly.
+    const supplementalCompanions = supplementalCompanionLines(estimateData);
+    const soloRecurringKey = recurringServicesForConversion.length === 1
+      ? recurringServiceKey(recurringServicesForConversion[0]) : null;
+    const absorbedCompanions = soloRecurringKey
+      ? supplementalCompanions.filter((companion) => COMBINED_SERVICE_ROUTES.some((route) =>
+        soloRecurringKey === route.primaryKey && recurringServiceKey(companion) === route.companionKey))
+      : [];
+    const recurringUnitCount = recurringServicesForConversion.length + absorbedCompanions.length;
+    if (billingTerm === 'prepay_annual' && recurringUnitCount > 1) {
+      const err = new Error(
+        `Annual prepay isn't supported for multi-service plans (${recurringUnitCount} recurring services) yet — convert this estimate as monthly, or bill the annual prepay manually.`
+      );
+      err.code = 'ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED';
+      err.isOperational = true;
+      err.status = 422;
+      err.statusCode = 422;
+      throw err;
+    }
     const serviceCount = countTierQualifyingRecurringServices(recurringServicesForConversion);
     // Commercial auto-priced programs are FLAT and never a WaveGuard membership.
     // Used both to flag manual scheduling (the follow-up seeder doesn't support
@@ -1502,7 +1537,79 @@ const EstimateConverter = {
           draftInvoiceAmount = inv?.total != null ? Number(inv.total) : annualAmount;
           draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
 
+          // Coverage config so the paid-invoice → webhook → refreshTermSnapshot
+          // pipeline STAMPS the recurring visits prepaid (prevents the completion
+          // double-bill). A term carries ONE coverage service, so only derive it
+          // for a single recurring service; multi-service prepay coverage is
+          // Phase 2 (left legacy, warned). Derive from the SAME svc / cadence /
+          // visit-count the recurring series is built from (serviceName below at
+          // the series loop, inferRecurringPattern, visitsPerYearForRecurringService)
+          // so ensureCoverageRowsForTerm attaches the EXISTING visits instead of
+          // seeding a duplicate series.
+          let coverageServiceType;
+          let coverageVisitCount;
+          let coverageCadence;
+          if (recurringServicesForConversion.length === 1) {
+            const coverageSvc = recurringServicesForConversion[0];
+            const svcType = coverageSvc.name || coverageSvc.serviceName || coverageSvc.service_name || null;
+            const cadence = RecurringAppointmentSeeder.inferRecurringPattern({
+              service: coverageSvc,
+              fallbackFrequency: inferredFrequencyKey,
+            }) || null;
+            // Visits/year: prefer the line's explicit count (the series' own
+            // source); else map from cadence. Values mirror inferCoverageCadence
+            // (annual-prepay-renewals.js) so coverage aligns with the seeded series.
+            const CADENCE_VISITS = {
+              monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
+            };
+            const visits = visitsPerYearForRecurringService(coverageSvc) || CADENCE_VISITS[cadence] || null;
+            if (svcType && visits > 0) {
+              coverageServiceType = svcType;
+              coverageVisitCount = visits;
+              coverageCadence = cadence || undefined; // absent → applyPrepaidCoverageForTerm infers from visit count
+            } else {
+              // Coverage service type / visit count could not be derived (e.g. a
+              // sparse line with no name/serviceName/service_name — the seeded
+              // visits then fall back to the generic 'Service' label). We must NOT
+              // create an unstampable term; the guard at the top of the
+              // term-creation try fails closed (routes to manual).
+              logger.warn(`[estimate-converter] annual-prepay coverage underivable for estimate ${estimateId} (serviceType=${svcType}, visits=${visits}) — will fail closed`);
+            }
+          } else if (recurringServicesForConversion.length > 1) {
+            // Unreachable — multi-service prepay_annual is hard-blocked at the top
+            // of convertEstimate. Re-assert fail-closed so a future refactor that
+            // moves or drops that guard can never silently create an under-stamped
+            // (double-billing) multi-service prepay term + invoice here.
+            const err = new Error(
+              `Annual prepay isn't supported for multi-service plans (${recurringServicesForConversion.length} recurring services) yet — convert as monthly or bill manually.`
+            );
+            err.code = 'ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED';
+            err.isOperational = true;
+            err.status = 422;
+            err.statusCode = 422;
+            throw err;
+          }
+
           try {
+            // FAIL-CLOSED: a single-service annual prepay whose coverage service
+            // type couldn't be derived (a sparse line → its seeded visits fall
+            // back to the generic 'Service' label) would create a term + invoice
+            // that refreshTermSnapshot can't stamp → the visits complete-bill
+            // again (double bill). coverage_service_type is derived from the SAME
+            // name expression the recurring visits use for service_type, so when
+            // it IS set stamping matches; when it can't be, refuse and route to
+            // manual rather than ship an unstampable term. The catch below voids
+            // the draft invoice; the enclosing transaction rolls back the rest.
+            if (recurringServicesForConversion.length === 1 && !coverageServiceType) {
+              const err = new Error(
+                `Couldn't derive annual-prepay coverage for estimate ${estimateId} (the recurring service line has no resolvable name) — convert as monthly or bill the prepay manually.`
+              );
+              err.code = 'ANNUAL_PREPAY_COVERAGE_UNDERIVABLE';
+              err.isOperational = true;
+              err.status = 422;
+              err.statusCode = 422;
+              throw err;
+            }
             const AnnualPrepayRenewals = require('./annual-prepay-renewals');
             const annualPrepayTerm = await AnnualPrepayRenewals.createTermForAnnualPrepay({
               customerId,
@@ -1516,6 +1623,14 @@ const EstimateConverter = {
               // so draftInvoiceAmount === annualAmount there.
               prepayAmount: draftInvoiceAmount,
               termStart: termStartDate || null,
+              // Coverage config for the single recurring service → visits get
+              // stamped on payment. A single service that couldn't be derived
+              // fails closed above, so a single-service term always ships WITH
+              // coverage; these are undefined only for the (0-recurring) prepay
+              // edge, which seeds no visits to double-bill.
+              coverageServiceType,
+              coverageVisitCount,
+              coverageCadence,
               conn: database,
             });
             if (!annualPrepayTerm?.id) {

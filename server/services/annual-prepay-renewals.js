@@ -675,6 +675,107 @@ async function clearPrepaidStampsForTerm(termId, conn = db, { throwOnError = fal
   }
 }
 
+// Canonical "is this term's paid coverage live on `coverageDate`" query — the
+// single source of truth shared by getActivelyCoveredCustomerIds and the
+// completion gate (annualPrepayCoversVisit), so the two can't drift. A term
+// counts as covered when: coverageDate is within [term_start, term_end]; the term
+// is in a paid-coverage status (or a payment_pending term whose invoice is in fact
+// paid, or a renewal *lapse* still inside its already-paid term); the prepay
+// invoice is not void/cancelled/refunded; and the prepay payment was not FULLY
+// refunded (the Stripe refund webhook flips the PAYMENT row, not invoices.status,
+// so we detect it on payments via the invoice's Stripe identifiers). Partial
+// refunds (invoice stays 'paid') keep coverage.
+// `coverageDate` restricts to terms whose window contains that date (the covered-
+// as-of-a-day question). Pass null to skip the window and return EVERY term with
+// still-valid paid coverage regardless of window (the audit's "which paid terms
+// exist" question) — the invoice/payment refund exclusions still apply.
+function coveredTermsAsOf(conn, coverageDate = null) {
+  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
+  const query = conn('annual_prepay_terms as t')
+    .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id');
+  if (coverageDate) {
+    query.where('t.term_start', '<=', coverageDate).where('t.term_end', '>=', coverageDate);
+  }
+  return query
+    .where(function statusGuard() {
+      this.whereIn('t.status', COVERED_STATUSES)
+        .orWhere(function paidPending() {
+          this.where('t.status', PAYMENT_PENDING_STATUS)
+            .andWhere(function invoicePaid() {
+              this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
+            });
+        })
+        .orWhere(function lapsedRenewalStillInTerm() {
+          this.where('t.status', 'cancelled').andWhere('t.renewal_decision', 'cancel');
+        });
+    })
+    .whereRaw(
+      `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
+      cancelledStatuses,
+    )
+    .whereRaw(
+      `not exists (
+        select 1 from payments p
+        where (p.status = 'refunded' or p.refund_status = 'full')
+          and (
+            (p.stripe_payment_intent_id is not null and p.stripe_payment_intent_id = i.stripe_payment_intent_id)
+            or (p.stripe_charge_id is not null and p.stripe_charge_id = i.stripe_charge_id)
+          )
+      )`,
+    );
+}
+
+// Fail-closed coverage test for completion billing. An annual-prepay-stamped
+// visit is COVERED when its explicit stamp (prepaid_method === annual_prepay_invoice)
+// is backed by a term whose paid coverage is STILL LIVE on the visit date
+// (coveredTermsAsOf) — INDEPENDENT of the per-visit prepaid_amount. The stamp is a
+// DISCOUNTED allocation slice (splitCoverageAmount divides the discounted invoice
+// total across visits), so on a discounted plan the slice is < the visit's
+// undiscounted estimated_price; the legacy `prepaid_amount >= amount` gate would
+// then wrongly re-bill a prepaid visit (the double-bill this fixes). It is
+// fail-closed twice over: (1) requires an explicit stamp AND a live term, so a
+// stale stamp left by a best-effort void/refund clear (clearPrepaidStampsForTerm
+// swallows errors on the webhook path) can't suppress; (2) revalidates the prepay
+// invoice/payment isn't void/refunded and the visit date is inside the term, so a
+// term whose status drifts from its paid state can't suppress either.
+// Absence/ambiguity => false; the caller then falls back to the numeric
+// prepaid_amount >= amount comparison for other (cash/Zelle) methods.
+async function annualPrepayCoversVisit(scheduledService, conn = db) {
+  if (!scheduledService) return false;
+  if (scheduledService.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
+  if (!(Number(scheduledService.prepaid_amount) > 0)) return false;
+  const termId = scheduledService.annual_prepay_term_id;
+  if (!termId) return false;
+  if (!(await annualPrepayTableExists())) return false;
+  try {
+    const coverageDate = dateOnly(scheduledService.scheduled_date) || etDateString();
+    const term = await coveredTermsAsOf(conn, coverageDate)
+      .where('t.id', termId)
+      // The stamp must belong to THIS visit's customer — a stale stamp pointing at
+      // another customer's live term can't suppress.
+      .modify((q) => {
+        if (scheduledService.customer_id != null) q.where('t.customer_id', scheduledService.customer_id);
+      })
+      .first('t.id', 't.coverage_service_type');
+    if (!term) return false;
+    // Defense-in-depth: when the term declares a coverage service, the stamped
+    // visit must still be that service (coverage-selection cleanup is best-effort,
+    // so a stale stamp left on a dropped/re-typed service must not suppress). The
+    // same matcher that APPLIED the stamp gates it here. Legacy no-config terms
+    // (no coverage_service_type) never had a service to match, so skip the check.
+    if (term.coverage_service_type
+      && scheduledService.service_type
+      && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type))) {
+      return false;
+    }
+    return true;
+  } catch (err) {
+    // Fail-closed: if the term/invoice can't be validated, DON'T suppress billing.
+    logger.warn(`[annual-prepay] coverage validation failed for scheduled service ${scheduledService.id}: ${err.message}`);
+    return false;
+  }
+}
+
 async function refreshTermSnapshot(termOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return null;
   const term = typeof termOrId === 'object'
@@ -882,51 +983,13 @@ async function activatePaidPendingTerms(conn = db) {
 async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
   if (!(await annualPrepayTableExists())) return new Set();
   const coverageDate = dateOnly(asOf) || etDateString();
-  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
-  const rows = await conn('annual_prepay_terms as t')
-    .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
-    .where('t.term_start', '<=', coverageDate)
-    .where('t.term_end', '>=', coverageDate)
-    // Covered = a paid-coverage status, OR a payment_pending term whose invoice
-    // is in fact paid (webhook/reconcile lag — activatePaidPendingTerms() is the
-    // canonical recovery, run before this in the billing cron), OR a renewal
-    // *lapse* (status='cancelled' with renewal_decision='cancel') whose already
-    // paid term is still current through term_end. A true refund sets
-    // status='cancelled' with a NULL renewal_decision and is dropped by the
-    // invoice/payment refund exclusions below.
-    .where(function statusGuard() {
-      this.whereIn('t.status', COVERED_STATUSES)
-        .orWhere(function paidPending() {
-          this.where('t.status', PAYMENT_PENDING_STATUS)
-            .andWhere(function invoicePaid() {
-              this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
-            });
-        })
-        .orWhere(function lapsedRenewalStillInTerm() {
-          this.where('t.status', 'cancelled').andWhere('t.renewal_decision', 'cancel');
-        });
-    })
-    // Exclude void/refunded prepay invoices…
-    .whereRaw(
-      `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
-      cancelledStatuses,
-    )
-    // …and any term whose prepay payment was FULLY refunded. The Stripe refund
-    // webhook (charge.refunded) flips a full refund to status='refunded' /
-    // refund_status='full' on the payment row — it does NOT flip invoices.status
-    // — so detect it on the payment via the invoice's Stripe identifiers.
-    // Partial refunds (status stays 'paid') keep coverage.
-    .whereRaw(
-      `not exists (
-        select 1 from payments p
-        where (p.status = 'refunded' or p.refund_status = 'full')
-          and (
-            (p.stripe_payment_intent_id is not null and p.stripe_payment_intent_id = i.stripe_payment_intent_id)
-            or (p.stripe_charge_id is not null and p.stripe_charge_id = i.stripe_charge_id)
-          )
-      )`,
-    )
-    .distinct('t.customer_id');
+  // Covered = a paid-coverage status, OR a payment_pending term whose invoice is
+  // in fact paid (webhook/reconcile lag — activatePaidPendingTerms() is the
+  // canonical recovery, run before this in the billing cron), OR a renewal *lapse*
+  // still current through term_end; void/refunded prepay invoices and fully
+  // refunded payments are excluded. See coveredTermsAsOf (shared with the
+  // completion coverage gate so the two definitions can't drift).
+  const rows = await coveredTermsAsOf(conn, coverageDate).distinct('t.customer_id');
   return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
 }
 
@@ -1516,6 +1579,9 @@ module.exports = {
   hasAnnualPrepayRenewal,
   applyPrepaidCoverageForTerm,
   clearPrepaidStampsForTerm,
+  annualPrepayCoversVisit,
+  coveredTermsAsOf,
+  ANNUAL_PREPAY_PREPAID_METHOD,
   recordDecision,
   _private: {
     dateOnly,
