@@ -86,10 +86,27 @@ async function exposedVisitsForTerm(term) {
     .select('s.id', 's.service_type', 's.scheduled_date', 's.status', 's.estimated_price',
       's.prepaid_method', 's.prepaid_amount', 's.annual_prepay_term_id', 's.is_callback',
       'c.monthly_rate as cust_monthly_rate');
-  // A visit double-bills when a completion WOULD bill it AND it isn't stamped prepaid.
+  // A visit is an exposed gap when a completion WOULD bill it AND it isn't stamped
+  // prepaid for this term. For a CONFIGURED term, restrict candidates to visits
+  // that actually belong to its coverage — either linked to the term (a stale
+  // stamp on a dropped/re-typed service still belongs) OR of the covered service
+  // type. An unrelated billable visit (e.g. a one-time WDO for a lawn-prepay
+  // customer) is correctly billed by completion and is NOT a coverage gap, so it
+  // must not inflate the report / a --restamp that can't fix it. No-config terms
+  // can't filter by service (reported MANUAL anyway).
+  const hasConfig = term.coverage_service_type != null && Number(term.coverage_visit_count) > 0;
+  const coverageType = hasConfig ? normalizeCoverageServiceType(term.coverage_service_type) : null;
   return rows
     .map((v) => ({ ...v, billAmount: completionBillAmount(v) }))
-    .filter((v) => v.billAmount > 0 && !visitIsStamped(v, term));
+    .filter((v) => {
+      if (!(v.billAmount > 0) || visitIsStamped(v, term)) return false;
+      if (hasConfig) {
+        const belongsToTerm = String(v.annual_prepay_term_id) === String(term.id);
+        const matchesCoverage = v.service_type && serviceMatchesCoverage(v, coverageType);
+        if (!belongsToTerm && !matchesCoverage) return false;
+      }
+      return true;
+    });
 }
 
 // refreshTermSnapshot only (re)stamps terms in an ACTIVE status — a configured

@@ -145,6 +145,9 @@ router.get('/leaks', async (req, res) => {
         'ss.service_type',
         'ss.estimated_price',
         'ss.prepaid_amount',
+        'ss.prepaid_method',
+        'ss.annual_prepay_term_id',
+        'ss.scheduled_date',
         'ss.completed_at',
         'c.id as customer_id',
         'c.first_name',
@@ -153,6 +156,17 @@ router.get('/leaks', async (req, res) => {
         'c.waveguard_tier',
       )
       .orderBy('ss.completed_at', 'desc');
+
+    // A discounted annual-prepay slice is intentionally < the undiscounted
+    // estimated_price, so a LIVE-covered annual visit passes the "not fully
+    // prepaid" filter and would otherwise surface here as a recovery candidate —
+    // a manual double-bill trap. Drop live-covered visits using the SAME gate the
+    // completion path uses (fail-closed; a stale stamp is NOT treated as covered).
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const coveredFlags = await Promise.all(
+      rows.map((r) => AnnualPrepayRenewals.annualPrepayCoversVisit(r)),
+    );
+    const activeRows = rows.filter((_, i) => !coveredFlags[i]);
 
     const shape = (r) => ({
       scheduled_service_id: r.scheduled_service_id,
@@ -174,8 +188,8 @@ router.get('/leaks', async (req, res) => {
     const isReview = (r) => parseFloat(r.monthly_rate || 0) > 0
       || parseFloat(r.prepaid_amount || 0) > 0
       || isReviewServiceType(r.service_type);
-    const leaks = rows.filter((r) => !isReview(r)).map(shape);
-    const needsReview = rows.filter(isReview).map(shape);
+    const leaks = activeRows.filter((r) => !isReview(r)).map(shape);
+    const needsReview = activeRows.filter(isReview).map(shape);
     const sum = (arr) => Math.round(arr.reduce((s, r) => s + r.price, 0) * 100) / 100;
 
     res.json({
@@ -239,6 +253,9 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
         'ss.service_type',
         'ss.estimated_price',
         'ss.prepaid_amount',
+        'ss.prepaid_method',
+        'ss.annual_prepay_term_id',
+        'ss.scheduled_date',
         db.raw('COALESCE(ss.payer_id, c.payer_id) as payer_id'),
         db.raw('COALESCE(ss.is_callback, false) as ss_callback'),
         db.raw('COALESCE(sr.is_callback, false) as sr_callback'),
@@ -290,7 +307,21 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     if (isNoCostServiceType(visit.service_type)) {
       return res.status(409).json({ error: 'Visit type is always no-cost (appointment / estimate / re-service / follow-up) — not billable here.' });
     }
-    const prepaid = parseFloat(visit.prepaid_amount || 0);
+    // A LIVE annual-prepay-covered visit is fully covered by the term. Its stamp is
+    // a DISCOUNTED slice < the undiscounted estimated_price, so without this guard it
+    // would fall into the "partial prepay → bill manually" 409 below and get
+    // double-billed. Fail-closed: a stale/refunded stamp is NOT covered and still bills.
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    if (await AnnualPrepayRenewals.annualPrepayCoversVisit(visit)) {
+      return res.status(409).json({ error: 'Visit is covered by an active annual prepay — already paid; do not bill manually.' });
+    }
+    // Past the coverage gate: a lingering annual_prepay_invoice stamp is STALE
+    // (term voided/refunded) — its amount is NOT real coverage, so ignore it and
+    // bill normally rather than block as "fully/partially prepaid" with refunded
+    // money (mirror the completion fallback). Other methods keep their real amount.
+    const prepaid = visit.prepaid_method === AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
+      ? 0
+      : parseFloat(visit.prepaid_amount || 0);
     const price = parseFloat(visit.estimated_price || 0);
     if (!(price > 0)) {
       return res.status(422).json({ error: 'Visit has no price to invoice.' });

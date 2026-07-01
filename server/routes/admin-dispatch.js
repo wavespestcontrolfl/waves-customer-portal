@@ -4227,14 +4227,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
     const applyPrepaidCreditToInvoice = async (invoiceRow) => {
-      // An annual_prepay_invoice stamp may credit an invoice ONLY when the live-term
-      // gate passed (annualPrepayCovered). A stale stamp left by a best-effort
-      // void/refund clear must NOT credit/mark-paid a freshly-cut invoice with
-      // money that was refunded — mirror the suppression gate's fallback rule.
-      // Other methods (cash/Zelle) credit as before.
-      const isAnnualPrepayStamp = svc.prepaid_method === AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD;
-      const annualPrepayStampCredits = !isAnnualPrepayStamp || annualPrepayCovered;
-      const prepaidCents = (svc.prepaid_amount != null && annualPrepayStampCredits) ? toCents(svc.prepaid_amount) : 0;
+      // Applying annual-prepay coverage to a PRE-EXISTING invoice is deferred to a
+      // dedicated follow-up — it needs non-cash accounting (the money was already
+      // collected on the annual prepay invoice, so no payments row / revenue), an
+      // idempotency marker, and add-on split-billing. This path only applies
+      // out-of-band prepayments (cash/Zelle): skip annual_prepay_invoice stamps so
+      // we never credit a discounted slice, book a non-cash payment as revenue, or
+      // credit a stale/refunded stamp. The completion suppression gate already
+      // stops the double-bill for covered visits (no new invoice is cut).
+      const prepaidCents = (svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
+        && svc.prepaid_amount != null) ? toCents(svc.prepaid_amount) : 0;
       if (!(prepaidCents > 0) || !invoiceRow?.id) return invoiceRow;
       // Third-party Bill-To: never credit the homeowner's prepaid amount against
       // a payer-billed invoice — that money isn't owed by the payer. The invoice
@@ -4284,28 +4286,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .first('id');
         if (existingCredit) return lockedInvoice;
 
-        // A LIVE-covered annual prepay covers the whole visit CHARGE inclusive of
-        // tax (the prepay invoice total is tax-inclusive), not the discounted
-        // per-visit slice — crediting only the slice/pre-tax base here would leave an
-        // OPEN residual (the tax on a commercial invoice, or the whole undiscounted
-        // charge) on a pre-existing/pre-minted (Charge Now) invoice while the pay
-        // link is suppressed, stranding the customer. When the invoice is JUST the
-        // covered visit (subtotal within the covered base), settle it in FULL
-        // (tax included); when it carries more than the covered visit, credit the
-        // covered base + its tax so genuine add-ons keep their remainder. Non-annual
-        // methods keep the slice credit.
-        let targetCreditCents = prepaidCents;
-        if (isAnnualPrepayStamp && annualPrepayCovered) {
-          const coveredBaseCents = toCents(invoiceAmount);
-          const invoiceContainsOnlyCoveredVisit = toCents(lockedInvoice.subtotal) <= coveredBaseCents + 1;
-          if (invoiceContainsOnlyCoveredVisit || coveredBaseCents <= 0) {
-            targetCreditCents = invoiceTotalCents; // settle the whole covered-visit invoice, tax included
-          } else {
-            const taxRate = Number(lockedInvoice.tax_rate) || 0;
-            targetCreditCents = Math.round(coveredBaseCents * (1 + taxRate)); // covered base + its tax; add-ons remain
-          }
-        }
-        const creditCents = Math.min(targetCreditCents, invoiceTotalCents);
+        const creditCents = Math.min(prepaidCents, invoiceTotalCents);
         const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
         const prepaidCredit = centsToDollars(creditCents);
         const remainingTotal = centsToDollars(remainingCents);
@@ -4388,6 +4369,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // Treat already-paid / prepaid pre-mint as the same SMS branch.
       if (invoice.status === 'paid' || invoice.status === 'prepaid') alreadyPaid = true;
       else invoiceCreated = true;
+    }
+
+    // A live annual-prepay-COVERED visit must never carry a collectible invoice: the
+    // work is already paid on the annual prepay invoice. The suppression gate stops
+    // NEW invoices, but a pre-existing / pre-minted invoice would otherwise be
+    // attached here as AR (a duplicate bill). Void it (voidInvoice cancels any open
+    // PaymentIntent and refuses to void a paid/in-flight one) and treat the visit as
+    // settled. Only suppress if the void succeeds, so a genuinely paid invoice stays
+    // handled normally. Full non-cash settlement / add-on split-billing is deferred.
+    if (annualPrepayCovered && invoice?.id
+      && !['paid', 'prepaid', 'void'].includes(String(invoice.status || '').toLowerCase())) {
+      try {
+        const InvoiceService = require('../services/invoice');
+        await InvoiceService.voidInvoice(invoice.id);
+        invoice = null;
+        invoiceCreated = false;
+        payUrl = null;
+        alreadyPaid = true;
+      } catch (voidErr) {
+        logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: could not void pre-existing invoice ${invoice.id}: ${voidErr.message}`);
+      }
     }
 
     // Auto-apply available account credit (e.g. the referral reward) to the
