@@ -501,8 +501,13 @@ export default function CreateProjectModal({
     setFindings(prev => {
       const current = prev[addressFieldKey] || '';
       const auto = projectAddressAutoFillRef.current;
-      const isAutoFilled = auto.key === addressFieldKey && current === auto.value;
-      // Never overwrite an address the tech owns (typed or autocompleted).
+      // A field already holding the selected customer's address counts as
+      // auto-filled even if the ref was reset (e.g. a restored draft, whose
+      // findings repopulate but leave the ref empty) — so re-adopt it and keep
+      // it in sync on a later customer switch. A hand-entered pre-construction
+      // lot address that DIFFERS from the customer's is left tech-owned.
+      const isAutoFilled = (auto.key === addressFieldKey && current === auto.value)
+        || (!!address && current === address);
       if (hasMeaningfulValue(current) && !isAutoFilled) return prev;
       if (!address) {
         // Customer un-picked: drop only what we auto-filled.
@@ -510,8 +515,10 @@ export default function CreateProjectModal({
         projectAddressAutoFillRef.current = { key: null, value: '' };
         return { ...prev, [addressFieldKey]: '' };
       }
-      if (current === address) return prev;
+      // Re-establish the marker whenever the field matches the customer (covers
+      // the restored-draft case) so a subsequent switch re-syncs or clears it.
       projectAddressAutoFillRef.current = { key: addressFieldKey, value: address };
+      if (current === address) return prev;
       return { ...prev, [addressFieldKey]: address };
     });
   }, [projectType, selectedCustomer, addressFieldKey]);
