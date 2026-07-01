@@ -199,6 +199,12 @@ const LEAD_PIPELINE_STAGES = new Set([
   'negotiating',
 ]);
 
+// Terminal lead statuses (`leads.status`). The customer-less recovery path must
+// not resurrect one of these when it reuses an existing lead by phone — a won /
+// lost / converted row would keep its closed status and the recovered inquiry
+// would never surface as new work.
+const CLOSED_LEAD_STATUSES = ['won', 'lost', 'converted'];
+
 function shouldCreateCallLeadForCustomer(customer, { createdCustomerFromCall = false } = {}) {
   if (!customer) return false;
   if (createdCustomerFromCall) return true;
@@ -2369,7 +2375,11 @@ const CallRecordingProcessor = {
     // had a chance to land, so a crash cannot mark the call processed early.
     const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam);
     const customerLanded = !!customerId;
-    const finalStatus = (customerExpected && !customerLanded) ? 'customer_creation_failed' : 'processed';
+    // Downgraded below if a customer-less recovery lead was expected but its
+    // insert failed — that lead is the only durable record for this call, and
+    // customerExpected is false, so a swallowed failure would otherwise look
+    // fully 'processed'.
+    let finalStatus = (customerExpected && !customerLanded) ? 'customer_creation_failed' : 'processed';
     await db('call_log').where({ id: call.id }).update({
       customer_id: customerId || call.customer_id,
       ai_extraction: JSON.stringify(extracted),
@@ -2427,8 +2437,17 @@ const CallRecordingProcessor = {
     }
     if (shouldCreateLead) {
       try {
-        // Check if lead already exists for this phone
-        const existingLead = phone ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first() : null;
+        // Check if lead already exists for this phone. On the customer-less
+        // recovery path, ignore closed (won/lost/converted) leads so a recovered
+        // inquiry lands as a fresh, workable lead instead of silently attaching
+        // to a terminal row. The customer-attached path is unchanged — its
+        // shouldCreateCallLeadForCustomer gate already limits it to open-lead /
+        // newly-created customers.
+        let existingLeadQuery = phone ? db('leads').where('phone', phone) : null;
+        if (existingLeadQuery && workableUnnamedLead) {
+          existingLeadQuery = existingLeadQuery.whereNotIn('status', CLOSED_LEAD_STATUSES).whereNull('converted_at');
+        }
+        const existingLead = existingLeadQuery ? await existingLeadQuery.orderBy('created_at', 'desc').first() : null;
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -2519,6 +2538,11 @@ const CallRecordingProcessor = {
         // conversion still counts). recordCallPpcAttribution dedupes by lead_id and
         // respects first-touch (a web-attributed lead keeps its source), so this
         // never double-counts.
+        // NOTE: stays gated on customerId, so a customer-less recovery lead from
+        // a paid tracking number gets no ad_service_attribution row yet — the
+        // lead keeps its lead_source_id and is attributed when it converts to a
+        // customer. Lead-only PPC attribution needs schema work on the
+        // customer-keyed ad_service_attribution table; deferred out of this PR.
         if (leadId && customerId && leadSourceRow
             && ['google_ads', 'facebook'].includes(leadSourceRow.source_type)) {
           require('./ads/call-attribution').recordCallPpcAttribution({
@@ -2628,6 +2652,14 @@ const CallRecordingProcessor = {
       } catch (leadErr) {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
+    }
+
+    // A customer-less recovery lead is the ONLY durable record for this call, so
+    // a swallowed insert failure must not read as a clean 'processed'. Mark it
+    // failed and open it for review so the work surfaces instead of vanishing.
+    if (workableUnnamedLead && !leadId) {
+      finalStatus = 'lead_creation_failed';
+      logger.error(`[call-proc] Customer-less recovery lead did not persist for ${callSid} — flagged lead_creation_failed`);
     }
 
     // ── Finding 2: when V2 drives routing and approved, schedule from the
@@ -3191,9 +3223,10 @@ const CallRecordingProcessor = {
         processing_status: finalStatus,
         processing_token: null,
         processing_started_at: null,
-        // Address unverifiable / caller-not-owner / missing surname → open the
-        // call for human review instead of letting it look fully processed.
-        ...(bridgeNeedsConfirmation.length ? { review_status: 'open' } : {}),
+        // Address unverifiable / caller-not-owner / missing surname, or a
+        // customer-less recovery lead that failed to persist → open the call for
+        // human review instead of letting it look fully processed.
+        ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' ? { review_status: 'open' } : {}),
         updated_at: new Date(),
       });
     if (finalized === 0) {

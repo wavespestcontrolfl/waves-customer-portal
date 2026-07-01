@@ -79,6 +79,30 @@ describe('call route decisions', () => {
     ]));
   });
 
+  test('records a customer-less recovery lead as create_lead, not no_op / no_customer_match', () => {
+    const decision = buildLegacyShadowRouteDecision({
+      call,
+      customerId: null,
+      leadId: '33333333-3333-4333-8333-333333333333',
+      extracted: {
+        // Nameless new prospect: service intent + email/address, no appointment.
+        requested_service: 'termite prevention services',
+        matched_service: 'Liquid Termite Perimeter',
+        email: 'prospect@example.com',
+        address_line1: '100 Example Loop',
+      },
+    });
+
+    expect(decision.final_action_taken).toBe('create_lead');
+    expect(decision.validator_recommendation).toBe('create_lead');
+    expect(decision.blocked_reasons).toEqual([]);
+    expect(decision.blocked_reasons).not.toContain('no_customer_match');
+    expect(decision.allowed_reasons).toEqual(expect.arrayContaining([
+      'lead_linked',
+      'lead_created_without_customer',
+    ]));
+  });
+
   test('prefers the v2 enforce decision over a newer legacy shadow decision', () => {
     const enforceDecision = {
       id: 'enforce-decision',
