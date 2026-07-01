@@ -97,7 +97,11 @@ export default function PaymentPreferenceButtons({
   // NOT promise an immediate invoice for these.
   const heldForSiteConfirmation = invoiceMode && siteConfirmationHold && !isOneTime;
   const waivableSetupFee = setupFee && setupFee.waivedWithPrepay ? setupFee : null;
-  const offerPrepay = !invoiceMode && !isOneTime && (annualPrepayEligible || !!waivableSetupFee);
+  // A ranged (site-confirmation) price must never be prepaid — the annual prepay
+  // invoice is an exact 12-month amount, minted before the on-site confirmation.
+  // The accept handler rejects it too (fail-closed); hiding it here keeps the
+  // customer from selecting a dead-end option.
+  const offerPrepay = !invoiceMode && !isOneTime && !siteConfirmationHold && (annualPrepayEligible || !!waivableSetupFee);
   const setupAmount = Number(setupFee?.amount);
   const hasSetupInvoice = Number.isFinite(setupAmount) && setupAmount > 0;
   const firstVisit = firstVisitAmount(selectedFrequency || {});

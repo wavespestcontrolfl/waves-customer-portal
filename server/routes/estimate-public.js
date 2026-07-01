@@ -6597,17 +6597,27 @@ router.put('/:token/accept', async (req, res, next) => {
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
 
     // A NARROW low-confidence commercial RECURRING estimate accepts online
-    // (self-serve), but its exact price is confirmed on site — so DON'T mint the
-    // first invoice at accept; the account manager issues it after the on-site
-    // confirmation, matching the "$X–$Y/mo, confirmed on site" range the customer
-    // approved. The WIDE case never reaches here (the quote gate above rejects it
-    // 409). Computed AFTER treatAsOneTime so a one-time accept keeps its own
+    // (self-serve), but its exact price is confirmed on site — so NO money moves
+    // at accept, whatever the billing mode: invoice-mode skips the first-invoice
+    // mint (the account manager issues it after the on-site confirmation), and
+    // non-invoice pay-per-application simply bills after the confirmed visit.
+    // Matches the "$X–$Y/mo, confirmed on site" range the customer approved.
+    // The WIDE case never reaches here (the quote gate above rejects it 409).
+    // Computed AFTER treatAsOneTime so a one-time accept keeps its own
     // booking/invoice outcome (the hold is about the recurring program only).
     const lowConfidenceAccept = commercialLowConfidenceRange(estData);
-    const holdFirstInvoiceForSiteConfirmation = billByInvoice
-      && !treatAsOneTime
+    const holdFirstInvoiceForSiteConfirmation = !treatAsOneTime
       && lowConfidenceAccept.hasLowConfidence
       && !lowConfidenceAccept.forceSiteQuote;
+    // The one non-invoice path that WOULD collect exact money at accept is
+    // annual prepay (its conversion mints the exact 12-month invoice) — a price
+    // shown as a range must never be prepaid before the site confirmation.
+    // Fail closed; the client also hides the prepay option for these.
+    if (holdFirstInvoiceForSiteConfirmation && annualPrepaySelected) {
+      return res.status(400).json({
+        error: 'Annual prepay opens after we confirm your exact price on a quick site visit — choose pay per application to approve now.',
+      });
+    }
 
     // One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). Read straight
     // from the raw body so the normalized payment preference + existing
@@ -12187,22 +12197,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
     const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence);
     // Narrow low-confidence commercial recurring estimate (the population whose
-    // price renders as a "$X–$Y/mo, confirmed on site" range).
-    const narrowLowConfidenceCommercial = defaultServiceMode !== 'one_time'
+    // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
+    // its accept, whatever the billing mode — invoice-mode holds the first-
+    // invoice mint, non-invoice bills per application after the confirmed visit,
+    // and annual prepay is rejected/hidden until the price is confirmed. Drives
+    // the payment copy + deposit overrides below AND the no-slot accept mode
+    // (slots return the empty commercial-manual list for every commercial auto
+    // estimate). Matches the accept-handler hold predicate.
+    const siteConfirmationHold = defaultServiceMode !== 'one_time'
       && (() => {
         const lc = commercialLowConfidenceRange(estimateDataForIntelligence);
         return lc.hasLowConfidence && !lc.forceSiteQuote;
       })();
-    // Its first invoice is held for on-site price confirmation at accept (no
-    // immediate invoice) — invoice-mode only; drives the payment copy/deposit
-    // overrides below. Matches the accept-handler hold predicate.
-    const siteConfirmationHold = estimate.bill_by_invoice === true && narrowLowConfidenceCommercial;
-    // No-slot accept mode: the slots endpoints return an empty commercial-manual
-    // list for EVERY commercial auto estimate regardless of billing mode, so a
-    // slot-pick acceptance would leave ANY ranged narrow-LOW estimate (invoice
-    // mode or not) with a visible range but no way to approve it. Broader than
-    // the hold on purpose — the payment behavior stays keyed to the hold flag.
-    const commercialNoSlotAccept = narrowLowConfidenceCommercial;
+    const commercialNoSlotAccept = siteConfirmationHold;
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
@@ -12276,19 +12283,22 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       paymentMethodPreference: null,
     });
 
-    // A held estimate collects NO money at accept (the invoice is issued after the
+    // A held estimate collects NO money at accept (the invoice comes after the
     // on-site confirmation), so the confirm flow must not require/mint a deposit
     // either — matches the accept-handler + /deposit-intent exemptions. Overriding
     // here keeps the "No payment now" CTA honest. The hold only covers the
     // RECURRING accept path (the hold predicate and both server exemptions are
-    // !oneTime), so preserve the pre-override requirement as requiredForOneTime:
-    // a customer who switches to one-time still owes that mode's deposit, and the
-    // client must keep consulting /deposit-intent (which re-resolves per mode)
-    // rather than skipping straight to an accept that 402s with no modal path.
+    // !oneTime), so preserve the pre-override requirement as requiredForOneTime —
+    // but only for INVOICE-MODE estimates, where a one-time accept mints its
+    // invoice in the accept transaction and the deposit credits it (the accept
+    // gate enforces exactly that shape; an uninvoiced one-time commercial deposit
+    // has nothing to credit and stays exempt). The client keeps consulting
+    // /deposit-intent for the one-time switch (it re-resolves per mode) rather
+    // than skipping straight to an accept that 402s with no modal path.
     // `required` is mode-independent in the resolver (oneTime only picks the
     // amount class), so the pre-override value IS the one-time requirement.
     if (siteConfirmationHold) {
-      depositPolicy.requiredForOneTime = depositPolicy.required;
+      depositPolicy.requiredForOneTime = estimate.bill_by_invoice === true ? depositPolicy.required : false;
       depositPolicy.required = false;
       depositPolicy.slotRequired = false;
       depositPolicy.exemptReason = depositPolicy.exemptReason || 'commercial_manual_billing';

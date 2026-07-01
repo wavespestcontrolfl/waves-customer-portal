@@ -121,6 +121,25 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getByText(/confirms the exact price on a quick site visit/i)).toBeInTheDocument();
   });
 
+  it('non-invoice site-confirmation hold hides annual prepay (a ranged price is never prepaid)', () => {
+    const onSelect = vi.fn();
+    render(
+      <PaymentPreferenceButtons
+        onSelect={onSelect}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        annualPrepayEligible
+        siteConfirmationHold
+        selectedFrequency={{ key: 'monthly', monthly: 400 }}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: /pay the 12-month plan in full/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /pay per application/i }));
+    expect(onSelect).toHaveBeenCalledWith('pay_at_visit');
+  });
+
   it('invoice-mode WITHOUT the hold keeps the standard "Accept + send invoice" CTA', () => {
     render(
       <PaymentPreferenceButtons
