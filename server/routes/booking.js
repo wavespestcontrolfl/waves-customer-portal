@@ -959,7 +959,14 @@ async function createSelfBooking(payload = {}) {
         // resolved customer — so a forged/borrowed id can't price a booking from
         // someone else's quote.
         const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
-        const pricingEstimate = pricing_estimate_id
+        // Verify the HMAC BEFORE touching the DB: pricing_estimate_id is a raw
+        // public-URL value, and the token is bound to the exact id string, so a
+        // forged/malformed id (which would otherwise throw a Postgres uuid cast
+        // error from the lookup) fails the cheap constant-time check first and
+        // never reaches a query.
+        const handoffTokenValid = !!pricing_estimate_id
+          && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token);
+        const pricingEstimate = handoffTokenValid
           ? await db('estimates').where('id', pricing_estimate_id).first()
           : null;
         // Re-check the CURRENT estimate is still handoff-eligible: a wizard draft
@@ -976,8 +983,7 @@ async function createSelfBooking(payload = {}) {
           && pricingEstimate.status === 'draft'
           && !pricingEstData.commercialEstimatedPricing
           && !pricingEstData.quoteRequired;
-        const pricingTrusted = !!pricing_estimate_id
-          && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)
+        const pricingTrusted = handoffTokenValid
           && pricingEstimateEligible
           && String(pricingEstimate.customer_id) === String(custId);
         // The verified LINKED-estimate path (/book/:estimateToken posts
