@@ -286,6 +286,7 @@ const V3_CHIPS = [
   { key: "pricing_risk", label: "Pricing Risk" },
   { key: "missing_cogs", label: "Missing COGS" },
   { key: "low_margin", label: "Low Margin" },
+  { key: "risk_type_review", label: "Risk Type" },
   { key: "open", label: "Open" },
   { key: "closed", label: "Closed" },
   { key: "drafts", label: "Drafts" },
@@ -298,6 +299,7 @@ function v3ChipMatches(e, chip) {
   if (chip === "missing_cogs")
     return (e.pricingRisk?.missingCogsCount || 0) > 0;
   if (chip === "low_margin") return (e.pricingRisk?.lowMarginCount || 0) > 0;
+  if (chip === "risk_type_review") return !!e.riskTypeNeedsReview;
   if (chip === "archived") return !!e.archivedAt;
   if (chip === "drafts") return e.status === "draft";
   if (chip === "open")
@@ -2107,6 +2109,17 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                           }
                         />
                         <AutomationStatusBadge automation={e.automation} />
+                        {e.riskTypeNeedsReview && (
+                          <>
+                            {" "}
+                            <Badge
+                              tone="alert"
+                              title="Set the commercial business type — it drives the pest/rodent service cadence."
+                            >
+                              Risk Type
+                            </Badge>
+                          </>
+                        )}
                         <LawnOutlineStatusBadge outline={e.lawnServiceOutline} />
                         {e.confirmedAppointment && (
                           <Badge
@@ -3019,6 +3032,17 @@ function MobileEstimateRow({
               onLowMargin={() => onAudit?.(estimate, "low_margin")}
             />
             <AutomationStatusBadge automation={estimate.automation} />
+            {estimate.riskTypeNeedsReview && (
+              <>
+                {" "}
+                <Badge
+                  tone="alert"
+                  title="Set the commercial business type — it drives the pest/rodent service cadence."
+                >
+                  Risk Type
+                </Badge>
+              </>
+            )}
             <LawnOutlineStatusBadge outline={estimate.lawnServiceOutline} />
             {estimate.confirmedAppointment && (
               <span

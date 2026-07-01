@@ -1,3 +1,5 @@
+const { isCommercialRiskType } = require('./pricing-engine/commercial-risk-type');
+
 function validateEstimateDeliveryOptions({
   showOneTimeOption,
   billByInvoice,
@@ -222,6 +224,53 @@ function estimateDataHasUnresolvedManagerApproval(estimateData) {
   const data = parseEstimateData(estimateData);
   return containsUnresolvedManagerApproval(data, data) ||
     rootRequiresLegacyStAugustineDethatchingApproval(data);
+}
+
+// Commercial risk-type (business-type) review gate. The risk type drives the
+// commercial pest/rodent cadence, so an estimate that has a commercial pest or
+// rodent line must be classified before it can be sent/accepted — a NULL default
+// would silently under/over-cadence restaurants/hotels vs offices (owner-locked
+// risk-type lane, decision 1). Only cadence-relevant lines gate: a commercial
+// lawn/tree/mosquito/termite-only estimate does not need a risk type.
+const CADENCE_COMMERCIAL_SERVICES = new Set(['commercial_pest', 'commercial_rodent_bait']);
+
+function containsCadenceCommercialLine(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) return value.some((item) => containsCadenceCommercialLine(item, depth + 1));
+  if (typeof value !== 'object') return false;
+  if (typeof value.service === 'string' && CADENCE_COMMERCIAL_SERVICES.has(value.service)) return true;
+  return Object.values(value).some((item) => containsCadenceCommercialLine(item, depth + 1));
+}
+
+function firstCommercialRiskType(value, depth = 0) {
+  if (!value || depth > 12) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = firstCommercialRiskType(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== 'object') return null;
+  if (typeof value.commercialRiskType === 'string' && value.commercialRiskType.trim()) {
+    return value.commercialRiskType.trim();
+  }
+  for (const item of Object.values(value)) {
+    const found = firstCommercialRiskType(item, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function commercialRiskTypeReviewNeeded(estimateData) {
+  const data = parseEstimateData(estimateData);
+  if (!data) return false;
+  // Explicit flag — the public "Other / skipped" business-type path sets this
+  // (Phase 3) so a defaulted-but-unconfirmed bucket still surfaces for review.
+  if (data.riskTypeNeedsReview === true) return true;
+  // Otherwise only a cadence-relevant commercial line requires a classified type.
+  if (!containsCadenceCommercialLine(data)) return false;
+  return !isCommercialRiskType(firstCommercialRiskType(data));
 }
 
 function cloneEstimateData(data) {
@@ -718,6 +767,7 @@ function nonPestRecurringServicesForOneTimeOption(estimateData) {
 module.exports = {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
+  commercialRiskTypeReviewNeeded,
   hasDerivableOneTimePestChoicePricing,
   hasPestRecurringServiceForOneTimeOption,
   normalizeEstimateDethatchingManagerApproval,
