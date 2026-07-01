@@ -2696,9 +2696,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   }
   // Annual rodent guarantee — gated. The engine drops the line unless all four
   // eligibility flags are true, so the rep confirms each affirmatively; missing
-  // any → INELIGIBLE and no line item (fail closed).
+  // any → INELIGIBLE and no line item (fail closed). Pass the normalized
+  // homeSqFt/stories/roofType so tiering (standard/complex/estate) keys off the
+  // same authoritative inputs as the rest of the estimate — the engine's
+  // property.footprint fallback is only set when the profile carries a footprint
+  // field, so relying on it can undertier a large home (e.g. 5,000 sf → complex).
   if (sel.has('RODENT_GUARANTEE')) {
     services.rodentGuarantee = {
+      homeSqFt,
+      stories,
+      roofType: p.roofType,
       eligibility: {
         trappingCompleted: !!o.rgTrappingCompleted,
         exclusionCompleted: !!o.rgExclusionCompleted,

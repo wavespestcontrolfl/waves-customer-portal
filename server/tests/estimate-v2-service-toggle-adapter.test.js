@@ -555,7 +555,7 @@ describe('estimate v2 service toggle adapter', () => {
       }
     );
 
-    expect(input.services.rodentGuarantee).toEqual({
+    expect(input.services.rodentGuarantee).toMatchObject({
       eligibility: {
         trappingCompleted: true,
         exclusionCompleted: true,
@@ -571,6 +571,34 @@ describe('estimate v2 service toggle adapter', () => {
     expect(item.eligible).toBe(true);
     expect(item.price).toBeGreaterThan(0);
     expect(item.detail).toContain('renewable annually');
+  });
+
+  test('tiers the guarantee off the profile home size even without a footprint field', () => {
+    // A large two-story tile home must price as estate ($299), not complex —
+    // the adapter forwards normalized homeSqFt/stories/roofType so tiering does
+    // not depend on the engine's optional property.footprint fallback.
+    const { footprint, ...profileNoFootprint } = baseProfile();
+    const input = translateV2CallToV1Input(
+      { ...profileNoFootprint, homeSqFt: 5000, stories: 2, roofType: 'tile' },
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: true,
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+
+    expect(input.services.rodentGuarantee).toMatchObject({
+      homeSqFt: 5000,
+      stories: 2,
+      roofType: 'tile',
+    });
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item.tier).toBe('estate');
+    expect(item.price).toBe(299);
   });
 
   test('drops the RODENT_GUARANTEE line when any eligibility flag is missing (fail closed)', () => {
