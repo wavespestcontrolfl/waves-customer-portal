@@ -904,7 +904,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           utm_campaign: attr?.utm?.campaign || null,
           utm_term: attr?.utm?.term || null,
           funnel_stage: 'lead',
-          is_paid: channelAttr.isPaid,
+          // The map's isPaid says the CHANNEL is a paid one; the resolver's
+          // isPaidClick says THIS visit carried paid evidence (click id / cpc).
+          // Both must hold — organic utm_source=facebook traffic lands in the
+          // Facebook channel but must not count as paid spend attribution.
+          is_paid: channelAttr.isPaid && sourceMeta.isPaidClick === true,
         }).onConflict('lead_id').ignore();
       }
     } catch (attrErr) {

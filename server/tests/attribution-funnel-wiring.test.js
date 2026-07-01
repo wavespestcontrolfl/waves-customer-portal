@@ -33,7 +33,7 @@ describe('public-quote ad_service_attribution wiring', () => {
   });
 
   test('carries the paid flag from the shared map, not a local guess', () => {
-    expect(src).toMatch(/is_paid:\s*channelAttr\.isPaid/);
+    expect(src).toMatch(/is_paid:\s*channelAttr\.isPaid\s*&&\s*sourceMeta\.isPaidClick/);
   });
 
   test('skips the funnel row entirely when the source has no mapped channel (fail-closed)', () => {

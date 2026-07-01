@@ -120,6 +120,15 @@ async function resolveLeadSource(attribution) {
     }
   } catch { /* swallow — caller still gets the classified strings even if FK lookup fails */ }
 
+  // A PAID click needs paid evidence: a click id, or an explicit cpc medium.
+  // metaPaid alone is NOT that — it classifies any utm_source=facebook (organic
+  // social included) into the Facebook channel, and the funnel map marks that
+  // channel paid. Mirrors the webhook's determineLeadSource, where facebook is
+  // channel='paid' only for cpc/click-id traffic.
+  const isPaidClick = googlePaid
+    || !!attribution?.fbclid || !!attribution?.fbc
+    || (isMetaClick && utmMed === 'cpc');
+
   return {
     leadSourceId: row?.id || null,
     leadSourceName: row?.name || targetName,
@@ -129,6 +138,7 @@ async function resolveLeadSource(attribution) {
     // classifications keep their type even when the FK row is missing;
     // anything else without a row stays null (no funnel row, fail-closed).
     sourceType: row?.source_type || (googlePaid ? 'google_ads' : metaPaid ? 'facebook' : null),
+    isPaidClick,
   };
 }
 

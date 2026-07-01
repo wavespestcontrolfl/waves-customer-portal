@@ -139,3 +139,42 @@ describe('resolveLeadSource sourceType', () => {
     expect(res.sourceType).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// isPaidClick — paid evidence for THIS visit (click id or explicit cpc).
+// Pre-push P1: metaPaid classifies any utm_source=facebook into the Facebook
+// channel, whose funnel-map entry is paid — organic social must not inherit it.
+// ---------------------------------------------------------------------------
+describe('resolveLeadSource isPaidClick', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isGbpUtmCampaign.mockReturnValue(false);
+    findGbpLocationByUtmContent.mockReturnValue(null);
+    mockLeadSources({
+      google: { id: 'ls-google', source_type: 'google_ads' },
+      facebook: { id: 'ls-fb', name: 'Facebook Ads', source_type: 'facebook' },
+    });
+  });
+
+  test('true for Google click ids and google/cpc', async () => {
+    expect((await resolveLeadSource({ gclid: 'g1' })).isPaidClick).toBe(true);
+    expect((await resolveLeadSource({ wbraid: 'w1' })).isPaidClick).toBe(true);
+    expect((await resolveLeadSource({ utm: { source: 'google', medium: 'cpc' } })).isPaidClick).toBe(true);
+  });
+
+  test('true for Meta click ids and facebook/cpc', async () => {
+    expect((await resolveLeadSource({ fbclid: 'f1' })).isPaidClick).toBe(true);
+    expect((await resolveLeadSource({ fbc: 'fb.1.123.f1' })).isPaidClick).toBe(true);
+    expect((await resolveLeadSource({ utm: { source: 'facebook', medium: 'cpc' } })).isPaidClick).toBe(true);
+  });
+
+  test('FALSE for organic facebook utm — channel facebook, but not paid', async () => {
+    const res = await resolveLeadSource({ utm: { source: 'facebook', medium: 'social' } });
+    expect(res.sourceType).toBe('facebook'); // still the Facebook channel
+    expect(res.isPaidClick).toBe(false);     // but no paid evidence
+  });
+
+  test('FALSE for plain organic traffic', async () => {
+    expect((await resolveLeadSource({ referrer: 'https://duckduckgo.com/' })).isPaidClick).toBe(false);
+  });
+});
