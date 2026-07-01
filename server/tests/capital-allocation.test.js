@@ -108,6 +108,37 @@ describe('rankCapitalAllocation', () => {
     expect(out.headline.blendedBand).toBe('healthy');
   });
 
+  test('headline carries the paid-customer count + a small-N confidence flag', () => {
+    const out = rankCapitalAllocation({
+      sources: [src('google_ads', 'Google Ads', 22.5, 400, 1, 9000)], // 22.5:1 off ONE customer
+    });
+    expect(out.headline.blendedLtvCac).toBe(22.5);
+    expect(out.headline.blendedCustomers).toBe(1);
+    expect(out.headline.blendedConfidence).toBe('low'); // 1 < 5 → don't present it as confident
+  });
+
+  test('headline is confident once enough paid customers back the blend', () => {
+    const out = rankCapitalAllocation({
+      sources: [
+        src('google_ads', 'Google Ads', 12, 500, 4, 6000),
+        src('google_lsa', 'Google LSA', 6, 200, 3, 1200),
+      ],
+    });
+    expect(out.headline.blendedCustomers).toBe(7); // 4 + 3 paid customers
+    expect(out.headline.blendedConfidence).toBe('ok'); // 7 >= 5
+  });
+
+  test('blended confidence ignores no-spend channels (only paid customers count)', () => {
+    const out = rankCapitalAllocation({
+      sources: [
+        src('google_ads', 'Google Ads', 22.5, 400, 1, 9000), // 1 paid customer
+        src('organic', 'Organic', null, 0, 40, 20000), // 40 free customers — must NOT lend confidence
+      ],
+    });
+    expect(out.headline.blendedCustomers).toBe(1); // organic's 40 excluded
+    expect(out.headline.blendedConfidence).toBe('low');
+  });
+
   test('empty attribution → no channels, null headline calls', () => {
     const out = rankCapitalAllocation({ sources: [] });
     expect(out.channels).toEqual([]);

@@ -1026,14 +1026,26 @@ export function CapitalAllocationCard({ data }) {
   if (!channels.length) return <EmptyState>No ad spend tracked yet</EmptyState>;
   const h = data.headline || {};
   const blendedColor = h.blendedLtvCac == null ? undefined : (CAP_TONE_COLOR[h.blendedTone] || CAP_TONE_COLOR.neutral);
+  // Fade the headline when too few paid customers back the blend — same small-sample
+  // convention as the per-channel rows (see legend). Keeps the biggest number on the
+  // card from reading as a confident "scale up" when it's really one customer's ratio.
+  const hasBlend = h.blendedLtvCac != null;
+  const blendedLow = hasBlend && h.blendedConfidence === 'low';
   return (
     <div>
-      <div className="flex items-end justify-between gap-3">
+      <div className="flex items-end justify-between gap-3" style={{ opacity: blendedLow ? 0.55 : 1 }}>
         <div>
           <div className="u-label text-ink-tertiary">Blended LTV:CAC</div>
           <div className="u-nums text-28 font-medium tracking-tight leading-none" style={{ color: blendedColor }}>
             {fmtRatio(h.blendedLtvCac)}
           </div>
+          {hasBlend && h.blendedCustomers != null && (
+            <div className="text-11 text-ink-tertiary mt-0.5">
+              {blendedLow
+                ? `n=${fmtInt(h.blendedCustomers)} — small sample`
+                : `${fmtInt(h.blendedCustomers)} paid customers`}
+            </div>
+          )}
         </div>
         {h.blendedBandLabel && (
           <span
