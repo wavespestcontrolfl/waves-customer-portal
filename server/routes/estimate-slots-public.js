@@ -38,6 +38,7 @@ const { getAvailableSlots, findEstimateSlots } = require('../services/estimate-s
 const slotReservation = require('../services/slot-reservation');
 const {
   buildPricingBundle,
+  estimateTrenchingReviewRequired,
   findLinkedUpcomingAppointment,
   handleEstimateAsk,
   isEstimateAcceptActive,
@@ -47,6 +48,15 @@ const {
   resolveEstimateQuoteRequirement,
   verifyEstimateAskToken,
 } = require('./estimate-public');
+
+// Termite trenching review-before-booking 409 — mirrors the accept-time gate so a
+// slot hold or Stripe intent is never created for a priced trenching-only quote
+// that /accept would reject (money-gate mirroring per AGENTS.md).
+const TRENCHING_REVIEW_409 = {
+  error: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit — this quote can’t be booked online.',
+  reviewBeforeBooking: true,
+  reason: 'termite_trenching_review',
+};
 const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
 const {
   createDepositIntentForEstimate,
@@ -152,6 +162,13 @@ router.get('/:token/available-slots', async (req, res) => {
         primary: [], expander: [], availableSlots: [], summary: null,
         commercialManualScheduling: true,
         message: 'A Waves team member will reach out to schedule your commercial service.',
+      });
+    }
+    if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
+      return res.json({
+        primary: [], expander: [], availableSlots: [], summary: null,
+        reviewBeforeBooking: true,
+        message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
       });
     }
 
@@ -265,6 +282,13 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
         message: 'A Waves team member will reach out to schedule your commercial service.',
       });
     }
+    if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
+      return res.json({
+        primary: [], expander: [], availableSlots: [], summary: null,
+        reviewBeforeBooking: true,
+        message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
+      });
+    }
     const serviceMode = resolveSlotServiceMode(estimate, req.body?.serviceMode);
     const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
       ? req.body.selectedFrequency.trim()
@@ -327,6 +351,9 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         error: 'Commercial service is scheduled by our team — no self-booking.',
         commercialManualScheduling: true,
       });
+    }
+    if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
+      return res.status(409).json(TRENCHING_REVIEW_409);
     }
 
     slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
@@ -404,6 +431,9 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
     if (quoteRequirement.quoteRequired) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+    if (estimateTrenchingReviewRequired(estData)) {
+      return res.status(409).json(TRENCHING_REVIEW_409);
     }
 
     const membership = await buildEstimateMembershipContext(estimate);
@@ -509,6 +539,9 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
     if (quoteRequirement.quoteRequired) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+    if (estimateTrenchingReviewRequired(estData)) {
+      return res.status(409).json(TRENCHING_REVIEW_409);
     }
 
     // The hold only applies to a one-time booking — mirror accept's one-time

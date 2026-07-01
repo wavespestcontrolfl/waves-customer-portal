@@ -1219,6 +1219,7 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
       servicePrompts.push('How does pre-slab treatment work?');
     } else if (termiteOneTimeCategories.includes('termite_trenching')) {
       servicePrompts.push('How long does the barrier last?');
+      servicePrompts.push('Do you drill the concrete or driveway?');
     } else {
       servicePrompts.push('How does the bait work?');
     }
@@ -2112,10 +2113,26 @@ function isInspectionReviewOneTimeItem(item = {}) {
 function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  // Ignore non-billable rows (inspection/review lines, WaveGuard setup, and any
+  // discount/credit/zero row) so a discounted trenching-only quote — e.g.
+  // trenching + a negative one_time_adjustment — still classifies as trenching-only
+  // and keeps the review gate on both the render path and the accept 409. Mirrors
+  // hasOnlyBoraCareServiceMix. A *positive* non-trenching charge still blocks it.
   return recurringRows.length === 0
     && oneTimeRows.length > 0
     && oneTimeRows.some(isTermiteTrenchingOneTimeItem)
-    && oneTimeRows.every((item) => isTermiteTrenchingOneTimeItem(item) || isInspectionReviewOneTimeItem(item));
+    && oneTimeRows.every((item) => isTermiteTrenchingOneTimeItem(item) || isNonBillableOneTimeRow(item));
+}
+
+// Shared termite-trenching review-before-booking predicate. A priced trenching-only
+// estimate must not be self-booked or self-charged online — a Waves specialist
+// confirms the treatment path and schedules the visit. Applied identically at every
+// booking/money touchpoint (SSR view + accept, and the React /data contract +
+// reserve/deposit/card-hold intents) so a slot hold or Stripe intent can never be
+// created for a quote that /accept would reject (AGENTS.md money-gate mirroring).
+function estimateTrenchingReviewRequired(estData) {
+  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+  return hasOnlyTermiteTrenchingServiceMix(recurringSvcList, oneTimeList);
 }
 
 // True for one-time rows that carry no billable service of their own, so they
@@ -3253,9 +3270,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               billingLede: null,
               payAfterTitle: 'Pay per application',
               payAfterBody: 'Approve now; after you confirm, we send the invoice so you can pay before service.',
-              noPaymentCopy: 'No payment is charged on this page. Waves will finish the inspection review before pricing is finalized.',
+              noPaymentCopy: 'No payment is charged on this page. You pay on service day; no card or deposit now.',
               bookingTitle: 'Review your termite trenching quote with Waves',
-              bookingSubhead: 'Waves will confirm the treatment path before a normal service slot is reserved online.',
+              bookingSubhead: 'Waves confirms your treatment path — access, exact footage, product, and warranty — then schedules your visit. You pay on service day; no card or deposit now.',
               payPrefHeading: 'Choose how you want to pay',
               payPrefCardTitle: 'Pay per application',
               payPrefCardSub: 'Invoice is sent automatically after confirmation.',
@@ -3393,6 +3410,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest') || k.includes('commercial_mosquito') || k.includes('commercial_termite') || k.includes('commercial_rodent');
     })
   );
+
+  // Termite trenching review gate: a trenching job is a high-liability structural
+  // service (concrete drilling, a chemical soil barrier, and a warranty/retreat
+  // obligation), so Waves confirms the treatment path — access, exact footage,
+  // product, warranty — before a crew is dispatched. A priced trenching-only
+  // estimate is therefore review-before-booking: the PRICE stays visible (this is
+  // NOT quoteRequired, so the number and the Ask-Waves AI both stay live), but the
+  // online slot picker / self-book is suppressed and Waves schedules after review.
+  const trenchingReviewBeforeBooking = !locked && !commercialManualAccept && hasOnlyTermiteTrenchingServices;
 
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeDiscounts) * 100) / 100);
   // Per-day figure is a true daily rate: annual cost / 365 (monthly * 12 / 365).
@@ -4514,7 +4540,15 @@ ${shellTopBar()}
     <span id="upsell-request-status-copy">Got it. We are reviewing this service for your property and will follow up with a revised estimate shortly.</span>
   </div>` : ''}
 
-  ${locked ? '' : commercialManualAccept ? `
+  ${locked ? '' : trenchingReviewBeforeBooking ? `
+  <section class="card booking-card" id="trenching-review-card">
+    <h2 id="booking-title">${escapeHtml(pageCopy.bookingTitle)}</h2>
+    <p class="card-sub">${escapeHtml(pageCopy.bookingSubhead)}</p>
+    <p class="card-sub" style="font-style:italic">This price is set from the measured treatment path. Because trenching drills concrete, lays a chemical soil barrier, and carries a retreat warranty, a Waves specialist confirms the plan with you before your visit is scheduled &mdash; so it can't be self-booked online.</p>
+    <a href="tel:${COMPANY.phoneRaw}" class="cta" style="max-width:360px;margin:16px auto 0;display:block;text-align:center;text-decoration:none">Call Waves to confirm &mdash; ${escapeHtml(COMPANY.phone)}</a>
+    <p class="card-sub" style="margin-top:12px">Prefer we reach out? We'll follow up to confirm your treatment path and schedule your visit. You pay on service day.</p>
+  </section>
+  ` : commercialManualAccept ? `
   <section class="card booking-card" id="commercial-accept-card">
     <h2 id="booking-title">Approve your commercial service</h2>
     <p class="card-sub">This is a commercial service plan. Approve your estimate and a Waves account manager will schedule your visits and send your invoice &mdash; no card or deposit needed now.</p>
@@ -4653,12 +4687,20 @@ ${shellTopBar()}
     </div>
   </div>
 
-  ${quoteRequired && est.status !== 'accepted' ? (commercialProposal ? `
+  ${(quoteRequired || trenchingReviewBeforeBooking) && est.status !== 'accepted' ? (commercialProposal ? `
   <div class="final">
     <h2>Your commercial proposal is ready</h2>
     <p>${proposalPdfEmailed
       ? 'We’ve emailed your formal proposal as a PDF.'
       : 'Your Waves account manager has your formal proposal and will send the PDF to you directly.'} There’s no online checkout for a commercial bid — your account manager will follow up to answer questions and finalize the agreement.</p>
+    <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
+    <div style="margin-top:20px;font-size:14px">
+      Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
+    </div>
+  </div>` : trenchingReviewBeforeBooking ? `
+  <div class="final">
+    <h2>Waves will confirm &amp; schedule your trenching</h2>
+    <p>Your price is set from the measured treatment path. Before we dispatch a crew, a Waves specialist confirms access, exact footage, product, and warranty &mdash; then schedules your visit and sends your invoice. You pay on service day; no card or deposit now.</p>
     <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
@@ -5065,9 +5107,12 @@ ${shellQuestionsBar()}
   }
 
   function ensureBookingCardVisible() {
-    // Commercial estimates render an approval card (no slots) in place of the
-    // booking card — fall back to it so the hero CTA still scrolls somewhere.
-    const target = document.getElementById('booking-card') || document.getElementById('commercial-accept-card');
+    // Commercial estimates render an approval card, and priced termite trenching
+    // renders a review-before-booking card, in place of the slot-picker booking
+    // card — fall back to either so the hero CTA still scrolls somewhere.
+    const target = document.getElementById('booking-card')
+      || document.getElementById('commercial-accept-card')
+      || document.getElementById('trenching-review-card');
     if (!target) return null;
     target.style.display = '';
     if (target.id === 'booking-card' && target.dataset.slotsLoaded !== 'true') {
@@ -6563,6 +6608,20 @@ router.put('/:token/accept', async (req, res, next) => {
     }
 
     let { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+    // Termite trenching review gate (fail-closed): a priced trenching-only estimate
+    // can't be self-booked or self-accepted online — a Waves specialist confirms the
+    // treatment path (access, exact footage, product, warranty) and schedules the
+    // visit before a crew is dispatched. The public view mirrors this (price visible,
+    // no slot picker, "Waves will confirm & schedule" copy); this blocks a crafted
+    // accept from committing a slot behind that UI. Priced only — a trenching estimate
+    // that is genuinely quoteRequired already 409'd above with its own reason.
+    if (estimateTrenchingReviewRequired(estData)) {
+      return res.status(409).json({
+        error: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit — this quote can’t be booked online.',
+        reviewBeforeBooking: true,
+        reason: 'termite_trenching_review',
+      });
+    }
     if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
       recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
     }
@@ -12036,6 +12095,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const pricingBundle = await buildPricingBundle(estimate);
     const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+    const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
+      && estimateTrenchingReviewRequired(estimateDataForIntelligence);
     const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence);
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
@@ -12173,10 +12234,16 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
       cta: {
-        canAccept: terminalState === null && !quoteRequirement.quoteRequired,
+        // Priced termite trenching is review-before-booking: the price stays visible
+        // (NOT quoteRequired) but self-accept/self-book is suppressed on the React
+        // path too, mirroring the SSR view + the reserve/deposit/card-hold gates so
+        // no slot or Stripe intent is ever created for a quote /accept would reject.
+        canAccept: terminalState === null && !quoteRequirement.quoteRequired && !trenchingReviewBeforeBooking,
         terminalState: ctaTerminalState,
         quoteRequired: quoteRequirement.quoteRequired,
         quoteRequiredReason: quoteRequirement.reason || null,
+        reviewBeforeBooking: trenchingReviewBeforeBooking,
+        reviewReason: trenchingReviewBeforeBooking ? 'termite_trenching_review' : null,
         // Proposal-aware fields so the React view renders the formal-proposal
         // state (PDF + account-manager follow-up), not the generic
         // "inspection required" quote-required copy — and is channel-aware
@@ -12282,6 +12349,7 @@ module.exports.germanRoachVisitPhrase = germanRoachVisitPhrase;
 module.exports.buildEstimateAskPrompts = buildEstimateAskPrompts;
 module.exports.resolveAnnualPrepayInvoiceAmount = resolveAnnualPrepayInvoiceAmount;
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
+module.exports.estimateTrenchingReviewRequired = estimateTrenchingReviewRequired;
 module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;

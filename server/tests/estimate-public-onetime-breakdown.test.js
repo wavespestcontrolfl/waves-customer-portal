@@ -46,6 +46,7 @@ const {
   resolveRecurringMonthlyParts,
   resolveEstimateDeclineGuard,
   resolveEstimateQuoteRequirement,
+  estimateTrenchingReviewRequired,
   resolveRecurringFirstVisitAmount,
   resolveRecurringFirstVisitAmountFromFrequency,
   shouldApplyFirstViewSideEffects,
@@ -2539,6 +2540,96 @@ describe('public estimate one-time breakdown', () => {
     // Trenching is a liquid barrier, not a bait system — the chip matches the method.
     expect(html).toContain('data-estimate-ask-prompt="How long does the barrier last?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+    // Second trenching-specific chip (drilling is a top question for slab/driveway jobs).
+    expect(html).toContain('data-estimate-ask-prompt="Do you drill the concrete or driveway?"');
+  });
+
+  test('server-rendered priced termite trenching quote gates self-booking behind Waves review', () => {
+    const html = renderPage('termite-trenching-priced-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2210,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    // Price stays visible (NOT quoteRequired) — this is a review-before-booking gate,
+    // not a "quote required" hide-the-price hold.
+    expect(html).toContain('$2,210');
+    expect(html).not.toContain('Quote Required');
+    // Review card renders in place of the self-book slot picker.
+    expect(html).toContain('id="trenching-review-card"');
+    expect(html).toContain('Review your termite trenching quote with Waves');
+    // No self-book affordances: no slot-picker booking card, no "Pick a time and book".
+    expect(html).not.toContain('id="booking-card"');
+    expect(html).not.toContain('class="cta pick-time-cta"');
+    // Honest copy — the old over-promise ("before a normal service slot is reserved
+    // online") is gone; scheduling happens after Waves review.
+    expect(html).not.toContain('before a normal service slot is reserved online');
+    expect(html).toContain('Waves will confirm &amp; schedule your trenching');
+  });
+
+  test('discounted trenching-only quote (with a discount line) still gets the review gate', () => {
+    const html = renderPage('termite-trenching-discounted-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2100,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          // Trenching + a negative discount row must NOT defeat the trenching-only
+          // classification (a non-billable row is ignored, like the Bora-Care path).
+          items: [
+            { service: 'trenching', name: 'Termite Trenching', price: 2210 },
+            { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -110 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('id="trenching-review-card"');
+    expect(html).not.toContain('id="booking-card"');
+    expect(html).not.toContain('class="cta pick-time-cta"');
+  });
+
+  test('estimateTrenchingReviewRequired is the shared gate for every trenching booking/money path', () => {
+    const trenchingOnly = { result: { recurring: { services: [] }, oneTime: {
+      items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }], specItems: [] } } };
+    const trenchingDiscounted = { result: { recurring: { services: [] }, oneTime: {
+      items: [
+        { service: 'trenching', name: 'Termite Trenching', price: 2210 },
+        { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -110 },
+      ], specItems: [] } } };
+    const trenchingPlusOtherCharge = { result: { recurring: { services: [] }, oneTime: {
+      items: [
+        { service: 'trenching', name: 'Termite Trenching', price: 2210 },
+        { service: 'pre_slab_termiticide', name: 'Pre-Slab', price: 500 },
+      ], specItems: [] } } };
+    const pestOnly = { result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control' }] }, oneTime: { items: [], specItems: [] } } };
+
+    expect(estimateTrenchingReviewRequired(trenchingOnly)).toBe(true);
+    expect(estimateTrenchingReviewRequired(trenchingDiscounted)).toBe(true); // discount row ignored
+    expect(estimateTrenchingReviewRequired(trenchingPlusOtherCharge)).toBe(false); // positive non-trenching charge
+    expect(estimateTrenchingReviewRequired(pestOnly)).toBe(false);
+    expect(estimateTrenchingReviewRequired({})).toBe(false);
   });
 
   test('server-rendered pre-slab estimate uses pre-slab ask prompt and never duplicates its copy', () => {
