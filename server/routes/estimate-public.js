@@ -6425,6 +6425,20 @@ function isCommercialAutoAcceptEstimate(estimate = {}) {
   return recurringRows.some(isCommercialSvc);
 }
 
+// The commercial deposit exemption covers accepts that mint NOTHING at accept
+// time: the recurring commercial program is manually invoiced after on-site
+// confirmation (held or not), and an UNinvoiced one-time commercial accept's
+// deposit could never credit — commercial has no self-servable booking for the
+// completed-visit roll-forward. A one-time INVOICE-MODE accept is different:
+// its invoice is minted right in the accept transaction (with depositCredit),
+// so it keeps the standard one-time deposit gate — agreeing with /data's
+// requiredForOneTime and /deposit-intent, which collect that deposit. Without
+// this carve-out a crafted accept could skip the deposit the UI just required.
+function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirmationHold = false, treatAsOneTime = false, billByInvoice = false } = {}) {
+  if (treatAsOneTime && billByInvoice) return false;
+  return isCommercialAccept === true || siteConfirmationHold === true;
+}
+
 // PUT /api/estimates/:token/accept — customer accepts
 // Body (backward compatible — both optional):
 //   { slotId?: string, paymentMethodPreference?: 'card_on_file' | 'deposit_now' | 'pay_at_visit' | 'prepay_annual' }
@@ -6649,7 +6663,12 @@ router.put('/:token/accept', async (req, res, next) => {
       // resolver re-derive an unrelated linked appointment when this is null.
       useLinkedFallback: false,
     });
-    if (isCommercialAccept || holdFirstInvoiceForSiteConfirmation) {
+    if (commercialAcceptDepositExempt({
+      isCommercialAccept,
+      siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
+      treatAsOneTime,
+      billByInvoice,
+    })) {
       // Commercial bills by manual invoice after on-site confirmation, not a
       // booking deposit/card — and nothing is auto-scheduled, so there is no
       // first-visit invoice to credit a deposit against. Exempt the commitment
@@ -6657,6 +6676,9 @@ router.put('/:token/accept', async (req, res, next) => {
       // The hold predicate is included so a held estimate is deposit-exempt even
       // in a line shape commercialLowConfidenceRange sees but the isCommercial
       // Accept detector doesn't (result.lineItems / top-level lineItems).
+      // NOT exempt: a one-time INVOICE-MODE commercial accept — its invoice is
+      // minted below and the deposit credits it (see commercialAcceptDeposit
+      // Exempt), matching /data requiredForOneTime + /deposit-intent.
       depositPolicy.required = false;
       depositPolicy.slotRequired = false;
       depositPolicy.exemptReason = 'commercial_manual_billing';
@@ -12472,6 +12494,7 @@ module.exports.estimateInvoicePayUrlParams = estimateInvoicePayUrlParams;
 module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVisits;
 module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
+module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.foamFrequenciesFromEngineResult = foamFrequenciesFromEngineResult;

@@ -11,7 +11,7 @@ const {
   commercialLowConfidenceRange,
   commercialLowConfidenceRequiresSiteQuote,
 } = require('../services/estimate-delivery-options');
-const { resolveEstimateQuoteRequirement, renderPage, attachPublicPricingContract, buildAcceptSuccessPayload, buildEstimateAcceptanceContract } = require('../routes/estimate-public');
+const { resolveEstimateQuoteRequirement, renderPage, attachPublicPricingContract, buildAcceptSuccessPayload, buildEstimateAcceptanceContract, commercialAcceptDepositExempt } = require('../routes/estimate-public');
 const { generateEstimate } = require('../services/pricing-engine');
 
 const recurring = (services) => ({ result: { recurring: { services } } });
@@ -221,6 +221,29 @@ describe('buildEstimateAcceptanceContract — held estimates accept without a sl
   });
   test('no hold → standard slot pick (unchanged)', () => {
     expect(buildEstimateAcceptanceContract({ quoteRequirement: {} }).mode).toBe('standard_slot_pick');
+  });
+});
+
+describe('commercialAcceptDepositExempt — the accept gate must agree with /data + /deposit-intent', () => {
+  // The exemption covers accepts that mint nothing at accept time. A one-time
+  // INVOICE-MODE accept mints its invoice in the accept transaction (deposit
+  // credits it), so it keeps the standard gate — the deposit the UI collected
+  // via requiredForOneTime + /deposit-intent is enforced, not silently waived.
+  test('recurring commercial accept stays exempt', () => {
+    expect(commercialAcceptDepositExempt({ isCommercialAccept: true, billByInvoice: true })).toBe(true);
+  });
+  test('held recurring accept stays exempt (shape the commercial detector misses)', () => {
+    expect(commercialAcceptDepositExempt({ siteConfirmationHold: true, billByInvoice: true })).toBe(true);
+  });
+  test('one-time INVOICE-MODE commercial accept is NOT exempt (invoice minted at accept)', () => {
+    expect(commercialAcceptDepositExempt({ isCommercialAccept: true, treatAsOneTime: true, billByInvoice: true })).toBe(false);
+  });
+  test('one-time UNinvoiced commercial accept stays exempt (nothing to credit — no self-serve booking)', () => {
+    expect(commercialAcceptDepositExempt({ isCommercialAccept: true, treatAsOneTime: true, billByInvoice: false })).toBe(true);
+  });
+  test('non-commercial accepts are never exempted here', () => {
+    expect(commercialAcceptDepositExempt({ treatAsOneTime: true, billByInvoice: true })).toBe(false);
+    expect(commercialAcceptDepositExempt({})).toBe(false);
   });
 });
 
