@@ -226,7 +226,7 @@ function buildCommercialManualQuoteResult(service, property = {}, options = {}) 
     autoQuoteRequiresAdminApproval: true,
     manualReviewReasons,
     reason: isLawn
-      ? 'Commercial lawn treatment requires manual quote or commercial pilot pricing.'
+      ? 'Commercial turf treatment requires manual quote or commercial pilot pricing.'
       : 'Commercial pest requires manual quote or commercial pilot pricing.',
     price: null,
     monthly: null,

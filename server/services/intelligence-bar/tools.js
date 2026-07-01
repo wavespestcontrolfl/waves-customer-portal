@@ -449,13 +449,16 @@ async function findOverdueCustomers(input) {
     termite: 365,    // annual
   };
 
-  // Service type patterns for matching
+  // Service type patterns for matching. Case-insensitive POSIX regex (~*) so the
+  // lawn bucket can alternate lawn|turf — commercial lawn persists as
+  // "Commercial Turf Treatment Program" in service_type, and a plain ILIKE
+  // pattern can't OR the two. (~* 'pest' ≡ ILIKE '%pest%' for plain substrings.)
   const patterns = {
-    pest: '%pest%',
-    lawn: '%lawn%',
-    mosquito: '%mosquito%',
-    tree_shrub: '%tree%shrub%',
-    termite: '%termite%',
+    pest: 'pest',
+    lawn: 'lawn|turf',
+    mosquito: 'mosquito',
+    tree_shrub: 'tree.*shrub',
+    termite: 'termite',
   };
 
   const categories = service_category === 'all'
@@ -474,17 +477,17 @@ async function findOverdueCustomers(input) {
         'customers.id', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.city', 'customers.waveguard_tier',
         'customers.monthly_rate', 'customers.active',
-        db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ILIKE ?) as last_service_date", [patterns[cat]]),
-        db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed') AND service_type ILIKE ?) as next_scheduled", [patterns[cat]]),
+        db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) as last_service_date", [patterns[cat]]),
+        db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed') AND service_type ~* ?) as next_scheduled", [patterns[cat]]),
       )
       .where('customers.active', true)
       .whereExists(function () {
         this.select('*').from('service_records')
           .whereRaw('service_records.customer_id = customers.id')
-          .whereILike('service_type', patterns[cat]);
+          .whereRaw('service_type ~* ?', [patterns[cat]]);
       })
-      .havingRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ILIKE ?) < ?", [patterns[cat], cutoff.toISOString().split('T')[0]])
-      .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ILIKE ?) ASC", [patterns[cat]])
+      .havingRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) < ?", [patterns[cat], cutoff.toISOString().split('T')[0]])
+      .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC", [patterns[cat]])
       .limit(limit);
 
     for (const c of customers) {

@@ -4675,7 +4675,7 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcLawn" label="Lawn Care" />
               {form.svcLawn && commercialDetected && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-12 text-zinc-600">
-                  Commercial lawn treatment is auto-priced (estimated — confirmed on site). Residential lawn pricing is suppressed.
+                  Commercial turf treatment is auto-priced (estimated — confirmed on site). Residential lawn pricing is suppressed.
                 </div>
               )}
               {form.svcLawn && !commercialDetected && (
