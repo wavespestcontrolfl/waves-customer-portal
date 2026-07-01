@@ -2084,6 +2084,11 @@ export default function EstimateToolViewV2({
     svcRoach: false,
     svcBedbug: false,
     svcExclusion: false,
+    svcRodentGuarantee: false,
+    rgTrappingCompleted: false,
+    rgExclusionCompleted: false,
+    rgSanitationBaseline: false,
+    rgNoActivityAfterFinalCheck: false,
     showOneTimeOption: false,
     billByInvoice: false,
   });
@@ -2275,6 +2280,7 @@ export default function EstimateToolViewV2({
       "svcRoach",
       "svcBedbug",
       "svcExclusion",
+      "svcRodentGuarantee",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
     const anySelected = recurringCount > 0 || commercialAutoPricedCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
@@ -3028,6 +3034,7 @@ export default function EstimateToolViewV2({
       if (form.svcRoach) selectedServices.push("ROACH");
       if (form.svcBedbug) selectedServices.push("BEDBUG");
       if (form.svcExclusion) selectedServices.push("EXCLUSION");
+      if (form.svcRodentGuarantee) selectedServices.push("RODENT_GUARANTEE");
 
       const manualDiscountType =
         overrides.manualDiscountType ?? form.manualDiscountType;
@@ -3169,6 +3176,10 @@ export default function EstimateToolViewV2({
         exclMeshSoftLF: parseInt(form.exclMeshSoftLF, 10) || 0,
         exclMeshConcreteLF: parseInt(form.exclMeshConcreteLF, 10) || 0,
         exclWaiveInspection: form.exclWaive === "YES",
+        rgTrappingCompleted: !!form.rgTrappingCompleted,
+        rgExclusionCompleted: !!form.rgExclusionCompleted,
+        rgSanitationBaseline: !!form.rgSanitationBaseline,
+        rgNoActivityAfterFinalCheck: !!form.rgNoActivityAfterFinalCheck,
         rodentTrappingPlan: form.rodentTrappingPlan || "standard",
         rodentTrappingEmergency: !!form.rodentTrappingEmergency,
         callbacksUsed: parseInt(form.callbacksUsed, 10) || 0,
@@ -6098,6 +6109,21 @@ export default function EstimateToolViewV2({
                       ]}
                     />
                   </FieldV2>
+                </div>
+              )}
+              <CheckboxV2 k="svcRodentGuarantee" label="Rodent Guarantee (annual, renewable)" />
+              {form.svcRodentGuarantee && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium mb-2">
+                    Guarantee Eligibility — all four required
+                  </p>
+                  <CheckboxV2 k="rgTrappingCompleted" label="Trapping completed" />
+                  <CheckboxV2 k="rgExclusionCompleted" label="Exclusion completed" />
+                  <CheckboxV2 k="rgSanitationBaseline" label="Sanitation completed or photo baseline on file" />
+                  <CheckboxV2 k="rgNoActivityAfterFinalCheck" label="No activity after final trap check" />
+                  <div className="text-12 text-zinc-600 mt-2">
+                    $199–$299/yr by property tier. 12-month re-entry warranty, renewable annually — free re-service during the term. All four boxes must be confirmed or the guarantee will not be added.
+                  </div>
                 </div>
               )}
             </div>

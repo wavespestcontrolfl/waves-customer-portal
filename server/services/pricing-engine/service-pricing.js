@@ -7283,7 +7283,7 @@ function priceRodentGuarantee(options = {}) {
     eligibilityMissing: missing,
     effectivePoints,
     detail: eligible
-      ? `$${price}/yr — 12-month re-entry warranty (${tier} tier)`
+      ? `$${price}/yr — 12-month re-entry warranty, renewable annually (${tier} tier)`
       : `INELIGIBLE — missing: ${missing.join(', ')}`,
   };
 }

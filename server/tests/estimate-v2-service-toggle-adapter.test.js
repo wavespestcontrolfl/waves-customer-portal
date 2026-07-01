@@ -542,4 +542,53 @@ describe('estimate v2 service toggle adapter', () => {
     expect(pest.productionDiagnostics.reviewReasons).toContain('large_pool_cage');
     expect(pest.productionDiagnostics.reviewReasons).not.toContain('pool_cage_size_inferred');
   });
+
+  test('maps RODENT_GUARANTEE with all eligibility flags into a priced renewable warranty line', () => {
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: true,
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+
+    expect(input.services.rodentGuarantee).toEqual({
+      eligibility: {
+        trappingCompleted: true,
+        exclusionCompleted: true,
+        sanitationCompletedOrPhotoBaseline: true,
+        noActivityAfterFinalTrapCheck: true,
+      },
+    });
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+
+    expect(item).toBeDefined();
+    expect(item.eligible).toBe(true);
+    expect(item.price).toBeGreaterThan(0);
+    expect(item.detail).toContain('renewable annually');
+  });
+
+  test('drops the RODENT_GUARANTEE line when any eligibility flag is missing (fail closed)', () => {
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: false, // not confirmed
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+
+    expect(input.services.rodentGuarantee.eligibility.exclusionCompleted).toBe(false);
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item).toBeUndefined();
+  });
 });

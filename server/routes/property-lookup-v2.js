@@ -2694,6 +2694,19 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       };
     }
   }
+  // Annual rodent guarantee — gated. The engine drops the line unless all four
+  // eligibility flags are true, so the rep confirms each affirmatively; missing
+  // any → INELIGIBLE and no line item (fail closed).
+  if (sel.has('RODENT_GUARANTEE')) {
+    services.rodentGuarantee = {
+      eligibility: {
+        trappingCompleted: !!o.rgTrappingCompleted,
+        exclusionCompleted: !!o.rgExclusionCompleted,
+        sanitationCompletedOrPhotoBaseline: !!o.rgSanitationBaseline,
+        noActivityAfterFinalTrapCheck: !!o.rgNoActivityAfterFinalCheck,
+      },
+    };
+  }
   if (sel.has('TOPDRESS')) {
     const topDressArea = Math.max(0, Number(o.topDressArea) || 0);
     services.topDressing = topDressArea > 0
