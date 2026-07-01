@@ -1159,7 +1159,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       )}
 
-      {showManualEntryHint && (
+      {showManualEntryHint && !isCardFamily && (
         <div style={{
           background: 'var(--surface-subtle, rgba(0,0,0,0.03))',
           border: '1px solid var(--border)',
