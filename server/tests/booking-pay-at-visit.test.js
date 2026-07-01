@@ -57,6 +57,11 @@ describe('derivePerApplicationAmount — estimate-level net ÷ cadence', () => {
     expect(derivePerApplicationAmount(est(387.96, [{ mo: 32.33, perTreatment: 96.99, frequency: 'quarterly' }]))).toBe(96.99);
   });
 
+  test('monthlyTotal / perVisit / pa amount aliases resolve eligibility', () => {
+    expect(derivePerApplicationAmount(est(387.96, [{ monthlyTotal: 32.33, perVisit: 96.99, visitsPerYear: 4 }]))).toBe(96.99);
+    expect(derivePerApplicationAmount(est(387.96, [{ monthly_total: 32.33, pa: 96.99, visitsPerYear: 4 }]))).toBe(96.99);
+  });
+
   test('ambiguity / no-perApp / no-cadence / no-total / empty → null', () => {
     expect(derivePerApplicationAmount(est(600, [pest(), pest({ perApp: 60 })]))).toBeNull();
     expect(derivePerApplicationAmount(est(360, [{ monthly: 30, visitsPerYear: 4 }]))).toBeNull();
@@ -90,6 +95,15 @@ describe('resolveBookingVisitPrice — linked estimate (all shapes, service-boun
     expect(resolveBookingVisitPrice({ estimate, serviceKey: 'lawn_care' })).toBeNull();
     expect(resolveBookingVisitPrice({ estimate })).toBeNull();
   });
+
+  test('supplemental recurring program present → null (annual_total covers both)', () => {
+    // one pest service row, but a rodent-bait recurring program rides annual_total.
+    const estimate = { id: 'e5', annual_total: 500, estimate_data: {
+      engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] },
+      result: { recurring: { rodentBaitMo: 49 } },
+    } };
+    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control' })).toBeNull();
+  });
 });
 
 describe('resolveBookingVisitPrice — customer recent-draft fallback (bound)', () => {
@@ -116,6 +130,15 @@ describe('resolveBookingVisitPrice — customer recent-draft fallback (bound)', 
 
   test('different property (different street, same zip) → null', () => {
     expect(resolve([draft('c1', 'pest_control', { address: '999 Elsewhere Ave, Bradenton, FL 34212' })])).toBeNull();
+  });
+
+  test('suffix + ZIP+4 variants still match ("8th Pl" vs "8th Place East", 34212-1234)', () => {
+    const res = resolveBookingVisitPrice({
+      candidateEstimates: [draft('c1', 'pest_control')], // stored "15715 8th Place East, ... 34212"
+      serviceKey: 'pest_control',
+      bookingAddress: { line1: '15715 8th Pl East', zip: '34212-1234' },
+    });
+    expect(res.sourceEstimateId).toBe('c1');
   });
 
   test('substring street is NOT a match ("112 Main" vs booked "12 Main")', () => {

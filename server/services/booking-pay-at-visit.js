@@ -27,10 +27,24 @@ const logger = require('./logger');
 // A recurring line's monthly price (any positive value across shape aliases) —
 // used ONLY to identify a priced recurring line, never as the billed amount.
 function lineMonthlyOf(s) {
-  return Number(s.monthlyAfterCredits ?? s.monthlyAfterDiscount ?? s.monthly ?? s.mo);
+  return Number(s.monthlyAfterCredits ?? s.monthlyAfterDiscount ?? s.monthly ?? s.mo ?? s.monthlyTotal ?? s.monthly_total);
 }
 function perAppOf(s) {
-  return Number(s.perApp ?? s.perTreatment);
+  return Number(s.perApp ?? s.perTreatment ?? s.perVisit ?? s.pa);
+}
+
+// Supplemental recurring programs (rodent bait, palm injection) are persisted
+// OUTSIDE recurring.services (result.recurring.rodentBaitMo / palmInjectionMo)
+// and NOT surfaced by recurringServicesFromEstimateData — but estimate.annual_total
+// still includes them. So a pest+rodent quote could show a single pest service
+// row while annual_total covers both. Fail closed when any supplemental program
+// is present so we never divide a combined total by one service's cadence.
+function hasSupplementalRecurring(estimate) {
+  const data = estimate.estimate_data || {};
+  const rec = data.recurring || data.result?.recurring || {};
+  const res = data.results || data.result?.results || {};
+  return Number(rec.rodentBaitMo) > 0 || Number(rec.palmInjectionMo) > 0
+    || Number(res.rodBaitMo) > 0 || Number(res.palmInjectionMo) > 0;
 }
 
 const VISITS_PER_YEAR_BY_PATTERN = {
@@ -96,17 +110,29 @@ function serviceKeyOf(svc) {
   return serviceKeyFor(svc);
 }
 
+// Canonical street suffixes (mirrors booking.js's address normalization) so
+// "Main Street" == "Main St", "8th Place" == "8th Pl", etc.
+const STREET_SUFFIXES = {
+  street: 'st', st: 'st', avenue: 'ave', ave: 'ave', av: 'ave', road: 'rd', rd: 'rd',
+  drive: 'dr', dr: 'dr', lane: 'ln', ln: 'ln', court: 'ct', ct: 'ct', place: 'pl', pl: 'pl',
+  boulevard: 'blvd', blvd: 'blvd', circle: 'cir', cir: 'cir', terrace: 'ter', ter: 'ter',
+  way: 'way', trail: 'trl', trl: 'trl', parkway: 'pkwy', pkwy: 'pkwy', highway: 'hwy', hwy: 'hwy',
+  square: 'sq', sq: 'sq',
+};
 function normalizeAddr(v) {
-  return String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+    .split(' ').filter(Boolean).map((t) => STREET_SUFFIXES[t] || t).join(' ');
 }
 
 // Fail-CLOSED address bind for the candidate (fallback) path: the candidate
-// quote's street line and 5-digit zip must match the booked address EXACTLY
-// (normalized). Substring matching is deliberately avoided so "112 Main St"
-// can't match a booking for "12 Main St". Not applied to a linked estimate.
+// quote's street line and 5-digit zip must match the booked address after
+// suffix canonicalization (so "St"/"Street" variants and ZIP+4 are treated as
+// equal, consistent with booking.js). Substring matching is deliberately
+// avoided so "112 Main St" can't match a booking for "12 Main St". Not applied
+// to an explicitly-linked estimate.
 function estimateAddressMatches(estimate, bookingAddress) {
   const bookStreet = normalizeAddr(bookingAddress?.line1);
-  const bookZip = String(bookingAddress?.zip || '').replace(/\D/g, '');
+  const bookZip = String(bookingAddress?.zip || '').replace(/\D/g, '').slice(0, 5); // ZIP+4 → first 5
   if (!bookStreet || bookZip.length !== 5) return false;
   const estStreet = normalizeAddr(String(estimate?.address || '').split(',')[0]);
   // The zip is the LAST 5-digit group — a 5-digit street number (e.g. "15715")
@@ -122,6 +148,9 @@ function priceFromEstimate(estimate, serviceKey) {
   const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
   if (!picked) return null;
   if (!serviceKey || serviceKeyOf(picked.svc) !== serviceKey) return null;
+  // annual_total (the amount basis) would also cover any supplemental recurring
+  // program, so pricing a single service off it would overbill → fail closed.
+  if (hasSupplementalRecurring(estimate)) return null;
   const amount = perVisitAmountForEstimate(estimate, picked);
   return amount ? { amount, sourceEstimateId: estimate.id || null, serviceKey } : null;
 }

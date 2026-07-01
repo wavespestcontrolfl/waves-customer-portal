@@ -942,8 +942,10 @@ async function createSelfBooking(payload = {}) {
           const candidateEstimates = await db('estimates')
             .where({ customer_id: custId, source: 'quote_wizard' })
             .whereIn('status', ['draft', 'sent', 'viewed'])
-            .whereRaw("created_at > NOW() - INTERVAL '14 days'")
-            .orderBy('created_at', 'desc')
+            // A wizard re-run refreshes the row + updated_at but keeps created_at,
+            // so window on the last refresh — the customer just booked from it.
+            .whereRaw("COALESCE(updated_at, created_at) > NOW() - INTERVAL '14 days'")
+            .orderBy(db.raw('COALESCE(updated_at, created_at)'), 'desc')
             .catch(() => []);
           // Candidates must also match the booked address (fail-closed) so a
           // second property's quote for the same customer can't be picked up.
