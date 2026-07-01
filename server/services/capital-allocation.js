@@ -88,6 +88,12 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
   const blendedExact = paidSpend > 0 ? paidLifetime / paidSpend : null;
   const blendedLtvCac = blendedExact == null ? null : round1(blendedExact);
   const blendedBand = bandFor(blendedExact);
+  // Small-N guard for the HEADLINE too — the blended ratio is only as trustworthy
+  // as the paid customers underneath it. A 22:1 blend off 1 customer must not read
+  // as a confident "scale up"; carry the paid-customer count + a confidence flag so
+  // the card can fade the headline exactly as it fades the per-channel rows.
+  const blendedCustomers = paid.reduce((t, c) => t + (Number(c.customers) || 0), 0);
+  const blendedConfidence = blendedCustomers >= minConfidentCustomers ? 'ok' : 'low';
 
   // Opportunity (the optimistic "pour cash in" call) requires CONFIDENCE — don't
   // bet on a sky-high ratio off a handful of customers. Highest-ratio scale/
@@ -111,6 +117,8 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
       blendedBand,
       blendedBandLabel: BAND_META[blendedBand].label,
       blendedTone: BAND_META[blendedBand].tone,
+      blendedCustomers,
+      blendedConfidence,
       topOpportunity: opp
         ? { source: opp.source, sourceKey: opp.sourceKey, ltvCac: opp.ltvCac, band: opp.band }
         : null,
