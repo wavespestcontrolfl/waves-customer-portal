@@ -341,6 +341,91 @@ function commercialRiskTypeReviewNeeded(estimateData) {
   return !isCommercialRiskType(firstCommercialRiskType(data));
 }
 
+// Low-confidence commercial price RANGE (owner-locked risk-type lane, decision 7).
+// A commercial auto-priced recurring line whose driving area is estimated/large
+// carries pricingConfidence 'LOW'; it contributes a ±20% band to the customer
+// range, while MEDIUM lines stay exact. When the aggregate band is too wide
+// (> $300/mo swing) a range is useless — the estimate must be site-confirmed (a
+// manual quote). Reads the persisted commercial recurring lines (the
+// v1-legacy-mapper commAdd shape: service + annual + pricingConfidence).
+const COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT = 0.20;
+const COMMERCIAL_LOW_CONFIDENCE_MAX_MONTHLY_SWING = 300;
+
+function commercialLineMonthly(svc) {
+  const monthly = Number(svc.monthly ?? svc.mo);
+  if (Number.isFinite(monthly) && monthly > 0) return monthly;
+  const annual = Number(svc.annual);
+  return Number.isFinite(annual) && annual > 0 ? annual / 12 : 0;
+}
+
+// Collect the priced commercial recurring lines from EITHER persisted shape — the
+// admin mapped `result.recurring.services` (commAdd) OR the public-quote mirror's
+// `engineResult.lineItems` — deduped by service so no line is double-counted, and
+// preferring the row that actually carries pricingConfidence + a positive amount
+// (recurring supplementation can drop pricingConfidence, so the raw lineItems row
+// may be the one that has it).
+function commercialRecurringLinesForConfidence(data) {
+  const sources = [
+    data?.result?.recurring?.services,
+    data?.recurring?.services,
+    data?.result?.lineItems,
+    data?.engineResult?.lineItems,
+    data?.lineItems,
+  ];
+  const score = (row) => (row.pricingConfidence ? 2 : 0) + (commercialLineMonthly(row) > 0 ? 1 : 0);
+  const byService = new Map();
+  for (const arr of sources) {
+    if (!Array.isArray(arr)) continue;
+    for (const svc of arr) {
+      if (!svc || typeof svc !== 'object' || typeof svc.service !== 'string') continue;
+      if (!svc.service.startsWith('commercial_')) continue;
+      if (svc.quoteRequired === true) continue; // manual lines handled by the quote gate
+      const existing = byService.get(svc.service);
+      if (!existing || score(svc) > score(existing)) byService.set(svc.service, svc);
+    }
+  }
+  return [...byService.values()];
+}
+
+function commercialLowConfidenceRange(estimateData) {
+  const data = parseEstimateData(estimateData);
+  const services = commercialRecurringLinesForConfidence(data || {});
+  let lowMonthly = 0;
+  let highMonthly = 0;
+  let hasLowConfidence = false;
+  for (const svc of services) {
+    if (!svc || typeof svc !== 'object') continue;
+    if (typeof svc.service !== 'string' || !svc.service.startsWith('commercial_')) continue;
+    if (svc.quoteRequired === true) continue; // manual lines handled by the quote gate
+    const monthly = commercialLineMonthly(svc);
+    if (monthly <= 0) continue;
+    if (String(svc.pricingConfidence || '').toUpperCase() === 'LOW') {
+      hasLowConfidence = true;
+      lowMonthly += monthly * (1 - COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT);
+      highMonthly += monthly * (1 + COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT);
+    } else {
+      lowMonthly += monthly;
+      highMonthly += monthly;
+    }
+  }
+  if (!hasLowConfidence) return { hasLowConfidence: false };
+  const round = (n) => Math.round(n * 100) / 100;
+  const rangeLowMonthly = round(lowMonthly);
+  const rangeHighMonthly = round(highMonthly);
+  const monthlySwing = round(rangeHighMonthly - rangeLowMonthly);
+  return {
+    hasLowConfidence: true,
+    rangeLowMonthly,
+    rangeHighMonthly,
+    monthlySwing,
+    forceSiteQuote: monthlySwing > COMMERCIAL_LOW_CONFIDENCE_MAX_MONTHLY_SWING,
+  };
+}
+
+function commercialLowConfidenceRequiresSiteQuote(estimateData) {
+  return commercialLowConfidenceRange(estimateData).forceSiteQuote === true;
+}
+
 function cloneEstimateData(data) {
   if (!data || typeof data !== 'object') return data;
   return JSON.parse(JSON.stringify(data));
@@ -836,6 +921,8 @@ module.exports = {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
   commercialRiskTypeReviewNeeded,
+  commercialLowConfidenceRange,
+  commercialLowConfidenceRequiresSiteQuote,
   hasDerivableOneTimePestChoicePricing,
   hasPestRecurringServiceForOneTimeOption,
   normalizeEstimateDethatchingManagerApproval,
