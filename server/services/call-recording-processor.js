@@ -282,6 +282,16 @@ function isNonLeadCallContent(extracted = {}) {
   return NON_LEAD_CALL_TYPES.has(callType);
 }
 
+// Word-of-mouth referral detection from the AI call extraction. The prompt sets
+// referred_by to the referrer's name (or 'unnamed') ONLY on an explicit referral.
+// Returns that name, or '' when there's no referral — used to override the dialed-
+// number source with the 'referral' channel so word-of-mouth is attributed.
+function referrerNameFromExtracted(extracted = {}) {
+  const raw = String(extracted?.referred_by || '').trim();
+  if (!raw || ['null', 'none', 'n/a', 'no'].includes(raw.toLowerCase())) return '';
+  return raw;
+}
+
 // A lead is "qualified" only once we've actually captured the contact info the
 // office needs to work it: first + last name, a service street address, and an
 // email. Phone is implicit (caller ID). Evaluate against the MERGED record
@@ -1323,8 +1333,13 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "pain_points": "brief summary of customer concerns or pest issues",
   "call_summary": "2-3 sentence summary of the call",
   "lead_quality": "hot/warm/cold/spam",
-  "matched_service": "best match from: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, or null"
+  "matched_service": "best match from: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, or null",
+  "referred_by": "if the caller EXPLICITLY says a friend / neighbor / existing customer referred or recommended them, the referrer's name — or 'unnamed' if they say they were referred but don't name who. Else null."
 }
+
+IMPORTANT — referred_by (word-of-mouth attribution):
+- Set referred_by ONLY on an explicit referral: "my neighbor Jane told me to call", "a friend recommended you", "you treat my sister's house and she said to call". Use the referrer's name if stated, else "unnamed".
+- Do NOT infer a referral from a passing mention of a neighbor, or from Google / website / ad / Facebook / "saw your truck" mentions. When unsure, use null.
 
 IMPORTANT — is this a new lead? Set call_type and is_lead together:
 - "new_inquiry" (is_lead=true): a NEW prospective customer asking about service, pricing, availability, or booking for the first time. This is the ONLY call_type that is a lead.
@@ -2198,6 +2213,13 @@ const CallRecordingProcessor = {
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
         const numberConfig = TWILIO_NUMBERS.findByNumber(call.to_phone);
         const leadSource = numberConfig ? TWILIO_NUMBERS.getLeadSourceFromNumber(call.to_phone) : { source: 'phone_call' };
+        // Explicit word-of-mouth referral overrides the dialed-number source — the
+        // referral is the real acquisition channel, not the tracking line they called.
+        const referredByName = referrerNameFromExtracted(extracted);
+        if (referredByName) {
+          leadSource.source = 'referral';
+          leadSource.detail = referredByName.toLowerCase() === 'unnamed' ? 'Referral (unnamed)' : `Referred by ${referredByName}`;
+        }
 
         try {
           // Parse address if AI extracted a full address string
@@ -2229,7 +2251,7 @@ const CallRecordingProcessor = {
             zip: addrZip || null,
             referral_code: code,
             lead_source: leadSource.source || 'phone_call',
-            lead_source_detail: numberConfig?.domain || 'inbound call',
+            lead_source_detail: leadSource.detail || numberConfig?.domain || 'inbound call',
             pipeline_stage: 'new_lead',
             pipeline_stage_changed_at: new Date(),
             nearest_location_id: loc.id,
@@ -2531,6 +2553,13 @@ const CallRecordingProcessor = {
             .first();
           if (ls) { leadSourceId = ls.id; leadSourceRow = ls; }
           else logger.warn(`[call-proc] No lead_source matched ${maskPhone(call.to_phone)} (variants tried: ${[...variants].map(maskPhone).join(', ')})`);
+          // Explicit referral wins over the number-matched source: point the lead at
+          // the 'referral' lead_sources row so the PPC funnel attributes it to the
+          // referral channel (its per-conversion reward cost), not the dialed line.
+          if (referrerNameFromExtracted(extracted)) {
+            const refRow = await db('lead_sources').where({ source_type: 'referral', is_active: true }).first().catch(() => null);
+            if (refRow) { leadSourceId = refRow.id; leadSourceRow = refRow; }
+          }
         } catch (e) {
           logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
         }
@@ -3542,6 +3571,7 @@ const CallRecordingProcessor = {
 
 CallRecordingProcessor._test = {
   canonicalWavesService,
+  referrerNameFromExtracted,
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
   resolveCallContactPhone,
