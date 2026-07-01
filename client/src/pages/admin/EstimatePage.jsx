@@ -872,7 +872,7 @@ function EstimateToolView() {
     trenchingEstimateFromFootprint: false,
     trenchingProductKey: "taurus_sc",
     trenchingApplicationRate: "standard",
-    trenchingDepthFt: "1",
+    trenchingDepthFt: "0.5",
     trenchingWarrantyTier: "one_year_retreat",
     trenchingLabelConfirmed: false,
     boracareSqft: "",
@@ -1769,7 +1769,7 @@ function EstimateToolView() {
           trenchingEstimateFromFootprint: !!form.trenchingEstimateFromFootprint,
           trenchingProductKey: form.trenchingProductKey || "taurus_sc",
           trenchingApplicationRate: form.trenchingApplicationRate || "standard",
-          trenchingDepthFt: form.trenchingDepthFt || "1",
+          trenchingDepthFt: form.trenchingDepthFt || "0.5",
           trenchingWarrantyTier: form.trenchingWarrantyTier || "one_year_retreat",
           trenchingLabelConfirmed: !!form.trenchingLabelConfirmed,
           boracareSqft,
@@ -2243,7 +2243,7 @@ function EstimateToolView() {
       trenchingEstimateFromFootprint: false,
       trenchingProductKey: "taurus_sc",
       trenchingApplicationRate: "standard",
-      trenchingDepthFt: "1",
+      trenchingDepthFt: "0.5",
       trenchingWarrantyTier: "one_year_retreat",
       trenchingLabelConfirmed: false,
       customerName: "",
@@ -3506,7 +3506,7 @@ function EstimateToolView() {
                             k="trenchingApplicationRate"
                             options={[
                               { value: "standard", label: "Standard 0.06%" },
-                              { value: "high", label: "High/problem-soil rate" },
+                              { value: "high", label: "High/problem-soil rate (+12%)" },
                             ]}
                           />
                         </Field>
@@ -3514,9 +3514,9 @@ function EstimateToolView() {
                           <Select
                             k="trenchingDepthFt"
                             options={[
-                              { value: "0.5", label: "0.5 ft / 6 in" },
-                              { value: "1", label: "1.0 ft / 12 in" },
-                              { value: "1.5", label: "1.5 ft / 18 in" },
+                              { value: "0.5", label: "0.5 ft / 6 in (standard)" },
+                              { value: "1", label: "1.0 ft / 12 in (+15%)" },
+                              { value: "1.5", label: "1.5 ft / 18 in (+30%)" },
                             ]}
                           />
                         </Field>

@@ -332,6 +332,15 @@ function validatePestPricingConfig(snapshot = constants) {
   if (!isPositiveNumber(trenching.productPremiumMultiplier) || Number(trenching.productPremiumMultiplier) < 1) {
     errors.push('SPECIALTY.trenching.productPremiumMultiplier must be at least 1');
   }
+  if (!isPositiveNumber(trenching.baselineTrenchDepthFt)) {
+    errors.push('SPECIALTY.trenching.baselineTrenchDepthFt must be positive');
+  }
+  if (!isNonNegativeNumber(trenching.trenchDepthPremiumPerHalfFt)) {
+    errors.push('SPECIALTY.trenching.trenchDepthPremiumPerHalfFt must be non-negative');
+  }
+  if (!isPositiveNumber(trenching.highRatePriceMultiplier) || Number(trenching.highRatePriceMultiplier) < 1) {
+    errors.push('SPECIALTY.trenching.highRatePriceMultiplier must be at least 1');
+  }
   for (const key of ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p']) {
     const product = trenching.products?.[key] || {};
     if (!isPositiveNumber(product.containerCost)) {
@@ -1227,6 +1236,9 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(constants.SPECIALTY.trenching, 'finishedGallonsPer10LFPerFtDepth', ot.finishedGallonsPer10LFPerFtDepth ?? ot.finished_gallons_per_10_lf_per_ft_depth, Number);
       setNumber(constants.SPECIALTY.trenching, 'defaultConcreteVolumePadPct', ot.defaultConcreteVolumePadPct ?? ot.default_concrete_volume_pad_pct, Number);
       setNumber(constants.SPECIALTY.trenching, 'productPremiumMultiplier', ot.productPremiumMultiplier ?? ot.product_premium_multiplier, Number);
+      setNumber(constants.SPECIALTY.trenching, 'baselineTrenchDepthFt', ot.baselineTrenchDepthFt ?? ot.baseline_trench_depth_ft, Number);
+      setNumber(constants.SPECIALTY.trenching, 'trenchDepthPremiumPerHalfFt', ot.trenchDepthPremiumPerHalfFt ?? ot.trench_depth_premium_per_half_ft, Number);
+      setNumber(constants.SPECIALTY.trenching, 'highRatePriceMultiplier', ot.highRatePriceMultiplier ?? ot.high_rate_price_multiplier, Number);
       const trenchingProducts = ot.products || ot.product_costs || {};
       const applyTrenchingProductOverlay = (key, data = {}) => {
         const target = constants.SPECIALTY.trenching.products?.[key];
