@@ -975,7 +975,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
-            : `${serviceInterest} · $${Math.round(monthly)}/mo · ${quoteFullAddress}`,
+            : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`,
         { icon: '\u{1F4B0}', link: '/admin/leads', metadata: { leadId: lead.id } }
       );
     } catch (e) {
@@ -1042,7 +1042,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? 'Manual review needed'
       : isOneTimeOnly
         ? `$${Math.round(oneTimeTotal)} one-time`
-        : `$${Math.round(monthly)}/mo`;
+        : `$${monthly.toFixed(2)}/mo`;
     const nextStepSummary = quoteRequired
       ? 'A Waves team member will review the property details and follow up with the right quote.'
       : commercialDetected
@@ -1185,7 +1185,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     const response = {
       lead_id: lead.id,
-      monthly_total: Math.round(monthly),
+      monthly_total: Math.round(monthly * 100) / 100,
       annual_total: Math.round(annual),
       variance_low: Math.round(monthly * (1 - varianceBand)),
       variance_high: Math.round(monthly * (1 + varianceBand)),

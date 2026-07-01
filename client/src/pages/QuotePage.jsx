@@ -1221,7 +1221,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                     <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
                       <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Waves Price</div>
                       <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
-                        ${Number(result.monthly_total).toLocaleString()}
+                        ${Number(result.monthly_total).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>/mo</span>
                       </div>
                       <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${Number(result.variance_low).toLocaleString()} – ${Number(result.variance_high).toLocaleString()}</strong> per month</div>
