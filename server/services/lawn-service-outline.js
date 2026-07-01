@@ -155,7 +155,10 @@ function estimateHasLawnService(estimate = {}, estimateData = {}) {
     ...(Array.isArray(estimateData.serviceLines) ? estimateData.serviceLines : []),
     ...(Array.isArray(estimateData.service_lines) ? estimateData.service_lines : []),
   ];
-  return [...fields, ...serviceLines].some((value) => String(value || '').toLowerCase().includes('lawn'));
+  return [...fields, ...serviceLines].some((value) => {
+    const s = String(value || '').toLowerCase();
+    return s.includes('lawn') || s.includes('turf');
+  });
 }
 
 function resolveTurf({ estimate = {}, estimateData = {}, input = {} }) {

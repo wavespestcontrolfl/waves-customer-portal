@@ -284,7 +284,7 @@ function matchTechs(techs, serviceType, zip, jobCategoryKey) {
   return techs.map((tech, index) => {
     let score = 72 - (index * 3);
     const reasoning = [];
-    if (service.includes('lawn')) {
+    if (service.includes('lawn') || service.includes('turf')) {
       score += 4;
       reasoning.push('Lawn route capable');
     } else if (service.includes('termite') || service.includes('inspection')) {

@@ -128,7 +128,7 @@ function treeShrubLegacyTierRows(v1Result = {}, tsLI = {}) {
 
 const SERVICE_LABEL = {
   commercial_pest: 'Commercial Pest Control',
-  commercial_lawn: 'Commercial Lawn Treatment',
+  commercial_lawn: 'Commercial Turf Treatment Program',
   commercial_tree_shrub: 'Commercial Tree & Shrub',
   commercial_mosquito: 'Commercial Mosquito',
   commercial_termite_bait: 'Commercial Termite Bait Monitoring',
@@ -667,7 +667,7 @@ function mapV1ToLegacyShape(v1Result) {
       excludeFromPctDiscount: true,
     });
   };
-  commAdd('Commercial Lawn Treatment', commLawnLI, 'commercial_lawn');
+  commAdd('Commercial Turf Treatment Program', commLawnLI, 'commercial_lawn');
   commAdd('Commercial Tree & Shrub', commTsLI, 'commercial_tree_shrub');
   commAdd('Commercial Pest Control', commPestLI, 'commercial_pest');
   commAdd('Commercial Mosquito', commMosqLI, 'commercial_mosquito');

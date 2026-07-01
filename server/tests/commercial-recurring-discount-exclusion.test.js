@@ -21,6 +21,9 @@ describe('commercial recurring lines are excluded from WaveGuard discounts on ac
     // WaveGuard-discountable residential rodent_bait).
     expect(recurringServiceKey({ service: 'commercial_rodent_bait' })).toBe('commercial_rodent_bait');
     // Match by display name too (persisted rows may only carry a label).
+    expect(recurringServiceKey({ name: 'Commercial Turf Treatment Program' })).toBe('commercial_lawn');
+    // Backward compat: the OLD "Commercial Lawn Treatment" label on already-
+    // persisted rows must still normalize to commercial_lawn (not residential).
     expect(recurringServiceKey({ name: 'Commercial Lawn Treatment' })).toBe('commercial_lawn');
     expect(recurringServiceKey({ name: 'Commercial Tree & Shrub' })).toBe('commercial_tree_shrub');
     expect(recurringServiceKey({ name: 'Commercial Pest Control' })).toBe('commercial_pest');

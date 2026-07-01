@@ -142,7 +142,8 @@ function googleMapsUrl(address) {
 
 function detectServiceCategory(serviceType) {
   const t = (serviceType || "").toLowerCase();
-  if (t.includes("lawn")) return "lawn";
+  // "turf": commercial lawn persists as "Commercial Turf Treatment Program"
+  if (t.includes("lawn") || t.includes("turf")) return "lawn";
   if (t.includes("mosquito")) return "mosquito";
   return "pest";
 }

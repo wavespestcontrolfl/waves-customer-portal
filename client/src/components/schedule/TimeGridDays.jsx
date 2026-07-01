@@ -125,7 +125,7 @@ function statusBlockFill(status) {
 }
 
 function isLawnService(service) {
-  return String(service?.serviceType || '').toLowerCase().includes('lawn');
+  return /lawn|turf/.test(String(service?.serviceType || '').toLowerCase());
 }
 
 function serviceDisplayName(service) {

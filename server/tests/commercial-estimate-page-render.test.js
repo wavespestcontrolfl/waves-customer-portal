@@ -33,7 +33,7 @@ function commercialEstimateData(extra = {}) {
         annualBeforeDiscount: 4689,
         annualAfterDiscount: 4689,
         services: [{
-          name: 'Commercial Lawn Treatment',
+          name: 'Commercial Turf Treatment Program',
           service: 'commercial_lawn',
           mo: 390.75,
           annual: 4689,
@@ -48,7 +48,7 @@ function commercialEstimateData(extra = {}) {
     engineResult: {
       lineItems: [{
         service: 'commercial_lawn',
-        name: 'Commercial Lawn Treatment',
+        name: 'Commercial Turf Treatment Program',
         monthly: 390.75,
         annual: 4689,
         estimatedPricing: true,
@@ -130,5 +130,41 @@ describe('commercial auto-priced estimate page is approval-only', () => {
   test('an accepted commercial estimate shows the accepted state (no approval card)', () => {
     const html = renderPage('commercial-token-4', commercialEstimate({ status: 'accepted' }), commercialEstimateData());
     expect(html).not.toContain('id="commercial-accept-card"');
+  });
+
+  // Turf reframe (owner 2026-07-01): when the commercial turf line renders as
+  // per-application service cards (visits present), the "N applications/year"
+  // detail dropped svc.detail, so the customer never saw that mowing/maintenance
+  // is excluded. The card must now carry the concise scope note. (PR #2227
+  // Codex P2 "Surface the turf scope copy in the estimate card".)
+  test('commercial turf card surfaces the mowing-exclusion scope note when visits are shown', () => {
+    const svc = {
+      name: 'Commercial Turf Treatment Program',
+      service: 'commercial_lawn',
+      mo: 390.75,
+      monthly: 390.75,
+      annual: 4689,
+      visitsPerYear: 8,
+      frequency: 8,
+      perApp: 586.13,
+      perVisit: 586.13,
+      estimatedPricing: true,
+      detail: 'Fertilization, weed control, and insect control for commercial turf. Does not include mowing, edging, trimming, or landscape maintenance. Estimated from property data — final price confirmed on site.',
+      discountable: false,
+      excludeFromPctDiscount: true,
+    };
+    const data = {
+      commercialEstimatedPricing: true,
+      result: {
+        recurring: { discount: 0, annualBeforeDiscount: 4689, annualAfterDiscount: 4689, services: [svc] },
+        oneTime: { items: [], membershipFee: 0 },
+      },
+      engineResult: { lineItems: [svc] },
+    };
+    const html = renderPage('commercial-turf-scope', commercialEstimate(), data);
+    // Renders as an application card (visits present)...
+    expect(html).toMatch(/applications\/year/);
+    // ...and now carries the explicit "does not include mowing/maintenance" note.
+    expect(html).toContain('Does not include mowing, edging, or landscape maintenance');
   });
 });

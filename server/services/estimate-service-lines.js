@@ -1,6 +1,6 @@
 const SERVICE_LINE_LABELS = {
   commercial_pest: 'Commercial Pest Control',
-  commercial_lawn: 'Commercial Lawn Treatment',
+  commercial_lawn: 'Commercial Turf Treatment Program',
   commercial_tree_shrub: 'Commercial Tree & Shrub',
   commercial_mosquito: 'Commercial Mosquito',
   commercial_termite_bait: 'Commercial Termite Bait Monitoring',

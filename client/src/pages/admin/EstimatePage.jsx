@@ -3019,7 +3019,7 @@ function EstimateToolView() {
                   color: C.textBody || C.muted,
                   fontSize: 13,
                 }}>
-                  Commercial lawn treatment is auto-priced (estimated — confirmed on site). Residential lawn pricing is suppressed.
+                  Commercial turf treatment is auto-priced (estimated — confirmed on site). Residential lawn pricing is suppressed.
                 </div>
               )}
               {form.svcLawn && !commercialDetected && (

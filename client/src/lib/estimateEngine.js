@@ -279,11 +279,11 @@ function commercialManualQuoteItem(service, input = {}) {
   const isLawn = service === "commercial_lawn" || service === "lawn_care";
   const canonical = isLawn ? "commercial_lawn" : "commercial_pest";
   const reason = isLawn
-    ? "Commercial lawn treatment requires manual quote or commercial pilot pricing."
+    ? "Commercial turf treatment requires manual quote or commercial pilot pricing."
     : "Commercial pest requires manual quote or commercial pilot pricing.";
   return {
     service: canonical,
-    name: isLawn ? "Commercial Lawn Treatment" : "Commercial Pest Control",
+    name: isLawn ? "Commercial Turf Treatment Program" : "Commercial Pest Control",
     price: null,
     det: reason,
     detail: reason,

@@ -135,8 +135,8 @@ class ForecastAnalyzer {
     if (s.includes('rodent') || s.includes('rat')) return 'rodent';
     if (s.includes('tree') && s.includes('inject')) return 'tree_injection';
     if (s.includes('tree') || s.includes('shrub')) return 'tree_shrub_spray';
-    if (s.includes('lawn') && s.includes('granular')) return 'lawn_granular';
-    if (s.includes('lawn')) return 'lawn_spray';
+    if ((s.includes('lawn') || s.includes('turf')) && s.includes('granular')) return 'lawn_granular';
+    if (s.includes('lawn') || s.includes('turf')) return 'lawn_spray';
     if (s.includes('pest') && s.includes('interior')) return 'pest_interior';
     return 'pest_exterior';
   }

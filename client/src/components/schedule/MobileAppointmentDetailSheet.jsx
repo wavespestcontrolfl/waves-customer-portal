@@ -185,7 +185,7 @@ export default function MobileAppointmentDetailSheet({
     : 'Complete project';
 
   const noteDirty = (service?.notes || '') !== note;
-  const isLawn = String(service?.serviceType || '').toLowerCase().includes('lawn');
+  const isLawn = /lawn|turf/.test(String(service?.serviceType || '').toLowerCase());
   const canCompleteService = ['en_route', 'on_site', 'pending', 'confirmed', 'rescheduled'].includes(
     String(service?.status || '').toLowerCase(),
   );

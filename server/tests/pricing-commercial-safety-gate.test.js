@@ -749,7 +749,7 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
     // Commercial lawn auto-prices → surfaces as a recurring service, not a manual line.
     const recurringLawn = mapped.recurring.services.find((s) => s.service === 'commercial_lawn');
     expect(recurringLawn).toBeTruthy();
-    expect(recurringLawn.name).toBe('Commercial Lawn Treatment');
+    expect(recurringLawn.name).toBe('Commercial Turf Treatment Program');
     expect(recurringLawn.mo).toBeGreaterThan(0);
     expect(mapped.specItems).not.toContainEqual(expect.objectContaining({ service: 'commercial_lawn' }));
 

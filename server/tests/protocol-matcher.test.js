@@ -37,6 +37,15 @@ describe('protocol matcher specialty routing', () => {
     expect(match('Aeration').programKey).not.toBe('rodent');
   });
 
+  test('routes the commercial TURF treatment label to the lawn program (not pest)', () => {
+    // "Commercial Turf Treatment Program" has no 'lawn' token — without turf
+    // awareness it would fall through to the pest protocol, loading the wrong
+    // completion actions for a turf visit.
+    expect(match('Commercial Turf Treatment Program').programKey).toBe('lawn');
+    // The residential/legacy "Commercial Lawn Treatment" label still routes to lawn.
+    expect(match('Commercial Lawn Treatment').programKey).toBe('lawn');
+  });
+
   test('routes mosquito IGR and station service labels to source reduction', () => {
     expect(match('Mosquito Treatment - IGR')).toEqual({
       programKey: 'mosquito',

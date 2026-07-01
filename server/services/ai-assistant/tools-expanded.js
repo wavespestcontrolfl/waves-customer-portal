@@ -391,7 +391,7 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
       if (!activeServices.some(s => /pest/i.test(s))) {
         recommendations.push({ service: 'General Pest Control', reason: 'No active pest control subscription — SWFL properties need year-round protection.', priority: 'high' });
       }
-      if (!activeServices.some(s => /lawn/i.test(s)) && customer?.grass_type) {
+      if (!activeServices.some(s => /lawn|turf/i.test(s)) && customer?.grass_type) {
         recommendations.push({ service: 'Lawn Care', reason: `${customer.grass_type} lawn detected but no active lawn care plan.`, priority: 'high' });
       }
       if (!activeServices.some(s => /mosquito/i.test(s)) && month >= 4 && month <= 10) {

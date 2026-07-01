@@ -27,7 +27,8 @@ function getPeriodDates(period, dateStr) {
 
 function classifyServiceLine(type) {
   const t = (type || '').toLowerCase();
-  if (t.includes('lawn')) return 'Lawn Care';
+  // "turf": commercial lawn persists as "Commercial Turf Treatment Program"
+  if (t.includes('lawn') || t.includes('turf')) return 'Lawn Care';
   if (t.includes('mosquito')) return 'Mosquito';
   if (t.includes('tree') || t.includes('shrub')) return 'Tree & Shrub';
   if (t.includes('termite')) return 'Termite';
@@ -190,3 +191,5 @@ router.put('/settings', async (req, res, next) => {
 });
 
 module.exports = router;
+// Exported for regression tests (turf revenue must classify as Lawn Care, not Pest).
+module.exports.classifyServiceLine = classifyServiceLine;

@@ -14,7 +14,7 @@ describe('estimate service line inference', () => {
         engineResult: {
           lineItems: [
             {
-              service: 'commercial_lawn', name: 'Commercial Lawn Treatment',
+              service: 'commercial_lawn', name: 'Commercial Turf Treatment Program',
               monthly: 391, annual: 4689, quoteRequired: false, isCommercial: true,
               commercialPricingMode: 'auto_estimate', taxable: false,
               taxCategory: 'lawn_spraying_or_treatment', pricingConfidence: 'LOW',
@@ -44,6 +44,10 @@ describe('estimate service line inference', () => {
     expect(serviceKeysFromText('General Pest Control')).toEqual(['pest']);
     expect(serviceKeysFromText('General Pest Control + Lawn Care')).toEqual(['lawn', 'pest']);
     expect(serviceKeysFromText('Commercial Pest Control')).toEqual(['commercial_pest']);
+    expect(serviceKeysFromText('Commercial Turf Treatment Program')).toEqual(['commercial_lawn']);
+    // Backward compat: the OLD "Commercial Lawn Treatment" label is still on
+    // historical scheduled_services rows — it must keep classifying as
+    // commercial_lawn (the classifier matches both 'turf' and 'lawn').
     expect(serviceKeysFromText('Commercial Lawn Treatment')).toEqual(['commercial_lawn']);
     expect(serviceKeysFromText('Commercial Pest Control + Commercial Lawn')).toEqual(['commercial_pest', 'commercial_lawn']);
     // Commercial pest-family text must NOT also emit its residential counterpart
@@ -214,7 +218,7 @@ describe('estimate service line inference', () => {
           },
           {
             service: 'commercial_lawn',
-            name: 'Commercial Lawn Treatment',
+            name: 'Commercial Turf Treatment Program',
             price: null,
             commercialPricingMode: 'manual_quote',
             isCommercial: true,

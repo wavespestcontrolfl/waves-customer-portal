@@ -723,12 +723,12 @@ async function getServiceMix(input) {
     .whereBetween('service_date', [from, to])
     .where('status', 'completed')
     .select(
-      db.raw("CASE WHEN service_type ILIKE '%pest%' THEN 'Pest Control' WHEN service_type ILIKE '%lawn%' THEN 'Lawn Care' WHEN service_type ILIKE '%mosquito%' THEN 'Mosquito' WHEN service_type ILIKE '%termite%' THEN 'Termite' WHEN service_type ILIKE '%tree%' OR service_type ILIKE '%shrub%' THEN 'Tree & Shrub' WHEN service_type ILIKE '%rodent%' THEN 'Rodent' ELSE 'Other' END as category"),
+      db.raw("CASE WHEN service_type ILIKE '%pest%' THEN 'Pest Control' WHEN service_type ILIKE '%lawn%' OR service_type ILIKE '%turf%' THEN 'Lawn Care' WHEN service_type ILIKE '%mosquito%' THEN 'Mosquito' WHEN service_type ILIKE '%termite%' THEN 'Termite' WHEN service_type ILIKE '%tree%' OR service_type ILIKE '%shrub%' THEN 'Tree & Shrub' WHEN service_type ILIKE '%rodent%' THEN 'Rodent' ELSE 'Other' END as category"),
       db.raw('COUNT(*) as service_count'),
       db.raw('SUM(COALESCE(revenue, 0)) as revenue'),
       db.raw('COUNT(DISTINCT customer_id) as unique_customers'),
     )
-    .groupByRaw("CASE WHEN service_type ILIKE '%pest%' THEN 'Pest Control' WHEN service_type ILIKE '%lawn%' THEN 'Lawn Care' WHEN service_type ILIKE '%mosquito%' THEN 'Mosquito' WHEN service_type ILIKE '%termite%' THEN 'Termite' WHEN service_type ILIKE '%tree%' OR service_type ILIKE '%shrub%' THEN 'Tree & Shrub' WHEN service_type ILIKE '%rodent%' THEN 'Rodent' ELSE 'Other' END")
+    .groupByRaw("CASE WHEN service_type ILIKE '%pest%' THEN 'Pest Control' WHEN service_type ILIKE '%lawn%' OR service_type ILIKE '%turf%' THEN 'Lawn Care' WHEN service_type ILIKE '%mosquito%' THEN 'Mosquito' WHEN service_type ILIKE '%termite%' THEN 'Termite' WHEN service_type ILIKE '%tree%' OR service_type ILIKE '%shrub%' THEN 'Tree & Shrub' WHEN service_type ILIKE '%rodent%' THEN 'Rodent' ELSE 'Other' END")
     .orderByRaw('COUNT(*) DESC');
 
   const total = mix.reduce((s, m) => s + parseInt(m.service_count), 0);

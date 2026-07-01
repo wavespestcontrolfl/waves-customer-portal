@@ -23,7 +23,7 @@ export const CATEGORY_COLORS = {
 
 export function detectServiceCategory(serviceType) {
   const s = String(serviceType || '').toLowerCase();
-  if (/lawn|fertil|weed|dethatch|aerat|sod|top\s*dress/.test(s)) return 'lawn';
+  if (/lawn|turf|fertil|weed|dethatch|aerat|sod|top\s*dress/.test(s)) return 'lawn';
   if (/mosquito/.test(s)) return 'mosquito';
   if (/termite|wdo|bora|termidor|trelona/.test(s)) return 'termite';
   if (/rodent|rat|mouse|mice/.test(s)) return 'rodent';

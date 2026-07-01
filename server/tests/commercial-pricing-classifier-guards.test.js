@@ -74,7 +74,7 @@ describe('commercial lines EARN the 5% annual-prepay discount but never the Wave
 
 describe('commercial plans do not count as WaveGuard qualifiers (existing-services scan)', () => {
   test('commercial labels/keys are non-qualifying', () => {
-    expect(toQualifyingKey('Commercial Lawn Treatment')).toBeNull();
+    expect(toQualifyingKey('Commercial Turf Treatment Program')).toBeNull();
     expect(toQualifyingKey('Commercial Tree & Shrub')).toBeNull();
     expect(toQualifyingKey('commercial_lawn')).toBeNull();
   });
@@ -110,7 +110,7 @@ describe('an all-commercial recurring plan does not activate a WaveGuard members
     const estData = {
       engineResult: {
         lineItems: [
-          { service: 'commercial_lawn', name: 'Commercial Lawn Treatment', annual: 4689, monthly: 391 },
+          { service: 'commercial_lawn', name: 'Commercial Turf Treatment Program', annual: 4689, monthly: 391 },
           { service: 'commercial_pest', name: 'Commercial Pest Control', quoteRequired: true, annual: null },
         ],
       },
@@ -134,7 +134,7 @@ describe('an all-commercial recurring plan does not activate a WaveGuard members
       },
     });
     const byKey = Object.fromEntries(rows.map((r) => [r.service, r.name]));
-    expect(byKey.commercial_lawn).toBe('Commercial Lawn Treatment');
+    expect(byKey.commercial_lawn).toBe('Commercial Turf Treatment Program');
     expect(byKey.commercial_tree_shrub).toBe('Commercial Tree & Shrub');
     expect(byKey.lawn_care).toBe('Lawn Care');
   });
@@ -166,7 +166,7 @@ describe('the commercial disclaimer survives into the supplemented recurring row
       engineResult: {
         lineItems: [
           {
-            service: 'commercial_lawn', name: 'Commercial Lawn Treatment',
+            service: 'commercial_lawn', name: 'Commercial Turf Treatment Program',
             monthly: 391, annual: 4689,
             disclaimer: 'Estimated from property data — final price confirmed on site.',
             estimatedPricing: true, discountable: false, excludeFromPctDiscount: true,

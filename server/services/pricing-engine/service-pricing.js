@@ -2438,7 +2438,7 @@ function priceCommercialLawn(property = {}, options = {}) {
 
   return {
     service: 'commercial_lawn',
-    name: 'Commercial Lawn Treatment',
+    name: 'Commercial Turf Treatment Program',
     originalRequestedService: 'lawn_care',
     propertyType: 'commercial',
     isCommercial: true,
@@ -2452,7 +2452,12 @@ function priceCommercialLawn(property = {}, options = {}) {
     excludeFromPctDiscount: true,
     quoteRequired: false,
     requiresManualReview: false,
-    detail: 'Commercial turf program (fertilization + weed + insect control). Estimated from property data — final price confirmed on site.',
+    // Reframe (owner 2026-07-01): a TURF HEALTH program, not "8 fertilizer
+    // visits" — SWFL N/P fertilizer rules are LOCAL (Jun 1–Sep 30 N/P blackout in
+    // Naples/Charlotte/Sarasota/Cape Coral/unincorp. Lee, but Collier has no
+    // N-ban), so "varies by season … and local fertilizer ordinances" is the safe
+    // wording. Also disambiguates from mowing/maintenance.
+    detail: 'Fertilization, weed control, and insect control for commercial turf. Visit contents vary by season, turf condition, product label, and local fertilizer ordinances. Does not include mowing, edging, trimming, or landscape maintenance. Estimated from property data — final price confirmed on site.',
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     turfSf,
     turfBasis,

@@ -1911,7 +1911,7 @@ function recurringServiceDisplayName(key) {
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
-    case 'commercial_lawn': return 'Commercial Lawn Treatment';
+    case 'commercial_lawn': return 'Commercial Turf Treatment Program';
     case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
     case 'commercial_pest': return 'Commercial Pest Control';
     case 'commercial_mosquito': return 'Commercial Mosquito';
@@ -2599,12 +2599,12 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
         default: return raw;
       }
     });
-  const hasLawn = serviceNames.some((name) => /lawn/i.test(name))
+  const hasLawn = serviceNames.some((name) => /lawn|turf/i.test(name))
     || !!inputServices.lawn
     || !!inputServices.lawnCare
     || inputs.svcLawn === true;
   const isLawnOnly = serviceNames.length > 0
-    && serviceNames.every((name) => /lawn/i.test(String(name)));
+    && serviceNames.every((name) => /lawn|turf/i.test(String(name)));
   const hasMosquito = serviceKeys.includes('mosquito')
     || !!inputServices.mosquito
     || !!inputServices.oneTimeMosquito
@@ -3552,7 +3552,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       });
       const { visits, anchorPrice, basePrice, price } = firstVisitPricing;
       const isPest = /pest/i.test(String(name));
-      const isLawn = /lawn/i.test(String(name));
+      const isLawn = /lawn|turf/i.test(String(name));
       const visitText = visits
         ? `${Math.round(visits).toLocaleString()} ${visits === 1 ? 'application' : 'applications'}/year`
         : 'Service applications/year';
@@ -3560,8 +3560,19 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       const displayCadenceText = isPest && /quarterly service/i.test(String(cadenceText || ''))
         ? ''
         : cadenceText;
+      // Commercial turf reframe (owner 2026-07-01): the visits-present branch below
+      // shows only "N applications/year" and drops svc.detail, so the mowing-exclusion
+      // scope note the reframe added never reaches the customer. Surface a concise
+      // version on the card for the commercial turf line only (fuller copy still shows
+      // via svc.detail in the no-visits fallback).
+      const isCommercialTurf = serviceKey === 'commercial_lawn' || /commercial turf/i.test(String(name));
+      const scopeNote = isCommercialTurf ? 'Does not include mowing, edging, or landscape maintenance' : '';
       const detailHtml = displayCadenceText || visits
-        ? [displayCadenceText ? escapeHtml(displayCadenceText) : null, escapeHtml(visitText)].filter(Boolean).join(' &middot; ')
+        ? [
+            displayCadenceText ? escapeHtml(displayCadenceText) : null,
+            escapeHtml(visitText),
+            scopeNote ? escapeHtml(scopeNote) : null,
+          ].filter(Boolean).join(' &middot; ')
         : escapeHtml(svc?.detail || 'Service applications/year');
       return {
         name,
@@ -10447,7 +10458,10 @@ function isLawnTierFrequency(frequency = {}) {
   if (!lawnTierRuntimeMeta(frequency?.key)) return false;
   if (frequency.serviceCategory === 'lawn_care') return true;
   const included = Array.isArray(frequency.included) ? frequency.included : [];
-  return included.some((item) => String(item?.key || item?.service || item?.label || '').toLowerCase().includes('lawn'));
+  return included.some((item) => {
+    const s = String(item?.key || item?.service || item?.label || '').toLowerCase();
+    return s.includes('lawn') || s.includes('turf');
+  });
 }
 
 function selectedLawnServiceRow(existing = {}, frequency = {}) {
