@@ -458,6 +458,29 @@ async function fetchChannelAttribution(since, months = 1) {
     }
   } catch { /* channel_fixed_costs not present yet */ }
 
+  // Referral cost is PER-CONVERSION (referrer reward + referee discount), not a flat
+  // monthly fee. Read the CURRENT reward from referral_program_settings via the
+  // referral engine's getSettings (same defaults) so the card auto-tracks a reward
+  // change instead of pinning to a stale figure — then cost the channel at that ×
+  // its converted (completed) referral customers in the window, so the card divides
+  // by the same count → a true CAC (default $25 + $25 = $50). Guarded / no-op.
+  try {
+    let perConversion = 50; // fallback ONLY if the settings row can't be read
+    try {
+      const s = await require('../services/referral-engine').getSettings();
+      // Trust the configured reward even when it's a deliberate $0 (incentives off) —
+      // that's free acquisition, not "no settings". Only the catch (unreadable
+      // settings) keeps the $25+$25 default.
+      perConversion = ((Number(s?.referrer_reward_cents) || 0) + (Number(s?.referee_discount_cents) || 0)) / 100;
+    } catch { /* settings unreadable — keep the default */ }
+    const [{ n }] = await db('ad_service_attribution')
+      .where({ lead_source: 'referral', funnel_stage: 'completed' })
+      .where('lead_date', '>=', since)
+      .countDistinct({ n: 'customer_id' });
+    const refCost = round((Number(n) || 0) * perConversion, 2);
+    if (refCost > 0) fixedCostBySource.referral = (fixedCostBySource.referral || 0) + refCost;
+  } catch { /* ad_service_attribution shape / no referrals — no-op */ }
+
   const { sources, ...totals } = buildChannelAttribution(completed, platformSpendBySource, fixedCostBySource);
   return { sources: sources.map((s) => ({ source: formatSourceName(s.sourceKey), ...s })), ...totals };
 }
