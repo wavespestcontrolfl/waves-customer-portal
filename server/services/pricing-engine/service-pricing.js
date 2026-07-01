@@ -2640,6 +2640,16 @@ function priceCommercialPest(property = {}, options = {}) {
 // Build a priced commercial pest-family line from the supplied per-visit
 // material $ and on-site minutes. Identical buildup/margin/shape across the
 // three services (45% target margin, account minimum, FL-taxed).
+// Cadence word for a commercial visit count — used in customer-facing detail copy
+// so a monthly program isn't described as quarterly after a risk-type override.
+function commercialCadenceLabel(visits) {
+  const v = Number(visits);
+  if (v >= 12) return 'monthly';
+  if (v >= 6) return 'bimonthly';
+  if (v >= 4) return 'quarterly';
+  return null;
+}
+
 function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, service, name, originalRequestedService, detail, extra = {}, visits: visitsOverride }) {
   // Risk-type cadence override (commercial pest/rodent visits-per-year vary by
   // business type). Falls back to the program default when not supplied.
@@ -2903,16 +2913,22 @@ function priceCommercialRodentBait(property = {}, options = {}) {
       commercialSubtype: options.commercialSubtype || property.commercialSubtype,
     });
   }
+  // Resolve the risk-type cadence override once (warehouse/restaurant rodent
+  // 12/yr; default 4) so both the priced line AND the detail copy agree — never
+  // describe a monthly program as quarterly.
+  const rodentVisits = Number.isFinite(options.rodentVisits) && options.rodentVisits > 0
+    ? options.rodentVisits
+    : cfg.programVisits;
+  const rodentCadence = commercialCadenceLabel(rodentVisits);
   return buildCommercialPestFamilyLine({
     cfg,
-    // Risk-type cadence override (warehouse/restaurant rodent 12/yr); default 4.
-    visits: options.rodentVisits,
+    visits: rodentVisits,
     materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (footprint / 1000),
     onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPerKSqFt * (footprint / 1000),
     service: 'commercial_rodent_bait',
     name: 'Commercial Rodent Bait Stations',
     originalRequestedService: 'rodent_bait',
-    detail: 'Commercial rodent bait-station program (quarterly). Estimated from property data — final price confirmed on site.',
+    detail: `Commercial rodent bait-station program${rodentCadence ? ` (${rodentCadence})` : ''}. Estimated from property data — final price confirmed on site.`,
     extra: {
       commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
       footprint,

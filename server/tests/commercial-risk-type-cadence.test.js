@@ -67,6 +67,12 @@ describe('pricers honor the visits override', () => {
     expect(priceCommercialPest(BUILD, { pestVisits: NaN }).visitsPerYear).toBe(12);
     expect(priceCommercialRodentBait(BUILD, { rodentVisits: undefined }).visitsPerYear).toBe(4);
   });
+
+  test('rodent detail cadence word tracks the visit count (no monthly-described-as-quarterly)', () => {
+    expect(priceCommercialRodentBait(BUILD).detail).toContain('(quarterly)'); // 4/yr default
+    expect(priceCommercialRodentBait(BUILD, { rodentVisits: 12 }).detail).toContain('(monthly)');
+    expect(priceCommercialRodentBait(BUILD, { rodentVisits: 12 }).detail).not.toContain('quarterly');
+  });
 });
 
 describe('cadence threads through generateEstimate (input.commercialRiskType)', () => {
