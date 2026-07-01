@@ -53,6 +53,11 @@ const SOURCE_TYPE_ATTRIBUTION = {
   // real cost: the card divides its lifetime value by the wrap's amortized cost
   // (a channel_fixed_costs row for 'van_wrap') to give it an honest LTV:CAC.
   vehicle:         { leadSource: 'van_wrap',        isPaid: false },
+  // Customer referral / word-of-mouth. Not click-paid (is_paid=false); its cost is
+  // the per-conversion reward ($25 referrer + $25 referee), applied to the channel
+  // in fetchChannelAttribution (admin-ads.js) — so a referred lead that calls in
+  // lands on the card as its own high-LTV, low-CAC channel instead of vanishing.
+  referral:        { leadSource: 'referral',        isPaid: false },
 };
 
 /**
