@@ -953,18 +953,33 @@ async function createSelfBooking(payload = {}) {
         // is refreshed IN PLACE on re-runs, so a token minted while the quote was
         // residential/recurring must not price a snapshot that has since become
         // commercial or manual-quote (both excluded from the exposure gate).
+        // status must still be 'draft': tokens are minted only for refreshable
+        // wizard drafts, so once staff promote the same estimate (sent/accepted/
+        // declined) a not-yet-expired token must not stamp pricing from a quote
+        // that is no longer the live self-serve draft.
         const pricingEstData = pricingEstimate?.estimate_data || {};
         const pricingEstimateEligible = !!pricingEstimate
           && pricingEstimate.source === 'quote_wizard'
+          && pricingEstimate.status === 'draft'
           && !pricingEstData.commercialEstimatedPricing
           && !pricingEstData.quoteRequired;
         const pricingTrusted = !!pricing_estimate_id
           && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)
           && pricingEstimateEligible
           && String(pricingEstimate.customer_id) === String(custId);
+        // The verified LINKED-estimate path (/book/:estimateToken posts
+        // estimate_id) still prices as it did before the handoff landed: that
+        // estimate resolved identity above (non-quote_wizard only), so pricing
+        // it is the same trust — customer-matched so a crafted estimate_id +
+        // customer_id pair can't stamp another customer's price.
+        const linkedEstimatePriceable = !!estimate
+          && estimate.source !== 'quote_wizard'
+          && String(estimate.customer_id) === String(custId);
         const priced = pricingTrusted
           ? resolveBookingVisitPrice({ estimate: pricingEstimate, serviceKey: bookedServiceKey, bookingVisits })
-          : null;
+          : (linkedEstimatePriceable
+            ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey, bookingVisits })
+            : null);
         if (priced) {
           visitPrice = priced.amount;
           paymentPref = 'pay_at_visit';

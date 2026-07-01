@@ -878,6 +878,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // lookup resolves; pre-stringifying risks pg storing it as a json string
     // scalar.
     let draftEstimateId = null;
+    let handoffPriceable = false;
     try {
       const estimateDataObj = {
         lead_id: lead.id,
@@ -947,6 +948,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         lead_source_detail: sourceMeta.leadSourceDetail,
         estimate_data: estimateDataObj,
       };
+      // Mint a quote→book handoff ONLY for shapes /booking/confirm can actually
+      // price today: a single quarterly PEST recurring line (confirm seeds a
+      // series cadence — bookingVisits=4 — only for quarterly pest_control).
+      // Same resolver over the same stored fields confirm will read back, so
+      // mint-time and confirm-time agree by construction. Lawn/tree/mosquito
+      // quotes get NO token rather than one that silently prices nothing;
+      // widening the handoff means extending confirm's cadence support first.
+      const { resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
+      handoffPriceable = !!resolveBookingVisitPrice({
+        estimate: { estimate_data: estimateDataObj, annual_total: annual || null, monthly_total: monthly || null },
+        serviceKey: 'pest_control',
+        bookingVisits: 4,
+      });
       if (existingEst) {
         await db('estimates').where({ id: existingEst.id }).update({ ...estFields, updated_at: new Date() });
         draftEstimateId = existingEst.id;
@@ -1047,8 +1061,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (isOneTimeOnly && bookingServiceLabel) bookingParams.set('service_label', bookingServiceLabel);
         // Quote→book handoff on the emailed/texted booking link too, so an invite
         // booking is priced from this exact estimate (not just the astro CTA).
-        // Recurring-only — one-time bookings aren't pay-at-visit-priced.
-        if (draftEstimateId && !isOneTimeOnly) {
+        // Recurring-only — one-time bookings aren't pay-at-visit-priced — and
+        // handoffPriceable-only (quarterly pest, the one shape confirm prices).
+        if (draftEstimateId && handoffPriceable && !isOneTimeOnly) {
           const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
           const inviteToken = mintEstimateHandoffToken(draftEstimateId);
           if (inviteToken) {
@@ -1238,10 +1253,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // so a booking made from this quote can be priced from THIS exact estimate
     // (see /booking/confirm), instead of inferring which quote it came from.
     // Gated like the self-booking link above (!quoteRequired && !commercialDetected)
-    // plus recurring-only (!isOneTimeOnly): pay-at-visit applies to a recurring
-    // series, never a one-time visit. Commercial/manual/one-time shapes get no
-    // handoff (they'd otherwise mint a token booking.js can't price).
-    if (draftEstimateId && !quoteRequired && !commercialDetected && !isOneTimeOnly) {
+    // plus recurring-only (!isOneTimeOnly) plus handoffPriceable (a single
+    // quarterly pest line — the one shape /booking/confirm prices today).
+    // Commercial/manual/one-time/non-pest shapes get no handoff (they'd
+    // otherwise mint a token booking.js can't price).
+    if (draftEstimateId && handoffPriceable && !quoteRequired && !commercialDetected && !isOneTimeOnly) {
       const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
       response.estimate_id = draftEstimateId;
       const estimateToken = mintEstimateHandoffToken(draftEstimateId);
