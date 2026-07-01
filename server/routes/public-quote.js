@@ -877,6 +877,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // estimate_data is jsonb — pass the object directly so the ->>'lead_id'
     // lookup resolves; pre-stringifying risks pg storing it as a json string
     // scalar.
+    let draftEstimateId = null;
+    let handoffPriceable = false;
     try {
       const estimateDataObj = {
         lead_id: lead.id,
@@ -946,8 +948,22 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         lead_source_detail: sourceMeta.leadSourceDetail,
         estimate_data: estimateDataObj,
       };
+      // Mint a quote→book handoff ONLY for shapes /booking/confirm can actually
+      // price today: a single quarterly PEST recurring line (confirm seeds a
+      // series cadence — bookingVisits=4 — only for quarterly pest_control).
+      // Same resolver over the same stored fields confirm will read back, so
+      // mint-time and confirm-time agree by construction. Lawn/tree/mosquito
+      // quotes get NO token rather than one that silently prices nothing;
+      // widening the handoff means extending confirm's cadence support first.
+      const { resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
+      handoffPriceable = !!resolveBookingVisitPrice({
+        estimate: { estimate_data: estimateDataObj, annual_total: annual || null, monthly_total: monthly || null },
+        serviceKey: 'pest_control',
+        bookingVisits: 4,
+      });
       if (existingEst) {
         await db('estimates').where({ id: existingEst.id }).update({ ...estFields, updated_at: new Date() });
+        draftEstimateId = existingEst.id;
       } else {
         await withAutomatedEstimatePhoneLock(contactPhone, async (trx) => {
           const duplicateBlock = await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx });
@@ -965,12 +981,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               await trx('estimates')
                 .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
                 .update({ ...estFields, updated_at: new Date() });
+              draftEstimateId = duplicateBlock.existingEstimateId;
               logger.info(`[public-quote] Estimate mirror refreshed wizard draft ${duplicateBlock.existingEstimateId} for lead ${lead.id} (same-phone re-run)`);
             } else {
               logger.info(`[public-quote] Estimate mirror blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for lead ${lead.id}`);
             }
           } else {
-            await trx('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' });
+            const [inserted] = await trx('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' }).returning('id');
+            draftEstimateId = inserted?.id || inserted || null;
           }
         });
       }
@@ -1041,6 +1059,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const bookingSource = isOneTimeOnly ? 'quote-wizard-onetime' : 'quote-wizard';
         const bookingParams = new URLSearchParams({ service: bookingServiceId, source: bookingSource });
         if (isOneTimeOnly && bookingServiceLabel) bookingParams.set('service_label', bookingServiceLabel);
+        // Quote→book handoff on the emailed/texted booking link too, so an invite
+        // booking is priced from this exact estimate (not just the astro CTA).
+        // Recurring-only — one-time bookings aren't pay-at-visit-priced — and
+        // handoffPriceable-only (quarterly pest, the one shape confirm prices).
+        if (draftEstimateId && handoffPriceable && !isOneTimeOnly) {
+          const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+          const inviteToken = mintEstimateHandoffToken(draftEstimateId);
+          if (inviteToken) {
+            bookingParams.set('estimate_id', draftEstimateId);
+            bookingParams.set('estimate_token', inviteToken);
+          }
+        }
         const longBookingUrl = `${PORTAL_BASE_URL}/book?${bookingParams.toString()}`;
         bookingUrl = await shortenOrPassthrough(longBookingUrl, {
           kind: 'booking', entityType: 'leads', entityId: lead.id,
@@ -1218,6 +1248,20 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (commercialDisclaimer) {
       response.estimated_pricing = true;
       response.disclaimer = commercialDisclaimer;
+    }
+    // Quote→book handoff: expose the draft estimate id + a server-trusted token
+    // so a booking made from this quote can be priced from THIS exact estimate
+    // (see /booking/confirm), instead of inferring which quote it came from.
+    // Gated like the self-booking link above (!quoteRequired && !commercialDetected)
+    // plus recurring-only (!isOneTimeOnly) plus handoffPriceable (a single
+    // quarterly pest line — the one shape /booking/confirm prices today).
+    // Commercial/manual/one-time/non-pest shapes get no handoff (they'd
+    // otherwise mint a token booking.js can't price).
+    if (draftEstimateId && handoffPriceable && !quoteRequired && !commercialDetected && !isOneTimeOnly) {
+      const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+      response.estimate_id = draftEstimateId;
+      const estimateToken = mintEstimateHandoffToken(draftEstimateId);
+      if (estimateToken) response.estimate_token = estimateToken;
     }
     res.json(response);
   } catch (err) {
