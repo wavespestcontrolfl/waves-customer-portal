@@ -251,13 +251,20 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
       logger.error(`Failed to send confirmation SMS for request ${request.id}: ${smsErr.message}`);
     }
 
-    void AccountMembershipEmail.sendRequestReceived({
-      customerId: req.customer.id,
-      request,
-      responseTime,
-    }).catch((emailErr) => {
-      logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
-    });
+    // No generic "request received" email for a cancellation: the account was
+    // just churned (active=false) and this template's CTAs link into the
+    // authenticated portal, which an inactive customer can no longer open
+    // (portal auth requires active=true). The dedicated cancellation SMS above
+    // is the confirmation.
+    if (!isCancellation) {
+      void AccountMembershipEmail.sendRequestReceived({
+        customerId: req.customer.id,
+        request,
+        responseTime,
+      }).catch((emailErr) => {
+        logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
+      });
+    }
 
     res.status(201).json({
       success: true,

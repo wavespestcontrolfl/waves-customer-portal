@@ -146,18 +146,21 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
     // Charge-now path) so dunning doesn't chase a cancelled job. The helper
     // never throws — it intentionally SKIPS invoices it can't safely void
     // (payment in flight / applied money / unverifiable PI) — so re-check for
-    // anything still open and surface it as a manual-review error instead of
-    // the alert claiming billing fully stopped.
+    // anything NOT money-resolved and surface it as a manual-review error
+    // instead of the alert claiming billing fully stopped. That includes
+    // 'paid'/'processing' (cash captured or in flight for a visit that now
+    // won't happen → refund/credit decision) and a transient 'sending' claim,
+    // not just the voidable statuses the sweep skipped.
     try {
       const InvoiceService = require('./invoice');
       await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
-      const stillOpen = await db('invoices')
+      const unresolved = await db('invoices')
         .where({ scheduled_service_id: svc.id })
-        .whereIn('status', InvoiceService.CANCELLED_SERVICE_VOIDABLE_STATUSES)
+        .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
         .select('id');
-      for (const inv of stillOpen) {
+      for (const inv of unresolved) {
         errors.push(`invoice_review:${inv.id}`);
-        logger.error(`[cancellation-processor] invoice ${inv.id} for visit ${svc.id} could not be auto-voided — needs manual review`);
+        logger.error(`[cancellation-processor] invoice ${inv.id} for visit ${svc.id} still needs money handling — manual review`);
       }
     } catch (err) {
       errors.push(`void_invoices:${svc.id}`);
@@ -184,9 +187,18 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
     // Customer-visible track layer: track_state / cancelled_at /
     // cancellation_reason + tech-status clear + token-expiry extension. It
     // no-ops on a genuinely-complete visit, so it can't un-complete anything.
+    // A failure/non-ok result means the public tracker still shows the visit
+    // live after the status flip above — surface it so staff repair it.
     try {
-      await trackTransitions.cancel(svc.id, { reason: cancelReason, actorId: null });
+      const trackResult = await trackTransitions.cancel(svc.id, { reason: cancelReason, actorId: null });
+      if (!trackResult || trackResult.ok !== true) {
+        errors.push(`track_cancel:${svc.id}`);
+        logger.error(
+          `[cancellation-processor] track-layer cancel not ok for ${svc.id}: ${(trackResult && trackResult.reason) || 'unknown'}`
+        );
+      }
     } catch (err) {
+      errors.push(`track_cancel:${svc.id}`);
       logger.error(`[cancellation-processor] track-layer cancel failed for ${svc.id}: ${err.message}`);
     }
   }

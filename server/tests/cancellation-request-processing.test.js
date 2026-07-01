@@ -51,7 +51,7 @@ jest.mock('../services/appointment-reminders', () => ({
 jest.mock('../services/invoice', () => ({
   voidOpenInvoicesForCancelledService: jest.fn().mockResolvedValue([]),
   // Mirrors the real exported list — the processor post-checks with it.
-  CANCELLED_SERVICE_VOIDABLE_STATUSES: ['draft', 'scheduled', 'sent', 'viewed', 'overdue', 'prepaid'],
+  CANCELLED_SERVICE_RESOLVED_STATUSES: ['void', 'refunded', 'canceled', 'cancelled'],
 }));
 
 jest.mock('../services/estimate-card-holds', () => ({
@@ -304,16 +304,20 @@ describe('processCancellationRequest', () => {
     expect(db.__tables.scheduled_services.every((r) => r.status === 'cancelled')).toBe(true);
   });
 
-  test('an invoice the void sweep could not safely void is surfaced for manual review', async () => {
+  test('an invoice the void sweep could not safely resolve is surfaced for manual review', async () => {
     db.__tables.scheduled_services = [
       { id: 's1', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
     ];
-    // voidOpenInvoicesForCancelledService never throws — it silently skips a
-    // money-in-flight invoice. The post-check must catch what it left open.
+    // voidOpenInvoicesForCancelledService never throws — it silently skips
+    // whatever it can't safely void. The post-check must catch everything not
+    // money-resolved: a skipped voidable invoice AND captured money ('paid' —
+    // cash collected for a visit that now won't happen → refund decision).
     db.__tables.invoices = [
       { id: 'inv1', scheduled_service_id: 's1', status: 'sent' },
-      { id: 'inv2', scheduled_service_id: 's1', status: 'void' },     // already voided — fine
-      { id: 'inv3', scheduled_service_id: 'other', status: 'sent' },  // other visit — untouched
+      { id: 'inv2', scheduled_service_id: 's1', status: 'void' },      // already voided — fine
+      { id: 'inv3', scheduled_service_id: 'other', status: 'sent' },   // other visit — untouched
+      { id: 'inv4', scheduled_service_id: 's1', status: 'paid' },      // captured money — review
+      { id: 'inv5', scheduled_service_id: 's1', status: 'refunded' },  // already resolved — fine
     ];
     db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true }];
     db.__tables.payments = [];
@@ -322,8 +326,32 @@ describe('processCancellationRequest', () => {
     const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req6' });
 
     expect(result.cancelledCount).toBe(1);
-    expect(result.errors).toEqual(['invoice_review:inv1']);
+    expect(result.errors).toEqual(['invoice_review:inv1', 'invoice_review:inv4']);
     expect(result.ok).toBe(false);
+  });
+
+  test('a failed or non-ok track-layer cancel is surfaced so staff repair the public tracker', async () => {
+    db.__tables.scheduled_services = [
+      { id: 's1', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+      { id: 's2', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+      { id: 's3', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true }];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+
+    trackTransitions.cancel
+      .mockResolvedValueOnce({ ok: false, reason: 'not_found' })  // s1: non-ok result
+      .mockRejectedValueOnce(new Error('socket layer down'));     // s2: throw
+    // s3 falls through to the default stateful mock → ok.
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req9' });
+
+    // All three status flips still committed; the tracker failures are surfaced.
+    expect(result.cancelledCount).toBe(3);
+    expect(result.errors).toEqual(['track_cancel:s1', 'track_cancel:s2']);
+    expect(result.ok).toBe(false);
+    expect(db.__tables.scheduled_services.every((r) => r.status === 'cancelled')).toBe(true);
   });
 
   test('a card-hold outcome that leaves money unresolved is surfaced; benign outcomes are not', async () => {
