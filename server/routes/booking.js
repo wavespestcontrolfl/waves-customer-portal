@@ -748,7 +748,7 @@ router.post('/find-slots', async (req, res, next) => {
 // { ok:true, body } | { ok:false, status, error }; throws on unexpected errors.
 async function createSelfBooking(payload = {}) {
     const {
-      estimate_id, customer_id, lead_id,
+      estimate_id, pricing_estimate_id, estimate_token, customer_id, lead_id,
       slot_date, slot_start, slot_end,
       technician_id,
       service_type,
@@ -791,7 +791,13 @@ async function createSelfBooking(payload = {}) {
     let estimate = null;
     if (estimate_id) {
       estimate = await db('estimates').where('id', estimate_id).first();
-      if (!custId) custId = estimate?.customer_id;
+      // Do NOT resolve identity from an unverified quote-wizard / handoff draft
+      // (linked to a customer by unverified phone/email) — trusting it would let
+      // anyone who quotes with a victim's contact then POST estimate_id here to
+      // book under that customer. Only verified estimates (admin/accepted,
+      // source !== 'quote_wizard') resolve identity; quote handoffs are used for
+      // PRICING only, via pricing_estimate_id.
+      if (!custId && estimate && estimate.source !== 'quote_wizard') custId = estimate.customer_id;
     }
     // NB: ?lead=<lead_id> is NOT trusted for identity. A lead_id is mintable
     // from a known phone/email via the public quote flow, so using it to resolve
@@ -930,14 +936,34 @@ async function createSelfBooking(payload = {}) {
           && RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern) === 'quarterly'
           && bookedServiceKey === 'pest_control';
         const bookingVisits = willSeedQuarterlyPestSeries ? 4 : null;
-        // Price ONLY from the estimate this booking is explicitly linked to.
-        // (The common quote-wizard booking carries no estimate_id today; lighting
-        // that up safely is a follow-up that passes a server-trusted estimate
-        // reference from the quote flow — inferring the source quote from the
-        // customer's recent drafts proved unsafe/ineffective with the real,
-        // address-prelinked /book UI that sends no phone to verify identity.)
-        const priced = estimate
-          ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey, bookingVisits })
+        // Pay-at-visit prices from the quote→book handoff estimate
+        // (pricing_estimate_id) — deliberately SEPARATE from the identity
+        // `estimate_id`. A quote-wizard draft is linked to a customer by
+        // UNVERIFIED phone/email, so trusting it for identity would let anyone
+        // who knows a phone book + price under that customer. Identity is
+        // resolved by the normal verified path above; here we price ONLY when
+        // the handoff token is valid AND the handoff estimate belongs to the
+        // resolved customer — so a forged/borrowed id can't price a booking from
+        // someone else's quote.
+        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+        const pricingEstimate = pricing_estimate_id
+          ? await db('estimates').where('id', pricing_estimate_id).first()
+          : null;
+        // Re-check the CURRENT estimate is still handoff-eligible: a wizard draft
+        // is refreshed IN PLACE on re-runs, so a token minted while the quote was
+        // residential/recurring must not price a snapshot that has since become
+        // commercial or manual-quote (both excluded from the exposure gate).
+        const pricingEstData = pricingEstimate?.estimate_data || {};
+        const pricingEstimateEligible = !!pricingEstimate
+          && pricingEstimate.source === 'quote_wizard'
+          && !pricingEstData.commercialEstimatedPricing
+          && !pricingEstData.quoteRequired;
+        const pricingTrusted = !!pricing_estimate_id
+          && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)
+          && pricingEstimateEligible
+          && String(pricingEstimate.customer_id) === String(custId);
+        const priced = pricingTrusted
+          ? resolveBookingVisitPrice({ estimate: pricingEstimate, serviceKey: bookedServiceKey, bookingVisits })
           : null;
         if (priced) {
           visitPrice = priced.amount;
