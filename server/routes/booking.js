@@ -914,12 +914,31 @@ async function createSelfBooking(payload = {}) {
     if (payAtVisit) {
       try {
         const { resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
-        // Bind the price to the booked SERVICE: only stamp when the linked
-        // estimate's recurring line is the same service that was booked, so a
+        // Bind the price to the booked SERVICE: only stamp when the priced
+        // estimate's recurring service is the same service that was booked, so a
         // crafted/stale payload can't pair one service's booking with another
         // service's price. service_type is client-influenced, hence the bind.
         const bookedServiceKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
-        const priced = resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey });
+        // Bind the pricing cadence to the ACTUAL series this route creates, NOT
+        // the client's recurring_pattern: a quarterly (4-visit) pest series is
+        // seeded ONLY under this exact condition (mirrors
+        // shouldSeedQuarterlyPestFollowUps below); every other booking creates a
+        // single visit with no recurring series → no cadence → fail closed. So a
+        // crafted recurring_pattern:'monthly' can't inflate the divisor and
+        // underbill — bookingVisits is 4 or nothing.
+        const willSeedQuarterlyPestSeries = !isOneTimeBookingSource(source)
+          && RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern) === 'quarterly'
+          && bookedServiceKey === 'pest_control';
+        const bookingVisits = willSeedQuarterlyPestSeries ? 4 : null;
+        // Price ONLY from the estimate this booking is explicitly linked to.
+        // (The common quote-wizard booking carries no estimate_id today; lighting
+        // that up safely is a follow-up that passes a server-trusted estimate
+        // reference from the quote flow — inferring the source quote from the
+        // customer's recent drafts proved unsafe/ineffective with the real,
+        // address-prelinked /book UI that sends no phone to verify identity.)
+        const priced = estimate
+          ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey, bookingVisits })
+          : null;
         if (priced) {
           visitPrice = priced.amount;
           paymentPref = 'pay_at_visit';

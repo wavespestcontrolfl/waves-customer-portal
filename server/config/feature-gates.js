@@ -239,8 +239,14 @@ const gates = {
   // "live on merge", one env flip). Off → the cron only shadow-logs candidates.
   bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY === 'true',
 
-  // Booking "pay per application" — when a self-booking can be priced from the
-  // estimate it is linked to (service-bound), stamp the per-application price +
+  // Booking "pay per application" — LINKED-ESTIMATE, PEST-ONLY BY DESIGN: prices
+  // ONLY a booking explicitly linked to an estimate (estimate_id), and only for
+  // the quarterly pest_control series this route actually seeds (lawn/mosquito/
+  // tree bookings are single visits). Everything else fails closed to today's
+  // price-less behavior. Lighting up the common quote-wizard booking (no
+  // estimate_id) is a follow-up that passes a server-trusted estimate reference
+  // from the quote flow — not identity inference. When priceable (service- +
+  // cadence-bound, no supplemental program), stamp the per-application price +
   // payment_method_preference='pay_at_visit' + create_invoice_on_complete onto
   // the booked visit (and its inherited recurring follow-ups) so completion
   // invoicing bills each visit from estimated_price. Self-booked customers carry
