@@ -35,6 +35,7 @@ function mockLeadsDb({ monthLeads, openLeads, recentMinutes }) {
       where(...a) { calls.push(['where', a[0], a[1], a[2]]); return builder; },
       whereNull(...a) { calls.push(['whereNull', ...a]); return builder; },
       whereNotNull(...a) { calls.push(['whereNotNull', ...a]); return builder; },
+      whereRaw(...a) { calls.push(['whereRaw', ...a]); return builder; },
       pluck() { return Promise.resolve(recentMinutes); },
       then(resolve, reject) {
         const isOpen = calls.some((c) => c[0] === 'where' && c[1] === 'status' && c[2] === 'new');

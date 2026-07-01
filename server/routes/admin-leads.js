@@ -199,12 +199,20 @@ router.get('/analytics/overview', async (req, res, next) => {
     const openUnansweredCount = openLeads.length;
 
     // Rolling 7-day median so recent responses show up even when the selected
-    // window's median is still weighed down by earlier slow ones. Keyed on
-    // first_contact_at (this week's NEW leads — the speed-to-lead cohort) and
-    // independent of the page's date filter.
+    // window's median is still weighed down by earlier slow ones. Windowed on the
+    // RESPONSE moment, not the inbound time: response_time_minutes is logged as
+    // (now - first_contact_at) at first response (services/lead-attribution.js), so
+    // the response happened at first_contact_at + response_time_minutes. Keying on
+    // that (not first_contact_at) means a rep answering an OLD backlog lead THIS week
+    // still counts — the whole point of a "recent performance" gauge. Independent of
+    // the page's date filter.
     const recentResponded = await db('leads')
-      .where('first_contact_at', '>=', new Date(nowMs - 7 * 24 * 60 * 60 * 1000))
       .whereNotNull('response_time_minutes')
+      .whereNotNull('first_contact_at')
+      .whereRaw(
+        'first_contact_at + make_interval(mins => response_time_minutes) >= ?',
+        [new Date(nowMs - 7 * 24 * 60 * 60 * 1000)],
+      )
       .pluck('response_time_minutes');
     const recentMedianResponseTime = medianMinutes(recentResponded);
 
