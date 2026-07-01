@@ -31,6 +31,19 @@ function parseInclusiveStart(startDate) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return parseETDateTime(`${startDate}T00:00:00`);
   return new Date(startDate);
 }
+
+// Speed-to-Lead fresh-start baseline (owner directive 2026-06-30: "fresh start
+// tomorrow"). The live backlog gauge (Avg Speed to Lead + the "waiting" count)
+// only counts leads first contacted on/after this ET date, so a one-time reset
+// isn't dragged down forever by the pre-reset backlog of never-answered leads.
+// Env-overridable (SPEED_TO_LEAD_FRESH_START=YYYY-MM-DD) for a future reset; set
+// it empty to disable the floor. Invalid values fail open (no floor).
+const SPEED_TO_LEAD_FRESH_START = (() => {
+  const raw = process.env.SPEED_TO_LEAD_FRESH_START ?? '2026-07-01';
+  if (!raw) return null;
+  const d = parseInclusiveStart(raw);
+  return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
+})();
 const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 
@@ -180,17 +193,23 @@ router.get('/analytics/overview', async (req, res, next) => {
     // been waiting, right now. Distinct from avgResponseTime (the historical
     // first-contact -> first-response gap on leads we DID respond to).
     //
-    // This is a live backlog gauge, so it is intentionally NOT bounded to the
-    // reporting window: a lead that first contacted us last month but is still
-    // unanswered is part of the backlog "right now". A lead is "still waiting"
+    // This is a live backlog gauge, so it is NOT bounded to the reporting window
+    // (a lead that first contacted us last week but is still unanswered is part of
+    // the backlog "right now") — but it IS floored at the fresh-start baseline
+    // below so the pre-reset backlog doesn't drag it forever. A lead is "still waiting"
     // only while status is 'new' — the sole pre-first-response state; every
     // other status ('contacted', 'estimate_sent', terminal, etc.) implies a
     // first response has happened. response_time_minutes IS NULL is kept as a
     // belt-and-suspenders guard against status/timestamp drift.
-    const openLeads = await db('leads')
+    const openLeadsQuery = db('leads')
       .where('status', 'new')
       .whereNull('response_time_minutes')
       .whereNotNull('first_contact_at');
+    // Fresh-start floor: exclude the pre-reset backlog so the gauge measures the
+    // team's speed-to-lead from the reset date forward, not against leads that
+    // predate the clean slate.
+    if (SPEED_TO_LEAD_FRESH_START) openLeadsQuery.where('first_contact_at', '>=', SPEED_TO_LEAD_FRESH_START);
+    const openLeads = await openLeadsQuery;
     const nowMs = Date.now();
     const avgSpeedToLead = openLeads.length > 0
       ? Math.round(openLeads.reduce((s, l) =>
@@ -238,6 +257,7 @@ router.get('/analytics/overview', async (req, res, next) => {
       total, won, lost, active, conversionRate,
       avgResponseTime, medianResponseTime, recentMedianResponseTime,
       avgSpeedToLead, openUnansweredCount,
+      speedToLeadSince: SPEED_TO_LEAD_FRESH_START ? SPEED_TO_LEAD_FRESH_START.toISOString() : null,
       costTotal: Math.round(costTotal * 100) / 100,
       revenue: Math.round(revenue * 100) / 100, cpa, roi,
       startDate: start, endDate: end,

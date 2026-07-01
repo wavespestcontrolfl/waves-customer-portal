@@ -495,6 +495,13 @@ function fmtTime(min) {
     .map((value) => String(value).padStart(2, "0"))
     .join(":");
 }
+// Short "M/D" for the Speed-to-Lead fresh-start baseline label.
+function fmtShortDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-US", { month: "numeric", day: "numeric" });
+}
 function roiColor(roi) {
   return roi >= 0 ? C.heading : C.red;
 }
@@ -1058,17 +1065,19 @@ export function LeadsSection() {
           <MetricCard
             label="Avg Speed to Lead"
             value={ov.avgSpeedToLead != null ? fmtTime(ov.avgSpeedToLead) : "--"}
-            sub={
-              ov.avgSpeedToLead == null
-                ? "None waiting"
-                : `${ov.openUnansweredCount} waiting · ${
-                    ov.avgSpeedToLead < 5
-                      ? "Great!"
-                      : ov.avgSpeedToLead < 15
-                        ? "Good"
-                        : "Needs work"
-                  }`
-            }
+            sub={(() => {
+              const since = ov.speedToLeadSince
+                ? ` since ${fmtShortDate(ov.speedToLeadSince)}`
+                : "";
+              if (ov.avgSpeedToLead == null) return `None waiting${since}`;
+              const quality =
+                ov.avgSpeedToLead < 5
+                  ? "Great!"
+                  : ov.avgSpeedToLead < 15
+                    ? "Good"
+                    : "Needs work";
+              return `${ov.openUnansweredCount} waiting${since} · ${quality}`;
+            })()}
             color={
               ov.avgSpeedToLead == null
                 ? C.green
