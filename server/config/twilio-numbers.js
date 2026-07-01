@@ -215,20 +215,30 @@ const TWILIO_NUMBERS = {
     return this.locations[customerLocationId]?.number || this.mainLine.number;
   },
 
+  // Returns the CANONICAL channel key (the same namespace the web classifier
+  // determineLeadSource, ad_service_attribution, and formatSourceName use) so a
+  // call-sourced customers.lead_source matches a web-sourced one for the same
+  // channel — no google_business vs google_business_profile / hub-vs-spoke splits.
+  //   hub (wavespestcontrol.com) → waves_website ; spoke domains → domain_website
+  //   GBP → google_business ; van → van_wrap ; office/location lines → waves_website
+  //   paid numbers keep their platform key (google_ads / facebook).
   getLeadSourceFromNumber(phoneNumber) {
-    const domain = this.domainTracking.find(d => d.number === phoneNumber);
-    if (domain) return { source: 'domain_website', domain: domain.domain, area: domain.area };
-    const lawn = this.lawnDomainTracking.find(d => d.number === phoneNumber);
-    if (lawn) return { source: 'domain_website', domain: lawn.domain, area: lawn.area };
+    const domain = this.domainTracking.find(d => d.number === phoneNumber)
+      || this.lawnDomainTracking.find(d => d.number === phoneNumber);
+    if (domain) {
+      const isHub = /(^|\.)wavespestcontrol\.com$/i.test(String(domain.domain || '').trim().toLowerCase());
+      return { source: isHub ? 'waves_website' : 'domain_website', domain: domain.domain, area: domain.area };
+    }
     for (const [, paid] of Object.entries(this.paidTracking)) {
       if (paid.number === phoneNumber) return { source: paid.source, domain: null, area: paid.label };
     }
     for (const [, gbp] of Object.entries(this.gbpTracking)) {
-      if (gbp.number === phoneNumber) return { source: 'google_business_profile', domain: null, area: gbp.area };
+      if (gbp.number === phoneNumber) return { source: 'google_business', domain: null, area: gbp.area };
     }
     if (this.tracking.vanWrap.number === phoneNumber) return { source: 'van_wrap', domain: null, area: null };
+    // Office/location direct lines are the hub's NAP numbers → waves_website.
     for (const [, loc] of Object.entries(this.locations)) {
-      if (loc.number === phoneNumber) return { source: 'location_direct', domain: null, area: loc.label };
+      if (loc.number === phoneNumber) return { source: 'waves_website', domain: null, area: loc.label };
     }
     return { source: 'unknown', domain: null, area: null };
   },
