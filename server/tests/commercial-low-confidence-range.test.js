@@ -35,6 +35,26 @@ describe('commercialLowConfidenceRange', () => {
       rangeLowMonthly: 820, rangeHighMonthly: 980, monthlySwing: 160,
     });
   });
+  test('engineResult.lineItems shape (public-quote mirror) is detected', () => {
+    // The public calculator persists non-manual commercial priced lines here, not
+    // under result.recurring.services — the backstop/range must still apply.
+    const eng = (svc) => ({ engineResult: { lineItems: [svc] } });
+    expect(commercialLowConfidenceRange(eng({ service: 'commercial_lawn', pricingConfidence: 'LOW', annual: 4800, monthly: 400 })))
+      .toMatchObject({ hasLowConfidence: true, forceSiteQuote: false });
+    expect(commercialLowConfidenceRange(eng({ service: 'commercial_lawn', pricingConfidence: 'LOW', annual: 12000, monthly: 1000 })))
+      .toMatchObject({ forceSiteQuote: true });
+  });
+
+  test('a line present in BOTH shapes is deduped (not double-counted)', () => {
+    // recurring row lost pricingConfidence in supplementation; engineResult has it.
+    const both = {
+      result: { recurring: { services: [{ service: 'commercial_lawn', annual: 12000 }] } },
+      engineResult: { lineItems: [{ service: 'commercial_lawn', pricingConfidence: 'LOW', annual: 12000, monthly: 1000 }] },
+    };
+    // single $1000/mo LOW line → swing 400 (not 800 from double-count)
+    expect(commercialLowConfidenceRange(both)).toMatchObject({ monthlySwing: 400, forceSiteQuote: true });
+  });
+
   test('all-MEDIUM / manual / non-commercial → no range', () => {
     expect(commercialLowConfidenceRange(recurring([MED(6000)]))).toEqual({ hasLowConfidence: false });
     expect(commercialLowConfidenceRange(recurring([{ service: 'commercial_pest', pricingConfidence: 'LOW', quoteRequired: true, annual: null }]))).toEqual({ hasLowConfidence: false });
