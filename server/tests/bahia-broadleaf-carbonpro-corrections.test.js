@@ -37,17 +37,23 @@ function makeKnex(state) {
 }
 
 function seed() {
-  // stale B1 goals that still name Drive XLR8 / Celsius (Part E must rewrite these)
-  const STALE_GOALS = {
-    may_micros_crabgrass: 'No fert; micros + K (irrigated only); crabgrass curative Drive XLR8 if breakthrough.',
-    jul_seed_head: 'Celsius app 2; structured seed-head talk; mowing upsell if available.',
-    sep_blackout_crabgrass: 'K-Flow returns; SpeedZone weather-gated; crabgrass curative Drive XLR8.',
+  // stale B1 windows that still name Drive XLR8 / Celsius in title/goal/tasks
+  const STALE = {
+    may_micros_crabgrass: { title: 'May Micros + K (Irrigated) + Crabgrass Curative', goal: 'crabgrass curative Drive XLR8 if breakthrough.', tasks: ['route_by_ordinance_zone', 'crabgrass_curative_gate', 'irrigation_status_product_load'] },
+    jul_seed_head: { title: 'July Blackout + Seed Head Customer Talk', goal: 'Celsius app 2; structured seed-head talk.', tasks: ['blackout_zero_np', 'seed_head_customer_talk', 'heat_stress_herbicide_gate'] },
+    sep_blackout_crabgrass: { title: 'September Blackout Closeout + Crabgrass Curative', goal: 'SpeedZone weather-gated; crabgrass curative Drive XLR8.', tasks: ['blackout_zero_np', 'crabgrass_curative_gate', 'speedzone_weather_gate'] },
   };
   const bahiaWindows = ['jan_pre_m_irrigation_class', 'mar_n1_pre_m', 'apr_insect_fire_ant', 'may_micros_crabgrass', 'jul_seed_head', 'sep_blackout_crabgrass', 'nov_winter_k']
-    .map((k) => ({
-      id: `w-${k}`, window_key: k, lawn_protocol_id: 'bahia-p',
-      goal: STALE_GOALS[k] || 'goal', service_report_context: JSON.stringify({ title: k, goal: STALE_GOALS[k] || 'goal' }),
-    }));
+    .map((k) => {
+      const s = STALE[k];
+      return {
+        id: `w-${k}`, window_key: k, lawn_protocol_id: 'bahia-p',
+        title: s ? s.title : 'title', goal: s ? s.goal : 'goal',
+        required_tasks: JSON.stringify(s ? s.tasks : []),
+        assessment_bridge: JSON.stringify({ writeExpectedWindow: true, requiredTasks: s ? s.tasks : [] }),
+        service_report_context: JSON.stringify({ title: s ? s.title : k, goal: s ? s.goal : 'goal' }),
+      };
+    });
   return {
     lawn_protocol_gates: [
       { id: 'g-heat', lawn_protocol_id: 'bahia-p', gate_key: 'speedzone_heat_gate', rule_text: 'Do not apply SpeedZone Southern above 90°F; use Celsius WG for hot-season broadleaf.' },
@@ -104,25 +110,40 @@ describe('bahia broadleaf + CarbonPro correction migration', () => {
     });
   });
 
-  test('D) March broadleaf-cleanup SpeedZone row inserted (conditional, mapped, spot-capped)', () => {
-    const mar = state.lawn_protocol_products.find((p) => p.lawn_protocol_window_id === 'w-mar_n1_pre_m'
-      && p.product_name === 'SpeedZone Southern + NIS');
-    expect(mar).toBeTruthy();
-    expect(mar.default_in_plan).toBe(false);
-    expect(mar.product_id).toBe('sz');
-    expect(mar.rate_per_1000).toBe(1.1); // catalog rate (mix math); preferred 1.0 is metadata
-    expect(JSON.parse(mar.gates).trigger).toBe('broadleaf_heavy');
-    expect(JSON.parse(mar.gates).spotAreaCapSqFtPerAcre).toBe(1000);
-    expect(JSON.parse(mar.gates).bahiaPreferredRatePer1000).toBe(1.0);
+  test('D) March + July SpeedZone conditional rows inserted (mapped, spot-capped, catalog rate)', () => {
+    ['w-mar_n1_pre_m', 'w-jul_seed_head'].forEach((wid) => {
+      const row = state.lawn_protocol_products.find((p) => p.lawn_protocol_window_id === wid
+        && p.product_name === 'SpeedZone Southern + NIS');
+      expect(row).toBeTruthy();
+      expect(row.default_in_plan).toBe(false);
+      expect(row.product_id).toBe('sz');
+      expect(row.rate_per_1000).toBe(1.1); // catalog rate (mix math); preferred 1.0 is metadata
+      const g = JSON.parse(row.gates);
+      expect(g.spotAreaCapSqFtPerAcre).toBe(1000);
+      expect(g.bahiaPreferredRatePer1000).toBe(1.0);
+    });
+    // July uses the <90°F broadleaf trigger; March the broadleaf-heavy trigger
+    const jul = state.lawn_protocol_products.find((p) => p.lawn_protocol_window_id === 'w-jul_seed_head' && p.product_name === 'SpeedZone Southern + NIS');
+    expect(JSON.parse(jul.gates).trigger).toBe('broadleaf_below_90f');
   });
 
-  test('E) bahia window goals no longer name Drive/Celsius (goal + service_report_context)', () => {
-    ['may_micros_crabgrass', 'jul_seed_head', 'sep_blackout_crabgrass'].forEach((wk) => {
+  test('E) bahia windows fully corrected: title/goal/tasks no longer name Drive/Celsius or a curative', () => {
+    ['may_micros_crabgrass', 'sep_blackout_crabgrass'].forEach((wk) => {
       const w = state.lawn_protocol_windows.find((r) => r.window_key === wk);
+      expect(w.title).toMatch(/Scout/);
+      expect(w.title).not.toMatch(/Crabgrass Curative/i);
       expect(w.goal).not.toMatch(/Drive XLR8|Celsius/i);
-      expect(JSON.parse(w.service_report_context).goal).toBe(w.goal); // copy kept in sync
+      const tasks = JSON.parse(w.required_tasks);
+      expect(tasks).not.toContain('crabgrass_curative_gate');
+      expect(tasks).toContain('crabgrass_scout_no_curative');
+      // derived fields stay in sync
+      expect(JSON.parse(w.assessment_bridge).requiredTasks).toEqual(tasks);
+      expect(JSON.parse(w.wiki_refs)).toContain('protocols/lawn/crabgrass_scout_no_curative');
+      expect(JSON.parse(w.service_report_context).title).toBe(w.title);
+      expect(JSON.parse(w.service_report_context).goal).toBe(w.goal);
     });
-    // untouched windows keep their goal
+    // July goal no longer says "Celsius app 2"; untouched window keeps its goal
+    expect(state.lawn_protocol_windows.find((r) => r.window_key === 'jul_seed_head').goal).not.toMatch(/Celsius/i);
     expect(state.lawn_protocol_windows.find((r) => r.window_key === 'jan_pre_m_irrigation_class').goal).toBe('goal');
   });
 

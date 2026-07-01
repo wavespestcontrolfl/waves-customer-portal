@@ -24,8 +24,11 @@
  *     across turf) — a divergent structured rate would disagree with the runtime mix.
  *     The owner's bahia-preferred 1.0 (label 0.7-1.5) is recorded as gate metadata.
  *
- *  D) Bahia March broadleaf-cleanup now uses SpeedZone (was Celsius, bahia-excluded),
- *     so seed the matching conditional structured row for completion-matching.
+ *  D) Bahia March + July broadleaf now use SpeedZone (was Celsius, bahia-excluded),
+ *     so seed the matching conditional structured rows for completion-matching.
+ *  E) Rewrite the corrected bahia window titles/goals/required_tasks (+ derived
+ *     service_report_context / assessment_bridge / wiki_refs / customer notes) and the
+ *     bahia SpeedZone heat gate; remove the inert bahia Celsius annual-rate gate.
  *
  * Idempotent; down() is a non-destructive no-op (data correction, not schema).
  */
@@ -105,62 +108,89 @@ exports.up = async function up(knex) {
       .update({ gates: JSON.stringify(gates), updated_at: knex.fn.now() });
   }
 
-  // D) March broadleaf-cleanup SpeedZone (replaces the removed Celsius secondary)
-  const marId = windowIdByKey.get('mar_n1_pre_m');
-  if (marId) {
+  // D) SpeedZone conditional in the broadleaf windows that dropped Celsius/Drive but
+  //    now use SpeedZone — March cleanup + July (<90°F only). Idempotent.
+  const speedZoneCatalog = await findSpeedZoneCatalog(knex);
+  for (const wk of ['mar_n1_pre_m', 'jul_seed_head']) {
+    const wid = windowIdByKey.get(wk);
+    if (!wid) continue;
     const exists = await knex('lawn_protocol_products')
-      .where({ lawn_protocol_window_id: marId, product_name: 'SpeedZone Southern + NIS' })
+      .where({ lawn_protocol_window_id: wid, product_name: 'SpeedZone Southern + NIS' })
       .first();
-    if (!exists) {
-      const sz = await findSpeedZoneCatalog(knex);
-      await knex('lawn_protocol_products').insert({
-        lawn_protocol_window_id: marId,
-        product_name: 'SpeedZone Southern + NIS',
-        product_id: sz ? sz.id : null,
-        role: 'post_emergent',
-        application_mode: 'broadcast',
-        rate_per_1000: 1.1, // catalog default_rate (mix math uses this); see Part C note
-        rate_unit: 'fl_oz',
-        carrier_gal_per_1000: 1,
-        default_in_plan: false,
-        gates: JSON.stringify({
-          trigger: 'broadleaf_heavy',
-          gateProduct: 'SpeedZone',
-          maxTempF: 90,
-          establishedTurfOnly: true,
-          avoidHeatStress: true,
-          spotAreaCapSqFtPerAcre: 1000,
-          bahiaPreferredRatePer1000: 1.0,
-          labelRateRange: '0.7-1.5 fl_oz_per_1000',
-        }),
-        annual_counter: JSON.stringify({}),
-        mixing: JSON.stringify({}),
-        report_copy: JSON.stringify({ role: 'post_emergent' }),
-        created_at: knex.fn.now(),
-        updated_at: knex.fn.now(),
-      });
-    }
+    if (exists) continue;
+    await knex('lawn_protocol_products').insert({
+      lawn_protocol_window_id: wid,
+      product_name: 'SpeedZone Southern + NIS',
+      product_id: speedZoneCatalog ? speedZoneCatalog.id : null,
+      role: 'post_emergent',
+      application_mode: 'broadcast',
+      rate_per_1000: 1.1, // catalog default_rate (mix math uses this); see Part C note
+      rate_unit: 'fl_oz',
+      carrier_gal_per_1000: 1,
+      default_in_plan: false,
+      gates: JSON.stringify({
+        trigger: wk === 'jul_seed_head' ? 'broadleaf_below_90f' : 'broadleaf_heavy',
+        gateProduct: 'SpeedZone',
+        maxTempF: 90,
+        establishedTurfOnly: true,
+        avoidHeatStress: true,
+        spotAreaCapSqFtPerAcre: 1000,
+        bahiaPreferredRatePer1000: 1.0,
+        labelRateRange: '0.7-1.5 fl_oz_per_1000',
+      }),
+      annual_counter: JSON.stringify({}),
+      mixing: JSON.stringify({}),
+      report_copy: JSON.stringify({ role: 'post_emergent' }),
+      created_at: knex.fn.now(),
+      updated_at: knex.fn.now(),
+    });
   }
 
-  // ── E) Correct stale bahia window goals — B1 seeded Drive XLR8 / Celsius text in
-  //       the goal (and the copy inside service_report_context.goal), which
-  //       getProtocolWindowContext exposes to the Tech Treatment Plan.
-  const BAHIA_WINDOW_GOALS = {
-    may_micros_crabgrass: 'No fert (only 2 N/yr); micros + K (irrigated only); NO bahia-safe crabgrass curative — rely on pre-emergent timing + scout/manual, nonselective spot only where turf loss is acceptable.',
-    jul_seed_head: 'No broadleaf herbicide labeled on bahiagrass (defer when hot); structured seed-head customer talk (proactive, not reactive); mowing upsell if available.',
-    sep_blackout_crabgrass: 'K-Flow returns (irrigated); SpeedZone weather-gated broadleaf; NO bahia-safe crabgrass curative — rely on pre-emergent timing + scout/manual, nonselective spot only where turf loss is acceptable.',
+  // ── E) Correct stale bahia windows in full — B1 seeded Drive XLR8 / Celsius text in
+  //       the goal AND "Crabgrass Curative" in the title + a crabgrass_curative_gate
+  //       required task (used by closeout). Rewrite title/goal/tasks and every derived
+  //       field (required_tasks, assessment_bridge.requiredTasks, wiki_refs,
+  //       service_report_context, customer_note_templates) to the defer/no-curative form.
+  const BAHIA_WINDOW_FIXES = {
+    may_micros_crabgrass: {
+      title: 'May Micros + K (Irrigated) + Crabgrass Scout',
+      goal: 'No fert (only 2 N/yr); micros + K (irrigated only); NO bahia-safe crabgrass curative — rely on pre-emergent timing + scout/manual, nonselective spot only where turf loss is acceptable.',
+      tasks: ['route_by_ordinance_zone', 'crabgrass_scout_no_curative', 'irrigation_status_product_load'],
+    },
+    jul_seed_head: {
+      title: 'July Blackout + Seed Head Customer Talk',
+      goal: 'Broadleaf: SpeedZone only if <90°F on established turf, else defer (no bahia-safe hot-weather fallback); structured seed-head customer talk (proactive, not reactive); mowing upsell if available.',
+      tasks: ['blackout_zero_np', 'seed_head_customer_talk', 'heat_stress_herbicide_gate'],
+    },
+    sep_blackout_crabgrass: {
+      title: 'September Blackout Closeout + Crabgrass Scout',
+      goal: 'K-Flow returns (irrigated); SpeedZone weather-gated broadleaf; NO bahia-safe crabgrass curative — rely on pre-emergent timing + scout/manual, nonselective spot only where turf loss is acceptable.',
+      tasks: ['blackout_zero_np', 'crabgrass_scout_no_curative', 'speedzone_weather_gate'],
+    },
   };
   const bahiaWindowRows = await knex('lawn_protocol_windows')
     .where({ lawn_protocol_id: bahiaProtocol.id })
-    .select('id', 'window_key', 'service_report_context');
+    .select('id', 'window_key', 'service_report_context', 'assessment_bridge');
   for (const row of bahiaWindowRows) {
-    const goal = BAHIA_WINDOW_GOALS[row.window_key];
-    if (!goal) continue;
+    const fix = BAHIA_WINDOW_FIXES[row.window_key];
+    if (!fix) continue;
     const src = parseJson(row.service_report_context, {});
-    src.goal = goal;
+    src.title = fix.title;
+    src.goal = fix.goal;
+    const ab = parseJson(row.assessment_bridge, {});
+    ab.requiredTasks = fix.tasks;
     await knex('lawn_protocol_windows')
       .where({ id: row.id })
-      .update({ goal, service_report_context: JSON.stringify(src), updated_at: knex.fn.now() });
+      .update({
+        title: fix.title,
+        goal: fix.goal,
+        required_tasks: JSON.stringify(fix.tasks),
+        assessment_bridge: JSON.stringify(ab),
+        wiki_refs: JSON.stringify(fix.tasks.map((t) => `protocols/lawn/${t}`)),
+        service_report_context: JSON.stringify(src),
+        customer_note_templates: JSON.stringify([`${fix.title}: service completed according to the seasonal bahia protocol and local ordinance gates.`]),
+        updated_at: knex.fn.now(),
+      });
   }
 
   // ── F) bahia gates: the shared SpeedZone heat gate recommends Celsius as the
