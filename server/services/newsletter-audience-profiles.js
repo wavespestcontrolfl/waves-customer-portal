@@ -43,6 +43,14 @@ const LINE_ALIASES = {
   palm_injection: 'tree_shrub',
   commercial_pest: 'pest',
   commercial_lawn: 'lawn',
+  // Commercial pest-family lines count toward their residential sellable line so
+  // a covered commercial mosquito/termite/rodent customer isn't segmented as
+  // MISSING that line (and spammed the cross-sell). estimate-service-lines now
+  // suppresses the residential alias when the commercial key is present, so the
+  // alias must live here.
+  commercial_mosquito: 'mosquito',
+  commercial_termite_bait: 'termite',
+  commercial_rodent_bait: 'rodent',
 };
 
 function normalizeLine(key) {

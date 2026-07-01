@@ -29,6 +29,22 @@ const {
 
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
 
+// Resolve a TRUSTED lot size for the public quote, or null when none is known.
+// The posted lotSqFt is NOT trustworthy on its own: the wizard seeds a synthetic
+// 8,000 default when the lookup returns no parcel, and the customer may submit it
+// unedited. So trust the lot only when (a) the property lookup actually measured
+// the parcel (enriched.lotSqFt), or (b) the customer hand-confirmed/edited it on
+// the confirm step (lotSizeConfirmed). Drives lotSizeMeasured, which keeps
+// commercial mosquito from auto-pricing off a fabricated treatable area. Mirrors
+// the realFootprintSqFt / buildingSizeMeasured pattern.
+function resolveRealLotSqFt({ enrichedLotSqFt, lotSqFt, lotSizeConfirmed } = {}) {
+  // A customer-confirmed (hand-entered/edited) lot wins over the lookup — they may
+  // have corrected a stale parcel value (mirrors realFootprintSqFt + buildingSizeConfirmed).
+  if (lotSizeConfirmed === true && Number(lotSqFt) > 0) return Number(lotSqFt);
+  if (Number(enrichedLotSqFt) > 0) return Number(enrichedLotSqFt);
+  return null;
+}
+
 function isPublicCommercialQuote(body = {}, enriched = {}) {
   const enrichedCommercial = isCommercialProperty({
     propertyType: enriched.propertyType,
@@ -339,7 +355,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const {
       leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
       buildingSizeConfirmed,
-      lotSqFt, stories, propertyType, category, isCommercial, commercialSubtype,
+      lotSqFt, lotSizeConfirmed, stories, propertyType, category, isCommercial, commercialSubtype,
       enriched, services, attribution,
     } = req.body || {};
     const normalizedAddress = normalizeLeadAddress({
@@ -398,7 +414,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const HOME_CAP = commercialDetected ? 5_000_000 : 20000;
     const LOT_CAP = commercialDetected ? 50_000_000 : 200000;
     const sqft = Math.max(500, Math.min(HOME_CAP, Number(homeSqFt) || 2000));
-    const lot = Math.max(500, Math.min(LOT_CAP, Number(lotSqFt) || sqft * 4));
+    // Resolve the TRUSTED lot once (lookup-measured or customer-confirmed) and use
+    // it for BOTH the measured flag AND the lot fed to the engine — otherwise we
+    // could mark the lot measured off enriched.lotSqFt while still pricing off the
+    // stale/synthetic top-level value. When there's no trusted lot, fall back to
+    // the synthetic sqft×4 default: lot-derived commercial lawn/tree still estimate
+    // off it, but commercial mosquito reads lotSizeMeasured and stays manual.
+    const realLotSqFt = resolveRealLotSqFt({ enrichedLotSqFt: ep.lotSqFt, lotSqFt, lotSizeConfirmed });
+    const lotSizeMeasured = realLotSqFt != null;
+    const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? (Number(lotSqFt) || sqft * 4)));
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
     // density, landscape complexity, near-water, large-driveway) flow into the
@@ -441,6 +465,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // win and there's no double ÷-stories). Residential is unchanged.
       ...(commercialDetected && realFootprintSqFt != null ? { footprintSqFt: realFootprintSqFt } : {}),
       buildingSizeMeasured,
+      // True only for a REAL (lookup-measured or customer-confirmed) lot; when
+      // absent we still pass the synthetic lot (sqft × 4, below) so lot-derived
+      // commercial lawn/tree can estimate, but commercial mosquito reads this flag
+      // and falls back to manual rather than auto-pricing a fabricated area.
+      lotSizeMeasured,
       stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
       lotSqFt: lot,
       propertyType: commercialDetected ? 'commercial' : (propertyType || ep.propertyType || 'Single Family'),
@@ -1294,4 +1323,5 @@ module.exports._internals = {
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   shouldRefreshWizardDraft,
+  resolveRealLotSqFt,
 };

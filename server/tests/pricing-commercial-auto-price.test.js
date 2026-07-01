@@ -7,6 +7,9 @@ const {
   priceCommercialLawn,
   priceCommercialTreeShrub,
   priceCommercialPest,
+  priceCommercialMosquito,
+  priceCommercialTermiteBait,
+  priceCommercialRodentBait,
 } = require('../services/pricing-engine/service-pricing');
 const { generateEstimate } = require('../services/pricing-engine');
 
@@ -243,6 +246,214 @@ describe('priceCommercialPest — cost-buildup auto-pricer', () => {
 
     // Direct-call: the option also forces manual even with a real footprint.
     expect(priceCommercialPest({ footprint: 2000 }, { buildingSizeMeasured: false }).quoteRequired).toBe(true);
+  });
+});
+
+describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup auto-pricers', () => {
+  test('mosquito golden anchor (treatable-area driven, 9 visits) + FL-taxed flat', () => {
+    const r = priceCommercialMosquito({ mosquitoTreatableSqFt: 40000 });
+    expect(r).toMatchObject({
+      service: 'commercial_mosquito',
+      annual: 1534.09,
+      monthly: 127.84,
+      visitsPerYear: 9,
+      quoteRequired: false,
+      taxable: true,
+      taxCategory: 'nonresidential_pest_control',
+      discountable: false,
+      excludeFromPctDiscount: true,
+      estimatedPricing: true,
+    });
+  });
+
+  test('mosquito prices off lot-derived treatable area (lot − footprint − hardscape)', () => {
+    // Lot-only (no building) still prices off lot − footprint − hardscape.
+    const r = priceCommercialMosquito({ lotSqFt: 60000 });
+    expect(r.quoteRequired).toBe(false);
+    expect(r.annual).toBeGreaterThan(0);
+  });
+
+  test('mosquito with a SYNTHETIC public lot (lotSizeMeasured:false) falls back to a MANUAL quote', () => {
+    // The public wizard synthesizes lotSqFt = sqft × 4 when no real parcel data
+    // exists, so the whole treatable area is fabricated. lotSizeMeasured:false
+    // marks it — go manual regardless of how the area resolves.
+    const synthetic = priceCommercialMosquito({ lotSqFt: 32000 }, { lotSizeMeasured: false });
+    expect(synthetic).toMatchObject({
+      service: 'commercial_mosquito',
+      quoteRequired: true,
+      annual: null,
+      manualReviewReasons: ['commercial_mosquito_missing_treatable_area'],
+    });
+    // The flag (not the area source) drives it: even a pre-resolved explicit
+    // treatable area is profile-derived from the synthetic lot, so it's manual too.
+    expect(priceCommercialMosquito({ mosquitoTreatableSqFt: 30000 }, { lotSizeMeasured: false }).quoteRequired).toBe(true);
+    // A REAL lot (lotSizeMeasured true, or admin path where it's undefined) prices.
+    expect(priceCommercialMosquito({ lotSqFt: 32000 }, { lotSizeMeasured: true }).quoteRequired).toBe(false);
+    expect(priceCommercialMosquito({ lotSqFt: 32000 }).quoteRequired).toBe(false);
+  });
+
+  test('synthetic-lot guard fires through generateEstimate (profile pre-derives the treatable area)', () => {
+    // The real path: calculatePropertyProfile converts the synthetic lotSqFt into
+    // property.mosquitoTreatableSqFt BEFORE the pricer runs, so the area resolves
+    // as 'explicit' — the guard must key off lotSizeMeasured, not the area source,
+    // or it never fires here. (Regression for the PR bot's engine-path P2.)
+    const synthetic = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 8000,
+      lotSqFt: 32000,            // synthetic sqft × 4
+      lotSizeMeasured: false,
+      services: { mosquito: { tier: 'monthly12' } },
+    });
+    expect(synthetic.lineItems.find((l) => l.service === 'commercial_mosquito'))
+      .toMatchObject({ quoteRequired: true });
+    // A real parcel auto-prices through the same engine path.
+    const real = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 8000,
+      lotSqFt: 32000,
+      lotSizeMeasured: true,
+      services: { mosquito: { tier: 'monthly12' } },
+    });
+    const realMosq = real.lineItems.find((l) => l.service === 'commercial_mosquito');
+    expect(realMosq).toMatchObject({ quoteRequired: false });
+    expect(realMosq.annual).toBeGreaterThan(0);
+  });
+
+  test('mosquito off a lot-category BUCKET guess (no real lot) stays MANUAL', () => {
+    // A lot-category proxy is a size-bucket guess, not a measured area — commercial
+    // must not auto-bill off it. Direct: a gross-lot-category proxy.
+    const proxy = priceCommercialMosquito({ lotCategory: 'SMALL' });
+    expect(proxy).toMatchObject({ service: 'commercial_mosquito', quoteRequired: true, annual: null });
+    // Engine path: an admin/API estimate with a building but lotSqFt:0 →
+    // getLotCategory(0)='SMALL' → resolveMosquitoTreatableArea returns a positive
+    // 6k gross_lot_proxy, yet lotSizeMeasured is undefined (admin), so only the
+    // source allowlist (not the flag) keeps this out of auto-pricing.
+    const est = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 6000,
+      lotSqFt: 0,
+      services: { mosquito: { tier: 'monthly12' } },
+    });
+    expect(est.lineItems.find((l) => l.service === 'commercial_mosquito'))
+      .toMatchObject({ quoteRequired: true });
+  });
+
+  test('mosquito with a building size but NO outdoor-area data falls back to a MANUAL quote', () => {
+    // Footprint only, no lot/treatable area, no lot category → treatable resolves
+    // to 0 (missing_or_zero_fallback). Don't auto-price the bare account minimum
+    // off 0 sqft — require a lot / treatable-area input via a manual quote.
+    const r = priceCommercialMosquito({ footprintSqFt: 3000 });
+    expect(r).toMatchObject({
+      service: 'commercial_mosquito',
+      originalRequestedService: 'mosquito',
+      quoteRequired: true,
+      annual: null,
+      taxable: true,
+      manualReviewReasons: ['commercial_mosquito_missing_treatable_area'],
+    });
+  });
+
+  test('termite-bait golden anchor (perimeter-driven monitoring, 4 visits)', () => {
+    const r = priceCommercialTermiteBait({ footprint: 10000, perimeter: 400 });
+    expect(r).toMatchObject({ service: 'commercial_termite_bait', annual: 850.91, visitsPerYear: 4, taxable: true });
+  });
+
+  test('rodent-bait golden anchor (footprint-driven, 4 visits)', () => {
+    const r = priceCommercialRodentBait({ footprint: 10000 });
+    expect(r).toMatchObject({ service: 'commercial_rodent_bait', annual: 781.21, visitsPerYear: 4, taxable: true });
+  });
+
+  test('termite/rodent fall back to a MANUAL quote with no real building size', () => {
+    for (const fn of [priceCommercialTermiteBait, priceCommercialRodentBait]) {
+      const r = fn({ lotSqFt: 60000 }, { buildingSizeMeasured: false });
+      expect(r.quoteRequired).toBe(true);
+      expect(r.annual).toBeNull();
+      expect(r.taxable).toBe(true);
+    }
+  });
+
+  test('termite measurements override the property building size and unlock auto-pricing', () => {
+    // Admin-measured perimeter on a lot-only estimate auto-prices (no manual quote)
+    // even under buildingSizeMeasured:false — the operator measured the building.
+    const measuredLotOnly = priceCommercialTermiteBait(
+      { lotSqFt: 60000 },
+      { buildingSizeMeasured: false, footprintSqFt: 10000, perimeterLF: 400 },
+    );
+    expect(measuredLotOnly).toMatchObject({ service: 'commercial_termite_bait', quoteRequired: false, annual: 850.91 });
+    expect(measuredLotOnly.footprintSource).toBe('termite_measurement');
+    // A divergent homeSqFt must NOT override the supplied termite measurement —
+    // price equals the golden anchor, not whatever the home size would derive.
+    const divergent = priceCommercialTermiteBait(
+      { homeSqFt: 99999, stories: 1 },
+      { footprintSqFt: 10000, perimeterLF: 400 },
+    );
+    expect(divergent.annual).toBe(850.91);
+    expect(divergent.perimeter).toBe(400);
+  });
+
+  test('a footprint-only termite measurement re-derives perimeter (ignores a stale home-derived perimeter)', () => {
+    // property.perimeter is stale (computed from the top-level home size). A
+    // measured footprint with NO perimeterLF must re-derive the perimeter from the
+    // footprint (4·√area), not price the monitoring line off the stale perimeter.
+    const r = priceCommercialTermiteBait(
+      { perimeter: 5000, footprint: 2000 },
+      { footprintSqFt: 10000 },
+    );
+    expect(r.quoteRequired).toBe(false);
+    // 4·√10000 = 400 → matches the {footprint:10000, perimeter:400} golden anchor.
+    expect(r.perimeter).toBe(400);
+    expect(r.annual).toBe(850.91);
+  });
+
+  test('all three auto-price through the engine as taxable, flat, non-WaveGuard lines', () => {
+    const est = generateEstimate({
+      propertyType: 'commercial',
+      homeSqFt: 10000,
+      lotSqFt: 80000,
+      services: { mosquito: { tier: 'monthly12' }, termite: {}, rodentBait: {} },
+    });
+    const byKey = Object.fromEntries(est.lineItems.map((l) => [l.service, l]));
+    ['commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait'].forEach((k) => {
+      expect(byKey[k]).toBeTruthy();
+      expect(byKey[k].quoteRequired).toBe(false);
+      expect(byKey[k].annual).toBeGreaterThan(0);
+      expect(byKey[k].taxable).toBe(true);
+    });
+    // No residential pricers fired; flat (no WaveGuard discount on the recurring total).
+    expect(byKey.mosquito).toBeUndefined();
+    expect(byKey.termite_bait).toBeUndefined();
+    expect(byKey.rodent_bait).toBeUndefined();
+    expect(est.summary.recurringAnnualBeforeDiscount).toBeCloseTo(est.summary.recurringAnnualAfterDiscount, 0);
+  });
+
+  test('termite/rodent manual fallbacks keep their specific commercial service (not collapsed to commercial_pest)', () => {
+    // Lot-only commercial estimate (no building footprint) → termite & rodent fall
+    // to a manual quote. Each must keep its OWN service + originalRequestedService
+    // + review reason: the engine pushes the pricer's service-specific manual line
+    // rather than routing through the generic commercial_pest manual quote (which
+    // would mislabel a termite/rodent request as commercial pest). Mosquito is
+    // lot-derivable so it still prices.
+    const est = generateEstimate({
+      propertyType: 'commercial',
+      lotSqFt: 40000,
+      services: { mosquito: { tier: 'monthly12' }, termite: {}, rodentBait: {} },
+    });
+    const byKey = Object.fromEntries(est.lineItems.map((l) => [l.service, l]));
+    expect(byKey.commercial_termite_bait).toMatchObject({
+      quoteRequired: true,
+      originalRequestedService: 'termite_bait',
+      manualReviewReasons: ['commercial_termite_missing_building_footprint'],
+    });
+    expect(byKey.commercial_rodent_bait).toMatchObject({
+      quoteRequired: true,
+      originalRequestedService: 'rodent_bait',
+      manualReviewReasons: ['commercial_rodent_missing_building_footprint'],
+    });
+    // The termite/rodent manual lines did NOT collapse into a commercial_pest quote.
+    expect(byKey.commercial_pest).toBeUndefined();
+    // Mosquito stays auto-priced (treatable area is lot-derivable).
+    expect(byKey.commercial_mosquito).toMatchObject({ quoteRequired: false });
+    expect(byKey.commercial_mosquito.annual).toBeGreaterThan(0);
   });
 });
 

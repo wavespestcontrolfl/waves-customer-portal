@@ -4,7 +4,9 @@
 const {
   GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
-  TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
+  TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
+  COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT,
+  BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
 const {
@@ -2617,6 +2619,256 @@ function priceCommercialPest(property = {}, options = {}) {
     margin,
     marginFloorOk: margin >= cfg.targetGrossMargin - 0.01,
   };
+}
+
+// ============================================================
+// COMMERCIAL MOSQUITO / TERMITE-BAIT / RODENT-BAIT — cost-buildup auto-pricers
+// ============================================================
+// Same FL-taxed cost-buildup + return shape as commercial pest; each supplies
+// its own per-visit material $ and on-site labor minutes (driven by treatable
+// area / perimeter / footprint). Mosquito's driver (treatable area) is
+// lot-derivable so it ALWAYS prices; termite/rodent price off the building
+// footprint and fall back to a manual quote when no real building size exists
+// (mirrors priceCommercialPest, incl. the buildingSizeMeasured:false override).
+
+// Build a priced commercial pest-family line from the supplied per-visit
+// material $ and on-site minutes. Identical buildup/margin/shape across the
+// three services (45% target margin, account minimum, FL-taxed).
+function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, service, name, originalRequestedService, detail, extra = {} }) {
+  const visits = cfg.programVisits;
+  const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + cfg.laborOverheadMinutesPerVisit) / 60);
+  const drivePerVisit = GLOBAL.LABOR_RATE * (cfg.routeDriveMinutes / 60);
+  const annualMaterial = materialPerVisit * visits;
+  const annualLabor = laborPerVisit * visits;
+  const annualDrive = drivePerVisit * visits;
+  const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
+  const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
+  const minApplied = computedAnnual < cfg.minAnnual;
+  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const monthly = roundMoney(annual / 12);
+  const perApp = roundMoney(annual / visits);
+  const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
+  return {
+    service,
+    name,
+    originalRequestedService,
+    propertyType: 'commercial',
+    isCommercial: true,
+    commercialPricingMode: 'auto_estimate',
+    estimatedPricing: true,
+    // Flat commercial pricing — never WaveGuard/recurring-discountable.
+    discountable: false,
+    excludeFromPctDiscount: true,
+    quoteRequired: false,
+    requiresManualReview: false,
+    detail,
+    disclaimer: 'Estimated from property data — final price confirmed on site.',
+    frequency: visits,
+    visitsPerYear: visits,
+    onSiteMin: roundMoney(onSiteMin),
+    monthly,
+    annual,
+    perApp,
+    internalPerVisitRevenue: perApp,
+    perVisit: perApp,
+    pricingBasis: 'COMMERCIAL_COST_BUILDUP',
+    minApplied,
+    taxable: cfg.taxable,
+    taxCategory: cfg.taxCategory,
+    costs: {
+      materialCost: roundMoney(annualMaterial),
+      laborCost: roundMoney(annualLabor),
+      driveCost: roundMoney(annualDrive),
+      adminCost: cfg.adminAnnual,
+      directCost: roundMoney(annualMaterial + annualLabor + annualDrive),
+      total: roundMoney(annualCost),
+    },
+    margin,
+    marginFloorOk: margin >= cfg.targetGrossMargin - 0.01,
+    ...extra,
+  };
+}
+
+// Manual-quote fallback when no real building size exists (termite/rodent only —
+// mirrors priceCommercialPest's defaulted-footprint branch).
+function commercialPestFamilyManualLine({ service, name, originalRequestedService, cfg, reason, detail, commercialSubtype }) {
+  return {
+    service,
+    name,
+    originalRequestedService,
+    propertyType: 'commercial',
+    isCommercial: true,
+    commercialSubtype: commercialSubtype || null,
+    commercialPricingMode: 'manual_quote',
+    estimatedPricing: false,
+    quoteRequired: true,
+    requiresManualReview: true,
+    autoQuoteRequiresAdminApproval: true,
+    manualReviewReasons: [reason],
+    detail,
+    taxable: cfg.taxable,
+    taxCategory: cfg.taxCategory,
+    price: null,
+    monthly: null,
+    annual: null,
+    perApp: null,
+    pricingConfidence: 'LOW',
+  };
+}
+
+function priceCommercialMosquito(property = {}, options = {}) {
+  const cfg = COMMERCIAL_MOSQUITO;
+  const area = resolveMosquitoTreatableArea(property);
+  const treatableSqFt = Math.max(0, Number(area.mosquitoTreatableSqFt) || 0);
+  // Commercial mosquito auto-prices ONLY off a REAL measured outdoor area: an
+  // explicit treatable area, or a positive area computed from a REAL lot. Any
+  // softer basis is a fabricated/guessed number and must go to MANUAL review —
+  // owner directive: never auto-BILL a commercial customer off a guessed area.
+  // The non-real bases this rejects:
+  //   • missing_or_zero_fallback → no area data at all.
+  //   • lot_category_proxy / gross_lot_proxy → a lot-size BUCKET guess.
+  //     getLotCategory() returns a category even for lotSqFt:0 (an admin/API
+  //     estimate with homeSqFt but no parcel), yielding e.g. a 'SMALL' 6k-sqft
+  //     proxy that is NOT a measurement.
+  //   • lotSizeMeasured:false → a synthetic/default lot (the public wizard's
+  //     sqft×4, lead-automation's DEFAULT_LOT_SQFT, the IB tool's homeSqFt*4).
+  //     calculatePropertyProfile pre-derives property.mosquitoTreatableSqFt from
+  //     input.lotSqFt, so in the engine path resolveMosquitoTreatableArea reports
+  //     'explicit_mosquito_treatable_sqft' even for a synthetic lot — the FLAG
+  //     (not the source) is what distinguishes synthetic from real, so it's
+  //     checked separately from the source allowlist below.
+  // CALLER CONTRACT: any caller that SYNTHESIZES a default lot when none was
+  // supplied MUST pass lotSizeMeasured:false (real lot → true/omit) so this never
+  // auto-bills off a guessed lot. public-quote / lead-estimate-automation /
+  // intelligence-bar estimate-tools all do; property-lookup-v2 + customer-pricing-ai
+  // pass a real-or-zero lot (no positive synthetic default), so a missing lot there
+  // resolves to a rejected proxy/zero source above.
+  const REAL_TREATABLE_AREA_SOURCES = new Set([
+    'explicit_mosquito_treatable_sqft',
+    'computed_lot_minus_footprint_hardscape',
+  ]);
+  const hasRealTreatableArea = treatableSqFt > 0
+    && REAL_TREATABLE_AREA_SOURCES.has(area.source)
+    && options.lotSizeMeasured !== false;
+  if (!hasRealTreatableArea) {
+    return commercialPestFamilyManualLine({
+      service: 'commercial_mosquito',
+      name: 'Commercial Mosquito',
+      originalRequestedService: 'mosquito',
+      cfg,
+      reason: 'commercial_mosquito_missing_treatable_area',
+      detail: 'Commercial mosquito pricing needs the lot or treatable outdoor area — your Waves account manager will confirm the quote.',
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype,
+    });
+  }
+  return buildCommercialPestFamilyLine({
+    cfg,
+    materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (treatableSqFt / 1000),
+    onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPerKSqFt * (treatableSqFt / 1000),
+    service: 'commercial_mosquito',
+    name: 'Commercial Mosquito',
+    originalRequestedService: 'mosquito',
+    detail: 'Commercial mosquito program (exterior barrier + larvicide). Estimated from property data — final price confirmed on site.',
+    extra: {
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+      treatableSqFt,
+      treatableSource: area.source,
+      pricingConfidence: (treatableSqFt > cfg.lowConfidenceTreatableSf || area.confidence === 'low') ? 'LOW' : 'MEDIUM',
+    },
+  });
+}
+
+function priceCommercialTermiteBait(property = {}, options = {}) {
+  const cfg = COMMERCIAL_TERMITE_BAIT;
+  // Admin-entered termite measurements (services.termite.measurements →
+  // footprintSqFt / perimeterLF) take precedence over the property-derived
+  // building size: an operator who measured the building on a lot-only estimate
+  // must auto-price off that measurement (not fall to a manual quote), and a
+  // divergent homeSqFt must never override the supplied termite values. Perimeter
+  // is termite's cost driver; footprint only sets pricing confidence here.
+  const measuredFootprint = Number(options.footprintSqFt);
+  const measuredPerimeter = Number(options.perimeterLF);
+  const hasMeasuredFootprint = Number.isFinite(measuredFootprint) && measuredFootprint > 0;
+  const hasMeasuredPerimeter = Number.isFinite(measuredPerimeter) && measuredPerimeter > 0;
+  const hasTermiteMeasurement = hasMeasuredFootprint || hasMeasuredPerimeter;
+  const resolved = resolveCommercialPestFootprint(hasTermiteMeasurement
+    ? {
+        ...property,
+        // Set BOTH footprint aliases so the measurement wins over any existing
+        // property.footprint (resolvePestFootprint reads `footprint` first).
+        ...(hasMeasuredFootprint ? { footprint: measuredFootprint, footprintSqFt: measuredFootprint } : {}),
+        // A measured perimeter wins. Otherwise, when only a measured FOOTPRINT is
+        // supplied, CLEAR any property.perimeter (computed from the top-level home
+        // size) so resolveCommercialPestFootprint re-derives the perimeter from the
+        // measured footprint (4·√area) — else a corrected footprint would still
+        // price the monitoring line off the stale home-derived perimeter.
+        ...(hasMeasuredPerimeter
+          ? { perimeter: measuredPerimeter }
+          : (hasMeasuredFootprint ? { perimeter: undefined, perimeterLF: undefined, perimeterLf: undefined } : {})),
+      }
+    : property);
+  const { footprint, perimeter } = resolved;
+  const footprintSource = hasMeasuredFootprint ? 'termite_measurement' : resolved.footprintSource;
+  // A supplied termite measurement means a real building exists — don't fall to a
+  // manual quote even on a lot-only estimate or under buildingSizeMeasured:false.
+  if (!hasTermiteMeasurement && (resolved.defaulted || options.buildingSizeMeasured === false)) {
+    return commercialPestFamilyManualLine({
+      service: 'commercial_termite_bait',
+      name: 'Commercial Termite Bait Monitoring',
+      originalRequestedService: 'termite_bait',
+      cfg,
+      reason: 'commercial_termite_missing_building_footprint',
+      detail: 'Commercial termite monitoring needs the building size — your Waves account manager will confirm the quote.',
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype,
+    });
+  }
+  return buildCommercialPestFamilyLine({
+    cfg,
+    materialPerVisit: cfg.materialPerVisitBase + cfg.materialPer100LfPerVisit * (perimeter / 100),
+    onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPer100Lf * (perimeter / 100),
+    service: 'commercial_termite_bait',
+    name: 'Commercial Termite Bait Monitoring',
+    originalRequestedService: 'termite_bait',
+    detail: 'Commercial termite bait-station monitoring (quarterly). Estimated from property data — final price confirmed on site.',
+    extra: {
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+      footprint,
+      perimeter: roundMoney(perimeter),
+      footprintSource,
+      pricingConfidence: footprint > cfg.lowConfidenceFootprintSf ? 'LOW' : 'MEDIUM',
+    },
+  });
+}
+
+function priceCommercialRodentBait(property = {}, options = {}) {
+  const cfg = COMMERCIAL_RODENT_BAIT;
+  const { footprint, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
+  if (defaulted || options.buildingSizeMeasured === false) {
+    return commercialPestFamilyManualLine({
+      service: 'commercial_rodent_bait',
+      name: 'Commercial Rodent Bait Stations',
+      originalRequestedService: 'rodent_bait',
+      cfg,
+      reason: 'commercial_rodent_missing_building_footprint',
+      detail: 'Commercial rodent station pricing needs the building size — your Waves account manager will confirm the quote.',
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype,
+    });
+  }
+  return buildCommercialPestFamilyLine({
+    cfg,
+    materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (footprint / 1000),
+    onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPerKSqFt * (footprint / 1000),
+    service: 'commercial_rodent_bait',
+    name: 'Commercial Rodent Bait Stations',
+    originalRequestedService: 'rodent_bait',
+    detail: 'Commercial rodent bait-station program (quarterly). Estimated from property data — final price confirmed on site.',
+    extra: {
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+      footprint,
+      footprintSource,
+      pricingConfidence: footprint > cfg.lowConfidenceFootprintSf ? 'LOW' : 'MEDIUM',
+    },
+  });
 }
 
 // ============================================================
@@ -7178,7 +7430,8 @@ function applyRodentBundle(componentTotal, bundle) {
 
 module.exports = {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
-  priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest, pricePalmInjection,
+  priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
+  priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,

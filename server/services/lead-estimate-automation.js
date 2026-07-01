@@ -194,6 +194,11 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
     input: {
       homeSqFt: homeSqFt || DEFAULT_HOME_SQFT,
       lotSqFt: lotSqFt || DEFAULT_LOT_SQFT,
+      // Assert lot provenance: true only when a REAL lot was supplied, false when
+      // we fell back to DEFAULT_LOT_SQFT. Commercial mosquito reads this and stays
+      // a manual quote rather than auto-pricing off the synthetic 8,000 default
+      // (harmless for residential, which ignores it).
+      lotSizeMeasured: !!lotSqFt,
       stories: numberOrNull(body.stories, customer.stories) || 1,
       propertyType: body.propertyType || body.property_type || customer.property_type || 'Single Family',
       category: body.category || null,

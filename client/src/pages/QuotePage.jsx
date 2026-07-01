@@ -323,6 +323,10 @@ export default function QuotePage({ serviceSlug = '' }) {
   // commercial pest off the unconfirmed 2,000 sqft confirm-step default.
   const [homeSqFtConfirmed, setHomeSqFtConfirmed] = useState(false);
   const [lotSqFt, setLotSqFt] = useState('');
+  // Confirmed only when the lookup measured the lot (not the synthetic 8,000
+  // default) or the user edits the field — mirrors homeSqFtConfirmed. Commercial
+  // mosquito won't auto-price off an unconfirmed (defaulted) lot.
+  const [lotSqFtConfirmed, setLotSqFtConfirmed] = useState(false);
 
   const [result, setResult] = useState(null);
   const [attribution] = useState(() => captureAttribution());
@@ -364,7 +368,7 @@ export default function QuotePage({ serviceSlug = '' }) {
     setLookupStatus(''); setLookupSub('');
     setLeadId(null); setEnriched(null); setSatellite(null); setAiSources(null);
     setSvcPest(false); setSvcLawn(false);
-    setHomeSqFt(''); setHomeSqFtConfirmed(false); setLotSqFt('');
+    setHomeSqFt(''); setHomeSqFtConfirmed(false); setLotSqFt(''); setLotSqFtConfirmed(false);
     setUpsellSelected({}); setUpsellLoading(false); setUpsellError('');
     setNewsletterOptIn(false);
     setSubscribeStatus('idle');
@@ -533,6 +537,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       // synthetic 2,000 default); editing the field below flips it true.
       setHomeSqFtConfirmed(!!d.enriched?.homeSqFt);
       setLotSqFt(d.enriched?.lotSqFt   ? String(d.enriched.lotSqFt)   : '8000');
+      setLotSqFtConfirmed(!!d.enriched?.lotSqFt);
       setSvcPest(intake.interest === 'pest' || intake.interest === 'both');
       setSvcLawn(intake.interest === 'lawn' || intake.interest === 'both');
       setPestFreq('quarterly');
@@ -677,6 +682,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           homeSqFt: sq,
           buildingSizeConfirmed: homeSqFtConfirmed,
           lotSqFt: Number(lotSqFt) || undefined,
+          lotSizeConfirmed: lotSqFtConfirmed,
           stories: Number(enriched?.stories) || 1,
           propertyType: enriched?.propertyType || undefined,
           enriched: enriched || undefined,
@@ -709,7 +715,7 @@ export default function QuotePage({ serviceSlug = '' }) {
     setLookupStatus(''); setLookupSub('');
     setLeadId(null); setEnriched(null); setSatellite(null); setAiSources(null);
     setSvcPest(false); setSvcLawn(false);
-    setHomeSqFt(''); setHomeSqFtConfirmed(false); setLotSqFt('');
+    setHomeSqFt(''); setHomeSqFtConfirmed(false); setLotSqFt(''); setLotSqFtConfirmed(false);
     setUpsellSelected({}); setUpsellLoading(false); setUpsellError('');
     setNewsletterOptIn(false);
     setSubscribeStatus('idle');
@@ -1097,7 +1103,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                   </div>
                   <div>
                     <label style={sLabel}>Lot size (sq ft)</label>
-                    <input style={sInput} type="number" inputMode="numeric" value={lotSqFt} onChange={(e) => setLotSqFt(e.target.value)} placeholder="8000" />
+                    <input style={sInput} type="number" inputMode="numeric" value={lotSqFt} onChange={(e) => { setLotSqFt(e.target.value); setLotSqFtConfirmed(true); }} placeholder="8000" />
                   </div>
                 </div>
 

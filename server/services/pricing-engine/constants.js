@@ -469,6 +469,63 @@ const COMMERCIAL_PEST = {
   taxable: true,
   taxCategory: 'nonresidential_pest_control',
 };
+// Commercial MOSQUITO — cost-buildup keyed off the TREATABLE lot area (lot −
+// footprint − hardscape), which IS lot-derivable, so it always auto-prices
+// (no manual fallback). Seasonal cadence (FL mosquito season). FL-taxed
+// commercial. All values tunable against real quotes.
+const COMMERCIAL_MOSQUITO = {
+  programVisits: 9,                   // seasonal program (the standard mosquito cadence)
+  materialPerVisitBase: 8,            // bifenthrin + IGR baseline per visit
+  materialPerKSqFtPerVisit: 0.6,      // $/1000 sqft treatable area/visit
+  laborMinutesBase: 20,               // mobilization + setup per visit
+  laborMinutesPerKSqFt: 1.0,          // backpack/mist-blower app over treatable area
+  laborOverheadMinutesPerVisit: 8,    // reporting / larvicide check
+  routeDriveMinutes: 15,
+  adminAnnual: 120,
+  targetGrossMargin: 0.45,
+  minAnnual: 720,                     // $60/mo floor
+  lowConfidenceTreatableSf: 80000,    // above this the treatable-area estimate is flagged LOW confidence
+  taxable: true,
+  taxCategory: 'nonresidential_pest_control',
+};
+// Commercial TERMITE BAIT (recurring monitoring) — cost-buildup keyed off the
+// building PERIMETER (station-line proxy), derived from the footprint. Needs a
+// real building size (like commercial pest) → else a manual quote. Quarterly
+// monitoring cadence. FL-taxed commercial. (The one-time install is a separate
+// manual quote; this is the recurring monitoring MRR.)
+const COMMERCIAL_TERMITE_BAIT = {
+  programVisits: 4,                   // quarterly station monitoring
+  materialPerVisitBase: 14,           // bait check/refresh baseline per monitoring visit
+  materialPer100LfPerVisit: 6,        // $/100 lf perimeter/visit (more stations = more bait)
+  laborMinutesBase: 25,               // mobilization + report per visit
+  laborMinutesPer100Lf: 9,            // walking + inspecting the station line per 100 lf
+  laborOverheadMinutesPerVisit: 8,
+  routeDriveMinutes: 15,
+  adminAnnual: 120,
+  targetGrossMargin: 0.45,
+  minAnnual: 600,                     // $50/mo monitoring floor
+  lowConfidenceFootprintSf: 30000,
+  taxable: true,
+  taxCategory: 'nonresidential_pest_control',
+};
+// Commercial RODENT BAIT — cost-buildup keyed off the building FOOTPRINT
+// (interior/exterior station coverage). Needs a real building size (like
+// commercial pest) → else a manual quote. Quarterly service. FL-taxed commercial.
+const COMMERCIAL_RODENT_BAIT = {
+  programVisits: 4,                   // quarterly station service
+  materialPerVisitBase: 10,           // bait + station maintenance baseline per visit
+  materialPerKSqFtPerVisit: 1.2,      // $/1000 sqft footprint/visit (more stations)
+  laborMinutesBase: 22,               // mobilization + report per visit
+  laborMinutesPerKSqFt: 5,            // servicing stations across the footprint
+  laborOverheadMinutesPerVisit: 8,
+  routeDriveMinutes: 15,
+  adminAnnual: 120,
+  targetGrossMargin: 0.45,
+  minAnnual: 600,                     // $50/mo floor
+  lowConfidenceFootprintSf: 30000,
+  taxable: true,
+  taxCategory: 'nonresidential_pest_control',
+};
 
 // ============================================================
 // PALM INJECTION - protocol-based pricing
@@ -1786,7 +1843,8 @@ module.exports = {
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
   PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
-  TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST, PALM, MOSQUITO, TERMITE, RODENT,
+  TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
+  COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, TERMITE, RODENT,
   ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD,
   PROCESSING_ADJUSTMENT,

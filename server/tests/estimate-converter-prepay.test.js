@@ -452,6 +452,24 @@ describe('commercial prepay blended tax rate (taxable pest share only)', () => {
     ])).toBeCloseTo(0.035, 4);
   });
 
+  test('commercial mosquito / termite / rodent are taxable by service key even without the flag', () => {
+    // Engine-backed (quote-wizard) accepts source recurring rows from lineItems,
+    // and a save path can drop item.taxable. The pest-FAMILY keys must still be
+    // recognized as taxable so the annual-prepay total isn't taxed as $0. Lawn
+    // (non-taxable) stays the non-taxable share. (Regression for the bot's P1.)
+    for (const svc of ['commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait']) {
+      // Flag dropped: 50/50 taxable-pest-family + lawn → 0.5 * 0.07 = 0.035.
+      expect(resolveCommercialPrepayTaxRate([
+        { service: svc, annual: 1000 },
+        { service: 'commercial_lawn', annual: 1000 },
+      ])).toBeCloseTo(0.035, 4);
+      // Pest-family only → fully taxable at the base rate.
+      expect(resolveCommercialPrepayTaxRate([
+        { service: svc, annual: 1500 },
+      ])).toBeCloseTo(0.07, 4);
+    }
+  });
+
   test('empty / zero-total recurring set yields a 0 rate (no divide-by-zero)', () => {
     expect(resolveCommercialPrepayTaxRate([])).toBe(0);
     expect(resolveCommercialPrepayTaxRate([{ service: 'commercial_pest', annual: 0 }])).toBe(0);

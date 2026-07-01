@@ -46,6 +46,18 @@ describe('estimate service line inference', () => {
     expect(serviceKeysFromText('Commercial Pest Control')).toEqual(['commercial_pest']);
     expect(serviceKeysFromText('Commercial Lawn Treatment')).toEqual(['commercial_lawn']);
     expect(serviceKeysFromText('Commercial Pest Control + Commercial Lawn')).toEqual(['commercial_pest', 'commercial_lawn']);
+    // Commercial pest-family text must NOT also emit its residential counterpart
+    // (the commercial patterns are a superset of the residential ones).
+    expect(serviceKeysFromText('Commercial Mosquito')).toEqual(['commercial_mosquito']);
+    expect(serviceKeysFromText('Commercial Termite Bait Monitoring')).toEqual(['commercial_termite_bait']);
+    expect(serviceKeysFromText('Commercial Rodent Bait Stations')).toEqual(['commercial_rodent_bait']);
+    // …but the recurring bait key matches ONLY the bait/monitoring/station program,
+    // not other commercial termite/rodent specialty work — else a one-time
+    // trenching/WDO/exclusion job would read as holding the recurring sellable line.
+    expect(serviceKeysFromText('Commercial Termite Trenching')).not.toContain('commercial_termite_bait');
+    expect(serviceKeysFromText('Commercial WDO Inspection')).not.toContain('commercial_termite_bait');
+    expect(serviceKeysFromText('Commercial Rodent Exclusion')).not.toContain('commercial_rodent_bait');
+    expect(serviceKeysFromText('Commercial Rodent Trapping')).not.toContain('commercial_rodent_bait');
     expect(serviceKeysFromText('Palm Injection')).toEqual(['palm_injection']);
     expect(serviceKeysFromText('Palms to treat')).toEqual(['palm_injection']);
     expect(serviceKeysFromText('Native / Palmetto / American roaches')).toEqual(['pest']);

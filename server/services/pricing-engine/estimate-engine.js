@@ -26,7 +26,8 @@ const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
-  priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest, pricePalmInjection,
+  priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
+  priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
@@ -729,44 +730,108 @@ function generateEstimate(input) {
   }
 
   // Mosquito
-  if (services.mosquito && !useCommercialManualQuote(services.mosquito, 'pest_control')) {
-    const result = priceMosquito(property, {
-      tier: normalizeMosquitoProgram(services.mosquito.tier || services.mosquito.program),
-      modifiers,
-      stationCount: services.mosquito.stationCount,
-      dunkCount: services.mosquito.dunkCount,
-    });
-    result.annual = Math.round(result.annual);
-    result.monthly = Math.round(result.annual / 12 * 100) / 100;
-    lineItems.push(result);
-    activeServiceKeys.push('mosquito');
+  if (services.mosquito) {
+    if (propertyIsCommercial) {
+      // Commercial auto-pricing (owner directive: ALL commercial auto). Treatable
+      // area is usually lot-derivable, so commercial mosquito prices instantly;
+      // with NO outdoor-area data at all (no lot/treatable area, no lot category)
+      // it falls back to a manual quote rather than auto-pricing off 0 sqft. FL-taxed.
+      const result = priceCommercialMosquito(property, {
+        commercialSubtype,
+        // Public quotes set this false when the lot is the synthetic sqft×4
+        // default (no real parcel) — mosquito can't auto-price a fabricated
+        // treatable area. Undefined (admin / measured) → auto-price as usual.
+        lotSizeMeasured: input.lotSizeMeasured,
+      });
+      // Push the pricer's OWN line — priced or its service-specific manual quote.
+      // The manual line keeps service=commercial_mosquito / originalRequestedService=
+      // mosquito and the missing-area review reason; routing it through
+      // addCommercialManualQuote('pest_control') would collapse it to a generic
+      // commercial_pest quote (the v1 mapper flows any unpriced commercial_* line
+      // through the manual/specialty path). Only a PRICED line is an active service.
+      if (!lineItems.some((line) => line.service === result.service)) {
+        lineItems.push(result);
+        if (!result.quoteRequired) activeServiceKeys.push('commercial_mosquito');
+      }
+    } else {
+      const result = priceMosquito(property, {
+        tier: normalizeMosquitoProgram(services.mosquito.tier || services.mosquito.program),
+        modifiers,
+        stationCount: services.mosquito.stationCount,
+        dunkCount: services.mosquito.dunkCount,
+      });
+      result.annual = Math.round(result.annual);
+      result.monthly = Math.round(result.annual / 12 * 100) / 100;
+      lineItems.push(result);
+      activeServiceKeys.push('mosquito');
+    }
   }
 
   // Termite Bait
   const termiteBaitService = services.termite || services.termiteBait || services.termite_bait;
-  if (termiteBaitService && !useCommercialManualQuote(termiteBaitService, 'pest_control')) {
-    const termiteOptions = serviceOptions(termiteBaitService);
-    const result = priceTermiteBait(property, {
-      ...termiteOptions,
-      system: termiteOptions.system || 'advance',
-      monitoringTier: termiteOptions.monitoringTier || 'basic',
-      modifiers,
-    });
-    result.annual = Math.round(result.annual);
-    result.monthly = Math.round(result.annual / 12 * 100) / 100;
-    lineItems.push(result);
-    if (!result.quoteRequired && !result.requiresMeasurement) {
-      activeServiceKeys.push('termite_bait');
+  if (termiteBaitService) {
+    if (propertyIsCommercial) {
+      // Commercial termite bait MONITORING auto-prices off the building
+      // perimeter; with no real building size it falls back to a manual quote.
+      // Admin-entered termite measurements (services.termite.measurements →
+      // footprintSqFt / perimeterLF) override the property-derived building size
+      // so a measured lot-only estimate auto-prices off the operator's numbers.
+      const termiteMeasurements = serviceOptions(termiteBaitService).measurements || {};
+      const result = priceCommercialTermiteBait(property, {
+        commercialSubtype,
+        buildingSizeMeasured: input.buildingSizeMeasured,
+        footprintSqFt: termiteMeasurements.footprintSqFt,
+        perimeterLF: termiteMeasurements.perimeterLF,
+      });
+      // Push the pricer's own line — priced or its service-specific manual quote
+      // (keeps service=commercial_termite_bait / originalRequestedService=
+      // termite_bait + the missing-building reason rather than collapsing to a
+      // generic commercial_pest quote). Only a PRICED line is an active service.
+      if (!lineItems.some((line) => line.service === result.service)) {
+        lineItems.push(result);
+        if (!result.quoteRequired) activeServiceKeys.push('commercial_termite_bait');
+      }
+    } else {
+      const termiteOptions = serviceOptions(termiteBaitService);
+      const result = priceTermiteBait(property, {
+        ...termiteOptions,
+        system: termiteOptions.system || 'advance',
+        monitoringTier: termiteOptions.monitoringTier || 'basic',
+        modifiers,
+      });
+      result.annual = Math.round(result.annual);
+      result.monthly = Math.round(result.annual / 12 * 100) / 100;
+      lineItems.push(result);
+      if (!result.quoteRequired && !result.requiresMeasurement) {
+        activeServiceKeys.push('termite_bait');
+      }
     }
   }
 
   // Rodent Bait
-  if (services.rodentBait && !useCommercialManualQuote(services.rodentBait, 'pest_control')) {
-    const result = priceRodentBait(property, { modifiers });
-    result.annual = Math.round(result.annual);
-    result.monthly = Math.round(result.annual / 12 * 100) / 100;
-    lineItems.push(result);
-    // Rodent does NOT add to activeServiceKeys for tier determination
+  if (services.rodentBait) {
+    if (propertyIsCommercial) {
+      // Commercial rodent bait stations auto-price off the building footprint;
+      // with no real building size it falls back to a manual quote.
+      const result = priceCommercialRodentBait(property, {
+        commercialSubtype,
+        buildingSizeMeasured: input.buildingSizeMeasured,
+      });
+      // Push the pricer's own line — priced or its service-specific manual quote
+      // (keeps service=commercial_rodent_bait / originalRequestedService=
+      // rodent_bait + the missing-building reason rather than collapsing to a
+      // generic commercial_pest quote). Only a PRICED line is an active service.
+      if (!lineItems.some((line) => line.service === result.service)) {
+        lineItems.push(result);
+        if (!result.quoteRequired) activeServiceKeys.push('commercial_rodent_bait');
+      }
+    } else {
+      const result = priceRodentBait(property, { modifiers });
+      result.annual = Math.round(result.annual);
+      result.monthly = Math.round(result.annual / 12 * 100) / 100;
+      lineItems.push(result);
+      // Rodent does NOT add to activeServiceKeys for tier determination
+    }
   }
 
   // ── One-Time Services ──────────────────────────────────────

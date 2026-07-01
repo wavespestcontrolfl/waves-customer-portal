@@ -38,6 +38,9 @@ export function classifyEstimateServiceLine(estimate) {
 const SERVICE_META = {
   commercial_pest: { label: "Commercial pest", icon: Bug, ticketSuffix: "manual quote" },
   commercial_lawn: { label: "Commercial lawn", icon: Leaf, ticketSuffix: "manual quote" },
+  commercial_mosquito: { label: "Commercial mosquito", icon: Bug, ticketSuffix: "/mo recurring" },
+  commercial_termite_bait: { label: "Commercial termite bait", icon: ShieldCheck, ticketSuffix: "/mo recurring" },
+  commercial_rodent_bait: { label: "Commercial rodent bait", icon: PawPrint, ticketSuffix: "/mo recurring" },
   pest: { label: "Pest control", icon: Bug, ticketSuffix: "/mo recurring" },
   mosquito: { label: "Mosquito", icon: Bug, ticketSuffix: "/mo recurring" },
   lawn: { label: "Lawn care", icon: Leaf, ticketSuffix: "/mo recurring" },

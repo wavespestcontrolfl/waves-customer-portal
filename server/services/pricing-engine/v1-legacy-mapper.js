@@ -21,6 +21,7 @@ const RECURRING_SERVICES = new Set([
   // lawn-adjacent one-time services, so the recurring svcAdd below guards on
   // .annual to only pick up the priced line.
   'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest',
+  'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait',
 ]);
 
 const ONE_TIME_SERVICES = new Set([
@@ -129,6 +130,9 @@ const SERVICE_LABEL = {
   commercial_pest: 'Commercial Pest Control',
   commercial_lawn: 'Commercial Lawn Treatment',
   commercial_tree_shrub: 'Commercial Tree & Shrub',
+  commercial_mosquito: 'Commercial Mosquito',
+  commercial_termite_bait: 'Commercial Termite Bait Monitoring',
+  commercial_rodent_bait: 'Commercial Rodent Bait Stations',
   one_time_pest: 'One-Time Pest',
   one_time_lawn: 'One-Time Lawn',
   one_time_mosquito: 'One-Time Mosquito',
@@ -389,6 +393,9 @@ function mapV1ToLegacyShape(v1Result) {
   const commLawnLI = lineItems.find(l => l.service === 'commercial_lawn' && l.annual);
   const commTsLI = lineItems.find(l => l.service === 'commercial_tree_shrub' && l.annual);
   const commPestLI = lineItems.find(l => l.service === 'commercial_pest' && l.annual);
+  const commMosqLI = lineItems.find(l => l.service === 'commercial_mosquito' && l.annual);
+  const commTermiteLI = lineItems.find(l => l.service === 'commercial_termite_bait' && l.annual);
+  const commRodentLI = lineItems.find(l => l.service === 'commercial_rodent_bait' && l.annual);
 
   // Pest → R.pest, R.pestTiers
   if (pestLI) {
@@ -663,6 +670,9 @@ function mapV1ToLegacyShape(v1Result) {
   commAdd('Commercial Lawn Treatment', commLawnLI, 'commercial_lawn');
   commAdd('Commercial Tree & Shrub', commTsLI, 'commercial_tree_shrub');
   commAdd('Commercial Pest Control', commPestLI, 'commercial_pest');
+  commAdd('Commercial Mosquito', commMosqLI, 'commercial_mosquito');
+  commAdd('Commercial Termite Bait Monitoring', commTermiteLI, 'commercial_termite_bait');
+  commAdd('Commercial Rodent Bait Stations', commRodentLI, 'commercial_rodent_bait');
 
   // One-time + specialty split
   const v1OtItems = [];

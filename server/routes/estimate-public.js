@@ -1830,12 +1830,16 @@ function recurringServiceKey(svc = {}) {
     || raw.includes('palm_treatment')
     || /\bpalm injection\b|\bpalm tree\b|\bpalms?\b/.test(words)
   ) return 'palm_injection';
+  // NOT commercial — commercial_rodent_bait must reach the commercial block below
+  // and keep its distinct (non-WaveGuard-discountable) key.
   if (
-    raw.includes('rodent_bait')
-    || raw.includes('rodent_monitoring')
-    || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
+    !raw.includes('commercial') && (
+      raw.includes('rodent_bait')
+      || raw.includes('rodent_monitoring')
+      || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
+    )
   ) return 'rodent_bait';
-  if (/\brodent\b|\brat\b|\bmouse\b|\bmice\b/.test(words)) return 'rodent';
+  if (!raw.includes('commercial') && /\brodent\b|\brat\b|\bmouse\b|\bmice\b/.test(words)) return 'rodent';
   // Commercial auto-priced lines must keep a DISTINCT key — otherwise the
   // residential lawn/tree special-cases below normalize them to lawn_care /
   // tree_shrub, which are WaveGuard-qualifying, and an existing commercial
@@ -1843,6 +1847,13 @@ function recurringServiceKey(svc = {}) {
   if (raw.includes('commercial')) {
     if (raw.includes('lawn') || raw.includes('turf')) return 'commercial_lawn';
     if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'commercial_tree_shrub';
+    if (raw.includes('mosquito')) return 'commercial_mosquito';
+    // Only the recurring BAIT/monitoring/station programs get the bait key —
+    // commercial termite trenching/WDO or rodent trapping/exclusion are one-time
+    // specialty work, not the recurring line, and must not inherit its
+    // discount/tax/scheduling behavior (mirrors the residential rodent_bait gate).
+    if (raw.includes('termite') && /bait|station|monitor/.test(raw)) return 'commercial_termite_bait';
+    if (raw.includes('rodent') && /bait|station|monitor/.test(raw)) return 'commercial_rodent_bait';
     if (raw.includes('pest')) return 'commercial_pest';
   }
   if (raw.includes('pest')) return 'pest_control';
@@ -1903,6 +1914,9 @@ function recurringServiceDisplayName(key) {
     case 'commercial_lawn': return 'Commercial Lawn Treatment';
     case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
     case 'commercial_pest': return 'Commercial Pest Control';
+    case 'commercial_mosquito': return 'Commercial Mosquito';
+    case 'commercial_termite_bait': return 'Commercial Termite Bait Monitoring';
+    case 'commercial_rodent_bait': return 'Commercial Rodent Bait Stations';
     default: return null;
   }
 }
@@ -2185,7 +2199,7 @@ function recurringServicesWithSupplements(estResult = {}) {
     indexByKey.set(key, services.length - 1);
   };
 
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait']);
   if (Array.isArray(estResult.lineItems)) {
     estResult.lineItems.forEach((item) => {
       const key = recurringServiceKey(item);
@@ -2229,6 +2243,13 @@ function recurringServicesWithSupplements(estResult = {}) {
         discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
         discountEligible: key === 'lawn_care' ? true : item.discountEligible,
         excludeFromPctDiscount: item.excludeFromPctDiscount,
+        // Carry the engine line's taxability so the annual-prepay blended rate
+        // (resolveCommercialPrepayTaxRate) taxes the taxable commercial pest /
+        // mosquito / termite / rodent share — engine-backed (quote-wizard) accepts
+        // source recurring rows from lineItems, and without these flags those
+        // newly-taxable commercial lines would prepay-tax as $0.
+        taxable: item.taxable,
+        taxCategory: item.taxCategory,
         discount: itemDiscount,
         pricingVersion: item.pricingVersion,
         pricingSource: item.pricingSource,
@@ -3341,7 +3362,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     estData?.commercialEstimatedPricing === true
     || recurring.some((s) => {
       const k = String(recurringServiceKey(s) || s.service || s.name || '').toLowerCase();
-      return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest');
+      return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest') || k.includes('commercial_mosquito') || k.includes('commercial_termite') || k.includes('commercial_rodent');
     })
   );
 
@@ -6343,7 +6364,7 @@ function isCommercialAutoAcceptEstimate(estimate = {}) {
   if (data.commercialEstimatedPricing === true) return true;
   const isCommercialSvc = (s) => {
     const k = String(s?.service || s?.serviceKey || s?.name || '').toLowerCase();
-    return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest');
+    return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest') || k.includes('commercial_mosquito') || k.includes('commercial_termite') || k.includes('commercial_rodent');
   };
   const lineItems = Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems : [];
   if (lineItems.some((li) => li && li.estimatedPricing === true && isCommercialSvc(li) && Number(li.annual) > 0)) return true;
@@ -8183,7 +8204,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   // (mosquito uses `visits`, T&S uses `frequency`; palm and rodent bait
   // are separate recurring lines that do not receive WaveGuard percentage
   // discounts).
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest']);
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait', 'foam_recurring', 'commercial_lawn', 'commercial_tree_shrub', 'commercial_pest', 'commercial_mosquito', 'commercial_termite_bait', 'commercial_rodent_bait']);
   const labelForRecurring = (svc) => {
     switch (svc) {
       case 'pest_control': return 'Pest Control';
@@ -9639,6 +9660,13 @@ function categoryForRecurringServiceKey(key) {
     case 'commercial_lawn': return 'lawn_care';
     case 'commercial_tree_shrub': return 'tree_shrub';
     case 'commercial_pest': return 'pest_control';
+    case 'commercial_mosquito': return 'mosquito';
+    case 'commercial_termite_bait': return 'termite_bait';
+    // Match the residential rodent_bait → 'rodent' mapping above: the 'rodent_bait'
+    // category has no section copy/chips, so a single commercial rodent-bait quote
+    // would fall back to generic bundle copy (and one-time rodent rows wouldn't
+    // group with it). Use the 'rodent' category that actually has copy.
+    case 'commercial_rodent_bait': return 'rodent';
     default: return null;
   }
 }

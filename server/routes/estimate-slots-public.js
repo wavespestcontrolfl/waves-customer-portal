@@ -116,7 +116,8 @@ function isCommercialAutoEstimate(estimate = {}) {
   if (data.commercialEstimatedPricing === true) return true;
   const isCommercialSvc = (s) => {
     const k = String(s?.service || s?.serviceKey || s?.name || '').toLowerCase();
-    return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest');
+    return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest')
+      || k.includes('commercial_mosquito') || k.includes('commercial_termite') || k.includes('commercial_rodent');
   };
   // Quote-wizard/engine save → engineResult.lineItems; admin save → the mapped
   // result.recurring.services (v1-legacy-mapper). Check both shapes.
