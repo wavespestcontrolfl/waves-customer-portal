@@ -13,6 +13,10 @@ const {
   resolveMosquitoTreatableArea,
   resolveMosquitoLotCategory,
 } = require('./property-calculator');
+const {
+  resolveTreeShrubDensityMultiplier,
+  resolveMosquitoPressureMultiplier,
+} = require('./commercial-risk-multipliers');
 // Single source of truth for the Lawn V2 cost-floor math, shared with the client
 // estimate preview so the shown price and the billed price cannot drift.
 const {
@@ -2650,15 +2654,18 @@ function commercialCadenceLabel(visits) {
   return null;
 }
 
-function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, service, name, originalRequestedService, detail, extra = {}, visits: visitsOverride }) {
+function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, service, name, originalRequestedService, detail, extra = {}, visits: visitsOverride, priceMultiplier = 1 }) {
   // Risk-type cadence override (commercial pest/rodent visits-per-year vary by
   // business type). Falls back to the program default when not supplied.
   const visits = Number.isFinite(visitsOverride) && visitsOverride > 0 ? visitsOverride : cfg.programVisits;
+  // Risk multiplier (e.g. mosquito pressure): scales the VARIABLE cost buildup so
+  // the target margin is preserved. Fixed admin overhead is not scaled. Default 1.
+  const mult = Number.isFinite(priceMultiplier) && priceMultiplier > 0 ? priceMultiplier : 1;
   const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + cfg.laborOverheadMinutesPerVisit) / 60);
   const drivePerVisit = GLOBAL.LABOR_RATE * (cfg.routeDriveMinutes / 60);
-  const annualMaterial = materialPerVisit * visits;
-  const annualLabor = laborPerVisit * visits;
-  const annualDrive = drivePerVisit * visits;
+  const annualMaterial = materialPerVisit * visits * mult;
+  const annualLabor = laborPerVisit * visits * mult;
+  const annualDrive = drivePerVisit * visits * mult;
   const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
   const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
   const minApplied = computedAnnual < cfg.minAnnual;
@@ -2779,8 +2786,23 @@ function priceCommercialMosquito(property = {}, options = {}) {
       commercialSubtype: options.commercialSubtype || property.commercialSubtype,
     });
   }
+  // Mosquito pressure multiplier (rep-set): low 0.85 / normal 1.0 / high 1.35;
+  // SEVERE (chronic complaint / preserve / mangrove / drainage) → manual quote.
+  const pressure = resolveMosquitoPressureMultiplier(options.mosquitoPressure);
+  if (pressure.forceManual) {
+    return commercialPestFamilyManualLine({
+      service: 'commercial_mosquito',
+      name: 'Commercial Mosquito',
+      originalRequestedService: 'mosquito',
+      cfg,
+      reason: 'commercial_mosquito_severe_pressure_manual_quote',
+      detail: 'Severe mosquito pressure needs a site visit — your Waves account manager will confirm the quote.',
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype,
+    });
+  }
   return buildCommercialPestFamilyLine({
     cfg,
+    priceMultiplier: pressure.multiplier,
     materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (treatableSqFt / 1000),
     onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPerKSqFt * (treatableSqFt / 1000),
     service: 'commercial_mosquito',
@@ -2791,6 +2813,7 @@ function priceCommercialMosquito(property = {}, options = {}) {
       commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
       treatableSqFt,
       treatableSource: area.source,
+      mosquitoPressureMultiplier: pressure.multiplier,
       pricingConfidence: (treatableSqFt > cfg.lowConfidenceTreatableSf || area.confidence === 'low') ? 'LOW' : 'MEDIUM',
     },
   });
@@ -3020,17 +3043,34 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
   treeCount = Math.max(0, Number(treeCount) || 0);
   const visits = cfg.programVisits;
 
-  const annualMaterial = cfg.materialFixedAnnual
+  // Plant-density multiplier (rep-set): low 0.75 / normal 1.0 / high 1.5;
+  // VERY HIGH (resort entrances / palm-heavy / whitefly ficus / disease-prone) →
+  // manual quote. Scales the VARIABLE cost buildup so the target margin holds.
+  const density = resolveTreeShrubDensityMultiplier(options.treeShrubDensity);
+  if (density.forceManual) {
+    return commercialPestFamilyManualLine({
+      service: 'commercial_tree_shrub',
+      name: 'Commercial Tree & Shrub',
+      originalRequestedService: 'tree_shrub',
+      cfg,
+      reason: 'commercial_tree_shrub_very_high_density_manual_quote',
+      detail: 'Very high ornamental density needs a site visit — your Waves account manager will confirm the quote.',
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype,
+    });
+  }
+  const densityMult = density.multiplier;
+
+  const annualMaterial = (cfg.materialFixedAnnual
     + cfg.materialPerSqFtAnnual * bedArea
-    + cfg.materialPerTreeAnnual * treeCount;
+    + cfg.materialPerTreeAnnual * treeCount) * densityMult;
 
   const onSiteMin = cfg.laborMinutesBase
     + (bedArea / 100) * cfg.laborMinutesPerHundredSqFt
     + treeCount * cfg.laborMinutesPerTree;
   const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + cfg.laborOverheadMinutesPerVisit) / 60);
   const drivePerVisit = GLOBAL.LABOR_RATE * (cfg.routeDriveMinutes / 60);
-  const annualLabor = laborPerVisit * visits;
-  const annualDrive = drivePerVisit * visits;
+  const annualLabor = laborPerVisit * visits * densityMult;
+  const annualDrive = drivePerVisit * visits * densityMult;
 
   const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
   const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
@@ -3064,6 +3104,7 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
     bedAreaSource: bedBasis,
     bedAreaEstimated: estimated,
     treeCount,
+    treeShrubDensityMultiplier: densityMult,
     frequency: visits,
     visitsPerYear: visits,
     onSiteMin: roundMoney(onSiteMin),

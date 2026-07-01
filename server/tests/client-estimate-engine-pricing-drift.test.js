@@ -272,6 +272,17 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(adminToolViewSource).toContain('"commercialRiskType",');
   });
 
+  test('commercial multipliers ride in BOTH admin payloads + reset set (Phase 2)', () => {
+    // T&S density + mosquito pressure must forward + invalidate on both forms so
+    // the priced multiplier can never diverge between the two admin surfaces.
+    for (const src of [legacyAdminSource, adminToolViewSource]) {
+      expect(src).toContain('treeShrubDensity: formIsCommercial');
+      expect(src).toContain('mosquitoPressure: formIsCommercial');
+      expect(src).toContain('"treeShrubDensity",');
+      expect(src).toContain('"mosquitoPressure",');
+    }
+  });
+
   test('commercial termite scope rides in BOTH admin payloads (liability gate stays in sync)', () => {
     // Both admin surfaces must forward termiteScope to the server so the
     // bond/warranty/install → manual-quote gate can never fire on one form but

@@ -437,6 +437,8 @@ const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   // Commercial cadence: changing the business type re-prices pest/rodent, so it
   // must invalidate a generated estimate (else Save persists stale totals).
   "commercialRiskType",
+  "treeShrubDensity",
+  "mosquitoPressure",
 ]);
 
 const MOSQUITO_PROTOCOL_STEPS = [
@@ -1918,6 +1920,8 @@ export default function EstimateToolViewV2({
     isCommercial: "NO",
     commercialSubtype: "",
     commercialRiskType: "",
+    treeShrubDensity: "",
+    mosquitoPressure: "",
     commercialPricingMode: "manual_quote",
     hasPool: "NO",
     hasPoolCage: "NO",
@@ -3192,6 +3196,8 @@ export default function EstimateToolViewV2({
         commercialPricingMode: form.commercialPricingMode || "manual_quote",
         commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
         commercialRiskType: formIsCommercial ? form.commercialRiskType || "" : "",
+        treeShrubDensity: formIsCommercial ? form.treeShrubDensity || "" : "",
+        mosquitoPressure: formIsCommercial ? form.mosquitoPressure || "" : "",
         fleaOfferKey: form.fleaOfferKey || "flea_elimination_two_visit",
         fleaComplexity: form.fleaComplexity || "light",
         fleaExteriorSourceSuspected: !!form.fleaExteriorSourceSuspected,
@@ -3322,6 +3328,8 @@ export default function EstimateToolViewV2({
       profile.isCommercial = formIsCommercial;
       profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
       profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
+      profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
+      profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
@@ -3680,6 +3688,8 @@ export default function EstimateToolViewV2({
       isCommercial: "NO",
       commercialSubtype: "",
       commercialRiskType: "",
+      treeShrubDensity: "",
+      mosquitoPressure: "",
       commercialPricingMode: "manual_quote",
       hasPool: "NO",
       hasPoolCage: "NO",
@@ -4185,6 +4195,8 @@ export default function EstimateToolViewV2({
                       isCommercial: "NO",
                       commercialSubtype: "",
                       commercialRiskType: "",
+                      treeShrubDensity: "",
+                      mosquitoPressure: "",
                       commercialPricingMode: "manual_quote",
                       hasPool: "NO",
                       hasPoolCage: "NO",
@@ -4517,6 +4529,34 @@ export default function EstimateToolViewV2({
                       { value: "healthcare_childcare", label: "Healthcare / childcare" },
                       { value: "hotel_resort", label: "Hotel / resort" },
                       { value: "multifamily", label: "Multifamily" },
+                    ]}
+                  />
+                </FieldV2>
+              )}
+              {commercialDetected && form.svcTs && (
+                <FieldV2 label="Tree & Shrub density">
+                  <SelectV2
+                    k="treeShrubDensity"
+                    options={[
+                      { value: "", label: "Normal (default)" },
+                      { value: "low", label: "Low / sparse (0.75×)" },
+                      { value: "normal", label: "Normal (1.0×)" },
+                      { value: "high", label: "High / dense (1.5×)" },
+                      { value: "very_high", label: "Very high — manual quote" },
+                    ]}
+                  />
+                </FieldV2>
+              )}
+              {commercialDetected && form.svcMosquito && (
+                <FieldV2 label="Mosquito pressure">
+                  <SelectV2
+                    k="mosquitoPressure"
+                    options={[
+                      { value: "", label: "Normal (default)" },
+                      { value: "low", label: "Low (0.85×)" },
+                      { value: "normal", label: "Normal (1.0×)" },
+                      { value: "high", label: "High (1.35×)" },
+                      { value: "severe", label: "Severe — manual quote" },
                     ]}
                   />
                 </FieldV2>

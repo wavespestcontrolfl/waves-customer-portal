@@ -689,10 +689,14 @@ function generateEstimate(input) {
       const result = priceCommercialTreeShrub(property, {
         commercialSubtype,
         treeCount: services.treeShrub.treeCount,
+        // Rep-set plant-density multiplier (very_high → manual); admin-set.
+        treeShrubDensity: input.treeShrubDensity,
       });
       if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
-        activeServiceKeys.push('commercial_tree_shrub');
+        // very_high density returns a quote-required manual line — don't mark it
+        // active/priced (mirrors the pest/mosquito/termite/rodent branches).
+        if (!result.quoteRequired) activeServiceKeys.push('commercial_tree_shrub');
       }
     } else {
       const result = priceTreeShrub(property, {
@@ -749,6 +753,8 @@ function generateEstimate(input) {
         // default (no real parcel) — mosquito can't auto-price a fabricated
         // treatable area. Undefined (admin / measured) → auto-price as usual.
         lotSizeMeasured: input.lotSizeMeasured,
+        // Rep-set mosquito-pressure multiplier (severe → manual); admin-set.
+        mosquitoPressure: input.mosquitoPressure,
       });
       // Push the pricer's OWN line — priced or its service-specific manual quote.
       // The manual line keeps service=commercial_mosquito / originalRequestedService=
