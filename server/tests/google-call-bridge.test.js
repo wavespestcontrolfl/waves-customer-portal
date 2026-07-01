@@ -249,3 +249,20 @@ describe('Google Ads call reporting bridge', () => {
     expect(query).toContain('LIMIT 500');
   });
 });
+
+describe('isBridgeTargetNumber', () => {
+  test('true only for the configured Google Ads call-bridge target line', () => {
+    // The bridge target is TWILIO_NUMBERS.locations.bradenton (+19413187612).
+    // Callers use this to avoid pre-attributing that shared number organic.
+    expect(GoogleCallBridge.isBridgeTargetNumber('+19413187612')).toBe(true);
+    expect(GoogleCallBridge.isBridgeTargetNumber('9413187612')).toBe(true); // format-agnostic
+    expect(GoogleCallBridge.isBridgeTargetNumber('(941) 318-7612')).toBe(true);
+  });
+
+  test('false for other city-page / spoke numbers and empties', () => {
+    expect(GoogleCallBridge.isBridgeTargetNumber('+19412972817')).toBe(false); // another main_site number
+    expect(GoogleCallBridge.isBridgeTargetNumber('+19412838194')).toBe(false); // a spoke number
+    expect(GoogleCallBridge.isBridgeTargetNumber('')).toBe(false);
+    expect(GoogleCallBridge.isBridgeTargetNumber(null)).toBe(false);
+  });
+});

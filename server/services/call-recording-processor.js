@@ -2585,29 +2585,39 @@ const CallRecordingProcessor = {
           }
         }
 
-        // Paid call lead (dedicated Google Ads tracking number), NEW or reused ->
-        // surface it in the PPC funnel (ad_service_attribution). Gated on leadId so
-        // it only counts actual leads (shouldCreateLead already excluded established
-        // customers). campaign_id is null here (single-number bucket; the
-        // call-reporting bridge fills the campaign when it matches). Best-effort.
-        // Label each PAID source with its OWN platform so Google and Facebook
-        // calls land in their respective funnels — never mislabel one as the other.
-        // For Google the call-reporting bridge backfills the campaign later; Meta
-        // has no call→campaign reporting, so Facebook rows stay campaign-null (the
-        // conversion still counts). recordCallPpcAttribution dedupes by lead_id and
-        // respects first-touch (a web-attributed lead keeps its source), so this
-        // never double-counts.
-        // NOTE: stays gated on customerId, so a customer-less recovery lead from
-        // a paid tracking number gets no ad_service_attribution row yet — the
-        // lead keeps its lead_source_id and is attributed when it converts to a
-        // customer. Lead-only PPC attribution needs schema work on the
-        // customer-keyed ad_service_attribution table; deferred out of this PR.
-        if (leadId && customerId && leadSourceRow
-            && ['google_ads', 'facebook'].includes(leadSourceRow.source_type)) {
+        // Marketing call lead (matched a tracking number), NEW or reused -> surface
+        // it in the PPC funnel (ad_service_attribution) so it buckets into the same
+        // channel as a web-form lead from that source. attributionForSourceType maps
+        // the lead_sources.source_type to the funnel channel key + paid flag: PAID
+        // numbers (google_ads/facebook) stay paid; ORGANIC marketing sources (spoke
+        // domains -> domain_website, hub city pages -> waves_website, GBP ->
+        // google_business) are is_paid=false so they show as their own no-spend
+        // channels instead of being invisible (an organic call otherwise makes a
+        // lead but no funnel row, hiding whole channels from the LTV:CAC surfaces).
+        // Offline / word-of-mouth sources map to null and get no row. campaign_id is
+        // null here (the Google call-reporting bridge backfills it later for paid
+        // Google). recordCallPpcAttribution dedupes by lead_id and respects
+        // first-touch (a web-attributed lead keeps its source), so no double-count.
+        // EXCEPTION: the Google Ads call-bridge target number is SHARED (organic hub
+        // + paid Google call-extension), resolved by the bridge AFTER the fact — so
+        // never pre-attribute THAT one number (it would lock the row before the
+        // bridge can mark the call paid). Only that single number is suppressed; the
+        // other main_site city-page numbers attribute organic normally.
+        // NOTE: stays gated on customerId, so a customer-less recovery lead gets no
+        // ad_service_attribution row yet — the lead keeps its lead_source_id and is
+        // attributed when it converts to a customer. Lead-only PPC attribution needs
+        // schema work on the customer-keyed table; deferred out of this PR.
+        const callAttr = leadSourceRow
+          ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
+          : null;
+        const isBridgeTarget = leadSourceRow
+          && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
+        if (leadId && customerId && callAttr && !isBridgeTarget) {
           require('./ads/call-attribution').recordCallPpcAttribution({
             customerId,
             leadId,
-            leadSource: leadSourceRow.source_type, // 'google_ads' | 'facebook'
+            leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
+            isPaid: callAttr.isPaid,
             leadSourceDetail: leadSourceRow.name || 'inbound call',
             // service_interest isn't on the lead row yet (enrichment writes it
             // later) — pass the extracted service so service-line ROI is right.

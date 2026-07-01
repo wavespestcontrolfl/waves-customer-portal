@@ -20,6 +20,46 @@ const { etDateString } = require('../../utils/datetime-et');
 // Shared with the web lead path so call + web leads bucket identically.
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../../utils/service-line-infer');
 
+// Map a lead_sources.source_type to the ad_service_attribution channel key +
+// paid flag, so inbound CALLS bucket into the SAME channels as web-form leads
+// (which write these keys directly). Without this, an organic call — e.g. someone
+// calling the tracking number on a spoke site — creates a lead but never a funnel
+// row, so whole organic channels (spoke domains, the hub city pages, GBP) are
+// invisible to the LTV:CAC / "where to put ad dollars" surfaces even though they drive real
+// business. Paid tracking numbers stay paid; organic marketing sources are unpaid
+// but still real acquisition channels the card should show.
+//
+// IMPORTANT — main_site is the website city-page numbers (migration 20260628000001).
+// It's mapped here (waves_website), BUT one of those numbers is the Google Ads
+// call-bridge target and is SHARED with paid Google call-extension traffic. The
+// CALLER must skip that one number (google-call-bridge.isBridgeTargetNumber) —
+// pre-attributing it organic would lock the funnel row (recordCallPpcAttribution
+// won't change an existing row's lead_source) so the bridge could never mark the
+// call paid. The other (non-bridge) city-page numbers attribute organic normally.
+//
+// Word-of-mouth / offline sources (referral, walk_in, vehicle, tollfree, direct
+// field-observation) and marketplaces (Yelp/Nextdoor share source_type=marketplace
+// with different channels) are intentionally NOT mapped — they aren't ad-dollar
+// channels and their canonical keys need an owner decision. null ⇒ no funnel row.
+const SOURCE_TYPE_ATTRIBUTION = {
+  google_ads:      { leadSource: 'google_ads',      isPaid: true },
+  facebook:        { leadSource: 'facebook',        isPaid: true },
+  spoke_site:      { leadSource: 'domain_website',  isPaid: false },
+  main_site:       { leadSource: 'waves_website',   isPaid: false },
+  gbp:             { leadSource: 'google_business', isPaid: false },
+  website_organic: { leadSource: 'google_business', isPaid: false },
+};
+
+/**
+ * attributionForSourceType(sourceType)
+ * @returns {{leadSource:string, isPaid:boolean}|null} the funnel channel + paid
+ *   flag for a lead_sources.source_type, or null when the source shouldn't get a
+ *   PPC-funnel row (offline / word-of-mouth / undecided).
+ */
+function attributionForSourceType(sourceType) {
+  return SOURCE_TYPE_ATTRIBUTION[sourceType] || null;
+}
+
 async function resolveCampaignId(googleCampaignId) {
   if (!googleCampaignId) return null;
   try {
@@ -59,6 +99,7 @@ async function recordCallPpcAttribution({
   googleCampaignId = null,
   leadDate,
   serviceInterest = null,
+  isPaid = true,
 } = {}) {
   if (!customerId) return { recorded: false, reason: 'no_customer' };
   if (!leadId) return { recorded: false, reason: 'no_lead' };
@@ -147,11 +188,12 @@ async function recordCallPpcAttribution({
       lead_source: leadSource,
       lead_source_detail: leadSourceDetail,
       funnel_stage: 'lead',
-      // Call-sourced rows come from PAID tracking numbers (google_ads + facebook),
-      // so they are inherently paid. Calls carry no click ids (gclid/fbclid), so
-      // this flag is how the paid filters count them — without it a Facebook call
-      // would be mis-bucketed as organic (no fbclid/_fbc).
-      is_paid: true,
+      // Calls carry no click ids (gclid/fbclid), so this flag — not a cookie — is
+      // how the paid filters count them: a paid-number call (google_ads/facebook)
+      // is is_paid=true so a Facebook call isn't mis-bucketed as organic, while an
+      // organic-marketing call (spoke domain / hub / GBP) is is_paid=false so it
+      // stays out of the paid ratio. Defaults true for the paid callers.
+      is_paid: isPaid,
     }).onConflict('lead_id').ignore();
     logger.info(`[call-attribution] recorded ${leadSource} call lead ${leadId}${campaignId ? ` (campaign ${campaignId})` : ''}`);
     return { recorded: true, campaignId };
@@ -163,5 +205,6 @@ async function recordCallPpcAttribution({
 
 module.exports = {
   recordCallPpcAttribution,
-  _private: { resolveCampaignId },
+  attributionForSourceType,
+  _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION },
 };
