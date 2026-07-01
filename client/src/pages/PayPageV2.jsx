@@ -113,6 +113,21 @@ function paymentErrorPayload(err, extra = {}) {
   };
 }
 
+// The Stripe instant bank-link (Financial Connections) can fail to finalize for
+// certain institutions even after the bank reports success — the confirm returns
+// "No account connected" / instant_verification_incomplete. Detect ONLY that
+// specific case so the pay page can nudge the customer toward manual bank entry
+// (routing + account), which sidesteps instant linking. Other errors are left
+// untouched so the nudge never shows spuriously.
+function isInstantLinkFailure(err) {
+  const code = String(err?.code || err?.decline_code || err?.raw?.code || '').toLowerCase();
+  const msg = String(err?.message || '').toLowerCase();
+  return code === 'instant_verification_incomplete'
+    || msg.includes('no account connected')
+    || msg.includes("account can't be connected")
+    || msg.includes('account cannot be connected');
+}
+
 function serverReportedError(message, { status = null, inProgress = false, microdepositPending = false } = {}) {
   const err = new Error(message || 'Payment error');
   err.serverReported = true;
@@ -375,6 +390,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const [ready, setReady] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [elementError, setElementError] = useState(null);
+  // Shown only after an instant bank-link (Financial Connections) failure, to
+  // steer the customer to the manual routing/account entry that avoids it.
+  const [showManualEntryHint, setShowManualEntryHint] = useState(false);
   // Stripe.js failed to load (network/blocker). The shared loader already
   // auto-retries; this surfaces a one-tap Retry once those are exhausted so the
   // customer never has to reload the whole page to recover.
@@ -714,6 +732,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     if (!stripeRef.current || !elementsRef.current || processing) return;
     setProcessing(true);
     setElementError(null);
+    setShowManualEntryHint(false);
 
     // ACH: use the existing confirmPayment flow (no surcharge)
     if (selectedMethodRef.current === 'us_bank_account') {
@@ -776,6 +795,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         });
         if (error) {
           setElementError(error.message);
+          if (isInstantLinkFailure(error)) setShowManualEntryHint(true);
           reportPaymentError(token, paymentErrorPayload(error, {
             phase: 'stripe_confirm',
             methodCategory: 'us_bank_account',
@@ -789,6 +809,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         else onSuccess?.(pi, 'us_bank_account');
       } catch (err) {
         setElementError(err.message || 'Payment failed');
+        if (isInstantLinkFailure(err)) setShowManualEntryHint(true);
         reportPaymentError(token, paymentErrorPayload(err, {
           phase: 'stripe_confirm',
           methodCategory: 'us_bank_account',
@@ -1135,6 +1156,23 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           color: 'var(--danger)',
         }}>
           {elementError}
+        </div>
+      )}
+
+      {showManualEntryHint && !isCardFamily && (
+        <div style={{
+          background: 'var(--surface-subtle, rgba(0,0,0,0.03))',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+          padding: '12px 14px',
+          fontSize: 14,
+          lineHeight: 1.5,
+          color: 'var(--text)',
+        }}>
+          <strong>Trouble linking your bank?</strong> Some banks don't support instant
+          linking. Choose <strong>“Enter bank details manually”</strong> above and type
+          your routing and account number instead — it avoids this issue, and bank
+          payments still have no added fee.
         </div>
       )}
 
