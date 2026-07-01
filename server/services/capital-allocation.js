@@ -101,14 +101,19 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
   const opp = channels.find(
     (c) => c.confidence === 'ok' && (c.band === 'scale' || c.band === 'pour_in'),
   );
-  // Leak (the warning call) does NOT require confidence: a channel that spent
-  // money and returned almost nothing is the clearest waste — and a zero-customer
-  // channel (0 customers ⇒ low confidence by definition) is exactly the case to
-  // flag. Pick the one wasting the MOST cash (all-in spend − lifetime value).
+  // Leak (the warning "cut or fix" call). CUTTABLE ad spend (adSpend > 0) flags
+  // regardless of confidence — a paid channel that spent real money and returned
+  // almost nothing is the clearest waste, even off few customers. But a FIXED-cost-
+  // only channel (adSpend === 0: a domain / SEO retainer / vehicle wrap / GBP-mgmt
+  // fee) is sunk overhead you can't "cut" on one quarter's ratio, so don't headline
+  // it as a leak until it has enough customers to actually judge — otherwise a
+  // brand-new channel with one pending lead, or a wrap you already bought for 5
+  // years, wrongly becomes the card's top warning. It still shows as its own faded
+  // row; it just isn't the "cut or fix" headline. Pick the one wasting the MOST cash.
   const wasted = (c) => spendOf(c) - (Number(c.lifetimeValue) || 0);
-  const [leak] = channels
-    .filter((c) => c.band === 'losing' && spendOf(c) > 0)
-    .sort((a, b) => wasted(b) - wasted(a));
+  const leakEligible = (c) => c.band === 'losing' && spendOf(c) > 0
+    && (c.adSpend > 0 || (c.customers || 0) >= minConfidentCustomers);
+  const [leak] = channels.filter(leakEligible).sort((a, b) => wasted(b) - wasted(a));
 
   return {
     channels,

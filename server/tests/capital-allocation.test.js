@@ -90,6 +90,38 @@ describe('rankCapitalAllocation', () => {
     expect(out.channels.find((c) => c.sourceKey === 'google_ads').band).toBe('losing');
   });
 
+  test('a FIXED-cost-only channel with too few customers is NOT headlined as a leak', () => {
+    // Van wrap: $225/qtr sunk cost, 0 customers, 0 return. A wrap you already bought
+    // is not "cut or fix" off one pending lead — it still shows as a losing row, but
+    // must not be the card's headline warning.
+    const out = rankCapitalAllocation({
+      sources: [
+        { sourceKey: 'van_wrap', source: 'Van Wrap', ltvCac: 0, adSpend: 0, fixedCost: 225, allInSpend: 225, lifetimeValue: 0, customers: 0 },
+      ],
+    });
+    expect(out.channels[0].band).toBe('losing'); // still a losing row
+    expect(out.headline.biggestLeak).toBeNull(); // but NOT the "cut or fix" headline
+  });
+
+  test('a fixed-cost-only channel IS flagged once it has enough customers to judge', () => {
+    const out = rankCapitalAllocation({
+      sources: [
+        // $600/qtr SEO/domain cost, 8 customers, poor return — now judgeable → real leak
+        { sourceKey: 'domain_website', source: 'Domain Sites', ltvCac: 0.5, adSpend: 0, fixedCost: 600, allInSpend: 600, lifetimeValue: 300, customers: 8 },
+      ],
+    });
+    expect(out.headline.biggestLeak.sourceKey).toBe('domain_website');
+  });
+
+  test('cuttable AD spend still flags as a leak even off few customers (unchanged)', () => {
+    const out = rankCapitalAllocation({
+      sources: [
+        { sourceKey: 'google_ads', source: 'Google Ads', ltvCac: 0.2, adSpend: 500, fixedCost: 0, allInSpend: 500, lifetimeValue: 100, customers: 1 },
+      ],
+    });
+    expect(out.headline.biggestLeak.sourceKey).toBe('google_ads'); // adSpend>0 → flagged despite n=1
+  });
+
   test('bands off the EXACT ratio, not the display-rounded value', () => {
     // displayed ltvCac rounds to 3.0, but the true ratio (296/100) is 2.96 → below 3:1
     const out = rankCapitalAllocation({ sources: [src('google_ads', 'Google Ads', 3.0, 100, 10, 296)] });
