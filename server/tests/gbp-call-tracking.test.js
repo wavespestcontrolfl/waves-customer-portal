@@ -28,10 +28,12 @@ describe('GBP call tracking numbers', () => {
     }
   });
 
-  test('getLeadSourceFromNumber returns google_business_profile per city', () => {
+  test('getLeadSourceFromNumber returns the canonical google_business key per city', () => {
+    // Canonical channel key — matches the web classifier + ad_service_attribution
+    // + formatSourceName, so a GBP call and a GBP web lead share one lead_source.
     for (const number of Object.values(GBP_NUMBERS)) {
       const ls = TWILIO_NUMBERS.getLeadSourceFromNumber(number);
-      expect(ls.source).toBe('google_business_profile');
+      expect(ls.source).toBe('google_business');
       expect(ls.area).toBeTruthy();
     }
   });
@@ -49,5 +51,22 @@ describe('GBP call tracking numbers', () => {
       .filter(n => n.type !== 'gbp_tracking')
       .map(n => n.number);
     for (const number of others) expect(gbp.has(number)).toBe(false);
+  });
+});
+
+describe('getLeadSourceFromNumber — canonical channel keys', () => {
+  // The resolver emits the SAME keys the card/web use, so a call-sourced
+  // customers.lead_source matches a web-sourced one for the same channel.
+  test('hub (wavespestcontrol.com) numbers → waves_website, spoke domains → domain_website', () => {
+    expect(TWILIO_NUMBERS.getLeadSourceFromNumber('+19412975749').source).toBe('waves_website'); // hub main line
+    expect(TWILIO_NUMBERS.getLeadSourceFromNumber('+19413187612').source).toBe('waves_website'); // hub Bradenton page
+    expect(TWILIO_NUMBERS.getLeadSourceFromNumber('+19412838194').source).toBe('domain_website'); // spoke: bradentonflexterminator.com
+    expect(TWILIO_NUMBERS.getLeadSourceFromNumber('+19413041850').source).toBe('domain_website'); // spoke lawn
+  });
+  test('office/location lines → waves_website; van → van_wrap; paid keep platform', () => {
+    expect(TWILIO_NUMBERS.getLeadSourceFromNumber('+19412972817').source).toBe('waves_website'); // Parrish office line
+    expect(TWILIO_NUMBERS.getLeadSourceFromNumber('+19412412459').source).toBe('van_wrap'); // van wrap
+    expect(TWILIO_NUMBERS.getLeadSourceFromNumber('+19412691697').source).toBe('google_ads');
+    expect(TWILIO_NUMBERS.getLeadSourceFromNumber('+19418775491').source).toBe('facebook');
   });
 });
