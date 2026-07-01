@@ -1,4 +1,4 @@
-const { deriveStatus, buildAddressLines, STATUSES } = require('../services/address-validation');
+const { deriveStatus, buildAddressLines, STATUSES, validateAddress } = require('../services/address-validation');
 
 describe('buildAddressLines', () => {
   test('street + city/state/zip → two lines', () => {
@@ -94,5 +94,48 @@ describe('deriveStatus (Google AV → provider-neutral status)', () => {
   test('county normalization handles "X County" and case', () => {
     expect(deriveStatus(result(), 'manatee').status).toBe(STATUSES.VALIDATED_ACCEPT);
     expect(deriveStatus(result(), 'DESOTO COUNTY').status).toBe(STATUSES.VALIDATED_ACCEPT);
+  });
+});
+
+describe('validateAddress deadline handling', () => {
+  const realFetch = global.fetch;
+  const realEnabled = process.env.ADDRESS_VALIDATION_ENABLED;
+  const realKey = process.env.GOOGLE_API_KEY;
+
+  beforeEach(() => {
+    process.env.ADDRESS_VALIDATION_ENABLED = 'true';
+    process.env.GOOGLE_API_KEY = 'test-key';
+  });
+  afterEach(() => {
+    global.fetch = realFetch;
+    if (realEnabled === undefined) delete process.env.ADDRESS_VALIDATION_ENABLED;
+    else process.env.ADDRESS_VALIDATION_ENABLED = realEnabled;
+    if (realKey === undefined) delete process.env.GOOGLE_API_KEY;
+    else process.env.GOOGLE_API_KEY = realKey;
+  });
+
+  // A stalled Google connection must not hang the caller (e.g. the call
+  // processor sitting in processing_status='processing'); the run deadline
+  // aborts the fetch and validateAddress fails closed to api_unavailable.
+  test('fails closed when the caller run deadline is already spent', async () => {
+    global.fetch = (_url, opts = {}) => {
+      if (opts.signal?.aborted) {
+        const e = new Error('aborted'); e.name = 'AbortError';
+        return Promise.reject(e);
+      }
+      return new Promise((_resolve, reject) => {
+        opts.signal?.addEventListener('abort', () => {
+          const e = new Error('aborted'); e.name = 'AbortError';
+          reject(e);
+        });
+      });
+    };
+    const spent = new AbortController();
+    spent.abort();
+    const res = await validateAddress({
+      addressLines: ['123 Main St', 'Bradenton FL 34205'],
+      signal: spent.signal,
+    });
+    expect(res.status).toBe(STATUSES.API_UNAVAILABLE);
   });
 });

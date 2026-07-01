@@ -1953,6 +1953,7 @@ const CallRecordingProcessor = {
           try {
             v2AddressValidation = await validateAddress({
               addressLines: buildAddressLines(v2Result.extraction.property?.service_address),
+              signal: runDeadlineSignal,
             });
           } catch (avErr) {
             logger.warn(`[call-proc-v2] address validation error for ${callSid}: ${avErr.message}`);
@@ -3448,6 +3449,15 @@ const CallRecordingProcessor = {
     } catch (procErr) {
       logger.error(`[call-proc] Unhandled error processing ${callSid}: ${procErr.message}\n${procErr.stack || ''}`);
       try {
+        // Distinct from the pre-side-effect 'extraction_failed' status: this
+        // catch wraps the WHOLE pipeline, so it can fire after Step 3+ side
+        // effects (customer/lead/appointment/interaction rows) have already
+        // run. Those inserts are not all idempotent, so this state must NOT be
+        // auto-reselected by processAllPending — a blind cron rerun would
+        // duplicate them. 'processing_error' is a human-review terminal state
+        // (manual reprocess only); only the pre-extraction 'extraction_failed'
+        // rows, which have no side effects yet, are cron-retryable.
+        //
         // Fence on processing_token (owner-only column). If the 10-min stale
         // reclaim handed the lock to a peer, the peer's claim overwrote our
         // token and this UPDATE matches 0 rows — we log and bail without
@@ -3456,7 +3466,7 @@ const CallRecordingProcessor = {
           .where({ id: call.id })
           .where('processing_token', procToken)
           .update({
-            processing_status: 'extraction_failed',
+            processing_status: 'processing_error',
             processing_token: null,
             processing_started_at: null,
             updated_at: new Date(),
@@ -3482,10 +3492,13 @@ const CallRecordingProcessor = {
     //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
     //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
     //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly)
-    //   - processing_status='extraction_failed' but stale > 10 min. A provider TIMEOUT during
-    //     extraction lands here (transient), so it must re-enter the retry path to self-heal;
-    //     the 10-min age gate keeps a deterministically-failing transcript from re-billing the
-    //     extraction model every 5-min cron pass.
+    //   - processing_status='extraction_failed' but stale > 10 min. This status is written ONLY
+    //     at the pre-side-effect extraction step, so retrying it is safe (no customer/lead/
+    //     appointment rows exist yet to duplicate). A transient provider TIMEOUT during
+    //     extraction lands here, so it must re-enter the retry path to self-heal; the 10-min age
+    //     gate keeps a deterministically-failing transcript from re-billing the extraction model
+    //     every 5-min cron pass. Late/unknown pipeline failures use 'processing_error' instead
+    //     and are intentionally NOT reselected here (a rerun would duplicate side effects).
     //   - processing_status='processing' but stale > 10 min (orphaned claim from crash/hang)
     // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
     // with duration_seconds fallback, since the call-status webhook may not have populated
