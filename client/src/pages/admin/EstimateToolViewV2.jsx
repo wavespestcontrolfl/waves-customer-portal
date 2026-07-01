@@ -439,6 +439,13 @@ const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   "commercialRiskType",
   "treeShrubDensity",
   "mosquitoPressure",
+  // Rodent guarantee eligibility: these four flags gate whether RODENT_GUARANTEE
+  // prices at all (all four required), so toggling one after generating must
+  // invalidate the estimate (else Save/Send persists a stale guarantee line).
+  "rgTrappingCompleted",
+  "rgExclusionCompleted",
+  "rgSanitationBaseline",
+  "rgNoActivityAfterFinalCheck",
 ]);
 
 const MOSQUITO_PROTOCOL_STEPS = [
