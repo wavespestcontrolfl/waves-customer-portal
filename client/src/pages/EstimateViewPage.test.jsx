@@ -308,6 +308,23 @@ describe('TerminalStateCard', () => {
     expect(screen.queryByText(/attached as a PDF to the email/i)).not.toBeInTheDocument();
     expect(screen.getByText(/account manager has your formal proposal/i)).toBeInTheDocument();
   });
+
+  it('renders account-manager copy for a commercial risk-type hold, not the inspection state', () => {
+    render(
+      <TerminalStateCard
+        state="quote_required"
+        customerFirstName="Pat"
+        address="123 Main St"
+        quoteReason="commercial_risk_type_review"
+      />,
+    );
+
+    expect(screen.getByText('Your account manager will finalize this.')).toBeInTheDocument();
+    expect(screen.queryByText('This treatment needs an inspection.')).not.toBeInTheDocument();
+    expect(screen.getByText(/commercial service plan/i)).toBeInTheDocument();
+    // never surfaces the raw internal token as a reason badge
+    expect(screen.queryByText('Commercial risk type review')).not.toBeInTheDocument();
+  });
 });
 
 describe('getServiceLabel', () => {

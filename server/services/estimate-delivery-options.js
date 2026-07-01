@@ -233,13 +233,52 @@ function estimateDataHasUnresolvedManagerApproval(estimateData) {
 // risk-type lane, decision 1). Only cadence-relevant lines gate: a commercial
 // lawn/tree/mosquito/termite-only estimate does not need a risk type.
 const CADENCE_COMMERCIAL_SERVICES = new Set(['commercial_pest', 'commercial_rodent_bait']);
+const RECURRING_PEST_RODENT_SELECTIONS = new Set(['PEST', 'RODENT_BAIT']);
 
-function containsCadenceCommercialLine(value, depth = 0) {
+// An engine-AUTO-priced commercial pest/rodent recurring line — the only line
+// whose cadence the risk type drives. Manual-quote, one-time, and authored-
+// proposal lines carry the same service key but are not engine-cadence lines
+// (they set commercialPricingMode 'manual_quote' or none, and/or quoteRequired),
+// so they are excluded.
+function containsAutoPricedCadenceLine(value, depth = 0) {
   if (!value || depth > 12) return false;
-  if (Array.isArray(value)) return value.some((item) => containsCadenceCommercialLine(item, depth + 1));
+  if (Array.isArray(value)) return value.some((item) => containsAutoPricedCadenceLine(item, depth + 1));
   if (typeof value !== 'object') return false;
-  if (typeof value.service === 'string' && CADENCE_COMMERCIAL_SERVICES.has(value.service)) return true;
-  return Object.values(value).some((item) => containsCadenceCommercialLine(item, depth + 1));
+  if (
+    typeof value.service === 'string'
+    && CADENCE_COMMERCIAL_SERVICES.has(value.service)
+    && value.commercialPricingMode === 'auto_estimate'
+    && value.quoteRequired !== true
+  ) return true;
+  return Object.values(value).some((item) => containsAutoPricedCadenceLine(item, depth + 1));
+}
+
+// engineInputs-only fallback: some rows store only the engine request (the public
+// pricing path replays it) with no materialized result line yet. Detect the raw
+// selectedServices choosing recurring pest / rodent-bait so the gate still fails
+// closed — it will price a commercial cadence line, or fall to a manual quote that
+// the quote-required gate already blocks. (The uppercase tokens only appear in a
+// selectedServices array, so this does not collide with results.pest stat arrays.)
+function selectsRecurringPestOrRodent(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) {
+    if (value.some((v) => RECURRING_PEST_RODENT_SELECTIONS.has(v))) return true;
+    return value.some((item) => selectsRecurringPestOrRodent(item, depth + 1));
+  }
+  if (typeof value !== 'object') return false;
+  return Object.values(value).some((item) => selectsRecurringPestOrRodent(item, depth + 1));
+}
+
+function isCommercialEstimateData(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) return value.some((item) => isCommercialEstimateData(item, depth + 1));
+  if (typeof value !== 'object') return false;
+  if (value.commercialEstimatedPricing === true || value.isCommercial === true) return true;
+  if (typeof value.propertyType === 'string' && value.propertyType.toLowerCase() === 'commercial') return true;
+  if (typeof value.category === 'string' && value.category.toLowerCase() === 'commercial') return true;
+  if (typeof value.commercialSubtype === 'string' && value.commercialSubtype.trim()) return true;
+  if (typeof value.service === 'string' && value.service.startsWith('commercial_')) return true;
+  return Object.values(value).some((item) => isCommercialEstimateData(item, depth + 1));
 }
 
 function firstCommercialRiskType(value, depth = 0) {
@@ -268,8 +307,14 @@ function commercialRiskTypeReviewNeeded(estimateData) {
   // Explicit flag — the public "Other / skipped" business-type path sets this
   // (Phase 3) so a defaulted-but-unconfirmed bucket still surfaces for review.
   if (data.riskTypeNeedsReview === true) return true;
-  // Otherwise only a cadence-relevant commercial line requires a classified type.
-  if (!containsCadenceCommercialLine(data)) return false;
+  // Authored commercial proposals are hand-priced (the line items ARE the quote);
+  // their cadence is not engine-risk-type driven, so they are never risk-type gated.
+  if (data.proposal && data.proposal.enabled === true) return false;
+  // Gate only when a commercial pest/rodent CADENCE line exists (auto-priced) OR
+  // will be produced from an engineInputs-only commercial pest/rodent selection.
+  const cadenceRelevant = containsAutoPricedCadenceLine(data)
+    || (isCommercialEstimateData(data) && selectsRecurringPestOrRodent(data));
+  if (!cadenceRelevant) return false;
   return !isCommercialRiskType(firstCommercialRiskType(data));
 }
 

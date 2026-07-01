@@ -164,7 +164,7 @@ describe('assertEstimateSendable commercial risk-type gate', () => {
     status: 'sent',
     monthly_total: 200,
     estimate_data: {
-      result: { lineItems: [{ service: 'commercial_pest', annual: 2400 }] },
+      result: { lineItems: [{ service: 'commercial_pest', commercialPricingMode: 'auto_estimate', annual: 2400, visitsPerYear: 12 }] },
       ...(riskType ? { engineRequest: { options: { commercialRiskType: riskType } } } : {}),
     },
   });

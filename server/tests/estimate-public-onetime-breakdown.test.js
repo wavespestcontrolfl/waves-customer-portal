@@ -6691,7 +6691,7 @@ describe('resolveEstimateQuoteRequirement — commercial risk-type gate (public 
   // customer can't set the type, so it surfaces as quote-required and the accept
   // endpoint refuses (routing back to the account manager).
   const commercialPestEstData = (riskType) => ({
-    result: { lineItems: [{ service: 'commercial_pest', annual: 2400 }] },
+    result: { lineItems: [{ service: 'commercial_pest', commercialPricingMode: 'auto_estimate', annual: 2400, visitsPerYear: 12 }] },
     ...(riskType ? { engineRequest: { options: { commercialRiskType: riskType } } } : {}),
   });
 
