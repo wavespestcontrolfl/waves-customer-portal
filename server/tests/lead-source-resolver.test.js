@@ -90,3 +90,52 @@ describe('resolveLeadSource', () => {
     expect(res.leadSourceId).toBe('ls-gbp-parrish');
   });
 });
+
+// ---------------------------------------------------------------------------
+// sourceType — the lead_sources.source_type key the ad-funnel channel map
+// (ads/call-attribution attributionForSourceType) is keyed on. public-quote
+// stamps its ad_service_attribution row from this, so a wrong/missing value
+// means a wizard lead is mis-channeled or silently dropped from the funnel.
+// ---------------------------------------------------------------------------
+describe('resolveLeadSource sourceType', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isGbpUtmCampaign.mockReturnValue(false);
+    findGbpLocationByUtmContent.mockReturnValue(null);
+  });
+
+  test('passes through the resolved row source_type (main_site)', async () => {
+    mockLeadSources({ byName: { [MAIN_SITE_NAME]: { id: 'ls-main', name: MAIN_SITE_NAME, source_type: 'main_site' } } });
+    const res = await resolveLeadSource({ landing_url: 'https://wavespestcontrol.com/quote' });
+    expect(res.sourceType).toBe('main_site');
+  });
+
+  test('passes through spoke_site for a spoke referrer', async () => {
+    mockLeadSources({
+      byName: {
+        'Spoke Pest — parrishpestcontrol.com': { id: 'ls-spoke', name: 'Spoke Pest — parrishpestcontrol.com', source_type: 'spoke_site' },
+      },
+    });
+    const res = await resolveLeadSource({ referrer: 'https://www.parrishpestcontrol.com/services' });
+    expect(res.sourceType).toBe('spoke_site');
+  });
+
+  test('paid Google click keeps google_ads even when no lead_sources row exists', async () => {
+    mockLeadSources({ google: null });
+    const res = await resolveLeadSource({ gclid: 'g-1' });
+    expect(res.leadSourceId).toBeNull();
+    expect(res.sourceType).toBe('google_ads');
+  });
+
+  test('paid Meta click keeps facebook even when no lead_sources row exists', async () => {
+    mockLeadSources({ facebook: null });
+    const res = await resolveLeadSource({ fbclid: 'fb-1' });
+    expect(res.sourceType).toBe('facebook');
+  });
+
+  test('no row and no paid signal → null (fail-closed: no funnel row)', async () => {
+    mockLeadSources({ byName: {} });
+    const res = await resolveLeadSource({ referrer: 'https://duckduckgo.com/' });
+    expect(res.sourceType).toBeNull();
+  });
+});

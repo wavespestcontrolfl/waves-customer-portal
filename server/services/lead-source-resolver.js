@@ -124,6 +124,11 @@ async function resolveLeadSource(attribution) {
     leadSourceId: row?.id || null,
     leadSourceName: row?.name || targetName,
     leadSourceDetail: clampDetail(detail),
+    // lead_sources.source_type — the key the ad-funnel channel map
+    // (ads/call-attribution attributionForSourceType) is keyed on. Paid
+    // classifications keep their type even when the FK row is missing;
+    // anything else without a row stays null (no funnel row, fail-closed).
+    sourceType: row?.source_type || (googlePaid ? 'google_ads' : metaPaid ? 'facebook' : null),
   };
 }
 

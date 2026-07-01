@@ -284,9 +284,61 @@ async function backfillAdAttributionFromServiceRecords(db, { onError } = {}) {
   return { processed, updated, skipped };
 }
 
+/**
+ * sweepPendingAdAttribution(db?, { limit }?)
+ * Daily backstop for the completion-time sync. syncCustomerAdAttribution's only
+ * live trigger is job-costing at visit completion — so a funnel row that appears
+ * AFTER the customer's visits completed (late attribution insert, backfill, a
+ * missed completion hook) never advances: the customer has completed costed
+ * visits but no 'completed' funnel row, and nothing ever looks at them again.
+ * This finds exactly those customers and runs the normal idempotent sync.
+ * Customers whose completed visits all predate their lead_date will no-op each
+ * run (sync only credits visits on/after the lead) — that set is tiny and the
+ * no-op is one aggregate query.
+ */
+async function sweepPendingAdAttribution(db, { limit = 300 } = {}) {
+  db = resolveDb(db);
+  const asaCols = await db('ad_service_attribution').columnInfo().catch(() => ({}));
+  if (!asaCols.completed_revenue) return { candidates: 0, advanced: 0, skipped: 0 };
+
+  const candidates = await db('ad_service_attribution as asa')
+    .whereNotNull('asa.customer_id')
+    .whereNotExists(function notCompleted() {
+      this.select(1).from('ad_service_attribution as done')
+        .whereRaw('done.customer_id = asa.customer_id')
+        .where('done.funnel_stage', 'completed');
+    })
+    .whereExists(function hasCompletedVisit() {
+      this.select(1).from('scheduled_services as ss')
+        .whereRaw('ss.customer_id = asa.customer_id')
+        .where('ss.status', 'completed');
+    })
+    .distinct('asa.customer_id')
+    .limit(limit)
+    .pluck('asa.customer_id');
+
+  if (!candidates.length) return { candidates: 0, advanced: 0, skipped: 0 };
+
+  const targetMarginPct = await getTargetMarginPct(db); // resolve once per run
+  let advanced = 0;
+  let skipped = 0;
+  for (const cid of candidates) {
+    try {
+      const res = await syncCustomerAdAttribution(cid, db, { targetMarginPct });
+      if (res.updated) advanced += 1; else skipped += 1;
+    } catch (err) {
+      skipped += 1;
+      logger.warn(`[ad-attribution-sync] sweep skipped ${cid}: ${err.message}`);
+    }
+  }
+  logger.info(`[ad-attribution-sync] sweep — candidates ${candidates.length}, advanced ${advanced}, skipped ${skipped}`);
+  return { candidates: candidates.length, advanced, skipped };
+}
+
 module.exports = {
   syncCustomerAdAttribution,
   backfillAdAttributionFromServiceRecords,
+  sweepPendingAdAttribution,
   // exported for unit tests
   projectedLtv12moGP,
   pickPrimaryAttributionRow,

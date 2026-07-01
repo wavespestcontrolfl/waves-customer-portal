@@ -840,6 +840,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         utm_campaign: utmCampaign,
         utm_term: utmTerm,
         funnel_stage: 'lead',
+        // determineLeadSource marks every paid classification (google cpc,
+        // gclid/wbraid/gbraid, fbclid/_fbc, facebook cpc) channel='paid'.
+        // Without this stamp even gclid rows sit at is_paid NULL and the paid
+        // funnel views undercount.
+        is_paid: leadSource.channel === 'paid',
       }).onConflict('lead_id').ignore();
     } catch (attrErr) {
       logger.error(`Ad attribution insert failed: ${attrErr.message}`);

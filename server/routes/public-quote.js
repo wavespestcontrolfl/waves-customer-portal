@@ -11,6 +11,9 @@ const { subscribeOrResubscribe } = require('../services/newsletter-subscribers')
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
+const { attributionForSourceType } = require('../services/ads/call-attribution');
+const { etDateString } = require('../utils/datetime-et');
+const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplateLibrary = require('../services/email-template-library');
@@ -868,6 +871,44 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
     } catch (e) {
       logger.error(`[public-quote] Customer upsert failed: ${e.message}`);
+    }
+
+    // Ad service attribution — the quote wizard is a lead entry point just like
+    // the lead webhook, so it must stamp its own funnel row (nothing downstream
+    // does): without this a wizard lead never appears in the ad-dollar funnel,
+    // even after they pay. Channel key + paid flag come from the shared
+    // source_type map so the wizard can't drift from the call/webhook paths.
+    // onConflict(lead_id) dedupes against a row the webhook (or a prior wizard
+    // submit updating the same property-lookup lead) already stamped. Outside
+    // the customer-upsert try: a customer failure must not cost the funnel row
+    // (customer_id may be null; such a row counts lead volume and simply can
+    // never advance — correct, since it never converted).
+    try {
+      const channelAttr = attributionForSourceType(sourceMeta.sourceType);
+      if (channelAttr) {
+        await db('ad_service_attribution').insert({
+          customer_id: customerId,
+          lead_id: lead.id,
+          service_line: inferServiceLine(serviceInterest),
+          specific_service: inferSpecificService(serviceInterest),
+          service_bucket: inferServiceBucket(serviceInterest),
+          lead_date: etDateString(),
+          lead_source: channelAttr.leadSource,
+          lead_source_detail: sourceMeta.leadSourceDetail,
+          gclid: gclid || null,
+          wbraid: wbraid || null,
+          gbraid: gbraid || null,
+          fbclid: fbclid || null,
+          fbc: fbc || null,
+          fbp: fbp || null,
+          utm_campaign: attr?.utm?.campaign || null,
+          utm_term: attr?.utm?.term || null,
+          funnel_stage: 'lead',
+          is_paid: channelAttr.isPaid,
+        }).onConflict('lead_id').ignore();
+      }
+    } catch (attrErr) {
+      logger.error(`[public-quote] Ad attribution insert failed: ${attrErr.message}`);
     }
 
     // Mirror the priced quote into the estimates pipeline so wizard-generated
