@@ -105,6 +105,18 @@ function getProjectAddressFieldKey(fields) {
   return match ? match.key : null;
 }
 
+// Loose address equality. The same address arrives punctuated differently by
+// source: a customer search row carries the server `formatAddress` string
+// ("123 Main St, Bradenton, FL 34205") while the estimates-summary refetch
+// (used after a draft restore) is assembled client-side into "123 Main St
+// Bradenton, FL 34205". Comparing on a case/punctuation/whitespace-normalized
+// form lets the effect still recognize a customer-derived address it wrote.
+function addressesMatch(a, b) {
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const na = norm(a);
+  return na !== '' && na === norm(b);
+}
+
 function formatCustomerName(customer) {
   if (!customer) return '';
   const first = customer.firstName || customer.first_name || '';
@@ -506,8 +518,8 @@ export default function CreateProjectModal({
       // findings repopulate but leave the ref empty) — so re-adopt it and keep
       // it in sync on a later customer switch. A hand-entered pre-construction
       // lot address that DIFFERS from the customer's is left tech-owned.
-      const isAutoFilled = (auto.key === addressFieldKey && current === auto.value)
-        || (!!address && current === address);
+      const isAutoFilled = (auto.key === addressFieldKey && addressesMatch(current, auto.value))
+        || addressesMatch(current, address);
       if (hasMeaningfulValue(current) && !isAutoFilled) return prev;
       if (!address) {
         // Customer un-picked: drop only what we auto-filled.
@@ -516,9 +528,11 @@ export default function CreateProjectModal({
         return { ...prev, [addressFieldKey]: '' };
       }
       // Re-establish the marker whenever the field matches the customer (covers
-      // the restored-draft case) so a subsequent switch re-syncs or clears it.
+      // the restored-draft case, where the saved value may be punctuated
+      // differently) so a subsequent switch re-syncs or clears it. Leave a
+      // loosely-matching value in place — no need to rewrite just punctuation.
       projectAddressAutoFillRef.current = { key: addressFieldKey, value: address };
-      if (current === address) return prev;
+      if (addressesMatch(current, address)) return prev;
       return { ...prev, [addressFieldKey]: address };
     });
   }, [projectType, selectedCustomer, addressFieldKey]);
