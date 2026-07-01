@@ -93,9 +93,12 @@ export default function PaymentPreferenceButtons({
 }) {
   const isOneTime = serviceMode === 'one_time';
   // A narrow low-confidence commercial estimate is approved online but its exact
-  // price is confirmed on site before any invoice — so the invoice-mode CTA must
-  // NOT promise an immediate invoice for these.
-  const heldForSiteConfirmation = invoiceMode && siteConfirmationHold && !isOneTime;
+  // price is confirmed on site before any invoice — so the recurring flow must
+  // NOT promise (or preview) an invoice, whatever the billing mode: the server
+  // skips the first-invoice mint / first-application invoice / auto-send for
+  // these accepts.
+  const heldRecurring = siteConfirmationHold && !isOneTime;
+  const heldForSiteConfirmation = invoiceMode && heldRecurring;
   const waivableSetupFee = setupFee && setupFee.waivedWithPrepay ? setupFee : null;
   // A ranged (site-confirmation) price must never be prepaid — the annual prepay
   // invoice is an exact 12-month amount, minted before the on-site confirmation.
@@ -122,7 +125,10 @@ export default function PaymentPreferenceButtons({
     textAlign: 'center',
   };
   const optionWrap = { textAlign: 'center' };
-  const invoiceRows = [
+  // Held estimates preview NO exact invoice rows — a "First service visit $X"
+  // figure would contradict the "$X–$Y, confirmed on site" range, and the
+  // accept intentionally creates no invoice to open.
+  const invoiceRows = heldRecurring ? [] : [
     ...(hasSetupInvoice ? [{ label: 'WaveGuard Membership Setup', amount: setupAmount }] : []),
     ...(firstVisit ? [{ label: 'First service visit', amount: firstVisit }] : []),
   ];
@@ -143,12 +149,16 @@ export default function PaymentPreferenceButtons({
       ? 'No card setup here. Once you accept, we send an invoice pay link due immediately.'
       : isOneTime
         ? 'This books a single visit. We do not charge you now.'
-        : invoiceRows.length > 0
-          ? `Choose pay per application and we will send the ${payPerApplicationInvoiceLabel} after confirmation.`
-          : 'Choose pay per application. Your first service visit will be billed after completion.';
-  const payPerApplicationOptionNote = invoiceRows.length > 0
-    ? 'Approve now; after confirmation we send the invoice and open secure payment.'
-    : 'Approve now; your first service visit will be billed after completion.';
+        : heldRecurring
+          ? 'No payment now — we confirm your exact price on a quick site visit, then bill each application after service.'
+          : invoiceRows.length > 0
+            ? `Choose pay per application and we will send the ${payPerApplicationInvoiceLabel} after confirmation.`
+            : 'Choose pay per application. Your first service visit will be billed after completion.';
+  const payPerApplicationOptionNote = heldRecurring
+    ? 'Approve now — no payment today. We confirm your exact price on site before your first invoice.'
+    : invoiceRows.length > 0
+      ? 'Approve now; after confirmation we send the invoice and open secure payment.'
+      : 'Approve now; your first service visit will be billed after completion.';
 
   if (invoiceMode) {
     return (

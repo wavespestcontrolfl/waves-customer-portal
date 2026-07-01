@@ -140,6 +140,26 @@ describe('PaymentPreferenceButtons', () => {
     expect(onSelect).toHaveBeenCalledWith('pay_at_visit');
   });
 
+  it('non-invoice site-confirmation hold suppresses the exact invoice preview + promises only the site confirmation', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={{ amount: 99, waivedWithPrepay: true }}
+        siteConfirmationHold
+        selectedFrequency={{ key: 'monthly', monthly: 400 }}
+      />,
+    );
+
+    // No exact "First service visit $X" / invoice rows — they'd contradict the
+    // "$X–$Y, confirmed on site" range, and the accept creates no invoice.
+    expect(screen.queryByText('First service visit')).not.toBeInTheDocument();
+    expect(screen.queryByText('Invoice total')).not.toBeInTheDocument();
+    expect(screen.queryByText(/after confirmation, we open the invoice/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/confirm your exact price on/i).length).toBeGreaterThan(0);
+  });
+
   it('invoice-mode WITHOUT the hold keeps the standard "Accept + send invoice" CTA', () => {
     render(
       <PaymentPreferenceButtons
