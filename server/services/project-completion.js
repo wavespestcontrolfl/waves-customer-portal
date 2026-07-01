@@ -179,16 +179,31 @@ async function resolveProjectCompletionBilling({
   if (!(invoiceAmount > 0)) {
     return { required: false, resolved: true, amount: 0, reason: 'not_billable' };
   }
+  // Payer-billed (third-party Bill-To) visits are owed by the payer's AP inbox —
+  // the homeowner's prepay/annual prepay must never suppress the payer invoice
+  // (mirror the admin completion guard). resolveForInvoice fails soft to self-pay
+  // and never throws, so a lookup problem leaves the existing self-pay coverage.
+  let visitIsPayerBilled = false;
+  try {
+    const PayerService = require('./payer');
+    const resolvedPayer = await PayerService.resolveForInvoice({
+      customerId: scheduledService.customer_id,
+      scheduledServiceId: scheduledService.id,
+    });
+    visitIsPayerBilled = !!resolvedPayer?.payerId;
+  } catch (err) {
+    logger.warn(`[project-completion] payer resolve failed for scheduled service ${scheduledService.id}: ${err.message}`);
+  }
   // Annual-prepay coverage is a term-link fact, not an amount comparison: a
   // discounted plan stamps each visit below its undiscounted estimated_price, so
   // the numeric prepaidCoversAmount check below would wrongly re-bill an already-
   // prepaid visit. annualPrepayCoversVisit is fail-closed (explicit stamp + live
   // term). Lazy-require to avoid a load-time cycle with annual-prepay-renewals.
   const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
-  if (await annualPrepayCoversVisit(scheduledService, knex)) {
+  if (!visitIsPayerBilled && await annualPrepayCoversVisit(scheduledService, knex)) {
     return { required: true, resolved: true, amount: invoiceAmount, reason: 'prepaid_covered' };
   }
-  if (prepaidCoversAmount(scheduledService, invoiceAmount)) {
+  if (!visitIsPayerBilled && prepaidCoversAmount(scheduledService, invoiceAmount)) {
     return { required: true, resolved: true, amount: invoiceAmount, reason: 'prepaid_covered' };
   }
   const invoice = await findExistingCompletionInvoice({

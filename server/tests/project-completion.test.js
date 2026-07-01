@@ -4,6 +4,9 @@
 // annual-prepay-coverage-gate.test.js). Default (unset) return is falsy, so every
 // other test in this file falls through to the legacy numeric/invoice path.
 jest.mock('../services/annual-prepay-renewals', () => ({ annualPrepayCoversVisit: jest.fn() }));
+// Payer lookup is mocked so the resolver's third-party Bill-To guard is driven
+// directly (default: no payer → self-pay). Keeps these tests off the real DB.
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn() }));
 
 const {
   buildProjectCloseoutPreview,
@@ -549,9 +552,11 @@ describe('resolveProjectCompletionBilling — annual-prepay term-link coverage',
   // require('./annual-prepay-renewals') is the same mocked fn we drive here.
   let resolveBilling;
   let coversVisit;
+  let payerResolve;
   beforeEach(() => {
     jest.resetModules();
     coversVisit = require('../services/annual-prepay-renewals').annualPrepayCoversVisit;
+    payerResolve = require('../services/payer').resolveForInvoice;
     resolveBilling = require('../services/project-completion').resolveProjectCompletionBilling;
   });
 
@@ -600,6 +605,26 @@ describe('resolveProjectCompletionBilling — annual-prepay term-link coverage',
       knex: knexNoExistingInvoice(),
     });
     expect(result).toMatchObject({ required: true, resolved: true, reason: 'prepaid_covered', amount: 55 });
+  });
+
+  test('payer-billed (third-party Bill-To) visit: annual-prepay coverage must NOT suppress the payer invoice', async () => {
+    // Even with a LIVE annual-prepay stamp, a payer-billed visit is owed by the
+    // payer — the homeowner's prepay can't cover it, so it must still require the invoice.
+    coversVisit.mockResolvedValue(true);
+    payerResolve.mockResolvedValue({ payerId: 'payer-1' });
+    const scheduledService = {
+      id: 'ss-5',
+      estimated_price: '55.00',
+      prepaid_method: 'annual_prepay_invoice',
+      prepaid_amount: '55.00',
+      annual_prepay_term_id: 'term-1',
+    };
+    const result = await resolveBilling({
+      scheduledService,
+      customer: {},
+      knex: knexNoExistingInvoice(),
+    });
+    expect(result).toMatchObject({ required: true, resolved: false, reason: 'invoice_required', amount: 55 });
   });
 
   test('stale annual-prepay stamp on a dead (refunded/voided) term: bills — the numeric fallback must NOT suppress it', async () => {

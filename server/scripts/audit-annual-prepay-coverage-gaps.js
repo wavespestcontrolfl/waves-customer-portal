@@ -92,9 +92,16 @@ async function exposedVisitsForTerm(term) {
     .filter((v) => v.billAmount > 0 && !visitIsStamped(v, term));
 }
 
+// refreshTermSnapshot only (re)stamps terms in an ACTIVE status — a configured
+// term in any other covered status (renewed / switch_plan / payment_pending /
+// lapsed-cancelled, all of which coveredTermsAsOf includes) would no-op under
+// --restamp-configured, so it must NOT be reported RESTAMPABLE (that would claim a
+// fix that never happens). Those need manual handling (activate/sync first).
+const RESTAMP_STATUSES = ['active', 'renewal_pending'];
+
 function classify(term, exposed) {
   const hasConfig = term.coverage_service_type != null && Number(term.coverage_visit_count) > 0;
-  if (hasConfig) return 'RESTAMPABLE';
+  if (hasConfig && RESTAMP_STATUSES.includes(term.status)) return 'RESTAMPABLE';
   const distinctServices = new Set(exposed.map((v) => String(v.service_type || '').trim().toLowerCase()).filter(Boolean));
   return distinctServices.size > 1 ? 'MANUAL_MULTI' : 'MANUAL_SINGLE';
 }
@@ -161,9 +168,9 @@ async function main() {
 
   const counts = report.reduce((acc, r) => { acc[r.category] = (acc[r.category] || 0) + 1; return acc; }, {});
   console.log(`\nAnnual-prepay coverage-gap audit — ${terms.length} covered term(s) scanned, ${report.length} exposed.`);
-  console.log(`  RESTAMPABLE:   ${counts.RESTAMPABLE || 0}  (has config → refreshTermSnapshot re-stamps)`);
-  console.log(`  MANUAL_SINGLE: ${counts.MANUAL_SINGLE || 0}  (no config, one service — safe for a human to fix)`);
-  console.log(`  MANUAL_MULTI:  ${counts.MANUAL_MULTI || 0}  (no config, multi-service — MUST bill manually)`);
+  console.log(`  RESTAMPABLE:   ${counts.RESTAMPABLE || 0}  (has config + active status → refreshTermSnapshot re-stamps)`);
+  console.log(`  MANUAL_SINGLE: ${counts.MANUAL_SINGLE || 0}  (no config or non-active status, one service — human fix)`);
+  console.log(`  MANUAL_MULTI:  ${counts.MANUAL_MULTI || 0}  (no config or non-active status, multi-service — MUST bill manually)`);
   for (const r of report) {
     console.log(`\n• term ${r.termId}  [${r.category}]  status=${r.status}`);
     console.log(`    customer=${r.customerId}  estimate=${r.sourceEstimateId || '—'}  prepayInvoice=${r.prepayInvoiceId || '—'}`);
