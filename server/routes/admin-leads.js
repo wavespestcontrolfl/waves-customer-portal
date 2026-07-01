@@ -42,7 +42,13 @@ const SPEED_TO_LEAD_FRESH_START = (() => {
   const raw = process.env.SPEED_TO_LEAD_FRESH_START ?? '2026-07-01';
   if (!raw) return null;
   const d = parseInclusiveStart(raw);
-  return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return null;
+  // parseETDateTime builds the cutoff with Date.UTC(), which silently rolls a
+  // non-existent calendar date over (2026-02-30 -> Mar 2) instead of failing.
+  // Round-trip a date-only value through ET and reject any mismatch, so a
+  // typoed reset env falls open to "no floor" rather than a wrong cutoff.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw) && etDateString(d) !== raw) return null;
+  return d;
 })();
 const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');
 const { applyContactNormalization } = require('../utils/intake-normalize');
