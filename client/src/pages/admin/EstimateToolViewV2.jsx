@@ -2128,12 +2128,7 @@ export default function EstimateToolViewV2({
           next[key] = value;
         }
       }
-      if (prefillIdentityChanged) {
-        next.measuredTurfSf = "";
-        // A different customer/address means last property's guarantee
-        // confirmations no longer apply — force a fresh re-confirmation.
-        for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
-      }
+      if (prefillIdentityChanged) next.measuredTurfSf = "";
       return next;
     });
   }, [
@@ -2145,6 +2140,26 @@ export default function EstimateToolViewV2({
     initialLeadId,
     initialServiceInterest,
   ]);
+
+  // Rodent-guarantee eligibility confirmations are per-job. A rep can change the
+  // property/customer identity through many paths (prefill props, address
+  // autocomplete, property lookup, customer search, manual edits) that each call
+  // setForm directly, so enforce the reset centrally: whenever the address or
+  // customer identity changes, drop the four rg* flags so the guarantee can't be
+  // re-priced for a new property without fresh confirmation. (toggle() still
+  // clears them when the guarantee is switched off; nextEstimate resets too.)
+  const rgIdentityKey = `${form.address || ""}|${form.customerId || ""}|${form.customerName || ""}|${form.customerEmail || ""}`;
+  const rgIdentityRef = useRef(rgIdentityKey);
+  useEffect(() => {
+    if (rgIdentityRef.current === rgIdentityKey) return;
+    rgIdentityRef.current = rgIdentityKey;
+    setForm((f) => {
+      if (!RODENT_GUARANTEE_ELIGIBILITY_KEYS.some((k) => f[k])) return f;
+      const next = { ...f };
+      for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
+      return next;
+    });
+  }, [rgIdentityKey]);
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
