@@ -211,6 +211,37 @@ async function resolveEstimateEventLeads(database, estimateId, { originatingNotA
       estimateId,
       leadIds: matches.map((lead) => lead.id),
     });
+    return { leads: [], rescued: false };
+  }
+
+  // 3. Customer-linked contact fallback — an OPEN lead that matches the estimate's
+  //    contact but already carries a `customer_id` (so tier 2's `customer_id IS
+  //    NULL` guard skips it). This is the common shape when the originating
+  //    inquiry's estimate was built standalone AFTER a customer record was created
+  //    for the lead (e.g. Convert-to-Customer, or an estimate flow that mints a
+  //    customer) — the lead never got FK-linked and stayed open. Rescue it ONLY
+  //    when it is unambiguously that customer's ORIGINATING deal, reusing the
+  //    acceptance path's exact guards so we never advance an established customer's
+  //    unrelated add-on inquiry: a single such lead, the customer has no prior WON
+  //    lead, and the lead was first contacted on/before they became a customer.
+  const linkedMatches = (await findCustomerLinkedLeadsByContact(database, estimate.customer_phone, estimate.customer_email))
+    .filter((lead) => !lead.estimate_id && !CLOSED_LEAD_STATUSES.has(lead.status))
+    .filter((lead) => leadOriginatedOnOrBefore(lead, originatingNotAfter));
+  if (linkedMatches.length === 1) {
+    const lead = linkedMatches[0];
+    const established = await customerHasWonLead(database, lead.customer_id);
+    const originating = await isOriginatingLead(database, lead.customer_id, lead);
+    if (!established && originating) return { leads: [lead], rescued: true, estimate };
+    logger.warn(`[lead-estimate-link] estimate ${estimateId} send/view: customer-linked contact match ${lead.id} is not the originating deal (established=${established}, originating=${originating}) — not advancing`, {
+      estimateId,
+      leadId: lead.id,
+      customerId: lead.customer_id,
+    });
+  } else if (linkedMatches.length > 1) {
+    logger.warn(`[lead-estimate-link] estimate ${estimateId} send/view: ambiguous customer-linked contact match (${linkedMatches.length} open leads) — not advancing`, {
+      estimateId,
+      leadIds: linkedMatches.map((lead) => lead.id),
+    });
   }
   return { leads: [], rescued: false };
 }
@@ -421,6 +452,25 @@ async function findUnconvertedLeadsByContact(database, phone, email) {
   return database('leads')
     .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
     .whereNull('customer_id')
+    .andWhere((builder) => {
+      if (np) builder.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?", [np]);
+      if (ne) builder.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [ne]);
+    });
+}
+
+// Counterpart to findUnconvertedLeadsByContact for the customer-linked rescue
+// tier: OPEN leads matching the contact that ALREADY carry a `customer_id` (the
+// exact rows the `customer_id IS NULL` version excludes). Same last-10-digit /
+// case-insensitive-email match. Callers must still enforce the originating guards
+// (single match + no prior won lead + isOriginatingLead) before advancing — this
+// only widens the candidate set.
+async function findCustomerLinkedLeadsByContact(database, phone, email) {
+  const np = normalizePhone(phone);
+  const ne = normalizeEmail(email);
+  if (!np && !ne) return [];
+  return database('leads')
+    .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
+    .whereNotNull('customer_id')
     .andWhere((builder) => {
       if (np) builder.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?", [np]);
       if (ne) builder.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [ne]);

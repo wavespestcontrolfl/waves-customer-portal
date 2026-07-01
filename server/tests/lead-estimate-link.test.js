@@ -975,6 +975,11 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
           return Promise.resolve(opts.linked || []);
         }
         if (table === 'estimates') return { first: async () => opts.estimate || null };
+        if (table === 'customers') return { first: async () => opts.customer || null };
+        // customerHasWonLead: .where({ customer_id, status: 'won' }).first('id')
+        if (table === 'leads' && clause && 'customer_id' in clause && 'status' in clause) {
+          return { first: async () => opts.customerWonLead || null };
+        }
         if (table === 'leads' && clause && 'id' in clause) {
           return {
             first: async () => leadsById[clause.id] || null,
@@ -1001,7 +1006,10 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
         return Promise.resolve([]);
       },
       whereNotIn() {
-        return { whereNull: () => ({ andWhere: () => Promise.resolve(opts.contactLeads || []) }) };
+        return {
+          whereNull: () => ({ andWhere: () => Promise.resolve(opts.contactLeads || []) }),
+          whereNotNull: () => ({ andWhere: () => Promise.resolve(opts.customerLinkedLeads || []) }),
+        };
       },
       insert: async (row) => {
         activities.push({ table, row });
@@ -1250,5 +1258,75 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     const responseUpdate = database._updates.find((u) => u.patch && 'response_time_minutes' in u.patch);
     expect(responseUpdate.patch.response_time_minutes).toBe(30);
     expect(types(database)).toEqual(['estimate_created', 'first_response', 'estimate_sent']);
+  });
+
+  // Tier 3 — customer-linked contact rescue: an open lead that matches the
+  // estimate's contact but already carries a customer_id (excluded from tier 2).
+  test('customer-linked lead: rescues the customer’s ORIGINATING open lead (Lawrence case)', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-16', estimate_data: null, customer_phone: '+19415550142' },
+      contactLeads: [], // tier 2 (customer_id IS NULL) finds nothing
+      customerLinkedLeads: [{ id: 'L-cust', status: 'new', customer_id: 'cust-1', first_contact_at: '2026-06-30T16:49:49Z', response_time_minutes: 5 }],
+      customerWonLead: null, // customer has no prior won lead → not established
+      customer: { id: 'cust-1', member_since: '2026-06-30', created_at: '2026-06-30T16:49:48Z' }, // lead first-contacted same ET day → originating
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-16', sendMethod: 'sms', database });
+
+    expect(database._updates).toEqual([
+      { id: 'L-cust', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-16' }) },
+      { id: 'L-cust', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+    ]);
+    expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
+  });
+
+  test('customer-linked lead: does NOT advance an ESTABLISHED customer’s add-on (customer has a won lead)', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-17', estimate_data: null, customer_phone: '+19415550142' },
+      contactLeads: [],
+      customerLinkedLeads: [{ id: 'L-addon', status: 'new', customer_id: 'cust-2', first_contact_at: '2026-06-30T16:49:49Z' }],
+      customerWonLead: { id: 'won-1' }, // established → skip
+      customer: { id: 'cust-2', member_since: '2026-06-30' },
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-17', sendMethod: 'sms', database });
+
+    expect(database._updates).toEqual([]);
+    expect(database._activities).toEqual([]);
+  });
+
+  test('customer-linked lead: does NOT advance a lead first contacted AFTER they became a customer (not originating)', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-18', estimate_data: null, customer_phone: '+19415550142' },
+      contactLeads: [],
+      customerLinkedLeads: [{ id: 'L-late', status: 'new', customer_id: 'cust-3', first_contact_at: '2026-05-01T10:00:00Z' }],
+      customerWonLead: null,
+      customer: { id: 'cust-3', member_since: '2026-01-01' }, // lead (May) post-dates member_since (Jan) → not originating
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-18', sendMethod: 'sms', database });
+
+    expect(database._updates).toEqual([]);
+    expect(database._activities).toEqual([]);
+  });
+
+  test('customer-linked lead: AMBIGUOUS (2+ open customer-linked matches) advances nothing', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-19', estimate_data: null, customer_phone: '+19415550142' },
+      contactLeads: [],
+      customerLinkedLeads: [
+        { id: 'L-a', status: 'new', customer_id: 'cust-4' },
+        { id: 'L-b', status: 'contacted', customer_id: 'cust-4' },
+      ],
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-19', sendMethod: 'sms', database });
+
+    expect(database._updates).toEqual([]);
+    expect(database._activities).toEqual([]);
   });
 });
