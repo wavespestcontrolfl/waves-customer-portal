@@ -945,16 +945,43 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
+// Deadline for every outbound provider call on the processRecording critical
+// path (Twilio download, OpenAI transcribe/label, Gemini transcribe/extract).
+// Bare fetch has no overall response timeout, so a stalled provider connection
+// hangs processRecording *after* it has claimed the row (processing_status=
+// 'processing') but *before* any terminal status write. A hang never throws, so
+// the outer catch that releases the lock never runs and the row stays wedged at
+// 'processing' until the 10-min stale reclaim — which then re-hangs on the next
+// cron pass (the "Skipped — already_processing" loop). An AbortController
+// deadline converts a stall into a thrown error so the lock releases and the
+// existing retry paths (manual reprocess / 5-min cron) can recover the row.
+const PROVIDER_FETCH_TIMEOUT_MS = Number(process.env.CALL_PROC_FETCH_TIMEOUT_MS) || 180000;
+
+async function fetchWithTimeout(url, options = {}, { timeoutMs = PROVIDER_FETCH_TIMEOUT_MS, label = 'provider' } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`${label} request timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── Download Twilio recording (authenticated) ──
 async function downloadRecording(mp3Url) {
   const twilioAuth = Buffer.from(
     `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
   ).toString('base64');
 
-  const res = await fetch(mp3Url, {
+  const res = await fetchWithTimeout(mp3Url, {
     headers: { Authorization: `Basic ${twilioAuth}` },
     redirect: 'follow',
-  });
+  }, { label: 'twilio recording download' });
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
 }
@@ -1048,7 +1075,7 @@ async function labelTranscriptWithOpenAI(transcript, opts = {}) {
   const contactPhone = resolveCallContactPhone(opts.call || {}, opts.contactPhone);
 
   try {
-    const res = await fetch(OPENAI_RESPONSES_API, {
+    const res = await fetchWithTimeout(OPENAI_RESPONSES_API, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1071,7 +1098,7 @@ Rules:
 Transcript:
 ${text}`,
       }),
-    });
+    }, { label: 'openai transcript labeling' });
 
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
@@ -1111,11 +1138,11 @@ async function transcribeWithOpenAI(audioBuffer) {
     }
     form.append('temperature', '0');
 
-    const res = await fetch(OPENAI_TRANSCRIPTIONS_API, {
+    const res = await fetchWithTimeout(OPENAI_TRANSCRIPTIONS_API, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
-    });
+    }, { label: 'openai transcription' });
 
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
@@ -1149,7 +1176,7 @@ async function transcribeWithGemini(audioBuffer, opts = {}) {
     const audioBase64 = audioBuffer.toString('base64');
     const direction = isOutboundCall(opts.call) ? 'outbound' : 'inbound';
     const contactPhone = resolveCallContactPhone(opts.call || {}, opts.contactPhone);
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TRANSCRIPTION_MODEL}:generateContent?key=${apiKey}`,
       {
         method: 'POST',
@@ -1172,7 +1199,8 @@ Rules:
           }],
           generationConfig: { temperature: 0 },
         }),
-      }
+      },
+      { label: 'gemini fallback transcription' }
     );
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
@@ -1397,7 +1425,7 @@ IMPORTANT — customer contact rules:
 
 Return ONLY valid JSON.`;
 
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
     {
       method: 'POST',
@@ -1409,7 +1437,8 @@ Return ONLY valid JSON.`;
           temperature: 0.2, // keep extraction deterministic
         },
       }),
-    }
+    },
+    { label: 'gemini extraction' }
   );
 
   if (!res.ok) {
@@ -1510,7 +1539,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
 
   let rawText;
   try {
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: 'POST',
@@ -1522,7 +1551,8 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
             temperature: 0.2,
           },
         }),
-      }
+      },
+      { label: 'gemini v2 extraction' }
     );
 
     if (!res.ok) {
