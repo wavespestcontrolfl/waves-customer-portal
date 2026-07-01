@@ -11,7 +11,7 @@ const {
   commercialLowConfidenceRange,
   commercialLowConfidenceRequiresSiteQuote,
 } = require('../services/estimate-delivery-options');
-const { resolveEstimateQuoteRequirement, renderPage, attachPublicPricingContract } = require('../routes/estimate-public');
+const { resolveEstimateQuoteRequirement, renderPage, attachPublicPricingContract, buildAcceptSuccessPayload } = require('../routes/estimate-public');
 const { generateEstimate } = require('../services/pricing-engine');
 
 const recurring = (services) => ({ result: { recurring: { services } } });
@@ -161,6 +161,26 @@ describe('attachPublicPricingContract — narrow low-confidence range marker (Re
     const section = contract.services.find((s) => s.isRecurring);
     expect(section.frequencies[0].lowConfidenceRangePct).toBeUndefined();
     expect(contract.combinedRecurring.lowConfidenceRangePct).toBeUndefined();
+  });
+});
+
+describe('buildAcceptSuccessPayload — low-confidence site-confirmation hold', () => {
+  test('siteConfirmationHold → site_confirmation outcome, no invoice/pay step', () => {
+    const out = buildAcceptSuccessPayload({ siteConfirmationHold: true });
+    expect(out.nextStep).toBe('site_confirmation');
+    expect(out.invoiceMode).toBe(false);
+    expect(out.invoiceId).toBeNull();
+  });
+
+  test('site-confirmation hold wins even if an invoice somehow leaks through', () => {
+    // Defense-in-depth: the hold suppresses the mint, but the outcome must never
+    // fall back to a pay step for a held estimate.
+    const out = buildAcceptSuccessPayload({ siteConfirmationHold: true, invoiceMode: true, invoiceId: 'inv_1', invoicePayUrl: '/pay/x' });
+    expect(out.nextStep).toBe('site_confirmation');
+  });
+
+  test('without the hold, a normal invoice-mode accept still routes to pay_invoice', () => {
+    expect(buildAcceptSuccessPayload({ invoiceMode: true, invoiceId: 'inv_1', invoicePayUrl: '/pay/x' }).nextStep).toBe('pay_invoice');
   });
 });
 

@@ -6565,6 +6565,18 @@ router.put('/:token/accept', async (req, res, next) => {
       });
     }
 
+    // A NARROW low-confidence commercial estimate accepts online (self-serve),
+    // but its exact price is confirmed on site — so DON'T mint the first invoice
+    // at accept. The account manager issues it after the on-site confirmation,
+    // matching the "$X–$Y/mo, confirmed on site" range the customer approved. The
+    // WIDE case never reaches here (the quote gate above rejects it 409). Commercial
+    // already bills manually via the converter (skipSetupInvoice/autoSendInvoice:
+    // false); this additionally suppresses the bill_by_invoice first-invoice mint.
+    const lowConfidenceAccept = commercialLowConfidenceRange(estData);
+    const holdFirstInvoiceForSiteConfirmation = billByInvoice
+      && lowConfidenceAccept.hasLowConfidence
+      && !lowConfidenceAccept.forceSiteQuote;
+
     let { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
     if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
       recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
@@ -7242,7 +7254,10 @@ router.put('/:token/accept', async (req, res, next) => {
       let invoiceServiceLabelResult = acceptedOneTimeServiceLabel || null;
       let invoiceKindResult = null;
       let annualPrepayConversionResult = null;
-      if (billByInvoice) {
+      // Narrow low-confidence commercial: skip the exact first-invoice mint so the
+      // team invoices after on-site price confirmation (see holdFirstInvoiceFor
+      // SiteConfirmation above). Acceptance still commits + books the program.
+      if (billByInvoice && !holdFirstInvoiceForSiteConfirmation) {
         if (!customerId) {
           throw estimateAcceptError('invoice-mode acceptance requires a customer record before creating the invoice');
         }
@@ -7624,16 +7639,21 @@ router.put('/:token/accept', async (req, res, next) => {
           // auto-schedule a wrong-length visit and never auto-create/send an
           // invoice before the on-site scope confirmation.
           skipSetupInvoice: billByInvoice || isCommercialAccept,
-          skipAutoSchedule: isCommercialAccept,
+          // A narrow low-confidence commercial estimate is held for on-site price
+          // confirmation, so it bills manually just like any commercial accept —
+          // never auto-schedule or auto-create/send an invoice here either. (Hold
+          // implies commercial, but fold it in explicitly so the no-invoice
+          // invariant can't depend on the isCommercialAccept detector shape.)
+          skipAutoSchedule: isCommercialAccept || holdFirstInvoiceForSiteConfirmation,
           prepayInvoiceAmount: annualPrepayInvoiceAmount,
           // Commercial (standard) bills manually — create NO auto first-
           // application invoice (which would also mis-tax a mixed plan); the team
           // invoices after on-site confirmation. The commercial customer is
           // marked property_type='commercial' by the converter so that manual
           // invoice taxes the taxable services (pest) correctly.
-          firstApplicationAmount: isCommercialAccept ? null : firstApplicationInvoiceAmount,
+          firstApplicationAmount: (isCommercialAccept || holdFirstInvoiceForSiteConfirmation) ? null : firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
-          autoSendInvoice: !isCommercialAccept,
+          autoSendInvoice: !(isCommercialAccept || holdFirstInvoiceForSiteConfirmation),
         });
         if (conversion?.draftInvoiceId) {
           invoiceMode = true;
@@ -7826,6 +7846,7 @@ router.put('/:token/accept', async (req, res, next) => {
       bookingUrl,
       treatAsOneTime,
       reservationCommitted,
+      siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
     }));
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
@@ -9314,11 +9335,17 @@ function buildAcceptSuccessPayload({
   bookingUrl = null,
   treatAsOneTime = false,
   reservationCommitted = false,
+  siteConfirmationHold = false,
 } = {}) {
   let nextStep = 'confirmed';
+  // A narrow low-confidence commercial estimate is approved online but its first
+  // invoice is intentionally held for on-site price confirmation (no invoice was
+  // minted) — so it gets its own "we'll confirm on site, then invoice" outcome
+  // rather than the generic "you're booked" confirmed copy.
+  if (siteConfirmationHold) nextStep = 'site_confirmation';
   // Third-party Bill-To: a payer-billed invoice is the payer's to pay — the
   // homeowner has no pay-invoice step (the invoice went to the payer AP inbox).
-  if (!payerBilled && (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl))) nextStep = 'pay_invoice';
+  else if (!payerBilled && (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl))) nextStep = 'pay_invoice';
   else if (treatAsOneTime && !reservationCommitted) nextStep = 'book_one_time';
   // A payer-billed annual-prepay accept also has no homeowner step — the prepay
   // invoice went to the payer AP inbox, so don't surface prepay follow-up copy.

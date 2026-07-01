@@ -1944,6 +1944,26 @@ function SuccessCard({ acceptResult }) {
     );
   }
 
+  if (nextStep === 'site_confirmation') {
+    // Narrow low-confidence commercial: approved online, but the exact price is
+    // confirmed on site before the first invoice — so no payment step here.
+    return (
+      <div style={{
+        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
+        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+        marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          You're approved — no payment needed yet.
+        </div>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
+          Your Waves account manager will confirm the exact price on a quick site visit, then send your first
+          invoice. Nothing is charged until that's done.
+        </div>
+      </div>
+    );
+  }
+
   if (nextStep === 'book_one_time') {
     return (
       <div style={{
