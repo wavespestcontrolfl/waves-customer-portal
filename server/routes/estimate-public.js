@@ -56,6 +56,7 @@ const {
 } = require('../services/estimate-pricing-bundle-utils');
 const {
   estimateDataHasUnresolvedManagerApproval,
+  commercialRiskTypeReviewNeeded,
 } = require('../services/estimate-delivery-options');
 const {
   createEstimateAddServiceRequest,
@@ -6508,11 +6509,14 @@ router.put('/:token/accept', async (req, res, next) => {
     if (quoteRequirement.quoteRequired) {
       const needsManagerApproval = quoteRequirement.reason === 'st_augustine_dethatching';
       const commercialProposal = quoteRequirement.reason === 'commercial_proposal';
+      const commercialRiskType = quoteRequirement.reason === 'commercial_risk_type_review';
       return res.status(409).json({
         error: needsManagerApproval
           ? 'Manager approval is required before this estimate can be accepted online'
           : commercialProposal
           ? 'This is a custom commercial proposal — your Waves account manager will finalize acceptance with you directly.'
+          : commercialRiskType
+          ? 'Your Waves account manager will confirm this commercial service plan with you before it’s finalized.'
           : 'This estimate requires an inspection before it can be accepted online',
         quoteRequired: true,
         managerApprovalRequired: needsManagerApproval,
@@ -8886,18 +8890,29 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   // the public view shows the formal-proposal state and the accept endpoint
   // refuses online acceptance.
   const commercialProposal = estData?.proposal?.enabled === true;
+  // A commercial pest/rodent estimate with no classified business type can't be
+  // self-serve accepted — the risk type drives the service cadence and the
+  // customer can't set it. Surface it as quote-required so the public view shows
+  // the "account manager will finalize" state and the accept endpoint refuses
+  // online acceptance (the admin classifies + accepts manually). See
+  // commercialRiskTypeReviewNeeded.
+  const commercialRiskTypeReview = commercialRiskTypeReviewNeeded(
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  );
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
     || managerApprovalRequired
-    || commercialProposal;
+    || commercialProposal
+    || commercialRiskTypeReview;
 
   return {
     quoteRequired,
     reason: managerApprovalRequired
       ? 'st_augustine_dethatching'
       : (quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason
-        || (commercialProposal ? 'commercial_proposal' : null)),
+        || (commercialProposal ? 'commercial_proposal' : null)
+        || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)),
     items: quoteRequiredItems,
   };
 }

@@ -6684,3 +6684,31 @@ describe('public estimate one-time breakdown', () => {
     expect(shouldApplyFirstViewSideEffects(req, '203.0.113.10', { sent_at: '2026-05-20T12:00:00.000Z' })).toBe(true);
   });
 });
+
+describe('resolveEstimateQuoteRequirement — commercial risk-type gate (public accept)', () => {
+  // An already-sent commercial pest/rodent estimate with no classified business
+  // type must not self-serve accept and convert at the default cadence — the
+  // customer can't set the type, so it surfaces as quote-required and the accept
+  // endpoint refuses (routing back to the account manager).
+  const commercialPestEstData = (riskType) => ({
+    result: { lineItems: [{ service: 'commercial_pest', annual: 2400 }] },
+    ...(riskType ? { engineRequest: { options: { commercialRiskType: riskType } } } : {}),
+  });
+
+  test('commercial pest with no business type → quoteRequired: commercial_risk_type_review', () => {
+    expect(resolveEstimateQuoteRequirement(null, commercialPestEstData())).toEqual(
+      expect.objectContaining({ quoteRequired: true, reason: 'commercial_risk_type_review' }),
+    );
+  });
+
+  test('a valid business type clears the public accept gate', () => {
+    expect(resolveEstimateQuoteRequirement(null, commercialPestEstData('restaurant_food')))
+      .toEqual(expect.objectContaining({ quoteRequired: false }));
+  });
+
+  test('a commercial lawn-only estimate is not risk-type gated', () => {
+    expect(resolveEstimateQuoteRequirement(null, {
+      result: { lineItems: [{ service: 'commercial_lawn', annual: 1200 }] },
+    })).toEqual(expect.objectContaining({ quoteRequired: false }));
+  });
+});
