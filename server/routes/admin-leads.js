@@ -34,6 +34,17 @@ function parseInclusiveStart(startDate) {
 const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 
+// Median of an array of numbers (minutes), or null when empty. Robust to the
+// multi-day response-time outliers that skew a mean.
+function medianMinutes(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[mid]
+    : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const LEAD_STATUSES = [
@@ -153,10 +164,17 @@ router.get('/analytics/overview', async (req, res, next) => {
     const active = leads.filter(l => !['won', 'lost', 'disqualified', 'duplicate'].includes(l.status)).length;
     const conversionRate = total > 0 ? Math.round(won / total * 1000) / 10 : 0;
 
-    const responded = leads.filter(l => l.response_time_minutes != null);
-    const avgResponseTime = responded.length > 0
-      ? Math.round(responded.reduce((s, l) => s + l.response_time_minutes, 0) / responded.length)
+    // Response time headline is the MEDIAN, not the mean: a handful of multi-day
+    // responses (a lead answered a week later) drag the average to an unrepresentative
+    // number, so the median reflects the team's TYPICAL first-response speed. The mean
+    // is still returned (avgResponseTime) for back-compat / anyone who wants it.
+    const respondedMinutes = leads
+      .filter((l) => l.response_time_minutes != null)
+      .map((l) => l.response_time_minutes);
+    const avgResponseTime = respondedMinutes.length > 0
+      ? Math.round(respondedMinutes.reduce((s, v) => s + v, 0) / respondedMinutes.length)
       : null;
+    const medianResponseTime = medianMinutes(respondedMinutes);
 
     // Speed to Lead: how long leads still awaiting their first response have
     // been waiting, right now. Distinct from avgResponseTime (the historical
@@ -180,6 +198,16 @@ router.get('/analytics/overview', async (req, res, next) => {
       : null;
     const openUnansweredCount = openLeads.length;
 
+    // Rolling 7-day median so recent responses show up even when the selected
+    // window's median is still weighed down by earlier slow ones. Keyed on
+    // first_contact_at (this week's NEW leads — the speed-to-lead cohort) and
+    // independent of the page's date filter.
+    const recentResponded = await db('leads')
+      .where('first_contact_at', '>=', new Date(nowMs - 7 * 24 * 60 * 60 * 1000))
+      .whereNotNull('response_time_minutes')
+      .pluck('response_time_minutes');
+    const recentMedianResponseTime = medianMinutes(recentResponded);
+
     // Revenue + cost reuse the SAME real-invoice, conversion-bounded, de-duped
     // attribution as the Sources / Channel breakdown (calculateAllSourceROI) so
     // the top-line ROI reconciles with the per-source rows shown on the same tab
@@ -200,7 +228,8 @@ router.get('/analytics/overview', async (req, res, next) => {
 
     res.json({
       total, won, lost, active, conversionRate,
-      avgResponseTime, avgSpeedToLead, openUnansweredCount,
+      avgResponseTime, medianResponseTime, recentMedianResponseTime,
+      avgSpeedToLead, openUnansweredCount,
       costTotal: Math.round(costTotal * 100) / 100,
       revenue: Math.round(revenue * 100) / 100, cpa, roi,
       startDate: start, endDate: end,

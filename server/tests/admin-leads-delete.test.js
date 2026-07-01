@@ -6,6 +6,10 @@ jest.mock('../middleware/admin-auth', () => ({
     next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
+  // admin-leads.js transitively loads admin-customers.js, whose route
+  // registration references requireAdmin at import time — mock it so the suite
+  // can load (otherwise: "Route.post() requires a callback ... got Undefined").
+  requireAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
