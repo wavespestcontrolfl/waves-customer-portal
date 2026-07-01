@@ -7258,6 +7258,9 @@ function priceRodentGuarantee(options = {}) {
   const meshLF = Number(totalLinearMeshLF) || 0;
   const storiesNum = Number(stories) || 1;
   const homeSqFtNum = Number(homeSqFt) || 0;
+  // Roof type arrives from property lookup / verified overrides in mixed case
+  // (e.g. 'TILE'); case-fold so tile roofs reliably promote the tier.
+  const roofTypeNorm = String(roofType || '').trim().toLowerCase();
 
   let tier = 'standard';
   if (homeSqFtNum > 4000 || effectivePoints > 15 || meshLF > 150) {
@@ -7265,7 +7268,7 @@ function priceRodentGuarantee(options = {}) {
   } else if (
     homeSqFtNum > 2500 ||
     storiesNum >= 2 ||
-    roofType === 'tile' ||
+    roofTypeNorm === 'tile' ||
     effectivePoints >= 9 ||
     (meshLF > 75 && meshLF <= 150)
   ) {

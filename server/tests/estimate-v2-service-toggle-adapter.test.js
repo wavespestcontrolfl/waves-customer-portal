@@ -601,6 +601,28 @@ describe('estimate v2 service toggle adapter', () => {
     expect(item.price).toBe(299);
   });
 
+  test('promotes a small tile-roof home to complex even when roof type is uppercase', () => {
+    // Property lookup / verified overrides return roof type as 'TILE'; the tier
+    // rule must still recognize it (small single-story tile home -> complex $249,
+    // not standard $199).
+    const { footprint, ...profileNoFootprint } = baseProfile();
+    const input = translateV2CallToV1Input(
+      { ...profileNoFootprint, homeSqFt: 2000, stories: 1, roofType: 'TILE' },
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: true,
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item.tier).toBe('complex');
+    expect(item.price).toBe(249);
+  });
+
   test('drops the RODENT_GUARANTEE line when any eligibility flag is missing (fail closed)', () => {
     const input = translateV2CallToV1Input(
       baseProfile(),
