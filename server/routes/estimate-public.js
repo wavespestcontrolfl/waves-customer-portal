@@ -57,7 +57,6 @@ const {
 const {
   estimateDataHasUnresolvedManagerApproval,
   commercialRiskTypeReviewNeeded,
-  commercialLowConfidenceRange,
   commercialLowConfidenceRequiresSiteQuote,
 } = require('../services/estimate-delivery-options');
 const {
@@ -3379,9 +3378,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? quoteRequiredReasonText({ reason: est.quoteRequiredReason || quoteRequirementForDisplay.reason })
     : '';
   const locked = est.status === 'accepted' || quoteRequired;
-  // Narrow low-confidence estimate (not forced to a site quote): show the ±20%
-  // price range + a "confirmed on site" note instead of a single figure.
-  const commercialPriceRange = quoteRequired ? { hasLowConfidence: false } : commercialLowConfidenceRange(estData);
 
   // Commercial auto-priced lawn/tree estimates are approval-only: no booking
   // form, no billing/payment-setup card, no slots. The customer approves and a
@@ -3891,9 +3887,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ` : `
       <div class="big-price" data-mode-only="recurring">
         ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
-        <span class="num" id="monthly-display">${commercialPriceRange.hasLowConfidence
-          ? `${fmtMoney(commercialPriceRange.rangeLowMonthly)}&ndash;${fmtMoney(commercialPriceRange.rangeHighMonthly)}`
-          : fmtMoney(recurringDisplayTotal)}</span>
+        <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
         <span class="per">${escapeHtml(recurringPricePeriodWord)}</span>
         <span class="tier-lbl">${commercialManualAccept ? 'Commercial' : `WaveGuard ${escapeHtml(tier)}`}</span>
       </div>
@@ -4524,9 +4518,7 @@ ${shellTopBar()}
   <section class="card booking-card" id="commercial-accept-card">
     <h2 id="booking-title">Approve your commercial service</h2>
     <p class="card-sub">This is a commercial service plan. Approve your estimate and a Waves account manager will schedule your visits and send your invoice &mdash; no card or deposit needed now.</p>
-    <p class="card-sub" style="font-style:italic">${commercialPriceRange.hasLowConfidence
-      ? 'The price above is an estimated range from your property details — your final price is confirmed on site before your first visit.'
-      : 'Pricing is estimated from your property details and confirmed on site before your first visit.'}</p>
+    <p class="card-sub" style="font-style:italic">Pricing is estimated from your property details and confirmed on site before your first visit.</p>
     <div class="pay-pref-grid options">
       <div class="pay-pref-choice">
         <button type="button" class="pay-pref-btn primary" id="commercial-approve-btn" data-commercial-mode="monthly"><span class="pay-pref-title">Approve &amp; pay monthly</span></button>
