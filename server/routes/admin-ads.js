@@ -458,18 +458,24 @@ async function fetchChannelAttribution(since, months = 1) {
     }
   } catch { /* channel_fixed_costs not present yet */ }
 
-  // Referral cost is PER-CONVERSION ($25 referrer reward + $25 referee discount =
-  // $50), not a flat monthly fee. Cost the referral channel at $50 × its converted
-  // (completed) referral customers in the window, so the card divides by the same
-  // count → a true ~$50 CAC (referrals are the cheap, high-LTV channel — this makes
-  // it visible). Guarded so a missing table is a no-op.
-  const REFERRAL_COST_PER_CONVERSION = 50;
+  // Referral cost is PER-CONVERSION (referrer reward + referee discount), not a flat
+  // monthly fee. Read the CURRENT reward from referral_program_settings via the
+  // referral engine's getSettings (same defaults) so the card auto-tracks a reward
+  // change instead of pinning to a stale figure — then cost the channel at that ×
+  // its converted (completed) referral customers in the window, so the card divides
+  // by the same count → a true CAC (default $25 + $25 = $50). Guarded / no-op.
   try {
+    let perConversion = 50; // $25 referrer + $25 referee — the settings' default
+    try {
+      const s = await require('../services/referral-engine').getSettings();
+      const cents = (Number(s?.referrer_reward_cents) || 0) + (Number(s?.referee_discount_cents) || 0);
+      if (cents > 0) perConversion = cents / 100;
+    } catch { /* engine/settings unreadable — keep the default */ }
     const [{ n }] = await db('ad_service_attribution')
       .where({ lead_source: 'referral', funnel_stage: 'completed' })
       .where('lead_date', '>=', since)
       .countDistinct({ n: 'customer_id' });
-    const refCost = round((Number(n) || 0) * REFERRAL_COST_PER_CONVERSION, 2);
+    const refCost = round((Number(n) || 0) * perConversion, 2);
     if (refCost > 0) fixedCostBySource.referral = (fixedCostBySource.referral || 0) + refCost;
   } catch { /* ad_service_attribution shape / no referrals — no-op */ }
 
