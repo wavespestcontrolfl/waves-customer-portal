@@ -66,6 +66,24 @@ describe('resolveCampaignId', () => {
   });
 });
 
+describe('attributionForSourceType', () => {
+  test('paid tracking numbers stay paid, mapped to their own channel', () => {
+    expect(CallAttribution.attributionForSourceType('google_ads')).toEqual({ leadSource: 'google_ads', isPaid: true });
+    expect(CallAttribution.attributionForSourceType('facebook')).toEqual({ leadSource: 'facebook', isPaid: true });
+  });
+  test('organic marketing sources map to their funnel channel, is_paid=false', () => {
+    expect(CallAttribution.attributionForSourceType('spoke_site')).toEqual({ leadSource: 'domain_website', isPaid: false });
+    expect(CallAttribution.attributionForSourceType('main_site')).toEqual({ leadSource: 'waves_website', isPaid: false });
+    expect(CallAttribution.attributionForSourceType('gbp')).toEqual({ leadSource: 'google_business', isPaid: false });
+    expect(CallAttribution.attributionForSourceType('website_organic')).toEqual({ leadSource: 'google_business', isPaid: false });
+  });
+  test('offline / word-of-mouth / unknown sources are not attributed (null)', () => {
+    for (const t of ['referral', 'walk_in', 'vehicle', 'tollfree', 'direct', 'marketplace', 'unknown', undefined, null]) {
+      expect(CallAttribution.attributionForSourceType(t)).toBeNull();
+    }
+  });
+});
+
 describe('recordCallPpcAttribution', () => {
   test('skips when there is no customer', async () => {
     const res = await CallAttribution.recordCallPpcAttribution({ customerId: null, leadId: 'L1' });
@@ -135,6 +153,32 @@ describe('recordCallPpcAttribution', () => {
       // Facebook calls carry no fbclid/_fbc, so is_paid is what keeps them in the
       // PAID Meta bucket (channel-attribution / ad-cost-allocation).
       is_paid: true,
+    });
+  });
+
+  test('records an ORGANIC marketing call (spoke domain) with is_paid=false so it stays out of the paid ratio', async () => {
+    firstByTable.ad_service_attribution = undefined; // no existing row for this lead
+    firstByTable.ad_campaigns = undefined; // organic call — no campaign
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C7',
+      leadId: 'L7',
+      leadSource: 'domain_website', // spoke_site → domain_website
+      isPaid: false,
+      leadSourceDetail: 'Spoke Pest — bradentonflpestcontrol.com',
+      serviceInterest: 'Pest Control',
+      leadDate: new Date('2026-06-20T18:00:00Z'),
+    });
+
+    expect(res).toEqual({ recorded: true, campaignId: null });
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0].row).toMatchObject({
+      customer_id: 'C7',
+      lead_id: 'L7',
+      lead_source: 'domain_website',
+      lead_source_detail: 'Spoke Pest — bradentonflpestcontrol.com',
+      funnel_stage: 'lead',
+      is_paid: false, // organic call → its own no-spend channel, not the paid LTV:CAC blend
     });
   });
 
