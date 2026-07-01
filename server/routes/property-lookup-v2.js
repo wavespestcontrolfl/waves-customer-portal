@@ -2500,7 +2500,11 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     services.trenching = {
       productKey: o.trenchingProductKey || o.trenchingTermiticideProductKey || o.productKey || 'taurus_sc',
       applicationRate: o.trenchingApplicationRate || o.applicationRate || 'standard',
-      trenchDepthFt: o.trenchingDepthFt || o.trenchDepthFt || 1.0,
+      // 0.5 ft (6 in) is the canonical baseline trench depth (SPECIALTY.trenching
+      // .defaultTrenchDepthFt) — must match the admin-form default so a V2/server
+      // estimate without an explicit depth prices at the ×1.0 baseline, not the
+      // retired 1.0 ft (+15%) tier with doubled chemical volume.
+      trenchDepthFt: o.trenchingDepthFt || o.trenchDepthFt || 0.5,
       concreteVolumePadPct: o.trenchingConcreteVolumePadPct || o.concreteVolumePadPct,
       warrantyTier: o.trenchingWarrantyTier || o.warrantyTier || 'one_year_retreat',
       labelConfirmed: o.trenchingLabelConfirmed === true || o.labelConfirmed === true ||
