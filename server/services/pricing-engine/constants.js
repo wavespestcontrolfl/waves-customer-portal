@@ -464,7 +464,7 @@ const COMMERCIAL_PEST = {
   routeDriveMinutes: 15,
   adminAnnual: 120,                   // COI tracking, net-terms invoicing, account management
   targetGrossMargin: 0.45,            // commercial target margin (tunable)
-  minAnnual: 720,                     // commercial pest account annual minimum ($60/mo floor)
+  minAnnual: 900,                     // commercial pest account annual minimum ($75/mo floor — professional commercial posture; owner 2026-06-30)
   lowConfidenceFootprintSf: 30000,    // above this the footprint estimate is flagged LOW confidence
   taxable: true,
   taxCategory: 'nonresidential_pest_control',
@@ -503,7 +503,7 @@ const COMMERCIAL_TERMITE_BAIT = {
   routeDriveMinutes: 15,
   adminAnnual: 120,
   targetGrossMargin: 0.45,
-  minAnnual: 600,                     // $50/mo monitoring floor
+  minAnnual: 900,                     // $75/mo monitoring floor (inspection/monitoring; bond/warranty quoted separately — owner 2026-06-30)
   lowConfidenceFootprintSf: 30000,
   taxable: true,
   taxCategory: 'nonresidential_pest_control',
@@ -521,7 +521,7 @@ const COMMERCIAL_RODENT_BAIT = {
   routeDriveMinutes: 15,
   adminAnnual: 120,
   targetGrossMargin: 0.45,
-  minAnnual: 600,                     // $50/mo floor
+  minAnnual: 900,                     // $75/mo standalone floor (a $50/mo commercial rodent line reads cheap; bundled-add-on $600 nuance needs the risk-type PR — owner 2026-06-30)
   lowConfidenceFootprintSf: 30000,
   taxable: true,
   taxCategory: 'nonresidential_pest_control',
