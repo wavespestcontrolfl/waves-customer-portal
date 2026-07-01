@@ -17,9 +17,12 @@
  *     (min 1.0 / max 2.0); no over-app gate — it's a biostimulant.
  *
  *  C) Bahia SpeedZone: now catalog-labeled, so drop the bahiaLabelUnverified flag,
- *     set the owner's bahia default rate 1.0 (label 0.7-1.5), keep it CONDITIONAL,
- *     and keep the temp/stress gates + a hand-spot area cap (label: spot treatment
- *     with hand sprayers <= 1,000 sq ft/acre; larger areas must be broadcast/zone).
+ *     keep it CONDITIONAL with the temp/stress gates + a hand-spot area cap (label:
+ *     spot treatment with hand sprayers <= 1,000 sq ft/acre; larger => broadcast/zone).
+ *     The structured rate is LEFT at the catalog value (1.1) because the mix math in
+ *     buildWaveGuardTreatmentPlan reads products_catalog.default_rate_per_1000 (shared
+ *     across turf) — a divergent structured rate would disagree with the runtime mix.
+ *     The owner's bahia-preferred 1.0 (label 0.7-1.5) is recorded as gate metadata.
  *
  *  D) Bahia March broadleaf-cleanup now uses SpeedZone (was Celsius, bahia-excluded),
  *     so seed the matching conditional structured row for completion-matching.
@@ -92,9 +95,14 @@ exports.up = async function up(knex) {
     gates.establishedTurfOnly = true;
     gates.avoidHeatStress = true;
     gates.spotAreaCapSqFtPerAcre = 1000; // label hand-spot cap; larger => broadcast/zone
+    gates.bahiaPreferredRatePer1000 = 1.0; // owner default; label range 0.7-1.5
+    gates.labelRateRange = '0.7-1.5 fl_oz_per_1000';
+    // rate LEFT at the B2/catalog value (1.1): buildWaveGuardTreatmentPlan mixes from
+    // products_catalog.default_rate_per_1000 (shared across turf), so a divergent
+    // structured rate would disagree with the runtime mix. Owner's 1.0 is metadata.
     await knex('lawn_protocol_products')
       .where({ id: r.id })
-      .update({ rate_per_1000: 1.0, gates: JSON.stringify(gates), updated_at: knex.fn.now() });
+      .update({ gates: JSON.stringify(gates), updated_at: knex.fn.now() });
   }
 
   // D) March broadleaf-cleanup SpeedZone (replaces the removed Celsius secondary)
@@ -111,7 +119,7 @@ exports.up = async function up(knex) {
         product_id: sz ? sz.id : null,
         role: 'post_emergent',
         application_mode: 'broadcast',
-        rate_per_1000: 1.0,
+        rate_per_1000: 1.1, // catalog default_rate (mix math uses this); see Part C note
         rate_unit: 'fl_oz',
         carrier_gal_per_1000: 1,
         default_in_plan: false,
@@ -122,6 +130,8 @@ exports.up = async function up(knex) {
           establishedTurfOnly: true,
           avoidHeatStress: true,
           spotAreaCapSqFtPerAcre: 1000,
+          bahiaPreferredRatePer1000: 1.0,
+          labelRateRange: '0.7-1.5 fl_oz_per_1000',
         }),
         annual_counter: JSON.stringify({}),
         mixing: JSON.stringify({}),

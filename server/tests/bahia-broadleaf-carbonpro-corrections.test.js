@@ -59,8 +59,8 @@ function seed() {
     lawn_protocol_products: [
       { id: 'c1', product_name: 'CarbonPro-L', gates: JSON.stringify({}), lawn_protocol_window_id: 'bz-may' },
       { id: 'c2', product_name: 'CarbonPro-L', gates: JSON.stringify({ premiumTier: true }), lawn_protocol_window_id: 'bz-dec' },
-      { id: 's-jan', product_name: 'SpeedZone Southern + NIS', lawn_protocol_window_id: 'w-jan_pre_m_irrigation_class', gates: JSON.stringify({ gateProduct: 'SpeedZone', maxTempF: 90, bahiaLabelUnverified: true }) },
-      { id: 's-sep', product_name: 'SpeedZone Southern + NIS', lawn_protocol_window_id: 'w-sep_blackout_crabgrass', gates: JSON.stringify({ gateProduct: 'SpeedZone', maxTempF: 90, bahiaLabelUnverified: true }) },
+      { id: 's-jan', product_name: 'SpeedZone Southern + NIS', lawn_protocol_window_id: 'w-jan_pre_m_irrigation_class', rate_per_1000: 1.1, gates: JSON.stringify({ gateProduct: 'SpeedZone', maxTempF: 90, bahiaLabelUnverified: true }) },
+      { id: 's-sep', product_name: 'SpeedZone Southern + NIS', lawn_protocol_window_id: 'w-sep_blackout_crabgrass', rate_per_1000: 1.1, gates: JSON.stringify({ gateProduct: 'SpeedZone', maxTempF: 90, bahiaLabelUnverified: true }) },
     ],
   };
 }
@@ -89,17 +89,18 @@ describe('bahia broadleaf + CarbonPro correction migration', () => {
     expect(JSON.parse(state.lawn_protocol_products.find((p) => p.id === 'c2').gates).premiumTier).toBe(true);
   });
 
-  test('C) bahia SpeedZone re-rated to 1.0, label-unverified flag dropped, spot cap added', () => {
+  test('C) bahia SpeedZone keeps catalog rate 1.1; label-unverified dropped; spot cap + preferred-rate metadata', () => {
     const sz = state.lawn_protocol_products.filter((p) => p.product_name === 'SpeedZone Southern + NIS'
       && p.lawn_protocol_window_id.startsWith('w-'));
     expect(sz.length).toBeGreaterThanOrEqual(2);
     sz.forEach((p) => {
-      expect(p.rate_per_1000).toBe(1.0);
+      expect(p.rate_per_1000).toBe(1.1); // unchanged — mix math reads the catalog rate
       const g = JSON.parse(p.gates);
       expect(g.bahiaLabelUnverified).toBeUndefined();
       expect(g.spotAreaCapSqFtPerAcre).toBe(1000);
       expect(g.establishedTurfOnly).toBe(true);
       expect(g.maxTempF).toBe(90);
+      expect(g.bahiaPreferredRatePer1000).toBe(1.0); // owner default recorded as metadata
     });
   });
 
@@ -109,9 +110,10 @@ describe('bahia broadleaf + CarbonPro correction migration', () => {
     expect(mar).toBeTruthy();
     expect(mar.default_in_plan).toBe(false);
     expect(mar.product_id).toBe('sz');
-    expect(mar.rate_per_1000).toBe(1.0);
+    expect(mar.rate_per_1000).toBe(1.1); // catalog rate (mix math); preferred 1.0 is metadata
     expect(JSON.parse(mar.gates).trigger).toBe('broadleaf_heavy');
     expect(JSON.parse(mar.gates).spotAreaCapSqFtPerAcre).toBe(1000);
+    expect(JSON.parse(mar.gates).bahiaPreferredRatePer1000).toBe(1.0);
   });
 
   test('E) bahia window goals no longer name Drive/Celsius (goal + service_report_context)', () => {
