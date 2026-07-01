@@ -623,6 +623,28 @@ describe('estimate v2 service toggle adapter', () => {
     expect(item.price).toBe(249);
   });
 
+  test('does not apply the recurring-customer one-time perk to the rodent guarantee', () => {
+    // The guarantee is excluded from % discounts (RODENT.excludeFromPctDiscount).
+    // A recurring customer must still pay the full per-tier price, not 15% off.
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: true,
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+    input.isRecurringCustomer = true;
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item.priceAfterDiscount).toBe(item.price);
+    expect((item.discount?.appliedDiscounts || []).map((d) => d.type))
+      .not.toContain('recurring_customer_one_time_perk');
+  });
+
   test('drops the RODENT_GUARANTEE line when any eligibility flag is missing (fail closed)', () => {
     const input = translateV2CallToV1Input(
       baseProfile(),
