@@ -10,8 +10,11 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 const { commercialRiskTypeReviewNeeded } = require('../services/estimate-delivery-options');
 
 const data = (o) => JSON.stringify(o);
-const autoPest = { service: 'commercial_pest', commercialPricingMode: 'auto_estimate', annual: 2400, visitsPerYear: 12 };
-const autoRodent = { service: 'commercial_rodent_bait', commercialPricingMode: 'auto_estimate', annual: 1080, visitsPerYear: 4 };
+// The REAL persisted shape after an admin save (v1-legacy-mapper commAdd): a
+// priced recurring commercial line keeps service + annual + estimatedPricing but
+// does NOT carry commercialPricingMode. The gate must recognize this shape.
+const autoPest = { service: 'commercial_pest', annual: 2400, estimatedPricing: true, taxable: true, discountable: false };
+const autoRodent = { service: 'commercial_rodent_bait', annual: 1080, estimatedPricing: true, taxable: true, discountable: false };
 
 describe('commercialRiskTypeReviewNeeded', () => {
   test('auto-priced commercial pest line with no risk type → needs review', () => {
@@ -82,8 +85,16 @@ describe('commercialRiskTypeReviewNeeded', () => {
   });
 
   test('engineInputs-only commercial pest/rodent selection still fails closed', () => {
+    // uppercase selectedServices token (admin engineRequest shape)…
     expect(commercialRiskTypeReviewNeeded(data({
       engineRequest: { profile: { isCommercial: true }, selectedServices: ['PEST'] },
+    }))).toBe(true);
+    // …and the v1 services map (engineInputs snapshot shape)…
+    expect(commercialRiskTypeReviewNeeded(data({
+      engineInputs: { services: { pest: { tier: 'monthly12' } }, isCommercial: true },
+    }))).toBe(true);
+    expect(commercialRiskTypeReviewNeeded(data({
+      engineInputs: { services: { rodentBait: {} }, propertyType: 'commercial' },
     }))).toBe(true);
     // …but a valid type clears it.
     expect(commercialRiskTypeReviewNeeded(data({

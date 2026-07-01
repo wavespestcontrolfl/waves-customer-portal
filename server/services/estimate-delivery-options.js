@@ -235,11 +235,13 @@ function estimateDataHasUnresolvedManagerApproval(estimateData) {
 const CADENCE_COMMERCIAL_SERVICES = new Set(['commercial_pest', 'commercial_rodent_bait']);
 const RECURRING_PEST_RODENT_SELECTIONS = new Set(['PEST', 'RODENT_BAIT']);
 
-// An engine-AUTO-priced commercial pest/rodent recurring line — the only line
-// whose cadence the risk type drives. Manual-quote, one-time, and authored-
-// proposal lines carry the same service key but are not engine-cadence lines
-// (they set commercialPricingMode 'manual_quote' or none, and/or quoteRequired),
-// so they are excluded.
+// An engine-PRICED commercial pest/rodent recurring line — the only line whose
+// cadence the risk type drives. Detected by a positive `annual` with no
+// `quoteRequired`, which holds for BOTH the raw pricer shape AND the legacy
+// mapped save shape (v1-legacy-mapper's commAdd drops commercialPricingMode but
+// keeps service + annual, and is only emitted for priced recurring lines). A
+// manual quote (quoteRequired / null annual) and one-time items (no `annual`) are
+// excluded — the quote-required gate handles those.
 function containsAutoPricedCadenceLine(value, depth = 0) {
   if (!value || depth > 12) return false;
   if (Array.isArray(value)) return value.some((item) => containsAutoPricedCadenceLine(item, depth + 1));
@@ -247,8 +249,8 @@ function containsAutoPricedCadenceLine(value, depth = 0) {
   if (
     typeof value.service === 'string'
     && CADENCE_COMMERCIAL_SERVICES.has(value.service)
-    && value.commercialPricingMode === 'auto_estimate'
     && value.quoteRequired !== true
+    && Number(value.annual) > 0
   ) return true;
   return Object.values(value).some((item) => containsAutoPricedCadenceLine(item, depth + 1));
 }
@@ -265,12 +267,14 @@ function containsCommercialCadenceServiceLine(value, depth = 0) {
   return Object.values(value).some((item) => containsCommercialCadenceServiceLine(item, depth + 1));
 }
 
-// engineInputs-only fallback: some rows store only the engine request (the public
-// pricing path replays it) with no materialized result line yet. Detect the raw
-// selectedServices choosing recurring pest / rodent-bait so the gate still fails
-// closed — it will price a commercial cadence line, or fall to a manual quote that
-// the quote-required gate already blocks. (The uppercase tokens only appear in a
-// selectedServices array, so this does not collide with results.pest stat arrays.)
+// A recurring pest / rodent-bait selection — true for either the uppercase
+// selectedServices tokens (admin engineRequest) OR a v1 `services` map that
+// selects pest / rodentBait (engineInputs snapshot). A services selection is a
+// config object or boolean `true`, NOT a results.pest[] stat array, so this does
+// not collide with priced-result stats.
+function isServiceSelection(v) {
+  return v === true || (!!v && typeof v === 'object' && !Array.isArray(v));
+}
 function selectsRecurringPestOrRodent(value, depth = 0) {
   if (!value || depth > 12) return false;
   if (Array.isArray(value)) {
@@ -278,6 +282,7 @@ function selectsRecurringPestOrRodent(value, depth = 0) {
     return value.some((item) => selectsRecurringPestOrRodent(item, depth + 1));
   }
   if (typeof value !== 'object') return false;
+  if (isServiceSelection(value.pest) || isServiceSelection(value.rodentBait)) return true;
   return Object.values(value).some((item) => selectsRecurringPestOrRodent(item, depth + 1));
 }
 
