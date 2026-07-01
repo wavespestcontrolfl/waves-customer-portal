@@ -392,6 +392,11 @@ function commercialLowConfidenceRange(estimateData) {
   const services = commercialRecurringLinesForConfidence(data || {});
   let lowMonthly = 0;
   let highMonthly = 0;
+  // Track the exact totals separately so a MIXED estimate can band ONLY the
+  // low-confidence share of the price (not the whole total). lowConfidenceMonthly
+  // is the sum of LOW-line monthlies; exactMonthly is the sum of every line.
+  let lowConfidenceMonthly = 0;
+  let exactMonthly = 0;
   let hasLowConfidence = false;
   for (const svc of services) {
     if (!svc || typeof svc !== 'object') continue;
@@ -399,8 +404,10 @@ function commercialLowConfidenceRange(estimateData) {
     if (svc.quoteRequired === true) continue; // manual lines handled by the quote gate
     const monthly = commercialLineMonthly(svc);
     if (monthly <= 0) continue;
+    exactMonthly += monthly;
     if (String(svc.pricingConfidence || '').toUpperCase() === 'LOW') {
       hasLowConfidence = true;
+      lowConfidenceMonthly += monthly;
       lowMonthly += monthly * (1 - COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT);
       highMonthly += monthly * (1 + COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT);
     } else {
@@ -418,6 +425,8 @@ function commercialLowConfidenceRange(estimateData) {
     rangeLowMonthly,
     rangeHighMonthly,
     monthlySwing,
+    lowConfidenceMonthly: round(lowConfidenceMonthly),
+    exactMonthly: round(exactMonthly),
     forceSiteQuote: monthlySwing > COMMERCIAL_LOW_CONFIDENCE_MAX_MONTHLY_SWING,
   };
 }

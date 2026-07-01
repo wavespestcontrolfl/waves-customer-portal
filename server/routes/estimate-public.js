@@ -11432,9 +11432,16 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // range tracks whatever cadence the customer selects (no stale fixed bounds).
   const lowConfidenceRange = commercialLowConfidenceRange(estData);
   const markLowConfidenceRange = lowConfidenceRange.hasLowConfidence && !lowConfidenceRange.forceSiteQuote;
+  // The band applies only to the LOW-confidence SHARE of the price so a mixed
+  // estimate (LOW $400 + exact MEDIUM $500) shows $820–$980, not a blanket ±20%
+  // on the whole total. PriceCard bands cadencePrice × fraction × pct, which
+  // stays exact for a single all-LOW line (fraction 1) and cadence-proportional.
+  const lowConfidenceFraction = lowConfidenceRange.exactMonthly > 0
+    ? Math.min(1, lowConfidenceRange.lowConfidenceMonthly / lowConfidenceRange.exactMonthly)
+    : 1;
   const withRangeMarker = (frequency) => (
     markLowConfidenceRange && frequency && frequency.quoteRequired !== true
-      ? { ...frequency, lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT }
+      ? { ...frequency, lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT, lowConfidenceFraction }
       : frequency
   );
   const contractPayload = Array.isArray(payload.frequencies)

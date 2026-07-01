@@ -119,11 +119,19 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   // upstream (site-confirmation), so this only fires for the self-serve narrow band.
   const round2 = (n) => Math.round(Number(n) * 100) / 100;
   const lowConfidenceRangePct = quoteRequired ? 0 : Number(frequency.lowConfidenceRangePct) || 0;
+  // Band only the LOW-confidence SHARE of the price. fraction is 1 for a single
+  // all-LOW commercial line and < 1 when the card mixes LOW + exact MEDIUM lines,
+  // so a mixed card never overstates the range (e.g. LOW $400 + MED $500 → ±$80,
+  // not ±$180). Defaults to 1 if the server didn't send a fraction.
+  const rawFraction = Number(frequency.lowConfidenceFraction);
+  const lowConfidenceFraction = Number.isFinite(rawFraction) && rawFraction > 0 ? Math.min(rawFraction, 1) : 1;
   const showLowConfidenceRange = lowConfidenceRangePct > 0 && cadencePrice != null && cadencePrice > 0;
-  const rangeLow = showLowConfidenceRange ? round2(cadencePrice * (1 - lowConfidenceRangePct)) : null;
-  const rangeHigh = showLowConfidenceRange ? round2(cadencePrice * (1 + lowConfidenceRangePct)) : null;
-  const annualRangeLow = showLowConfidenceRange && annual ? round2(Number(annual) * (1 - lowConfidenceRangePct)) : null;
-  const annualRangeHigh = showLowConfidenceRange && annual ? round2(Number(annual) * (1 + lowConfidenceRangePct)) : null;
+  const monthlyBand = showLowConfidenceRange ? cadencePrice * lowConfidenceFraction * lowConfidenceRangePct : 0;
+  const rangeLow = showLowConfidenceRange ? round2(cadencePrice - monthlyBand) : null;
+  const rangeHigh = showLowConfidenceRange ? round2(cadencePrice + monthlyBand) : null;
+  const annualBand = showLowConfidenceRange && annual ? Number(annual) * lowConfidenceFraction * lowConfidenceRangePct : 0;
+  const annualRangeLow = showLowConfidenceRange && annual ? round2(Number(annual) - annualBand) : null;
+  const annualRangeHigh = showLowConfidenceRange && annual ? round2(Number(annual) + annualBand) : null;
   const manualDiscount = frequency.manualDiscount && Number(frequency.manualDiscount.amount) > 0
     ? frequency.manualDiscount
     : null;

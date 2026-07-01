@@ -20,9 +20,10 @@ const MED = (annual) => ({ service: 'commercial_pest', pricingConfidence: 'MEDIU
 
 describe('commercialLowConfidenceRange', () => {
   test('narrow LOW line → ±20% range, not forced to a site quote', () => {
-    // $400/mo → 320–480, swing 160 (< 300)
+    // $400/mo → 320–480, swing 160 (< 300); all-LOW so low share == exact total
     expect(commercialLowConfidenceRange(recurring([LOW(4800)]))).toEqual({
-      hasLowConfidence: true, rangeLowMonthly: 320, rangeHighMonthly: 480, monthlySwing: 160, forceSiteQuote: false,
+      hasLowConfidence: true, rangeLowMonthly: 320, rangeHighMonthly: 480, monthlySwing: 160,
+      lowConfidenceMonthly: 400, exactMonthly: 400, forceSiteQuote: false,
     });
   });
   test('wide LOW line → force site quote', () => {
@@ -31,9 +32,11 @@ describe('commercialLowConfidenceRange', () => {
     expect(commercialLowConfidenceRequiresSiteQuote(recurring([LOW(12000)]))).toBe(true);
   });
   test('MEDIUM lines are exact; only LOW lines get the band', () => {
-    // LOW $400 (320–480) + MEDIUM $500 (exact) → 820–980, swing 160
+    // LOW $400 (320–480) + MEDIUM $500 (exact) → 820–980, swing 160. Only the
+    // $400 LOW share carries the band; exact total is the full $900.
     expect(commercialLowConfidenceRange(recurring([LOW(4800), MED(6000)]))).toMatchObject({
       rangeLowMonthly: 820, rangeHighMonthly: 980, monthlySwing: 160,
+      lowConfidenceMonthly: 400, exactMonthly: 900,
     });
   });
   test('engineResult.lineItems shape (public-quote mirror) is detected', () => {
@@ -111,10 +114,12 @@ describe('attachPublicPricingContract — narrow low-confidence range marker (Re
   const payload = (annual) => ({ frequencies: [{ key: 'monthly', label: 'Commercial Turf Treatment Program', monthly: annual / 12, annual }] });
   const firstFreq = (contract) => contract.services?.[0]?.frequencies?.[0] || {};
 
-  test('narrow LOW commercial → frequencies carry lowConfidenceRangePct 0.20', () => {
-    // $400/mo → swing $160 (< $300) → narrow, approvable, ranged
+  test('narrow LOW commercial → frequencies carry lowConfidenceRangePct 0.20 + full LOW fraction', () => {
+    // $400/mo → swing $160 (< $300) → narrow, approvable, ranged. Single all-LOW
+    // line → fraction 1 (whole price is low-confidence).
     const contract = attachPublicPricingContract(payload(4800), {}, estData(4800));
     expect(firstFreq(contract).lowConfidenceRangePct).toBe(0.2);
+    expect(firstFreq(contract).lowConfidenceFraction).toBe(1);
     expect(contract.quoteRequired).not.toBe(true);
   });
 
