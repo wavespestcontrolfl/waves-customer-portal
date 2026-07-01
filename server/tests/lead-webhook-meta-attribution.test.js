@@ -140,4 +140,11 @@ describe('determineLeadSource — hub city detection (waves_website area)', () =
     expect(ds('https://wavespestcontrol.com/lawn-care/')).toMatchObject({ source: 'waves_website', area: undefined });
     expect(ds('https://wavespestcontrol.com/')).toMatchObject({ source: 'waves_website', detail: 'Main site', area: undefined });
   });
+  test('a pest term like "palmetto-bug" does NOT resolve to the city of Palmetto', () => {
+    // "palmetto bug" = a FL cockroach — a blog/service page about it must not skew area.
+    expect(ds('https://wavespestcontrol.com/palmetto-bugs-in-florida/').area).toBeUndefined();
+    expect(ds('https://wavespestcontrol.com/how-to-get-rid-of-palmetto-bugs/').area).toBeUndefined();
+    // ...but a real Palmetto city page still resolves.
+    expect(ds('https://wavespestcontrol.com/pest-control-palmetto-fl/').area).toBe('Palmetto');
+  });
 });

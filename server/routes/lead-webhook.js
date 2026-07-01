@@ -1205,10 +1205,14 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
   if (url.includes('wavespestcontrol.com')) {
     const path = String(url).replace(/^https?:\/\/[^/]+/i, '').split(/[?#]/)[0].replace(/\/+$/, '');
     const seg = path.split('/').filter(Boolean).pop() || '';
+    // Anchor single-word cities to the "-fl" city/quote-page suffix so an incidental
+    // mention in a slug isn't read as a city — most importantly "palmetto-bug" (a FL
+    // cockroach) must NOT resolve to Palmetto and skew office routing. Compound names
+    // (north-port, lakewood-ranch) are unambiguous on their own and need no anchor.
     const HUB_CITIES = [
-      [/north[-_ ]?port/i, 'North Port'], [/bradenton/i, 'Bradenton'], [/parrish/i, 'Parrish'],
-      [/sarasota/i, 'Sarasota'], [/venice/i, 'Venice'], [/palmetto/i, 'Palmetto'],
-      [/lakewood/i, 'Lakewood Ranch'], [/ellenton/i, 'Ellenton'],
+      [/north[-_ ]?port/i, 'North Port'], [/lakewood[-_ ]?ranch/i, 'Lakewood Ranch'],
+      [/bradenton-fl/i, 'Bradenton'], [/parrish-fl/i, 'Parrish'], [/sarasota-fl/i, 'Sarasota'],
+      [/venice-fl/i, 'Venice'], [/palmetto-fl/i, 'Palmetto'], [/ellenton-fl/i, 'Ellenton'],
     ];
     const hit = HUB_CITIES.find(([re]) => re.test(path));
     return { source: 'waves_website', detail: seg ? `${seg} page` : 'Main site', channel: 'organic', area: hit ? hit[1] : undefined };
