@@ -1041,8 +1041,13 @@ export function LeadsSection() {
             color={C.green}
           />{" "}
           <MetricCard
-            label="Avg Response Time"
-            value={fmtTime(ov.avgResponseTime)}
+            label="Median Response Time"
+            value={fmtTime(ov.medianResponseTime)}
+            sub={
+              ov.recentMedianResponseTime != null
+                ? `7-day: ${fmtTime(ov.recentMedianResponseTime)}`
+                : undefined
+            }
             color={C.amber}
           />{" "}
           <MetricCard
