@@ -375,7 +375,7 @@ function serviceLineFromAuditLine(line) {
     return "termite";
   if (value.includes("mosquito")) return "mosquito";
   if (value.includes("rodent")) return "rodent";
-  if (value.includes("lawn")) return "lawn";
+  if (value.includes("lawn") || value.includes("turf")) return "lawn";
   if (value.includes("tree") || value.includes("shrub")) return "tree_shrub";
   return "pest";
 }

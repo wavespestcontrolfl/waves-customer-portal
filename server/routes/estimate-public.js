@@ -3560,8 +3560,19 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       const displayCadenceText = isPest && /quarterly service/i.test(String(cadenceText || ''))
         ? ''
         : cadenceText;
+      // Commercial turf reframe (owner 2026-07-01): the visits-present branch below
+      // shows only "N applications/year" and drops svc.detail, so the mowing-exclusion
+      // scope note the reframe added never reaches the customer. Surface a concise
+      // version on the card for the commercial turf line only (fuller copy still shows
+      // via svc.detail in the no-visits fallback).
+      const isCommercialTurf = serviceKey === 'commercial_lawn' || /commercial turf/i.test(String(name));
+      const scopeNote = isCommercialTurf ? 'Does not include mowing, edging, or landscape maintenance' : '';
       const detailHtml = displayCadenceText || visits
-        ? [displayCadenceText ? escapeHtml(displayCadenceText) : null, escapeHtml(visitText)].filter(Boolean).join(' &middot; ')
+        ? [
+            displayCadenceText ? escapeHtml(displayCadenceText) : null,
+            escapeHtml(visitText),
+            scopeNote ? escapeHtml(scopeNote) : null,
+          ].filter(Boolean).join(' &middot; ')
         : escapeHtml(svc?.detail || 'Service applications/year');
       return {
         name,

@@ -61,7 +61,7 @@ class AppointmentTagger {
     if (s.includes('termite') && !s.includes('inspect') && !s.includes('monitor')) return { tag: 'termite_treatment', label: 'Termite Treatment' };
     if (s.includes('rodent') && s.includes('exclusion')) return { tag: 'rodent_exclusion', label: 'Rodent Exclusion' };
     if (s.includes('mosquito')) return { tag: 'mosquito', label: 'Mosquito Treatment' };
-    if (s.includes('lawn')) return { tag: 'lawn', label: 'Lawn Care' };
+    if (s.includes('lawn') || s.includes('turf')) return { tag: 'lawn', label: 'Lawn Care' };
     if (s.includes('tree') || s.includes('shrub')) return { tag: 'tree_shrub', label: 'Tree & Shrub' };
     if (s.includes('pest')) return { tag: 'pest_general', label: 'Pest Control' };
     return { tag: 'general', label: 'General Service' };

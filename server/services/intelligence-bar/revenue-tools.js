@@ -13,7 +13,8 @@ const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, par
 
 function classifyServiceLine(type) {
   const t = (type || '').toLowerCase();
-  if (t.includes('lawn')) return 'Lawn Care';
+  // "turf": commercial lawn persists as "Commercial Turf Treatment Program"
+  if (t.includes('lawn') || t.includes('turf')) return 'Lawn Care';
   if (t.includes('mosquito')) return 'Mosquito';
   if (t.includes('tree') || t.includes('shrub')) return 'Tree & Shrub';
   if (t.includes('termite')) return 'Termite';
@@ -394,4 +395,4 @@ async function getTopRevenueCustomers(input) {
 }
 
 
-module.exports = { REVENUE_TOOLS, executeRevenueTool };
+module.exports = { REVENUE_TOOLS, executeRevenueTool, classifyServiceLine };

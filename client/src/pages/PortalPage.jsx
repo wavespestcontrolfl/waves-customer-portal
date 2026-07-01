@@ -7895,7 +7895,7 @@ function ServiceTracker() {
   const summary = tracker.serviceSummary;
   const serviceDescription = tracker.service?.summary;
   const office = tracker.office || { name: 'Waves Pest Control', phone: '(941) 297-5749', area: 'Southwest Florida' };
-  const isLawn = svcType.toLowerCase().includes('lawn');
+  const isLawn = svcType.toLowerCase().includes('lawn') || svcType.toLowerCase().includes('turf');
   const isPest = svcType.toLowerCase().includes('pest');
   const isMosquito = svcType.toLowerCase().includes('mosquito');
   const isTermite = svcType.toLowerCase().includes('termite');

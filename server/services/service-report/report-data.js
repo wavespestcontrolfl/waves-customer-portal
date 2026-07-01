@@ -2421,7 +2421,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             .where('customer_id', service.customer_id)
             .andWhere('scheduled_date', '>', afterIso)
             .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site', 'rescheduled'])
-            .whereRaw('LOWER(service_type) LIKE ?', ['%lawn%'])
+            // "turf": commercial lawn persists as "Commercial Turf Treatment Program".
+            // Grouped OR so it stays ANDed with the customer/date/status predicates.
+            .andWhere((qb) => qb
+              .whereRaw('LOWER(service_type) LIKE ?', ['%lawn%'])
+              .orWhereRaw('LOWER(service_type) LIKE ?', ['%turf%']))
             .orderBy('scheduled_date', 'asc')
             .first('scheduled_date')
             .catch(() => null);

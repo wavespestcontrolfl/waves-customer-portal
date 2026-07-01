@@ -3606,7 +3606,9 @@ const PRIMARY_VISIT_TIMELINE_TYPES = new Set([
 
 function normalizeVisitTimelineServiceLine(serviceLine, serviceType) {
   const text = `${serviceLine || ''} ${serviceType || ''}`.toLowerCase();
-  if (text.includes('lawn')) return 'lawn';
+  // "turf": commercial lawn persists as "Commercial Turf Treatment Program"
+  // (mirrors the server visit-timeline normalizer).
+  if (text.includes('lawn') || text.includes('turf')) return 'lawn';
   if (text.includes('termite')) return 'termite';
   if (text.includes('tree') || text.includes('shrub') || text.includes('palm')) return 'tree_shrub';
   if (text.includes('mosquito')) return 'mosquito';
