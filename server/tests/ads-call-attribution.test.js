@@ -79,13 +79,15 @@ describe('attributionForSourceType', () => {
     // Van wrap: offline advertising on a dedicated number → its own no-spend channel
     // (is_paid=false; the wrap's amortized cost lives in channel_fixed_costs).
     expect(CallAttribution.attributionForSourceType('vehicle')).toEqual({ leadSource: 'van_wrap', isPaid: false });
+    // Referral: its cost is the per-conversion reward (applied in fetchChannelAttribution).
+    expect(CallAttribution.attributionForSourceType('referral')).toEqual({ leadSource: 'referral', isPaid: false });
     // NB: main_site maps to waves_website, but the caller suppresses the single
     // shared bridge-target number via google-call-bridge.isBridgeTargetNumber (so
     // paid Google calls on that line aren't pre-locked organic). The other
     // main_site city-page numbers attribute organic normally.
   });
-  test('word-of-mouth / offline / unknown sources are not attributed (null)', () => {
-    for (const t of ['referral', 'walk_in', 'tollfree', 'direct', 'marketplace', 'unknown', undefined, null]) {
+  test('offline / unknown sources are not attributed (null)', () => {
+    for (const t of ['walk_in', 'tollfree', 'direct', 'marketplace', 'unknown', undefined, null]) {
       expect(CallAttribution.attributionForSourceType(t)).toBeNull();
     }
   });

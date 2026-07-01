@@ -458,6 +458,21 @@ async function fetchChannelAttribution(since, months = 1) {
     }
   } catch { /* channel_fixed_costs not present yet */ }
 
+  // Referral cost is PER-CONVERSION ($25 referrer reward + $25 referee discount =
+  // $50), not a flat monthly fee. Cost the referral channel at $50 × its converted
+  // (completed) referral customers in the window, so the card divides by the same
+  // count → a true ~$50 CAC (referrals are the cheap, high-LTV channel — this makes
+  // it visible). Guarded so a missing table is a no-op.
+  const REFERRAL_COST_PER_CONVERSION = 50;
+  try {
+    const [{ n }] = await db('ad_service_attribution')
+      .where({ lead_source: 'referral', funnel_stage: 'completed' })
+      .where('lead_date', '>=', since)
+      .countDistinct({ n: 'customer_id' });
+    const refCost = round((Number(n) || 0) * REFERRAL_COST_PER_CONVERSION, 2);
+    if (refCost > 0) fixedCostBySource.referral = (fixedCostBySource.referral || 0) + refCost;
+  } catch { /* ad_service_attribution shape / no referrals — no-op */ }
+
   const { sources, ...totals } = buildChannelAttribution(completed, platformSpendBySource, fixedCostBySource);
   return { sources: sources.map((s) => ({ source: formatSourceName(s.sourceKey), ...s })), ...totals };
 }
