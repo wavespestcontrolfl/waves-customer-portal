@@ -354,13 +354,21 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
   });
 
   test('termite-bait golden anchor (perimeter-driven monitoring, 4 visits)', () => {
-    const r = priceCommercialTermiteBait({ footprint: 10000, perimeter: 400 });
-    expect(r).toMatchObject({ service: 'commercial_termite_bait', annual: 850.91, visitsPerYear: 4, taxable: true });
+    // Sized ABOVE the $900 commercial floor so this exercises the cost-buildup,
+    // not the minimum (the floor is covered by its own test below).
+    const r = priceCommercialTermiteBait({ footprint: 22500, perimeter: 600 });
+    expect(r).toMatchObject({ service: 'commercial_termite_bait', annual: 1014.55, visitsPerYear: 4, taxable: true });
   });
 
   test('rodent-bait golden anchor (footprint-driven, 4 visits)', () => {
-    const r = priceCommercialRodentBait({ footprint: 10000 });
-    expect(r).toMatchObject({ service: 'commercial_rodent_bait', annual: 781.21, visitsPerYear: 4, taxable: true });
+    const r = priceCommercialRodentBait({ footprint: 20000 });
+    expect(r).toMatchObject({ service: 'commercial_rodent_bait', annual: 1080.61, visitsPerYear: 4, taxable: true });
+  });
+
+  test('termite/rodent apply the $900 commercial floor on small buildings', () => {
+    // Below the buildup breakeven, the account minimum ($900/yr = $75/mo) binds.
+    expect(priceCommercialTermiteBait({ footprint: 10000, perimeter: 400 }).annual).toBe(900);
+    expect(priceCommercialRodentBait({ footprint: 10000 }).annual).toBe(900);
   });
 
   test('termite/rodent fall back to a MANUAL quote with no real building size', () => {
@@ -377,18 +385,18 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     // even under buildingSizeMeasured:false — the operator measured the building.
     const measuredLotOnly = priceCommercialTermiteBait(
       { lotSqFt: 60000 },
-      { buildingSizeMeasured: false, footprintSqFt: 10000, perimeterLF: 400 },
+      { buildingSizeMeasured: false, footprintSqFt: 22500, perimeterLF: 600 },
     );
-    expect(measuredLotOnly).toMatchObject({ service: 'commercial_termite_bait', quoteRequired: false, annual: 850.91 });
+    expect(measuredLotOnly).toMatchObject({ service: 'commercial_termite_bait', quoteRequired: false, annual: 1014.55 });
     expect(measuredLotOnly.footprintSource).toBe('termite_measurement');
     // A divergent homeSqFt must NOT override the supplied termite measurement —
     // price equals the golden anchor, not whatever the home size would derive.
     const divergent = priceCommercialTermiteBait(
       { homeSqFt: 99999, stories: 1 },
-      { footprintSqFt: 10000, perimeterLF: 400 },
+      { footprintSqFt: 22500, perimeterLF: 600 },
     );
-    expect(divergent.annual).toBe(850.91);
-    expect(divergent.perimeter).toBe(400);
+    expect(divergent.annual).toBe(1014.55);
+    expect(divergent.perimeter).toBe(600);
   });
 
   test('a footprint-only termite measurement re-derives perimeter (ignores a stale home-derived perimeter)', () => {
@@ -397,12 +405,12 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     // footprint (4·√area), not price the monitoring line off the stale perimeter.
     const r = priceCommercialTermiteBait(
       { perimeter: 5000, footprint: 2000 },
-      { footprintSqFt: 10000 },
+      { footprintSqFt: 22500 },
     );
     expect(r.quoteRequired).toBe(false);
-    // 4·√10000 = 400 → matches the {footprint:10000, perimeter:400} golden anchor.
-    expect(r.perimeter).toBe(400);
-    expect(r.annual).toBe(850.91);
+    // 4·√22500 = 600 → matches the {footprint:22500, perimeter:600} golden anchor.
+    expect(r.perimeter).toBe(600);
+    expect(r.annual).toBe(1014.55);
   });
 
   test('all three auto-price through the engine as taxable, flat, non-WaveGuard lines', () => {
