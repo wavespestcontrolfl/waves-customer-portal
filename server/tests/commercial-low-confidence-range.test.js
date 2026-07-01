@@ -152,6 +152,19 @@ describe('attachPublicPricingContract — narrow low-confidence range marker (Re
     expect(contract.combinedRecurring.lowConfidenceFraction).toBeCloseTo(400 / 650, 5);
   });
 
+  test('exact non-commercial add-on stays OUT of the band (denominator = displayed total)', () => {
+    // commercial_lawn LOW $400 + foam_recurring exact $100 → displayed $500. Only
+    // the $400 LOW carries the band: fraction 0.8 (not 1.0), so foam isn't ranged.
+    const withAddOn = { result: { recurring: { services: [
+      { service: 'commercial_lawn', name: 'Commercial Turf Treatment Program', pricingConfidence: 'LOW', mo: 400, annual: 4800 },
+      { service: 'foam_recurring', name: 'Termite Foam', pricingConfidence: 'HIGH', mo: 100, annual: 1200 },
+    ] } } };
+    const contract = attachPublicPricingContract({ frequencies: [{ key: 'monthly', monthly: 500, annual: 6000 }] }, {}, withAddOn);
+    const section = contract.services.find((s) => s.isRecurring);
+    expect(section.frequencies[0].lowConfidenceFraction).toBeCloseTo(0.8, 5);
+    expect(contract.combinedRecurring.lowConfidenceFraction).toBeCloseTo(0.8, 5);
+  });
+
   test('MEDIUM-only commercial multi-service → no range marker anywhere', () => {
     const med = { result: { recurring: { services: [
       { service: 'commercial_lawn', pricingConfidence: 'MEDIUM', mo: 400, annual: 4800 },

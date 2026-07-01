@@ -102,4 +102,38 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.queryByText('$72')).not.toBeInTheDocument();
     expect(screen.queryByText('$144')).not.toBeInTheDocument();
   });
+
+  it('invoice-mode + site-confirmation hold drops the immediate-invoice promise', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        invoiceMode
+        siteConfirmationHold
+        selectedFrequency={{ key: 'monthly', monthly: 400 }}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Accept your estimate' })).toBeInTheDocument();
+    expect(screen.queryByText(/send an invoice pay link due immediately/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/confirms the exact price on a quick site visit/i)).toBeInTheDocument();
+  });
+
+  it('invoice-mode WITHOUT the hold keeps the standard "Accept + send invoice" CTA', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        invoiceMode
+        selectedFrequency={{ key: 'monthly', monthly: 400 }}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Accept + send invoice' })).toBeInTheDocument();
+    expect(screen.getByText(/send an invoice pay link due immediately/i)).toBeInTheDocument();
+  });
 });

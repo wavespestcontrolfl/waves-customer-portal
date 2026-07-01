@@ -89,8 +89,13 @@ export default function PaymentPreferenceButtons({
   annualPrepayEligible = false,
   selectedFrequency = null,
   cardHold = null,
+  siteConfirmationHold = false,
 }) {
   const isOneTime = serviceMode === 'one_time';
+  // A narrow low-confidence commercial estimate is approved online but its exact
+  // price is confirmed on site before any invoice — so the invoice-mode CTA must
+  // NOT promise an immediate invoice for these.
+  const heldForSiteConfirmation = invoiceMode && siteConfirmationHold && !isOneTime;
   const waivableSetupFee = setupFee && setupFee.waivedWithPrepay ? setupFee : null;
   const offerPrepay = !invoiceMode && !isOneTime && (annualPrepayEligible || !!waivableSetupFee);
   const setupAmount = Number(setupFee?.amount);
@@ -158,11 +163,15 @@ export default function PaymentPreferenceButtons({
           onClick={() => onSelect('pay_at_visit')}
           style={{ ...btnBase, background: ACTION_BG, color: W.white }}
         >
-          {isOneTime ? 'Book + send invoice' : 'Accept + send invoice'}
+          {heldForSiteConfirmation
+            ? 'Accept your estimate'
+            : isOneTime ? 'Book + send invoice' : 'Accept + send invoice'}
         </button>
 
         <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
-          {fineprint}
+          {heldForSiteConfirmation
+            ? 'No payment now — your Waves account manager confirms the exact price on a quick site visit, then sends your first invoice.'
+            : fineprint}
         </div>
       </div>
     );

@@ -6565,18 +6565,6 @@ router.put('/:token/accept', async (req, res, next) => {
       });
     }
 
-    // A NARROW low-confidence commercial estimate accepts online (self-serve),
-    // but its exact price is confirmed on site — so DON'T mint the first invoice
-    // at accept. The account manager issues it after the on-site confirmation,
-    // matching the "$X–$Y/mo, confirmed on site" range the customer approved. The
-    // WIDE case never reaches here (the quote gate above rejects it 409). Commercial
-    // already bills manually via the converter (skipSetupInvoice/autoSendInvoice:
-    // false); this additionally suppresses the bill_by_invoice first-invoice mint.
-    const lowConfidenceAccept = commercialLowConfidenceRange(estData);
-    const holdFirstInvoiceForSiteConfirmation = billByInvoice
-      && lowConfidenceAccept.hasLowConfidence
-      && !lowConfidenceAccept.forceSiteQuote;
-
     let { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
     if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
       recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
@@ -6593,6 +6581,19 @@ router.put('/:token/accept', async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+
+    // A NARROW low-confidence commercial RECURRING estimate accepts online
+    // (self-serve), but its exact price is confirmed on site — so DON'T mint the
+    // first invoice at accept; the account manager issues it after the on-site
+    // confirmation, matching the "$X–$Y/mo, confirmed on site" range the customer
+    // approved. The WIDE case never reaches here (the quote gate above rejects it
+    // 409). Computed AFTER treatAsOneTime so a one-time accept keeps its own
+    // booking/invoice outcome (the hold is about the recurring program only).
+    const lowConfidenceAccept = commercialLowConfidenceRange(estData);
+    const holdFirstInvoiceForSiteConfirmation = billByInvoice
+      && !treatAsOneTime
+      && lowConfidenceAccept.hasLowConfidence
+      && !lowConfidenceAccept.forceSiteQuote;
 
     // One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). Read straight
     // from the raw body so the normalized payment preference + existing
@@ -6648,11 +6649,14 @@ router.put('/:token/accept', async (req, res, next) => {
       // resolver re-derive an unrelated linked appointment when this is null.
       useLinkedFallback: false,
     });
-    if (isCommercialAccept) {
+    if (isCommercialAccept || holdFirstInvoiceForSiteConfirmation) {
       // Commercial bills by manual invoice after on-site confirmation, not a
       // booking deposit/card — and nothing is auto-scheduled, so there is no
       // first-visit invoice to credit a deposit against. Exempt the commitment
       // deposit (and its slot requirement) so the customer can approve online.
+      // The hold predicate is included so a held estimate is deposit-exempt even
+      // in a line shape commercialLowConfidenceRange sees but the isCommercial
+      // Accept detector doesn't (result.lineItems / top-level lineItems).
       depositPolicy.required = false;
       depositPolicy.slotRequired = false;
       depositPolicy.exemptReason = 'commercial_manual_billing';
@@ -11450,6 +11454,17 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
   };
 }
 
+// The section card's displayed default-cadence monthly — the denominator the
+// range fraction is taken against (NOT just the commercial lines), so an exact
+// non-commercial add-on folded into the same card is never banded.
+function sectionDisplayedMonthly(section) {
+  const freqs = Array.isArray(section?.frequencies) ? section.frequencies : [];
+  const chosen = freqs.find((f) => f && f.key === section.defaultFrequencyKey)
+    || freqs.find((f) => Number(f?.monthly) > 0)
+    || freqs[0];
+  return Number(chosen?.monthly) || 0;
+}
+
 // A NARROW low-confidence commercial estimate (LOW pricing confidence, ±20% band
 // ≤ $300/mo swing) stays self-serve approvable, but the customer sees the price
 // as a "$X–$Y/mo, confirmed on site" range instead of a false-precision number.
@@ -11462,13 +11477,15 @@ function sectionLowConfidenceFraction(section, lines) {
     Array.isArray(section?.memberKeys) && section.memberKeys.length ? section.memberKeys : [section?.key]
   );
   let low = 0;
-  let exact = 0;
   for (const line of lines) {
     if (!memberKeys.has(recurringServiceKey({ service: line.service }))) continue;
-    exact += line.monthly;
     if (line.isLow) low += line.monthly;
   }
-  return (low > 0 && exact > 0) ? Math.min(1, low / exact) : 0;
+  if (!(low > 0)) return 0;
+  // Denominator = the card's full displayed total (which may include exact
+  // non-commercial add-ons), so only the LOW dollars carry the ±20% band.
+  const displayedMonthly = sectionDisplayedMonthly(section);
+  return displayedMonthly > 0 ? Math.min(1, low / displayedMonthly) : 0;
 }
 
 function stampLowConfidenceRangeOnServices(services, lines) {
@@ -11489,10 +11506,13 @@ function stampLowConfidenceRangeOnServices(services, lines) {
 }
 
 // The combined "Recurring total" card (shown when >1 recurring service) ranges
-// on the AGGREGATE low-confidence share across all its services.
+// on the AGGREGATE low-confidence share across all its services. Denominator is
+// the full displayed recurring subtotal (which may include exact non-commercial
+// add-ons), so only the LOW commercial dollars carry the band.
 function withCombinedLowConfidenceRange(combined, range) {
   if (!combined || !range || !range.hasLowConfidence || range.forceSiteQuote) return combined;
-  const fraction = range.exactMonthly > 0 ? Math.min(1, range.lowConfidenceMonthly / range.exactMonthly) : 1;
+  const displayedMonthly = Number(combined.monthlySubtotal) || 0;
+  const fraction = displayedMonthly > 0 ? Math.min(1, range.lowConfidenceMonthly / displayedMonthly) : 1;
   if (!(fraction > 0)) return combined;
   return { ...combined, lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT, lowConfidenceFraction: fraction };
 }
@@ -12199,6 +12219,17 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       paymentMethodPreference: null,
     });
 
+    // Narrow low-confidence commercial recurring estimate → its first invoice is
+    // held for on-site price confirmation at accept (no immediate invoice). Expose
+    // it so the invoice-mode accept CTA drops the "send invoice / due immediately"
+    // promise for these. Matches the accept-handler hold predicate.
+    const siteConfirmationHold = estimate.bill_by_invoice === true
+      && defaultServiceMode !== 'one_time'
+      && (() => {
+        const lc = commercialLowConfidenceRange(depositEstData);
+        return lc.hasLowConfidence && !lc.forceSiteQuote;
+      })();
+
     // "Show your work" trust payload for the React estimate view. The key
     // only exists while the estimateShowYourWork gate is on, so gate-off
     // responses stay byte-identical; null means no enriched lookup data.
@@ -12253,6 +12284,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         acceptedServiceMode: estimate.accepted_service_mode || null,
         acceptedFrequencyKey: estimate.accepted_frequency_key || null,
         billByInvoice: !!estimate.bill_by_invoice,
+        siteConfirmationHold,
         serviceCategory,
         acceptance,
         membership,

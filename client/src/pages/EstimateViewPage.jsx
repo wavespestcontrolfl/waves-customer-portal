@@ -2921,6 +2921,7 @@ export default function EstimateViewPage() {
                 setupFee={pricing.setupFee || null}
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
                 invoiceMode={!!estimate.billByInvoice}
+                siteConfirmationHold={!!estimate.siteConfirmationHold}
                 selectedFrequency={combinedFrequency}
                 cardHold={data?.cardHoldPolicy || null}
               />
@@ -3015,6 +3016,7 @@ export default function EstimateViewPage() {
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
+              siteConfirmationHold={!!estimate.siteConfirmationHold}
               selectedFrequency={combinedFrequency}
               cardHold={data?.cardHoldPolicy || null}
             />
