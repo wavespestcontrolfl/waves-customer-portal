@@ -1009,3 +1009,46 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(normalizeCallExtraction({}).call_type).toBeNull();
   });
 });
+
+describe('DNI-forwarding caller-ID guard', () => {
+  const { resolveCallContactPhone } = CallRecordingProcessor._test;
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const BRADENTON = '+19413187612'; // a Waves tracking/location number
+  const MAIN = '+19412975749';      // Waves main line
+  const EXTERNAL = '+19415551234';  // a real customer
+
+  test('isOwnedNumber matches our lines on last-10, rejects external', () => {
+    expect(TWILIO_NUMBERS.isOwnedNumber(BRADENTON)).toBe(true);
+    expect(TWILIO_NUMBERS.isOwnedNumber('9413187612')).toBe(true);       // 10-digit
+    expect(TWILIO_NUMBERS.isOwnedNumber('(941) 318-7612')).toBe(true);   // formatted
+    expect(TWILIO_NUMBERS.isOwnedNumber(MAIN)).toBe(true);
+    expect(TWILIO_NUMBERS.isOwnedNumber(EXTERNAL)).toBe(false);
+    expect(TWILIO_NUMBERS.isOwnedNumber('')).toBe(false);
+    expect(TWILIO_NUMBERS.isOwnedNumber(null)).toBe(false);
+  });
+
+  test('inbound: keeps a real external caller', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: EXTERNAL, to_phone: BRADENTON }))
+      .toBe(EXTERNAL);
+  });
+
+  test('inbound: forwarding-masked (caller is our tracking number) resolves to null, not a phantom', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: BRADENTON, to_phone: BRADENTON })).toBeNull();
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: BRADENTON, to_phone: MAIN })).toBeNull();
+  });
+
+  test('inbound: a real extracted callback number wins over a masked from_phone', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: BRADENTON, to_phone: BRADENTON }, '+19415559999'))
+      .toBe('+19415559999');
+  });
+
+  test('inbound: an extracted Waves number is ignored, real from_phone is used', () => {
+    expect(resolveCallContactPhone({ direction: 'inbound', from_phone: EXTERNAL, to_phone: BRADENTON }, '+19413265011'))
+      .toBe(EXTERNAL);
+  });
+
+  test('outbound: returns the external customer, never our own line', () => {
+    expect(resolveCallContactPhone({ direction: 'outbound', from_phone: MAIN, to_phone: EXTERNAL }))
+      .toBe(EXTERNAL);
+  });
+});

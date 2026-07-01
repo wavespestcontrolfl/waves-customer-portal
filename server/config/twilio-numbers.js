@@ -114,6 +114,29 @@ const TWILIO_NUMBERS = {
     ];
   },
 
+  // True when the number is one of OUR own lines (any location / tracking / paid /
+  // GBP / van / toll-free / main). Matches on the last 10 digits so E.164, 11-digit,
+  // and formatted variants all resolve. Used to reject a Waves number that shows up
+  // as an inbound caller — a call-forwarding artifact, never a real customer — so we
+  // don't key a lead/customer on it. Set is built once and cached.
+  _ownedLast10: null,
+  isOwnedNumber(phoneNumber) {
+    const digits = String(phoneNumber == null ? '' : phoneNumber).replace(/\D/g, '');
+    const last10 = digits.slice(-10);
+    if (last10.length !== 10) return false;
+    if (!this._ownedLast10) {
+      const set = new Set();
+      for (const n of this.allNumbers) {
+        const d = String(n.number || '').replace(/\D/g, '').slice(-10);
+        if (d.length === 10) set.add(d);
+      }
+      const main = String(this.mainLine.number || '').replace(/\D/g, '').slice(-10);
+      if (main.length === 10) set.add(main);
+      this._ownedLast10 = set;
+    }
+    return this._ownedLast10.has(last10);
+  },
+
   findByNumber(phoneNumber) {
     // Location lines
     for (const [locId, loc] of Object.entries(this.locations)) {

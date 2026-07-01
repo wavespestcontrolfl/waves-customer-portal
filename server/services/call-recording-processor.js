@@ -156,15 +156,33 @@ function maskPhone(value) {
   return digits ? `***${digits.slice(-4)}` : 'unknown';
 }
 
+// Return the first candidate that is a real EXTERNAL number — i.e. not one of our
+// own lines. A Waves-owned number appearing as the caller/callee is a call-
+// forwarding artifact (a DNI tracking number masking the true caller), never a real
+// customer; keying a lead/customer on it collapses many callers onto one phantom
+// record. Skipping owned candidates (and returning null when every candidate is
+// owned) stops that at the source.
+function firstExternalPhone(...candidates) {
+  for (const c of candidates) {
+    const v = c && String(c).trim();
+    if (v && !TWILIO_NUMBERS.isOwnedNumber(v)) return v;
+  }
+  return null;
+}
+
 function resolveCallContactPhone(call = {}, extractedPhone = null) {
   const extracted = String(extractedPhone || '').trim();
   if (isOutboundCall(call)) {
-    if (extracted && !samePhone(extracted, call.from_phone)) return extracted;
-    return call.to_phone || extracted || call.from_phone || null;
+    if (extracted && !samePhone(extracted, call.from_phone)) {
+      return firstExternalPhone(extracted, call.to_phone, call.from_phone);
+    }
+    return firstExternalPhone(call.to_phone, extracted, call.from_phone);
   }
 
-  if (extracted && !samePhone(extracted, call.to_phone)) return extracted;
-  return call.from_phone || extracted || call.to_phone || null;
+  if (extracted && !samePhone(extracted, call.to_phone)) {
+    return firstExternalPhone(extracted, call.from_phone, call.to_phone);
+  }
+  return firstExternalPhone(call.from_phone, extracted, call.to_phone);
 }
 
 function normalizeNamePart(value) {
@@ -1623,6 +1641,13 @@ const CallRecordingProcessor = {
     // immediately and the real error reaches the caller.
     try {
     const contactPhone = resolveCallContactPhone(call);
+    // Forwarding-masked call: the inbound leg recorded one of our own tracking
+    // numbers as the caller, so there's no recoverable external contact. We still
+    // transcribe/extract + log the call, but won't key a lead/customer on the
+    // masked number (that's what created the phantom "collapsed" leads).
+    if (!contactPhone && !isOutboundCall(call) && TWILIO_NUMBERS.isOwnedNumber(call.from_phone)) {
+      logger.warn(`[call-proc] ${maskSid(callSid)}: caller ID is a Waves tracking number (${maskPhone(call.from_phone)}) — forwarding-masked; no lead/customer will be keyed on it`);
+    }
 
     // Step 1: Transcribe — OpenAI is the source of record. Gemini and Twilio are fallbacks only.
     let transcription = null;
