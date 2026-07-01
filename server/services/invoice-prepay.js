@@ -176,16 +176,80 @@ function coverageMonths(termStart, termEnd) {
   return Math.max(1, Math.round(days / 30.44));
 }
 
+// A completion invoice that collects at least this fraction of the term's full
+// prepay amount is treated as the annual prepayment (anchor). A covered visit's
+// add-on / uncovered-balance invoice is a small fraction and stays below it, so
+// it never inherits the prepay framing. See resolveInvoiceTermId.
+const ANCHOR_MIN_PREPAY_FRACTION = 0.5;
+
+// Resolves the annual-prepay term id for an invoice — off the invoice's own tag
+// when present, otherwise (gated) through its scheduled visit.
+//
+// A completion-billed first visit mints its invoice via
+// InvoiceService.createFromService, which does NOT copy the term onto the
+// invoice — the link lives on the visit (scheduled_services.annual_prepay_term_id),
+// and the invoice only gets tagged later (on payment/term sync). But the pay-link
+// SMS goes out seconds after completion (services/invoice.js sendViaSMS), while
+// the row is still untagged — so keying only off invoice.annual_prepay_term_id
+// sends the generic invoice_sent copy for what is really a full year prepaid up
+// front. Resolving the term through the visit fixes the SMS, the pay page and the
+// PDFs (all read loadInvoiceAnnualPrepay) in one place.
+//
+// ANCHOR GATE: every covered visit in a term is stamped with the term id
+// (annual-prepay-renewals attachScheduledServices), so a bare "visit has a term"
+// check would also paint an add-on / uncovered-balance invoice on a covered visit
+// as the full annual plan. Accept the visit's term ONLY when this invoice is the
+// term's registered anchor (prepay_invoice_id) or it collects ~the full prepay
+// amount — never a small residual. Never throws; a lookup failure resolves to
+// null (standard, non-prepay copy).
+async function resolveInvoiceTermId(invoice, conn = db) {
+  if (invoice?.annual_prepay_term_id) return invoice.annual_prepay_term_id;
+  if (!invoice?.scheduled_service_id) return null;
+  try {
+    const visit = await conn('scheduled_services')
+      .where({ id: invoice.scheduled_service_id })
+      .first('annual_prepay_term_id');
+    const termId = visit?.annual_prepay_term_id;
+    if (!termId) return null;
+    const term = await conn('annual_prepay_terms')
+      .where({ id: termId })
+      .first('id', 'prepay_invoice_id', 'prepay_amount');
+    if (!term) return null;
+    // If the term already registered a billing invoice, trust that identity
+    // exactly: this invoice is the prepayment only when it IS that anchor. A
+    // covered visit is stamped with the term too, so any OTHER invoice on the
+    // visit — however large — is an add-on/residual and must stay generic.
+    if (term.prepay_invoice_id) {
+      return invoice.id && String(term.prepay_invoice_id) === String(invoice.id)
+        ? termId
+        : null;
+    }
+    // Anchor not yet registered (an untagged completion invoice at the moment its
+    // pay-link SMS goes out): accept only an anchor-scale amount (~the whole
+    // prepayment), never a small add-on/residual on an already-covered visit.
+    const total = Number(invoice.total);
+    const prepay = Number(term.prepay_amount);
+    if (Number.isFinite(total) && Number.isFinite(prepay) && prepay > 0
+        && total >= prepay * ANCHOR_MIN_PREPAY_FRACTION) {
+      return termId;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // Loads + normalizes the annual-prepay term for an invoice, or null when the
 // invoice isn't an annual prepayment. Shape matches the camelCase descriptor
 // returned by /api/auth/me so the client can treat them the same.
 async function loadInvoiceAnnualPrepay(invoice) {
-  if (!invoice?.annual_prepay_term_id) return null;
+  const termId = await resolveInvoiceTermId(invoice);
+  if (!termId) return null;
   const hasTable = await db.schema.hasTable('annual_prepay_terms').catch(() => false);
   if (!hasTable) return null;
   const coverageCols = await annualPrepayCoverageCols();
   const term = await db('annual_prepay_terms')
-    .where({ id: invoice.annual_prepay_term_id })
+    .where({ id: termId })
     .first(
       'id', 'status', 'renewal_decision', 'plan_label', 'monthly_rate', 'prepay_amount',
       'term_start', 'term_end',
@@ -227,6 +291,7 @@ async function loadInvoiceAnnualPrepay(invoice) {
 
 module.exports = {
   loadInvoiceAnnualPrepay,
+  resolveInvoiceTermId,
   annualPrepaySetupFeeWaived,
   coverageMonths,
   buildPrepayCoverageSummary,

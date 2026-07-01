@@ -3,6 +3,7 @@ const {
   annualPrepaySetupFeeWaived,
   buildPrepayCoverageSummary,
   buildCoverageVisits,
+  resolveInvoiceTermId,
 } = require('../services/invoice-prepay');
 
 describe('invoice-prepay helpers', () => {
@@ -170,6 +171,82 @@ describe('invoice-prepay helpers', () => {
     it('returns an empty array when coverage is not configured', () => {
       expect(buildCoverageVisits({ term_start: '2026-06-20' }, 528)).toEqual([]);
       expect(buildCoverageVisits(null, 528)).toEqual([]);
+    });
+  });
+
+  describe('resolveInvoiceTermId (visit fallback + anchor gate)', () => {
+    // Minimal knex-shaped stub: conn(table).where(..).first(..) → the seeded row.
+    const conn = ({ visitTermId = null, term = null } = {}) => (table) => ({
+      where: () => ({
+        first: async () => {
+          if (table === 'scheduled_services') return { annual_prepay_term_id: visitTermId };
+          if (table === 'annual_prepay_terms') return term;
+          return null;
+        },
+      }),
+    });
+
+    it('uses the invoice\'s own term id when directly tagged (no visit query)', async () => {
+      const boom = () => { throw new Error('should not query when already tagged'); };
+      const id = await resolveInvoiceTermId(
+        { annual_prepay_term_id: 'T1', scheduled_service_id: 'V1' }, boom,
+      );
+      expect(id).toBe('T1');
+    });
+
+    it('returns null when the invoice has neither a tag nor a visit', async () => {
+      expect(await resolveInvoiceTermId({ id: 'I1' }, conn())).toBeNull();
+    });
+
+    it('returns null when the visit carries no term', async () => {
+      const id = await resolveInvoiceTermId(
+        { id: 'I1', scheduled_service_id: 'V1', total: 400 },
+        conn({ visitTermId: null }),
+      );
+      expect(id).toBeNull();
+    });
+
+    it('accepts the visit term when the invoice IS the term\'s registered anchor', async () => {
+      // The e10f9183 case: completion invoice registered as term.prepay_invoice_id.
+      const id = await resolveInvoiceTermId(
+        { id: 'INV1', scheduled_service_id: 'V1', total: 415.75 },
+        conn({ visitTermId: 'T9', term: { id: 'T9', prepay_invoice_id: 'INV1', prepay_amount: '404.04' } }),
+      );
+      expect(id).toBe('T9');
+    });
+
+    it('accepts an anchor-scale amount when no anchor is registered yet (send-time)', async () => {
+      // total 415.75 >= prepay 404.04 * 0.5, and the term hasn't registered the
+      // invoice yet (untagged completion invoice at the moment the SMS goes out).
+      const id = await resolveInvoiceTermId(
+        { id: 'INV1', scheduled_service_id: 'V1', total: 415.75 },
+        conn({ visitTermId: 'T9', term: { id: 'T9', prepay_invoice_id: null, prepay_amount: '404.04' } }),
+      );
+      expect(id).toBe('T9');
+    });
+
+    it('rejects a small residual on a covered visit when no anchor is registered (amount gate)', async () => {
+      const id = await resolveInvoiceTermId(
+        { id: 'ADDON', scheduled_service_id: 'V1', total: 32.34 },
+        conn({ visitTermId: 'T9', term: { id: 'T9', prepay_invoice_id: null, prepay_amount: '404.04' } }),
+      );
+      expect(id).toBeNull();
+    });
+
+    it('rejects even a LARGE add-on when the term already registered a different anchor (Codex P1)', async () => {
+      // prepay_invoice_id is set to another invoice, so this one is not the
+      // prepayment regardless of amount — the amount fallback must not apply.
+      const id = await resolveInvoiceTermId(
+        { id: 'ADDON', scheduled_service_id: 'V1', total: 400 },
+        conn({ visitTermId: 'T9', term: { id: 'T9', prepay_invoice_id: 'REAL_ANCHOR', prepay_amount: '404.04' } }),
+      );
+      expect(id).toBeNull();
+    });
+
+    it('never throws — a lookup failure resolves to null', async () => {
+      const throwing = () => ({ where: () => ({ first: async () => { throw new Error('db down'); } }) });
+      const id = await resolveInvoiceTermId({ id: 'I', scheduled_service_id: 'V', total: 400 }, throwing);
+      expect(id).toBeNull();
     });
   });
 });
