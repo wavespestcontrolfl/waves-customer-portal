@@ -239,6 +239,19 @@ const gates = {
   // "live on merge", one env flip). Off → the cron only shadow-logs candidates.
   bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY === 'true',
 
+  // Booking "pay per application" — when a self-booking can be priced from the
+  // estimate it is linked to (service-bound), stamp the per-application price +
+  // payment_method_preference='pay_at_visit' + create_invoice_on_complete onto
+  // the booked visit (and its inherited recurring follow-ups) so completion
+  // invoicing bills each visit from estimated_price. Self-booked customers carry
+  // no WaveGuard tier, so the invoice-on-complete flag is what makes completion
+  // auto-invoice fire. No charge or card capture happens AT booking; billing +
+  // card-save ride the existing completion → invoice → /pay path. A money-path
+  // behavior change, so it FAILS CLOSED (explicit opt-in in every environment);
+  // off → bookings stay price-less as before. Owner sets
+  // GATE_BOOKING_PAY_AT_VISIT=true after verify.
+  bookingPayAtVisit: process.env.GATE_BOOKING_PAY_AT_VISIT === 'true',
+
   // Proactive line-type lookup — before the first SMS to a number, Twilio Lookup
   // its line type and skip landlines (avoids the wasted send + 30006 bounce that
   // the reactive suppression in #2160 only catches after the fact). Adds a paid

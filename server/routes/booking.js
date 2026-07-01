@@ -760,6 +760,7 @@ async function createSelfBooking(payload = {}) {
       referrer_url,
       attribution,
       new_customer,
+      payAtVisit,
     } = payload;
 
     if (!slot_date || !slot_start) {
@@ -901,6 +902,33 @@ async function createSelfBooking(payload = {}) {
       || estimate?.service_type
       || 'General Pest Control';
 
+    // Pay-per-application (gated by bookingPayAtVisit): resolve a per-application
+    // price so the booked visit + its inherited recurring follow-ups carry
+    // `estimated_price` + payment_method_preference='pay_at_visit' — the same
+    // fields an estimate accept sets on its recurring visits, so the existing
+    // completion → invoice → /pay path bills each visit. Best-effort: an
+    // unresolvable price leaves the booking price-less (today's behavior). No
+    // charge or card capture happens here; billing rides completion.
+    let visitPrice = null;
+    let paymentPref = null;
+    if (payAtVisit) {
+      try {
+        const { resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
+        // Bind the price to the booked SERVICE: only stamp when the linked
+        // estimate's recurring line is the same service that was booked, so a
+        // crafted/stale payload can't pair one service's booking with another
+        // service's price. service_type is client-influenced, hence the bind.
+        const bookedServiceKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
+        const priced = resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey });
+        if (priced) {
+          visitPrice = priced.amount;
+          paymentPref = 'pay_at_visit';
+        }
+      } catch (err) {
+        logger.warn(`[booking:confirm] pay-at-visit price resolution failed for customer=${custId}: ${err.message}`);
+      }
+    }
+
     // Conflict re-check + both inserts ride one transaction, serialized per
     // customer+day: a double-submit (button double-tap, client retry)
     // otherwise mints two parents — and two seeded quarterly series — and a
@@ -1016,6 +1044,17 @@ async function createSelfBooking(payload = {}) {
         self_booking_id: bookingRow.id,
         estimated_duration_minutes: duration,
         zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
+        // Pay-per-application (gated): price the visit and mark the billing
+        // preference. Null when the gate is off or no price resolved →
+        // unchanged, price-less behavior. Inherited by seeded recurring
+        // follow-ups (recurring-appointment-seeder).
+        estimated_price: visitPrice,
+        payment_method_preference: paymentPref,
+        // Self-booked customers have no WaveGuard tier, so completion auto-invoice
+        // (shouldAutoInvoiceCompletion) would skip them even with a price. Set the
+        // flag so the visit invoices on completion; the AMOUNT still comes from
+        // estimated_price (projectCompletionInvoiceAmount returns it first).
+        create_invoice_on_complete: paymentPref === 'pay_at_visit',
       }).returning('*');
 
       // Mark abandoned-booking recovery intents converted ATOMICALLY with the
@@ -1272,6 +1311,8 @@ router.post('/confirm', async (req, res, next) => {
     const result = await createSelfBooking({
       ...req.body,
       referrer_url: req.body?.referrer_url || req.get('referer') || null,
+      // Server-resolved gate — set AFTER the spread so a client can't forge it.
+      payAtVisit: isEnabled('bookingPayAtVisit'),
     });
     if (!result.ok) return res.status(result.status).json({ error: result.error });
     return res.json(result.body);
