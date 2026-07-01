@@ -1401,6 +1401,20 @@ function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier
     ? combined.manualDiscount
     : null;
   const manualDiscountMonthly = manualDiscountMonthlyAmount(manualDiscount);
+  // Narrow low-confidence commercial estimate: range the combined recurring total
+  // on its aggregate low-confidence share (mirrors PriceCard). The band tracks the
+  // displayed total; a mixed LOW + exact bundle bands only the LOW portion.
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const lowConfidencePct = quoteRequired ? 0 : Number(selectedFrequency?.lowConfidenceRangePct ?? combined.lowConfidenceRangePct) || 0;
+  const rawFraction = Number(selectedFrequency?.lowConfidenceFraction ?? combined.lowConfidenceFraction);
+  const lowConfidenceFraction = Number.isFinite(rawFraction) && rawFraction > 0 ? Math.min(rawFraction, 1) : 1;
+  const showLowConfidenceRange = lowConfidencePct > 0 && monthly != null && monthly > 0;
+  const monthlyBand = showLowConfidenceRange ? monthly * lowConfidenceFraction * lowConfidencePct : 0;
+  const rangeLow = showLowConfidenceRange ? round2(monthly - monthlyBand) : null;
+  const rangeHigh = showLowConfidenceRange ? round2(monthly + monthlyBand) : null;
+  const annualBand = showLowConfidenceRange && annual ? Number(annual) * lowConfidenceFraction * lowConfidencePct : 0;
+  const annualRangeLow = showLowConfidenceRange && annual ? round2(Number(annual) - annualBand) : null;
+  const annualRangeHigh = showLowConfidenceRange && annual ? round2(Number(annual) + annualBand) : null;
   return (
     <section style={{
       background: COLORS.white,
@@ -1435,17 +1449,28 @@ function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier
         <div style={{ textAlign: 'right' }}>
           <div style={{
             fontFamily: FONTS.serif,
-            fontSize: quoteRequired ? 34 : 46,
+            fontSize: quoteRequired ? 34 : showLowConfidenceRange ? 34 : 46,
             lineHeight: 1,
             color: ESTIMATE_TEXT,
             fontWeight: 500,
           }}>
-            {quoteRequired ? 'Quote required' : fmtMoney(monthly)}
+            {quoteRequired
+              ? 'Quote required'
+              : showLowConfidenceRange
+              ? `${fmtMoney(rangeLow)}–${fmtMoney(rangeHigh)}`
+              : fmtMoney(monthly)}
             {!quoteRequired ? <span style={{ fontFamily: FONT_BODY, fontSize: 20, color: ESTIMATE_MUTED }}> /mo</span> : null}
           </div>
           {!quoteRequired && annual ? (
             <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8 }}>
-              {fmtMoney(annual)} / year
+              {showLowConfidenceRange
+                ? `${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`
+                : `${fmtMoney(annual)} / year`}
+            </div>
+          ) : null}
+          {showLowConfidenceRange ? (
+            <div style={{ fontSize: 13, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5, maxWidth: 320 }}>
+              Estimated range — we confirm your exact price with a quick site visit.
             </div>
           ) : null}
           {quoteRequired && quoteReason ? (

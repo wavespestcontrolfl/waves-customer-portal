@@ -134,6 +134,34 @@ describe('attachPublicPricingContract — narrow low-confidence range marker (Re
     const contract = attachPublicPricingContract({ frequencies: [{ key: 'monthly', monthly: 50, annual: 600 }] }, {}, resiData);
     expect(firstFreq(contract).lowConfidenceRangePct).toBeUndefined();
   });
+
+  test('multi-service commercial → each recurring card + combined carry their own LOW share', () => {
+    // commercial_lawn LOW $400/mo + commercial_tree_shrub MEDIUM $250/mo. Commercial
+    // services have no per-service selectable ladder → one bundle card covering both.
+    // The bundle bands only the LOW share: fraction = 400 / (400 + 250) ≈ 0.615.
+    const mixed = { result: { recurring: { services: [
+      { service: 'commercial_lawn', name: 'Commercial Turf Treatment Program', pricingConfidence: 'LOW', mo: 400, annual: 4800 },
+      { service: 'commercial_tree_shrub', name: 'Commercial Tree & Shrub', pricingConfidence: 'MEDIUM', mo: 250, annual: 3000 },
+    ] } } };
+    const contract = attachPublicPricingContract({ frequencies: [{ key: 'monthly', monthly: 650, annual: 7800 }] }, {}, mixed);
+    const section = contract.services.find((s) => s.isRecurring);
+    expect(section.frequencies[0].lowConfidenceRangePct).toBe(0.2);
+    expect(section.frequencies[0].lowConfidenceFraction).toBeCloseTo(400 / 650, 5);
+    // The combined "Recurring total" card ranges on the same aggregate share.
+    expect(contract.combinedRecurring.lowConfidenceRangePct).toBe(0.2);
+    expect(contract.combinedRecurring.lowConfidenceFraction).toBeCloseTo(400 / 650, 5);
+  });
+
+  test('MEDIUM-only commercial multi-service → no range marker anywhere', () => {
+    const med = { result: { recurring: { services: [
+      { service: 'commercial_lawn', pricingConfidence: 'MEDIUM', mo: 400, annual: 4800 },
+      { service: 'commercial_tree_shrub', pricingConfidence: 'MEDIUM', mo: 250, annual: 3000 },
+    ] } } };
+    const contract = attachPublicPricingContract({ frequencies: [{ key: 'monthly', monthly: 650, annual: 7800 }] }, {}, med);
+    const section = contract.services.find((s) => s.isRecurring);
+    expect(section.frequencies[0].lowConfidenceRangePct).toBeUndefined();
+    expect(contract.combinedRecurring.lowConfidenceRangePct).toBeUndefined();
+  });
 });
 
 describe('renderPage — low-confidence commercial estimate', () => {

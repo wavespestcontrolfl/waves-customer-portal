@@ -435,6 +435,29 @@ function commercialLowConfidenceRequiresSiteQuote(estimateData) {
   return commercialLowConfidenceRange(estimateData).forceSiteQuote === true;
 }
 
+// The per-service priced commercial recurring lines with their monthly + whether
+// each is LOW confidence. Lets the pricing-contract layer compute a per-section
+// low-confidence share (a single split card carries only its own service's
+// confidence; a bundle card blends them), so mixed multi-service estimates never
+// over- or under-state the ±20% band.
+function commercialLowConfidenceServiceLines(estimateData) {
+  const data = parseEstimateData(estimateData);
+  const services = commercialRecurringLinesForConfidence(data || {});
+  const out = [];
+  for (const svc of services) {
+    if (!svc || typeof svc.service !== 'string' || !svc.service.startsWith('commercial_')) continue;
+    if (svc.quoteRequired === true) continue;
+    const monthly = commercialLineMonthly(svc);
+    if (monthly <= 0) continue;
+    out.push({
+      service: svc.service,
+      monthly,
+      isLow: String(svc.pricingConfidence || '').toUpperCase() === 'LOW',
+    });
+  }
+  return out;
+}
+
 function cloneEstimateData(data) {
   if (!data || typeof data !== 'object') return data;
   return JSON.parse(JSON.stringify(data));
@@ -932,6 +955,7 @@ module.exports = {
   estimateDataHasUnresolvedManagerApproval,
   commercialRiskTypeReviewNeeded,
   commercialLowConfidenceRange,
+  commercialLowConfidenceServiceLines,
   commercialLowConfidenceRequiresSiteQuote,
   hasDerivableOneTimePestChoicePricing,
   hasPestRecurringServiceForOneTimeOption,

@@ -58,6 +58,7 @@ const {
   estimateDataHasUnresolvedManagerApproval,
   commercialRiskTypeReviewNeeded,
   commercialLowConfidenceRange,
+  commercialLowConfidenceServiceLines,
   commercialLowConfidenceRequiresSiteQuote,
   COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT,
 } = require('../services/estimate-delivery-options');
@@ -11422,33 +11423,71 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
   };
 }
 
-function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) {
-  // A NARROW low-confidence commercial estimate (LOW pricing confidence, ±20%
-  // band ≤ $300/mo swing) stays self-serve approvable, but the customer sees the
-  // price as a "$X–$Y/mo, confirmed on site" range instead of a false-precision
-  // number. The WIDE case is already force-converted to a site-confirmation quote
-  // (resolveEstimateQuoteRequirement), so gate the range marker on !forceSiteQuote.
-  // PriceCard derives the band from the displayed price using this pct, so the
-  // range tracks whatever cadence the customer selects (no stale fixed bounds).
-  const lowConfidenceRange = commercialLowConfidenceRange(estData);
-  const markLowConfidenceRange = lowConfidenceRange.hasLowConfidence && !lowConfidenceRange.forceSiteQuote;
-  // The band applies only to the LOW-confidence SHARE of the price so a mixed
-  // estimate (LOW $400 + exact MEDIUM $500) shows $820–$980, not a blanket ±20%
-  // on the whole total. PriceCard bands cadencePrice × fraction × pct, which
-  // stays exact for a single all-LOW line (fraction 1) and cadence-proportional.
-  const lowConfidenceFraction = lowConfidenceRange.exactMonthly > 0
-    ? Math.min(1, lowConfidenceRange.lowConfidenceMonthly / lowConfidenceRange.exactMonthly)
-    : 1;
-  const withRangeMarker = (frequency) => (
-    markLowConfidenceRange && frequency && frequency.quoteRequired !== true
-      ? { ...frequency, lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT, lowConfidenceFraction }
-      : frequency
+// A NARROW low-confidence commercial estimate (LOW pricing confidence, ±20% band
+// ≤ $300/mo swing) stays self-serve approvable, but the customer sees the price
+// as a "$X–$Y/mo, confirmed on site" range instead of a false-precision number.
+// The band applies to a section's OWN low-confidence share — 1 for a single
+// all-LOW line, a fraction when a card mixes LOW + exact lines — so single,
+// split, and bundle cards all range correctly. PriceCard derives the band from
+// the displayed price × fraction × pct, so it tracks whatever cadence is picked.
+function sectionLowConfidenceFraction(section, lines) {
+  const memberKeys = new Set(
+    Array.isArray(section?.memberKeys) && section.memberKeys.length ? section.memberKeys : [section?.key]
   );
+  let low = 0;
+  let exact = 0;
+  for (const line of lines) {
+    if (!memberKeys.has(recurringServiceKey({ service: line.service }))) continue;
+    exact += line.monthly;
+    if (line.isLow) low += line.monthly;
+  }
+  return (low > 0 && exact > 0) ? Math.min(1, low / exact) : 0;
+}
+
+function stampLowConfidenceRangeOnServices(services, lines) {
+  if (!Array.isArray(services) || !lines.length) return services;
+  return services.map((section) => {
+    if (!section?.isRecurring) return section;
+    const fraction = sectionLowConfidenceFraction(section, lines);
+    if (!(fraction > 0)) return section;
+    return {
+      ...section,
+      frequencies: (Array.isArray(section.frequencies) ? section.frequencies : []).map((frequency) => (
+        frequency && frequency.quoteRequired !== true
+          ? { ...frequency, lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT, lowConfidenceFraction: fraction }
+          : frequency
+      )),
+    };
+  });
+}
+
+// The combined "Recurring total" card (shown when >1 recurring service) ranges
+// on the AGGREGATE low-confidence share across all its services.
+function withCombinedLowConfidenceRange(combined, range) {
+  if (!combined || !range || !range.hasLowConfidence || range.forceSiteQuote) return combined;
+  const fraction = range.exactMonthly > 0 ? Math.min(1, range.lowConfidenceMonthly / range.exactMonthly) : 1;
+  if (!(fraction > 0)) return combined;
+  return { ...combined, lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT, lowConfidenceFraction: fraction };
+}
+
+function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) {
   const contractPayload = Array.isArray(payload.frequencies)
-    ? { ...payload, frequencies: payload.frequencies.map((frequency) => withRangeMarker(normalizePricingFrequencyTotals(frequency))) }
+    ? { ...payload, frequencies: payload.frequencies.map(normalizePricingFrequencyTotals) }
     : payload;
-  const services = buildPricingServices(contractPayload, estimate, estData);
-  const combinedRecurring = buildCombinedRecurring(contractPayload, estimate, estData, services);
+  // The WIDE case is force-converted to a site-confirmation quote upstream
+  // (resolveEstimateQuoteRequirement), so gate the range on !forceSiteQuote.
+  const lowConfidenceRange = commercialLowConfidenceRange(estData);
+  const lowConfidenceLines = lowConfidenceRange.hasLowConfidence && !lowConfidenceRange.forceSiteQuote
+    ? commercialLowConfidenceServiceLines(estData)
+    : [];
+  const services = stampLowConfidenceRangeOnServices(
+    buildPricingServices(contractPayload, estimate, estData),
+    lowConfidenceLines,
+  );
+  const combinedRecurring = withCombinedLowConfidenceRange(
+    buildCombinedRecurring(contractPayload, estimate, estData, services),
+    lowConfidenceRange,
+  );
   const serviceCategories = services.map((section) => (
     section.key === 'bundle' ? 'bundle' : (categoryForRecurringServiceKey(section.key) || section.key)
   ));
