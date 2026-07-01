@@ -3406,19 +3406,24 @@ function EstimateToolView() {
                           ]}
                         />
                       </Field>
-                      <Field label="Scope (liability)">
-                        <Select
-                          k="termiteScope"
-                          options={[
-                            { value: "inspection_only", label: "Inspection only" },
-                            { value: "monitoring_only", label: "Monitoring only" },
-                            { value: "bait_monitoring_no_warranty", label: "Bait monitoring (no warranty)" },
-                            { value: "bond_manual", label: "Bond — manual quote" },
-                            { value: "warranty_manual", label: "Warranty — manual quote" },
-                            { value: "initial_install_manual", label: "Initial install — manual quote" },
-                          ]}
-                        />
-                      </Field>
+                      {/* Scope-split is commercial-only — the residential termite
+                          pricer ignores termiteScope, so hide it there to avoid a
+                          "Bond — manual quote" label that still auto-prices. */}
+                      {isCommercialEstimateInput(form) && (
+                        <Field label="Scope (liability)">
+                          <Select
+                            k="termiteScope"
+                            options={[
+                              { value: "inspection_only", label: "Inspection only" },
+                              { value: "monitoring_only", label: "Monitoring only" },
+                              { value: "bait_monitoring_no_warranty", label: "Bait monitoring (no warranty)" },
+                              { value: "bond_manual", label: "Bond — manual quote" },
+                              { value: "warranty_manual", label: "Warranty — manual quote" },
+                              { value: "initial_install_manual", label: "Initial install — manual quote" },
+                            ]}
+                          />
+                        </Field>
+                      )}
                     </>
                   )}
                   {form.svcTrenching && (
