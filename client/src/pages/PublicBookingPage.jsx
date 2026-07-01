@@ -280,6 +280,11 @@ export default function PublicBookingPage() {
           capture_token: captureTokenRef.current,
           session_id: sessionIdRef.current,
           capture_client_ts: Date.now(),
+          // Quote→book handoff — persisted (HMAC-verified server-side) on the
+          // intent so the recovery link re-carries it and a booking recovered
+          // from the SMS/email still prices from this quote (pay-at-visit).
+          pricing_estimate_id: estimateIdParam || undefined,
+          estimate_token: estimateTokenParam || undefined,
           source,
           service_id: service.id,
           service_type: quotedServiceLabel || service.label,

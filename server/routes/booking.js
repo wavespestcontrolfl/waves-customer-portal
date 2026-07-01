@@ -1453,7 +1453,20 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // Client capture time — used to reject a stale (out-of-order / slow keepalive)
     // capture from overwriting a newer one for the same session.
     const clientTs = Number.isFinite(Number(b.capture_client_ts)) ? Math.floor(Number(b.capture_client_ts)) : null;
+    // Quote→book handoff: persist the pricing estimate reference so the recovery
+    // /book link re-carries it and a recovered booking still prices from that
+    // exact quote (pay-at-visit). VERIFY the HMAC before storing — this is a
+    // public endpoint and recovery re-sends whatever is stored here, so never
+    // persist an id the caller couldn't prove was minted by us. Absent or
+    // unverified → nulls, so a fresh capture without the params clears a stale
+    // handoff instead of letting it ride along with a newer non-quote intent.
+    const { verifyEstimateHandoffToken: verifyHandoff } = require('../utils/estimate-handoff-token');
+    const handoffId = str(b.pricing_estimate_id, 80);
+    const handoffToken = str(b.estimate_token, 200);
+    const handoffVerified = !!(handoffId && handoffToken && verifyHandoff(handoffId, handoffToken));
     const row = {
+      pricing_estimate_id: handoffVerified ? handoffId : null,
+      pricing_estimate_token: handoffVerified ? handoffToken : null,
       session_id: sessionId,
       capture_client_ts: clientTs,
       phone: phoneDigits,

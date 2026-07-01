@@ -217,6 +217,19 @@ async function bookingUrlFor(intent) {
   let url = BOOKING_URL;
   const sid = String(intent.service_id || '').trim();
   if (/^[a-z_]{1,40}$/.test(sid)) url += `&service=${encodeURIComponent(sid)}`;
+  // Quote→book handoff: re-carry the pricing estimate reference captured with
+  // the intent (HMAC-verified at capture), so a booking made from the recovery
+  // link still prices from that exact quote (pay-at-visit) instead of landing
+  // unpriced. Re-check the token is STILL valid before sending — an expired one
+  // would just be ignored at confirm, but the link shouldn't carry a dead
+  // promise. /booking/confirm re-verifies everything fail-closed (token, draft
+  // status, eligibility, customer match) — this only restores the reference.
+  const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+  if (intent.pricing_estimate_id && intent.pricing_estimate_token
+      && verifyEstimateHandoffToken(intent.pricing_estimate_id, intent.pricing_estimate_token)) {
+    url += `&estimate_id=${encodeURIComponent(intent.pricing_estimate_id)}`
+      + `&estimate_token=${encodeURIComponent(intent.pricing_estimate_token)}`;
+  }
   return shortenOrPassthrough(url, {
     kind: 'booking', entityType: 'booking_intents', entityId: intent.id, customerId: intent.customer_id || null,
   }).catch(() => url);
@@ -410,5 +423,5 @@ async function checkAbandoned(now = new Date()) {
 
 module.exports = {
   checkAbandoned,
-  _internals: { isQuietHours, hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10 },
+  _internals: { isQuietHours, hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor },
 };

@@ -307,3 +307,54 @@ describe('runEmailStage (touch 2)', () => {
     ]);
   });
 });
+
+// Quote→book handoff through recovery: an intent captured with an HMAC-verified
+// pricing estimate reference must re-carry it on the recovery /book link (so the
+// recovered booking still prices pay-at-visit); anything unverified/expired/absent
+// must produce the plain link. Real token util (no mock) — mint with a test secret.
+describe('bookingUrlFor — quote→book handoff re-carry', () => {
+  const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+  const EST_ID = '7b6a4a1e-9d0f-4d61-8c0e-2f4f4a9b1c11';
+  let prevSecret;
+  beforeAll(() => {
+    prevSecret = process.env.ESTIMATE_HANDOFF_SECRET;
+    process.env.ESTIMATE_HANDOFF_SECRET = 'test-handoff-secret';
+  });
+  afterAll(() => {
+    if (prevSecret === undefined) delete process.env.ESTIMATE_HANDOFF_SECRET;
+    else process.env.ESTIMATE_HANDOFF_SECRET = prevSecret;
+  });
+
+  test('valid stored handoff → link carries estimate_id + estimate_token', async () => {
+    const token = mintEstimateHandoffToken(EST_ID);
+    const url = await _internals.bookingUrlFor(intent({
+      pricing_estimate_id: EST_ID, pricing_estimate_token: token,
+    }));
+    expect(url).toContain(`estimate_id=${EST_ID}`);
+    expect(url).toContain(`estimate_token=${encodeURIComponent(token)}`);
+    expect(url).toContain('service=pest_control');
+  });
+
+  test('no stored handoff → plain recovery link', async () => {
+    const url = await _internals.bookingUrlFor(intent());
+    expect(url).not.toContain('estimate_id=');
+    expect(url).not.toContain('estimate_token=');
+  });
+
+  test('EXPIRED token → plain link (never send a dead pricing promise)', async () => {
+    // Minted 15 days ago — past the 14-day TTL.
+    const expired = mintEstimateHandoffToken(EST_ID, Math.floor(Date.now() / 1000) - 15 * 86400);
+    const url = await _internals.bookingUrlFor(intent({
+      pricing_estimate_id: EST_ID, pricing_estimate_token: expired,
+    }));
+    expect(url).not.toContain('estimate_id=');
+  });
+
+  test('token bound to a DIFFERENT estimate id → plain link (fail closed)', async () => {
+    const otherToken = mintEstimateHandoffToken('00000000-0000-4000-8000-000000000000');
+    const url = await _internals.bookingUrlFor(intent({
+      pricing_estimate_id: EST_ID, pricing_estimate_token: otherToken,
+    }));
+    expect(url).not.toContain('estimate_id=');
+  });
+});
