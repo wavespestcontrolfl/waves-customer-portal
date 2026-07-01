@@ -11502,13 +11502,23 @@ function stampLowConfidenceRangeOnServices(services, lines) {
 // The combined "Recurring total" card (shown when >1 recurring service) ranges
 // on the AGGREGATE low-confidence share across all its services. Denominator is
 // the full displayed recurring subtotal (which may include exact non-commercial
-// add-ons), so only the LOW commercial dollars carry the band.
+// add-ons), so only the LOW commercial dollars carry the band. The card is
+// cadence-SELECTABLE, and the uncertain dollars are FIXED while the exact part
+// moves with the selection — so ship the raw LOW monthly (lowConfidenceMonthly)
+// and let the client recompute the fraction against whichever combined cadence
+// the customer selects; the default-subtotal fraction stays as a fallback.
 function withCombinedLowConfidenceRange(combined, range) {
   if (!combined || !range || !range.hasLowConfidence || range.forceSiteQuote) return combined;
+  const lowMonthly = Math.round((Number(range.lowConfidenceMonthly) || 0) * 100) / 100;
   const displayedMonthly = Number(combined.monthlySubtotal) || 0;
-  const fraction = displayedMonthly > 0 ? Math.min(1, range.lowConfidenceMonthly / displayedMonthly) : 1;
+  const fraction = displayedMonthly > 0 ? Math.min(1, lowMonthly / displayedMonthly) : 1;
   if (!(fraction > 0)) return combined;
-  return { ...combined, lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT, lowConfidenceFraction: fraction };
+  return {
+    ...combined,
+    lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT,
+    lowConfidenceFraction: fraction,
+    lowConfidenceMonthly: lowMonthly,
+  };
 }
 
 function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) {
@@ -11598,7 +11608,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   };
 }
 
-function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null } = {}) {
+function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, siteConfirmationHold = false } = {}) {
   if (quoteRequirement.quoteRequired) {
     return {
       mode: 'quote_required',
@@ -11612,6 +11622,19 @@ function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppoin
       ctaLabel: 'Confirm invoice option',
       reason: null,
       appointment: shapeLinkedAppointment(existingAppointment),
+    };
+  }
+  // A held (site-confirmation) commercial estimate has no self-servable slots —
+  // the slots endpoints return an empty commercial-manual list — so a slot-pick
+  // acceptance would show the price range with no way to approve it. Accept
+  // WITHOUT a slot: the team schedules the visit after approval (the accept
+  // handler already supports slotless accepts; the converter skips
+  // auto-scheduling for these).
+  if (siteConfirmationHold) {
+    return {
+      mode: 'commercial_site_confirmation',
+      ctaLabel: 'Approve estimate',
+      reason: null,
     };
   }
   return {
@@ -12140,6 +12163,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
     const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence);
+    // Narrow low-confidence commercial recurring estimate → its first invoice is
+    // held for on-site price confirmation at accept (no immediate invoice).
+    // Computed here (before the acceptance contract) so a held estimate with no
+    // linked appointment gets a no-slot accept mode — the slots endpoints return
+    // an empty commercial-manual list for these, so a slot-pick acceptance would
+    // leave the customer with a visible range but no way to approve it. Matches
+    // the accept-handler hold predicate.
+    const siteConfirmationHold = estimate.bill_by_invoice === true
+      && defaultServiceMode !== 'one_time'
+      && (() => {
+        const lc = commercialLowConfidenceRange(estimateDataForIntelligence);
+        return lc.hasLowConfidence && !lc.forceSiteQuote;
+      })();
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
@@ -12148,7 +12184,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       recurringServicesForIntelligence,
       pricingBundle?.oneTimeBreakdown?.items || []
     );
-    const acceptance = buildEstimateAcceptanceContract({ quoteRequirement, existingAppointment: linkedAppointment });
+    const acceptance = buildEstimateAcceptanceContract({ quoteRequirement, existingAppointment: linkedAppointment, siteConfirmationHold });
     const intelligence = buildWaveGuardIntelligencePayload(
       {
         ...estimate,
@@ -12213,21 +12249,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       paymentMethodPreference: null,
     });
 
-    // Narrow low-confidence commercial recurring estimate → its first invoice is
-    // held for on-site price confirmation at accept (no immediate invoice). Expose
-    // it so the invoice-mode accept CTA drops the "send invoice / due immediately"
-    // promise for these. Matches the accept-handler hold predicate.
-    const siteConfirmationHold = estimate.bill_by_invoice === true
-      && defaultServiceMode !== 'one_time'
-      && (() => {
-        const lc = commercialLowConfidenceRange(depositEstData);
-        return lc.hasLowConfidence && !lc.forceSiteQuote;
-      })();
     // A held estimate collects NO money at accept (the invoice is issued after the
     // on-site confirmation), so the confirm flow must not require/mint a deposit
     // either — matches the accept-handler + /deposit-intent exemptions. Overriding
-    // here keeps the "No payment now" CTA honest.
+    // here keeps the "No payment now" CTA honest. The hold only covers the
+    // RECURRING accept path (the hold predicate and both server exemptions are
+    // !oneTime), so preserve the pre-override requirement as requiredForOneTime:
+    // a customer who switches to one-time still owes that mode's deposit, and the
+    // client must keep consulting /deposit-intent (which re-resolves per mode)
+    // rather than skipping straight to an accept that 402s with no modal path.
+    // `required` is mode-independent in the resolver (oneTime only picks the
+    // amount class), so the pre-override value IS the one-time requirement.
     if (siteConfirmationHold) {
+      depositPolicy.requiredForOneTime = depositPolicy.required;
       depositPolicy.required = false;
       depositPolicy.slotRequired = false;
       depositPolicy.exemptReason = depositPolicy.exemptReason || 'commercial_manual_billing';
@@ -12246,6 +12280,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       depositPolicy: {
         enforced: depositPolicy.enforced,
         required: depositPolicy.required,
+        // Site-confirmation hold only: the recurring path owes nothing, but a
+        // one-time mode switch still owes its deposit class (see the override
+        // above). Absent/false everywhere else.
+        requiredForOneTime: depositPolicy.requiredForOneTime === true,
         slotRequired: depositPolicy.slotRequired,
         exemptReason: depositPolicy.exemptReason || null,
         amount: depositPolicy.amount || null,

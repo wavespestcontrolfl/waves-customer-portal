@@ -11,7 +11,7 @@ const {
   commercialLowConfidenceRange,
   commercialLowConfidenceRequiresSiteQuote,
 } = require('../services/estimate-delivery-options');
-const { resolveEstimateQuoteRequirement, renderPage, attachPublicPricingContract, buildAcceptSuccessPayload } = require('../routes/estimate-public');
+const { resolveEstimateQuoteRequirement, renderPage, attachPublicPricingContract, buildAcceptSuccessPayload, buildEstimateAcceptanceContract } = require('../routes/estimate-public');
 const { generateEstimate } = require('../services/pricing-engine');
 
 const recurring = (services) => ({ result: { recurring: { services } } });
@@ -147,9 +147,13 @@ describe('attachPublicPricingContract — narrow low-confidence range marker (Re
     const section = contract.services.find((s) => s.isRecurring);
     expect(section.frequencies[0].lowConfidenceRangePct).toBe(0.2);
     expect(section.frequencies[0].lowConfidenceFraction).toBeCloseTo(400 / 650, 5);
-    // The combined "Recurring total" card ranges on the same aggregate share.
+    // The combined "Recurring total" card ranges on the same aggregate share —
+    // AND ships the raw LOW dollars so the client can recompute the fraction
+    // against whichever combined cadence the customer selects (the uncertain
+    // dollars are fixed; the exact part moves with the selection).
     expect(contract.combinedRecurring.lowConfidenceRangePct).toBe(0.2);
     expect(contract.combinedRecurring.lowConfidenceFraction).toBeCloseTo(400 / 650, 5);
+    expect(contract.combinedRecurring.lowConfidenceMonthly).toBe(400);
   });
 
   test('exact non-commercial add-on stays OUT of the band (denominator = displayed total)', () => {
@@ -195,6 +199,28 @@ describe('attachPublicPricingContract — narrow low-confidence range marker (Re
     const section = contract.services.find((s) => s.isRecurring);
     expect(section.frequencies[0].lowConfidenceRangePct).toBeUndefined();
     expect(contract.combinedRecurring.lowConfidenceRangePct).toBeUndefined();
+  });
+});
+
+describe('buildEstimateAcceptanceContract — held estimates accept without a slot', () => {
+  // The slots endpoints return an empty commercial-manual list for these, so a
+  // slot-pick acceptance mode would leave the customer with a visible range but
+  // no way to approve it.
+  test('site-confirmation hold + no linked appointment → no-slot accept mode', () => {
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: { quoteRequired: false }, siteConfirmationHold: true }))
+      .toMatchObject({ mode: 'commercial_site_confirmation' });
+  });
+  test('an existing linked appointment still wins over the hold (its flow already accepts)', () => {
+    const appt = { id: 'ss1', scheduled_date: '2026-07-10', status: 'pending' };
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: {}, existingAppointment: appt, siteConfirmationHold: true }).mode)
+      .toBe('existing_appointment');
+  });
+  test('quote-required still wins over the hold (not self-serve at all)', () => {
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: { quoteRequired: true, reason: 'x' }, siteConfirmationHold: true }).mode)
+      .toBe('quote_required');
+  });
+  test('no hold → standard slot pick (unchanged)', () => {
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: {} }).mode).toBe('standard_slot_pick');
   });
 });
 
