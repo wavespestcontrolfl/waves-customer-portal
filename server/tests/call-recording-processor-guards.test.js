@@ -1169,3 +1169,21 @@ describe('DNI-forwarding: staff forward / CSR numbers are internal, never keyed'
       .toBe(EXTERNAL);
   });
 });
+
+describe('referrerNameFromExtracted (word-of-mouth referral detection)', () => {
+  const { referrerNameFromExtracted } = CallRecordingProcessor._test;
+
+  test('returns the referrer name on an explicit referral', () => {
+    expect(referrerNameFromExtracted({ referred_by: 'Jane Miller' })).toBe('Jane Miller');
+    expect(referrerNameFromExtracted({ referred_by: '  unnamed ' })).toBe('unnamed');
+  });
+
+  test('fails closed on empty / placeholder / non-string values', () => {
+    for (const v of [null, undefined, '', 'null', 'None', 'n/a', 'NO', '   ',
+      'unknown', 'Not mentioned', 'not specified', 'undefined', 'nobody',
+      false, true, 0, 42, {}, []]) {
+      expect(referrerNameFromExtracted({ referred_by: v })).toBe('');
+    }
+    expect(referrerNameFromExtracted({})).toBe('');
+  });
+});
