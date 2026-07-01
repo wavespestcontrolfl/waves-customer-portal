@@ -9,6 +9,7 @@ const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
+const { processCancellationRequest } = require('../services/cancellation-processor');
 
 const VALID_CATEGORIES = ['pest_issue', 'lawn_concern', 'add_service', 'schedule_change', 'billing', 'cancellation', 'pause', 'upgrade', 'other'];
 const VALID_URGENCIES = ['routine', 'urgent'];
@@ -122,6 +123,25 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     const categoryLabel = category.replace(/_/g, ' ');
     const photoCount = photoData.length;
     const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
+    const isCancellation = category === 'cancellation';
+
+    // A cancellation request is auto-processed: pull the customer's upcoming
+    // visits off the calendar, stop any recurring series, and mark the account
+    // churned. Best-effort — run it before the admin alert so the notification
+    // can report what happened. The durable service_requests row and the alert
+    // itself remain even if this fails.
+    let cancellationResult = null;
+    if (isCancellation) {
+      try {
+        cancellationResult = await processCancellationRequest({
+          customerId: req.customer.id,
+          reason: `Portal cancellation request ${request.id}`,
+          requestId: request.id,
+        });
+      } catch (cancelErr) {
+        logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
+      }
+    }
 
     // Internal admin alert only. Service requests should surface in the admin
     // notification feed, not text the office number. The notification is now
@@ -130,16 +150,26 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     // the create-request validation above.
     try {
       const urgencyTag = validUrgency === 'urgent' ? '🚨 URGENT ' : '';
+      const title = isCancellation
+        ? `⚠️ Cancellation request from ${customerName}`
+        : `${urgencyTag}New service request from ${customerName}`;
+      const cancellationSummary = isCancellation
+        ? (cancellationResult
+            ? `\n\nAuto-processed: ${cancellationResult.cancelledCount} upcoming visit(s) pulled, ` +
+              `recurrence stopped, account ${cancellationResult.churned ? 'marked churned' : 'left as-is (already churned)'}.`
+            : '\n\n⚠️ Auto-processing did not complete — review the calendar/account manually.')
+        : '';
       const notif = await NotificationService.notifyAdmin(
         'service',
-        `${urgencyTag}New service request from ${customerName}`,
+        title,
         `Category: ${categoryLabel}\n` +
           `Subject: ${cleanSubject}` +
           (locationLabel ? `\nLocation: ${locationLabel}` : '') +
           (photoCount > 0 ? `\n${photoCount} photo(s) attached` : '') +
-          (cleanDescription ? `\n\n"${cleanDescription}"` : ''),
+          (cleanDescription ? `\n\n"${cleanDescription}"` : '') +
+          cancellationSummary,
         {
-          icon: validUrgency === 'urgent' ? '🚨' : '🏠',
+          icon: isCancellation ? '⚠️' : (validUrgency === 'urgent' ? '🚨' : '🏠'),
           link: `/admin/customers?customerId=${encodeURIComponent(req.customer.id)}`,
           metadata: {
             requestId: request.id,
@@ -147,6 +177,13 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
             category,
             urgency: validUrgency,
             photoCount,
+            ...(isCancellation
+              ? {
+                  autoProcessed: !!cancellationResult,
+                  visitsPulled: cancellationResult ? cancellationResult.cancelledCount : 0,
+                  churned: cancellationResult ? cancellationResult.churned : false,
+                }
+              : {}),
           },
         }
       );
@@ -168,15 +205,23 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
       logger.error(`Failed to create admin notification for request ${request.id}: ${notifErr.message}`);
     }
 
-    // Send customer confirmation SMS
+    // Send customer confirmation SMS. A cancellation is auto-processed, so it
+    // gets a dedicated template — the generic copy ("we'll text you when it has
+    // been assigned to a technician") is wrong for a cancellation.
     const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
     try {
-      const body = await renderRequiredSmsTemplate('service_request_confirmation', {
-        first_name: req.customer.first_name || 'there',
-        category: categoryLabel,
-        response_time: responseTime,
-      }, {
-        workflow: 'service_request_confirmation',
+      const smsTemplateKey = isCancellation
+        ? 'service_cancellation_confirmation'
+        : 'service_request_confirmation';
+      const smsVars = isCancellation
+        ? { first_name: req.customer.first_name || 'there' }
+        : {
+            first_name: req.customer.first_name || 'there',
+            category: categoryLabel,
+            response_time: responseTime,
+          };
+      const body = await renderRequiredSmsTemplate(smsTemplateKey, smsVars, {
+        workflow: smsTemplateKey,
         entity_type: 'service_request',
         entity_id: request.id,
       });
@@ -190,7 +235,7 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
         identityTrustLevel: 'authenticated_portal',
         entryPoint: 'customer_service_request',
         metadata: {
-          original_message_type: 'service_request_confirmation',
+          original_message_type: smsTemplateKey,
           service_request_id: request.id,
           urgency: validUrgency,
         },
