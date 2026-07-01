@@ -422,6 +422,18 @@ const CONTACT_FIELDS = new Set([
 const SEND_FIELDS = new Set(["scheduleSend", "scheduledAt"]);
 const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
 const ONE_TIME_PEST_CHOICE = { floor: 199, multiplier: 2.2 };
+// The four rodent-guarantee eligibility confirmations. They are per-job
+// affirmations (work actually completed for THIS property), so they must reset
+// on a fresh estimate / customer-or-address change / when the guarantee toggle
+// is turned off — and any change must invalidate a generated estimate, since
+// all four gate whether RODENT_GUARANTEE prices at all.
+const RODENT_GUARANTEE_ELIGIBILITY_KEYS = [
+  "rgTrappingCompleted",
+  "rgExclusionCompleted",
+  "rgSanitationBaseline",
+  "rgNoActivityAfterFinalCheck",
+];
+
 const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   "dethatchingCleanupLevel",
   "dethatchingDebrisRemovalIncluded",
@@ -439,13 +451,7 @@ const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   "commercialRiskType",
   "treeShrubDensity",
   "mosquitoPressure",
-  // Rodent guarantee eligibility: these four flags gate whether RODENT_GUARANTEE
-  // prices at all (all four required), so toggling one after generating must
-  // invalidate the estimate (else Save/Send persists a stale guarantee line).
-  "rgTrappingCompleted",
-  "rgExclusionCompleted",
-  "rgSanitationBaseline",
-  "rgNoActivityAfterFinalCheck",
+  ...RODENT_GUARANTEE_ELIGIBILITY_KEYS,
 ]);
 
 const MOSQUITO_PROTOCOL_STEPS = [
@@ -2122,7 +2128,12 @@ export default function EstimateToolViewV2({
           next[key] = value;
         }
       }
-      if (prefillIdentityChanged) next.measuredTurfSf = "";
+      if (prefillIdentityChanged) {
+        next.measuredTurfSf = "";
+        // A different customer/address means last property's guarantee
+        // confirmations no longer apply — force a fresh re-confirmation.
+        for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
+      }
       return next;
     });
   }, [
@@ -2370,6 +2381,11 @@ export default function EstimateToolViewV2({
       const next = { ...f, [key]: !f[key] };
       if (key === "svcFlea" && f.svcFlea) {
         next.svcFleaExterior = false;
+      }
+      // Turning the guarantee off drops the per-job eligibility confirmations so
+      // they can't be silently reused if it's re-enabled for a different scope.
+      if (key === "svcRodentGuarantee" && f.svcRodentGuarantee) {
+        for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
       }
       if (key === "svcInjection" && !f.svcInjection && String(f.palmTreatmentCount || "").trim() === "") {
         next.palmTreatmentCount = f.palmCount || "";
@@ -3780,6 +3796,8 @@ export default function EstimateToolViewV2({
       customerEmail: "",
       leadServiceInterest: "",
       _termiteFootprintAuto: false,
+      // Guarantee eligibility is per-job; the next property must re-confirm.
+      ...Object.fromEntries(RODENT_GUARANTEE_ELIGIBILITY_KEYS.map((k) => [k, false])),
     }));
     setEstimate(null);
     setSavedId(null);
