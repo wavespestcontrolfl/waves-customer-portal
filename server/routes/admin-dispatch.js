@@ -4082,9 +4082,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // payer-billed visit is owed by the payer regardless of the homeowner's
     // prepay. Reuse the canonical coverage check (handles payment-pending-but-
     // paid, renewal lapses, and refund/void exclusions).
+    // A Bill-To invoice already minted for this visit is owed by the PAYER
+    // regardless of the homeowner's prepay — and the invoice ROW can carry
+    // payer_id even when the live resolveForInvoice (visitIsPayerBilled) has
+    // since fallen back to self-pay / the payer config changed. Treat either
+    // signal as payer-billed so we never mark the visit covered or void an AP
+    // invoice.
+    const existingInvoicePayerBilled = !!(invoice || existingCompletionInvoice)?.payer_id;
     if (shouldConsultAnnualPrepayCoverage({
       alreadyStampedPrepaid: prepaidCovered,
-      visitIsPayerBilled,
+      visitIsPayerBilled: visitIsPayerBilled || existingInvoicePayerBilled,
       hasVisitPrice,
       invoiceAmount,
     })) {
@@ -4120,7 +4127,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       if (annualPrepayConfirmed) {
         const dupInvoice = invoice || existingCompletionInvoice;
         const dupStatus = String(dupInvoice?.status || '').toLowerCase();
-        if (dupInvoice?.id && !['paid', 'prepaid', 'void'].includes(dupStatus)) {
+        // Never void a payer-billed (Bill-To) invoice — the payer owes it
+        // regardless of the homeowner's prepay (belt-and-suspenders; the
+        // shouldConsult guard above already excludes this via existingInvoicePayerBilled).
+        if (dupInvoice?.id && !dupInvoice.payer_id && !['paid', 'prepaid', 'void'].includes(dupStatus)) {
           try {
             // Use InvoiceService.voidInvoice — NOT a raw status='void' — so the
             // live PaymentIntent is cancelled first, applied credit is restored,
