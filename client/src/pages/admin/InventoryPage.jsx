@@ -932,6 +932,7 @@ function PriceSyncTab({ showToast }) {
   const [loginDiscoveryLimit, setLoginDiscoveryLimit] = useState(50);
   const [loginDiscoveryQueueing, setLoginDiscoveryQueueing] = useState(false);
   const [loginDiscoveryResult, setLoginDiscoveryResult] = useState(null);
+  const [autoMapId, setAutoMapId] = useState(null);
   const showToastRef = useRef(showToast);
 
   useEffect(() => {
@@ -999,6 +1000,22 @@ function PriceSyncTab({ showToast }) {
       await load();
     } catch (e) {
       showToast?.(`Import failed: ${e.message}`);
+    }
+  };
+
+  const autoMapVendor = async (vendorId) => {
+    setAutoMapId(vendorId);
+    try {
+      const result = await adminFetch("/admin/inventory/price-sync/auto-map", {
+        method: "POST",
+        body: JSON.stringify({ vendorId, limit: 8 }),
+      });
+      showToast?.(result.message || `Auto-mapped ${result.mapped || 0} products`);
+      await load();
+    } catch (e) {
+      showToast?.(`Auto-map failed: ${e.message}`);
+    } finally {
+      setAutoMapId(null);
     }
   };
 
@@ -1172,7 +1189,27 @@ function PriceSyncTab({ showToast }) {
                   <td style={tdS}>{vendor.currentPrices}</td>
                   <td style={tdS}>{vendor.bestPrices}</td>
                   <td style={tdS}>{vendor.pendingApprovals}</td>
-                  <td style={{ ...tdS, color: D.muted }}>{vendor.nextAction}</td>
+                  <td style={{ ...tdS, color: D.muted }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span>{vendor.nextAction}</span>
+                      {(vendor.nextAction === "Needs mapping" || vendor.nextAction === "Verify mappings") && (
+                        <button
+                          onClick={() => autoMapVendor(vendor.id)}
+                          disabled={autoMapId === vendor.id}
+                          title="AI-propose vendor SKUs/URLs for this vendor's unmapped products (writes unverified — review before pricing)"
+                          style={{
+                            ...sBtn(D.teal, D.white),
+                            padding: "4px 10px",
+                            fontSize: 11,
+                            opacity: autoMapId === vendor.id ? 0.6 : 1,
+                            cursor: autoMapId === vendor.id ? "default" : "pointer",
+                          }}
+                        >
+                          {autoMapId === vendor.id ? "Mapping…" : "Auto-map"}
+                        </button>
+                      )}
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
