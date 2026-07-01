@@ -117,7 +117,11 @@ const SERVICE_MAP = {
 
 const NAME_TO_KEY = [
   [/tree.*shrub/i, 'tree_shrub'],
-  [/lawn/i, 'lawn_care'],
+  // "turf": commercial lawn persists/displays as "Commercial Turf Treatment
+  // Program". Before the rename it read "Commercial Lawn Treatment" and matched
+  // here as lawn_care; keep that mapping so the audit doesn't flag a false
+  // "Missing COGS" on the renamed line.
+  [/lawn|turf/i, 'lawn_care'],
   [/mosquito/i, 'mosquito'],
   [/termite|bait station/i, 'termite_bait'],
   [/rodent.*bait/i, 'rodent_bait'],
@@ -555,4 +559,7 @@ module.exports = {
   getLatestEstimatePricingAuditSnapshot,
   saveEstimatePricingAuditSnapshot,
   summarizePricingRisk,
+  // Exported for regression tests (turf must map to lawn_care, not fall through
+  // to an unmapped key that trips a false "Missing COGS" warning).
+  keyFromName,
 };

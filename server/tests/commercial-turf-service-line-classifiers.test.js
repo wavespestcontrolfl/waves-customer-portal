@@ -8,6 +8,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
 const { classifyServiceLine: classifyRevenueRoute } = require('../routes/admin-revenue');
 const { classifyServiceLine: classifyRevenueTool } = require('../services/intelligence-bar/revenue-tools');
+const { keyFromName } = require('../services/estimate-pricing-audit');
 
 const TURF = 'Commercial Turf Treatment Program';
 
@@ -24,5 +25,15 @@ describe('revenue service-line classifiers recognize commercial turf as Lawn Car
     expect(classifyRevenueTool(TURF)).toBe('Lawn Care');
     expect(classifyRevenueTool('Commercial Lawn Treatment')).toBe('Lawn Care');
     expect(classifyRevenueTool('Quarterly Pest Control')).toBe('Pest Control');
+  });
+
+  test('estimate pricing-audit keyFromName: turf -> lawn_care (no false "Missing COGS")', () => {
+    // Before the rename "Commercial Lawn Treatment" matched /lawn/i -> lawn_care;
+    // the turf label must resolve the same way rather than fall through to an
+    // unmapped commercial_turf_treatment_program key.
+    expect(keyFromName(TURF)).toBe('lawn_care');
+    expect(keyFromName('Commercial Lawn Treatment')).toBe('lawn_care');
+    // Sanity: a non-lawn line is unaffected.
+    expect(keyFromName('Quarterly Pest Control')).toBe('pest_control');
   });
 });
