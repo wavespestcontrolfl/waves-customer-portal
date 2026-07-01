@@ -24,30 +24,28 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 // paid flag, so inbound CALLS bucket into the SAME channels as web-form leads
 // (which write these keys directly). Without this, an organic call — e.g. someone
 // calling the tracking number on a spoke site — creates a lead but never a funnel
-// row, so whole organic channels (spoke domains, GBP) are invisible to the
-// LTV:CAC / "where to put ad dollars" surfaces even though they drive real
+// row, so whole organic channels (spoke domains, the hub city pages, GBP) are
+// invisible to the LTV:CAC / "where to put ad dollars" surfaces even though they drive real
 // business. Paid tracking numbers stay paid; organic marketing sources are unpaid
 // but still real acquisition channels the card should show.
 //
-// DELIBERATELY EXCLUDED (map to null ⇒ no funnel row):
-//   • main_site — the real location/city-page numbers (migration 20260628000001)
-//     are SHARED: one of them is the Google Ads call-bridge target
-//     (google-call-bridge.js), so a call there may be paid Google resolved LATER
-//     by the call-reporting bridge. Pre-attributing it organic (waves_website)
-//     would lock the row (recordCallPpcAttribution won't change an existing row's
-//     lead_source), so the bridge could never attach the paid campaign and paid
-//     Google calls would be permanently mis-reported as organic. Leave main_site
-//     to the bridge (paid) or unattributed (organic) — never pre-committed here.
-//   • Word-of-mouth / offline (referral, walk_in, vehicle, tollfree, direct
-//     field-observation) and marketplaces (Yelp/Nextdoor share source_type=
-//     marketplace with different channels) — not ad-dollar channels; their keys
-//     need an owner decision.
-// Spoke + GBP numbers are dedicated (never the bridge target), so they're safe to
-// attribute organic here.
+// IMPORTANT — main_site is the website city-page numbers (migration 20260628000001).
+// It's mapped here (waves_website), BUT one of those numbers is the Google Ads
+// call-bridge target and is SHARED with paid Google call-extension traffic. The
+// CALLER must skip that one number (google-call-bridge.isBridgeTargetNumber) —
+// pre-attributing it organic would lock the funnel row (recordCallPpcAttribution
+// won't change an existing row's lead_source) so the bridge could never mark the
+// call paid. The other (non-bridge) city-page numbers attribute organic normally.
+//
+// Word-of-mouth / offline sources (referral, walk_in, vehicle, tollfree, direct
+// field-observation) and marketplaces (Yelp/Nextdoor share source_type=marketplace
+// with different channels) are intentionally NOT mapped — they aren't ad-dollar
+// channels and their canonical keys need an owner decision. null ⇒ no funnel row.
 const SOURCE_TYPE_ATTRIBUTION = {
   google_ads:      { leadSource: 'google_ads',      isPaid: true },
   facebook:        { leadSource: 'facebook',        isPaid: true },
   spoke_site:      { leadSource: 'domain_website',  isPaid: false },
+  main_site:       { leadSource: 'waves_website',   isPaid: false },
   gbp:             { leadSource: 'google_business', isPaid: false },
   website_organic: { leadSource: 'google_business', isPaid: false },
 };

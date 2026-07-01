@@ -612,9 +612,25 @@ async function applyBridge(options = {}) {
   };
 }
 
+// Is this phone number the Google Ads call-bridge target line? That number is
+// SHARED — organic hub/city-page calls AND paid Google call-extension calls both
+// land on it, and the bridge resolves paid vs organic AFTER the fact. Callers use
+// this to avoid pre-attributing that one number (which would lock the funnel row
+// before the bridge can mark the call paid). Config-driven via mainLine() so it
+// tracks GOOGLE_ADS_BRIDGE_LOCATION_ID; returns false when the target isn't
+// configured (no bridge ⇒ nothing to protect).
+function isBridgeTargetNumber(phone) {
+  if (!phone) return false;
+  try {
+    const target = normalizePhone(mainLine().number);
+    return !!target && normalizePhone(phone) === target;
+  } catch { return false; }
+}
+
 module.exports = {
   previewBridge,
   applyBridge,
+  isBridgeTargetNumber,
   _private: {
     areaCode,
     buildMatches,

@@ -2534,18 +2534,20 @@ const CallRecordingProcessor = {
         // it in the PPC funnel (ad_service_attribution) so it buckets into the same
         // channel as a web-form lead from that source. attributionForSourceType maps
         // the lead_sources.source_type to the funnel channel key + paid flag: PAID
-        // numbers (google_ads/facebook) stay paid; ORGANIC marketing sources on
-        // DEDICATED numbers (spoke domains -> domain_website, GBP -> google_business)
-        // are is_paid=false so they show as their own no-spend channels instead of
-        // being invisible (an organic call otherwise makes a lead but no funnel row,
-        // hiding whole channels from the LTV:CAC surfaces). main_site + offline /
-        // word-of-mouth sources map to null and get no row: the main_site location
-        // numbers are SHARED with the Google Ads call-bridge target, so pre-writing
-        // an organic row there would block the bridge from later marking the call
-        // paid google_ads. campaign_id is null here (the Google call-reporting
-        // bridge backfills it later for paid Google).
-        // recordCallPpcAttribution dedupes by lead_id and respects first-touch (a
-        // web-attributed lead keeps its source), so this never double-counts.
+        // numbers (google_ads/facebook) stay paid; ORGANIC marketing sources (spoke
+        // domains -> domain_website, hub city pages -> waves_website, GBP ->
+        // google_business) are is_paid=false so they show as their own no-spend
+        // channels instead of being invisible (an organic call otherwise makes a
+        // lead but no funnel row, hiding whole channels from the LTV:CAC surfaces).
+        // Offline / word-of-mouth sources map to null and get no row. campaign_id is
+        // null here (the Google call-reporting bridge backfills it later for paid
+        // Google). recordCallPpcAttribution dedupes by lead_id and respects
+        // first-touch (a web-attributed lead keeps its source), so no double-count.
+        // EXCEPTION: the Google Ads call-bridge target number is SHARED (organic hub
+        // + paid Google call-extension), resolved by the bridge AFTER the fact — so
+        // never pre-attribute THAT one number (it would lock the row before the
+        // bridge can mark the call paid). Only that single number is suppressed; the
+        // other main_site city-page numbers attribute organic normally.
         // NOTE: stays gated on customerId, so a customer-less recovery lead gets no
         // ad_service_attribution row yet — the lead keeps its lead_source_id and is
         // attributed when it converts to a customer. Lead-only PPC attribution needs
@@ -2553,7 +2555,9 @@ const CallRecordingProcessor = {
         const callAttr = leadSourceRow
           ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
           : null;
-        if (leadId && customerId && callAttr) {
+        const isBridgeTarget = leadSourceRow
+          && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
+        if (leadId && customerId && callAttr && !isBridgeTarget) {
           require('./ads/call-attribution').recordCallPpcAttribution({
             customerId,
             leadId,
