@@ -4070,9 +4070,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // per-visit prepaid_amount stamp above was never written — terms created by
     // the two-step / self-accept flow carry no coverage config, so the snapshot
     // never stamps the visit, yet the customer HAS prepaid the year. Fold it
-    // INTO prepaidCovered so the whole completion path treats it exactly like
-    // any other prepaid visit: invoice suppressed (gate), "paid" SMS framing,
-    // no pay link / no in-person payment sheet, and the review still requested.
+    // INTO prepaidCovered so the SERVER completion path treats it like any other
+    // prepaid visit: invoice suppressed (gate), "paid" SMS framing, and no pay
+    // link / no in-person payment sheet — stopping the double-bill. (The tech
+    // CompletionPanel's willInvoice/review PREDICTION and settling any existing
+    // pre-minted invoice are NOT mirrored here — deferred to the coverage-config
+    // backfill, which stamps prepaid_amount and engages the fully-correct
+    // stamped-prepay machinery across every entry point.)
     // Scope (shouldConsultAnnualPrepayCoverage): only an UNPRICED, self-pay
     // membership visit with a positive monthly-rate amount — a priced extra is
     // NOT covered by the recurring prepay (avoids over-suppressing), and a

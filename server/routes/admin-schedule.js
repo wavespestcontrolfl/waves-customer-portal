@@ -1144,22 +1144,6 @@ router.get('/', async (req, res, next) => {
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
-    // Customers whose active annual-prepay term covers THIS schedule date —
-    // surfaced per service as annualPrepayCovered so the tech CompletionPanel
-    // predicts a report-only (no-invoice) completion and still requests a
-    // review, matching the server completion gate (which folds this into
-    // prepaidCovered). Computed for `date` (this endpoint is single-date scoped)
-    // so a past/future view matches the gate's svc.scheduled_date check.
-    // Best-effort: a lookup failure leaves the hint off (the authoritative,
-    // fail-closed money decision is made server-side at completion).
-    let annualPrepayCoveredCustomerIds = new Set();
-    try {
-      const { getActivelyCoveredCustomerIds } = require('../services/annual-prepay-renewals');
-      // onlyLegacyCoverage mirrors the completion gate: only legacy (no-config)
-      // terms lack per-visit stamps; configured terms stamp their capped rows.
-      annualPrepayCoveredCustomerIds = await getActivelyCoveredCustomerIds(date, undefined, { onlyLegacyCoverage: true });
-    } catch (e) { logger.warn(`[admin-schedule] annual-prepay coverage hint failed: ${e.message}`); }
-
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
@@ -1244,10 +1228,6 @@ router.get('/', async (req, res, next) => {
         linkedProject: projectCompletionContext.linkedProject || null,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
-        // Payer-billed visits are excluded — the payer still owes the AP invoice
-        // regardless of the homeowner's prepay, mirroring the completion gate's
-        // visitIsPayerBilled guard.
-        annualPrepayCovered: annualPrepayCoveredCustomerIds.has(String(s.customer_id)) && !s.payer_id,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
         address: [s.address_line1, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
