@@ -51,6 +51,44 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
     expect(screen.queryByText('$720–$1,080')).toBeNull();
   });
 
+  it('suppresses exact per-application treatment rows while ranging', () => {
+    render(
+      <PriceCard
+        frequency={{
+          key: 'monthly',
+          monthly: 400,
+          annual: 4800,
+          lowConfidenceRangePct: 0.2,
+          lowConfidenceFraction: 1,
+          perServiceTreatments: [
+            { service: 'commercial_lawn', label: 'Turf application', displayPrice: 1200, visitsPerYear: 4 },
+          ],
+        }}
+      />,
+    );
+
+    // Range shows; the exact per-application price must NOT leak.
+    expect(screen.getByText('$320–$480')).toBeInTheDocument();
+    expect(screen.queryByText('$1,200')).toBeNull();
+    expect(screen.queryByText(/per application/i)).toBeNull();
+  });
+
+  it('still renders per-application treatment rows when NOT ranging', () => {
+    render(
+      <PriceCard
+        frequency={{
+          key: 'monthly',
+          monthly: 400,
+          perServiceTreatments: [
+            { service: 'commercial_lawn', label: 'Turf application', displayPrice: 1200, visitsPerYear: 4 },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText('$1,200')).toBeInTheDocument();
+  });
+
   it('renders the exact price (no range) when the marker is absent', () => {
     render(<PriceCard frequency={{ key: 'monthly', monthly: 400, annual: 4800 }} />);
 

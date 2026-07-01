@@ -165,6 +165,27 @@ describe('attachPublicPricingContract — narrow low-confidence range marker (Re
     expect(contract.combinedRecurring.lowConfidenceFraction).toBeCloseTo(0.8, 5);
   });
 
+  test('fraction is per-frequency (low ÷ that cadence monthly) → same dollar band at every cadence', () => {
+    // Single commercial_lawn LOW $400. Two cadences with different displayed
+    // monthly totals get DIFFERENT fractions but the same ±$80 dollar band, so a
+    // selectable bundle never over/under-states the band when the cadence flips.
+    const est = { result: { recurring: { services: [
+      { service: 'commercial_lawn', name: 'Commercial Turf Treatment Program', pricingConfidence: 'LOW', mo: 400, annual: 4800 },
+    ] } } };
+    const contract = attachPublicPricingContract(
+      { frequencies: [{ key: 'monthly', monthly: 400 }, { key: 'plus_addon', monthly: 500 }] },
+      {},
+      est,
+    );
+    const freqs = contract.services.find((s) => s.isRecurring).frequencies;
+    const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
+    expect(byKey.monthly.lowConfidenceFraction).toBeCloseTo(1, 5);       // 400/400
+    expect(byKey.plus_addon.lowConfidenceFraction).toBeCloseTo(0.8, 5);  // 400/500
+    // band = monthly × fraction × pct → $80 at BOTH cadences (only the LOW $400).
+    expect(byKey.monthly.monthly * byKey.monthly.lowConfidenceFraction * 0.2).toBeCloseTo(80, 5);
+    expect(byKey.plus_addon.monthly * byKey.plus_addon.lowConfidenceFraction * 0.2).toBeCloseTo(80, 5);
+  });
+
   test('MEDIUM-only commercial multi-service → no range marker anywhere', () => {
     const med = { result: { recurring: { services: [
       { service: 'commercial_lawn', pricingConfidence: 'MEDIUM', mo: 400, annual: 4800 },

@@ -143,7 +143,9 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const manualDiscountInterval = manualDiscountRecurringAnnual > 0
     ? Math.round((manualDiscountRecurringAnnual / 12) * intervalMonths * 100) / 100
     : 0;
-  const treatmentRows = Array.isArray(frequency.perServiceTreatments)
+  // Per-application treatment rows expose EXACT per-visit prices, which would
+  // contradict the "confirmed on site" range — so drop them while ranging.
+  const treatmentRows = !showLowConfidenceRange && Array.isArray(frequency.perServiceTreatments)
     ? frequency.perServiceTreatments
       .map((row) => ({ ...row, displayPrice: Number(row.displayPrice ?? row.perTreatment) }))
       .filter((row) => Number.isFinite(row.displayPrice) && row.displayPrice > 0)

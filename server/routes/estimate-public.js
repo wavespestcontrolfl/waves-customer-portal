@@ -11454,25 +11454,10 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
   };
 }
 
-// The section card's displayed default-cadence monthly — the denominator the
-// range fraction is taken against (NOT just the commercial lines), so an exact
-// non-commercial add-on folded into the same card is never banded.
-function sectionDisplayedMonthly(section) {
-  const freqs = Array.isArray(section?.frequencies) ? section.frequencies : [];
-  const chosen = freqs.find((f) => f && f.key === section.defaultFrequencyKey)
-    || freqs.find((f) => Number(f?.monthly) > 0)
-    || freqs[0];
-  return Number(chosen?.monthly) || 0;
-}
-
-// A NARROW low-confidence commercial estimate (LOW pricing confidence, ±20% band
-// ≤ $300/mo swing) stays self-serve approvable, but the customer sees the price
-// as a "$X–$Y/mo, confirmed on site" range instead of a false-precision number.
-// The band applies to a section's OWN low-confidence share — 1 for a single
-// all-LOW line, a fraction when a card mixes LOW + exact lines — so single,
-// split, and bundle cards all range correctly. PriceCard derives the band from
-// the displayed price × fraction × pct, so it tracks whatever cadence is picked.
-function sectionLowConfidenceFraction(section, lines) {
+// The section's LOW-confidence monthly dollars — the sum of its LOW commercial
+// member lines. This is a FIXED amount (the uncertain dollars); the ±20% band is
+// taken against it, not the whole total, so exact lines/add-ons aren't banded.
+function sectionLowConfidenceMonthly(section, lines) {
   const memberKeys = new Set(
     Array.isArray(section?.memberKeys) && section.memberKeys.length ? section.memberKeys : [section?.key]
   );
@@ -11481,26 +11466,35 @@ function sectionLowConfidenceFraction(section, lines) {
     if (!memberKeys.has(recurringServiceKey({ service: line.service }))) continue;
     if (line.isLow) low += line.monthly;
   }
-  if (!(low > 0)) return 0;
-  // Denominator = the card's full displayed total (which may include exact
-  // non-commercial add-ons), so only the LOW dollars carry the ±20% band.
-  const displayedMonthly = sectionDisplayedMonthly(section);
-  return displayedMonthly > 0 ? Math.min(1, low / displayedMonthly) : 0;
+  return low;
 }
 
+// A NARROW low-confidence commercial estimate (LOW pricing confidence, ±20% band
+// ≤ $300/mo swing) stays self-serve approvable, but the customer sees the price
+// as a "$X–$Y/mo, confirmed on site" range instead of a false-precision number.
+// The band applies to the section's OWN low-confidence dollars. The fraction is
+// computed PER FREQUENCY (low ÷ that cadence's displayed monthly) so a selectable
+// bundle — where the exact/non-LOW part changes by cadence — always bands only
+// the fixed uncertain dollars: PriceCard's cadencePrice × fraction × pct reduces
+// to low × interval × pct at every cadence. fraction 1 = a single all-LOW line.
 function stampLowConfidenceRangeOnServices(services, lines) {
   if (!Array.isArray(services) || !lines.length) return services;
   return services.map((section) => {
     if (!section?.isRecurring) return section;
-    const fraction = sectionLowConfidenceFraction(section, lines);
-    if (!(fraction > 0)) return section;
+    const low = sectionLowConfidenceMonthly(section, lines);
+    if (!(low > 0)) return section;
     return {
       ...section,
-      frequencies: (Array.isArray(section.frequencies) ? section.frequencies : []).map((frequency) => (
-        frequency && frequency.quoteRequired !== true
-          ? { ...frequency, lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT, lowConfidenceFraction: fraction }
-          : frequency
-      )),
+      frequencies: (Array.isArray(section.frequencies) ? section.frequencies : []).map((frequency) => {
+        if (!frequency || frequency.quoteRequired === true) return frequency;
+        const monthly = Number(frequency.monthly) || 0;
+        if (monthly <= 0) return frequency;
+        return {
+          ...frequency,
+          lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT,
+          lowConfidenceFraction: Math.min(1, low / monthly),
+        };
+      }),
     };
   });
 }
@@ -12229,6 +12223,15 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         const lc = commercialLowConfidenceRange(depositEstData);
         return lc.hasLowConfidence && !lc.forceSiteQuote;
       })();
+    // A held estimate collects NO money at accept (the invoice is issued after the
+    // on-site confirmation), so the confirm flow must not require/mint a deposit
+    // either — matches the accept-handler + /deposit-intent exemptions. Overriding
+    // here keeps the "No payment now" CTA honest.
+    if (siteConfirmationHold) {
+      depositPolicy.required = false;
+      depositPolicy.slotRequired = false;
+      depositPolicy.exemptReason = depositPolicy.exemptReason || 'commercial_manual_billing';
+    }
 
     // "Show your work" trust payload for the React estimate view. The key
     // only exists while the estimateShowYourWork gate is on, so gate-off
