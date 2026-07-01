@@ -1461,7 +1461,9 @@ function estimateHasLawnLine(estimate = {}) {
     estimate.notes,
     ...serviceLines,
   ].join(" ").toLowerCase();
-  return haystack.includes("lawn");
+  // 'turf' covers the commercial turf-treatment label ("Commercial Turf
+  // Treatment Program") so the Lawn service-outline workflow still gates on.
+  return haystack.includes("lawn") || haystack.includes("turf");
 }
 
 function LawnOutlineQuickButton({ estimate, onClick, compact = false }) {

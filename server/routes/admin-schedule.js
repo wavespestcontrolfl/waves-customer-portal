@@ -2575,7 +2575,7 @@ router.put('/:id/update-details', async (req, res, next) => {
           // catalog row so completion-profile resolution (keyed off service_id)
           // is correct; lawn vs pest is inferred from the label.
           incomingIsReService = true;
-          const reKey = /lawn/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
+          const reKey = /lawn|turf/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
           const reSvc = await db('services').where({ service_key: reKey }).first('id').catch(() => null);
           resolvedServiceId = reSvc?.id || null;
         }
@@ -4912,7 +4912,7 @@ function fmtTime(t) {
 
 function estimateDuration(serviceType, propertySqft, lotSqft) {
   const s = (serviceType || '').toLowerCase();
-  if (s.includes('lawn')) return Math.round(8 + (lotSqft || 5000) / 1000 * 1.75);
+  if (s.includes('lawn') || s.includes('turf')) return Math.round(8 + (lotSqft || 5000) / 1000 * 1.75);
   if (s.includes('pest') && s.includes('interior')) return Math.round(20 + (propertySqft || 1800) / 1000 * 5);
   if (s.includes('pest')) return Math.round(25 + (propertySqft || 1800) / 1000 * 3);
   if (s.includes('mosquito')) return Math.round(15 + (lotSqft || 5000) / 1000 * 2);

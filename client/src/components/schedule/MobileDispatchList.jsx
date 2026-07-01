@@ -105,7 +105,7 @@ function canMarkEnRoute(service) {
 }
 
 function isLawnService(service) {
-  return String(service?.serviceType || '').toLowerCase().includes('lawn');
+  return /lawn|turf/.test(String(service?.serviceType || '').toLowerCase());
 }
 
 // Human section header for each day segment.

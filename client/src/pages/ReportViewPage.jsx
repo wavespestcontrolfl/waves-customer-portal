@@ -2622,7 +2622,7 @@ const EVIDENCE_COPY = {
 
 function normalizeCoverageServiceType(value) {
   const raw = String(value || '').toLowerCase();
-  if (raw.includes('lawn')) return 'lawn';
+  if (raw.includes('lawn') || raw.includes('turf')) return 'lawn';
   if (raw.includes('pest') || raw === 'pest_control' || raw.includes('termite') || raw.includes('rodent')) return 'pest_control';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('palm')) return 'tree_shrub';

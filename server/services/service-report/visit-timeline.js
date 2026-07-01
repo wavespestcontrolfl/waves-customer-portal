@@ -125,7 +125,7 @@ function firstValidTimestamp(...values) {
 
 function normalizeTimelineServiceLine(serviceLine, serviceType) {
   const text = `${serviceLine || ''} ${serviceType || ''}`.toLowerCase();
-  if (text.includes('lawn')) return 'lawn';
+  if (text.includes('lawn') || text.includes('turf')) return 'lawn';
   if (text.includes('termite')) return 'termite';
   if (text.includes('tree') || text.includes('shrub') || text.includes('palm')) return 'tree_shrub';
   if (text.includes('mosquito')) return 'mosquito';

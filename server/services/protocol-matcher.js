@@ -241,7 +241,10 @@ function isPestPrimaryCompanion(normalized) {
 
 function programKeyForService(serviceType) {
   const normalized = normalize(serviceType);
-  if (normalized.includes('lawn')) return 'lawn';
+  // 'turf' is the commercial turf-treatment synonym for the lawn program
+  // ("Commercial Turf Treatment Program") — must route to the lawn protocol,
+  // not fall through to pest.
+  if (normalized.includes('lawn') || normalized.includes('turf')) return 'lawn';
   if (normalized.includes('bed bug') || normalized.includes('bedbug')) return 'bed_bug';
   if (normalized.includes('cockroach') || normalized.includes('roach') || normalized.includes('palmetto bug')) return 'cockroach';
   if (isPestPrimaryCompanion(normalized)) return 'pest';

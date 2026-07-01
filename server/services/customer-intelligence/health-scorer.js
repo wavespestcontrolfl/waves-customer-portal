@@ -100,12 +100,12 @@ class HealthScorer {
       const month = new Date().getMonth();
 
       // Pest but no lawn
-      if (Array.from(hasService).some(s => s.includes('pest')) && !Array.from(hasService).some(s => s.includes('lawn'))) {
+      if (Array.from(hasService).some(s => s.includes('pest')) && !Array.from(hasService).some(s => s.includes('lawn') || s.includes('turf'))) {
         opps.push({ service: 'lawn_care', reason: 'Has pest but no lawn — bundling saves 15% with WaveGuard Gold', confidence: 0.7, monthly_value: 72.50, trigger: 'service_pattern' });
       }
 
       // Lawn but no pest
-      if (Array.from(hasService).some(s => s.includes('lawn')) && !Array.from(hasService).some(s => s.includes('pest'))) {
+      if (Array.from(hasService).some(s => s.includes('lawn') || s.includes('turf')) && !Array.from(hasService).some(s => s.includes('pest'))) {
         opps.push({ service: 'pest_control', reason: 'Has lawn but no pest — Silver saves 10%', confidence: 0.7, monthly_value: 39.50, trigger: 'service_pattern' });
       }
 

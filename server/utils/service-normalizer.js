@@ -104,7 +104,7 @@ function normalizeServiceType(raw) {
  */
 function detectServiceCategory(serviceType) {
   const s = (serviceType || '').toLowerCase();
-  if (s.includes('lawn') || s.includes('fertil') || s.includes('weed') || s.includes('dethatch') || s.includes('top dress') || s.includes('aerat') || s.includes('sod')) return 'lawn';
+  if (s.includes('lawn') || s.includes('turf') || s.includes('fertil') || s.includes('weed') || s.includes('dethatch') || s.includes('top dress') || s.includes('aerat') || s.includes('sod')) return 'lawn';
   if (s.includes('mosquito')) return 'mosquito';
   if (s.includes('termite') || s.includes('wdo') || s.includes('bora') || s.includes('trelona')) return 'termite';
   if (s.includes('tree') || s.includes('shrub') || s.includes('palm') || s.includes('arborjet')) return 'tree_shrub';

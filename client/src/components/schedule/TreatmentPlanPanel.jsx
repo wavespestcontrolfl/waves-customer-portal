@@ -15,7 +15,8 @@ import { adminFetch } from '../../utils/admin-fetch';
 import { Button, Badge, cn } from '../ui';
 
 function isLawnService(service) {
-  return String(service?.serviceType || service?.service_type || '').toLowerCase().includes('lawn');
+  const s = String(service?.serviceType || service?.service_type || '').toLowerCase();
+  return s.includes('lawn') || s.includes('turf');
 }
 
 function statusTone(status) {

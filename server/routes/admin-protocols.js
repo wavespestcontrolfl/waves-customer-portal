@@ -1410,7 +1410,7 @@ router.get('/photos/relevant', async (req, res, next) => {
     let query = db('protocol_photos').where({ active: true });
 
     if (serviceType) {
-      const line = serviceType.toLowerCase().includes('lawn') ? 'lawn'
+      const line = (serviceType.toLowerCase().includes('lawn') || serviceType.toLowerCase().includes('turf')) ? 'lawn'
         : serviceType.toLowerCase().includes('tree') || serviceType.toLowerCase().includes('shrub') ? 'tree_shrub'
         : serviceType.toLowerCase().includes('pest') ? 'pest'
         : serviceType.toLowerCase().includes('mosquito') ? 'mosquito'
@@ -1721,7 +1721,7 @@ router.get('/completion-actions', async (req, res, next) => {
     let track = null;
     let month = null;
 
-    if (normalizeText(serviceType).includes('lawn')) {
+    if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
       programKey = 'lawn';
       track = lawnTrackFromInput(req.query.lawnType || req.query.grassType || req.query.track);
       program = protocols.lawn?.[track] || protocols.lawn?.st_augustine;

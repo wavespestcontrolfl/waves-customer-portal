@@ -107,6 +107,7 @@ function calculateReviewSendTime(completedAt, serviceType) {
   // Lawn care / tree & shrub: let them see the results first
   if (
     svc.includes("lawn") ||
+    svc.includes("turf") ||
     svc.includes("tree") ||
     svc.includes("shrub") ||
     svc.includes("dethatch")

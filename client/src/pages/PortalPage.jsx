@@ -5654,7 +5654,7 @@ function LearnTab({ customer }) {
 
   const faqIconFor = (category = '') => {
     const text = category.toLowerCase();
-    if (text.includes('lawn') || text.includes('grass')) return 'sprout';
+    if (text.includes('lawn') || text.includes('turf') || text.includes('grass')) return 'sprout';
     if (text.includes('billing') || text.includes('payment')) return 'card';
     if (text.includes('termite')) return 'shield';
     if (text.includes('schedule') || text.includes('service')) return 'calendar';

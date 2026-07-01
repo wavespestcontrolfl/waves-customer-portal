@@ -191,7 +191,7 @@ class SmartRebooker {
 
   findBestWindow(service) {
     const s = (service.service_type || '').toLowerCase();
-    if (s.includes('lawn') || s.includes('mosquito')) return { start: '08:00', end: '10:00', display: '8:00-10:00 AM' };
+    if (s.includes('lawn') || s.includes('turf') || s.includes('mosquito')) return { start: '08:00', end: '10:00', display: '8:00-10:00 AM' };
     return { start: '09:00', end: '12:00', display: '9:00 AM-12:00 PM' };
   }
 
