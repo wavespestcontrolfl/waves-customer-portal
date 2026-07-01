@@ -226,7 +226,13 @@ async function resolveEstimateEventLeads(database, estimateId, { originatingNotA
   //    lead, and the lead was first contacted on/before they became a customer.
   const linkedMatches = (await findCustomerLinkedLeadsByContact(database, estimate.customer_phone, estimate.customer_email))
     .filter((lead) => !lead.estimate_id && !CLOSED_LEAD_STATUSES.has(lead.status))
-    .filter((lead) => leadOriginatedOnOrBefore(lead, originatingNotAfter));
+    .filter((lead) => leadOriginatedOnOrBefore(lead, originatingNotAfter))
+    // These leads carry a customer_id, so when the estimate ALSO has one,
+    // leadMatchesEstimateContact requires the two customers to be the SAME — a
+    // shared phone/email between two customers (spouses, roommates) must never
+    // let this estimate advance the OTHER customer's lead. (When the estimate has
+    // no customer_id it falls back to the phone/email match the query already did.)
+    .filter((lead) => leadMatchesEstimateContact(lead, estimate));
   if (linkedMatches.length === 1) {
     const lead = linkedMatches[0];
     const established = await customerHasWonLead(database, lead.customer_id);

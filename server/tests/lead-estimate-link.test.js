@@ -1267,7 +1267,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
       linked: [],
       estimate: { id: 'e-16', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [], // tier 2 (customer_id IS NULL) finds nothing
-      customerLinkedLeads: [{ id: 'L-cust', status: 'new', customer_id: 'cust-1', first_contact_at: '2026-06-30T16:49:49Z', response_time_minutes: 5 }],
+      customerLinkedLeads: [{ id: 'L-cust', status: 'new', customer_id: 'cust-1', phone: '9415550142', first_contact_at: '2026-06-30T16:49:49Z', response_time_minutes: 5 }],
       customerWonLead: null, // customer has no prior won lead → not established
       customer: { id: 'cust-1', member_since: '2026-06-30', created_at: '2026-06-30T16:49:48Z' }, // lead first-contacted same ET day → originating
     });
@@ -1286,7 +1286,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
       linked: [],
       estimate: { id: 'e-17', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [],
-      customerLinkedLeads: [{ id: 'L-addon', status: 'new', customer_id: 'cust-2', first_contact_at: '2026-06-30T16:49:49Z' }],
+      customerLinkedLeads: [{ id: 'L-addon', status: 'new', customer_id: 'cust-2', phone: '9415550142', first_contact_at: '2026-06-30T16:49:49Z' }],
       customerWonLead: { id: 'won-1' }, // established → skip
       customer: { id: 'cust-2', member_since: '2026-06-30' },
     });
@@ -1302,7 +1302,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
       linked: [],
       estimate: { id: 'e-18', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [],
-      customerLinkedLeads: [{ id: 'L-late', status: 'new', customer_id: 'cust-3', first_contact_at: '2026-05-01T10:00:00Z' }],
+      customerLinkedLeads: [{ id: 'L-late', status: 'new', customer_id: 'cust-3', phone: '9415550142', first_contact_at: '2026-05-01T10:00:00Z' }],
       customerWonLead: null,
       customer: { id: 'cust-3', member_since: '2026-01-01' }, // lead (May) post-dates member_since (Jan) → not originating
     });
@@ -1319,13 +1319,31 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
       estimate: { id: 'e-19', estimate_data: null, customer_phone: '+19415550142' },
       contactLeads: [],
       customerLinkedLeads: [
-        { id: 'L-a', status: 'new', customer_id: 'cust-4' },
-        { id: 'L-b', status: 'contacted', customer_id: 'cust-4' },
+        { id: 'L-a', status: 'new', customer_id: 'cust-4', phone: '9415550142' },
+        { id: 'L-b', status: 'contacted', customer_id: 'cust-4', phone: '9415550142' },
       ],
     });
 
     await markLinkedLeadEstimateSent({ estimateId: 'e-19', sendMethod: 'sms', database });
 
+    expect(database._updates).toEqual([]);
+    expect(database._activities).toEqual([]);
+  });
+
+  test('customer-linked lead: never crosses customer boundaries (estimate customer ≠ lead customer, shared phone)', async () => {
+    const database = makeEventDb({
+      linked: [],
+      // estimate belongs to customer X; a DIFFERENT customer Y shares the phone
+      estimate: { id: 'e-20', estimate_data: null, customer_phone: '+19415550142', customer_id: 'cust-X' },
+      contactLeads: [],
+      customerLinkedLeads: [{ id: 'L-otherCust', status: 'new', customer_id: 'cust-Y', phone: '9415550142', first_contact_at: '2026-06-30T16:49:49Z' }],
+      customerWonLead: null,
+      customer: { id: 'cust-Y', member_since: '2026-06-30' },
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-20', sendMethod: 'sms', database });
+
+    // leadMatchesEstimateContact rejects the mismatched customer_id → not advanced.
     expect(database._updates).toEqual([]);
     expect(database._activities).toEqual([]);
   });
