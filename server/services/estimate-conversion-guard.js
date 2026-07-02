@@ -31,6 +31,15 @@ const db = require("../models/db");
 const logger = require("./logger");
 const { CUSTOMER_STAGES } = require("./customer-stages");
 
+// Appointment rows that leave NO live booking behind — the repo's terminal
+// convention (waveguard-existing-services TERMINAL_STATUSES) minus
+// 'completed', which IS a conversion signal here. 'rescheduled' is the
+// phantom row the reschedule flow leaves in place until SmartRebooker
+// handles it; 'skipped'/'no_show' are terminal misses. None of them proves
+// the customer converted, so none may suppress follow-ups or hold an
+// estimate out of expiration.
+const NON_LIVE_APPOINTMENT_STATUSES = ["cancelled", "rescheduled", "skipped", "no_show"];
+
 /**
  * Has this estimate's customer converted since the estimate was created?
  *
@@ -56,7 +65,7 @@ async function customerConvertedSince(est) {
 
     const booked = await db("scheduled_services")
       .where({ customer_id: est.customer_id })
-      .whereNot("status", "cancelled")
+      .whereNotIn("status", NON_LIVE_APPOINTMENT_STATUSES)
       .where("created_at", ">=", createdAt)
       .first("id");
     if (booked) return { converted: true, reason: "appointment-booked" };
@@ -130,12 +139,20 @@ async function archiveConvertedOpenEstimates() {
         );
     })
     .whereNotExists(function () {
+      // Legacy completed rows predate the tracking columns (migration
+      // 20260422000009) and carry a NULL completed_at even though
+      // status='completed' is the repo-wide completion signal. Fall back to
+      // the visit's scheduled_date (NOT NULL since the initial schema):
+      // midnight understates the real completion time, which fails toward
+      // "predates the estimate" — toward KEEPING a possibly-live upsell
+      // estimate, never toward archiving it.
       this.select(db.raw("1"))
         .from("scheduled_services")
         .whereRaw("scheduled_services.customer_id = estimates.customer_id")
         .where("scheduled_services.status", "completed")
-        .whereNotNull("scheduled_services.completed_at")
-        .whereRaw("scheduled_services.completed_at < estimates.created_at");
+        .whereRaw(
+          "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz) < estimates.created_at",
+        );
     })
     // Never archive an estimate holding a received (unconsumed, unrefunded)
     // acceptance deposit: archived rows are excluded from expiration, and
@@ -165,4 +182,63 @@ async function archiveConvertedOpenEstimates() {
   return { archived: archived.length, rows: archived };
 }
 
-module.exports = { customerConvertedSince, archiveConvertedOpenEstimates };
+/**
+ * Expiration hold (knex `.modify` helper for the expiration worker's
+ * `estimates` queries): keep an estimate out of the daily expiration flips
+ * while the customer's FIRST booking is still pending. Booking suppresses
+ * follow-ups (customerConvertedSince) but the archive sweep above waits for
+ * a completion/payment, so a visit scheduled beyond ESTIMATE_EXPIRATION_DAYS
+ * would otherwise flip to `expired` mid-courtship — and the sweep's
+ * sent/viewed filter can never reclaim an expired row, so the booked
+ * conversion would be counted lost forever.
+ *
+ * Self-resolving, never a permanent park: the visit completes → the sweep
+ * (which runs BEFORE expiration in the 6am chain) archives the estimate;
+ * the visit dies (cancelled/rescheduled/skipped/no_show) → the hold lifts
+ * and expiration resumes next run. A deposit-holding row resolves the same
+ * way: completion lifts the hold, the sweep's deposit guard refuses it, it
+ * expires, and the terminal-deposit sweep refunds.
+ *
+ * First-ever narrowing, in lockstep with the sweep's none-before guards
+ * (identical COALESCE predicates — keep them in sync): a customer who
+ * converted BEFORE the estimate is a long-standing customer whose pending
+ * visits are routine; holding their open upsell estimate would park it
+ * un-expirable for as long as they stay on service.
+ */
+function excludePendingFirstBookings(query) {
+  return query.whereNotExists(function () {
+    this.select(db.raw("1"))
+      .from("scheduled_services as pending_visit")
+      .whereRaw("pending_visit.customer_id = estimates.customer_id")
+      .whereNotIn("pending_visit.status", [
+        ...NON_LIVE_APPOINTMENT_STATUSES,
+        "completed",
+      ])
+      .whereRaw("pending_visit.created_at >= estimates.created_at")
+      .whereNotExists(function () {
+        this.select(db.raw("1"))
+          .from("invoices")
+          .whereRaw("invoices.customer_id = estimates.customer_id")
+          .where("invoices.status", "paid")
+          .whereRaw(
+            "COALESCE(invoices.paid_at, invoices.created_at) < estimates.created_at",
+          );
+      })
+      .whereNotExists(function () {
+        this.select(db.raw("1"))
+          .from("scheduled_services")
+          .whereRaw("scheduled_services.customer_id = estimates.customer_id")
+          .where("scheduled_services.status", "completed")
+          .whereRaw(
+            "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz) < estimates.created_at",
+          );
+      });
+  });
+}
+
+module.exports = {
+  customerConvertedSince,
+  archiveConvertedOpenEstimates,
+  excludePendingFirstBookings,
+  NON_LIVE_APPOINTMENT_STATUSES,
+};

@@ -12,6 +12,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { excludePendingFirstBookings } = require('./estimate-conversion-guard');
 
 function getThresholdDays() {
   const raw = parseInt(process.env.ESTIMATE_EXPIRATION_DAYS, 10);
@@ -35,6 +36,12 @@ async function runEstimateExpiration() {
     .where('sent_at', '<', ageCutoff)
     .whereNull('accepted_at')
     .whereNull('declined_at')
+    // Hold: a first-booking customer's estimate stays live until the visit
+    // resolves — the archive sweep (which runs before this in the 6am chain)
+    // claims it on completion; expiring it here would strand a booked
+    // conversion at `expired`, where the sweep's sent/viewed filter can
+    // never reclaim it. The hold self-lifts if the booking dies.
+    .modify(excludePendingFirstBookings)
     .update({ status: 'expired', updated_at: now });
 
   // Rule 2: explicit expires_at — any non-terminal row whose expires_at has
@@ -44,6 +51,10 @@ async function runEstimateExpiration() {
     .whereNull('archived_at')
     .where('expires_at', '<', now)
     .whereNotIn('status', ['expired', 'accepted', 'declined'])
+    // Same first-booking hold as Rule 1 — an explicit expires_at date set
+    // before the customer booked doesn't make expiring their live courtship
+    // any less wrong.
+    .modify(excludePendingFirstBookings)
     .update({ status: 'expired', updated_at: now });
 
   logger.info(`[estimate-expiration] thresholdDays=${thresholdDays} aged=${agedResult} dateExpired=${dateResult}`);

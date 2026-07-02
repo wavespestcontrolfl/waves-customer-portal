@@ -52,6 +52,8 @@ const logger = require('../services/logger');
 const {
   customerConvertedSince,
   archiveConvertedOpenEstimates,
+  excludePendingFirstBookings,
+  NON_LIVE_APPOINTMENT_STATUSES,
 } = require('../services/estimate-conversion-guard');
 const { _private } = require('../services/estimate-follow-up');
 
@@ -67,8 +69,9 @@ function makeBuilder(table, cfg = {}, calls = []) {
     return b;
   };
   for (const m of [
-    'whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'select',
-    'from', 'groupBy', 'max', 'as', 'join', 'andWhere', 'orWhereNull',
+    'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot',
+    'whereRaw', 'select', 'from', 'groupBy', 'max', 'as', 'join', 'andWhere',
+    'orWhereNull',
   ]) {
     b[m] = jest.fn(record(m));
   }
@@ -174,11 +177,19 @@ describe('customerConvertedSince', () => {
     });
     const res = await customerConvertedSince(BASE_EST);
     expect(res).toEqual({ converted: true, reason: 'appointment-booked' });
-    // Cancelled appointments never count as conversion.
-    const notCancelled = calls.find(
-      (c) => c.table === 'scheduled_services' && c.m === 'whereNot',
+    // Non-live rows never count as conversion — not just cancelled: a
+    // rescheduled phantom, a skipped or no-show visit leaves no live
+    // booking behind, so none of them may suppress follow-ups.
+    const notLive = calls.find(
+      (c) => c.table === 'scheduled_services' && c.m === 'whereNotIn',
     );
-    expect(notCancelled.args).toEqual(['status', 'cancelled']);
+    expect(notLive.args).toEqual(['status', NON_LIVE_APPOINTMENT_STATUSES]);
+    expect(NON_LIVE_APPOINTMENT_STATUSES).toEqual([
+      'cancelled',
+      'rescheduled',
+      'skipped',
+      'no_show',
+    ]);
   });
 
   // The canonical real-customer set (customer-stages.js) — not just
@@ -318,6 +329,21 @@ describe('archiveConvertedOpenEstimates', () => {
         c.args[0].includes('COALESCE(invoices.paid_at, invoices.created_at)'),
     );
     expect(coalesceBound).toBeTruthy();
+
+    // A legacy completed visit (pre-tracking-columns, null completed_at,
+    // status='completed') reads as completed on its scheduled_date in the
+    // none-before branch, so it still disqualifies the customer and a live
+    // upsell estimate is KEPT (midnight understates the real completion
+    // time — fails toward predating, toward keeping).
+    const legacyCompletedFallback = calls.find(
+      (c) =>
+        c.m === 'whereRaw' &&
+        typeof c.args?.[0] === 'string' &&
+        c.args[0].includes(
+          'COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz)',
+        ),
+    );
+    expect(legacyCompletedFallback).toBeTruthy();
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('Archived 2'),
     );
@@ -330,6 +356,63 @@ describe('archiveConvertedOpenEstimates', () => {
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('nothing to archive'),
     );
+  });
+});
+
+describe('excludePendingFirstBookings (expiration hold)', () => {
+  test('holds only first-booking customers: pending visit after the estimate, no conversion signal before it', () => {
+    const calls = wireDb({});
+    excludePendingFirstBookings(db('estimates'));
+
+    // One NOT EXISTS on the estimates query itself.
+    expect(
+      calls.filter((c) => c.table === 'estimates' && c.m === 'whereNotExists'),
+    ).toHaveLength(1);
+
+    // "Pending" = created on/after the estimate AND neither non-live nor
+    // completed — a completed visit is the archive sweep's job (which runs
+    // before expiration in the 6am chain), and a dead booking must lift the
+    // hold so expiration resumes.
+    const statusExcl = calls.find((c) => c.m === 'whereNotIn');
+    expect(statusExcl.args).toEqual([
+      'pending_visit.status',
+      [...NON_LIVE_APPOINTMENT_STATUSES, 'completed'],
+    ]);
+    const createdBound = calls.find(
+      (c) =>
+        c.m === 'whereRaw' &&
+        typeof c.args?.[0] === 'string' &&
+        c.args[0].includes('pending_visit.created_at >= estimates.created_at'),
+    );
+    expect(createdBound).toBeTruthy();
+
+    // First-ever narrowing in lockstep with the archive sweep's none-before
+    // guards: a customer already converted before the estimate is NOT held —
+    // their pending visits are routine, and the hold would park a dead
+    // upsell estimate out of expiration for as long as they stay on service.
+    expect(
+      calls.filter(
+        (c) => c.table === 'estimates:sub' && c.m === 'whereNotExists',
+      ),
+    ).toHaveLength(2);
+    expect(
+      calls.find(
+        (c) =>
+          c.m === 'whereRaw' &&
+          typeof c.args?.[0] === 'string' &&
+          c.args[0].includes('COALESCE(invoices.paid_at, invoices.created_at)'),
+      ),
+    ).toBeTruthy();
+    expect(
+      calls.find(
+        (c) =>
+          c.m === 'whereRaw' &&
+          typeof c.args?.[0] === 'string' &&
+          c.args[0].includes(
+            'COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz)',
+          ),
+      ),
+    ).toBeTruthy();
   });
 });
 
