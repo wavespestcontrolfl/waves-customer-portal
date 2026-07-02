@@ -589,40 +589,63 @@ describe('future-scheduled-date stale-attempt guard', () => {
     expect(result.state).toBe('complete');
   });
 
-  test('cancel cascades to the pending call-created follow-up child', async () => {
+  test('cancel cascades to the pending call-created follow-up child via transitionJobStatus', async () => {
     const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, track_state: 'scheduled' };
-    const cascade = query(1);
+    const childrenSelect = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ id: 'child-1' }]),
+    };
+    const trackingUpdate = query(1);
+    const trx = jest.fn(() => trackingUpdate);
+    db.transaction = jest.fn(async (callback) => callback(trx));
     db
       .mockReturnValueOnce(query(svc)) // loadService
       .mockReturnValueOnce(query(1)) // primary cancel update
-      .mockReturnValueOnce(cascade); // follow-up child cascade
+      .mockReturnValueOnce(childrenSelect); // follow-up children lookup
 
     const result = await trackTransitions.cancel('job-1', { reason: 'customer moved' });
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('cancelled');
     // Narrow filter: only the call pipeline's pending, never-confirmed child.
-    expect(cascade.where).toHaveBeenCalledWith({
+    expect(childrenSelect.where).toHaveBeenCalledWith({
       parent_service_id: 'job-1',
       source_action: 'ai_call_pipeline_followup',
       status: 'pending',
       customer_confirmed: false,
     });
-    expect(cascade.update).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'cancelled',
+    // Status goes through the sole canonical writer (audit row + broadcast)
+    // on the shared trx…
+    expect(transitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'child-1',
+      fromStatus: 'pending',
+      toStatus: 'cancelled',
+      transitionedBy: null,
+      trx,
+    }));
+    // …and the tracking columns ride the same trx (status itself is NOT
+    // written directly here).
+    expect(trackingUpdate.where).toHaveBeenCalledWith({ id: 'child-1' });
+    const trackingPayload = trackingUpdate.update.mock.calls[0][0];
+    expect(trackingPayload).toMatchObject({
       track_state: 'cancelled',
       cancellation_reason: 'parent_call_booking_cancelled',
-    }));
+    });
+    expect(trackingPayload).not.toHaveProperty('status');
   });
 
   test('a failed follow-up cascade is swallowed — the primary cancel still succeeds', async () => {
     const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, track_state: 'scheduled' };
-    const cascade = query(1);
-    cascade.update.mockRejectedValue(new Error('boom'));
+    const childrenSelect = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ id: 'child-1' }]),
+    };
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
+    transitionJobStatus.mockRejectedValueOnce(new Error('boom'));
     db
       .mockReturnValueOnce(query(svc))
       .mockReturnValueOnce(query(1))
-      .mockReturnValueOnce(cascade);
+      .mockReturnValueOnce(childrenSelect);
 
     const result = await trackTransitions.cancel('job-1', { reason: 'customer moved' });
 
