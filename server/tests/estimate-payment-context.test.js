@@ -22,14 +22,19 @@ const {
   _private: { sumMatchingLines, invoiceIsPaid, SETUP_FEE_RE, FIRST_APPLICATION_RE },
 } = require('../services/estimate-payment-context');
 
-// Chainable knex-table mock: .where().whereNotIn().orderBy().first() etc.
-// resolve to whatever the per-table `first` handler returns.
-function tableMock(firstResult) {
+// Chainable knex-table mock. A plain spec is the .first() result; a
+// { first, rows } spec also answers awaited .select() list queries (the
+// term-usage read) with `rows`.
+function tableMock(spec) {
+  const structured = spec && typeof spec === 'object' && ('first' in spec || 'rows' in spec);
+  const firstResult = structured ? spec.first : spec;
+  const rowsResult = structured ? (spec.rows || []) : [];
   const chain = {};
   const self = () => chain;
   ['where', 'whereNotIn', 'whereIn', 'whereNull', 'orderBy'].forEach((m) => {
     chain[m] = jest.fn(self);
   });
+  chain.select = jest.fn(async () => rowsResult);
   chain.first = jest.fn(async () => (typeof firstResult === 'function' ? firstResult() : firstResult));
   return chain;
 }
@@ -86,7 +91,16 @@ describe('buildEstimatePaymentContext', () => {
 
   it('returns the exact prepay term + paid invoice state for annual prepay', async () => {
     configureDb({
-      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: 'prepay_annual' },
+      scheduled_services: {
+        first: { annual_prepay_term_id: null, payment_method_preference: 'prepay_annual' },
+        // Covered visits linked to the term: one done, this one (ss-1) next.
+        rows: [
+          { id: 'ss-0', status: 'completed', scheduled_date: '2026-06-15' },
+          { id: 'ss-1', status: 'pending', scheduled_date: '2026-09-15' },
+          { id: 'ss-2', status: 'pending', scheduled_date: '2026-12-15' },
+          { id: 'ss-3', status: 'cancelled', scheduled_date: '2027-03-15' },
+        ],
+      },
       annual_prepay_terms: {
         id: 'term-1',
         status: 'active',
@@ -110,8 +124,42 @@ describe('buildEstimatePaymentContext', () => {
       coverageVisitCount: 4,
       invoiceStatus: 'paid',
       invoiceTotal: 743.06,
+      // Sold count wins as the total; cancelled visits don't count as slots;
+      // this appointment is the 2nd live covered visit; 1 used → 3 left.
+      totalVisits: 4,
+      visitsUsed: 1,
+      visitsRemaining: 3,
+      visitNumber: 2,
     });
     expect(ctx.acceptanceInvoice).toBe(null);
+  });
+
+  it('reports used/remaining without a visit number when this visit is not linked to the term', async () => {
+    configureDb({
+      scheduled_services: {
+        first: { annual_prepay_term_id: null, payment_method_preference: null },
+        rows: [
+          { id: 'ss-a', status: 'completed', scheduled_date: '2026-06-15' },
+          { id: 'ss-b', status: 'pending', scheduled_date: '2026-09-15' },
+        ],
+      },
+      annual_prepay_terms: {
+        id: 'term-9',
+        status: 'active',
+        prepay_amount: '743.06',
+        coverage_visit_count: 4,
+        prepay_invoice_id: null,
+      },
+      invoices: null,
+    });
+
+    const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-unlinked' });
+    expect(ctx.annualPrepay).toMatchObject({
+      totalVisits: 4,
+      visitsUsed: 1,
+      visitsRemaining: 3,
+      visitNumber: null,
+    });
   });
 
   it('reports a payment_pending term with an unpaid invoice as not paid', async () => {

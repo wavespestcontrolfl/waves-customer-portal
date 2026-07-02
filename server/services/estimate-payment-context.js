@@ -22,6 +22,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+// Shared terminal-status set so "remaining" counts visits the same way the
+// prepaid-series banner and Customer 360 rollup do.
+const { TERMINAL_STATUSES } = require('./prepaid-series');
 
 // Terms in these statuses are paid coverage (mirrors ACTIVE_STATUSES in
 // annual-prepay-renewals.js). payment_pending resolves through the invoice.
@@ -107,6 +110,45 @@ async function resolveAnnualPrepayTerm(estimate, scheduledServiceId) {
   }
 }
 
+// "Visit X of Y · N remaining" usage for a prepay term, from the visits the
+// coverage machinery linked to it (scheduled_services.annual_prepay_term_id).
+// totalVisits prefers the SOLD count (coverage_visit_count) so a partially
+// seeded series still reads "of 4"; used = completed covered visits;
+// remaining = sold minus used (never negative). visitNumber is this
+// appointment's 1-based position among the live covered visits by date —
+// null when the visit isn't linked to the term (e.g. a coverage gap), so the
+// card falls back to the used/total phrasing instead of inventing a slot.
+async function summarizeTermVisitUsage(term, scheduledServiceId) {
+  if (!term?.id) return null;
+  try {
+    const rows = await db('scheduled_services')
+      .where({ annual_prepay_term_id: term.id })
+      .orderBy('scheduled_date', 'asc')
+      .select('id', 'status', 'scheduled_date');
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const live = rows.filter((r) => {
+      const status = String(r.status || '').toLowerCase();
+      return status === 'completed' || !TERMINAL_STATUSES.has(status);
+    });
+    if (!live.length) return null;
+    const soldCount = term.coverage_visit_count != null ? Number(term.coverage_visit_count) : null;
+    const totalVisits = Number.isInteger(soldCount) && soldCount > 0 ? soldCount : live.length;
+    const visitsUsed = live.filter((r) => String(r.status || '').toLowerCase() === 'completed').length;
+    const idx = scheduledServiceId
+      ? live.findIndex((r) => String(r.id) === String(scheduledServiceId))
+      : -1;
+    return {
+      totalVisits,
+      visitsUsed,
+      visitsRemaining: Math.max(0, totalVisits - visitsUsed),
+      visitNumber: idx >= 0 ? idx + 1 : null,
+    };
+  } catch (err) {
+    logger.warn('[estimate-payment-context] term visit usage read failed', { error: err.message });
+    return null;
+  }
+}
+
 // The invoice the converter minted at accept. Its id is not persisted on the
 // estimate row, but the converter always writes "accepted estimate #<uuid>"
 // into the invoice notes, and a uuid in that marker is unambiguous — so the
@@ -172,6 +214,7 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
       }
     }
     const status = String(term.status || '').toLowerCase();
+    const usage = await summarizeTermVisitUsage(term, scheduledServiceId);
     annualPrepay = {
       termId: term.id,
       status: term.status,
@@ -186,6 +229,11 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
       termEnd: term.term_end || null,
       coverageServiceType: term.coverage_service_type || null,
       coverageVisitCount: term.coverage_visit_count != null ? Number(term.coverage_visit_count) : null,
+      // "Visit X of Y · N remaining" context (null when no visits are linked).
+      totalVisits: usage?.totalVisits ?? null,
+      visitsUsed: usage?.visitsUsed ?? null,
+      visitsRemaining: usage?.visitsRemaining ?? null,
+      visitNumber: usage?.visitNumber ?? null,
       invoiceId: invoice?.id || term.prepay_invoice_id || null,
       invoiceStatus: invoice?.status || null,
       invoicePaidAt: invoice?.paid_at || null,
@@ -229,6 +277,7 @@ module.exports = {
     invoiceIsPaid,
     findAcceptanceInvoice,
     resolveAnnualPrepayTerm,
+    summarizeTermVisitUsage,
     SETUP_FEE_RE,
     FIRST_APPLICATION_RE,
   },

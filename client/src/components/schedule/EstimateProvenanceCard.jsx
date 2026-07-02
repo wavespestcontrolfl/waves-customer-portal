@@ -75,8 +75,21 @@ function paymentRows(payment) {
   if (ap) {
     const amount = money(ap.prepayAmount != null ? ap.prepayAmount : ap.invoiceTotal);
     const status = String(ap.status || '').toLowerCase();
-    const covers = ap.coverageVisitCount > 0
-      ? ` · covers ${ap.coverageVisitCount} visit${ap.coverageVisitCount === 1 ? '' : 's'}`
+    // "visit 2 of 4 Quarterly Pest Control · 2 left" when this appointment is
+    // one of the covered visits; "1 of 4 used · 3 left" when it isn't linked
+    // (coverage gap) but the term still has usage; plain "covers 4 visits"
+    // when no visits are linked at all.
+    const svc = ap.coverageServiceType ? ` ${ap.coverageServiceType}` : '';
+    let usage = '';
+    if (ap.visitNumber && ap.totalVisits) {
+      usage = ` · visit ${ap.visitNumber} of ${ap.totalVisits}${svc}`;
+    } else if (ap.totalVisits) {
+      usage = ` · ${ap.visitsUsed || 0} of ${ap.totalVisits}${svc} used`;
+    } else if (ap.coverageVisitCount > 0) {
+      usage = ` · covers ${ap.coverageVisitCount}${svc} visit${ap.coverageVisitCount === 1 ? '' : 's'}`;
+    }
+    const left = ap.totalVisits && ap.visitsRemaining != null
+      ? ` · ${ap.visitsRemaining} left`
       : '';
     const through = ap.termEnd ? ` through ${fmtDate(ap.termEnd)}` : '';
     if (ap.paid) {
@@ -84,7 +97,7 @@ function paymentRows(payment) {
       rows.push({
         label: 'Annual prepay — paid',
         value: amount,
-        sub: `Paid${paidOn ? ` ${paidOn}` : ''}${covers}${through} — do not collect at the visit`,
+        sub: `Paid${paidOn ? ` ${paidOn}` : ''}${usage}${left}${through} — do not collect at the visit`,
         tone: 'paid',
       });
     } else if (['cancelled', 'canceled', 'refunded'].includes(status)) {
@@ -98,7 +111,7 @@ function paymentRows(payment) {
       rows.push({
         label: 'Annual prepay — pending',
         value: amount,
-        sub: `Invoice sent, payment not received yet${covers}${through}`,
+        sub: `Invoice sent, payment not received yet${usage}${left}${through}`,
         tone: 'muted',
       });
     }
