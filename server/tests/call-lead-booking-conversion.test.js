@@ -23,21 +23,36 @@ const { _test } = require('../services/call-recording-processor');
 const { convertCallLeadOnPhoneBooking } = _test;
 
 // Inner (savepoint) db stub: routes table calls to configurable results and
-// records update/insert payloads.
-function makeInner({ convertible = { id: 'lead-1' }, failOn = null } = {}) {
+// records update/insert payloads. where(fn) invokes the closure against the
+// same builder (mirroring knex) so the ownership-guard predicate is recorded.
+function makeInner({
+  convertible = { id: 'lead-1' },
+  customer = { id: 'cust-1', pipeline_stage: 'new_lead', member_since: null, active: true, churned_at: null },
+  failOn = null,
+  leadUpdateCount = 1,
+} = {}) {
   const writes = { updates: [], inserts: [] };
+  const chains = [];
   const inner = jest.fn((table) => {
     const b = {
-      where: jest.fn(() => b),
+      _table: table,
+      where: jest.fn((arg) => {
+        if (typeof arg === 'function') arg(b);
+        return b;
+      }),
+      whereNull: jest.fn(() => b),
+      orWhere: jest.fn(() => b),
       whereNotIn: jest.fn(() => b),
       first: jest.fn(async () => {
         if (failOn === 'first') throw new Error('boom');
-        return table === 'leads' ? convertible : null;
+        if (table === 'leads') return convertible;
+        if (table === 'customers') return customer;
+        return null;
       }),
       update: jest.fn(async (payload) => {
         if (failOn === 'update') throw new Error('boom');
         writes.updates.push({ table, payload });
-        return 1;
+        return table === 'leads' ? leadUpdateCount : 1;
       }),
       insert: jest.fn(async (payload) => {
         if (failOn === 'insert') throw new Error('boom');
@@ -45,9 +60,11 @@ function makeInner({ convertible = { id: 'lead-1' }, failOn = null } = {}) {
         return [1];
       }),
     };
+    chains.push(b);
     return b;
   });
   inner._writes = writes;
+  inner._chains = chains;
   return inner;
 }
 
@@ -127,5 +144,94 @@ describe('convertCallLeadOnPhoneBooking', () => {
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('Lead conversion on phone booking failed'),
     );
+  });
+
+  test('ownership guard on read AND write: only an unclaimed lead or one already owned by the booked customer converts', async () => {
+    const inner = makeInner();
+    const trx = makeTrx(inner);
+
+    await convertCallLeadOnPhoneBooking(trx, ARGS);
+
+    // leadId can come from the phone-only existing-lead lookup, and a caller
+    // phone can be shared across leads — booking one customer must never
+    // steal another customer's lead. The predicate is repeated in the UPDATE
+    // so a concurrent claim between read and write can't slip through.
+    const leadChains = inner._chains.filter((b) => b._table === 'leads');
+    expect(leadChains).toHaveLength(2); // read + update
+    for (const b of leadChains) {
+      expect(b.whereNull).toHaveBeenCalledWith('customer_id');
+      expect(b.orWhere).toHaveBeenCalledWith('customer_id', 'cust-1');
+    }
+  });
+
+  test('update raced to zero rows → returns false, no activity row, no promotion', async () => {
+    const inner = makeInner({ leadUpdateCount: 0 });
+    const trx = makeTrx(inner);
+
+    const converted = await convertCallLeadOnPhoneBooking(trx, ARGS);
+
+    expect(converted).toBe(false);
+    expect(inner._writes.inserts).toHaveLength(0);
+    expect(inner._writes.updates.filter((w) => w.table === 'customers')).toHaveLength(0);
+  });
+
+  test('promotes a new_lead customer to won with member_since + reactivation (mirrors admin schedule-appointment)', async () => {
+    const inner = makeInner();
+    const trx = makeTrx(inner);
+
+    const converted = await convertCallLeadOnPhoneBooking(trx, ARGS);
+
+    expect(converted).toBe(true);
+    const custUpdate = inner._writes.updates.find((w) => w.table === 'customers');
+    expect(custUpdate).toBeTruthy();
+    expect(custUpdate.payload).toMatchObject({
+      pipeline_stage: 'won',
+      active: true,
+      churned_at: null,
+      churn_reason: null,
+    });
+    // A lead's intake member_since is overwritten with today's ET date.
+    expect(custUpdate.payload.member_since).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test('customer already in a live stage and active → no customer write', async () => {
+    const inner = makeInner({
+      customer: { id: 'cust-1', pipeline_stage: 'active_customer', member_since: '2024-05-01', active: true, churned_at: null },
+    });
+    const trx = makeTrx(inner);
+
+    const converted = await convertCallLeadOnPhoneBooking(trx, ARGS);
+
+    expect(converted).toBe(true);
+    expect(inner._writes.updates.filter((w) => w.table === 'customers')).toHaveLength(0);
+  });
+
+  test('churned customer re-booking: real start date preserved, row reactivated', async () => {
+    const inner = makeInner({
+      customer: { id: 'cust-1', pipeline_stage: 'churned', member_since: '2024-05-01', active: false, churned_at: new Date('2026-01-01') },
+    });
+    const trx = makeTrx(inner);
+
+    const converted = await convertCallLeadOnPhoneBooking(trx, ARGS);
+
+    expect(converted).toBe(true);
+    const custUpdate = inner._writes.updates.find((w) => w.table === 'customers');
+    expect(custUpdate.payload).toMatchObject({
+      pipeline_stage: 'won',
+      member_since: '2024-05-01',
+      active: true,
+      churned_at: null,
+    });
+  });
+
+  test('customer row missing → lead still converts, no customer write, no throw', async () => {
+    const inner = makeInner({ customer: null });
+    const trx = makeTrx(inner);
+
+    const converted = await convertCallLeadOnPhoneBooking(trx, ARGS);
+
+    expect(converted).toBe(true);
+    expect(inner._writes.updates.filter((w) => w.table === 'customers')).toHaveLength(0);
+    expect(inner._writes.inserts).toHaveLength(1);
   });
 });

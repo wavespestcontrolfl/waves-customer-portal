@@ -27,6 +27,7 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
+const { CUSTOMER_STAGES } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
@@ -421,18 +422,32 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
   if (!leadId) return false;
   try {
     return await trx.transaction(async (inner) => {
+      // Ownership guard: leadId can come from the phone-only existing-lead
+      // lookup, and a caller phone can be shared across leads. Only a lead
+      // that is unclaimed (customer_id NULL) or already belongs to the
+      // booked customer may be closed here — never reassign another
+      // customer's lead. Repeated in the UPDATE predicate so a concurrent
+      // claim between the read and the write can't slip through.
+      const ownedOrUnclaimed = (q) =>
+        q.whereNull('customer_id').orWhere('customer_id', customerId);
       const convertible = await inner('leads')
         .where({ id: leadId })
         .whereNotIn('status', ['won', 'duplicate'])
+        .where(ownedOrUnclaimed)
         .first('id');
       if (!convertible) return false;
-      await inner('leads').where({ id: leadId }).update({
-        status: 'won',
-        customer_id: customerId,
-        converted_at: new Date(),
-        is_qualified: true,
-        updated_at: new Date(),
-      });
+      const updated = await inner('leads')
+        .where({ id: leadId })
+        .whereNotIn('status', ['won', 'duplicate'])
+        .where(ownedOrUnclaimed)
+        .update({
+          status: 'won',
+          customer_id: customerId,
+          converted_at: new Date(),
+          is_qualified: true,
+          updated_at: new Date(),
+        });
+      if (!updated) return false;
       await inner('lead_activities').insert({
         lead_id: leadId,
         activity_type: 'converted',
@@ -445,6 +460,37 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
           callSid,
         }),
       });
+      // Promote the customer row alongside the lead (mirrors the admin
+      // schedule-appointment route): a phone-booked account left at
+      // new_lead falls outside the canonical live-customer stages and is
+      // under-counted by every dashboard. Stage promotion only when still
+      // in a lead/churned stage; reactivation also for a deactivated or
+      // churn-stamped row already in a customer stage.
+      const customer = await inner('customers')
+        .where({ id: customerId })
+        .first('id', 'pipeline_stage', 'member_since', 'active', 'churned_at');
+      if (customer) {
+        const inCustomerStage = CUSTOMER_STAGES.includes(customer.pipeline_stage);
+        const customerUpdates = {};
+        if (!inCustomerStage) {
+          customerUpdates.pipeline_stage = 'won';
+          customerUpdates.pipeline_stage_changed_at = new Date();
+          // Conversion date: keep a former customer's real start (churned/
+          // dormant re-booking), but overwrite a lead's intake date with today.
+          customerUpdates.member_since = ['churned', 'dormant'].includes(customer.pipeline_stage)
+            ? (customer.member_since || etDateString())
+            : etDateString();
+        }
+        if (!inCustomerStage || customer.active === false || customer.churned_at) {
+          customerUpdates.active = true;
+          customerUpdates.churned_at = null;
+          customerUpdates.churn_reason = null;
+        }
+        if (Object.keys(customerUpdates).length) {
+          customerUpdates.updated_at = new Date();
+          await inner('customers').where({ id: customerId }).update(customerUpdates);
+        }
+      }
       logger.info(`[call-proc] Lead ${leadId} converted to won (appointment_booked) for ${callSid}`);
       return true;
     });
@@ -3038,14 +3084,26 @@ const CallRecordingProcessor = {
                 });
                 if (existing) {
                   reusedExistingSchedule = true;
+                  let effectiveExisting = existing;
                   if (!existing.technician_id && defaultTechnicianId) {
                     const [updatedExisting] = await trx('scheduled_services')
                       .where({ id: existing.id })
                       .update({ technician_id: defaultTechnicianId, updated_at: new Date() })
                       .returning('*');
-                    return updatedExisting || existing;
+                    effectiveExisting = updatedExisting || existing;
                   }
-                  return existing;
+                  // A reused appointment still closed the deal: reprocessing a
+                  // call (or recovering from an earlier savepoint-contained
+                  // conversion failure) must not strand the lead as open. The
+                  // helper's won/duplicate + ownership guards make this a no-op
+                  // when the lead already converted.
+                  await convertCallLeadOnPhoneBooking(trx, {
+                    leadId,
+                    customerId,
+                    scheduledServiceId: effectiveExisting.id,
+                    callSid,
+                  });
+                  return effectiveExisting;
                 }
                 const insertData = {
                   customer_id: customerId,
@@ -3103,6 +3161,14 @@ const CallRecordingProcessor = {
                 if (existingByKey) {
                   reusedExistingSchedule = true;
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
+                  // Same as the reuse path above: the appointment exists, so
+                  // the lead must still convert (idempotent, ownership-guarded).
+                  await convertCallLeadOnPhoneBooking(trx, {
+                    leadId,
+                    customerId,
+                    scheduledServiceId: existingByKey.id,
+                    callSid,
+                  });
                   return existingByKey;
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
