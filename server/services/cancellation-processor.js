@@ -40,8 +40,11 @@ const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'charge_review', 'cha
  *      autopay, clear the next charge, disarm any armed failed-payment retry)
  *      so a cancelled customer is never charged again.
  *
- * Best-effort and safe to call more than once: a visit already cancelled or a
- * customer already fully churned is skipped, so a retry is a no-op. Each step
+ * Best-effort and safe to call more than once: a retry is not just a no-op —
+ * visits a prior attempt of the SAME request already flipped (identified via
+ * the request-scoped job_status_history note) get their idempotent side
+ * effects re-run, so a partial first attempt is REPAIRED rather than skipped.
+ * An already-churned customer is re-inactivated without restamping. Each step
  * is guarded and records into `errors` so a partial failure still lets the
  * others run and is surfaced to the caller (`ok === false`) for manual review —
  * the durable service_requests row and admin notification remain regardless.
@@ -108,40 +111,114 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
     logger.error(`[cancellation-processor] failed to load visits for ${customerId}: ${err.message}`);
   }
 
-  let cancelledCount = 0;
-  for (const svc of services) {
-    // Canonical status flip: writes the job_status_history audit row,
-    // auto-resolves open tech_late / unassigned_overdue alerts, and broadcasts
-    // dispatch + customer job updates — the sole-writer the admin cancel path
-    // uses. The atomic guard on fromStatus makes a racing transition throw
-    // instead of clobbering it.
-    try {
-      await transitionJobStatus({
-        jobId: svc.id,
-        fromStatus: svc.status,
-        toStatus: 'cancelled',
-        transitionedBy: null,
-        notes: cancelReason,
-      });
-    } catch (err) {
-      // Guard-mismatch race: if another path already moved the row out of the
-      // cancellable set (e.g. a concurrent duplicate request cancelled it),
-      // that's a benign no-op. Anything else (a tech went en_route mid-request,
-      // or a real failure) needs office eyes via the alert's error list.
-      let benign = false;
-      try {
-        const fresh = await db('scheduled_services').where({ id: svc.id }).first('status');
-        benign = !!fresh && !CANCELLABLE_STATUSES.includes(fresh.status) && fresh.status !== 'en_route' && fresh.status !== 'on_site';
-      } catch (recheckErr) {
-        logger.error(`[cancellation-processor] status re-check failed for ${svc.id}: ${recheckErr.message}`);
-      }
-      if (!benign) {
-        errors.push(`cancel_visit:${svc.id}`);
-        logger.error(`[cancellation-processor] failed to cancel visit ${svc.id}: ${err.message}`);
-      }
-      continue;
+  // Visits a PRIOR attempt of this same request already flipped to cancelled:
+  // the sweep above only selects still-live statuses, so without this a retry
+  // (the route re-runs the processor on a deduped resubmit) would skip a visit
+  // whose status flip committed but whose side effects (invoice void, card
+  // hold, reminders, track layer) failed — leaving them broken forever. The
+  // flip stamps the request-scoped reason into job_status_history.notes, which
+  // identifies exactly the visits this request cancelled; re-confirm each is
+  // STILL cancelled so a visit an admin has since revived is left alone.
+  let repairs = [];
+  try {
+    const history = await db('job_status_history')
+      .where({ to_status: 'cancelled', notes: cancelReason })
+      .select('job_id');
+    const freshIds = new Set(services.map((s) => s.id));
+    const priorIds = [...new Set(history.map((h) => h.job_id))].filter((id) => !freshIds.has(id));
+    if (priorIds.length) {
+      repairs = await db('scheduled_services')
+        .whereIn('id', priorIds)
+        .where({ status: 'cancelled' })
+        .select('id', 'status');
     }
-    cancelledCount += 1;
+  } catch (err) {
+    errors.push('load_prior_cancelled');
+    logger.error(`[cancellation-processor] failed to load prior-cancelled visits for ${customerId}: ${err.message}`);
+  }
+
+  let cancelledCount = 0;
+  const toProcess = [
+    ...services.map((s) => ({ ...s, alreadyCancelled: false })),
+    ...repairs.map((s) => ({ ...s, alreadyCancelled: true })),
+  ];
+  for (const svc of toProcess) {
+    if (!svc.alreadyCancelled) {
+      // Canonical status flip: writes the job_status_history audit row,
+      // auto-resolves open tech_late / unassigned_overdue alerts, and broadcasts
+      // dispatch + customer job updates — the sole-writer the admin cancel path
+      // uses. The atomic guard on fromStatus makes a racing transition throw
+      // instead of clobbering it.
+      let flipped = false;
+      try {
+        await transitionJobStatus({
+          jobId: svc.id,
+          fromStatus: svc.status,
+          toStatus: 'cancelled',
+          transitionedBy: null,
+          notes: cancelReason,
+        });
+        flipped = true;
+      } catch (err) {
+        // Guard-mismatch race: another path moved the row first. A concurrent
+        // duplicate that already CANCELLED it falls through to the (idempotent)
+        // side effects below so a half-processed racer still gets repaired;
+        // other terminal history is a benign skip; anything else (a tech went
+        // en_route mid-request, or a real failure) needs office eyes.
+        let freshStatus = null;
+        try {
+          const fresh = await db('scheduled_services').where({ id: svc.id }).first('status');
+          freshStatus = fresh ? fresh.status : null;
+        } catch (recheckErr) {
+          logger.error(`[cancellation-processor] status re-check failed for ${svc.id}: ${recheckErr.message}`);
+        }
+        if (freshStatus !== 'cancelled') {
+          const benign = !!freshStatus
+            && !CANCELLABLE_STATUSES.includes(freshStatus)
+            && freshStatus !== 'en_route' && freshStatus !== 'on_site';
+          if (!benign) {
+            errors.push(`cancel_visit:${svc.id}`);
+            logger.error(`[cancellation-processor] failed to cancel visit ${svc.id}: ${err.message}`);
+          }
+          continue;
+        }
+      }
+
+      if (flipped) {
+        // The flip's atomic guard covers only `status` — the tracker can go
+        // LIVE between our sweep SELECT and the flip while its best-effort
+        // status sync fails, in which case we just cancelled a visit a tech is
+        // actively working. Re-read the track layer and compensate: revert the
+        // flip (with its own audit row) and flag for manual handling instead.
+        let wentLive = false;
+        try {
+          const freshTrack = await db('scheduled_services').where({ id: svc.id }).first('track_state');
+          wentLive = !!freshTrack && LIVE_TRACK_STATES.includes(freshTrack.track_state);
+        } catch (trackCheckErr) {
+          logger.error(`[cancellation-processor] track-state re-check failed for ${svc.id}: ${trackCheckErr.message}`);
+        }
+        if (wentLive) {
+          try {
+            await transitionJobStatus({
+              jobId: svc.id,
+              fromStatus: 'cancelled',
+              toStatus: svc.status,
+              transitionedBy: null,
+              notes: 'Auto-cancel reverted — tech went live mid-request',
+            });
+            errors.push(`in_progress_visit:${svc.id}`);
+            logger.warn(`[cancellation-processor] visit ${svc.id} went live mid-request — cancel reverted, left for manual handling`);
+          } catch (revertErr) {
+            // The revert lost its own race (the visit advanced again). Leave
+            // the row as-is and flag it — office review decides the end state.
+            errors.push(`cancel_visit:${svc.id}`);
+            logger.error(`[cancellation-processor] failed to revert live-visit cancel for ${svc.id}: ${revertErr.message}`);
+          }
+          continue;
+        }
+        cancelledCount += 1;
+      }
+    }
 
     // Mirror the admin cancel path's side effects for the committed flip.
     // Each is best-effort so one failure never strands the rest of the sweep;

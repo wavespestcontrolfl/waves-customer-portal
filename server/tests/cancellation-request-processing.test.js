@@ -280,7 +280,86 @@ describe('processCancellationRequest', () => {
     expect(result.cancelledCount).toBe(0);
     expect(result.errors).toEqual(['cancel_visit:sB']);
     expect(result.ok).toBe(false);
-    // Side effects never fire for a visit whose status flip didn't commit.
+    // The raced-to-CANCELLED visit still gets the idempotent side effects so a
+    // half-processed concurrent duplicate is repaired; the in-progress one
+    // (flip never committed) gets none.
+    expect(InvoiceService.voidOpenInvoicesForCancelledService).toHaveBeenCalledTimes(1);
+    expect(InvoiceService.voidOpenInvoicesForCancelledService).toHaveBeenCalledWith('sA');
+    expect(CardHolds.handleCardHoldCancellation).toHaveBeenCalledTimes(1);
+    expect(CardHolds.handleCardHoldCancellation).toHaveBeenCalledWith({ scheduledServiceId: 'sA' });
+  });
+
+  test('a retry repairs side effects for visits a prior attempt already cancelled', async () => {
+    const reason = 'Portal cancellation request req1';
+    db.__tables.scheduled_services = [
+      // Attempt 1 flipped the status but its side effects failed: the track
+      // layer is still 'scheduled' and an invoice is still open.
+      { id: 's1', customer_id: 'c1', status: 'cancelled', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+      // Cancelled by this request too, but an admin has since revived it —
+      // current status is no longer 'cancelled', so the repair leaves it alone
+      // (past-dated, so the fresh sweep skips it as well).
+      { id: 'sRevived', customer_id: 'c1', status: 'pending', scheduled_date: PAST, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+    ];
+    db.__tables.job_status_history = [
+      { job_id: 's1', from_status: 'pending', to_status: 'cancelled', notes: reason },
+      { job_id: 'sRevived', from_status: 'pending', to_status: 'cancelled', notes: reason },
+    ];
+    db.__tables.invoices = [
+      { id: 'inv1', scheduled_service_id: 's1', status: 'sent' },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'churned', active: false, churned_at: '2026-07-01', churn_reason: 'old', autopay_enabled: false }];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+
+    const result = await processCancellationRequest({ customerId: 'c1', reason, requestId: 'req1' });
+
+    // Nothing newly flipped — the repair pass re-runs side effects only.
+    expect(result.cancelledCount).toBe(0);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(AppointmentReminders.handleCancellation).toHaveBeenCalledWith('s1', { sendNotification: false });
+    expect(InvoiceService.voidOpenInvoicesForCancelledService).toHaveBeenCalledWith('s1');
+    expect(CardHolds.handleCardHoldCancellation).toHaveBeenCalledWith({ scheduledServiceId: 's1' });
+    // Track layer repaired this time.
+    const s1 = db.__tables.scheduled_services.find((r) => r.id === 's1');
+    expect(s1.track_state).toBe('cancelled');
+    // Still-unresolved money keeps the review flag up.
+    expect(result.errors).toContain('invoice_review:inv1');
+    // The revived visit was left alone.
+    const revived = db.__tables.scheduled_services.find((r) => r.id === 'sRevived');
+    expect(revived.status).toBe('pending');
+    expect(AppointmentReminders.handleCancellation).not.toHaveBeenCalledWith('sRevived', expect.anything());
+  });
+
+  test('a visit whose tracker goes live between the sweep and the flip is reverted and flagged', async () => {
+    db.__tables.scheduled_services = [
+      { id: 's1', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true }];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+
+    // Simulate the race: the flip commits, but by then a tech has gone
+    // en_route on the tracker with its best-effort status sync failing.
+    transitionJobStatus.mockImplementationOnce(async ({ jobId, fromStatus, toStatus }) => {
+      const row = db.__tables.scheduled_services.find((r) => r.id === jobId);
+      if (!row || row.status !== fromStatus) throw new Error(`transitionJobStatus: ${jobId} not in state ${fromStatus}`);
+      row.status = toStatus;
+      row.track_state = 'en_route';
+      (db.__tables.job_status_history = db.__tables.job_status_history || []).push({ job_id: jobId, from_status: fromStatus, to_status: toStatus });
+      return { customerPayload: {}, adminPayload: {} };
+    });
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req11' });
+
+    // Compensating revert restored the pre-flip status (second, default-mock
+    // transitionJobStatus call) and the visit is flagged, not counted.
+    const s1 = db.__tables.scheduled_services.find((r) => r.id === 's1');
+    expect(s1.status).toBe('pending');
+    expect(transitionJobStatus).toHaveBeenCalledTimes(2);
+    expect(result.cancelledCount).toBe(0);
+    expect(result.errors).toEqual(['in_progress_visit:s1']);
+    expect(result.ok).toBe(false);
+    // No side effects for a reverted cancel.
     expect(InvoiceService.voidOpenInvoicesForCancelledService).not.toHaveBeenCalled();
     expect(CardHolds.handleCardHoldCancellation).not.toHaveBeenCalled();
   });
