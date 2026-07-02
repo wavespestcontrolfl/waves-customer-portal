@@ -9,6 +9,14 @@ const { isEnabled } = require('../config/feature-gates');
 const { formatDisplayDate } = require('../utils/date-only');
 const { portalUrl } = require('../utils/portal-url');
 
+// Pest types whose booking triggers an automatic prep guide email
+// (email_template_automations, appointment.booked trigger).
+const PREP_AUTOMATION_BY_PEST_TYPE = Object.freeze({
+  cockroach: 'prep.cockroach',
+  bed_bug: 'prep.bed_bug',
+  flea: 'prep.flea',
+});
+
 class AppointmentTagger {
 
   async onServiceScheduled(scheduledServiceId) {
@@ -31,6 +39,7 @@ class AppointmentTagger {
         case 'wdo_inspection': await this.triggerWDOPrep(service); break;
         case 'german_roach': case 'cockroach': await this.triggerPestPrep(service, 'cockroach'); break;
         case 'bed_bug': await this.triggerPestPrep(service, 'bed_bug'); break;
+        case 'flea': await this.triggerPestPrep(service, 'flea'); break;
       }
     } catch (err) {
       logger.error('[appointment-tagger] Appointment automation failed', {
@@ -60,6 +69,7 @@ class AppointmentTagger {
     if (s.includes('german') || (s.includes('roach') && s.includes('interior'))) return { tag: 'german_roach', label: 'German Roach Treatment' };
     if (s.includes('cockroach') || s.includes('roach')) return { tag: 'cockroach', label: 'Cockroach Treatment' };
     if (s.includes('bed bug')) return { tag: 'bed_bug', label: 'Bed Bug Treatment' };
+    if (s.includes('flea')) return { tag: 'flea', label: 'Flea Treatment' };
     if (s.includes('fumigat') || s.includes('tent')) return { tag: 'tent_fumigation', label: 'Tent Fumigation' };
     if (s.includes('termite') && !s.includes('inspect') && !s.includes('monitor')) return { tag: 'termite_treatment', label: 'Termite Treatment' };
     if (s.includes('rodent') && s.includes('exclusion')) return { tag: 'rodent_exclusion', label: 'Rodent Exclusion' };
@@ -237,11 +247,7 @@ class AppointmentTagger {
   // still apply, and the once-per-appointment idempotency key makes re-runs
   // of onServiceScheduled (e.g. regenerate-brief) safe.
   async triggerPrepEmailGuide(service, pestType) {
-    const automationKey = pestType === 'cockroach'
-      ? 'prep.cockroach'
-      : pestType === 'bed_bug'
-        ? 'prep.bed_bug'
-        : null;
+    const automationKey = PREP_AUTOMATION_BY_PEST_TYPE[pestType] || null;
     if (!automationKey) return;
     if (!isEnabled('emailTemplateAutomations')) return;
     if (!service.email) {

@@ -91,6 +91,7 @@ const PROTECTED_EMAIL_AUTOMATION_KEYS = new Set([
   'payment.failed',
   'prep.bed_bug',
   'prep.cockroach',
+  'prep.flea',
   'project.report_ready',
   'service.report_ready',
   'welcome.new_recurring',

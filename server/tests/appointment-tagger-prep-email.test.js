@@ -76,6 +76,29 @@ describe('appointment tagger prep email automation', () => {
     expect(call.payload.customer_portal_url).toContain('?tab=visits');
   });
 
+  test('flea booking maps to prep.flea with no SMS companion', async () => {
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+
+    await AppointmentTagger.triggerPestPrep(
+      service({ service_type: 'Flea Treatment - Interior & Exterior' }),
+      'flea',
+    );
+
+    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+    const call = executor.processTrigger.mock.calls[0][0];
+    expect(call.automationKey).toBe('prep.flea');
+    expect(call.payload.project_type).toBe('Flea Treatment');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('classifier tags flea service types', () => {
+    expect(AppointmentTagger.classifyAppointmentType('Flea Treatment')).toEqual({
+      tag: 'flea',
+      label: 'Flea Treatment',
+    });
+    expect(AppointmentTagger.classifyAppointmentType('flea & tick service').tag).toBe('flea');
+  });
+
   test('bed bug booking maps to prep.bed_bug', async () => {
     await AppointmentTagger.triggerPestPrep(
       service({ service_type: 'Bed Bug Treatment' }),
