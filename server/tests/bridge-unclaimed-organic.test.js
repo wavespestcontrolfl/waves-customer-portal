@@ -180,6 +180,10 @@ describe('scheduler wiring', () => {
   test('a bridge-claimed call_log row excludes its lead even when the lead was never repointed', () => {
     const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
     expect(ca).toMatch(/callAlreadyBridged/);
+    // call_log has NO lead_id column — the linkage is twilio_call_sid (the
+    // bridge's own fetchCrmCalls join; prod-schema-verified 2026-07-01).
+    expect(ca).toMatch(/whereRaw\('cl\.twilio_call_sid = l\.twilio_call_sid'\)/);
+    expect(ca).not.toMatch(/cl\.lead_id/);
     expect(ca).toMatch(/whereNotNull\('cl\.google_ads_call_resource_name'\)/);
   });
 });

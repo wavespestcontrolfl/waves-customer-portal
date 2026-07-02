@@ -277,10 +277,13 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
     // A bridged CALL whose lead was never repointed (e.g. no lead matched at
     // claim time, or the funnel write skipped on a then-customer-less lead) is
     // still a CLAIMED Google Ads call — "unclaimed" means no bridge stamp
-    // anywhere, not just an un-repointed lead row.
+    // anywhere, not just an un-repointed lead row. call_log has NO lead_id
+    // column: the lead↔call linkage is twilio_call_sid, the same join the
+    // bridge's own fetchCrmCalls uses (a NULL sid on the lead matches nothing
+    // and passes, correctly — no linked call, no bridge stamp).
     .whereNotExists(function callAlreadyBridged() {
       this.select(1).from('call_log as cl')
-        .whereRaw('cl.lead_id = l.id')
+        .whereRaw('cl.twilio_call_sid = l.twilio_call_sid')
         .whereNotNull('cl.google_ads_call_resource_name');
     })
     .orderBy('l.created_at')
