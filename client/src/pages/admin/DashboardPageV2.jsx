@@ -485,6 +485,9 @@ export default function DashboardPageV2() {
         onApplyCustomRange={applyCustomRange}
       />
 
+      {/* Alerts stay the first dashboard content, even with AI charts pinned. */}
+      <TodaySection alerts={alerts} today={today} {...kpiStripProps} />
+
       {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
           by default; the model only proposes SQL, the server sandboxes it. */}
       {aiChartsEnabled && (
@@ -492,8 +495,6 @@ export default function DashboardPageV2() {
           <AiChartsPanel />
         </div>
       )}
-
-      <TodaySection alerts={alerts} today={today} {...kpiStripProps} />
 
       <GrowthSection
         data={data}
