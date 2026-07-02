@@ -2426,16 +2426,20 @@ function initScheduledJobs() {
             googleCalls: r.summary?.googleCalls,
             crmMainLineCalls: r.summary?.crmMainLineCalls,
           })}`);
+        } else if (process.env.BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED !== 'true') {
+          // Fail closed on an UNCONFIGURED Google Ads API: a missing/rotated
+          // GOOGLE_ADS_* secret is indistinguishable from a genuine
+          // organic-only install, and the organic write is irreversible. An
+          // install that truly runs no Google Ads API (so no call could ever
+          // be claimed) opts in with BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED=true.
+          bridgeBlockedReason = 'google_ads_unconfigured';
         }
 
         // AFTER the bridge has had the day's claim: unclaimed bridge-target
-        // leads older than the window become organic. DESIGN DECISION: this
-        // still runs when the Google Ads API is UNCONFIGURED — with no API
-        // there is no data source that could ever mark these calls paid, so
-        // gating on configuration would recreate the permanent hole this
-        // fallback exists to close (52 leads at ship time). A configured but
-        // incomplete/unhealthy pass (outage, row cap, write failure) DOES
-        // block it — those leads simply age one more day.
+        // leads older than the window become organic. Any doubt about the
+        // day's claim — outage, row cap, write failure, unconfigured API
+        // without the explicit opt-in — blocks it; those leads simply age
+        // one more day.
         if (bridgeBlockedReason) {
           logger.warn(`[bridge-unclaimed] skipped — bridge pass incomplete (${bridgeBlockedReason}); unclaimed leads age another day`);
         } else if (process.env.BRIDGE_UNCLAIMED_ORGANIC_DISABLED !== 'true') {

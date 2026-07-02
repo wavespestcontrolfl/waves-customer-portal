@@ -139,7 +139,7 @@ describe('scheduler wiring', () => {
     // bridge scan is mid-claim, and a deploy-overlap instance skips the pair
     // atomically — never the fallback without the bridge.
     expect(src).toMatch(/runExclusive\('google-call-bridge-organic'/);
-    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 3000);
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 7000);
     const bridgeIdx = block.indexOf('applyBridge');
     const sweepIdx = block.indexOf('attributeUnclaimedBridgeLeads');
     expect(bridgeIdx).toBeGreaterThan(-1);
@@ -153,10 +153,14 @@ describe('scheduler wiring', () => {
   });
 
   test('fallback requires a COMPLETE healthy bridge pass — outage, row cap, or write failure blocks it', () => {
-    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 4500);
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 7000);
     expect(block).toMatch(/bridgeBlockedReason = 'scan_failed'/);
     expect(block).toMatch(/bridgeBlockedReason = 'row_cap_hit'/);
     expect(block).toMatch(/bridgeBlockedReason = 'bridge_write_failed'/);
+    // Unconfigured API fails closed (rotated secret ≠ organic-only install);
+    // genuine no-Google-Ads installs opt in explicitly.
+    expect(block).toMatch(/bridgeBlockedReason = 'google_ads_unconfigured'/);
+    expect(block).toMatch(/BRIDGE_UNCLAIMED_ALLOW_UNCONFIGURED/);
     expect(block).toMatch(/if \(bridgeBlockedReason\)/);
     expect(block.indexOf('if (bridgeBlockedReason)')).toBeLessThan(block.indexOf('attributeUnclaimedBridgeLeads'));
   });
