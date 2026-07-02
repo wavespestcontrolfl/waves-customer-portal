@@ -2844,6 +2844,14 @@ const CallRecordingProcessor = {
           // already linked to a customer. Attach when we have one; otherwise
           // leave whatever link the lead already had.
           if (customerId) leadUpdates.customer_id = customerId;
+          // Reopen a reused lead the office parked as 'unresponsive' — the
+          // prospect just called back, and 'unresponsive' buckets under
+          // closed/lost in the admin leads UI, so a silently reused row would
+          // stay hidden from Needs Review. Same reopen semantics as the
+          // webhook prefill attach ('unresponsive' → 'new'; real terminal
+          // statuses are excluded from reuse upstream on the recovery path
+          // and never reopened here).
+          if (existingLead && current?.status === 'unresponsive') leadUpdates.status = 'new';
           leadUpdates.updated_at = new Date();
           await db('leads').where({ id: leadId }).update(leadUpdates);
 
