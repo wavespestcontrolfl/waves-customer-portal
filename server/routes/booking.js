@@ -1202,6 +1202,15 @@ async function createSelfBooking(payload = {}) {
     const { booking, serviceRow } = txResult;
     // (new-booking intents already converted in the transaction above)
 
+    // Appointment-type automations (tagging, prep guide emails) — same hook
+    // the admin scheduling path runs. Post-commit and fire-and-forget so the
+    // booking response never waits on it.
+    {
+      const AppointmentTagger = require('../services/appointment-tagger');
+      void AppointmentTagger.onServiceScheduled(serviceRow.id)
+        .catch((e) => logger.error(`[booking:confirm] appointment automations failed (non-blocking) for ${serviceRow.id}: ${e.message}`));
+    }
+
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
     const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
     let followUpRows = [];
