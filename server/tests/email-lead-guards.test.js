@@ -35,7 +35,7 @@ const {
 
 const CHAIN_METHODS = [
   'where', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereNot', 'whereNotIn',
-  'whereNull', 'whereNotNull', 'whereILike', 'andWhereILike', 'orderBy',
+  'whereIn', 'whereNull', 'whereNotNull', 'whereILike', 'andWhereILike', 'orderBy',
 ];
 
 /**
@@ -188,6 +188,26 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     const phoneRaw = state.raws.find((r) => r.table === 'customers' && String(r.sql).includes('RIGHT('));
     expect(phoneRaw).toBeDefined();
     expect(phoneRaw.bindings).toEqual(['9415551234']);
+  });
+
+  test('non-live customer match (churned/lost CRM row) goes to review, not silent skip', async () => {
+    // Both live-tier lookups (email, phone) miss; the inactive-tier
+    // (deleted_at IS NULL only) lookup hits a churned row — a re-engagement inquiry a human
+    // must see, never a silent skip and never a duplicate junk lead.
+    const state = setupDb({ customers: [null, null, { id: 'cust-9', pipeline_stage: 'churned' }] });
+
+    const result = await handleLeadInquiry(makeEmail(), makeClassification());
+
+    expect(result).toEqual({ action: 'lead_needs_review', reason: 'inactive_customer_match' });
+    expect(insertsFor(state, 'leads')).toHaveLength(0);
+    expect(emailUpdates(state)).toContainEqual(
+      expect.objectContaining({ customer_id: 'cust-9' })
+    );
+    expect(emailUpdates(state)).toContainEqual(
+      expect.objectContaining({ auto_action: 'lead_needs_review:inactive_customer_match' })
+    );
+    const [notification] = insertsFor(state, 'notifications');
+    expect(notification.row.category).toBe('email_alert');
   });
 
   test('soft-delete filter is applied to the customer lookup', async () => {

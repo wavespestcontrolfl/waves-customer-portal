@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const { isOperationalDomain, domainFromAddress, domainMatches, normalizeAddress } = require('./spam-blocker');
+const { whereLiveCustomer } = require('../customer-stages');
 
 /**
  * Destructive auto-actions (trash, archive, one-click UNSUBSCRIBE) must
@@ -193,36 +194,45 @@ async function isVendorEmail(email) {
   return !!vendor;
 }
 
-// Live (not soft-deleted) customer match by email (extracted + sender) and
-// by phone (last 10 digits) — an existing customer must not come back as a
-// brand-new lead.
+// Existing-customer match by email (extracted + sender) and by phone (last
+// 10 digits). A LIVE customer — the canonical whereLiveCustomer predicate
+// (active, not soft-deleted, pipeline_stage active_customer/won/at_risk) —
+// must not come back as a brand-new lead. A non-deleted CRM row that is NOT
+// live (new_lead / lost / churned / dormant) is returned separately: that
+// inquiry surfaces to a human instead of being silently skipped, because a
+// churned or lost contact emailing again is a re-engagement signal.
 async function findExistingCustomerForLead(email, extracted) {
   const emailCandidates = [...new Set(
     [extracted.email, email.from_address].map(normalizeAddress).filter(Boolean)
   )];
-  if (emailCandidates.length) {
-    const byEmail = await db('customers')
-      .whereNull('deleted_at')
-      .where(function () {
-        emailCandidates.forEach((candidate, idx) => {
-          idx === 0
-            ? this.whereRaw('LOWER(email) = ?', [candidate])
-            : this.orWhereRaw('LOWER(email) = ?', [candidate]);
-        });
-      })
-      .first();
-    if (byEmail) return byEmail;
-  }
-
   const last10 = phoneLast10(extracted.phone);
-  if (last10) {
-    const byPhone = await db('customers')
-      .whereNull('deleted_at')
-      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-      .first();
-    if (byPhone) return byPhone;
-  }
-  return null;
+
+  const matchByContact = async (applyLiveness) => {
+    if (emailCandidates.length) {
+      const byEmail = await applyLiveness(db('customers'))
+        .where(function () {
+          emailCandidates.forEach((candidate, idx) => {
+            idx === 0
+              ? this.whereRaw('LOWER(email) = ?', [candidate])
+              : this.orWhereRaw('LOWER(email) = ?', [candidate]);
+          });
+        })
+        .first();
+      if (byEmail) return byEmail;
+    }
+    if (last10) {
+      const byPhone = await applyLiveness(db('customers'))
+        .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .first();
+      if (byPhone) return byPhone;
+    }
+    return null;
+  };
+
+  const live = await matchByContact((qb) => whereLiveCustomer(qb));
+  if (live) return { live, inactive: null };
+  const inactive = await matchByContact((qb) => qb.whereNull('deleted_at'));
+  return { live: null, inactive };
 }
 
 // Blocked-but-maybe-real inquiries surface to a human instead of silently
@@ -311,16 +321,26 @@ async function handleLeadInquiry(email, classification) {
     return { action: 'linked_to_existing_lead', leadId: existingLead.id };
   }
 
-  // Guard: an existing live customer must not come back as a lead (silent).
-  const existingCustomer = await findExistingCustomerForLead(email, extracted);
-  if (existingCustomer) {
+  // Guard: an existing LIVE customer must not come back as a lead (silent
+  // skip); a match on a non-live CRM row (new_lead/lost/churned/dormant)
+  // surfaces for review instead — silently skipping those would eat a real
+  // re-engagement inquiry.
+  const customerMatch = await findExistingCustomerForLead(email, extracted);
+  if (customerMatch.live) {
     await db('emails').where({ id: email.id }).update({
-      customer_id: existingCustomer.id,
+      customer_id: customerMatch.live.id,
       auto_action: 'lead_skipped_existing_customer',
       updated_at: new Date(),
     });
-    logger.info(`[email-actions] Lead skipped — email ${email.id} matches existing customer ${existingCustomer.id}`);
-    return { action: 'skipped_existing_customer', customerId: existingCustomer.id };
+    logger.info(`[email-actions] Lead skipped — email ${email.id} matches existing customer ${customerMatch.live.id}`);
+    return { action: 'skipped_existing_customer', customerId: customerMatch.live.id };
+  }
+  if (customerMatch.inactive) {
+    await db('emails').where({ id: email.id }).update({
+      customer_id: customerMatch.inactive.id,
+      updated_at: new Date(),
+    });
+    return flagLeadNeedsReview(email, classification, 'inactive_customer_match');
   }
 
   // Guard: vendor mail is never a lead, regardless of classification.
