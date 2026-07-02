@@ -3,7 +3,11 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 }));
 
 const { getPaymentPendingCustomerIds } = require('../services/annual-prepay-renewals');
-const { computeMrrBreakdown, AT_RISK_PREDICATE } = require('../services/mrr-breakdown');
+const {
+  computeMrrBreakdown,
+  listAtRiskMrrAccounts,
+  AT_RISK_PREDICATE,
+} = require('../services/mrr-breakdown');
 
 // Minimal fake Knex: the helper chains where/whereNull/where/select off the
 // table builder and then awaits it for an array of {id, monthly_rate, at_risk}
@@ -86,6 +90,54 @@ describe('computeMrrBreakdown', () => {
     const db = makeFakeDb([{ id: 1, monthly_rate: '100', at_risk: false }]);
     const out = await computeMrrBreakdown(db, '2026-06-19');
     expect(out).toEqual({ total: 100, committed: 100, atRisk: 0, totalCount: 1, atRiskCount: 0 });
+  });
+});
+
+describe('listAtRiskMrrAccounts', () => {
+  beforeEach(() => {
+    getPaymentPendingCustomerIds.mockResolvedValue(new Set());
+  });
+
+  test('per-account causes from the shared sub-predicates, prepay-pending unioned, rate-desc, clear accounts dropped', async () => {
+    getPaymentPendingCustomerIds.mockResolvedValue(new Set(['4']));
+    const db = makeFakeDb([
+      { id: 1, first_name: 'Paused', last_name: 'Svc', monthly_rate: '50', risk_service_paused: true, risk_autopay_paused: false, risk_overdue: false },
+      { id: 2, first_name: 'All', last_name: 'Clear', monthly_rate: '80', risk_service_paused: false, risk_autopay_paused: false, risk_overdue: false },
+      // 't' exercises the non-pg-driver boolean tolerance.
+      { id: 3, first_name: 'Both', last_name: 'Risks', monthly_rate: '120', risk_service_paused: false, risk_autopay_paused: 't', risk_overdue: true },
+      { id: 4, first_name: 'Prepay', last_name: 'Pending', monthly_rate: '90', risk_service_paused: false, risk_autopay_paused: false, risk_overdue: false },
+    ]);
+    const out = await listAtRiskMrrAccounts(db, '2026-07-02');
+
+    // Highest monthly rate first; the clear account never appears.
+    expect(out.map((a) => a.id)).toEqual([3, 4, 1]);
+    expect(out[0]).toMatchObject({
+      firstName: 'Both',
+      lastName: 'Risks',
+      monthlyRate: 120,
+      causes: ['autopay_paused', 'overdue'],
+    });
+    expect(out[1].causes).toEqual(['prepay_payment_pending']);
+    expect(out[2].causes).toEqual(['service_paused']);
+  });
+
+  test('cause selects carry the asOf binding; the composite population matches the breakdown', async () => {
+    const db = makeFakeDb([]);
+    await listAtRiskMrrAccounts(db, '2026-07-02');
+    const bound = db._rawCalls.filter((c) => Array.isArray(c.bindings) && c.bindings.includes('2026-07-02'));
+    // autopay-paused + overdue each bind asOf once.
+    expect(bound.length).toBe(2);
+    expect(getPaymentPendingCustomerIds).toHaveBeenCalledWith('2026-07-02', db);
+  });
+
+  test('a prepay-helper failure fails soft — SQL-flagged causes still list', async () => {
+    getPaymentPendingCustomerIds.mockRejectedValue(new Error('prepay table missing'));
+    const db = makeFakeDb([
+      { id: 9, first_name: 'Over', last_name: 'Due', monthly_rate: '60', risk_service_paused: false, risk_autopay_paused: false, risk_overdue: true },
+    ]);
+    const out = await listAtRiskMrrAccounts(db, '2026-07-02');
+    expect(out).toHaveLength(1);
+    expect(out[0].causes).toEqual(['overdue']);
   });
 });
 

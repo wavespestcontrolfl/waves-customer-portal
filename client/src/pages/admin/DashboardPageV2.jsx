@@ -85,7 +85,12 @@ export default function DashboardPageV2() {
   const [reviewTrend, setReviewTrend] = useState(null);
   const [today, setToday] = useState(null);
   const [billing, setBilling] = useState(null);
-  const [alerts, setAlerts] = useState([]);
+  // null = alerts never loaded successfully. ActionInbox renders an explicit
+  // unavailable state for null — only a real [] response may claim all-clear.
+  const [alerts, setAlerts] = useState(null);
+  // true = the LATEST alerts fetch failed (value above is a kept-previous).
+  // ActionInbox suppresses the green all-clear while stale.
+  const [alertsStale, setAlertsStale] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -203,6 +208,10 @@ export default function DashboardPageV2() {
     setToday((prev) => td ?? prev);
     setBilling((prev) => bh?.summary ?? prev);
     setAlerts((prev) => (Array.isArray(al?.alerts) ? al.alerts : prev));
+    // Mark refresh failures so ActionInbox can tell "confirmed empty" from
+    // "kept the previous value" (the preserve-on-failure pattern above) —
+    // a green all-clear must never render off a failed load.
+    setAlertsStale(!Array.isArray(al?.alerts));
     setLoading(false);
 
     const wave2 = await Promise.all([
@@ -486,7 +495,7 @@ export default function DashboardPageV2() {
       />
 
       {/* Alerts stay the first dashboard content, even with AI charts pinned. */}
-      <TodaySection alerts={alerts} today={today} {...kpiStripProps} />
+      <TodaySection alerts={alerts} alertsStale={alertsStale} today={today} {...kpiStripProps} />
 
       {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
           by default; the model only proposes SQL, the server sandboxes it. */}

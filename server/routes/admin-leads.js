@@ -54,24 +54,12 @@ function parseInclusiveStart(startDate) {
   return new Date(startDate);
 }
 
-// Speed-to-Lead fresh-start baseline (owner directive 2026-06-30: "fresh start
-// tomorrow"). The live backlog gauge (Avg Speed to Lead + the "waiting" count)
-// only counts leads first contacted on/after this ET date, so a one-time reset
-// isn't dragged down forever by the pre-reset backlog of never-answered leads.
-// Env-overridable (SPEED_TO_LEAD_FRESH_START=YYYY-MM-DD) for a future reset; set
-// it empty to disable the floor. Invalid values fail open (no floor).
-const SPEED_TO_LEAD_FRESH_START = (() => {
-  const raw = process.env.SPEED_TO_LEAD_FRESH_START ?? '2026-07-01';
-  if (!raw) return null;
-  const d = parseInclusiveStart(raw);
-  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return null;
-  // parseETDateTime builds the cutoff with Date.UTC(), which silently rolls a
-  // non-existent calendar date over (2026-02-30 -> Mar 2) instead of failing.
-  // Round-trip a date-only value through ET and reject any mismatch, so a
-  // typoed reset env falls open to "no floor" rather than a wrong cutoff.
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw) && etDateString(d) !== raw) return null;
-  return d;
-})();
+// Speed-to-Lead fresh-start baseline — the live backlog gauge (Avg Speed to
+// Lead + the "waiting" count) only counts leads first contacted on/after this
+// ET date. Resolution (env override, fail-open validation, rolled-over-date
+// rejection) lives in the shared module, which the dashboard Action Inbox
+// also uses so the two "still waiting" definitions can't drift.
+const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
 const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 

@@ -15,6 +15,21 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
+const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
+const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
+const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
+const { listAtRiskMrrAccounts } = require('./mrr-breakdown');
+const { whereLiveCustomer } = require('./customer-stages');
+const { autopayActivePredicate } = require('./autopay-eligibility');
+
+// A lead is "waiting" once it has gone this long with no first response.
+// Mirrors the Response Speed tile's alert threshold order-of-magnitude but
+// fires earlier — 30 minutes is where a same-day booking realistically slips.
+const LEAD_RESPONSE_SLA_MINUTES = 30;
+
+// Below this share of live customers on chargeable autopay, the coverage gap
+// itself is an action item (manual collection labor + churn risk).
+const AUTOPAY_COVERAGE_TARGET_PCT = 50;
 
 // Severity → bell-priority mapping. The existing notification_service
 // metadata already carries `priority: urgent|high|normal|low` and the
@@ -25,16 +40,41 @@ const SEVERITY_TO_PRIORITY = {
   info: 'normal',
 };
 
+// Sorted member ids for a queue-backed alert. Dismissals persist them next to
+// dismissed_at_count (admin-notifications.js) so the bell re-shows the alert
+// when a member NOT covered by the dismissal enters the queue — and, unlike a
+// digest compare, stays hidden when the queue merely shrinks to a subset of
+// what the admin already dismissed.
+function queueMembers(ids) {
+  return ids.map(String).sort();
+}
+
+// Internal/test leads (QA captures left in status='new') must not page an
+// operator or nag as a data-quality gap. Mirrors excludeInternalLeads in
+// routes/admin-dashboard.js — leads denormalize contact names, so the
+// customers-side exclusion doesn't cover them. (Local copy, not an import:
+// requiring the route module here would be circular.)
+function excludeInternalLeads(qb) {
+  if (INTERNAL_TEST_CUSTOMERS.length === 0) return qb;
+  return qb.whereNotIn(
+    db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
+    INTERNAL_TEST_CUSTOMERS,
+  );
+}
+
 // Compute the current set of operational alerts. Each entry returns
 // only when its count is > 0 — clean day = empty array.
 //
 // Shape (banner-friendly):
-//   { id, severity: 'critical'|'warn', count, label, href, amount? }
+//   { id, kind: 'action'|'alert', severity: 'critical'|'warn', count, label, href, amount?, members? }
+// `members` (queue alerts only) lists the sorted member ids so dismissals can
+// re-show when a NEW member enters — while a queue that only shrank stays
+// dismissed.
 //
 // The notification bell adapter (toNotifications below) reshapes these
 // into notification-table-shaped objects with `id: 'live:<id>'`,
 // `read_at: null`, `created_at: now`.
-async function computeDashboardAlerts() {
+async function computeDashboardAlertsUncached() {
   const today = etDateString();
   const alerts = [];
 
@@ -244,7 +284,212 @@ async function computeDashboardAlerts() {
     }
   } catch (err) { logger.error(`[dashboard-alerts] admin_lawn_protocol_readiness: ${err.message}`); }
 
+  // ——— Action Inbox generators (kind: 'action') — "do this now" items, as
+  // opposed to the watch-state alarms above. Same fail-soft contract: each
+  // generator is independently try/caught so one bad query can't blank the rest.
+
+  // 8. Leads still waiting for a first response past the SLA. Mirrors the
+  //    Speed-to-Lead backlog definition (routes/admin-leads.js): status='new'
+  //    is the sole pre-first-response state, response_time_minutes is stamped
+  //    at first response, and first_contact_at is the lead's own inbound
+  //    moment. The shared fresh-start floor keeps the pre-reset backlog of
+  //    never-answered leads from nagging forever.
+  try {
+    const waitingQuery = excludeInternalLeads(
+      db('leads')
+        .where('status', 'new')
+        .whereNull('response_time_minutes')
+        .whereNotNull('first_contact_at')
+        .whereRaw(`first_contact_at <= NOW() - INTERVAL '${LEAD_RESPONSE_SLA_MINUTES} minutes'`),
+    );
+    if (SPEED_TO_LEAD_FRESH_START) {
+      waitingQuery.where('first_contact_at', '>=', SPEED_TO_LEAD_FRESH_START);
+    }
+    const waitingRows = (await waitingQuery.select('id')) || [];
+    const count = waitingRows.length;
+    if (count > 0) {
+      alerts.push({
+        id: 'leads_awaiting_contact',
+        kind: 'action',
+        severity: 'critical',
+        count,
+        // Queue membership, not just size: a dismissal stores this so a NEW
+        // lead crossing the SLA re-surfaces the alert even at an unchanged
+        // (or lower) count, instead of hiding behind the count-only dismissal.
+        members: queueMembers(waitingRows.map((r) => r.id)),
+        label: `${count} lead${count === 1 ? '' : 's'} waiting over ${LEAD_RESPONSE_SLA_MINUTES}m for first contact`,
+        href: '/admin/leads',
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] leads_awaiting_contact: ${err.message}`); }
+
+  // 9. Sent estimates expiring within 3 days — call before the quote dies.
+  //    Same exclusions as /sales-capture (archived + internal-test rows out);
+  //    value uses the same annualized monthly + one-time formula so the
+  //    at-stake dollars match the Sales Capture card's math.
+  try {
+    const expiringQuery = db('estimates as e')
+      .leftJoin('customers as c', 'e.customer_id', 'c.id')
+      .whereNull('e.archived_at')
+      .whereIn('e.status', ['sent', 'viewed'])
+      .whereRaw("e.expires_at >= NOW() AND e.expires_at <= NOW() + INTERVAL '3 days'");
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      expiringQuery
+        .whereNotIn(db.raw("LOWER(COALESCE(e.customer_name, ''))"), INTERNAL_TEST_CUSTOMERS)
+        .whereNotIn(
+          db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+          INTERNAL_TEST_CUSTOMERS,
+        );
+    }
+    // Per-row select (not a SQL aggregate) so the alert can carry the member
+    // estimate ids for membership-aware dismissal; the amount formula is the
+    // same annualized expression, summed in JS. The 3-day window keeps this
+    // to a handful of rows.
+    const expiringRows = (await expiringQuery
+      .select(
+        'e.id',
+        db.raw('(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)) as at_stake'),
+      )) || [];
+    const count = expiringRows.length;
+    if (count > 0) {
+      alerts.push({
+        id: 'estimates_expiring',
+        kind: 'action',
+        severity: 'warn',
+        count,
+        amount: expiringRows.reduce((s, r) => s + parseFloat(r.at_stake || 0), 0),
+        members: queueMembers(expiringRows.map((r) => r.id)),
+        label: `${count} open estimate${count === 1 ? '' : 's'} expiring within 3 days`,
+        href: '/admin/estimates',
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] estimates_expiring: ${err.message}`); }
+
+  // 10. MRR the next billing run can't count on (service-paused, autopay-paused,
+  //     overdue, or prepay payment-pending). Reuses the SAME shared breakdown
+  //     the MRR hero tile splits on (services/mrr-breakdown.js), so this item
+  //     and the tile can never disagree about what "at risk" means.
+  try {
+    // The account LIST variant of the same shared definition (identical
+    // population + causes by construction), so the alert can carry member
+    // customer ids for membership-aware dismissal.
+    const atRiskAccounts = await listAtRiskMrrAccounts();
+    const atRisk = atRiskAccounts.reduce((s, a) => s + a.monthlyRate, 0);
+    const atRiskCount = atRiskAccounts.length;
+    if (atRisk > 0) {
+      alerts.push({
+        id: 'at_risk_mrr',
+        kind: 'action',
+        severity: 'warn',
+        count: atRiskCount,
+        amount: atRisk,
+        members: queueMembers(atRiskAccounts.map((a) => a.id)),
+        label: `${atRiskCount} recurring account${atRiskCount === 1 ? '' : 's'} with MRR at risk`,
+        href: '/admin/billing-recovery',
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] at_risk_mrr: ${err.message}`); }
+
+  // 11. Autopay coverage below target — every manual-pay account is monthly
+  //     collection labor + churn risk. Shares autopayActivePredicate
+  //     (billing recovery / core-kpis) and whereLiveCustomer so the coverage
+  //     math matches the Autopay Coverage tile exactly.
+  try {
+    const baseRow = await whereLiveCustomer(db('customers')).count({ c: '*' }).first();
+    const base = parseInt(baseRow?.c || 0);
+    if (base > 0) {
+      const { sql: autopaySql, binding: autopayBinding } = autopayActivePredicate();
+      const coveredRow = await whereLiveCustomer(db('customers as c'))
+        .whereRaw(autopaySql, [autopayBinding])
+        .count({ c: '*' })
+        .first();
+      const covered = parseInt(coveredRow?.c || 0);
+      // Threshold on the raw ratio — rounding first would let 49.5-49.9%
+      // round up to the 50% target and silently skip the alert. Display uses
+      // the tile's one-decimal form (admin-dashboard autopayPct) so the two
+      // surfaces always show the same number.
+      const pct = (covered / base) * 100;
+      if (pct < AUTOPAY_COVERAGE_TARGET_PCT) {
+        const manual = base - covered;
+        alerts.push({
+          id: 'autopay_coverage_low',
+          kind: 'action',
+          severity: 'warn',
+          count: manual,
+          label: `Autopay covers ${Math.round(pct * 10) / 10}% of customers — ${manual} billed manually`,
+          href: '/admin/customers',
+        });
+      }
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] autopay_coverage_low: ${err.message}`); }
+
+  // 12. Data quality: this week's leads with no lead_source — they render as
+  //     'Unknown' in every attribution panel and silently corrupt LTV:CAC.
+  //     Complements calls_unmapped_today (which catches un-catalogued NUMBERS;
+  //     this catches sourceless LEADS). Both comparison sides are coerced to
+  //     naive ET wall-clock — a bare timestamptz created_at against the naive
+  //     ET-date RHS would resolve the week boundary at UTC midnight in a UTC
+  //     session (4-5h shifted week).
+  try {
+    const unattributed = await excludeInternalLeads(
+      db('leads')
+        .whereNull('lead_source_id')
+        // Mirror /leads-by-source: a null-source email/referral lead falls
+        // back to its own direct bucket there ('Email (direct)' / 'Referral
+        // (direct)'), so it is deliberate attribution, not a gap — only leads
+        // that would land in the 'Unattributed' row count here. COALESCE keeps
+        // null-channel rows counted (NULL NOT IN (...) is never true).
+        .whereRaw("COALESCE(first_contact_channel, '') NOT IN ('email', 'referral')")
+        .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
+        .whereRaw("(created_at AT TIME ZONE 'America/New_York') >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '6 days')"),
+    )
+      .count('* as count')
+      .first();
+    const count = parseInt(unattributed?.count || 0);
+    if (count > 0) {
+      alerts.push({
+        id: 'leads_unattributed_7d',
+        kind: 'action',
+        severity: 'warn',
+        count,
+        label: `${count} lead${count === 1 ? '' : 's'} this week missing a source`,
+        href: '/admin/leads',
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] leads_unattributed_7d: ${err.message}`); }
+
+  // Everything not explicitly tagged above is a passive watch-state alarm; the
+  // client separates do-this-now actions from alerts on this field.
+  for (const a of alerts) {
+    if (!a.kind) a.kind = 'alert';
+  }
+
   return { asOf: today, alerts };
+}
+
+// computeDashboardAlerts sits on two hot paths — the dashboard banner (60s
+// route-cached) and the bell's /unread-count poll (every 30s per admin,
+// UNcached). The generator battery now includes real aggregate work
+// (mrr-breakdown's per-customer scan), so memoize the whole result briefly at
+// module level; concurrent callers share one in-flight computation. Callers
+// about to WRITE against current alert state (dismissals) pass { fresh: true }
+// so a stale count is never persisted.
+const ALERTS_MEMO_TTL_MS = 30 * 1000;
+let alertsMemo = { at: 0, promise: null };
+async function computeDashboardAlerts({ fresh = false } = {}) {
+  if (!fresh && alertsMemo.promise && Date.now() - alertsMemo.at < ALERTS_MEMO_TTL_MS) {
+    return alertsMemo.promise;
+  }
+  const promise = computeDashboardAlertsUncached();
+  alertsMemo = { at: Date.now(), promise };
+  try {
+    return await promise;
+  } catch (err) {
+    // Defensive — the uncached fn fail-softs per generator and shouldn't
+    // reject, but never cache a rejection if it somehow does.
+    alertsMemo = { at: 0, promise: null };
+    throw err;
+  }
 }
 
 // Reshape the alerts array into objects shaped like rows from the
@@ -270,4 +515,4 @@ function toNotifications(alerts) {
   }));
 }
 
-module.exports = { computeDashboardAlerts, toNotifications };
+module.exports = { computeDashboardAlerts, computeDashboardAlertsUncached, toNotifications };

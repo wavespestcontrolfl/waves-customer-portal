@@ -85,10 +85,9 @@ function excludeInternalLeads(qb, aliasPrefix = '') {
 }
 
 // Statuses that aren't real lead engagement opportunities — exclude from
-// any "conversion rate" denominator. `lost` and `abandoned` are KEPT in
-// the denominator on purpose: those represent real prospects we worked
-// and didn't close, and excluding them would inflate the rate.
-const NON_ENGAGED_LEAD_STATUSES = ['cancelled', 'spam', 'duplicate'];
+// any "conversion rate" denominator. Shared with the alerts service so the
+// two definitions can't drift; see services/lead-statuses.js for the rationale.
+const { NON_ENGAGED_LEAD_STATUSES } = require('../services/lead-statuses');
 
 // ET-calendar period helpers — these back every dashboard KPI window.
 function startOfMonth(d = new Date()) { return etMonthStart(d); }
