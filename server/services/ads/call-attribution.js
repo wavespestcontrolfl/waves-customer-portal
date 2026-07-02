@@ -258,6 +258,12 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
 
   const leads = await db('leads as l')
     .whereIn('l.lead_source_id', bridgeSources.map((s) => s.id))
+    // CALL leads only. Bridge suppression only ever applied to the call path;
+    // web leads on this source row got their funnel row at webhook time — and
+    // the LEGACY ones link it by customer_id with lead_id NULL, which the
+    // lead_id NOT EXISTS below cannot see (prod check: every form lead in the
+    // first-run selection carried such a row → 18 guaranteed duplicates).
+    .where('l.first_contact_channel', 'call')
     .whereRaw("COALESCE(l.first_contact_at, l.created_at) < now() - (? * interval '1 day')", [days])
     .whereRaw("COALESCE(l.status,'') NOT IN ('duplicate','disqualified','spam')")
     // Lead-level only — the funnel table's model (and recordCallPpcAttribution's

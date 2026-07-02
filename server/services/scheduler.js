@@ -2430,16 +2430,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 6:05AM ET — Unclaimed bridge-target leads → organic funnel rows.
+  // DAILY 6:25AM ET — Unclaimed bridge-target leads → organic funnel rows.
   // Calls to the Google Ads call-bridge number are held out of organic
   // attribution at call time so the bridge gets first claim on them; leads the
   // bridge never claims within BRIDGE_UNCLAIMED_ORGANIC_DAYS (default 7) are
   // declared organic here via the normal recordCallPpcAttribution path
-  // (idempotent, dedup by lead_id). Runs before the morning attribution/upload
-  // jobs so newly-attributed leads advance + report the same day. Opt-out via
-  // BRIDGE_UNCLAIMED_ORGANIC_DISABLED=true.
+  // (idempotent, dedup by lead_id). MUST run after the 6:20 bridge claim cron
+  // — the bridge always gets the day's first claim on a boundary-age lead —
+  // and before the 6:40/6:45 conversion uploads so newly-attributed leads
+  // report the same day. Opt-out via BRIDGE_UNCLAIMED_ORGANIC_DISABLED=true.
   // =========================================================================
-  cron.schedule('5 6 * * *', async () => {
+  cron.schedule('25 6 * * *', async () => {
     if (process.env.BRIDGE_UNCLAIMED_ORGANIC_DISABLED === 'true') return;
     logger.info('Running: bridge-unclaimed organic attribution');
     try {

@@ -134,11 +134,16 @@ describe('scheduler wiring', () => {
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
 
-  test('daily 6:05am ET cron, serialized, default-ON with opt-out + window env', () => {
-    expect(src).toMatch(/cron\.schedule\('5 6 \* \* \*'/);
+  test('daily 6:25am ET cron (after the 6:20 bridge claim), serialized, default-ON with opt-out + window env', () => {
+    expect(src).toMatch(/cron\.schedule\('25 6 \* \* \*'/); // AFTER the 6:20 bridge claim cron
     expect(src).toMatch(/runExclusive\('bridge-unclaimed-organic'/);
     expect(src).toMatch(/attributeUnclaimedBridgeLeads/);
     expect(src).toMatch(/BRIDGE_UNCLAIMED_ORGANIC_DISABLED/);
     expect(src).toMatch(/BRIDGE_UNCLAIMED_ORGANIC_DAYS/);
+  });
+
+  test('selection is limited to CALL leads (web leads got their funnel row at webhook time)', () => {
+    const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    expect(ca).toMatch(/\.where\('l\.first_contact_channel', 'call'\)/);
   });
 });
