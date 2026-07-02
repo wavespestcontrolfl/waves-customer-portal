@@ -1676,6 +1676,16 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
           linked ? { scheduledServiceId: linked.id, useLinkedFallback: false } : {},
         );
       } catch { deposit = null; }
+      // Exact payment posture (annual prepay paid/pending, setup-fee invoice)
+      // for the same provenance card — fail-soft like the deposit read.
+      let payment = null;
+      try {
+        const { buildEstimatePaymentContext } = require('../services/estimate-payment-context');
+        payment = await buildEstimatePaymentContext(
+          estimate,
+          linked ? { scheduledServiceId: linked.id } : {},
+        );
+      } catch { payment = null; }
       return {
         id: estimate.id,
         token: estimate.token,
@@ -1690,6 +1700,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         waveguardTier: estimate.waveguard_tier,
         lines,
         deposit,
+        payment,
         linkedAppointment: linked ? {
           id: linked.id,
           scheduledDate: linked.scheduled_date,
