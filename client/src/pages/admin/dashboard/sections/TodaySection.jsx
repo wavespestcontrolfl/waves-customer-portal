@@ -23,10 +23,14 @@ export default function TodaySection({
         <ChartCard
           title="Today's Completion"
           sub={
+            // today.date is an ET calendar date (YYYY-MM-DD). Anchor at UTC
+            // noon and format in UTC so the weekday can't drift in a viewer
+            // timezone far from ET (browser-local parsing would).
             today?.date
-              ? new Date(today.date + "T12:00").toLocaleDateString("en-US", {
-                  weekday: "long",
-                })
+              ? new Date(today.date + "T12:00:00Z").toLocaleDateString(
+                  "en-US",
+                  { weekday: "long", timeZone: "UTC" },
+                )
               : ""
           }
         >
