@@ -50,7 +50,9 @@ const TEMPLATES = [
     category: 'lawn',
     sensitivity: 'account',
     description: 'Weekly watering check-in when last week\'s rain + the customer\'s irrigation schedule ran above the seasonal target for their grass. Recommends easing back.',
-    subject: 'The rain did some of your watering last week, {{first_name}}',
+    // Neutral on the water source: a surplus can be all sprinkler in a dry
+    // week (rain 0"), so the subject must not credit the rain.
+    subject: 'You can ease up on the sprinklers this week, {{first_name}}',
     preview: 'Your lawn got about {{total_inches}}" of water — more than it needs. Here\'s how to dial it in.',
     ctaLabel: 'UPDATE MY IRRIGATION INFO',
     ctaUrlVariable: 'customer_portal_url',

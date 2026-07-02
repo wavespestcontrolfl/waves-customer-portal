@@ -86,7 +86,8 @@ describe('irrigation weekly email template seeds', () => {
       grassType: 'st_augustine',
       weekEnding: '2026-07-05',
       et0Inches: 1.6,
-      forecastRainInches: 1.5,
+      // Below the 1.25" target so the deficit scenario is not forecast-vetoed.
+      forecastRainInches: 0.5,
       ...water,
     });
     expect(decision.shouldSend).toBe(true);

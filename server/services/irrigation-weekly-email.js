@@ -152,9 +152,9 @@ function forecastLine({ forecastRainInches, status, targetInches }) {
   const amount = formatInches(forecast);
   const base = `Looking ahead: about ${amount}" of rain is in the forecast for your area over the next 7 days`;
   const target = numberOrNull(targetInches);
-  if (status === 'deficit' && target != null && forecast >= target) {
-    return `${base} — that alone could cover what your lawn needs, so watch the weather before adding sprinkler time.`;
-  }
+  // (No deficit-with-full-forecast branch: that combination suppresses the
+  // email entirely in buildWeeklyEmailDecision rather than sending "add
+  // water" against incoming rain.)
   if (status === 'surplus' && target != null && forecast >= target) {
     return `${base} — more than your lawn needs on its own, so easing back now will really pay off.`;
   }
@@ -195,6 +195,17 @@ function buildWeeklyEmailDecision({
     return { shouldSend: false, reason: advice.rainKnown ? advice.status : 'rain_unknown', advice };
   }
 
+  // The instruction is for the week AHEAD. When the forecast alone covers the
+  // full weekly target, "add more water" would likely be wrong by mid-week —
+  // suppress instead of instructing against incoming rain (forecast
+  // unavailable → fail soft to last week's facts). A surplus is NOT forecast-
+  // suppressed: after an over-watered week the soil is already saturated, so
+  // easing back stays correct whatever this week brings.
+  const forecast = numberOrNull(forecastRainInches);
+  if (advice.status === 'deficit' && forecast != null && forecast >= advice.recommendedInchesPerWeek) {
+    return { shouldSend: false, reason: 'deficit_rain_forecast', advice };
+  }
+
   const surplus = advice.status === 'surplus';
   const differential = Math.abs(numberOrNull(advice.differentialInchesPerWeek) ?? 0);
   const payload = {
@@ -230,12 +241,21 @@ function buildWeeklyEmailDecision({
  * live customer + irrigation toggle ON + inches entered + an email and
  * coordinates to work with + lawn-care membership (mirrors
  * lawn-health.js hasCustomerLawnCare: active turf profile, or waveguard_tier /
- * lawn_type on the customer, or any lawn-flavored scheduled service).
+ * lawn_type on the customer, or a lawn-flavored scheduled service). Unlike
+ * hasCustomerLawnCare, the scheduled-service branch here requires a CURRENT
+ * service — not cancelled, and dated within the trailing window or upcoming —
+ * so an active pest-only customer with one long-dead lawn visit is not swept
+ * into a weekly lawn email.
  * Customers who turned email off portal-wide (notification_prefs.email_enabled
- * = false) are excluded — this is an optional nudge, not a required notice
- * (same rule as booking-abandon-recovery's customerEmailDisabled).
+ * = false) or opted out of Seasonal Lawn Tips are excluded — this is an
+ * optional nudge, not a required notice.
  */
-async function findEligibleCustomers() {
+// A recurring lawn program visits at least quarterly; 180 days of slack keeps
+// a delayed quarterly customer in while excluding long-churned service.
+const LAWN_SERVICE_RECENCY_DAYS = 180;
+
+async function findEligibleCustomers({ now = new Date() } = {}) {
+  const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
   return db('customers as c')
     .join('property_preferences as pp', 'pp.customer_id', 'c.id')
     .leftJoin('customer_turf_profiles as tp', function joinActiveProfile() {
@@ -264,6 +284,10 @@ async function findEligibleCustomers() {
           this.select(db.raw('1'))
             .from('scheduled_services as ss')
             .whereRaw('ss.customer_id = c.id')
+            // Current membership only: cancelled/skipped visits don't count,
+            // and the visit must be upcoming or within the recency window.
+            .whereNotIn('ss.status', ['cancelled', 'skipped'])
+            .where('ss.scheduled_date', '>=', lawnServiceCutoff)
             .where(function serviceTypes() {
               this.whereRaw("LOWER(ss.service_type) LIKE ?", ['%lawn%'])
                 .orWhereRaw("LOWER(ss.service_type) LIKE ?", ['%waveguard%'])
@@ -342,7 +366,7 @@ async function logEmailAttempt({ customerId, templateKey, status, providerMessag
  */
 async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts = MAX_SEND_ATTEMPTS_PER_RUN } = {}) {
   const weekEnding = lastCompletedWeekEnding(now);
-  const candidates = await findEligibleCustomers();
+  const candidates = await findEligibleCustomers({ now });
 
   if (!isEnabled('irrigationWeeklyEmail')) {
     logger.info(`[irrigation-weekly-email] shadow mode (gate off): ${candidates.length} candidate(s) for week ending ${weekEnding} — no emails sent`);
@@ -357,7 +381,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
     sent: 0,
     deduped: 0,
     blocked: 0,
-    skipped: { balanced: 0, rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0 },
+    skipped: { balanced: 0, rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0, deficit_rain_forecast: 0 },
     failed: 0,
   };
 
@@ -400,6 +424,12 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         longitude: customer.longitude,
       });
       decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches });
+      // The forecast can veto a deficit ("add water" against incoming rain).
+      if (!decision.shouldSend) {
+        if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
+        else summary.skipped.unknown += 1;
+        continue;
+      }
 
       // Same bounded per-recipient token as appointment-email so the key fits
       // email_messages.idempotency_key even for long addresses.

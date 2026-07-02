@@ -131,6 +131,37 @@ describe('buildWeeklyEmailDecision', () => {
     expect(decision.reason).toBe('unknown');
   });
 
+  test('deficit is VETOED when the forecast alone covers the weekly target', () => {
+    const decision = buildWeeklyEmailDecision({
+      ...base,
+      irrigationInchesPerWeek: 0.25,
+      rainfallInches7d: 0,
+      forecastRainInches: 1.5, // ≥ the 1.25" target — don't say "add water"
+    });
+    expect(decision.shouldSend).toBe(false);
+    expect(decision.reason).toBe('deficit_rain_forecast');
+  });
+
+  test('deficit still sends when the forecast is short of the target, and when it is unknown', () => {
+    expect(buildWeeklyEmailDecision({
+      ...base, irrigationInchesPerWeek: 0.25, rainfallInches7d: 0, forecastRainInches: 0.5,
+    }).shouldSend).toBe(true);
+    expect(buildWeeklyEmailDecision({
+      ...base, irrigationInchesPerWeek: 0.25, rainfallInches7d: 0, forecastRainInches: null,
+    }).shouldSend).toBe(true); // fail soft to last week's facts
+  });
+
+  test('surplus is NOT forecast-vetoed — a saturated lawn should ease back regardless', () => {
+    const decision = buildWeeklyEmailDecision({
+      ...base,
+      irrigationInchesPerWeek: 1,
+      rainfallInches7d: 2.1,
+      forecastRainInches: 3,
+    });
+    expect(decision.shouldSend).toBe(true);
+    expect(decision.templateKey).toBe(TEMPLATE_CUT_BACK);
+  });
+
   test('no ET₀ falls back to the grass×season target', () => {
     const decision = buildWeeklyEmailDecision({
       ...base,
@@ -204,12 +235,6 @@ describe('forecastLine', () => {
   test('dry forecast reads as little-to-no rain', () => {
     expect(forecastLine({ forecastRainInches: 0.05, status: 'deficit', targetInches: 1.25 }))
       .toMatch(/little to no rain/);
-  });
-
-  test('deficit + forecast covering the full target adds the hold-off caveat', () => {
-    const line = forecastLine({ forecastRainInches: 1.5, status: 'deficit', targetInches: 1.25 });
-    expect(line).toContain('1.5"');
-    expect(line).toMatch(/watch the weather before adding sprinkler time/);
   });
 
   test('surplus + heavy forecast reinforces easing back', () => {
@@ -357,6 +382,16 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(audit).toBeDefined();
     expect(JSON.stringify(audit)).not.toContain('dana@example.com');
     expect(audit.body).toContain('[redacted-email]');
+  });
+
+  test('deficit week with a target-covering forecast → suppressed, counted, no send', async () => {
+    isEnabled.mockReturnValue(true);
+    fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0, et0Inches: 1.6, dailyRain: [] });
+    // 7 full days summing 1.4" ≥ the 1.25" St. Augustine target.
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ daily: { precipitation_sum: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2] } }) }));
+    const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(summary.skipped.deficit_rain_forecast).toBe(1);
   });
 
   test('incomplete rainfall window → nothing sends, rain_unknown counted', async () => {
