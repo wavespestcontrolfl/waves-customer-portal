@@ -12,6 +12,11 @@ const CHURN_REASON = 'Customer cancellation request';
 // in-progress work (en_route / on_site — a tech already rolling is an office
 // decision; the admin alert flags the account for follow-up either way).
 const CANCELLABLE_STATUSES = ['pending', 'confirmed', 'rescheduled'];
+// track_state values that mean a tech is actively working the visit right now.
+// The tracker can LEAD the legacy status: track-transitions flips track_state
+// first and syncs `status` best-effort (a sync failure only logs), so a live
+// visit can still read status=pending/confirmed.
+const LIVE_TRACK_STATES = ['en_route', 'on_property'];
 // Card-hold outcomes that leave money unresolved: the fee path never throws
 // into the host flow — a decline / ambiguous Stripe outcome / post-charge
 // write failure comes back as a reason code with the hold parked for review.
@@ -53,13 +58,21 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   // — but it must not be silently ignored either. Flag each such visit so the
   // admin alert says "review manually" instead of claiming full auto-processing
   // while a tech is rolling; the rest of the wind-down still runs (owner
-  // directive: churn immediately on submit).
+  // directive: churn immediately on submit). Checked on BOTH layers: the
+  // legacy status AND a leading track_state whose status sync lagged (the two
+  // queries are disjoint — the second excludes statuses the first matched;
+  // terminal statuses there are stale-drift history, not live work).
   try {
-    const inProgress = await db('scheduled_services')
+    const inProgressByStatus = await db('scheduled_services')
       .where({ customer_id: customerId })
       .whereIn('status', ['en_route', 'on_site'])
       .select('id');
-    for (const row of inProgress) {
+    const inProgressByTrack = await db('scheduled_services')
+      .where({ customer_id: customerId })
+      .whereIn('track_state', LIVE_TRACK_STATES)
+      .whereNotIn('status', ['en_route', 'on_site', 'completed', 'cancelled', 'skipped', 'no_show'])
+      .select('id');
+    for (const row of [...inProgressByStatus, ...inProgressByTrack]) {
       errors.push(`in_progress_visit:${row.id}`);
       logger.warn(`[cancellation-processor] visit ${row.id} is in progress — left for manual handling`);
     }
@@ -83,10 +96,12 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         // pulled regardless of date (else a churned customer could be rebooked).
         this.where('scheduled_date', '>=', etDateString()).orWhere('status', 'rescheduled');
       })
-      // Never touch a row whose customer-visible track layer says the work was
-      // actually done (status/track_state drift). NULL-safe: `IS DISTINCT FROM`
-      // still matches legacy NULL track_state rows where `!=` would drop them.
-      .whereRaw("track_state IS DISTINCT FROM 'complete'")
+      // Never touch a row whose customer-visible track layer says the work is
+      // DONE or LIVE — track_state can lead the legacy status (the tracker
+      // flips first; the status sync is best-effort), so a status-only filter
+      // would sweep a visit a tech is actively working. NULL-safe for legacy
+      // rows with no track_state.
+      .whereRaw("(track_state IS NULL OR track_state NOT IN ('complete', 'en_route', 'on_property'))")
       .select('id', 'status');
   } catch (err) {
     errors.push('load_visits');

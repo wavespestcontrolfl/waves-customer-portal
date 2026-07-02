@@ -104,8 +104,9 @@ jest.mock('../models/db', () => {
       whereIn(col, vals) { conds.push((r) => vals.includes(r[col])); return q; },
       whereNotIn(col, vals) { conds.push((r) => !vals.includes(r[col])); return q; },
       whereRaw(sql) {
-        if (/track_state\s+IS\s+DISTINCT\s+FROM\s+'complete'/i.test(sql)) {
-          conds.push((r) => r.track_state !== 'complete'); // JS !== treats null correctly
+        if (/track_state\s+IS\s+NULL\s+OR\s+track_state\s+NOT\s+IN/i.test(sql)) {
+          const excluded = [...sql.matchAll(/'([a-z_]+)'/gi)].map((m) => m[1]);
+          conds.push((r) => r.track_state == null || !excluded.includes(r.track_state));
         }
         return q;
       },
@@ -403,6 +404,31 @@ describe('processCancellationRequest', () => {
     expect(result.churned).toBe(true);
     // The live visit's recurrence is still stopped.
     expect(live.recurring_ongoing).toBe(false);
+  });
+
+  test('a visit whose track_state leads its lagging legacy status is treated as in progress, not swept', async () => {
+    db.__tables.scheduled_services = [
+      // Tech is on the property but the best-effort status sync failed —
+      // status still says 'confirmed'. Must NOT be auto-cancelled.
+      { id: 'sDrift', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'on_property', cancelled_at: null, recurring_ongoing: false },
+      // Stale drift the other way: finished visit whose track_state stuck at
+      // en_route — history, neither swept (terminal status) nor flagged live.
+      { id: 'sStale', customer_id: 'c1', status: 'completed', scheduled_date: PAST, track_state: 'en_route', cancelled_at: null, recurring_ongoing: false },
+      { id: 's1', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: null, cancelled_at: null, recurring_ongoing: false },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true }];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req10' });
+
+    const svc = (id) => db.__tables.scheduled_services.find((r) => r.id === id);
+    expect(svc('sDrift').status).toBe('confirmed');       // live work untouched
+    expect(svc('sStale').status).toBe('completed');       // history untouched
+    expect(svc('s1').status).toBe('cancelled');           // NULL track_state still sweeps
+    expect(result.cancelledCount).toBe(1);
+    expect(result.errors).toEqual(['in_progress_visit:sDrift']);
+    expect(result.ok).toBe(false);
   });
 
   test('already-churned account is re-inactivated but keeps its original churn date and writes no new note', async () => {

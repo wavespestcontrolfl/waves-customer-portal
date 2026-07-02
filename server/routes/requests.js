@@ -87,6 +87,28 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
       .where('created_at', '>=', dupeWindow)
       .first();
     if (dupe) {
+      // A deduped CANCELLATION retry must still re-run the processor: the
+      // first submit's best-effort processing may have partially failed, and
+      // returning "success" here without re-running would leave visits/billing
+      // in the failed state until staff intervene. The processor is idempotent
+      // (already-cancelled visits and an already-churned account are no-ops),
+      // so a clean first run makes this a cheap sweep. No new admin alert —
+      // the original request's alert already carries the review flag.
+      if (category === 'cancellation') {
+        try {
+          const retry = await processCancellationRequest({
+            customerId: req.customer.id,
+            reason: `Portal cancellation request ${dupe.id}`,
+            requestId: dupe.id,
+          });
+          logger.info(
+            `Re-ran cancellation processing for deduped request ${dupe.id}: ok=${retry.ok}` +
+              (retry.ok ? '' : ` (errors: ${retry.errors.join(', ')})`)
+          );
+        } catch (retryErr) {
+          logger.error(`Deduped cancellation re-processing failed for ${dupe.id}: ${retryErr.message}`);
+        }
+      }
       return res.status(200).json({
         success: true,
         deduped: true,
@@ -213,6 +235,7 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     // gets a dedicated template — the generic copy ("we'll text you when it has
     // been assigned to a technician") is wrong for a cancellation.
     const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
+    let confirmationSmsSent = false;
     try {
       const smsTemplateKey = isCancellation
         ? 'service_cancellation_confirmation'
@@ -244,6 +267,7 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
           urgency: validUrgency,
         },
       });
+      confirmationSmsSent = !!smsResult.sent;
       if (!smsResult.sent) {
         logger.warn(`Request confirmation SMS blocked/failed for customer ${req.customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       }
@@ -252,10 +276,13 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     }
 
     // No generic "request received" email for a cancellation: the account was
-    // just churned (active=false) and this template's CTAs link into the
+    // just churned (active=false) and that template's CTAs link into the
     // authenticated portal, which an inactive customer can no longer open
     // (portal auth requires active=true). The dedicated cancellation SMS above
-    // is the confirmation.
+    // is the confirmation — but if it couldn't be delivered (no phone,
+    // landline, opted out), the customer would otherwise get NO confirmation
+    // at all and can't see the request in the portal either, so fall back to
+    // the cancellation-safe email (no portal CTAs).
     if (!isCancellation) {
       void AccountMembershipEmail.sendRequestReceived({
         customerId: req.customer.id,
@@ -263,6 +290,13 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
         responseTime,
       }).catch((emailErr) => {
         logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
+      });
+    } else if (!confirmationSmsSent) {
+      void AccountMembershipEmail.sendCancellationReceived({
+        customerId: req.customer.id,
+        request,
+      }).catch((emailErr) => {
+        logger.warn(`Failed to send cancellation confirmation email for request ${request.id}: ${emailErr.message}`);
       });
     }
 
