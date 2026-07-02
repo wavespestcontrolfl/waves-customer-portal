@@ -5027,6 +5027,14 @@ router.get('/:id/estimate-source', async (req, res, next) => {
         useLinkedFallback: false,
       });
     } catch { deposit = null; }
+    // Exact payment posture (annual prepay paid/pending, setup-fee invoice) so
+    // the appointment card answers "what has this customer actually paid"
+    // without anyone re-opening the estimate. Fail-soft like the deposit read.
+    let payment = null;
+    try {
+      const { buildEstimatePaymentContext } = require('../services/estimate-payment-context');
+      payment = await buildEstimatePaymentContext(est, { scheduledServiceId: req.params.id });
+    } catch { payment = null; }
     res.json({
       linked: true,
       estimateId: est.id,
@@ -5038,6 +5046,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       estimateStatus: est.status,
       createdAt: est.created_at,
       deposit,
+      payment,
     });
   } catch (err) { next(err); }
 });

@@ -431,13 +431,14 @@ export default function MobileAppointmentDetailSheet({
           </div>
         </section>
 
-        {/* Estimate provenance — quoted vs current, plus deposit posture and
-            the balance to charge once any paid deposit is credited. */}
+        {/* Estimate provenance — quoted vs current, plus the exact payment
+            posture (annual prepay / setup fee / deposit) from the estimate. */}
         {estimateSource && (
           <EstimateProvenanceCard
             quotedTotal={estimateSource.quotedTotal}
             currentPrice={price}
             deposit={estimateSource.deposit}
+            payment={estimateSource.payment}
             style={{ marginTop: 16 }}
           />
         )}
