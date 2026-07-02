@@ -2194,21 +2194,27 @@ router.post('/', requireAdmin, async (req, res, next) => {
           }
         }
 
-        // Booking a recurring service (e.g. a quarterly WaveGuard membership) is
-        // the deal closing — convert the originating lead to won now rather than
-        // waiting for the first visit to complete. enforceOriginating keeps the
-        // fuzzy contact fallback from winning a LATER unlinked add-on lead that
-        // happens to share the customer's phone/email (e.g. an established
-        // customer booking an add-on): only a lead first contacted on/before the
-        // customer signed up converts. Single unambiguous open lead only,
-        // idempotent. Best-effort; never blocks the booking.
-        if (isRecurring) {
-          try {
-            const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-            await convertLeadFromEvent({ source: 'recurring_service_booked', customerId, enforceOriginating: true });
-          } catch (e) {
-            logger.warn(`[lead-trigger] recurring-booking conversion failed for customer=${customerId}: ${e.message}`);
-          }
+        // Booking a service is the deal closing — convert the originating lead
+        // to won now rather than waiting for the first visit to complete.
+        // Recurring bookings keep their dedicated trigger source; one-time
+        // bookings use appointment_booked (previously they didn't convert
+        // until completion/invoice, stranding phone-sold one-time jobs as
+        // open leads whenever the completion trigger's matching tiers missed).
+        // enforceOriginating keeps the fuzzy contact fallback from winning a
+        // LATER unlinked add-on lead that happens to share the customer's
+        // phone/email (e.g. an established customer booking an add-on): only
+        // a lead first contacted on/before the customer signed up converts.
+        // Single unambiguous open lead only, idempotent. Best-effort; never
+        // blocks the booking.
+        try {
+          const { convertLeadFromEvent } = require('../services/lead-estimate-link');
+          await convertLeadFromEvent({
+            source: isRecurring ? 'recurring_service_booked' : 'appointment_booked',
+            customerId,
+            enforceOriginating: true,
+          });
+        } catch (e) {
+          logger.warn(`[lead-trigger] booking conversion failed for customer=${customerId}: ${e.message}`);
         }
 
         // Optional: push an in-app notification to the assigned tech's PWA queue
