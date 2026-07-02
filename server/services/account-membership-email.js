@@ -334,6 +334,36 @@ async function sendRequestReceived({
   });
 }
 
+// Cancellation-request confirmation — the fallback when the dedicated
+// cancellation SMS could not be delivered. By the time this sends the
+// auto-processor has churned the account (active=false blocks portal auth),
+// so the template deliberately carries NO portal CTAs (seeded by migration
+// 20260701000003); copy mirrors the service_cancellation_confirmation SMS.
+async function sendCancellationReceived({
+  customerId,
+  request,
+  idempotencyKey,
+} = {}) {
+  if (!request?.id) return { ok: false, skipped: true, reason: 'missing_request' };
+  const submittedAt = request.created_at || request.createdAt || new Date();
+  return sendTemplate({
+    customerId,
+    templateKey: 'account.cancellation_received',
+    eventType: 'account.cancellation_received',
+    payload: {
+      request_id: request.id,
+      request_subject: clean(request.subject) || 'Cancellation request',
+      submitted_at: displayDate(submittedAt),
+    },
+    idempotencyKey: idempotencyKey || `account.cancellation_received:${request.id}`,
+    categories: ['cancellation_received'],
+    metadata: {
+      service_request_id: request.id,
+      request_category: request.category,
+    },
+  });
+}
+
 async function sendRequestUpdated({
   customerId,
   request,
@@ -585,6 +615,7 @@ async function sendMembershipReactivated({
 module.exports = {
   sendAccountUpdated,
   sendRequestReceived,
+  sendCancellationReceived,
   sendRequestUpdated,
   sendMembershipStarted,
   sendAppIntro,
