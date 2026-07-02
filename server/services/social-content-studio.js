@@ -676,7 +676,7 @@ async function renderReviewGraphicImageUrl(candidate, platform) {
   );
 }
 
-function previewWithVisual(preview, { imageUrl, variant, templateKey, creative, variants }) {
+function previewWithVisual(preview, { imageUrl, variant, templateKey, creative, variants, videoUrl }) {
   if (!imageUrl) return preview;
   return {
     ...preview,
@@ -686,9 +686,11 @@ function previewWithVisual(preview, { imageUrl, variant, templateKey, creative, 
       templateKey: templateKey || (variant === 'review' ? 'waves_clean_square' : 'waves_campaign_square'),
       // Creative-engine metadata: which scene concept made this image (feeds the
       // no-repeat rotation) and, on draft runs, the alternate variants the admin
-      // can pick from in the approval queue.
+      // can pick from in the approval queue. videoUrl records an approved Reel
+      // (the primary imageUrl stays a still for thumbnails/GBP).
       ...(creative ? { creative } : {}),
       ...(Array.isArray(variants) && variants.length ? { variants } : {}),
+      ...(videoUrl ? { videoUrl } : {}),
     },
   };
 }
@@ -727,17 +729,43 @@ async function creativeVariantsForRun(plan, preview, { isReviewRun, wantsGbp, ef
     const cardInput = isReviewRun
       ? buildReviewCardInput(plan.reviewGraphic)
       : buildCampaignCardInput(plan, preview);
-    return await CreativeEngine.generateVariants({
+    const excludeConcepts = await recentCreativeConceptKeys();
+    const variants = await CreativeEngine.generateVariants({
       cardInput,
       topic: plan.topic,
       service: plan.service,
       city: plan.city,
       variant: isReviewRun ? 'review' : 'campaign',
       count: effectiveMode === 'draft' ? CreativeEngine.CREATIVE_FLAGS.variantCount : 1,
-      excludeConcepts: await recentCreativeConceptKeys(),
+      excludeConcepts,
       wantGbp: wantsGbp,
       now,
     });
+
+    // Veo Reel option — DRAFT campaign runs only (approval required for video:
+    // real cost per clip and the most public artifact the brand ships), on
+    // every Nth ET day, and only when at least one image variant succeeded (a
+    // video-only queue entry would leave GBP with no media and the runs list
+    // with no thumbnail). Appended LAST so variants[0] — the run's primary
+    // visual — stays a still.
+    if (
+      variants.length
+      && !isReviewRun
+      && effectiveMode === 'draft'
+      && CreativeEngine.VIDEO_FLAGS.enabled
+      && CreativeEngine.isVideoDay(now)
+    ) {
+      const video = await CreativeEngine.generateVideoVariant({
+        topic: plan.topic,
+        service: plan.service,
+        city: plan.city,
+        excludeConcepts: [...excludeConcepts, ...variants.map((v) => v.conceptKey).filter(Boolean)],
+        now,
+      });
+      if (video) variants.push(video);
+    }
+
+    return variants;
   } catch {
     return [];
   }
@@ -1456,10 +1484,25 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       return { ok: false, status: 400, error: variants.length ? `variantIndex must be 0..${variants.length - 1}` : 'run has no publishable image' };
     }
     const chosen = variants[idx];
+    const isVideoVariant = chosen?.type === 'video';
     // Variants were persisted server-side at run time, but re-validate to http(s)
     // anyway — preview JSON is also reachable through admin save endpoints.
-    const chosenImageUrl = httpUrlOrNull(chosen?.imageUrl);
-    if (!chosenImageUrl) return { ok: false, status: 400, error: 'selected variant has no hosted image' };
+    const chosenVideoUrl = isVideoVariant ? httpUrlOrNull(chosen?.videoUrl) : null;
+    if (isVideoVariant && !chosenVideoUrl) {
+      return { ok: false, status: 400, error: 'selected variant has no hosted video' };
+    }
+    // The still that rides along with the publish: for an image approval it's
+    // the chosen variant; for a video approval it's the run's first image
+    // variant (GBP has no video ingestion, and the post row keeps an image
+    // thumbnail). A video approval with no image variant just posts GBP
+    // text-only — its CTA button still carries the link.
+    const imageVariant = isVideoVariant
+      ? variants.find((v) => v?.type !== 'video' && v?.imageUrl)
+      : chosen;
+    const chosenImageUrl = httpUrlOrNull(imageVariant?.imageUrl);
+    if (!isVideoVariant && !chosenImageUrl) {
+      return { ok: false, status: 400, error: 'selected variant has no hosted image' };
+    }
 
     const channels = normalizeChannels(
       toJson(run.channels, null) ?? input.channels ?? preview.inputs?.channels
@@ -1478,7 +1521,8 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       customContent: preview.drafts,
       channels,
       imageUrl: chosenImageUrl,
-      gbpImageUrl: httpUrlOrNull(chosen?.gbpImageUrl),
+      gbpImageUrl: httpUrlOrNull(imageVariant?.gbpImageUrl),
+      videoUrl: chosenVideoUrl,
       noAiImage: true, // stored visual only — never a fresh literal AI image
       gbpLocationIds: [gbpLocationId],
       postId: run.social_media_post_id || null,
@@ -1503,13 +1547,15 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     // Promote the chosen variant to the run's primary visual so the audit list
     // shows what actually published. A failed/dry-run attempt keeps the run in
     // draft_created (still approvable once the blocker clears) but records the
-    // attempt for the audit trail.
+    // attempt for the audit trail. For a video approval the primary imageUrl
+    // stays the still (thumbnails/GBP) and videoUrl records the published Reel.
     const approvedPreview = previewWithVisual(preview, {
-      imageUrl: chosenImageUrl,
+      imageUrl: chosenImageUrl || preview.visual?.imageUrl,
       variant: preview.visual?.variant || 'campaign',
       templateKey: preview.visual?.templateKey,
       creative: chosen.conceptKey ? { conceptKey: chosen.conceptKey, sceneModel: chosen.sceneModel || null } : preview.visual?.creative,
       variants,
+      videoUrl: chosenVideoUrl,
     });
     const updated = await updateAutonomousRun(run.id, {
       status: published ? 'published' : 'draft_created',

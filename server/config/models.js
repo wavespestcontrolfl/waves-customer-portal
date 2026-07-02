@@ -84,6 +84,14 @@ const GEMINI_VISION_BEST = process.env.MODEL_GEMINI_VISION || 'gemini-3.5-flash'
 const GEMINI_IMAGE_BEST   = process.env.MODEL_GEMINI_IMAGE        || 'gemini-3.1-flash-image-preview';
 const GEMINI_IMAGE_STABLE = process.env.MODEL_GEMINI_IMAGE_STABLE || 'gemini-2.5-flash-image';
 
+// Gemini video-GENERATION models (Veo line) — consumed by
+// content/video-generator.js for the social creative engine's Reels clips.
+// FAST is the default (≈$0.15/s vs $0.40/s, generates in under a minute);
+// QUALITY is the full model the chain can step up to via env. Both are
+// env-overridable so a retired preview ID is a config change, not a deploy.
+const GEMINI_VIDEO_FAST    = process.env.MODEL_GEMINI_VIDEO         || 'veo-3.1-fast-generate-preview';
+const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || 'veo-3.1-generate-preview';
+
 // Per-feature routes: { provider, model }. services/llm/call.js#dispatch switches
 // on .provider. These are the LIVE provider for each feature; each call site falls
 // back to Claude (Anthropic) on any miss, so a provider issue never causes a gap.
@@ -110,6 +118,8 @@ module.exports = {
   GEMINI_VISION_BEST,
   GEMINI_IMAGE_BEST,
   GEMINI_IMAGE_STABLE,
+  GEMINI_VIDEO_FAST,
+  GEMINI_VIDEO_QUALITY,
   // Backwards-compatible default export for quick imports
   DEFAULT: FLAGSHIP,
 };

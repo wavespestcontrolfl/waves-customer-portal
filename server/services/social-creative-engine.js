@@ -41,6 +41,24 @@ const CREATIVE_FLAGS = {
   get chain() { return process.env.SOCIAL_IMAGE_PROVIDER || SOCIAL_DEFAULT_CHAIN; },
 };
 
+// Video (Veo Reels) — separate opt-in on top of the creative engine. A video
+// variant is only ever added to DRAFT runs (approval required: ~$1.20/clip and
+// a Reel is the brand's most public artifact), on every Nth ET day.
+const VIDEO_FLAGS = {
+  get enabled() { return boolEnv('SOCIAL_VIDEO_ENABLED', false); },
+  get intervalDays() {
+    const value = Number(process.env.SOCIAL_VIDEO_INTERVAL_DAYS);
+    if (!Number.isFinite(value)) return 3;
+    return Math.max(1, Math.min(14, Math.round(value)));
+  },
+};
+
+// Deterministic ET-anchored "is today a video day" — same seed the concept
+// rotation uses, so it never flips mid-day and retried runs agree with the cron.
+function isVideoDay(now = new Date()) {
+  return rotationSeed(now) % VIDEO_FLAGS.intervalDays === 0;
+}
+
 // ── Scene concept library ────────────────────────────────────────────────────
 // Each concept is a photoreal scene fragment. Rules baked into buildScenePrompt
 // (no text/logos/people, lower-third negative space) apply to every concept, so
@@ -258,12 +276,69 @@ async function generateVariants({
   return variants;
 }
 
+// ── Video (Veo Reels) ────────────────────────────────────────────────────────
+
+function buildVideoPrompt({ topic, city, concept } = {}) {
+  const cityLabel = String(city || 'Southwest Florida').replace(/[\r\n]+/g, ' ').slice(0, 80);
+  const topicLabel = String(topic || 'seasonal pest pressure').replace(/[\r\n]+/g, ' ').slice(0, 160);
+  return [
+    `A cinematic, photorealistic 8-second vertical video for a Southwest Florida pest control & lawn care brand. Theme: ${topicLabel}.`,
+    `Scene: ${concept?.scene || 'a well-kept Florida home exterior with tropical landscaping'}.`,
+    `Setting: the ${cityLabel} area — characteristic SWFL residential detail (palm trees, St. Augustine grass, stucco homes, bright gulf-coast light).`,
+    'Camera: one slow, smooth move (gentle push-in or drift) — no cuts, no whip pans, no shaky handheld.',
+    'Audio: natural ambient sound only (breeze, birds, distant surf, soft rain) — no music, no narration, no voices.',
+    // Same brand-grade rule as the image prompts: steer the grade, never teal.
+    'Style: crisp, editorial, natural. Sunny coastal grade with deep-blue sky tones and warm golden light (no teal color cast).',
+    'Strictly NO text, letters, numbers, captions, subtitles, signage, logos, watermarks, people, faces, or brand marks anywhere in the video.',
+  ].join(' ');
+}
+
+// One 9:16 Veo clip for a draft run's approval queue. Returns a video variant
+// { type: 'video', videoUrl, conceptKey, sceneModel, aspectRatio } or null —
+// NEVER throws, so a Veo outage just means no video option today.
+async function generateVideoVariant({ topic, service, city, excludeConcepts = [], now = new Date() } = {}) {
+  if (!hasImageHosting()) {
+    logger.warn('[social-creative] video skipped — hosting not configured (S3 creds/bucket + SOCIAL_MEDIA_CDN_DOMAIN)');
+    return null;
+  }
+  try {
+    const { uploadVideoToS3 } = require('./social-media');
+    const videoGenerator = require('./content/video-generator');
+
+    // A different scene than the image variants (their keys arrive in
+    // excludeConcepts) so the video option isn't a moving copy of a still.
+    const [concept] = pickConcepts({ service, topic, count: 1, excludeKeys: excludeConcepts, now });
+    if (!concept) return null;
+
+    const prompt = buildVideoPrompt({ topic, city, concept });
+    const generated = await videoGenerator.generate({ prompt, aspectRatio: '9:16' });
+    const seedBase = SocialCardRenderer.filenameSlug(`reel-${city || 'waves'}-${topic || 'creative'}`);
+    const videoUrl = await uploadVideoToS3(generated.buffer, `${seedBase}-${concept.key}-${Date.now()}.mp4`);
+    if (!videoUrl) return null;
+
+    return {
+      type: 'video',
+      videoUrl,
+      conceptKey: concept.key,
+      sceneModel: generated.model || null,
+      aspectRatio: '9:16',
+    };
+  } catch (err) {
+    logger.warn(`[social-creative] video variant failed: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   CREATIVE_FLAGS,
   SCENE_LIBRARY,
   SOCIAL_DEFAULT_CHAIN,
+  VIDEO_FLAGS,
   buildScenePrompt,
+  buildVideoPrompt,
   generateVariants,
+  generateVideoVariant,
+  isVideoDay,
   pickConcepts,
   resolveSceneBucket,
   rotationSeed,
