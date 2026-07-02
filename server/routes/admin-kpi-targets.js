@@ -14,13 +14,15 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { cacheRoute, clearRouteCacheForRequest } = require('../utils/route-cache');
 const { SNAPSHOT_METRICS } = require('../services/kpi-snapshot');
 
 const VALID_METRICS = new Set(SNAPSHOT_METRICS.map(([key]) => key));
 
-router.use(adminAuthenticate);
+// Staff-role guard at router level (adminAuthenticate alone verifies the
+// token/active row, not req.techRole); writes additionally requireAdmin.
+router.use(adminAuthenticate, requireTechOrAdmin);
 
 router.get('/', cacheRoute(60), async (req, res, next) => {
   try {

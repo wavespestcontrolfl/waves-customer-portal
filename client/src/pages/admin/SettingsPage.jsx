@@ -891,8 +891,15 @@ function KpiTargetsSettingsTab({ canAdmin }) {
   useEffect(() => {
     adminFetch("/admin/kpi-targets")
       .then((data) => {
+        // adminFetch resolves non-2xx JSON bodies too — treat anything
+        // without a real targets array as a failed load. Editing off
+        // fallback defaults while the store didn't load would let a save
+        // overwrite owner-set targets with the defaults.
+        if (!Array.isArray(data?.targets)) {
+          throw new Error(data?.error || "Could not load KPI targets.");
+        }
         const byMetric = {};
-        for (const row of data.targets || []) byMetric[row.metric] = row;
+        for (const row of data.targets) byMetric[row.metric] = row;
         setRows(byMetric);
       })
       .catch((err) => setMessage(err.message || "Could not load KPI targets."));
@@ -954,8 +961,17 @@ function KpiTargetsSettingsTab({ canAdmin }) {
     }
   };
 
-  if (!rows && !message) {
-    return <Card><div style={{ color: D.muted, fontSize: 13 }}>Loading KPI targets...</div></Card>;
+  // Fail closed: no editable table until a load actually succeeded — the
+  // fallback defaults are for the dashboard tiles, not for editing, and a
+  // save on top of them could clobber owner-set targets that failed to load.
+  if (!rows) {
+    return (
+      <Card>
+        <div style={{ color: message ? D.red : D.muted, fontSize: 13 }}>
+          {message || "Loading KPI targets..."}
+        </div>
+      </Card>
+    );
   }
 
   const inputStyle = {

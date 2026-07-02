@@ -28,6 +28,8 @@ jest.mock('../middleware/admin-auth', () => ({
     const users = {
       admin: { id: 'admin-1', role: 'admin', email: 'owner@example.com', name: 'Owner' },
       tech: { id: 'tech-1', role: 'technician', email: 'tech@example.com', name: 'Tech' },
+      // Active row whose role was downgraded — authenticates, but is not staff.
+      downgraded: { id: 'ghost-1', role: 'customer', email: 'ghost@example.com', name: 'Ghost' },
     };
     const user = users[token];
     if (!user) return res.status(401).json({ error: 'Admin authentication required' });
@@ -36,6 +38,11 @@ jest.mock('../middleware/admin-auth', () => ({
     req.techRole = user.role;
     return next();
   },
+  requireTechOrAdmin: (req, res, next) => (
+    req.techRole === 'admin' || req.techRole === 'technician'
+      ? next()
+      : res.status(403).json({ error: 'Staff access required' })
+  ),
   requireAdmin: (req, res, next) => (
     req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })
   ),
@@ -156,6 +163,11 @@ describe('admin kpi-targets route', () => {
 
       const read = await fetch(`${base}/admin/kpi-targets`, { headers: auth('tech') });
       expect(read.status).toBe(200);
+
+      // Authenticated-but-downgraded (non-staff) rows are blocked at the
+      // router level (requireTechOrAdmin), even for reads.
+      const ghost = await fetch(`${base}/admin/kpi-targets`, { headers: auth('downgraded') });
+      expect(ghost.status).toBe(403);
 
       const anon = await fetch(`${base}/admin/kpi-targets`);
       expect(anon.status).toBe(401);
