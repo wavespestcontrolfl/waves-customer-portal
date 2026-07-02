@@ -1,10 +1,32 @@
 const express = require('express');
+const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
 const logger = require('../services/logger');
+
+// Format/length validation for manual lead creation. Permissive by design — it
+// validates shape (email/phone format, string caps, types) without changing
+// which leads are accepted; the handler already whitelists fields by
+// destructuring, so this is defense-in-depth against malformed/oversized input.
+const createLeadSchema = Joi.object({
+  first_name: Joi.string().trim().max(120).allow('', null),
+  last_name: Joi.string().trim().max(120).allow('', null),
+  phone: Joi.string().trim().max(40).allow('', null),
+  email: Joi.string().trim().email({ tlds: false }).max(255).allow('', null),
+  address: Joi.string().trim().max(255).allow('', null),
+  city: Joi.string().trim().max(120).allow('', null),
+  zip: Joi.string().trim().max(20).allow('', null),
+  lead_source_id: Joi.alternatives(Joi.number().integer(), Joi.string().trim().max(40)).allow('', null),
+  lead_type: Joi.string().trim().max(60).allow('', null),
+  service_interest: Joi.string().trim().max(255).allow('', null),
+  urgency: Joi.string().trim().max(40).allow('', null),
+  is_residential: Joi.boolean(),
+  is_commercial: Joi.boolean(),
+  notes: Joi.string().trim().max(5000).allow('', null),
+}).unknown(true);
 const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
@@ -726,11 +748,17 @@ router.get('/', async (req, res, next) => {
 // POST /api/admin/leads — create lead manually
 router.post('/', async (req, res, next) => {
   try {
+    let validated;
+    try {
+      validated = await createLeadSchema.validateAsync(req.body);
+    } catch (validationErr) {
+      return res.status(400).json({ error: 'Invalid lead data' });
+    }
     const {
       first_name, last_name, phone, email, address, city, zip,
       lead_source_id, lead_type, service_interest, urgency,
       is_residential, is_commercial, notes,
-    } = req.body;
+    } = validated;
 
     const [lead] = await db('leads').insert({
       first_name, last_name,

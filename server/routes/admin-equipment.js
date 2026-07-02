@@ -96,10 +96,22 @@ router.post('/equipment', async (req, res, next) => {
 // PUT /equipment/:id — update
 router.put('/equipment/:id', async (req, res, next) => {
   try {
-    const updates = { ...req.body, updated_at: db.fn.now() };
+    // Whitelist updatable columns instead of spreading req.body, so a caller
+    // can't set columns they shouldn't (e.g. id/created_at, or any future
+    // sensitive column added to the table). Mirrors the create handler's field
+    // set above.
+    const ALLOWED_FIELDS = [
+      'name', 'category', 'make', 'model', 'serial_number',
+      'purchase_date', 'purchase_price', 'current_hours',
+      'next_service_hours', 'next_service_type', 'assigned_to',
+      'status', 'depreciation_method', 'depreciation_annual',
+      'book_value', 'specs', 'notes',
+    ];
+    const updates = { updated_at: db.fn.now() };
+    for (const key of ALLOWED_FIELDS) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
     if (updates.specs) updates.specs = JSON.stringify(updates.specs);
-    delete updates.id;
-    delete updates.created_at;
 
     const [record] = await db('equipment')
       .where({ id: req.params.id })
