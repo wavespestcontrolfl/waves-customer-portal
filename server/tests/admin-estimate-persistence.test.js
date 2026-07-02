@@ -24,6 +24,9 @@ function makeDatabase({ lead, estimate, emptyEstimateUpdate = false }) {
         forUpdate() {
           return this;
         },
+        whereNull() {
+          return this;
+        },
         first: async () => {
           if (table === 'leads' && clause.id === lead?.id) return lead;
           if (table === 'estimates' && clause.id === storedEstimate?.id) return storedEstimate;

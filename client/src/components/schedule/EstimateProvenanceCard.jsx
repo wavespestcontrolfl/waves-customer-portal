@@ -1,7 +1,9 @@
 // Shared "From Estimate" provenance card. Renders the blue quoted-vs-current
 // reference (originally inline in MobileAppointmentDetailSheet) plus the
-// deposit posture for an accepted estimate, so the New Appointment modal and
-// the appointment detail sheet show the same thing.
+// customer's exact payment posture for an accepted estimate — annual prepay
+// (paid / pending, to the cent), the pay-per-application setup-fee invoice,
+// and the deposit — so the New Appointment modal and the appointment detail
+// sheet show the same thing and nobody has to re-open the estimate.
 //
 // Deliberately styled with plain inline styles (no Tailwind classes, no `D`
 // palette import) so it drops cleanly into both the Tier-1 (Tailwind) detail
@@ -21,6 +23,10 @@
 //   deposit      object  — summarizeEstimateDeposit() payload from the server:
 //                          { enforced, oneTime, policyAmount, required,
 //                            exemptReason, paid, creditRemaining, payerBilled }
+//   payment      object  — buildEstimatePaymentContext() payload from the server:
+//                          { billingTerm, paymentPreference, annualPrepay,
+//                            acceptanceInvoice }. Amounts are the persisted
+//                          invoice/term figures (exact), never recomputed.
 //   style        object  — optional outer wrapper style (margins, etc.)
 
 const BLUE = { bg: '#F0F9FF', border: '#BAE6FD', ink: '#0369A1' };
@@ -33,13 +39,161 @@ const INK = '#0F172A';
 const GREEN = '#166534';
 
 const EXEMPT_LABEL = {
-  prepay_annual: 'paid annually at acceptance',
+  prepay_annual: 'not required — annual prepay',
   existing_plan_customer: 'existing plan customer',
   payer_billed: 'billed to third party',
 };
 
 function money(n) {
   return `$${(Number(n) || 0).toFixed(2)}`;
+}
+
+// Calendar-date label for date-only values (term boundaries). Formats off the
+// YYYY-MM-DD prefix at UTC noon so a timestamptz stored at UTC midnight can't
+// slip a day when rendered in ET.
+function fmtDate(value) {
+  if (!value) return '';
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(
+    value instanceof Date ? value.toISOString() : String(value),
+  );
+  if (!match) return '';
+  return new Date(`${match[1]}T12:00:00Z`).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+// Payment timestamps (invoice paid_at) are full UTC instants — format them in
+// ET so an evening payment after midnight UTC doesn't display as the next
+// calendar day. Bare YYYY-MM-DD values take the date-only path instead (a
+// UTC-parsed midnight would slip a day the OTHER way).
+function fmtPaidDate(value) {
+  if (!value) return '';
+  const str = value instanceof Date ? value.toISOString() : String(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return fmtDate(str);
+  const d = new Date(str);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: 'America/New_York',
+  });
+}
+
+// Unpaid-invoice wording keyed off the invoice's real status — a draft prepay
+// left for the office to send (manual-acceptance path sets autoSendInvoice
+// false) must not claim "Invoice sent". Unknown statuses make no delivery
+// claim at all.
+function invoicePendingNote(status) {
+  const s = String(status || '').toLowerCase();
+  if (['draft', 'scheduled', 'sending'].includes(s)) return 'Invoice drafted — not sent to the customer yet';
+  if (s === 'processing') return 'Payment processing — not settled yet';
+  if (s === 'sent' || s === 'overdue') return 'Invoice sent, payment not received yet';
+  return 'Payment not received yet';
+}
+
+// Payment-posture rows: what the customer actually paid (or still owes) at
+// acceptance, from persisted invoice/term figures. Same row shape as
+// depositRow so all money facts render in one list.
+function paymentRows(payment) {
+  if (!payment) return [];
+  const rows = [];
+  const ap = payment.annualPrepay;
+
+  if (ap) {
+    const amount = money(ap.prepayAmount != null ? ap.prepayAmount : ap.invoiceTotal);
+    const status = String(ap.status || '').toLowerCase();
+    // "visit 2 of 4 Quarterly Pest Control · 2 left" when this appointment is
+    // one of the covered visits; "1 of 4 used · 3 left" when it isn't linked
+    // (coverage gap) but the term still has usage; plain "covers 4 visits"
+    // when no visits are linked at all.
+    const svc = ap.coverageServiceType ? ` ${ap.coverageServiceType}` : '';
+    let usage = '';
+    if (ap.visitNumber && ap.totalVisits) {
+      usage = ` · visit ${ap.visitNumber} of ${ap.totalVisits}${svc}`;
+    } else if (ap.totalVisits) {
+      usage = ` · ${ap.visitsUsed || 0} of ${ap.totalVisits}${svc} used`;
+    } else if (ap.coverageVisitCount > 0) {
+      usage = ` · covers ${ap.coverageVisitCount}${svc} visit${ap.coverageVisitCount === 1 ? '' : 's'}`;
+    }
+    const left = ap.totalVisits && ap.visitsRemaining != null
+      ? ` · ${ap.visitsRemaining} left`
+      : '';
+    const through = ap.termEnd ? ` through ${fmtDate(ap.termEnd)}` : '';
+    if (ap.paid) {
+      const paidOn = fmtPaidDate(ap.invoicePaidAt);
+      // "Do not collect" only when the visit-level billing gate confirms THIS
+      // visit is covered (coversThisVisit true). false = the prepay is real
+      // but this visit isn't covered (detached/unstamped/service mismatch) and
+      // completion billing WILL bill it — say so instead of contradicting the
+      // invoice. null = no visit context (pre-booking); make no claim.
+      const collect = ap.coversThisVisit === true
+        ? ' — do not collect at the visit'
+        : ap.coversThisVisit === false
+          ? ' — not applied to this visit; it bills normally'
+          : '';
+      rows.push({
+        label: 'Annual prepay — paid',
+        value: amount,
+        sub: `Paid${paidOn ? ` ${paidOn}` : ''}${usage}${left}${through}${collect}`,
+        tone: 'paid',
+      });
+    } else if (ap.refunded || ['cancelled', 'canceled', 'refunded'].includes(status)) {
+      // ap.refunded covers the drift case: invoice still looks paid but the
+      // payment was fully refunded (term status may not have flipped yet).
+      rows.push({
+        label: 'Annual prepay',
+        value: amount,
+        sub: `${ap.refunded ? 'refunded' : status} — bill normally`,
+        tone: 'muted',
+      });
+    } else {
+      rows.push({
+        label: 'Annual prepay — pending',
+        value: amount,
+        sub: `${invoicePendingNote(ap.invoiceStatus)}${usage}${left}${through}`,
+        tone: 'muted',
+      });
+    }
+    return rows;
+  }
+
+  if (payment.billingTerm === 'prepay_annual') {
+    // Prepay was chosen at acceptance but no term row exists (older accept or
+    // manual billing) — say what's known rather than inventing an amount.
+    rows.push({
+      label: 'Annual prepay',
+      value: '—',
+      sub: 'selected at acceptance — no prepay record on file',
+      tone: 'muted',
+    });
+    return rows;
+  }
+
+  if (payment.billingTerm === 'standard') {
+    rows.push({ label: 'Billing', value: 'Per application', sub: null, tone: 'muted' });
+    const inv = payment.acceptanceInvoice;
+    if (inv) {
+      const paidSub = inv.paid
+        ? `Paid${fmtPaidDate(inv.paidAt) ? ` ${fmtPaidDate(inv.paidAt)}` : ''}`
+        : invoicePendingNote(inv.status);
+      const paidTone = inv.paid ? 'paid' : 'muted';
+      if (inv.setupFeeAmount != null) {
+        rows.push({ label: 'WaveGuard setup fee', value: money(inv.setupFeeAmount), sub: paidSub, tone: paidTone });
+      }
+      if (inv.firstApplicationAmount != null) {
+        rows.push({ label: 'First application', value: money(inv.firstApplicationAmount), sub: paidSub, tone: paidTone });
+      }
+      // A manually built acceptance invoice may carry neither recognizable
+      // line — still show the exact invoiced total rather than nothing.
+      if (inv.setupFeeAmount == null && inv.firstApplicationAmount == null && inv.total != null) {
+        rows.push({ label: inv.title || 'Acceptance invoice', value: money(inv.total), sub: paidSub, tone: paidTone });
+      }
+    }
+  }
+  return rows;
 }
 
 // Resolve the single deposit row: label, value, and a small sub-note. Returns
@@ -103,10 +257,12 @@ function depositRow(deposit) {
   return null;
 }
 
-export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, style }) {
+export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, style }) {
   const quoted = Number(quotedTotal) || 0;
   const price = currentPrice != null ? Number(currentPrice) : null;
+  const rows = paymentRows(payment);
   const dep = depositRow(deposit);
+  if (dep) rows.push(dep);
   // Whole-visit third-party billing: surfaced as its own prominent banner so a
   // tech scanning on a phone can't miss it and ask the homeowner for money.
   // Backed by summary.payerBilled (always resolved, gate-independent); fall back
@@ -163,17 +319,19 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
           </div>
         )}
 
-        {dep && (
+        {rows.length > 0 && (
           <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 4 }}>
-            <div style={lineStyle}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 500, color: INK }}>{dep.label}</div>
-                {dep.sub && <div style={{ fontSize: 11, color: MUTED, marginTop: 1 }}>{dep.sub}</div>}
+            {rows.map((row, i) => (
+              <div key={`${row.label}-${i}`} style={lineStyle}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: row.tone === 'paid' ? GREEN : INK }}>{row.label}</div>
+                  {row.sub && <div style={{ fontSize: 11, color: row.tone === 'paid' ? GREEN : MUTED, marginTop: 1 }}>{row.sub}</div>}
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: row.tone === 'paid' ? GREEN : INK, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                  {row.value}
+                </div>
               </div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: dep.tone === 'paid' ? GREEN : INK, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-                {dep.value}
-              </div>
-            </div>
+            ))}
           </div>
         )}
       </div>

@@ -37,21 +37,50 @@ const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 //
 // `iv` is correlated to the outer `customers c`, so the predicate works as a
 // per-row boolean and as a standalone WHERE. Two `?` bindings, both `asOf`.
-const AT_RISK_PREDICATE = `(
-  c.service_paused_at IS NOT NULL
-  OR (
+//
+// The three SQL-expressible causes are named sub-predicates so
+// listAtRiskMrrAccounts can report per-account causes from the SAME text the
+// composite evaluates — the Billing Recovery list and the MRR tile can't drift.
+const AT_RISK_SERVICE_PAUSED = `c.service_paused_at IS NOT NULL`;
+// One `?` binding: asOf.
+const AT_RISK_AUTOPAY_PAUSED = `(
     c.autopay_enabled = true
     AND c.autopay_paused_until IS NOT NULL
     AND c.autopay_paused_until >= ?::date
-  )
-  OR EXISTS (
+  )`;
+// One `?` binding: asOf.
+const AT_RISK_OVERDUE = `EXISTS (
     SELECT 1 FROM invoices iv
     WHERE iv.customer_id = c.id
       AND iv.paid_at IS NULL
       AND iv.status NOT IN ('void', 'cancelled', 'draft')
       AND (iv.status = 'overdue' OR iv.due_date < ?::date)
-  )
+  )`;
+const AT_RISK_PREDICATE = `(
+  ${AT_RISK_SERVICE_PAUSED}
+  OR ${AT_RISK_AUTOPAY_PAUSED}
+  OR ${AT_RISK_OVERDUE}
 )`;
+
+// The headline-MRR population: active, non-deleted, recurring, internal/test
+// accounts excluded — shared by the breakdown and the at-risk account list so
+// their counts always reconcile.
+function mrrPopulationQuery(conn) {
+  return conn('customers as c')
+    .where('c.active', true)
+    .whereNull('c.deleted_at')
+    .where('c.monthly_rate', '>', 0)
+    // Exclude internal/test accounts so they never inflate MRR — the same
+    // population the live trend (excludeInternalCustomers) and the snapshot use.
+    .modify((qb) => {
+      if (INTERNAL_TEST_CUSTOMERS.length) {
+        qb.whereNotIn(
+          conn.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+          INTERNAL_TEST_CUSTOMERS,
+        );
+      }
+    });
+}
 
 /**
  * Committed vs at-risk MRR.
@@ -86,20 +115,7 @@ async function computeMrrBreakdown(dbConn, asOf = etDateString()) {
   const { getPaymentPendingCustomerIds } = require('./annual-prepay-renewals');
 
   const [rows, pendingSet] = await Promise.all([
-    conn('customers as c')
-      .where('c.active', true)
-      .whereNull('c.deleted_at')
-      .where('c.monthly_rate', '>', 0)
-      // Exclude internal/test accounts so they never inflate MRR — the same
-      // population the live trend (excludeInternalCustomers) and the snapshot use.
-      .modify((qb) => {
-        if (INTERNAL_TEST_CUSTOMERS.length) {
-          qb.whereNotIn(
-            conn.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
-            INTERNAL_TEST_CUSTOMERS,
-          );
-        }
-      })
+    mrrPopulationQuery(conn)
       .select(
         'c.id as id',
         'c.monthly_rate as monthly_rate',
@@ -135,4 +151,63 @@ async function computeMrrBreakdown(dbConn, asOf = etDateString()) {
   return { total, committed, atRisk, totalCount, atRiskCount };
 }
 
-module.exports = { computeMrrBreakdown, AT_RISK_PREDICATE };
+/**
+ * The accounts behind computeMrrBreakdown's atRisk figure, with per-account
+ * causes, for the Billing Recovery workbench — the dashboard's "MRR at risk"
+ * action item deep-links there, so the page has to show WHICH recurring
+ * accounts the number means and WHY.
+ *
+ * Same population (mrrPopulationQuery), same cause definitions (the named
+ * sub-predicates AT_RISK_PREDICATE is composed from, plus the same
+ * payment-pending prepay set) — an account appears here if and only if the
+ * breakdown counted it at-risk.
+ *
+ * @param {import('knex')} [dbConn]
+ * @param {string} asOf  ET calendar date (YYYY-MM-DD). Defaults to today ET.
+ * @returns {Promise<Array<{id, firstName, lastName, monthlyRate, causes: string[]}>>}
+ *          Sorted by monthlyRate descending. `causes` ⊆ ['service_paused',
+ *          'autopay_paused', 'overdue', 'prepay_payment_pending'].
+ */
+async function listAtRiskMrrAccounts(dbConn, asOf = etDateString()) {
+  const conn = dbConn || require('../models/db');
+  const { getPaymentPendingCustomerIds } = require('./annual-prepay-renewals');
+
+  const [rows, pendingSet] = await Promise.all([
+    mrrPopulationQuery(conn)
+      .select(
+        'c.id as id',
+        'c.first_name as first_name',
+        'c.last_name as last_name',
+        'c.monthly_rate as monthly_rate',
+        conn.raw(`(${AT_RISK_SERVICE_PAUSED}) as risk_service_paused`),
+        conn.raw(`(${AT_RISK_AUTOPAY_PAUSED}) as risk_autopay_paused`, [asOf]),
+        conn.raw(`(${AT_RISK_OVERDUE}) as risk_overdue`, [asOf]),
+      ),
+    Promise.resolve()
+      .then(() => getPaymentPendingCustomerIds(asOf, conn))
+      .catch(() => new Set()),
+  ]);
+
+  // pg returns boolean columns as JS booleans; tolerate 't'/1 from other drivers.
+  const truthy = (v) => v === true || v === 't' || v === 1;
+  const accounts = [];
+  for (const r of rows) {
+    const causes = [];
+    if (truthy(r.risk_service_paused)) causes.push('service_paused');
+    if (truthy(r.risk_autopay_paused)) causes.push('autopay_paused');
+    if (truthy(r.risk_overdue)) causes.push('overdue');
+    if (pendingSet.has(String(r.id))) causes.push('prepay_payment_pending');
+    if (!causes.length) continue;
+    accounts.push({
+      id: r.id,
+      firstName: r.first_name,
+      lastName: r.last_name,
+      monthlyRate: parseFloat(r.monthly_rate || 0),
+      causes,
+    });
+  }
+  accounts.sort((a, b) => b.monthlyRate - a.monthlyRate);
+  return accounts;
+}
+
+module.exports = { computeMrrBreakdown, listAtRiskMrrAccounts, AT_RISK_PREDICATE };

@@ -178,6 +178,7 @@ router.get('/field-leads', async (req, res, next) => {
     const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString();
     const leads = await db('leads')
       .where({ first_contact_channel: 'field_observation' })
+      .whereNull('leads.deleted_at')
       .where('leads.created_at', '>=', sevenDaysAgo)
       .leftJoin('customers', 'leads.customer_id', 'customers.id')
       .leftJoin('technicians', 'leads.assigned_to', 'technicians.id')

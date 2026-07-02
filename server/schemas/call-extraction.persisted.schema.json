@@ -245,7 +245,9 @@
         "waveguard_tier_mentioned": {
           "type": ["string", "null"],
           "enum": ["bronze", "silver", "gold", "platinum", null]
-        }
+        },
+        "specific_service_name": { "type": ["string", "null"] },
+        "quoted_price_usd": { "type": ["number", "null"] }
       }
     },
 
@@ -285,6 +287,8 @@
         },
         "callback_window_start": { "type": ["string", "null"], "format": "time" },
         "callback_window_end": { "type": ["string", "null"], "format": "time" },
+        "follow_up_mentioned": { "type": ["boolean", "null"] },
+        "follow_up_start_at": { "type": ["string", "null"], "format": "date-time" },
         "blackout_dates": {
           "type": "array",
           "items": { "type": "string", "format": "date" }

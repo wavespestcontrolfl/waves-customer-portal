@@ -66,7 +66,9 @@ async function runDashboardAlertsCheckInner() {
   // transaction time should be the minimum needed to hold the lock.
   let current;
   try {
-    const result = await computeDashboardAlerts();
+    // fresh: this tick persists new/escalated alert rows keyed on count, so it
+    // must see the current state, not the read-path's 30s memo.
+    const result = await computeDashboardAlerts({ fresh: true });
     current = result.alerts || [];
   } catch (err) {
     logger.error(`[dashboard-alerts-cron] computeDashboardAlerts failed: ${err.message}`);

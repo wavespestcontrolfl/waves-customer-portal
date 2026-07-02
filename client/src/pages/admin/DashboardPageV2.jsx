@@ -1,38 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  Badge,
-  Card,
-  CardBody,
-  CardHeader,
-  CardTitle,
-  cn,
-} from "../../components/ui";
-import {
-  AgingBar,
-  AttributionScorecard,
-  CapitalAllocationCard,
-  CaptureGauge,
-  CHART_SUCCESS,
-  ChartCard,
-  CompletionGauge,
-  EmptyState,
-  EstimateFunnel,
-  KpiBullet,
-  KpiDivergingBar,
-  KpiRing,
-  KpiSparklineTile,
-  MrrTrendChart,
-  RetentionCohortGrid,
-  ReviewTrendChart,
-  RevenueByCity,
-  RevenueTrendArea,
-  ServiceMixDonut,
-  TechLeaderboardBars,
-  fmtInt,
-  fmtMoney,
-  fmtMoneyCompact,
-} from "../../components/dashboard/charts";
 import useIsMobile from "../../hooks/useIsMobile";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import AiChartsPanel from "../../components/dashboard/AiChartsPanel";
@@ -41,18 +8,21 @@ import {
   isForbiddenError,
   isRateLimitError,
 } from "../../utils/admin-fetch";
+import DashboardJumpNav from "./dashboard/DashboardJumpNav";
+import TodaySection from "./dashboard/sections/TodaySection";
+import GrowthSection from "./dashboard/sections/GrowthSection";
+import ProfitSection from "./dashboard/sections/ProfitSection";
+import RetentionSection from "./dashboard/sections/RetentionSection";
+import CashSection from "./dashboard/sections/CashSection";
 
-// Point-in-time → rolling windows (inclusive of today) → calendar-to-date.
-// Server resolves each id via the shared periodStartDate (admin-dashboard.js).
-const PERIODS = [
+// The command-center sections, in page order. Each answers one owner question;
+// the jump-nav pills scroll to these anchors.
+const SECTIONS = [
   { id: "today", label: "Today" },
-  { id: "last_7", label: "7D" },
-  { id: "last_30", label: "30D" },
-  { id: "last_90", label: "90D" },
-  { id: "wtd", label: "WTD" },
-  { id: "mtd", label: "MTD" },
-  { id: "qtd", label: "QTD" },
-  { id: "ytd", label: "YTD" },
+  { id: "growth", label: "Growth" },
+  { id: "profit", label: "Profit" },
+  { id: "retention", label: "Retention" },
+  { id: "cash", label: "Cash" },
 ];
 
 const greeting = () => {
@@ -93,15 +63,6 @@ function adminFirstName() {
   }
 }
 
-// Build a daily-revenue sparkline series from the array of { date, total }
-// returned by /admin/dashboard. Pad to at least 2 points so the sparkline
-// renders even on day 1 of the month.
-function sparkSeries(daily) {
-  if (!Array.isArray(daily) || daily.length === 0) return [];
-  if (daily.length === 1) return [0, daily[0].total];
-  return daily.map((d) => Number(d.total) || 0);
-}
-
 export default function DashboardPageV2() {
   const isMobile = useIsMobile();
   const aiChartsEnabled = useFeatureFlag("dashboard-ai-charts");
@@ -124,7 +85,12 @@ export default function DashboardPageV2() {
   const [reviewTrend, setReviewTrend] = useState(null);
   const [today, setToday] = useState(null);
   const [billing, setBilling] = useState(null);
-  const [alerts, setAlerts] = useState([]);
+  // null = alerts never loaded successfully. ActionInbox renders an explicit
+  // unavailable state for null — only a real [] response may claim all-clear.
+  const [alerts, setAlerts] = useState(null);
+  // true = the LATEST alerts fetch failed (value above is a kept-previous).
+  // ActionInbox suppresses the green all-clear while stale.
+  const [alertsStale, setAlertsStale] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -161,25 +127,20 @@ export default function DashboardPageV2() {
   // Custom lookback: a START date through today, driving Core KPIs + attribution
   // when period==='custom'. End is always today, so every metric stays valid.
   const [customRange, setCustomRange] = useState(null); // { from } | null
-  const [showRangePicker, setShowRangePicker] = useState(false);
-  const [draftFrom, setDraftFrom] = useState("");
   // Recomputed as the dashboard's freshness clock ticks, so an overnight session
   // gets the new ET day as the date-input max without a reload.
   const todayISO = useMemo(
     () => new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }),
     [clockTick],
   );
-  const applyCustomRange = () => {
-    if (!draftFrom || draftFrom > todayISO) return;
-    setCustomRange({ from: draftFrom });
+  const applyCustomRange = useCallback((from) => {
+    setCustomRange({ from });
     setPeriod("custom");
-    setShowRangePicker(false);
-  };
-  const selectNamedPeriod = (id) => {
+  }, []);
+  const selectNamedPeriod = useCallback((id) => {
     setPeriod(id);
     setCustomRange(null);
-    setShowRangePicker(false);
-  };
+  }, []);
   const navigate = useNavigate();
   // Drill-down: open the Leads list filtered to this attribution source, scoped
   // to the same period window the panel is showing so the list matches the count.
@@ -195,7 +156,6 @@ export default function DashboardPageV2() {
     },
     [navigate, leadsBySource],
   );
-  const [showAllKpis, setShowAllKpis] = useState(false);
   const [kpisLoading, setKpisLoading] = useState(false);
   const [kpisError, setKpisError] = useState(null);
   const [attributionLoading, setAttributionLoading] = useState(false);
@@ -248,6 +208,10 @@ export default function DashboardPageV2() {
     setToday((prev) => td ?? prev);
     setBilling((prev) => bh?.summary ?? prev);
     setAlerts((prev) => (Array.isArray(al?.alerts) ? al.alerts : prev));
+    // Mark refresh failures so ActionInbox can tell "confirmed empty" from
+    // "kept the previous value" (the preserve-on-failure pattern above) —
+    // a green all-clear must never render off a failed load.
+    setAlertsStale(!Array.isArray(al?.alerts));
     setLoading(false);
 
     const wave2 = await Promise.all([
@@ -460,8 +424,6 @@ export default function DashboardPageV2() {
     );
   }
 
-  const k = data.kpis;
-  const dailySpark = sparkSeries(data.revenueChart?.daily);
   // Eastern-time everywhere — the business (and every operator) is in ET, so the
   // header date/clock must not drift to the viewer's browser timezone.
   const todayLabel = new Date().toLocaleDateString("en-US", {
@@ -479,64 +441,17 @@ export default function DashboardPageV2() {
     timeZone: "America/New_York",
   });
   const firstName = adminFirstName();
-  const mrrTrendSub =
-    mrrTrend?.avg_growth_pct != null
-      ? `${mrrTrend.avg_growth_pct >= 0 ? "↑" : "↓"} ${Math.abs(mrrTrend.avg_growth_pct)}% avg monthly growth`
-      : "last 12 months";
-
-  // Hero KPI tiles. Google Rating tile intentionally removed. Review Index
-  // uses /rate/:token submissions and is not a standard NPS calculation.
-  const HERO = [
-    {
-      label: "Revenue MTD",
-      value: fmtMoney(k.revenueMTD),
-      delta: compare?.deltas?.revenue ?? k.revenueChangePercent,
-      deltaSuffix: "% vs same days last month",
-      series: dailySpark,
-    },
-    {
-      label: "Active Customers",
-      value: fmtInt(k.activeCustomers),
-      sub: `+${fmtInt(k.newCustomersThisMonth)} new MTD`,
-    },
-    {
-      label: "MRR",
-      value: fmtMoney(data.mrr),
-      // Headline MRR counts every recurring account, but paused-autopay and
-      // overdue accounts aren't actually going to bill. When any MRR is at
-      // risk, surface the committed-vs-at-risk split instead of ARR so the
-      // headline doesn't silently overstate the run-rate.
-      sub:
-        data.mrrBreakdown?.atRisk > 0
-          ? `${fmtMoneyCompact(data.mrrBreakdown.committed)} committed · ${fmtMoneyCompact(data.mrrBreakdown.atRisk)} at risk`
-          : `ARR ${fmtMoneyCompact(data.mrr * 12)}`,
-    },
-    {
-      label: "Review Index",
-      value: kpis?.quality?.nps != null ? String(kpis.quality.nps) : "—",
-      sub: kpis?.quality?.csatResponses
-        ? `${kpis.quality.csatResponses} responses · ${kpis.quality.csatAvg}/10 avg`
-        : "awaiting rate-page submissions",
-      alert: kpis?.quality?.nps != null && kpis.quality.nps < 30,
-    },
-  ];
-  const sales = kpis?.sales || {};
-  const salesUnavailable = !!sales.error;
+  const kpiStripProps = { kpis, kpisLoading, kpisError };
 
   return (
     <div className="dashboard-blackout font-sans bg-surface-page min-h-full p-3 sm:p-6 pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6 text-zinc-900">
-      {" "}
-      <header className="mb-5 max-md:mb-6">
-        {" "}
+      <header className="mb-3 max-md:mb-4">
         <div className="flex items-start justify-between flex-wrap gap-3">
-          {" "}
           <div>
-            {" "}
             <div className="u-label text-ink-secondary max-md:text-13 max-md:tracking-normal max-md:normal-case max-md:font-medium max-md:text-zinc-500">
               {todayLabel} · {timeLabel}
-            </div>{" "}
+            </div>
             <h1 className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2">
-              {" "}
               <span
                 className="md:hidden"
                 style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}
@@ -545,9 +460,9 @@ export default function DashboardPageV2() {
               </span>{" "}
               <span className="hidden md:inline">
                 {greeting()}, {firstName}
-              </span>{" "}
-            </h1>{" "}
-          </div>{" "}
+              </span>
+            </h1>
+          </div>
           <div className="text-12 text-ink-tertiary flex items-center gap-1.5">
             {/* clockTick keeps this label fresh between auto-refreshes */}
             <span>Updated {relativeTime(lastUpdated, clockTick)}</span>{" "}
@@ -562,10 +477,26 @@ export default function DashboardPageV2() {
                 ↻
               </span>
             </button>
-          </div>{" "}
-        </div>{" "}
+          </div>
+        </div>
       </header>
-      {alerts.length > 0 && <DashboardAlertsBanner alerts={alerts} />}
+
+      {/* Sticky jump-nav + period selector. The period drives the KPI tiles
+          (distributed across sections) and the Marketing Attribution panels;
+          everything else keeps its fixed window (labeled per card). */}
+      <DashboardJumpNav
+        sections={SECTIONS}
+        period={period}
+        customRange={customRange}
+        todayISO={todayISO}
+        periodLabel={kpis?.periodLabel}
+        onSelectPeriod={selectNamedPeriod}
+        onApplyCustomRange={applyCustomRange}
+      />
+
+      {/* Alerts stay the first dashboard content, even with AI charts pinned. */}
+      <TodaySection alerts={alerts} alertsStale={alertsStale} today={today} {...kpiStripProps} />
+
       {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
           by default; the model only proposes SQL, the server sandboxes it. */}
       {aiChartsEnabled && (
@@ -573,908 +504,40 @@ export default function DashboardPageV2() {
           <AiChartsPanel />
         </div>
       )}
-      {/* Row 1: Sales Capture gauge + Revenue trend — capture rate next to the
-          revenue it drives. */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
-        {salesCapture && (
-          <ChartCard
-            title="Sales Capture"
-            sub={`${fmtMoney(salesCapture.captured)} captured of ${fmtMoney(
-              (salesCapture.captured || 0) + (salesCapture.missed || 0),
-            )} estimated · MTD`}
-          >
-            <CaptureGauge
-              captureRate={salesCapture.captureRate}
-              captured={salesCapture.captured}
-              missed={salesCapture.missed}
-              wonCount={salesCapture.wonCount}
-              lostCount={salesCapture.lostCount}
-            />
-          </ChartCard>
-        )}
-        <ChartCard
-          title={`Revenue — ${new Date().toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "America/New_York" })}`}
-          sub={
-            compare?.deltas?.revenue != null
-              ? `${compare.deltas.revenue >= 0 ? "↑" : "↓"} ${Math.abs(compare.deltas.revenue)}% vs ${compare.against?.label?.toLowerCase() || "prior period"}`
-              : "vs same days last month"
-          }
-          action={
-            <span className="text-12 text-ink-secondary">
-              MRR{" "}
-              <span className="u-nums font-medium text-zinc-900 ml-1">
-                {fmtMoney(data.mrr)}
-              </span>{" "}
-            </span>
-          }
-        >
-          <RevenueTrendArea
-            current={compare?.period?.series || data.revenueChart?.daily || []}
-            prior={compare?.against?.series || []}
-          />
-        </ChartCard>
-      </div>
-      {/* Row 2: Hero KPI row — sparkline + delta */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-4 md:mb-5">
-        {HERO.map((h) => (
-          <KpiSparklineTile key={h.label} {...h} />
-        ))}
-      </div>
-      {/* Row 3: Reviews trend (2/3) + Today completion gauge (1/3) */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
-        {" "}
-        <div className="md:col-span-2">
-          {" "}
-          <ChartCard
-            title="Reviews"
-            sub={`${reviewTrend?.total ?? 0} reviews · ${reviewTrend?.avgRating ?? "—"}★ avg`}
-            action={
-              kpis?.quality?.nps != null ? (
-                <span className="text-12 text-ink-secondary">
-                  Index{" "}
-                  <span className="u-nums font-medium text-zinc-900 ml-1">
-                    {kpis.quality.nps}
-                  </span>
-                </span>
-              ) : null
-            }
-          >
-            {" "}
-            <ReviewTrendChart trend={reviewTrend?.trend || []} />{" "}
-          </ChartCard>{" "}
-        </div>{" "}
-        <ChartCard
-          title="Today's Completion"
-          sub={
-            today?.date
-              ? new Date(today.date + "T12:00").toLocaleDateString("en-US", {
-                  weekday: "long",
-                })
-              : ""
-          }
-        >
-          {today ? (
-            <CompletionGauge
-              completed={today.completed}
-              total={today.total}
-              remaining={today.remaining}
-              cancelled={today.cancelled}
-              noShow={today.noShow}
-            />
-          ) : (
-            <EmptyState>Loading…</EmptyState>
-          )}
-        </ChartCard>{" "}
-      </div>
-      {/* Row: Service mix donut + Estimate funnel */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
-        {" "}
-        <ChartCard
-          title="Service Mix"
-          sub={`${mix?.total_services || 0} completed services this month`}
-        >
-          {" "}
-          <ServiceMixDonut mix={mix?.mix || []} />{" "}
-        </ChartCard>{" "}
-        <ChartCard
-          title="Estimate Funnel"
-          sub={
-            funnel?.period ? `${funnel.period.from} → ${funnel.period.to}` : ""
-          }
-        >
-          {" "}
-          <EstimateFunnel
-            funnel={funnel?.funnel || {}}
-            rates={funnel?.rates || {}}
-            totalAcceptedValue={funnel?.total_accepted_value}
-          />{" "}
-        </ChartCard>{" "}
-      </div>
-      {/* Revenue by city — ServiceTitan-style geo cut of MTD completed revenue */}
-      {revenueByCity && (
-        <div className="mb-5">
-          {" "}
-          <ChartCard
-            title="Revenue by City"
-            sub={`${fmtMoney(revenueByCity.total || 0)} · MTD`}
-          >
-            {" "}
-            <RevenueByCity
-              cities={revenueByCity.cities || []}
-              total={revenueByCity.total || 0}
-            />{" "}
-          </ChartCard>{" "}
-        </div>
-      )}
-      {/* AR aging — full width, the 90+ bucket is the only place alert-fg */}
-      <div className="mb-5">
-        {" "}
-        <ChartCard
-          title="Accounts Receivable Aging"
-          sub={
-            aging?.invoice_count != null
-              ? `${aging.invoice_count} open invoices`
-              : ""
-          }
-        >
-          {" "}
-          <AgingBar
-            aging={aging?.aging || {}}
-            totalOutstanding={aging?.total_outstanding}
-            totalOverdue={aging?.total_overdue}
-          />{" "}
-        </ChartCard>{" "}
-      </div>
-      {/* Core operational KPIs (period switcher) */}
-      <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
-        {" "}
-        <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
-          {" "}
-          <div>
-            {" "}
-            <CardTitle>Core KPIs</CardTitle>{" "}
-            <div className="text-12 text-ink-secondary mt-1">
-              {kpis?.periodLabel || "Month to Date"}
-            </div>{" "}
-          </div>{" "}
-          <div className="relative flex items-center gap-2">
-            <div className="max-w-full overflow-x-auto">
-              <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
-                {PERIODS.map((p) => (
-                  <button
-                    key={p.id}
-                    onClick={() => selectNamedPeriod(p.id)}
-                    className={cn(
-                      "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0",
-                      period === p.id
-                        ? "bg-zinc-900 text-white"
-                        : "bg-white text-ink-secondary hover:bg-zinc-50",
-                    )}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-                <button
-                  onClick={() => {
-                    setDraftFrom(customRange?.from || "");
-                    setShowRangePicker((v) => !v);
-                  }}
-                  className={cn(
-                    "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0 border-l border-hairline border-zinc-200 whitespace-nowrap",
-                    period === "custom"
-                      ? "bg-zinc-900 text-white"
-                      : "bg-white text-ink-secondary hover:bg-zinc-50",
-                  )}
-                  title="Custom lookback — pick a start date (through today)"
-                >
-                  {period === "custom" && customRange ? `Since ${customRange.from}` : "Custom"}
-                </button>
-              </div>
-            </div>
-            {showRangePicker && (
-              <div className="absolute right-0 top-full mt-1 z-20 bg-white border-hairline border-zinc-200 rounded-sm shadow-lg p-3 flex flex-col gap-2">
-                <label className="text-11 text-ink-tertiary flex items-center justify-between gap-3">
-                  Since
-                  <input type="date" max={todayISO} value={draftFrom} onChange={(e) => setDraftFrom(e.target.value)}
-                    className="text-12 border-hairline border-zinc-300 rounded-sm px-2 py-1 u-focus-ring" />
-                </label>
-                <div className="text-11 text-ink-tertiary">through today</div>
-                <div className="flex justify-end gap-2 mt-1">
-                  <button onClick={() => setShowRangePicker(false)} className="text-11 text-ink-tertiary hover:text-ink-secondary u-focus-ring">Cancel</button>
-                  <button onClick={applyCustomRange} disabled={!draftFrom}
-                    className="text-11 font-medium px-3 py-1 rounded-sm bg-zinc-900 text-white disabled:opacity-40 u-focus-ring">Apply</button>
-                </div>
-              </div>
-            )}
-          </div>{" "}
-        </CardHeader>{" "}
-        <CardBody>
-          {kpisLoading ? (
-            <EmptyState>Loading KPIs…</EmptyState>
-          ) : kpisError ? (
-            <EmptyState>Failed to load KPIs for this period</EmptyState>
-          ) : !kpis ? (
-            <EmptyState>No KPI data for this period</EmptyState>
-          ) : (
-            <>
-              {" "}
-              <KpiGrid>
-                {" "}
-                {kpis.momentum && (
-                  <>
-                    {" "}
-                    <KpiTile
-                      label="Net MRR"
-                      value={signed(kpis.momentum.mrr?.net, fmtMoney)}
-                      sub={`+${fmtMoneyCompact(kpis.momentum.mrr?.new ?? 0)} new · ${fmtMoneyCompact(kpis.momentum.mrr?.churned ?? 0)} lost`}
-                      alert={kpis.momentum.mrr?.net < 0}
-                      chart={{
-                        kind: "diverging",
-                        positive: kpis.momentum.mrr?.new ?? 0,
-                        negative: kpis.momentum.mrr?.churned ?? 0,
-                      }}
-                    />{" "}
-                    <KpiTile
-                      label="Net Customers"
-                      value={signed(kpis.momentum.customers?.net, fmtInt)}
-                      sub={`+${fmtInt(kpis.momentum.customers?.new ?? 0)} new · ${fmtInt(kpis.momentum.customers?.lost ?? 0)} lost`}
-                      alert={kpis.momentum.customers?.net < 0}
-                      chart={{
-                        kind: "diverging",
-                        positive: kpis.momentum.customers?.new ?? 0,
-                        negative: kpis.momentum.customers?.lost ?? 0,
-                      }}
-                    />{" "}
-                  </>
-                )}{" "}
-                <KpiTile
-                  label="Lead → Booked"
-                  value={
-                    !salesUnavailable && sales.conversion != null
-                      ? `${sales.conversion}%`
-                      : "—"
-                  }
-                  sub={
-                    salesUnavailable
-                      ? "lead metrics unavailable"
-                      : `${sales.booked ?? 0}/${sales.leads ?? 0} leads`
-                  }
-                  alert={
-                    salesUnavailable ||
-                    (sales.conversion != null && sales.conversion < 20)
-                  }
-                  chart={{ kind: "gauge", value: sales.conversion, max: 100, target: 20 }}
-                />{" "}
-                <KpiTile
-                  label="Response Speed"
-                  value={
-                    !salesUnavailable && sales.avgResponseMin != null
-                      ? `${sales.avgResponseMin}m`
-                      : "—"
-                  }
-                  sub={
-                    salesUnavailable
-                      ? "lead metrics unavailable"
-                      : "lead → first contact"
-                  }
-                  alert={
-                    salesUnavailable ||
-                    (sales.avgResponseMin != null && sales.avgResponseMin > 60)
-                  }
-                  chart={{ kind: "bullet", value: sales.avgResponseMin, target: 60, lowerIsBetter: true }}
-                />{" "}
-                <KpiTile
-                  label="Service Completion"
-                  value={pct(kpis.service.completionRate)}
-                  sub={`${kpis.service.completed}/${kpis.service.scheduled} jobs`}
-                  alert={
-                    kpis.service.completionRate != null &&
-                    kpis.service.completionRate < 85
-                  }
-                  chart={{ kind: "gauge", value: kpis.service.completionRate, max: 100, target: 85 }}
-                />{" "}
-                <KpiTile
-                  label="Collection Rate"
-                  value={
-                    kpis.billing?.collectionRate != null
-                      ? `${kpis.billing.collectionRate}%`
-                      : "—"
-                  }
-                  sub={
-                    kpis.billing?.issuedCount
-                      ? `${fmtMoneyCompact(kpis.billing.collected)} / ${fmtMoneyCompact(kpis.billing.billed)} · ${kpis.billing.collectedCount}/${kpis.billing.issuedCount} paid`
-                      : "no invoices issued"
-                  }
-                  alert={
-                    kpis.billing?.collectionRate != null &&
-                    kpis.billing.issuedCount >= 5 &&
-                    kpis.billing.collectionRate < 70
-                  }
-                  chart={{ kind: "gauge", value: kpis.billing?.collectionRate, max: 100, target: 70 }}
-                />{" "}
-                <KpiTile
-                  label="Gross Margin"
-                  value={
-                    kpis.financial.grossMarginWeighted != null
-                      ? `${Math.round(kpis.financial.grossMarginWeighted)}%`
-                      : "—"
-                  }
-                  sub={
-                    kpis.financial.grossMarginAvg != null
-                      ? `per-job avg ${Math.round(kpis.financial.grossMarginAvg)}%`
-                      : "revenue-weighted"
-                  }
-                  alert={
-                    kpis.financial.grossMarginWeighted != null &&
-                    kpis.financial.grossMarginWeighted < 40
-                  }
-                  chart={{ kind: "gauge", value: kpis.financial.grossMarginWeighted, max: 100, target: 40 }}
-                />{" "}
-                <KpiTile
-                  label="Retention"
-                  value={
-                    kpis.retention.pct != null ? `${kpis.retention.pct}%` : "—"
-                  }
-                  sub={`${kpis.retention.lost} lost`}
-                  alert={kpis.retention.pct != null && kpis.retention.pct < 85}
-                  chart={{ kind: "gauge", value: kpis.retention.pct, max: 100, target: 85 }}
-                />{" "}
-              </KpiGrid>{" "}
-              <button
-                type="button"
-                onClick={() => setShowAllKpis((v) => !v)}
-                className="mt-3 u-label text-ink-secondary hover:text-zinc-900 u-focus-ring"
-              >
-                {showAllKpis ? "Show fewer metrics ▴" : "Show all metrics ▾"}
-              </button>{" "}
-              {showAllKpis && (
-                <KpiGrid>
-                  {" "}
-                  <KpiTile
-                    label="Callback Rate"
-                    value={
-                      kpis.service.callbackRate != null
-                        ? `${kpis.service.callbackRate}%`
-                        : "—"
-                    }
-                    sub={`${kpis.service.callbacks} callbacks`}
-                    alert={
-                      kpis.service.callbackRate != null &&
-                      kpis.service.callbackRate >= 6
-                    }
-                    chart={{ kind: "gauge", value: kpis.service.callbackRate, max: 12, target: 6, lowerIsBetter: true }}
-                  />{" "}
-                  <KpiTile
-                    label="Revenue / Job"
-                    value={
-                      kpis.financial.revPerJob != null
-                        ? fmtMoney(kpis.financial.revPerJob)
-                        : "—"
-                    }
-                    sub={`${kpis.financial.jobsDone} completed`}
-                  />{" "}
-                  <KpiTile
-                    label="Revenue / Man-Hour"
-                    value={
-                      kpis.financial.rpmh != null
-                        ? fmtMoney(kpis.financial.rpmh)
-                        : "—"
-                    }
-                    sub="target $120"
-                    alert={
-                      kpis.financial.rpmh != null && kpis.financial.rpmh < 90
-                    }
-                    chart={{ kind: "bullet", value: kpis.financial.rpmh, target: 120 }}
-                  />{" "}
-                  <KpiTile
-                    label="AR Days"
-                    value={kpis.ar.days != null ? `${kpis.ar.days}d` : "—"}
-                    sub={`${fmtMoneyCompact(kpis.ar.open)} open · ${kpis.ar.overdueCount} overdue`}
-                    alert={kpis.ar.days != null && kpis.ar.days > 30}
-                    chart={{ kind: "bullet", value: kpis.ar.days, target: 30, lowerIsBetter: true }}
-                  />{" "}
-                  <KpiTile
-                    label="CSAT"
-                    value={
-                      kpis.quality.csatAvg != null
-                        ? `${kpis.quality.csatAvg}/10`
-                        : "—"
-                    }
-                    sub={
-                      kpis.quality.csatResponses
-                        ? `${kpis.quality.csatResponses} rate-page responses`
-                        : "no responses yet"
-                    }
-                    alert={
-                      kpis.quality.csatAvg != null &&
-                      parseFloat(kpis.quality.csatAvg) < 8
-                    }
-                    chart={{
-                      kind: "gauge",
-                      value: kpis.quality.csatAvg != null ? parseFloat(kpis.quality.csatAvg) : null,
-                      max: 10,
-                      target: 8,
-                    }}
-                  />{" "}
-                  <KpiTile
-                    label="Autopay Coverage"
-                    value={
-                      kpis.billing?.autopayPct != null
-                        ? `${kpis.billing.autopayPct}%`
-                        : "—"
-                    }
-                    sub={
-                      kpis.billing?.customerBase
-                        ? `${kpis.billing.autopayCount} of ${kpis.billing.customerBase} customers`
-                        : "no customers"
-                    }
-                    chart={{ kind: "gauge", value: kpis.billing?.autopayPct, max: 100 }}
-                  />{" "}
-                  <KpiTile
-                    label="Memberships Sold"
-                    value={
-                      kpis.membershipsSold != null
-                        ? fmtInt(kpis.membershipsSold)
-                        : "—"
-                    }
-                    sub="new WaveGuard members"
-                  />{" "}
-                  <KpiTile
-                    label="Call → Booking"
-                    value={
-                      !salesUnavailable && sales.callToBooking != null
-                        ? `${sales.callToBooking}%`
-                        : "—"
-                    }
-                    sub={
-                      salesUnavailable
-                        ? "lead metrics unavailable"
-                        : `${sales.booked ?? 0} booked / ${sales.inboundCalls ?? 0} calls`
-                    }
-                    chart={{ kind: "gauge", value: salesUnavailable ? null : sales.callToBooking, max: 100 }}
-                  />{" "}
-                </KpiGrid>
-              )}{" "}
-            </>
-          )}
-        </CardBody>{" "}
-      </Card>
-      {/* MRR trend — full width above the attribution row */}
-      {isMobile ? (
-        <MobileFold title="MRR Trend" sub={mrrTrendSub}>
-          {" "}
-          <ChartCard title="MRR Trend" sub={mrrTrendSub}>
-            {" "}
-            <MrrTrendChart trend={mrrTrend?.trend || []} />{" "}
-          </ChartCard>{" "}
-        </MobileFold>
-      ) : (
-        <div className="mb-5">
-          {" "}
-          <ChartCard title="MRR Trend" sub={mrrTrendSub}>
-            {" "}
-            <MrrTrendChart trend={mrrTrend?.trend || []} />{" "}
-          </ChartCard>{" "}
-        </div>
-      )}
-      {/* Retention by signup cohort — % of each month's new customers still
-          active over the months since they joined. */}
-      {isMobile ? (
-        <MobileFold
-          title="Retention by Cohort"
-          sub="% still active by signup month"
-        >
-          {" "}
-          <ChartCard
-            title="Retention by Cohort"
-            sub="% still active by signup month"
-          >
-            {" "}
-            <RetentionCohortGrid
-              cohorts={cohort?.cohorts || []}
-              maxOffset={cohort?.maxOffset || 0}
-            />{" "}
-          </ChartCard>{" "}
-        </MobileFold>
-      ) : (
-        <div className="mb-5">
-          {" "}
-          <ChartCard
-            title="Retention by Cohort"
-            sub="% of each signup month still active"
-          >
-            {" "}
-            <RetentionCohortGrid
-              cohorts={cohort?.cohorts || []}
-              maxOffset={cohort?.maxOffset || 0}
-            />{" "}
-          </ChartCard>{" "}
-        </div>
-      )}
-      {/* Capital allocation — acquisition channels banded by LTV:CAC (lifetime
-          gross profit ÷ ad spend) so the owner can see where to pour cash and
-          where it's leaking. Trailing 90 days. */}
-      {isMobile ? (
-        <MobileFold
-          title="Where to Put Ad Dollars"
-          sub="channels by LTV:CAC · last 90 days"
-        >
-          {" "}
-          <ChartCard
-            title="Where to Put Ad Dollars"
-            sub="channels by LTV:CAC · last 90 days"
-          >
-            {" "}
-            <CapitalAllocationCard data={capAlloc} />{" "}
-          </ChartCard>{" "}
-        </MobileFold>
-      ) : (
-        <div className="mb-5">
-          {" "}
-          <ChartCard
-            title="Where to Put Ad Dollars"
-            sub="acquisition channels by LTV:CAC · last 90 days"
-          >
-            {" "}
-            <CapitalAllocationCard data={capAlloc} />{" "}
-          </ChartCard>{" "}
-        </div>
-      )}
-      {/* Upstream lead-attribution row.
-          Replaces the prior single Lead Source panel (which aggregated the
-          downstream customers.lead_source string) with three upstream views
-          we actually capture:
-            - Calls by Source: call_log JOIN lead_sources by dialed number
-            - Leads by Source: leads GROUP BY lead_source_id
-            - Channel Mix:     leads.first_contact_channel breakdown
-          Uses the same period selector as Core KPIs. */}
-      {isMobile ? (
-        <MobileFold
-          title="Marketing Attribution"
-          sub={
-            callsBySource?.period?.label || kpis?.periodLabel || "Month to Date"
-          }
-        >
-          {" "}
-          <AttributionScorecard
-            callsBySource={callsBySource}
-            leadsBySource={leadsBySource}
-            channelMix={channelMix}
-            loading={attributionLoading}
-            error={attributionError}
-            onDrillSource={drillToSource}
-          />{" "}
-        </MobileFold>
-      ) : (
-        <ChartCard
-          title="Marketing Attribution"
-          sub={
-            callsBySource?.period?.label || kpis?.periodLabel || "Month to Date"
-          }
-          className="mb-5"
-        >
-          <AttributionScorecard
-            callsBySource={callsBySource}
-            leadsBySource={leadsBySource}
-            channelMix={channelMix}
-            loading={attributionLoading}
-            error={attributionError}
-            onDrillSource={drillToSource}
-          />
-        </ChartCard>
-      )}
-      {/* Tech leaderboard — bar variant */}
-      {kpis?.leaderboard?.length > 0 &&
-        (isMobile ? (
-          <MobileFold title="Tech Leaderboard" sub={kpis.periodLabel}>
-            {" "}
-            <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel}>
-              {" "}
-              <TechLeaderboardBars leaderboard={kpis.leaderboard} />{" "}
-            </ChartCard>{" "}
-          </MobileFold>
-        ) : (
-          <ChartCard
-            title="Tech Leaderboard"
-            sub={kpis.periodLabel}
-            className="mb-5"
-          >
-            {" "}
-            <TechLeaderboardBars leaderboard={kpis.leaderboard} />{" "}
-          </ChartCard>
-        ))}
-      {/* Billing Health — kept as a peer panel per user instruction */}
-      {billing &&
-        (isMobile ? (
-          <MobileFold
-            title="Billing Health"
-            sub={`${billing.total_billable} billable`}
-          >
-            {" "}
-            <BillingHealthPanel summary={billing} embedded />{" "}
-          </MobileFold>
-        ) : (
-          <BillingHealthPanel summary={billing} />
-        ))}
+
+      <GrowthSection
+        data={data}
+        compare={compare}
+        salesCapture={salesCapture}
+        funnel={funnel}
+        revenueByCity={revenueByCity}
+        capAlloc={capAlloc}
+        callsBySource={callsBySource}
+        leadsBySource={leadsBySource}
+        channelMix={channelMix}
+        attributionLoading={attributionLoading}
+        attributionError={attributionError}
+        onDrillSource={drillToSource}
+        isMobile={isMobile}
+        {...kpiStripProps}
+      />
+
+      <ProfitSection mix={mix} isMobile={isMobile} {...kpiStripProps} />
+
+      <RetentionSection
+        mrrTrend={mrrTrend}
+        cohort={cohort}
+        reviewTrend={reviewTrend}
+        isMobile={isMobile}
+        {...kpiStripProps}
+      />
+
+      <CashSection
+        aging={aging}
+        billing={billing}
+        isMobile={isMobile}
+        {...kpiStripProps}
+      />
     </div>
-  );
-}
-
-function DashboardAlertsBanner({ alerts }) {
-  const visible = alerts.slice(0, 4);
-  const criticalCount = alerts.filter((a) => a.severity === "critical").length;
-  return (
-    <Card className="mb-4 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
-      {" "}
-      <CardBody className="p-4">
-        {" "}
-        <div className="flex items-center justify-between gap-3">
-          {" "}
-          <div>
-            {" "}
-            <div className="u-label text-ink-secondary">
-              Operational Alerts
-            </div>{" "}
-            <div className="mt-1 text-13 text-zinc-900">
-              {criticalCount > 0
-                ? `${criticalCount} critical alert${criticalCount === 1 ? "" : "s"}`
-                : `${alerts.length} active alert${alerts.length === 1 ? "" : "s"}`}
-            </div>{" "}
-          </div>{" "}
-          <Badge tone={criticalCount > 0 ? "alert" : "neutral"}>
-            {alerts.length}
-          </Badge>{" "}
-        </div>{" "}
-        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
-          {visible.map((alert) => (
-            <a
-              key={alert.id}
-              href={alert.href || "#"}
-              className="flex items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-13 text-zinc-900 hover:bg-white"
-            >
-              {" "}
-              <span className="flex items-center gap-2 min-w-0">
-                {" "}
-                <span
-                  className={cn(
-                    "h-2 w-2 rounded-full flex-shrink-0",
-                    alert.severity === "critical"
-                      ? "bg-alert-fg"
-                      : "bg-amber-500",
-                  )}
-                />{" "}
-                <span className="truncate">{alert.label}</span>{" "}
-              </span>
-              {alert.amount != null && (
-                <span className="u-nums text-12 text-ink-secondary flex-shrink-0">
-                  {fmtMoneyCompact(alert.amount)}
-                </span>
-              )}
-            </a>
-          ))}
-        </div>{" "}
-      </CardBody>{" "}
-    </Card>
-  );
-}
-
-function MobileFold({ title, sub, children }) {
-  return (
-    <details className="md:hidden mb-3 rounded-xl border-hairline border-zinc-200 bg-white shadow-sm overflow-hidden">
-      {" "}
-      <summary className="list-none cursor-pointer select-none px-4 py-4 flex items-center justify-between gap-3">
-        {" "}
-        <span className="u-label text-zinc-900">{title}</span>
-        {sub && (
-          <span className="text-12 text-ink-secondary text-right truncate">
-            {sub}
-          </span>
-        )}
-      </summary>{" "}
-      <div className="px-3 pb-3">{children}</div>{" "}
-    </details>
-  );
-}
-
-
-function pct(n) {
-  return n == null ? "—" : `${n}%`;
-}
-
-// Signed display for net-momentum tiles: explicit + on gains, a true minus
-// glyph on losses, bare 0 at flat. Magnitude is formatted by `fmt`.
-function signed(n, fmt) {
-  if (n == null) return "—";
-  const v = Number(n);
-  if (v === 0) return fmt(0);
-  return `${v > 0 ? "+" : "−"}${fmt(Math.abs(v))}`;
-}
-
-function KpiGrid({ children }) {
-  return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">{children}</div>
-  );
-}
-
-function KpiTile({ label, value, sub, alert, chart }) {
-  // Gauge tiles let the ring BE the value (number in the center), with the
-  // sub beside it — no duplicate big number.
-  if (chart?.kind === "gauge") {
-    return (
-      <div className="bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3">
-        <div className="u-label text-ink-secondary">{label}</div>
-        <div className="flex items-center gap-3 mt-2">
-          <KpiRing
-            value={chart.value}
-            max={chart.max}
-            target={chart.target}
-            lowerIsBetter={chart.lowerIsBetter}
-            alert={alert}
-            display={value}
-          />
-          {sub && <div className="text-11 text-ink-secondary min-w-0">{sub}</div>}
-        </div>
-      </div>
-    );
-  }
-  // Bullet / diverging tiles keep the big number, with the bar beneath.
-  return (
-    <div className="bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3">
-      {" "}
-      <div className="u-label text-ink-secondary">{label}</div>{" "}
-      <div
-        className={cn(
-          "u-nums text-22 font-medium tracking-tight mt-2 leading-none",
-          alert ? "text-alert-fg" : "text-zinc-900",
-        )}
-      >
-        {value}
-      </div>
-      {sub && <div className="mt-1 text-11 text-ink-secondary">{sub}</div>}
-      {chart?.kind === "bullet" && (
-        <div className="mt-2">
-          <KpiBullet
-            value={chart.value}
-            target={chart.target}
-            max={chart.max}
-            lowerIsBetter={chart.lowerIsBetter}
-            alert={alert}
-          />
-        </div>
-      )}
-      {chart?.kind === "diverging" && (
-        <div className="mt-2">
-          <KpiDivergingBar positive={chart.positive} negative={chart.negative} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function BillingHealthPanel({ summary: h, embedded = false }) {
-  const billable = h.total_billable || 0;
-  const autopayActive = h.autopay_active || 0; // enabled minus paused
-  const paused = h.autopay_paused || 0;
-  const enabled = autopayActive + paused; // all autopay-enabled accounts
-  // Autopay-off accounts (billed manually). The backend reports this directly;
-  // fall back to billable − enabled (every billable row is enabled or disabled).
-  const manual = h.autopay_disabled != null ? h.autopay_disabled : Math.max(billable - enabled, 0);
-  const autopayPct = billable > 0 ? Math.round((enabled / billable) * 100) : 0;
-  const seg = (n) => (billable > 0 ? (n / billable) * 100 : 0);
-
-  // Every state that means an account WON'T be billed cleanly — not just charge
-  // failures. `no_payment_method` is autopay-enabled-with-no-card (so autopay
-  // silently can't run) and `paused` autopay is skipped by the billing cron;
-  // both belong in the verdict, not hidden. Verdict is healthy only when all clear.
-  const attention = [
-    { label: "No card", value: h.no_payment_method || 0 },
-    { label: "Paused", value: paused },
-    { label: "Failed", value: h.failed_last_30_days || 0 },
-    { label: "In retry", value: h.in_retry_queue || 0 },
-    { label: "Escalated", value: h.escalated_last_30_days || 0 },
-    // 60-day window (incl. already-expired) — labelled so it isn't read as a 30d event.
-    { label: "Cards expiring (60d)", value: h.expiring_cards_60_days || 0 },
-  ];
-  const healthy = attention.every((a) => a.value === 0);
-
-  // Autopay-enabled vs manual — sums to the billable base, no inference. (We do
-  // NOT split out "has a saved method" because the backend only reports the
-  // no-card count within autopay-enabled accounts, so it can't be derived here.)
-  const coverage = [
-    { label: "Autopay", value: enabled, color: CHART_SUCCESS, suffix: ` (${autopayPct}%)` },
-    { label: "Manual", value: manual, color: "#D4D4D8" },
-  ];
-
-  // Status-first verdict — green only when every won't-bill state is clear.
-  const verdict = (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium whitespace-nowrap",
-        !healthy && "text-alert-fg bg-alert-bg",
-      )}
-      style={healthy ? { color: CHART_SUCCESS, background: "rgba(16,185,129,0.10)" } : undefined}
-    >
-      {healthy ? "✓ Healthy" : "⚠ Needs attention"}
-    </span>
-  );
-
-  const body = (
-    <>
-      {/* Autopay coverage — enabled vs manual; sums to the billable base. */}
-      <div className="u-label text-ink-tertiary mb-2">Autopay coverage</div>
-      <div className="flex h-2.5 rounded-sm overflow-hidden bg-surface-sunken mb-2">
-        {coverage.map((r) => (
-          <div
-            key={r.label}
-            style={{ width: `${seg(r.value)}%`, background: r.color }}
-            title={`${r.label}: ${r.value}`}
-          />
-        ))}
-      </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-12">
-        {coverage.map((r) => (
-          <span key={r.label} className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: r.color }} />
-            <span className="text-ink-secondary">{r.label}</span>
-            <span className="u-nums font-medium">{r.value}</span>
-            {r.suffix && <span className="u-nums text-ink-tertiary">{r.suffix}</span>}
-          </span>
-        ))}
-      </div>
-
-      {/* Won't-bill / needs-attention — chips, green-✓ when clear, alert when not */}
-      <div className="mt-4 pt-3 border-t border-hairline border-zinc-100">
-        <div className="flex items-center justify-between gap-2 mb-2">
-          <span className="u-label text-ink-tertiary">Won't bill / needs attention</span>
-          <span className="u-nums text-12 text-ink-tertiary whitespace-nowrap">
-            {h.charged_this_month || 0} charged this month
-          </span>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {attention.map((a) => {
-            const bad = a.value > 0;
-            return (
-              <span
-                key={a.label}
-                className={cn(
-                  "inline-flex items-center gap-1.5 rounded-sm border px-2 py-1 text-12",
-                  bad
-                    ? "text-alert-fg bg-alert-bg border-alert-fg/30"
-                    : "text-ink-secondary bg-surface-sunken border-zinc-200",
-                )}
-              >
-                {!bad && <span style={{ color: CHART_SUCCESS }}>✓</span>}
-                <span>{a.label}</span>
-                <span className="u-nums font-medium">{a.value}</span>
-              </span>
-            );
-          })}
-        </div>
-      </div>
-    </>
-  );
-
-  // Embedded inside a MobileFold that already shows the "Billing Health" title +
-  // billable count — render just the verdict + body (no duplicate Card/header/badge).
-  if (embedded) {
-    return (
-      <div>
-        <div className="mb-3">{verdict}</div>
-        {body}
-      </div>
-    );
-  }
-
-  return (
-    <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
-      <CardHeader className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <CardTitle>Billing Health</CardTitle>
-          {verdict}
-        </div>
-        <Badge>{billable} billable</Badge>
-      </CardHeader>
-      <CardBody>{body}</CardBody>
-    </Card>
   );
 }

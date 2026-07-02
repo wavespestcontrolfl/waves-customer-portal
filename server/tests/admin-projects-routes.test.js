@@ -1114,6 +1114,15 @@ describe('admin projects routes', () => {
         project_type: 'wdo_inspection',
         project_date: null,
         findings: { wdo_finding: 'No visible signs of WDO observed' },
+        // A signed WDO project: the hard licensee-signature gate fires before
+        // the overridable readiness check, so this fixture must carry a
+        // signature to reach the gate under test. A legacy (unhashed, not
+        // stale) signature is honored by wdoSignatureFreshness; the signature
+        // gate itself is covered in wdo-signature-binding.test.js.
+        wdo_signature: JSON.stringify({
+          image: 'data:image/png;base64,AAAA',
+          signer_name: 'Adam Benetti',
+        }),
         recommendations: null,
         report_token: null,
         sent_at: null,

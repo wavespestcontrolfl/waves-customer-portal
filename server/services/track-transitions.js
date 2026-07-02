@@ -614,6 +614,22 @@ async function markComplete(serviceId, opts = {}) {
   };
 }
 
+// Cancelling the primary pulls its pending, never-confirmed call-created
+// follow-up (visit 2) off the schedule too — shared helper, also invoked
+// by the admin bulk-cancel and status-route cancel paths. Best-effort:
+// a cascade failure must not fail the primary cancel. Idempotent, so it
+// also runs on the already-cancelled/0-row retry paths — a prior attempt
+// may have cancelled the tracker but died before reaching the cascade,
+// which would otherwise strand the follow-up active forever.
+async function cascadeCallFollowUpCancel(serviceId) {
+  try {
+    const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
+    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: serviceId });
+  } catch (err) {
+    logger.error(`[track-transitions] call follow-up cancel cascade failed for ${serviceId}: ${err.message}`);
+  }
+}
+
 /**
  * Admin-only cancel. Extends token expiry to NOW()+24h so the customer
  * can still see the cancelled state for a day.
@@ -622,6 +638,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.track_state === 'cancelled') {
+    await cascadeCallFollowUpCancel(serviceId);
     emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
     return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
   }
@@ -642,7 +659,13 @@ async function cancel(serviceId, { reason, actorId } = {}) {
       updated_at: now,
     });
   if (updated === 0) {
+    // Lost the race to another cancel flow. Only cascade when the parent
+    // really ended cancelled — a concurrent COMPLETION must keep visit 2
+    // on the schedule.
     const fresh = await loadService(serviceId);
+    if (!fresh || fresh.track_state === 'cancelled') {
+      await cascadeCallFollowUpCancel(serviceId);
+    }
     return { ok: true, state: fresh?.track_state || 'cancelled', cancelledAt: fresh?.cancelled_at || null };
   }
   if (svc.technician_id) {
@@ -656,6 +679,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
       logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
     }
   }
+  await cascadeCallFollowUpCancel(serviceId);
   emitCustomerTrackRefresh(svc, 'cancelled', now);
   return {
     ok: true,

@@ -31,6 +31,7 @@ const {
   assessDepositFollowUpEligibility,
   DEPOSIT_FOLLOWUP_WINDOW,
 } = require("./estimate-deposits");
+const { customerConvertedSince } = require("./estimate-conversion-guard");
 
 // ── Cadence windows ──────────────────────────────────────────────────────
 // With the 10-day default expiry the ladder lands roughly day 2-3 / day 5-6
@@ -201,6 +202,16 @@ async function safetyGate(est, now = new Date()) {
     return { skip: true, reason: "recently-opened" };
   if (await isLiveCustomer(est))
     return { skip: true, reason: "active-customer" };
+  // Conversion guard: the customer already paid an invoice, booked an
+  // appointment after this estimate, or is an active customer — the estimate
+  // status just never flipped (booking/invoicing/completion don't write it).
+  // Never nag a converted customer to "accept" a quote for work we already
+  // did. Fail-closed inside the check; complements the stage check above,
+  // which can't see invoice/appointment conversions that never updated
+  // pipeline_stage.
+  const conv = await customerConvertedSince(est);
+  if (conv.converted)
+    return { skip: true, reason: `customer-converted:${conv.reason}` };
   if (await hasRepliedRecently(est))
     return { skip: true, reason: "customer-replied-recently" };
   return { skip: false };
@@ -225,9 +236,13 @@ async function renderTemplate(templateKey, vars, context = {}) {
 // affects 1 row sends, the other gets 0 rows and skips. Prevents duplicate
 // SMS/email to the customer. The stamp doubles as the attribution record —
 // "accepted within 48h of the day-5 touch" needs the actual send time.
+// Re-checks archived_at at claim time: the candidate queries filter on it,
+// but a manual/sweep archive landing between the read and this UPDATE must
+// still block the send.
 async function claimStage(estId, column, now = new Date()) {
   const affected = await db("estimates")
     .where({ id: estId })
+    .whereNull("archived_at")
     .whereNull(column)
     .update({ [column]: now });
   return affected === 1;
@@ -513,6 +528,7 @@ async function checkQuestionsTouch(now = new Date()) {
   const nowMs = now.getTime();
   const q = db("estimates")
     .whereIn("status", ["sent", "viewed"])
+    .whereNull("archived_at")
     .whereNotNull("sent_at")
     .where("sent_at", "<", new Date(nowMs - QUESTIONS_WINDOW.minAgeHours * 3600000))
     .where("sent_at", ">", new Date(nowMs - QUESTIONS_WINDOW.maxAgeHours * 3600000))
@@ -555,6 +571,7 @@ async function checkCheckInTouch(now = new Date()) {
   const nowMs = now.getTime();
   const q = db("estimates")
     .whereIn("status", ["sent", "viewed"])
+    .whereNull("archived_at")
     .whereNotNull("sent_at")
     .where("sent_at", "<", new Date(nowMs - CHECKIN_WINDOW.minAgeDays * 86400000))
     .where("sent_at", ">", new Date(nowMs - CHECKIN_WINDOW.maxAgeDays * 86400000))
@@ -625,6 +642,7 @@ async function checkExpiringTouch(now = new Date()) {
   const nowMs = now.getTime();
   const q = db("estimates")
     .whereIn("status", ["sent", "viewed"])
+    .whereNull("archived_at")
     .whereNotNull("expires_at")
     .where("expires_at", ">", now)
     .where(
@@ -671,6 +689,7 @@ async function checkDepositAbandoned(now = new Date()) {
   const q = db("estimates")
     .join(latestPendingByEstimate, "pd.estimate_id", "estimates.id")
     .whereIn("estimates.status", ["sent", "viewed"])
+    .whereNull("estimates.archived_at")
     .whereNotNull("estimates.customer_phone")
     .where("pd.latest_pending_at", "<", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.minAgeHours * 3600000))
     .where("pd.latest_pending_at", ">", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.maxAgeHours * 3600000))
@@ -824,4 +843,5 @@ module.exports._private = {
   safetyGate,
   isLiveCustomer,
   formatExpiryDate,
+  claimStage,
 };

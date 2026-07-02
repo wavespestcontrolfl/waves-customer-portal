@@ -1,7 +1,7 @@
 /**
  * <BillingRecoveryPage> — /admin/billing-recovery (Tier 1 V2 styling).
  *
- * Two jobs:
+ * Three jobs:
  *   1. Surface completed visits that were never invoiced (the silent leak:
  *      priced, non-autopay, per-visit-billed customers whose completion missed
  *      the invoice gate). One-click "Bill" cuts a DRAFT invoice; "Mark free"
@@ -10,10 +10,14 @@
  *      and starts labeling the data.
  *   2. Show AR aging (30/60/90+) for invoiced-but-unpaid invoices so receivables
  *      get chased.
+ *   3. List the recurring accounts behind the dashboard's "MRR at risk" action
+ *      item (service paused / autopay paused / overdue / prepay invoice unpaid)
+ *      — the item deep-links here, so the number has to be actionable here.
  *
- * Autopay customers are intentionally absent — they hold no per-visit price and
- * are billed separately by billing-cron off monthly_rate. The server enforces
- * that guard too; this page never auto-bills.
+ * Autopay customers are intentionally absent from the LEAK queue — they hold no
+ * per-visit price and are billed separately by billing-cron off monthly_rate.
+ * The server enforces that guard too; this page never auto-bills. (Paused
+ * autopay accounts DO appear in the at-risk MRR list — that's the point.)
  */
 import React, { useCallback, useEffect, useState } from "react";
 import { Banknote } from "lucide-react";
@@ -39,6 +43,14 @@ export function formatMoney(n) {
   const v = Number(n) || 0;
   return v.toLocaleString("en-US", { style: "currency", currency: "USD" });
 }
+
+// Cause codes from /billing-recovery/at-risk-mrr (services/mrr-breakdown.js).
+export const AT_RISK_CAUSE_LABELS = {
+  service_paused: "Service paused",
+  autopay_paused: "Autopay paused",
+  overdue: "Overdue invoice",
+  prepay_payment_pending: "Prepay invoice unpaid",
+};
 
 export function daysSince(dateStr) {
   if (!dateStr) return null;
@@ -131,6 +143,7 @@ export default function BillingRecoveryPage() {
   const [days, setDays] = useState(90);
   const [data, setData] = useState(null);
   const [aging, setAging] = useState(null);
+  const [atRiskMrr, setAtRiskMrr] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [busyId, setBusyId] = useState(null);
@@ -142,12 +155,16 @@ export default function BillingRecoveryPage() {
     setLoading(true);
     setError(null);
     try {
-      const [leaks, ar] = await Promise.all([
+      const [leaks, ar, riskMrr] = await Promise.all([
         adminFetch(`/admin/billing-recovery/leaks?days=${days}`),
         adminFetch(`/admin/billing-recovery/aging`),
+        // Fail-soft: the at-risk list renders its own unavailable state
+        // rather than blanking the leak queue + AR aging with it.
+        adminFetch(`/admin/billing-recovery/at-risk-mrr`).catch(() => null),
       ]);
       setData(leaks);
       setAging(ar);
+      setAtRiskMrr(riskMrr);
     } catch (e) {
       setError(e.message || "Failed to load");
     } finally {
@@ -291,6 +308,48 @@ export default function BillingRecoveryPage() {
                 </Table>
               ) : (
                 <div className="text-13 text-zinc-500 py-4 text-center">No outstanding balances.</div>
+              )}
+            </CardBody>
+          </Card>
+
+          <Card className="mt-6">
+            <CardHeader>
+              <CardTitle>At-risk MRR</CardTitle>
+              <p className="text-12 text-zinc-500 mt-1">
+                Recurring accounts whose next monthly charge isn't expected to land. Same definition as the dashboard's MRR tile and its "MRR at risk" action item{atRiskMrr ? ` — ${formatMoney(atRiskMrr.atRisk)} across ${atRiskMrr.count} account${atRiskMrr.count === 1 ? "" : "s"}` : ""}.
+              </p>
+            </CardHeader>
+            <CardBody>
+              {atRiskMrr?.accounts?.length ? (
+                <Table>
+                  <THead><TR><TH>Customer</TH><TH>Why at risk</TH><TH align="right">Monthly</TH></TR></THead>
+                  <TBody>
+                    {atRiskMrr.accounts.map((a) => (
+                      <TR key={a.id}>
+                        <TD>
+                          <a
+                            href={`/admin/customers?customerId=${a.id}`}
+                            className="text-zinc-900 underline-offset-2 hover:underline u-focus-ring"
+                          >
+                            {`${a.firstName || ""} ${a.lastName || ""}`.trim() || "Unnamed account"}
+                          </a>
+                        </TD>
+                        <TD>
+                          <span className="inline-flex flex-wrap gap-1">
+                            {a.causes.map((c) => (
+                              <Badge key={c} tone="neutral">{AT_RISK_CAUSE_LABELS[c] || c}</Badge>
+                            ))}
+                          </span>
+                        </TD>
+                        <TD nums>{formatMoney(a.monthlyRate)}</TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              ) : (
+                <div className="text-13 text-zinc-500 py-4 text-center">
+                  {atRiskMrr ? "Every recurring account is clear to bill. 🎉" : "At-risk accounts couldn't be loaded — refresh to retry."}
+                </div>
               )}
             </CardBody>
           </Card>

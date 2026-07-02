@@ -65,6 +65,13 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
+// For suppressProviderErrorLog callers: strip anything address-shaped from a
+// provider error before it is persisted or audited (SendGrid 4xx bodies can
+// echo the recipient address).
+function redactEmailAddresses(text) {
+  return String(text || '').replace(/[^\s@:<>()"']+@[^\s@:<>()"']+\.[^\s@:<>()"']+/g, '[redacted-email]');
+}
+
 function textFor(payload, key) {
   const value = payload?.[key];
   if (value == null) return '';
@@ -664,6 +671,12 @@ async function sendTemplate({
   categories = [],
   attachments = [],
   suppressionGroupKey,
+  // PII-sensitive bulk callers (e.g. the weekly irrigation sweep) set this so
+  // sendOne does NOT log the raw SendGrid response body — provider rejections
+  // can echo the recipient address, and email addresses in logs are a P1. The
+  // caller is responsible for logging a sanitized reason itself; the thrown
+  // error (status/body) still propagates for classification.
+  suppressProviderErrorLog = false,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   let template;
@@ -925,6 +938,7 @@ async function sendTemplate({
       // SendGrid returns no X-Message-Id). The attempt token lets the webhook
       // reject a stale prior-attempt event. See email-bounce-recovery.js.
       customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken },
+      suppressErrorLog: suppressProviderErrorLog,
     });
     // Record provider id + send time, and advance status to 'sent' ONLY while
     // still 'queued' — a fast delivery/bounce webhook (resolvable via
@@ -946,16 +960,27 @@ async function sendTemplate({
       // Superseded by a newer attempt (token changed). This attempt's send still
       // reached SendGrid, but the row belongs to the live attempt — leave it.
       const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
-      return { sent: true, deduped: true, superseded: true, message: current || message, rendered };
+      return { sent: true, deduped: true, superseded: true, providerAttempted: true, message: current || message, rendered };
     }
-    return { sent: true, message: updated, rendered };
+    // providerAttempted distinguishes a real SendGrid call THIS invocation from
+    // the pre-send idempotency/suppression short-circuits (which return without
+    // it) — callers that budget provider attempts key off this, not `sent`,
+    // because a pre-send dedupe of a previously-sent message also reports
+    // sent: true.
+    return { sent: true, providerAttempted: true, message: updated, rendered };
   } catch (err) {
+    // PII-sensitive callers suppress the transport log — the persisted error
+    // and the audit reason must honor the same flag, or the raw provider body
+    // (which can echo the recipient address) leaks anyway.
+    const persistedErrorMessage = suppressProviderErrorLog
+      ? redactEmailAddresses(err.message)
+      : String(err.message || '');
     // SendGrid may have accepted the send and a webhook already terminalized the
     // row (lost-response race) — only mark failed while still queued AND only for
     // THIS attempt (a superseded attempt must not fail the live retry's row).
     await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
       status: 'failed',
-      error_message: err.message.slice(0, 1000),
+      error_message: persistedErrorMessage.slice(0, 1000),
       updated_at: new Date(),
     });
     const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
@@ -964,19 +989,19 @@ async function sendTemplate({
     // caller no longer owns it — don't audit/throw (which would make upstream jobs
     // report failure or schedule another retry while the live attempt is in flight).
     if (current && current.send_attempt_token && String(current.send_attempt_token) !== String(sendAttemptToken)) {
-      return { sent: true, deduped: true, superseded: true, message: current, rendered };
+      return { sent: true, deduped: true, superseded: true, providerAttempted: true, message: current, rendered };
     }
     // If a webhook already moved the row to a terminal status, the send actually
     // reached SendGrid — report success (deduped) so callers don't retry a send
     // that landed (and may already have triggered bounce recovery).
     if (current && currentStatus !== 'queued' && currentStatus !== 'failed') {
-      return { sent: true, deduped: true, message: current, rendered };
+      return { sent: true, deduped: true, providerAttempted: true, message: current, rendered };
     }
     await auditEmailTemplateIssue({
       templateKey: template.template_key,
       versionId: version.id,
       eventType: 'provider_send_error',
-      reason: err.message,
+      reason: persistedErrorMessage,
       recipientType,
       recipientId,
       triggerEventId,

@@ -140,6 +140,24 @@ function normalizeCallPhone(extractedPhone, callerPhone) {
   return normalizeE164Phone(extractedPhone) || normalizeE164Phone(callerPhone);
 }
 
+// Model-emitted quoted price: a finite positive number, or a string holding
+// EXACTLY ONE numeric amount ("$350", "1,350.50"). Strings with multiple
+// amounts ("50 to 60") are ranges, which the prompt requires to be null —
+// naive digit-stripping would inflate them into 5060. Range plausibility
+// bounds are enforced at booking time by the call-booking catalog's sanitizer.
+function normalizeQuotedPrice(value) {
+  if (value === null || value === undefined || value === '') return null;
+  let n;
+  if (typeof value === 'number') {
+    n = value;
+  } else {
+    const tokens = String(value).replace(/,/g, '').match(/\d+(?:\.\d+)?/g) || [];
+    if (tokens.length !== 1) return null;
+    n = Number(tokens[0]);
+  }
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
   const source = extracted && typeof extracted === 'object' && !Array.isArray(extracted)
     ? extracted
@@ -163,6 +181,10 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     call_summary: cleanNullableText(source.call_summary),
     lead_quality: cleanNullableText(source.lead_quality),
     matched_service: cleanNullableText(source.matched_service),
+    specific_service_name: cleanNullableText(source.specific_service_name),
+    quoted_price: normalizeQuotedPrice(source.quoted_price),
+    follow_up_visit_mentioned: source.follow_up_visit_mentioned === true,
+    follow_up_date_time: cleanNullableText(source.follow_up_date_time),
     is_lead: normalizeIsLead(source.is_lead),
     call_type: normalizeCallType(source.call_type),
   };

@@ -31,6 +31,7 @@ describe('estimate automation duplicate guard', () => {
       select: jest.fn(function (...args) { calls.push(['select', args]); return this; }),
       whereRaw: jest.fn(function (sql, params) { calls.push(['whereRaw', sql, params]); return this; }),
       whereIn: jest.fn(function (...args) { calls.push(['whereIn', args]); return this; }),
+      whereNull: jest.fn(function (...args) { calls.push(['whereNull', args]); return this; }),
       orderBy: jest.fn(function (...args) { calls.push(['orderBy', args]); return this; }),
       first: jest.fn(async function () { calls.push(['first']); return row; }),
     };
@@ -43,6 +44,9 @@ describe('estimate automation duplicate guard', () => {
     expect(calls[0]).toEqual(['table', 'estimates']);
     expect(query.whereRaw).toHaveBeenCalledWith(expect.stringContaining('regexp_replace'), ['9415550101']);
     expect(query.whereIn).toHaveBeenCalledWith('status', ['draft', 'scheduled', 'sent', 'viewed']);
+    // Archived rows keep their status but are closed courtships — they must
+    // not block a genuinely new automated estimate.
+    expect(query.whereNull).toHaveBeenCalledWith('archived_at');
   });
 
   test('builds the automation block payload without exposing phone details', () => {

@@ -35,6 +35,12 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+// The conversion guard (#2261) runs inside safetyGate; it has its own
+// suite (estimate-conversion-guard.test.js) — here it must not consume
+// the query queue.
+jest.mock('../services/estimate-conversion-guard', () => ({
+  customerConvertedSince: jest.fn(async () => ({ converted: false })),
+}));
 jest.mock('../services/estimate-service-lines', () => ({
   inferEstimateServiceInterest: jest.fn(() => ''),
 }));

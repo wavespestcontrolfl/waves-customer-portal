@@ -33,9 +33,16 @@ function makeBuilder(calls) {
     calls.push({ method, args });
     return b;
   });
-  for (const m of ['whereIn', 'whereNotIn', 'whereNotNull', 'whereNull', 'where']) {
+  for (const m of ['whereIn', 'whereNotIn', 'whereNotNull', 'whereNull', 'where', 'whereNotExists']) {
     b[m] = record(m);
   }
+  // knex's .modify(fn) invokes fn(builder) — the first-booking hold
+  // (#2261's excludePendingFirstBookings) runs through here.
+  b.modify = jest.fn((fn, ...args) => {
+    calls.push({ method: 'modify', args: [fn && fn.name] });
+    if (typeof fn === 'function') fn(b, ...args);
+    return b;
+  });
   b.update = jest.fn((payload) => {
     calls.push({ method: 'update', args: [payload] });
     return Promise.resolve(0);
