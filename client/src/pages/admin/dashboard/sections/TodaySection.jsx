@@ -4,11 +4,11 @@ import {
   EmptyState,
 } from "../../../../components/dashboard/charts";
 import DashboardSection from "../DashboardSection";
-import DashboardAlertsBanner from "../DashboardAlertsBanner";
+import ActionInbox from "../ActionInbox";
 import { KpiStrip, KpiTile } from "../KpiTile";
 
-// TODAY — what needs attention right now: operational alerts, today's schedule
-// completion, and the period's service-execution tiles.
+// TODAY — what needs attention right now: the ranked Action Inbox, today's
+// schedule completion, and the period's service-execution tiles.
 export default function TodaySection({
   alerts,
   today,
@@ -18,7 +18,7 @@ export default function TodaySection({
 }) {
   return (
     <DashboardSection id="today" title="Today" caption="What needs attention right now">
-      {alerts.length > 0 && <DashboardAlertsBanner alerts={alerts} />}
+      <ActionInbox alerts={alerts} />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <ChartCard
           title="Today's Completion"

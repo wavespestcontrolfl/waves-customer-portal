@@ -201,7 +201,9 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
   if (!adminUserId) return 0;
   let alerts;
   try {
-    const result = await computeDashboardAlerts();
+    // fresh: dismissals persist dismissed_at_count, so they must record the
+    // CURRENT count — the read-path memo could be up to 30s stale.
+    const result = await computeDashboardAlerts({ fresh: true });
     alerts = result.alerts || [];
   } catch {
     return 0;

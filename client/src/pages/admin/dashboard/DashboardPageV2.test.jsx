@@ -223,7 +223,7 @@ describe("DashboardPageV2 sections", () => {
       screen.getByText("Today's Completion"),
     );
     expect(document.getElementById("today")).toContainElement(
-      screen.getByText("Operational Alerts"),
+      screen.getByText("Action Inbox"),
     );
     // GROWTH
     expect(document.getElementById("growth")).toContainElement(
