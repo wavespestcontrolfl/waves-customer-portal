@@ -5,13 +5,15 @@
  *   A. BOOKED-BUT-UN-WON — leads whose linked customer has a real (non-
  *      cancelled/non-rescheduled) scheduled service but whose lead row was
  *      never converted (the AI-call booking path didn't convert until
- *      PR #2262). Open/unresponsive leads convert only when the lead
- *      ORIGINATES the customer (first contact on/before customer creation,
- *      mirroring convertLeadFromEvent's enforceOriginating), the customer
- *      has NO other won lead, and a qualifying visit postdates the lead —
- *      an established customer's add-on inquiry or routine visits can
- *      never win a lead. Human-closed rows (lost/disqualified) and
- *      add-on/secondary rows are reported instead of touched.
+ *      PR #2262). Open/unresponsive leads convert only when they pass the
+ *      SAME guards the live conversion path exports from lead-estimate-link
+ *      (isOriginatingLead's member_since-aware ET-calendar-day check +
+ *      customerHasWonLead, re-checked in-transaction), the lead is the
+ *      customer's ONLY open candidate (ambiguous multi-lead customers go
+ *      to a human, like the live path), and a qualifying visit postdates
+ *      the lead — an established customer's add-on inquiry or routine
+ *      visits can never win a lead. Human-closed rows (lost/disqualified)
+ *      are reported instead of touched.
  *      `converted_at` is BACKDATED to the earliest qualifying
  *      scheduled_services.created_at so ads offline-conversion windows
  *      (data-manager reads COALESCE(converted_at, …)) don't see 72 stale
@@ -113,11 +115,15 @@ async function hasDeletedAtColumn() {
 
 // ── Part A: booked-but-un-won → won ────────────────────────────────────────
 async function partABookedUnwon({ softDelete }) {
+  // The SAME guards the live conversion path applies (lead-estimate-link):
+  // isOriginatingLead = member_since-aware ET-calendar-day comparison,
+  // fail-closed; customerHasWonLead = the prior-won gate.
+  const { isOriginatingLead, customerHasWonLead } = require('../services/lead-estimate-link');
+
   let query = db('leads')
     .whereIn('leads.status', [...CONVERT_ELIGIBLE_STATUSES, ...CONVERT_HUMAN_STATUSES])
     .whereNotNull('leads.customer_id')
     .whereNull('leads.converted_at')
-    .join('customers as c', 'c.id', 'leads.customer_id')
     .join('scheduled_services as ss', 'ss.customer_id', 'leads.customer_id')
     .whereNotIn('ss.status', NON_EVIDENCE_VISIT_STATUSES)
     // Evidence must postdate the lead: an existing customer's OLD services
@@ -126,27 +132,15 @@ async function partABookedUnwon({ softDelete }) {
     // call-processing flow where the booking row can precede the lead row
     // inside one processing run.
     .whereRaw("ss.created_at >= COALESCE(leads.first_contact_at, leads.created_at) - interval '1 day'")
-    .groupBy('leads.id', 'leads.status', 'leads.customer_id', 'c.created_at')
+    .groupBy('leads.id', 'leads.status', 'leads.customer_id', 'leads.first_contact_at', 'leads.created_at')
     .select(
       'leads.id',
       'leads.status',
       'leads.customer_id',
-      'c.created_at as customer_created_at',
+      'leads.first_contact_at',
+      'leads.created_at',
       db.raw('MIN(ss.created_at) as first_booking_at'),
       db.raw('(ARRAY_AGG(ss.id ORDER BY ss.created_at ASC))[1] as evidence_service_id'),
-      // A customer who already has a won lead: this un-won row is a
-      // secondary/add-on inquiry, not the deal that created the customer.
-      db.raw(`EXISTS (
-        SELECT 1 FROM leads l2
-        WHERE l2.customer_id = leads.customer_id
-          AND l2.id <> leads.id
-          AND l2.status = 'won'
-      ) as customer_has_won_lead`),
-      // Originating check (mirrors convertLeadFromEvent's enforceOriginating):
-      // only a lead first contacted on/before the customer signed up (+1 day)
-      // is the deal that closed. An established customer's later add-on
-      // inquiry fails this and is routed to a human.
-      db.raw("COALESCE(leads.first_contact_at, leads.created_at) <= c.created_at + interval '1 day' as lead_originates_customer"),
     )
     .orderBy('first_booking_at', 'asc');
   if (softDelete) query = query.whereNull('leads.deleted_at');
@@ -154,27 +148,57 @@ async function partABookedUnwon({ softDelete }) {
   const all = await query;
   const humanClosed = all.filter((r) => CONVERT_HUMAN_STATUSES.includes(r.status));
   const eligibleStatus = all.filter((r) => CONVERT_ELIGIBLE_STATUSES.includes(r.status));
-  const notOriginating = eligibleStatus.filter((r) => !r.lead_originates_customer || r.customer_has_won_lead);
-  const rows = cap(eligibleStatus.filter((r) => r.lead_originates_customer && !r.customer_has_won_lead));
-  console.log(`\n── Part A: booked-but-un-won leads → won (${rows.length} actionable, ${humanClosed.length} human-closed + ${notOriginating.length} add-on/secondary for review)`);
-  for (const row of rows) {
+
+  // One candidate per customer, like the live path's ambiguity rule: two or
+  // more open leads on one customer can't BOTH be the deal that closed —
+  // the whole group goes to a human.
+  const byCustomer = new Map();
+  for (const row of eligibleStatus) {
+    if (!byCustomer.has(row.customer_id)) byCustomer.set(row.customer_id, []);
+    byCustomer.get(row.customer_id).push(row);
+  }
+  const ambiguous = [];
+  const singles = [];
+  for (const group of byCustomer.values()) {
+    if (group.length > 1) ambiguous.push(...group);
+    else singles.push(group[0]);
+  }
+
+  const notOriginating = [];
+  const rows = [];
+  for (const row of singles) {
+    // eslint-disable-next-line no-await-in-loop
+    const originating = await isOriginatingLead(db, row.customer_id, row);
+    // eslint-disable-next-line no-await-in-loop
+    const priorWon = await customerHasWonLead(db, row.customer_id);
+    if (originating && !priorWon) rows.push(row);
+    else notOriginating.push({ row, reason: priorWon ? 'customer already has a won lead' : 'lead postdates the customer (add-on inquiry)' });
+  }
+  const actionable = cap(rows);
+
+  console.log(`\n── Part A: booked-but-un-won leads → won (${actionable.length} actionable; ${humanClosed.length} human-closed + ${ambiguous.length} ambiguous multi-lead + ${notOriginating.length} add-on/secondary for review)`);
+  for (const row of actionable) {
     console.log(`  lead ${row.id} status=${row.status} booked=${new Date(row.first_booking_at).toISOString()}`);
   }
   for (const row of humanClosed) {
     console.log(`  NEEDS HUMAN (human-closed after booking?, not touched): lead ${row.id} status=${row.status}`);
   }
-  for (const row of notOriginating) {
-    const reason = row.customer_has_won_lead ? 'customer already has a won lead' : 'lead postdates the customer (add-on inquiry)';
+  for (const row of ambiguous) {
+    console.log(`  NEEDS HUMAN (multiple open leads on one customer, not touched): lead ${row.id} status=${row.status}`);
+  }
+  for (const { row, reason } of notOriginating) {
     console.log(`  NEEDS HUMAN (${reason}, not touched): lead ${row.id} status=${row.status}`);
   }
-  if (!COMMIT || !rows.length) return { candidates: rows.length, applied: 0 };
+  if (!COMMIT || !actionable.length) return { candidates: actionable.length, applied: 0 };
 
   let applied = 0;
-  for (const row of rows) {
+  for (const row of actionable) {
     // Per-lead transaction, stamp gated on the still-unconverted state so a
-    // concurrent live-path conversion can't be double-logged.
+    // concurrent live-path conversion can't be double-logged; the prior-won
+    // gate is re-checked on the transaction for the same reason.
     // eslint-disable-next-line no-await-in-loop
     await db.transaction(async (trx) => {
+      if (await customerHasWonLead(trx, row.customer_id)) return;
       let stampQuery = trx('leads')
         .where({ id: row.id })
         .whereIn('status', CONVERT_ELIGIBLE_STATUSES)
