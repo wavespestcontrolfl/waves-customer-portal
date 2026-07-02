@@ -2616,6 +2616,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:35AM ET — Lead staleness sweep
+  // Flips `new` leads to unresponsive after LEAD_STALENESS_DAYS (default 21)
+  // with no activity, no future follow-up, and no booked service, so funnel
+  // metrics stop counting dead leads as open pipeline. Env 0/empty disables.
+  // =========================================================================
+  cron.schedule('35 6 * * *', async () => {
+    logger.info('Running: Lead staleness sweep');
+    try {
+      const { runLeadStalenessSweep } = require('./lead-staleness');
+      await runLeadStalenessSweep();
+    } catch (err) {
+      logger.error(`Lead staleness sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:10AM ET — Document request lifecycle
   // Marks expired e-sign document requests and sends due reminders for
   // requests that were already delivered through email/SMS.
