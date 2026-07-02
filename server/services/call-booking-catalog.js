@@ -148,6 +148,22 @@ function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
   return { price: null, source: null };
 }
 
+// Real-calendar check: "2026-13-40" matches a date-shaped regex but must not
+// reach a scheduled_services insert — a rejected child INSERT inside the
+// booking transaction would roll back the confirmed primary appointment.
+function isValidCalendarDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return false;
+  const [y, mo, d] = String(value).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+}
+
+function isValidWindowTime(value) {
+  const m = String(value || '').match(/^(\d{2}):(\d{2})$/);
+  if (!m) return false;
+  return Number(m[1]) <= 23 && Number(m[2]) <= 59;
+}
+
 /**
  * Follow-up visit plan when the call specifically discussed one (a mention or
  * an agreed follow-up date). Date comes from the transcript when a valid
@@ -157,15 +173,15 @@ function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
 function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate, parentWindowStart } = {}) {
   const mentioned = extracted.follow_up_visit_mentioned === true || !!extracted.follow_up_date_time;
   if (!mentioned) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(parentDate || ''))) return null;
+  if (!isValidCalendarDate(parentDate)) return null;
 
   let scheduledDate = null;
   let windowStart = null;
   const raw = String(extracted.follow_up_date_time || '').trim();
   const m = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
-  if (m && m[1] > parentDate) {
+  if (m && isValidCalendarDate(m[1]) && m[1] > parentDate) {
     scheduledDate = m[1];
-    windowStart = m[2] || null;
+    windowStart = m[2] && isValidWindowTime(m[2]) ? m[2] : null;
   }
 
   if (!scheduledDate) {
@@ -178,7 +194,8 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
     scheduledDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(base);
   }
 
-  return { scheduledDate, windowStart: windowStart || parentWindowStart || '09:00' };
+  const finalWindowStart = windowStart || parentWindowStart || '09:00';
+  return { scheduledDate, windowStart: isValidWindowTime(finalWindowStart) ? finalWindowStart : '09:00' };
 }
 
 module.exports = {

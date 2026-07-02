@@ -3134,56 +3134,68 @@ const CallRecordingProcessor = {
                   // dispatch. No confirmation SMS and no reminder registration
                   // for this row — customer comms go out for the initial
                   // visit only (owner directive).
+                  // Runs in a SAVEPOINT (nested trx): a rejected follow-up
+                  // insert must never roll back the confirmed primary
+                  // appointment sharing this transaction.
                   const fuStart = callFollowUpPlan.windowStart;
                   const [fuH, fuM] = fuStart.split(':').map(Number);
                   const fuEndH = fuH >= 23 ? 23 : fuH + 1;
-                  const [fuRow] = await trx('scheduled_services')
-                    .insert({
-                      customer_id: customerId,
-                      technician_id: defaultTechnicianId,
-                      scheduled_date: callFollowUpPlan.scheduledDate,
-                      window_start: fuStart,
-                      window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
-                      window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
-                      service_type: serviceType,
-                      service_id: callBookingCatalogRow?.id || null,
-                      parent_service_id: created.id,
-                      status: 'pending',
-                      customer_confirmed: false,
-                      // Same no-charge shape as the completion-CTA follow-up
-                      // flow (admin-dispatch schedule-followup): $0 +
-                      // followup_included bypasses the one-time billing
-                      // pre-gate, create_invoice_on_complete=false blocks the
-                      // completion invoice, and followup_source_service_id's
-                      // partial unique index prevents a second follow-up from
-                      // being double-booked off this visit later. Without
-                      // these, completion billing can fall back to a monthly
-                      // rate and invoice an included second treatment.
-                      estimated_price: 0,
-                      followup_included: true,
-                      followup_source_service_id: created.id,
-                      create_invoice_on_complete: false,
-                      estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
-                      notes: [
-                        'Follow-up treatment (visit 2) booked from phone call — confirm exact time with the customer before dispatch.',
-                        priceInfo.price != null ? 'Included in the package price on the initial visit.' : null,
-                        `Call SID: ${callSid}.`,
-                      ].filter(Boolean).join(' '),
-                      booking_source: 'phone_call',
-                      source_call_log_id: call.id,
-                      source_action: 'ai_call_pipeline_followup',
-                      idempotency_key: computeAppointmentIdempotencyKey({
-                        callLogId: call.id,
-                        schedulingStatus: 'follow_up',
-                        confirmedStartAt: `${callFollowUpPlan.scheduledDate}T${fuStart}`,
-                        primaryServiceCategory: serviceType,
-                        addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
-                      }),
-                    })
-                    .onConflict('idempotency_key')
-                    .ignore()
-                    .returning('*');
-                  followUpCreated = fuRow || null;
+                  try {
+                    followUpCreated = await trx.transaction(async (sp) => {
+                      const [fuRow] = await sp('scheduled_services')
+                        .insert({
+                          customer_id: customerId,
+                          technician_id: defaultTechnicianId,
+                          scheduled_date: callFollowUpPlan.scheduledDate,
+                          window_start: fuStart,
+                          window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
+                          window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
+                          service_type: serviceType,
+                          service_id: callBookingCatalogRow?.id || null,
+                          parent_service_id: created.id,
+                          status: 'pending',
+                          customer_confirmed: false,
+                          // Same no-charge shape as the completion-CTA follow-up
+                          // flow (admin-dispatch schedule-followup): $0 +
+                          // followup_included bypasses the one-time billing
+                          // pre-gate, create_invoice_on_complete=false blocks the
+                          // completion invoice, and followup_source_service_id's
+                          // partial unique index prevents a second follow-up from
+                          // being double-booked off this visit later. Without
+                          // these, completion billing can fall back to a monthly
+                          // rate and invoice an included second treatment.
+                          estimated_price: 0,
+                          followup_included: true,
+                          followup_source_service_id: created.id,
+                          create_invoice_on_complete: false,
+                          estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
+                          notes: [
+                            'Follow-up treatment (visit 2) booked from phone call — confirm exact time with the customer before dispatch.',
+                            priceInfo.price != null ? 'Included in the package price on the initial visit.' : null,
+                            `Call SID: ${callSid}.`,
+                          ].filter(Boolean).join(' '),
+                          booking_source: 'phone_call',
+                          source_call_log_id: call.id,
+                          source_action: 'ai_call_pipeline_followup',
+                          idempotency_key: computeAppointmentIdempotencyKey({
+                            callLogId: call.id,
+                            schedulingStatus: 'follow_up',
+                            confirmedStartAt: `${callFollowUpPlan.scheduledDate}T${fuStart}`,
+                            primaryServiceCategory: serviceType,
+                            addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
+                          }),
+                        })
+                        .onConflict('idempotency_key')
+                        .ignore()
+                        .returning('*');
+                      return fuRow || null;
+                    });
+                  } catch (fuErr) {
+                    // Savepoint rolled back: visit 2 is lost but the confirmed
+                    // primary appointment commits. Dispatch confirms follow-ups
+                    // by hand, so surface it in the log for manual recovery.
+                    logger.warn(`[call-proc] Follow-up visit insert failed for ${callSid}; primary booking kept: ${fuErr.message}`);
+                  }
                 }
                 if (created) return created;
                 // Idempotency conflict: another writer already created a row with this key.

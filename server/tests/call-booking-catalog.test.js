@@ -228,6 +228,44 @@ describe('resolveCallFollowUpPlan', () => {
       parentDate: 'July 2',
     })).toBeNull();
   });
+
+  test('date-shaped but non-calendar parent date (2026-13-01) -> no follow-up', () => {
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true },
+      catalogRow: roach,
+      parentDate: '2026-13-01',
+    })).toBeNull();
+  });
+
+  test('date-shaped but non-calendar extracted date (2026-02-30) falls back to the interval', () => {
+    const plan = resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: '2026-02-30T13:00' },
+      catalogRow: roach,
+      parentDate: '2026-02-02',
+      parentWindowStart: '08:00',
+    });
+    expect(plan).toEqual({ scheduledDate: '2026-02-16', windowStart: '08:00' });
+  });
+
+  test('bogus extracted window time (13:75) is dropped in favor of the parent window', () => {
+    const plan = resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: '2026-07-20T13:75' },
+      catalogRow: roach,
+      parentDate: '2026-07-02',
+      parentWindowStart: '08:00',
+    });
+    expect(plan).toEqual({ scheduledDate: '2026-07-20', windowStart: '08:00' });
+  });
+
+  test('bogus parent window start falls back to 09:00', () => {
+    const plan = resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true },
+      catalogRow: roach,
+      parentDate: '2026-07-02',
+      parentWindowStart: '8am',
+    });
+    expect(plan).toEqual({ scheduledDate: '2026-07-16', windowStart: '09:00' });
+  });
 });
 
 describe('extraction plumbing for the new booking fields', () => {
