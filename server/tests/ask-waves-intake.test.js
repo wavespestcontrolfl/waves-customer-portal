@@ -25,7 +25,7 @@ const { processIntakeMessage, _internals } = require('../services/ask-waves-inta
 const {
   normalizeIntakeResult, sanitizeHistory, scrubPriceTalk,
   QUOTABLE_SERVICES, FALLBACK_RESULT, EMERGENCY_FALLBACK_RESULT,
-  looksLikeEmergency, PRICE_TALK_RE,
+  SUPPORT_FALLBACK_RESULT, looksLikeEmergency, PRICE_TALK_RE,
 } = _internals;
 
 afterEach(() => jest.clearAllMocks());
@@ -46,6 +46,12 @@ describe('scrubPriceTalk — the no-price invariant', () => {
     // per-cadence rates without a $ sign
     'Plans run 45/mo for your size home.',
     'That would be about 79 per month.',
+    // Spanish price phrasings (Codex round 2 P1)
+    'Cuesta 45 dólares al mes.',
+    'Serían cuarenta dólares por visita.',
+    'Unos cuarenta y cinco dólares.',
+    'Alrededor de 300 pesos.',
+    'Sale como 60 al mes.',
   ])('replaces a reply containing a price: %s', (reply) => {
     const out = scrubPriceTalk({ ...base, reply });
     expect(out.reply).not.toMatch(PRICE_TALK_RE);
@@ -58,6 +64,8 @@ describe('scrubPriceTalk — the no-price invariant', () => {
     'We treat 12 times a year and re-treat free between visits.',
     'Give it 24 hours after treatment before mopping.',
     'One of our techs will confirm measurements on the first visit.',
+    'Tratamos su casa 12 veces al año, con re-tratamientos gratis.',
+    'La visita dura unos 30 minutos.',
   ])('leaves price-free replies untouched: %s', (reply) => {
     expect(scrubPriceTalk({ ...base, reply }).reply).toBe(reply);
   });
@@ -162,6 +170,22 @@ describe('processIntakeMessage provider ladder', () => {
     const out = await processIntakeMessage({ message: 'My son got stung and his throat is swelling' });
     expect(out).toEqual(EMERGENCY_FALLBACK_RESULT);
     expect(out.reply).toContain('911');
+    expect(out.ready_for_quote).toBe(false);
+  });
+
+  test('both providers miss on a Spanish emergency → emergency-safe fallback', async () => {
+    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
+    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+    const out = await processIntakeMessage({ message: 'mi hijo fue picado por una avispa y no puede respirar' });
+    expect(out).toEqual(EMERGENCY_FALLBACK_RESULT);
+  });
+
+  test('both providers miss on an account/support message → portal fallback, no quote CTA', async () => {
+    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
+    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+    const out = await processIntakeMessage({ message: 'I need to reschedule my appointment for Tuesday' });
+    expect(out).toEqual(SUPPORT_FALLBACK_RESULT);
+    expect(out.intent).toBe('existing_customer');
     expect(out.ready_for_quote).toBe(false);
   });
 
@@ -280,6 +304,11 @@ describe('looksLikeEmergency', () => {
     'my daughter got bit and now has hives',
     'stung and feeling dizzy',
     'trouble breathing after mosquito bites',
+    // Spanish (Codex round 2 P1)
+    'mi hijo fue picado por una avispa y no puede respirar',
+    'reacción alérgica a picadura de abeja',
+    'le pica y tiene ronchas por picaduras',
+    'mordedura de araña y mucha hinchazón',
   ])('flags urgent/medical text: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(true);
   });
@@ -290,6 +319,8 @@ describe('looksLikeEmergency', () => {
     'wasps keep stinging our fence posts',
     'rats in the attic',
     'how much for pest control?',
+    'las hormigas pican en la cocina',
+    'picaduras de mosquito en el patio por la tarde',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });

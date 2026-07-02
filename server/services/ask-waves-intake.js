@@ -53,14 +53,19 @@ const HISTORY_TURN_MAX_LEN = 600;
 // Fires when a reply contains a price in ANY common phrasing: a dollar figure
 // ($45), digits + dollars/bucks (45 bucks), spelled-out amounts (forty-five
 // dollars, a hundred bucks), or a per-cadence rate (45/mo, 45 per visit). The
-// visitor was clearly talking price, so the replacement steers them to the
-// only surface allowed to show one. A false positive costs one redirect reply;
-// a false negative leaks a model-invented price — err toward matching.
+// prompt tells the model to answer Spanish visitors in Spanish, so the scrub
+// reads Spanish too (45 dólares, cuarenta dólares, 45 al mes). The visitor was
+// clearly talking price, so the replacement steers them to the only surface
+// allowed to show one. A false positive costs one redirect reply; a false
+// negative leaks a model-invented price — err toward matching.
 const NUM_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|few|couple)';
+const NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti\\w+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|mil|pocos)';
 const PRICE_TALK_RE = new RegExp(
   '\\$\\s*\\d' // $45, $ 100
   + `|\\b(?:\\d+|a|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NUM_WORD})*)\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks
-  + '|\\b\\d+(?:\\.\\d+)?\\s*(?:\\/|per\\s+)(?:mo\\b|month|visit|treatment|application|year|yr\\b)', // 45/mo, 45 per visit
+  + `|\\b(?:\\d+|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES})*)\\s+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, cuarenta y cinco dólares
+  + '|\\b\\d+(?:\\.\\d+)?\\s*(?:\\/|per\\s+)(?:mo\\b|month|visit|treatment|application|year|yr\\b)' // 45/mo, 45 per visit
+  + '|\\b\\d+(?:\\.\\d+)?\\s*(?:al|por)\\s+(?:mes|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b', // 45 al mes, 45 por visita
   'i',
 );
 const PRICE_REDIRECT_REPLY = `Exact pricing comes straight from your property details — square footage, lot size, the works — so I never have to guess. Tap "Get my price" and I'll pull your real number in about 20 seconds, or call us at ${COMPANY.phone}.`;
@@ -77,9 +82,11 @@ const FALLBACK_RESULT = Object.freeze({
 // visitor describing a medical reaction must never get the generic quote CTA.
 // Explicit medical/urgent phrases fire alone; sting/bite words fire only when
 // paired with a reaction word (plain "ants bite" stays a normal fallback).
-const EMERGENCY_RE = /\b(?:911|can'?t\s+breathe|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|allergic(?:\s+reaction)?|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|emergency\s+room|\be\.?r\.?\b|hospital|poison(?:ed|ing)?)\b/i;
-const BITE_STING_RE = /\b(?:stung|sting(?:s|ing)?|bit(?:e|es|ten)?)\b/i;
-const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|nause\w*|fever|reaction|breath\w*|baby|infant|toddler)\b/i;
+// English + Spanish — the surface explicitly supports Spanish visitors, so
+// every deterministic guard reads both languages.
+const EMERGENCY_RE = /\b(?:911|can'?t\s+breathe|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|hospital|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)?|envenen\w*|veneno|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
+const BITE_STING_RE = /\b(?:stung|sting(?:s|ing)?|bit(?:e|es|ten)?|picad(?:o|a|ura|uras)|pic[oó]|mordedura?s?|mordi[dó]\w*|mordi[oó])\b/i;
+const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|nause\w*|fever|reaction|breath\w*|baby|infant|toddler|hincha\w*|ronchas|urticaria|mare[oa]\w*|v[oó]mit\w*|n[aá]usea\w*|fiebre|sarpullido|reacci[oó]n|respir\w*|beb[eé])\b/i;
 
 function looksLikeEmergency(text) {
   const t = String(text || '');
@@ -87,8 +94,22 @@ function looksLikeEmergency(text) {
 }
 
 const EMERGENCY_FALLBACK_RESULT = Object.freeze({
-  reply: `If anyone is having a medical reaction — trouble breathing, swelling, or feeling faint — please call 911 or seek medical care right away. For an urgent pest problem at your home, call us now at ${COMPANY.phone} and a real person will help.`,
+  reply: `If anyone is having a medical reaction — trouble breathing, swelling, or feeling faint — please call 911 or seek medical care right away. For an urgent pest problem at your home, call us now at ${COMPANY.phone} and a real person will help. / Si alguien tiene una reacción médica, llame al 911 o busque atención médica de inmediato. Para una urgencia de plagas, llámenos al ${COMPANY.phone}.`,
   intent: 'emergency',
+  service_keys: [],
+  ready_for_quote: false,
+  source: 'fallback',
+});
+
+// Account/support-sounding messages must not get the quote CTA either when the
+// providers are down — reschedules, billing, portal access, etc. route to the
+// portal + phone (the model handles this nuance when it's up; this is the
+// deterministic floor). English + Spanish.
+const SUPPORT_RE = /\b(?:reschedul\w*|cancel\w*|autopay|refund\w*|billing|invoice|statement|password|log\s?in|portal|my\s+(?:account|bill|appointment|visit|service|technician|tech)|reagend\w*|cancelar|cancelaci[oó]n|factura|reembolso|contrase[ñn]a|mi\s+(?:cuenta|cita|servicio|factura|t[eé]cnico))\b/i;
+
+const SUPPORT_FALLBACK_RESULT = Object.freeze({
+  reply: `That sounds like an account question — the fastest help is the customer portal or a quick call to ${COMPANY.phone}, where a real person can pull up your account. / ¿Pregunta sobre su cuenta? Llámenos al ${COMPANY.phone} o use el portal de clientes.`,
+  intent: 'existing_customer',
   service_keys: [],
   ready_for_quote: false,
   source: 'fallback',
@@ -243,7 +264,9 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
 
   if (!result) {
     logger.warn('[ask-waves] both providers missed; serving deterministic fallback');
-    result = looksLikeEmergency(message) ? { ...EMERGENCY_FALLBACK_RESULT } : { ...FALLBACK_RESULT };
+    result = looksLikeEmergency(message) ? { ...EMERGENCY_FALLBACK_RESULT }
+      : SUPPORT_RE.test(String(message || '')) ? { ...SUPPORT_FALLBACK_RESULT }
+        : { ...FALLBACK_RESULT };
   }
 
   await logIntakeExchange({ sessionId, message, reply: result.reply, intent: result.intent });
@@ -263,6 +286,8 @@ module.exports = {
     PRICE_TALK_RE,
     FALLBACK_RESULT,
     EMERGENCY_FALLBACK_RESULT,
+    SUPPORT_FALLBACK_RESULT,
+    SUPPORT_RE,
     looksLikeEmergency,
     MESSAGE_MAX_LEN,
   },
