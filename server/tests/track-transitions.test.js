@@ -588,4 +588,45 @@ describe('future-scheduled-date stale-attempt guard', () => {
     expect(result.ok).toBe(true);
     expect(result.state).toBe('complete');
   });
+
+  test('cancel cascades to the pending call-created follow-up child', async () => {
+    const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, track_state: 'scheduled' };
+    const cascade = query(1);
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(1)) // primary cancel update
+      .mockReturnValueOnce(cascade); // follow-up child cascade
+
+    const result = await trackTransitions.cancel('job-1', { reason: 'customer moved' });
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('cancelled');
+    // Narrow filter: only the call pipeline's pending, never-confirmed child.
+    expect(cascade.where).toHaveBeenCalledWith({
+      parent_service_id: 'job-1',
+      source_action: 'ai_call_pipeline_followup',
+      status: 'pending',
+      customer_confirmed: false,
+    });
+    expect(cascade.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'cancelled',
+      track_state: 'cancelled',
+      cancellation_reason: 'parent_call_booking_cancelled',
+    }));
+  });
+
+  test('a failed follow-up cascade is swallowed — the primary cancel still succeeds', async () => {
+    const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, track_state: 'scheduled' };
+    const cascade = query(1);
+    cascade.update.mockRejectedValue(new Error('boom'));
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(query(1))
+      .mockReturnValueOnce(cascade);
+
+    const result = await trackTransitions.cancel('job-1', { reason: 'customer moved' });
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('cancelled');
+  });
 });

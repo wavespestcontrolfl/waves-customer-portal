@@ -27,6 +27,7 @@ const BOOKABLE_SERVICE_COLUMNS = [
   'name',
   'short_name',
   'billing_type',
+  'pricing_type',
   'base_price',
   'default_duration_minutes',
   'requires_follow_up',
@@ -54,13 +55,17 @@ const ROACH_RE = /\b(?:german\s+)?(?:cock)?roach(?:es)?\b/i;
 // historical-context mentions within the same clause, then test what's left —
 // one surviving affirmative mention is enough.
 const NEGATED_ROACH_RE = /\b(?:no|not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|never|without)\s+(?:\w+\s+){0,2}?(?:german\s+)?(?:cock)?roach(?:es)?\b/gi;
+// Historical context can sit on either side of the mention: "last time it was
+// roaches" AND "we had roaches last time" — strip both orders.
 const HISTORICAL_ROACH_RE = /\b(?:last\s+(?:time|visit|year)|previous(?:ly)?|in\s+the\s+past|used\s+to)\b[^.!?\n]{0,40}?\b(?:german\s+)?(?:cock)?roach(?:es)?\b/gi;
+const ROACH_HISTORICAL_RE = /\b(?:german\s+)?(?:cock)?roach(?:es)?\b[^.!?\n]{0,40}?\b(?:last\s+(?:time|visit|year)|previous(?:ly)?|in\s+the\s+past|ago)\b/gi;
 
 function hasAffirmativeRoachMention(text) {
   const cleaned = String(text || '')
     .replace(PALMETTO_BUG_RE, ' ')
     .replace(NEGATED_ROACH_RE, ' ')
-    .replace(HISTORICAL_ROACH_RE, ' ');
+    .replace(HISTORICAL_ROACH_RE, ' ')
+    .replace(ROACH_HISTORICAL_RE, ' ');
   return ROACH_RE.test(cleaned);
 }
 
@@ -151,17 +156,28 @@ function sanitizeQuotedCallPrice(value) {
 }
 
 /**
- * Price for a call booking. The price the agent quoted and the caller accepted
- * on the call wins; the catalog list price backstops it. Catalog fallback is
- * one_time services only — a recurring service's base_price is a per-visit
- * subscription rate whose billing runs through the recurring machinery, not a
- * price this booking should assert on its own.
+ * Price for a call booking. Billable prices are one_time-catalog-anchored
+ * only:
+ *   - A recurring service's rate (quoted or listed) is subscription billing
+ *     that runs through the recurring machinery — stamping it as
+ *     estimated_price would bill the visit outside that machinery.
+ *   - A quote with no catalog match has an unknown billing type; fail open
+ *     to the legacy no-price shape.
+ *   - The catalog list price backstops a missing quote only when the row is
+ *     pricing_type='fixed' — a variable-priced one_time service (termite
+ *     liquid, exclusion, …) needs sizing/quote-specific pricing, so its
+ *     base_price must never become the invoice amount on its own.
+ * A transcript quote on a one_time row wins over the list price: it IS the
+ * job-specific price the agent and caller agreed to.
  */
 function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
+  if (!catalogRow || catalogRow.billing_type !== 'one_time') {
+    return { price: null, source: null };
+  }
   const quoted = sanitizeQuotedCallPrice(quotedPrice);
   if (quoted !== null) return { price: quoted, source: 'transcript' };
-  const base = Number(catalogRow?.base_price);
-  if (catalogRow && catalogRow.billing_type === 'one_time' && Number.isFinite(base) && base > 0) {
+  const base = Number(catalogRow.base_price);
+  if (catalogRow.pricing_type === 'fixed' && Number.isFinite(base) && base > 0) {
     return { price: Math.round(base * 100) / 100, source: 'catalog' };
   }
   return { price: null, source: null };
@@ -203,20 +219,23 @@ function isValidWindowTime(value) {
  * (default 14 days). Returns { scheduledDate, windowStart } or null.
  */
 function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate, parentWindowStart } = {}) {
+  if (!isValidCalendarDate(parentDate)) return null;
+
   // A stated date only counts as a mention signal when it parses as a real
-  // calendar date: the V1 normalizer merely trims follow_up_date_time, so the
-  // model can emit "two weeks" or "none" alongside follow_up_visit_mentioned
-  // =false — truthy garbage must not book a visit nobody discussed.
+  // calendar date AND falls after the initial visit: the V1 normalizer merely
+  // trims follow_up_date_time, so the model can emit "two weeks"/"none"
+  // garbage, or copy confirmed_start_at into the field — the primary visit's
+  // own date is not evidence of a second visit, and without this guard it
+  // would book a default-interval follow-up nobody discussed.
   const raw = String(extracted.follow_up_date_time || '').trim();
   const m = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
-  const statedDateValid = !!(m && isValidCalendarDate(m[1]));
-  const mentioned = extracted.follow_up_visit_mentioned === true || statedDateValid;
+  const statedFutureDate = !!(m && isValidCalendarDate(m[1]) && m[1] > parentDate);
+  const mentioned = extracted.follow_up_visit_mentioned === true || statedFutureDate;
   if (!mentioned) return null;
-  if (!isValidCalendarDate(parentDate)) return null;
 
   let scheduledDate = null;
   let windowStart = null;
-  if (statedDateValid && m[1] > parentDate) {
+  if (statedFutureDate) {
     scheduledDate = m[1];
     windowStart = m[2] && isValidWindowTime(m[2]) ? m[2] : null;
   }

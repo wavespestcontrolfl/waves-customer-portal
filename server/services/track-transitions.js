@@ -656,6 +656,33 @@ async function cancel(serviceId, { reason, actorId } = {}) {
       logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
     }
   }
+  // A call-created follow-up (visit 2) is part of the same package as its
+  // parent: cancelling the primary must pull the pending, never-confirmed
+  // child off the schedule too, or dispatch would still see a follow-up for
+  // a cancelled booking. Narrow filter (source_action) keeps every other
+  // parent-linked flow untouched; best-effort — a cascade failure must not
+  // fail the primary cancel.
+  try {
+    const cascaded = await db('scheduled_services')
+      .where({
+        parent_service_id: serviceId,
+        source_action: 'ai_call_pipeline_followup',
+        status: 'pending',
+        customer_confirmed: false,
+      })
+      .update({
+        status: 'cancelled',
+        track_state: 'cancelled',
+        cancelled_at: now,
+        cancellation_reason: 'parent_call_booking_cancelled',
+        updated_at: now,
+      });
+    if (cascaded > 0) {
+      logger.info(`[track-transitions] cancelled ${cascaded} call-created follow-up visit(s) with parent ${serviceId}`);
+    }
+  } catch (err) {
+    logger.error(`[track-transitions] call follow-up cancel cascade failed for ${serviceId}: ${err.message}`);
+  }
   emitCustomerTrackRefresh(svc, 'cancelled', now);
   return {
     ok: true,

@@ -17,6 +17,7 @@ const CATALOG = [
     name: 'Cockroach Control Service',
     short_name: 'Cockroach Control',
     billing_type: 'one_time',
+    pricing_type: 'fixed',
     base_price: '350.00',
     default_duration_minutes: 60,
     requires_follow_up: true,
@@ -28,6 +29,7 @@ const CATALOG = [
     name: 'Bed Bug Treatment',
     short_name: 'Bed Bug',
     billing_type: 'one_time',
+    pricing_type: 'fixed',
     base_price: '850.00',
     default_duration_minutes: 120,
     requires_follow_up: true,
@@ -39,8 +41,21 @@ const CATALOG = [
     name: 'General Pest Control (Quarterly)',
     short_name: 'Pest Quarterly',
     billing_type: 'recurring',
+    pricing_type: 'variable',
     base_price: '65.00',
     default_duration_minutes: 45,
+    requires_follow_up: false,
+    follow_up_interval_days: null,
+  },
+  {
+    id: 'svc-exclusion',
+    service_key: 'rodent_exclusion',
+    name: 'Rodent Exclusion',
+    short_name: 'Exclusion',
+    billing_type: 'one_time',
+    pricing_type: 'variable',
+    base_price: '1200.00',
+    default_duration_minutes: 180,
     requires_follow_up: false,
     follow_up_interval_days: null,
   },
@@ -161,6 +176,24 @@ describe('resolveCallBookingCatalogService', () => {
     expect(row).toBeNull();
   });
 
+  test('reverse-order historical mention ("we had roaches last time") does NOT map either', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'lawn treatment' },
+      transcription: 'We had roaches last time, but this appointment is for the lawn',
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
+  test('"roaches a couple years ago" does NOT map to the cockroach program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control' },
+      transcription: 'You treated our roaches a couple years ago, now we need help with ants',
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
   test('an affirmative roach mention alongside a negated one still maps to the program', () => {
     const row = resolveCallBookingCatalogService({
       extracted: { requested_service: 'pest control' },
@@ -204,6 +237,28 @@ describe('resolveCallBookingPrice', () => {
   test('recurring services never take the catalog fallback', () => {
     expect(resolveCallBookingPrice({ quotedPrice: null, catalogRow: CATALOG[2] }))
       .toEqual({ price: null, source: null });
+  });
+
+  test('a quoted rate on a recurring service is NOT billable — subscription billing owns it', () => {
+    expect(resolveCallBookingPrice({ quotedPrice: 65, catalogRow: CATALOG[2] }))
+      .toEqual({ price: null, source: null });
+  });
+
+  test('a quote with no catalog match is NOT billable — billing type unknown', () => {
+    expect(resolveCallBookingPrice({ quotedPrice: 350, catalogRow: null }))
+      .toEqual({ price: null, source: null });
+  });
+
+  test('a variable-priced one_time service never takes its base_price on its own', () => {
+    const exclusion = CATALOG.find((s) => s.service_key === 'rodent_exclusion');
+    expect(resolveCallBookingPrice({ quotedPrice: null, catalogRow: exclusion }))
+      .toEqual({ price: null, source: null });
+  });
+
+  test('a transcript quote on a variable-priced one_time service IS billable — it is the agreed job price', () => {
+    const exclusion = CATALOG.find((s) => s.service_key === 'rodent_exclusion');
+    expect(resolveCallBookingPrice({ quotedPrice: 1450, catalogRow: exclusion }))
+      .toEqual({ price: 1450, source: 'transcript' });
   });
 
   test('no quote and no catalog row -> null', () => {
@@ -304,6 +359,23 @@ describe('resolveCallFollowUpPlan', () => {
       parentWindowStart: '08:00',
     });
     expect(plan.scheduledDate).toBe('2026-07-16');
+  });
+
+  test('date-only signal equal to the parent date (copied confirmed_start_at) does NOT imply a follow-up', () => {
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_date_time: '2026-07-02T08:00' },
+      catalogRow: roach,
+      parentDate: '2026-07-02',
+      parentWindowStart: '08:00',
+    })).toBeNull();
+  });
+
+  test('date-only signal before the parent date does NOT imply a follow-up', () => {
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: false, follow_up_date_time: '2026-06-20' },
+      catalogRow: roach,
+      parentDate: '2026-07-02',
+    })).toBeNull();
   });
 
   test('no mention -> no follow-up', () => {
