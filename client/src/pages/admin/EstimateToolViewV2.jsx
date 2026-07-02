@@ -713,6 +713,14 @@ function firstPositiveNumber(...values) {
   return undefined;
 }
 
+// The satellite analyzer emits SPARSE for low vegetation density; the form
+// dropdowns and pricing engine only know LIGHT/MODERATE/HEAVY.
+function normalizeDensityValue(value) {
+  const v = String(value || "").toUpperCase();
+  if (v === "SPARSE") return "LIGHT";
+  return ["LIGHT", "MODERATE", "HEAVY"].includes(v) ? v : undefined;
+}
+
 function lookupTermiteFootprintSqFt(data = {}) {
   const explicitFootprint = firstPositiveNumber(
     data.footprint,
@@ -2988,8 +2996,10 @@ export default function EstimateToolViewV2({
         upd.bedArea = String(Math.round(data.bed_area_sqft));
       if (data.palm_count) upd.palmCount = String(data.palm_count);
       if (data.tree_count) upd.treeCount = String(data.tree_count);
-      if (data.shrub_density) upd.shrubDensity = data.shrub_density;
-      if (data.tree_density) upd.treeDensity = data.tree_density;
+      const satShrubDensity = normalizeDensityValue(data.shrub_density);
+      if (satShrubDensity) upd.shrubDensity = satShrubDensity;
+      const satTreeDensity = normalizeDensityValue(data.tree_density);
+      if (satTreeDensity) upd.treeDensity = satTreeDensity;
       if (data.landscape_complexity)
         upd.landscapeComplexity = data.landscape_complexity;
       if (data.has_pool) upd.hasPool = "YES";
