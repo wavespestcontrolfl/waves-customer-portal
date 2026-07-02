@@ -79,7 +79,7 @@ function makeBuilder(table, cfg = {}, calls = []) {
       return b;
     });
   }
-  for (const m of ['whereExists', 'whereNotExists']) {
+  for (const m of ['whereExists', 'orWhereExists', 'whereNotExists']) {
     b[m] = jest.fn((fn) => {
       calls.push({ table, m });
       if (typeof fn === 'function') fn.call(makeBuilder(`${table}:sub`, {}, calls));
@@ -272,9 +272,12 @@ describe('archiveConvertedOpenEstimates', () => {
       'updated_at',
     ]);
 
-    // First-conversion semantics: both the has-signal EXISTS and the
-    // none-before NOT EXISTS run for invoices and completed services.
-    expect(calls.filter((c) => c.m === 'whereExists')).toHaveLength(2);
+    // First-conversion semantics across BOTH signal sources: one has-signal
+    // OR-pair, and a none-before NOT EXISTS per source applied to every row
+    // (a pre-estimate signal of EITHER kind disqualifies — judging sources
+    // independently would archive live upsell estimates).
+    expect(calls.filter((c) => c.m === 'whereExists')).toHaveLength(1);
+    expect(calls.filter((c) => c.m === 'orWhereExists')).toHaveLength(1);
     expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(2);
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('Archived 2'),

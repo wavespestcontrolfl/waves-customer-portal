@@ -87,55 +87,49 @@ async function customerConvertedSince(est) {
  */
 async function archiveConvertedOpenEstimates() {
   const now = new Date();
+  // "First-ever" is judged ACROSS both signal sources: at least one signal
+  // (paid invoice or completed service) exists, and NO signal of EITHER kind
+  // predates the estimate. Judging each source independently would let a
+  // customer with a pre-estimate completed service but no prior invoice
+  // match the invoice branch on a later payment and lose a live upsell
+  // estimate.
   const archivedRows = await db("estimates")
     .whereIn("status", ["sent", "viewed"])
     .whereNull("archived_at")
     .whereNotNull("customer_id")
     .where((q) =>
       q
-        .where((inv) =>
-          inv
-            .whereExists(function () {
-              this.select(db.raw("1"))
-                .from("invoices")
-                .whereRaw("invoices.customer_id = estimates.customer_id")
-                .where("invoices.status", "paid")
-                .whereNotNull("invoices.paid_at");
-            })
-            .whereNotExists(function () {
-              this.select(db.raw("1"))
-                .from("invoices")
-                .whereRaw("invoices.customer_id = estimates.customer_id")
-                .where("invoices.status", "paid")
-                .whereNotNull("invoices.paid_at")
-                .whereRaw("invoices.paid_at < estimates.created_at");
-            }),
-        )
-        .orWhere((svc) =>
-          svc
-            .whereExists(function () {
-              this.select(db.raw("1"))
-                .from("scheduled_services")
-                .whereRaw(
-                  "scheduled_services.customer_id = estimates.customer_id",
-                )
-                .where("scheduled_services.status", "completed")
-                .whereNotNull("scheduled_services.completed_at");
-            })
-            .whereNotExists(function () {
-              this.select(db.raw("1"))
-                .from("scheduled_services")
-                .whereRaw(
-                  "scheduled_services.customer_id = estimates.customer_id",
-                )
-                .where("scheduled_services.status", "completed")
-                .whereNotNull("scheduled_services.completed_at")
-                .whereRaw(
-                  "scheduled_services.completed_at < estimates.created_at",
-                );
-            }),
-        ),
+        .whereExists(function () {
+          this.select(db.raw("1"))
+            .from("invoices")
+            .whereRaw("invoices.customer_id = estimates.customer_id")
+            .where("invoices.status", "paid")
+            .whereNotNull("invoices.paid_at");
+        })
+        .orWhereExists(function () {
+          this.select(db.raw("1"))
+            .from("scheduled_services")
+            .whereRaw("scheduled_services.customer_id = estimates.customer_id")
+            .where("scheduled_services.status", "completed")
+            .whereNotNull("scheduled_services.completed_at");
+        }),
     )
+    .whereNotExists(function () {
+      this.select(db.raw("1"))
+        .from("invoices")
+        .whereRaw("invoices.customer_id = estimates.customer_id")
+        .where("invoices.status", "paid")
+        .whereNotNull("invoices.paid_at")
+        .whereRaw("invoices.paid_at < estimates.created_at");
+    })
+    .whereNotExists(function () {
+      this.select(db.raw("1"))
+        .from("scheduled_services")
+        .whereRaw("scheduled_services.customer_id = estimates.customer_id")
+        .where("scheduled_services.status", "completed")
+        .whereNotNull("scheduled_services.completed_at")
+        .whereRaw("scheduled_services.completed_at < estimates.created_at");
+    })
     .update({ archived_at: now, updated_at: now })
     .returning(["id", "customer_name", "status"]);
 
