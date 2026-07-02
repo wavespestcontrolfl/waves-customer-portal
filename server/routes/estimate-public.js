@@ -2090,11 +2090,28 @@ function hasOnlyTermiteBaitServiceMix(recurring = [], oneTimeItems = []) {
     && oneTimeRows.every(isTermiteBaitOneTimeItem);
 }
 
+// Termidor FOAM spot treatments (engine `termite_foam`, "Termidor Foam Spot
+// Treatment") are a localized injection, never the liquid trench/barrier. A
+// trenching row never mentions foam, so a plain substring match is safe.
+function isTermiteFoamOneTimeItem(item = {}) {
+  if (String(item?.service || '').toLowerCase() === 'termite_foam') return true;
+  const raw = [item.service, item.name, item.label]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('foam');
+}
+
 function isTermiteTrenchingOneTimeItem(item = {}) {
   // Bora-Care is a borate wood treatment, never a liquid trench/barrier. Exclude
   // it up front so a label like "Termite Bora-Care Treatment" can't match the raw
   // "termite … treatment" heuristic below and steal the trenching copy/branch.
   if (isBoraCareOneTimeItem(item)) return false;
+  // Same for Termidor foam: "termite foam … Termidor … Treatment" matches BOTH
+  // the category mapper and the raw heuristic below, and a misclassified foam
+  // row would review-gate a foam-only quote off self-booking entirely.
+  if (isTermiteFoamOneTimeItem(item)) return false;
   const category = serviceCategoryForOneTimeItem(item);
   if (category === 'termite_trenching') return true;
   const raw = [item.service, item.name, item.label]
@@ -2103,6 +2120,17 @@ function isTermiteTrenchingOneTimeItem(item = {}) {
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
   return raw.includes('termite') && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(raw);
+}
+
+// A row that may accompany a genuine trenching line without breaking the
+// trenching-only classification: the trenching rows themselves, a Termidor foam
+// spot add-on (the engine bundles foam onto the liquid treatment — the job is
+// still a trenching job, so the review gate must hold), and non-billable rows
+// (inspections, discounts, setup). Any other positive charge blocks it.
+function isTrenchingReviewMixRow(item = {}) {
+  return isTermiteTrenchingOneTimeItem(item)
+    || isTermiteFoamOneTimeItem(item)
+    || isNonBillableOneTimeRow(item);
 }
 
 function isInspectionReviewOneTimeItem(item = {}) {
@@ -2121,11 +2149,13 @@ function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
   // discount/credit/zero row) so a discounted trenching-only quote — e.g.
   // trenching + a negative one_time_adjustment — still classifies as trenching-only
   // and keeps the review gate on both the render path and the accept 409. Mirrors
-  // hasOnlyBoraCareServiceMix. A *positive* non-trenching charge still blocks it.
+  // hasOnlyBoraCareServiceMix. A Termidor foam spot add-on rides along (the job is
+  // still a trenching job); any OTHER positive charge still blocks it. Requires at
+  // least one genuine trenching row — foam-only never qualifies.
   return recurringRows.length === 0
     && oneTimeRows.length > 0
     && oneTimeRows.some(isTermiteTrenchingOneTimeItem)
-    && oneTimeRows.every((item) => isTermiteTrenchingOneTimeItem(item) || isNonBillableOneTimeRow(item));
+    && oneTimeRows.every(isTrenchingReviewMixRow);
 }
 
 // Shared termite-trenching review-before-booking predicate. A priced trenching-only
@@ -2146,7 +2176,7 @@ function estimateTrenchingReviewRequired(estData) {
   // re-check against the normalized rows too (empty normalization keeps the raw
   // verdict; discount rows still net out and stay ignorable).
   const normalizedRows = normalizeOneTimeBreakdown(estData).items;
-  return normalizedRows.every((item) => isTermiteTrenchingOneTimeItem(item) || isNonBillableOneTimeRow(item));
+  return normalizedRows.every(isTrenchingReviewMixRow);
 }
 
 // True for one-time rows that carry no billable service of their own, so they

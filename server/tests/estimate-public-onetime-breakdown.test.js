@@ -2632,6 +2632,49 @@ describe('public estimate one-time breakdown', () => {
     expect(estimateTrenchingReviewRequired({})).toBe(false);
   });
 
+  test('termite foam is never trenching: foam-only quotes stay self-bookable, foam add-ons keep the gate', () => {
+    // The engine's one-time foam row (service-pricing.js calculateFoamPrice) reads
+    // "termite_foam / Termidor Foam Spot Treatment" — it matches the trenching
+    // category mapper AND the raw termite+termidor/treatment heuristic, so without
+    // the foam exclusion a foam-only quote would be review-gated off self-booking.
+    const foamOnly = { result: { recurring: { services: [] }, oneTime: {
+      items: [{ service: 'termite_foam', name: 'Termidor Foam Spot Treatment', price: 180 }], specItems: [] } } };
+    // A foam spot add-on bundled onto the liquid treatment is still a trenching
+    // job — it must NOT un-gate the review requirement.
+    const trenchingWithFoamAddOn = { result: { recurring: { services: [] }, oneTime: {
+      items: [
+        { service: 'trenching', name: 'Termite Trenching', price: 2210 },
+        { service: 'termite_foam', name: 'Termidor Foam Spot Treatment', price: 180 },
+      ], specItems: [] } } };
+
+    expect(estimateTrenchingReviewRequired(foamOnly)).toBe(false);
+    expect(estimateTrenchingReviewRequired(trenchingWithFoamAddOn)).toBe(true);
+  });
+
+  test('server-rendered foam-only quote keeps the normal booking card (no trenching review gate)', () => {
+    const html = renderPage('termite-foam-only-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 180,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          items: [{ service: 'termite_foam', name: 'Termidor Foam Spot Treatment', price: 180 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).not.toContain('id="trenching-review-card"');
+    expect(html).toContain('id="booking-card"');
+  });
+
   test('a positive charge hidden in oneTime.total (normalized one_time_adjustment) blocks the trenching gate', () => {
     // oneTime.total is $500 above the listed rows — normalizeOneTimeBreakdown emits
     // that difference as a synthetic positive `one_time_adjustment` row. It is a
