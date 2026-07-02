@@ -901,32 +901,40 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
       .where(function openOnly() { this.whereNull('status').orWhereNotIn('status', CLOSED_LEAD_STATUSES); })
       .select('id', 'first_name', 'last_name', 'phone', 'extracted_data')
       .catch(() => []);
-    // Direct untracked sends also target per-record recipient emails that may
-    // not be on the customer/lead row: service outlines go to
+    // Per-record recipient emails are checked ALWAYS, not only when the
+    // customer/lead match missed: service outlines go to
     // estimates.customer_email and contract packets to
-    // customer_contracts.recipient_email. Resolve through their customer_id so
-    // the alert still names + links the right account.
-    let viaRecord = null;
-    if (!customer && !leads.length) {
-      const estimate = await db('estimates')
-        .whereRaw('LOWER(customer_email) = ?', [email])
-        .whereIn('status', ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed'])
-        .whereNull('archived_at')
-        .first('id', 'customer_id', 'customer_name')
+    // customer_contracts.recipient_email, and with a shared inbox (property
+    // manager) the record row is the only evidence of which account the send
+    // belonged to. No status filter on estimates — outlines can be sent after
+    // acceptance too, and any match identifies the account.
+    const estimate = await db('estimates')
+      .whereRaw('LOWER(customer_email) = ?', [email])
+      .whereNull('archived_at')
+      .orderBy('created_at', 'desc')
+      .first('id', 'customer_id', 'customer_name')
+      .catch(() => null);
+    const contract = estimate ? null : await db('customer_contracts')
+      .whereRaw('LOWER(recipient_email) = ?', [email])
+      .orderBy('created_at', 'desc')
+      .first('id', 'customer_id', 'recipient_name')
+      .catch(() => null);
+    const viaRecord = estimate || contract;
+    if (!customer && !leads.length && !viaRecord) return { skipped: 'no_contact_match' };
+
+    // The record's linked customer: primary identity when nothing matched
+    // directly, an "also tied to" mention when a DIFFERENT customer matched.
+    let recordCustomer = null;
+    if (viaRecord?.customer_id && String(viaRecord.customer_id) !== String(customer?.id || '')) {
+      recordCustomer = await db('customers')
+        .where({ id: viaRecord.customer_id })
+        .whereNull('deleted_at')
+        .first('id', 'first_name', 'last_name', 'phone')
         .catch(() => null);
-      const contract = estimate ? null : await db('customer_contracts')
-        .whereRaw('LOWER(recipient_email) = ?', [email])
-        .first('id', 'customer_id', 'recipient_name')
-        .catch(() => null);
-      viaRecord = estimate || contract;
-      if (!viaRecord) return { skipped: 'no_contact_match' };
-      if (viaRecord.customer_id) {
-        customer = await db('customers')
-          .where({ id: viaRecord.customer_id })
-          .whereNull('deleted_at')
-          .first('id', 'first_name', 'last_name', 'phone')
-          .catch(() => null);
-      }
+    }
+    if (!customer && recordCustomer) {
+      customer = recordCustomer;
+      recordCustomer = null;
     }
 
     for (const lead of leads) {
@@ -959,7 +967,13 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
       ? (`${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'customer')
       : leads.length
         ? (`${leads[0].first_name || ''} ${leads[0].last_name || ''}`.trim() || 'lead')
-        : ((viaRecord.customer_name || viaRecord.recipient_name || '').trim() || 'customer');
+        : ((viaRecord?.customer_name || viaRecord?.recipient_name || '').trim() || 'customer');
+    const alsoName = recordCustomer
+      ? (`${recordCustomer.first_name || ''} ${recordCustomer.last_name || ''}`.trim() || 'another customer')
+      : null;
+    const alsoNote = alsoName
+      ? ` The address is also the recipient on ${estimate ? 'an estimate' : 'a contract'} for ${alsoName} (/admin/customers/${recordCustomer.id}) — the bounced send may belong to that account.`
+      : '';
     // Lead-only matches are precisely the callback case — fall back to the
     // lead's phone when there is no customer row.
     const callbackPhone = customer?.phone || leads[0]?.phone || null;
@@ -971,11 +985,13 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
       windowHours: 168,
       category: 'alert',
       title: 'Email bounced — needs a correct address',
-      body: `${email} for ${who} hard-bounced (${reason}) and is now suppressed — estimates and receipts will not deliver until it is corrected.${phoneHint}`,
+      body: `${email} for ${who} hard-bounced (${reason}) and is now suppressed — estimates and receipts will not deliver until it is corrected.${phoneHint}${alsoNote}`,
       link: linkCustomerId ? `/admin/customers/${linkCustomerId}` : '/admin/leads',
       metadata: {
         customer_id: linkCustomerId,
         lead_id: leads[0]?.id || null,
+        record_customer_id: recordCustomer?.id || null,
+        record_type: estimate ? 'estimate' : (contract ? 'contract' : null),
         source: 'untracked_bounce',
       },
     });

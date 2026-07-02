@@ -109,7 +109,7 @@ describe('alertBouncedContactAddress', () => {
     db.mockImplementation((table) => {
       const cfg = map[table] || {};
       const chain = {};
-      for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'whereNull', 'orWhereNotIn']) {
+      for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'whereNull', 'orWhereNotIn', 'orderBy']) {
         chain[m] = jest.fn(() => chain);
       }
       chain.first = jest.fn(() => Promise.resolve(typeof cfg.first === 'function' ? cfg.first() : (cfg.first ?? null)));
@@ -216,6 +216,28 @@ describe('alertBouncedContactAddress', () => {
     expect(body).toContain('Pat Roe');
     expect(body).toContain('+19415550000');
     expect(opts.link).toBe('/admin/customers/cust-9');
+  });
+
+  test('a shared inbox on both a customer and an estimate surfaces BOTH accounts', async () => {
+    // The direct customer match stays primary, but the estimate row is the
+    // send-specific evidence — its (different) owner must be mentioned.
+    let customerCalls = 0;
+    mockTables({
+      customers: { first: () => (customerCalls++ === 0
+        ? { id: 'cust-a', first_name: 'Prop', last_name: 'Manager', phone: '+19415551111' }
+        : { id: 'cust-b', first_name: 'Owner', last_name: 'Two', phone: '+19415552222' }) },
+      leads: { select: [] },
+      estimates: { first: { id: 'est-b', customer_id: 'cust-b', customer_name: 'Owner Two' } },
+      notifications: { first: null },
+    });
+
+    const out = await alertBouncedContactAddress('manager@example.com', {});
+
+    expect(out).toMatchObject({ alerted: true, customerId: 'cust-a' });
+    const [, , body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).toContain('Prop Manager');
+    expect(body).toContain('Owner Two');
+    expect(opts.metadata.record_customer_id).toBe('cust-b');
   });
 
   test('empty email is a safe no-op', async () => {

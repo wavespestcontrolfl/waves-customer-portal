@@ -2135,9 +2135,21 @@ const CallRecordingProcessor = {
           // high-confidence domain typo before the customer/lead writes and the
           // first-touch emails (newsletter confirmation, lead response) read
           // extracted.email — catching at intake what bounce-recovery would
-          // otherwise have to repair after a bounce. No address value in the log.
-          extracted.email = normalizedEmail;
-          logger.info(`[call-proc-bridge] Adopted high-confidence email domain correction for ${maskSid(callSid)}`);
+          // otherwise have to repair after a bounce. Ownership gate mirrors
+          // bounce-recovery's rule: a corrected address already on file for
+          // ANY contact is never auto-adopted onto this caller (a same-person
+          // caller already has it on their own record; a different person
+          // would receive the new lead's first-touch email). Fails closed.
+          // No address value in the log.
+          const ownedElsewhere = await require('./email-bounce-recovery')
+            .correctedAddressOwnedByOther(normalizedEmail, null)
+            .catch(() => true);
+          if (!ownedElsewhere) {
+            extracted.email = normalizedEmail;
+            logger.info(`[call-proc-bridge] Adopted high-confidence email domain correction for ${maskSid(callSid)}`);
+          } else {
+            logger.info(`[call-proc-bridge] Skipped email domain correction — corrected address on file for another contact (${maskSid(callSid)})`);
+          }
         }
         if (needsConfirmation.length) {
           bridgeNeedsConfirmation.push(...needsConfirmation);
@@ -2173,8 +2185,16 @@ const CallRecordingProcessor = {
       try {
         const { normalizedEmail: correctedEmail, needsConfirmation: emailReasons } = deriveEmailReview(extracted);
         if (correctedEmail) {
-          extracted.email = correctedEmail;
-          logger.info(`[call-proc] Adopted high-confidence email domain correction for ${maskSid(callSid)}`);
+          // Same ownership gate as the shadow-bridge site above (fails closed).
+          const ownedElsewhere = await require('./email-bounce-recovery')
+            .correctedAddressOwnedByOther(correctedEmail, null)
+            .catch(() => true);
+          if (!ownedElsewhere) {
+            extracted.email = correctedEmail;
+            logger.info(`[call-proc] Adopted high-confidence email domain correction for ${maskSid(callSid)}`);
+          } else {
+            logger.info(`[call-proc] Skipped email domain correction — corrected address on file for another contact (${maskSid(callSid)})`);
+          }
         }
         if (emailReasons.length) {
           bridgeNeedsConfirmation.push(...emailReasons);
