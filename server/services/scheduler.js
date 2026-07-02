@@ -2617,7 +2617,17 @@ function initScheduledJobs() {
       const { archiveConvertedOpenEstimates } = require('./estimate-conversion-guard');
       await archiveConvertedOpenEstimates();
     } catch (err) {
-      logger.error(`Converted-estimate archive sweep failed — skipping estimate expiration this run: ${err.message}`);
+      logger.error(`Converted-estimate archive sweep failed — skipping estimate expiration status flips this run: ${err.message}`);
+      // Skipping expiration must NOT skip the terminal-deposit refund sweep
+      // that runs inside it — that sweep is the only daily self-healing path
+      // for stranded deposit refunds, and an archive-sweep bug must never
+      // block customer money. Run it directly instead.
+      try {
+        const { sweepTerminalEstimateDeposits } = require('./estimate-deposits');
+        await sweepTerminalEstimateDeposits();
+      } catch (e) {
+        logger.error(`Terminal-estimate deposit sweep failed: ${e.message}`);
+      }
       return;
     }
     logger.info('Running: Estimate expiration sweep');
