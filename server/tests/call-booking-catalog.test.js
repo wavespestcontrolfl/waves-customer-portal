@@ -257,6 +257,23 @@ describe('resolveCallFollowUpPlan', () => {
     expect(plan).toEqual({ scheduledDate: '2026-07-20', windowStart: '08:00' });
   });
 
+  test('garbage follow_up_date_time alone ("two weeks") does not create a follow-up', () => {
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: false, follow_up_date_time: 'two weeks' },
+      catalogRow: roach,
+      parentDate: '2026-07-02',
+      parentWindowStart: '08:00',
+    })).toBeNull();
+  });
+
+  test('non-calendar follow_up_date_time alone (no boolean) does not create a follow-up', () => {
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_date_time: '2026-02-30T13:00' },
+      catalogRow: roach,
+      parentDate: '2026-02-02',
+    })).toBeNull();
+  });
+
   test('bogus parent window start falls back to 09:00', () => {
     const plan = resolveCallFollowUpPlan({
       extracted: { follow_up_visit_mentioned: true },

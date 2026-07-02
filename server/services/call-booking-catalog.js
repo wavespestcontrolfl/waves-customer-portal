@@ -19,6 +19,7 @@
  */
 
 const logger = require('./logger');
+const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
 const BOOKABLE_SERVICE_COLUMNS = [
   'id',
@@ -171,15 +172,20 @@ function isValidWindowTime(value) {
  * (default 14 days). Returns { scheduledDate, windowStart } or null.
  */
 function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate, parentWindowStart } = {}) {
-  const mentioned = extracted.follow_up_visit_mentioned === true || !!extracted.follow_up_date_time;
+  // A stated date only counts as a mention signal when it parses as a real
+  // calendar date: the V1 normalizer merely trims follow_up_date_time, so the
+  // model can emit "two weeks" or "none" alongside follow_up_visit_mentioned
+  // =false — truthy garbage must not book a visit nobody discussed.
+  const raw = String(extracted.follow_up_date_time || '').trim();
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
+  const statedDateValid = !!(m && isValidCalendarDate(m[1]));
+  const mentioned = extracted.follow_up_visit_mentioned === true || statedDateValid;
   if (!mentioned) return null;
   if (!isValidCalendarDate(parentDate)) return null;
 
   let scheduledDate = null;
   let windowStart = null;
-  const raw = String(extracted.follow_up_date_time || '').trim();
-  const m = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
-  if (m && isValidCalendarDate(m[1]) && m[1] > parentDate) {
+  if (statedDateValid && m[1] > parentDate) {
     scheduledDate = m[1];
     windowStart = m[2] && isValidWindowTime(m[2]) ? m[2] : null;
   }
@@ -187,11 +193,11 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
   if (!scheduledDate) {
     const configured = Number(catalogRow?.follow_up_interval_days);
     const days = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_FOLLOW_UP_INTERVAL_DAYS;
-    // Pin to noon so a UTC server can't roll the ET calendar date when adding days.
-    const base = new Date(`${parentDate}T12:00:00`);
+    // parentDate is an ET wall-clock calendar date; the server runs UTC, so
+    // day math goes through the ET helpers (noon anchor clears DST seams).
+    const base = parseETDateTime(`${parentDate}T12:00`);
     if (Number.isNaN(base.getTime())) return null;
-    base.setDate(base.getDate() + days);
-    scheduledDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(base);
+    scheduledDate = etDateString(addETDays(base, days));
   }
 
   const finalWindowStart = windowStart || parentWindowStart || '09:00';
