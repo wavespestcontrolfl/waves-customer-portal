@@ -11,6 +11,7 @@ import { KpiStrip, KpiTile } from "../KpiTile";
 // schedule completion, and the period's service-execution tiles.
 export default function TodaySection({
   alerts,
+  alertsStale,
   today,
   kpis,
   kpisLoading,
@@ -18,7 +19,7 @@ export default function TodaySection({
 }) {
   return (
     <DashboardSection id="today" title="Today" caption="What needs attention right now">
-      <ActionInbox alerts={alerts} />
+      <ActionInbox alerts={alerts} stale={alertsStale} />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <ChartCard
           title="Today's Completion"

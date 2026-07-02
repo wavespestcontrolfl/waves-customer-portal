@@ -55,7 +55,7 @@ async function liveAlertNotifications(adminUserId) {
   let dismissals = [];
   try {
     dismissals = await db.raw(
-      `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_at
+      `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_fingerprint, dismissed_at
        FROM dashboard_alert_dismissed
        WHERE admin_user_id = ?
          AND dismissed_at > NOW() - (INTERVAL '1 hour' * ?)
@@ -69,13 +69,21 @@ async function liveAlertNotifications(adminUserId) {
   }
 
   const dismissedByAlert = new Map(
-    dismissals.map((d) => [d.alert_id, parseInt(d.dismissed_at_count || 0, 10)]),
+    dismissals.map((d) => [d.alert_id, {
+      count: parseInt(d.dismissed_at_count || 0, 10),
+      fingerprint: d.dismissed_fingerprint || null,
+    }]),
   );
 
   const visible = alerts.filter((a) => {
-    const dismissedAtCount = dismissedByAlert.get(a.id);
-    if (dismissedAtCount == null) return true; // never dismissed
-    return a.count > dismissedAtCount; // escalation re-shows
+    const dismissed = dismissedByAlert.get(a.id);
+    if (dismissed == null) return true; // never dismissed
+    if (a.count > dismissed.count) return true; // escalation re-shows
+    // Membership change re-shows a queue alert: a DIFFERENT lead crossing the
+    // SLA at the same count is new work, not the item that was dismissed.
+    // Requires a fingerprint on BOTH sides — alerts without one, and
+    // pre-migration dismissal rows, keep the count-only behavior.
+    return Boolean(a.fingerprint && dismissed.fingerprint && a.fingerprint !== dismissed.fingerprint);
   });
 
   return { live: toNotifications(visible), liveKeys };
@@ -216,6 +224,9 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
         admin_user_id: adminUserId,
         alert_id: a.id,
         dismissed_at_count: a.count,
+        // Queue alerts carry a membership digest — record it so the bell can
+        // re-show on membership change, not just on count growth.
+        dismissed_fingerprint: a.fingerprint || null,
       })),
     );
   } catch (err) {
