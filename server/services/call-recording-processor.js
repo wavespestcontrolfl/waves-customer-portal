@@ -43,7 +43,7 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
-const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete } = require('./call-booking-catalog');
+const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -3108,10 +3108,28 @@ const CallRecordingProcessor = {
                       .orWhere({ followup_source_service_id: primaryRow.id }))
                     .first('id');
                   if (existingChild) return null;
+                  // A reused primary may have been RESCHEDULED since the call
+                  // was first processed — callFollowUpPlan above was spaced
+                  // from the extraction's date, so a retry that lost the child
+                  // insert would book visit 2 at old-date + interval. Re-space
+                  // the plan from the row's actual date (an explicit transcript
+                  // date re-validates against it; a plan that no longer
+                  // resolves fails closed to no child — dispatch books by hand).
+                  let fuPlan = callFollowUpPlan;
+                  const primaryActualDate = callBookingDateOnly(primaryRow.scheduled_date);
+                  if (primaryActualDate && primaryActualDate !== scheduledDate) {
+                    fuPlan = resolveCallFollowUpPlan({
+                      extracted,
+                      catalogRow: callBookingCatalogRow,
+                      parentDate: primaryActualDate,
+                      parentWindowStart: String(primaryRow.window_start || '').slice(0, 5) || windowStart || '09:00',
+                    });
+                    if (!fuPlan) return null;
+                  }
                   // Runs in a SAVEPOINT (nested trx): a rejected follow-up
                   // insert must never roll back the confirmed primary
                   // appointment sharing this transaction.
-                  const fuStart = callFollowUpPlan.windowStart;
+                  const fuStart = fuPlan.windowStart;
                   const [fuH, fuM] = fuStart.split(':').map(Number);
                   const fuEndH = fuH >= 23 ? 23 : fuH + 1;
                   try {
@@ -3120,7 +3138,7 @@ const CallRecordingProcessor = {
                         .insert({
                           customer_id: customerId,
                           technician_id: primaryRow.technician_id || defaultTechnicianId,
-                          scheduled_date: callFollowUpPlan.scheduledDate,
+                          scheduled_date: fuPlan.scheduledDate,
                           window_start: fuStart,
                           window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
                           window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
@@ -3129,19 +3147,20 @@ const CallRecordingProcessor = {
                           parent_service_id: primaryRow.id,
                           status: 'pending',
                           customer_confirmed: false,
-                          // Same no-charge shape as the completion-CTA follow-up
-                          // flow (admin-dispatch schedule-followup): $0 +
+                          // Billing shape rides the price: a priced package
+                          // total covers both treatments → $0 "included" child
+                          // (same no-charge shape as the completion-CTA flow:
                           // followup_included bypasses the one-time billing
-                          // pre-gate, create_invoice_on_complete=false blocks the
-                          // completion invoice, and followup_source_service_id's
-                          // partial unique index prevents a second follow-up from
-                          // being double-booked off this visit later. Without
-                          // these, completion billing can fall back to a monthly
-                          // rate and invoice an included second treatment.
-                          estimated_price: 0,
-                          followup_included: true,
+                          // pre-gate and completion billing can't fall back to
+                          // a monthly rate). An UNPRICED booking's second visit
+                          // was never prepaid → billable-neutral like its
+                          // unpriced primary, office prices at completion.
+                          // followup_source_service_id is stamped either way:
+                          // its partial unique index blocks a duplicate
+                          // follow-up off this visit and carries no free
+                          // semantics of its own.
+                          ...callFollowUpBillingShape(priceInfo.price),
                           followup_source_service_id: primaryRow.id,
-                          create_invoice_on_complete: false,
                           estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
                           // Customer-safe only: once dispatch confirms this row
                           // the portal filter no longer hides it and
@@ -3164,7 +3183,7 @@ const CallRecordingProcessor = {
                           idempotency_key: computeAppointmentIdempotencyKey({
                             callLogId: call.id,
                             schedulingStatus: 'follow_up',
-                            confirmedStartAt: `${callFollowUpPlan.scheduledDate}T${fuStart}`,
+                            confirmedStartAt: `${fuPlan.scheduledDate}T${fuStart}`,
                             primaryServiceCategory: serviceType,
                             addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
                           }),

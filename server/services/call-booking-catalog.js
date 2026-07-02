@@ -86,8 +86,14 @@ const KEYWORD_SERVICE_RULES = [
 
 async function loadBookableCallServices(conn) {
   try {
+    // Stable order matters beyond display: these rows render the prompt's
+    // catalog block AND feed extractionPromptVersion's order-sensitive hash,
+    // so planner-dependent row order would stamp identical catalogs as
+    // different prompt versions and fragment shadow cohorts.
     const rows = await conn('services')
       .where({ is_active: true, booking_enabled: true })
+      .orderBy('name', 'asc')
+      .orderBy('id', 'asc')
       .select(BOOKABLE_SERVICE_COLUMNS);
     return Array.isArray(rows) ? rows : [];
   } catch (err) {
@@ -198,6 +204,25 @@ function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
  */
 function callBookingInvoiceOnComplete({ price, catalogRow } = {}) {
   return price != null && catalogRow?.billing_type === 'one_time';
+}
+
+// Visit-2 billing shape, mirroring callBookingInvoiceOnComplete's rule for
+// the primary. A priced booking means a one-time package total that covers
+// both treatments (resolveCallBookingPrice only prices one_time matches), so
+// the child is a $0 "included" visit — job-costing zeroes followup_included
+// rows and completion auto-invoice skips them. An UNPRICED booking's second
+// visit was never prepaid: it stays billable-neutral exactly like its
+// unpriced primary (estimated_price null, NOT included) so the office prices
+// it at completion instead of closing real work as a free included visit.
+// create_invoice_on_complete is false for both — an included child must
+// never invoice, and an unpriced child has no price to invoice.
+function callFollowUpBillingShape(price) {
+  const included = price != null;
+  return {
+    estimated_price: included ? 0 : null,
+    followup_included: included,
+    create_invoice_on_complete: false,
+  };
 }
 
 // Real-calendar check: "2026-13-40" matches a date-shaped regex but must not
@@ -357,6 +382,8 @@ module.exports = {
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,
   callBookingInvoiceOnComplete,
+  callFollowUpBillingShape,
+  callBookingDateOnly,
   sanitizeQuotedCallPrice,
   shiftCallFollowUpsForParentMove,
   cancelCallFollowUpsForParentCancel,

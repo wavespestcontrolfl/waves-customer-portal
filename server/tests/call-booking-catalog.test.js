@@ -8,10 +8,13 @@ jest.mock('../services/job-status', () => ({
 const { transitionJobStatus } = require('../services/job-status');
 
 const {
+  loadBookableCallServices,
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,
   callBookingInvoiceOnComplete,
+  callFollowUpBillingShape,
+  callBookingDateOnly,
   sanitizeQuotedCallPrice,
   shiftCallFollowUpsForParentMove,
   cancelCallFollowUpsForParentCancel,
@@ -823,5 +826,57 @@ describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade
     const untouched = fakeConn();
     expect(await cancelCallFollowUpsForParentCancel({ conn: untouched.conn, parentServiceId: null })).toBe(0);
     expect(untouched.log.table).toBeNull();
+  });
+});
+
+describe('callFollowUpBillingShape (visit-2 billing rides the package price)', () => {
+  test('a priced package books the child as a $0 included visit', () => {
+    expect(callFollowUpBillingShape(350)).toEqual({
+      estimated_price: 0,
+      followup_included: true,
+      create_invoice_on_complete: false,
+    });
+  });
+
+  test('an unpriced booking leaves the child billable-neutral — never a free included visit', () => {
+    expect(callFollowUpBillingShape(null)).toEqual({
+      estimated_price: null,
+      followup_included: false,
+      create_invoice_on_complete: false,
+    });
+    expect(callFollowUpBillingShape(undefined)).toEqual({
+      estimated_price: null,
+      followup_included: false,
+      create_invoice_on_complete: false,
+    });
+  });
+});
+
+describe('callBookingDateOnly (pg date hydration)', () => {
+  test('recovers the calendar date from a pg-hydrated local-midnight Date', () => {
+    expect(callBookingDateOnly(new Date(2026, 6, 2))).toBe('2026-07-02');
+  });
+
+  test('passes through date strings and rejects garbage', () => {
+    expect(callBookingDateOnly('2026-07-09T00:00:00.000Z')).toBe('2026-07-09');
+    expect(callBookingDateOnly('2026-07-09')).toBe('2026-07-09');
+    expect(callBookingDateOnly('not-a-date')).toBeNull();
+    expect(callBookingDateOnly(null)).toBeNull();
+    expect(callBookingDateOnly(new Date('invalid'))).toBeNull();
+  });
+});
+
+describe('loadBookableCallServices (catalog order feeds the prompt hash)', () => {
+  test('orders by stable catalog fields so identical catalogs stamp one prompt version', async () => {
+    const orderBys = [];
+    const chain = {
+      where: jest.fn().mockReturnThis(),
+      orderBy: jest.fn((col, dir) => { orderBys.push([col, dir]); return chain; }),
+      select: jest.fn().mockResolvedValue([{ name: 'A' }]),
+    };
+    const conn = jest.fn(() => chain);
+    const rows = await loadBookableCallServices(conn);
+    expect(rows).toEqual([{ name: 'A' }]);
+    expect(orderBys).toEqual([['name', 'asc'], ['id', 'asc']]);
   });
 });
