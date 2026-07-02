@@ -274,6 +274,15 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
     .whereNotExists(function noFunnelRow() {
       this.select(1).from('ad_service_attribution as a').whereRaw('a.lead_id = l.id');
     })
+    // A bridged CALL whose lead was never repointed (e.g. no lead matched at
+    // claim time, or the funnel write skipped on a then-customer-less lead) is
+    // still a CLAIMED Google Ads call — "unclaimed" means no bridge stamp
+    // anywhere, not just an un-repointed lead row.
+    .whereNotExists(function callAlreadyBridged() {
+      this.select(1).from('call_log as cl')
+        .whereRaw('cl.lead_id = l.id')
+        .whereNotNull('cl.google_ads_call_resource_name');
+    })
     .orderBy('l.created_at')
     .limit(cap)
     .select('l.id', 'l.customer_id', 'l.service_interest', 'l.first_contact_at', 'l.created_at', 'l.lead_source_id');

@@ -176,4 +176,10 @@ describe('scheduler wiring', () => {
     const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
     expect(ca).toMatch(/\.where\('l\.first_contact_channel', 'call'\)/);
   });
+
+  test('a bridge-claimed call_log row excludes its lead even when the lead was never repointed', () => {
+    const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
+    expect(ca).toMatch(/callAlreadyBridged/);
+    expect(ca).toMatch(/whereNotNull\('cl\.google_ads_call_resource_name'\)/);
+  });
 });
