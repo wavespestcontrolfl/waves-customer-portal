@@ -173,6 +173,11 @@ describe('processCancellationRequest', () => {
       { id: 'p2', customer_id: 'c1', status: 'paid', superseded_by_payment_id: null, next_retry_at: null },
       { id: 'p3', customer_id: 'other', status: 'failed', superseded_by_payment_id: null, next_retry_at: new Date() },
     ];
+    db.__tables.payment_methods = [
+      { id: 'pm1', customer_id: 'c1', is_default: true, autopay_enabled: true },
+      { id: 'pm2', customer_id: 'c1', is_default: false, autopay_enabled: true },
+      { id: 'pm3', customer_id: 'other', is_default: true, autopay_enabled: true },
+    ];
     db.__tables.customer_interactions = [];
 
     const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req1' });
@@ -228,6 +233,12 @@ describe('processCancellationRequest', () => {
     // Armed failed-payment retry disarmed — for this customer only.
     expect(db.__tables.payments.find((p) => p.id === 'p1').next_retry_at).toBeNull();
     expect(db.__tables.payments.find((p) => p.id === 'p3').next_retry_at).toBeInstanceOf(Date);
+
+    // Saved payment METHODS disabled too — StripeService.charge() selects by
+    // payment_methods.autopay_enabled alone, so the customer flag isn't enough.
+    expect(db.__tables.payment_methods.find((m) => m.id === 'pm1').autopay_enabled).toBe(false);
+    expect(db.__tables.payment_methods.find((m) => m.id === 'pm2').autopay_enabled).toBe(false);
+    expect(db.__tables.payment_methods.find((m) => m.id === 'pm3').autopay_enabled).toBe(true);
 
     // Audit note written once.
     expect(db.__tables.customer_interactions).toHaveLength(1);
@@ -533,6 +544,36 @@ describe('processCancellationRequest', () => {
     expect(result.cancelledCount).toBe(1);
     expect(result.errors).toEqual(['in_progress_visit:sDrift']);
     expect(result.ok).toBe(false);
+  });
+
+  test('a straggler occurrence inserted mid-sweep is caught by the second sweep pass', async () => {
+    db.__tables.scheduled_services = [
+      { id: 's1', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true }];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+
+    // Simulate a concurrent completion auto-extending the series while the
+    // first visit is being cancelled: the flip commits AND a fresh future
+    // occurrence appears that the first sweep never saw.
+    transitionJobStatus.mockImplementationOnce(async ({ jobId, fromStatus, toStatus }) => {
+      const rows = db.__tables.scheduled_services;
+      const row = rows.find((r) => r.id === jobId);
+      if (!row || row.status !== fromStatus) throw new Error(`transitionJobStatus: ${jobId} not in state ${fromStatus}`);
+      row.status = toStatus;
+      rows.push({ id: 'sNew', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false });
+      (db.__tables.job_status_history = db.__tables.job_status_history || []).push({ job_id: jobId, from_status: fromStatus, to_status: toStatus });
+      return { customerPayload: {}, adminPayload: {} };
+    });
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req13' });
+
+    const svc = (id) => db.__tables.scheduled_services.find((r) => r.id === id);
+    expect(svc('s1').status).toBe('cancelled');
+    expect(svc('sNew').status).toBe('cancelled'); // caught by pass 2
+    expect(result.cancelledCount).toBe(2);
+    expect(result.ok).toBe(true);
   });
 
   test('already-churned account is re-inactivated but keeps its original churn date and writes no new note', async () => {

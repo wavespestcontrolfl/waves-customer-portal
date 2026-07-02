@@ -23,22 +23,27 @@ const LIVE_TRACK_STATES = ['en_route', 'on_property'];
 const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'charge_review', 'charge_review_write_failed']);
 
 /**
- * Process an accepted customer cancellation request:
- *   1. Pull every upcoming cancellable visit off the calendar via the SAME
+ * Process an accepted customer cancellation request, in an order chosen so the
+ * highest-stakes wind-down happens before the slow parts:
+ *   1. Mark the account churned / inactive AND stop billing FIRST (disable
+ *      autopay, clear the next charge, disarm any armed failed-payment retry)
+ *      — the per-visit sweep below can take a while (Stripe calls), and the
+ *      billing crons must not find a chargeable customer in that window.
+ *   2. Stop any recurring series BEFORE sweeping, so a concurrent completion
+ *      can't auto-extend the series after we've read the visit list.
+ *   3. Pull every upcoming cancellable visit off the calendar via the SAME
  *      composed path the admin cancel action uses: transitionJobStatus (status
  *      flip + job_status_history + overdue-alert auto-resolve + dispatch/customer
  *      broadcasts), reminder-record cancellation (suppressing the per-visit SMS —
  *      this flow sends one dedicated confirmation), open-invoice void, one-time
- *      card-hold resolution, and the customer-visible track-layer cancel.
- *      A visit already in progress (en_route / on_site) is never auto-cancelled
- *      — it's flagged into `errors` for manual handling, as is any money the
- *      helpers couldn't safely resolve (unvoidable invoice, failed/ambiguous
- *      late-cancel fee), so the admin alert never claims full auto-processing
- *      while something still needs office eyes.
- *   2. Stop any recurring series so the scheduler doesn't regenerate visits.
- *   3. Mark the account churned / inactive AND wind down billing (disable
- *      autopay, clear the next charge, disarm any armed failed-payment retry)
- *      so a cancelled customer is never charged again.
+ *      card-hold resolution, and the customer-visible track-layer cancel. A
+ *      second sweep pass catches a straggler occurrence inserted mid-flight.
+ *      A visit already in progress (en_route / on_site, on either the status
+ *      or the track layer) is never auto-cancelled — it's flagged into
+ *      `errors` for manual handling, as is any money the helpers couldn't
+ *      safely resolve (unvoidable invoice, failed/ambiguous late-cancel fee),
+ *      so the admin alert never claims full auto-processing while something
+ *      still needs office eyes.
  *
  * Best-effort and safe to call more than once: a retry is not just a no-op —
  * visits a prior attempt of the SAME request already flipped (identified via
@@ -56,6 +61,81 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   if (!customerId) throw new Error('processCancellationRequest requires customerId');
   const cancelReason = String(reason || CHURN_REASON).slice(0, 500);
   const errors = [];
+
+  // 1. Churn + stop all billing FIRST — before the (potentially slow,
+  // Stripe-touching) visit sweep. The monthly charge loop preselects
+  // active/autopay customers and the failed-payment retry ladder only skips
+  // soft-deleted ones, so every second the account stays chargeable is a
+  // window for a billing cron to charge a customer who just cancelled.
+  let churned = false;
+  let wasChurnedStage = false;
+  try {
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .first('pipeline_stage', 'active');
+    if (customer) {
+      wasChurnedStage = customer.pipeline_stage === 'churned';
+      const now = new Date();
+      const update = {
+        active: false,
+        pipeline_stage: 'churned',
+        // Wind down billing: the monthly charge loop skips active=false /
+        // autopay_enabled=false, but the failed-payment retry ladder only skips
+        // soft-deleted customers — so also disable autopay + clear the next
+        // charge, and disarm any armed retry below.
+        autopay_enabled: false,
+        next_charge_date: null,
+        updated_at: now,
+      };
+      // Preserve the original churn timestamp/reason if already churned.
+      if (!wasChurnedStage) {
+        update.pipeline_stage_changed_at = now;
+        // churned_at is a DATE column — stamp the ET calendar date (a JS Date
+        // lands on the wrong day after ET midnight; same rule as the admin
+        // stage-change path).
+        update.churned_at = etDateString();
+        update.churn_reason = CHURN_REASON;
+      }
+      await db('customers').where({ id: customerId }).update(update);
+
+      // Also disable the saved payment METHODS, mirroring the customer
+      // autopay-off path: StripeService.charge() picks the default method by
+      // payment_methods.autopay_enabled alone (it never re-checks the
+      // customer flags), so a billing run that already preselected this
+      // customer would otherwise still charge the saved card.
+      await db('payment_methods')
+        .where({ customer_id: customerId })
+        .update({ autopay_enabled: false });
+
+      // Disarm any pending failed-payment retry so the retry ladder can't
+      // re-charge a cancelled customer (it does not check active/churn).
+      await db('payments')
+        .where({ customer_id: customerId, status: 'failed' })
+        .whereNull('superseded_by_payment_id')
+        .whereNotNull('next_retry_at')
+        .update({ next_retry_at: null });
+
+      churned = true;
+    }
+  } catch (err) {
+    errors.push('churn');
+    logger.error(`[cancellation-processor] failed to churn customer ${customerId}: ${err.message}`);
+  }
+
+  // 2. Stop any recurring series BEFORE reading the visit list, so a
+  // concurrent completion that would auto-extend the series sees
+  // recurring_ongoing=false instead of minting a fresh occurrence behind the
+  // sweep's back. (The straggler re-sweep below covers an extension already
+  // in flight past its flag read.)
+  let recurrenceStopped = 0;
+  try {
+    recurrenceStopped = await db('scheduled_services')
+      .where({ customer_id: customerId, recurring_ongoing: true })
+      .update({ recurring_ongoing: false, updated_at: new Date() });
+  } catch (err) {
+    errors.push('stop_recurrence');
+    logger.error(`[cancellation-processor] failed to stop recurrence for ${customerId}: ${err.message}`);
+  }
 
   // Live in-progress work (tech en route / on property) is never auto-cancelled
   // — but it must not be silently ignored either. Flag each such visit so the
@@ -84,10 +164,37 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
     logger.error(`[cancellation-processor] failed to check in-progress visits for ${customerId}: ${err.message}`);
   }
 
-  // 1. Cancel the customer's upcoming cancellable visits.
-  let services = [];
+  // Visits a PRIOR attempt of this same request already flipped to cancelled:
+  // the sweep only selects still-live statuses, so without this a retry (the
+  // route re-runs the processor on a deduped resubmit) would skip a visit
+  // whose status flip committed but whose side effects (invoice void, card
+  // hold, reminders, track layer) failed — leaving them broken forever. The
+  // flip stamps the request-scoped reason into job_status_history.notes, which
+  // identifies exactly the visits this request cancelled; re-confirm each is
+  // STILL cancelled so a visit an admin has since revived is left alone.
+  let repairs = [];
   try {
-    services = await db('scheduled_services')
+    const history = await db('job_status_history')
+      .where({ to_status: 'cancelled', notes: cancelReason })
+      .select('job_id');
+    const priorIds = [...new Set(history.map((h) => h.job_id))];
+    if (priorIds.length) {
+      repairs = await db('scheduled_services')
+        .whereIn('id', priorIds)
+        .where({ status: 'cancelled' })
+        .select('id', 'status');
+    }
+  } catch (err) {
+    errors.push('load_prior_cancelled');
+    logger.error(`[cancellation-processor] failed to load prior-cancelled visits for ${customerId}: ${err.message}`);
+  }
+
+  // 3. Cancel the customer's upcoming cancellable visits.
+  let cancelledCount = 0;
+  const processed = new Set();
+
+  function sweepCancellable() {
+    return db('scheduled_services')
       .where({ customer_id: customerId })
       .whereIn('status', CANCELLABLE_STATUSES)
       .where(function () {
@@ -106,43 +213,9 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       // rows with no track_state.
       .whereRaw("(track_state IS NULL OR track_state NOT IN ('complete', 'en_route', 'on_property'))")
       .select('id', 'status');
-  } catch (err) {
-    errors.push('load_visits');
-    logger.error(`[cancellation-processor] failed to load visits for ${customerId}: ${err.message}`);
   }
 
-  // Visits a PRIOR attempt of this same request already flipped to cancelled:
-  // the sweep above only selects still-live statuses, so without this a retry
-  // (the route re-runs the processor on a deduped resubmit) would skip a visit
-  // whose status flip committed but whose side effects (invoice void, card
-  // hold, reminders, track layer) failed — leaving them broken forever. The
-  // flip stamps the request-scoped reason into job_status_history.notes, which
-  // identifies exactly the visits this request cancelled; re-confirm each is
-  // STILL cancelled so a visit an admin has since revived is left alone.
-  let repairs = [];
-  try {
-    const history = await db('job_status_history')
-      .where({ to_status: 'cancelled', notes: cancelReason })
-      .select('job_id');
-    const freshIds = new Set(services.map((s) => s.id));
-    const priorIds = [...new Set(history.map((h) => h.job_id))].filter((id) => !freshIds.has(id));
-    if (priorIds.length) {
-      repairs = await db('scheduled_services')
-        .whereIn('id', priorIds)
-        .where({ status: 'cancelled' })
-        .select('id', 'status');
-    }
-  } catch (err) {
-    errors.push('load_prior_cancelled');
-    logger.error(`[cancellation-processor] failed to load prior-cancelled visits for ${customerId}: ${err.message}`);
-  }
-
-  let cancelledCount = 0;
-  const toProcess = [
-    ...services.map((s) => ({ ...s, alreadyCancelled: false })),
-    ...repairs.map((s) => ({ ...s, alreadyCancelled: true })),
-  ];
-  for (const svc of toProcess) {
+  async function processVisit(svc) {
     if (!svc.alreadyCancelled) {
       // Canonical status flip: writes the job_status_history audit row,
       // auto-resolves open tech_late / unassigned_overdue alerts, and broadcasts
@@ -180,7 +253,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
             errors.push(`cancel_visit:${svc.id}`);
             logger.error(`[cancellation-processor] failed to cancel visit ${svc.id}: ${err.message}`);
           }
-          continue;
+          return;
         }
       }
 
@@ -214,7 +287,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
             errors.push(`cancel_visit:${svc.id}`);
             logger.error(`[cancellation-processor] failed to revert live-visit cancel for ${svc.id}: ${revertErr.message}`);
           }
-          continue;
+          return;
         }
         cancelledCount += 1;
       }
@@ -308,78 +381,51 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
     }
   }
 
-  // 2. Stop any recurring series so no new occurrences are generated.
-  let recurrenceStopped = 0;
-  try {
-    recurrenceStopped = await db('scheduled_services')
-      .where({ customer_id: customerId, recurring_ongoing: true })
-      .update({ recurring_ongoing: false, updated_at: new Date() });
-  } catch (err) {
-    errors.push('stop_recurrence');
-    logger.error(`[cancellation-processor] failed to stop recurrence for ${customerId}: ${err.message}`);
+  // Pass 0 processes the sweep plus the prior-attempt repairs; pass 1 re-sweeps
+  // ONCE for stragglers — recurrence is already off, but a completion that read
+  // recurring_ongoing=true before our flip can still insert one final
+  // occurrence while we're cancelling. At most one generation can appear, so a
+  // single re-sweep bounds it.
+  for (let pass = 0; pass < 2; pass += 1) {
+    let rows = [];
+    try {
+      rows = await sweepCancellable();
+    } catch (err) {
+      errors.push('load_visits');
+      logger.error(`[cancellation-processor] failed to load visits for ${customerId}: ${err.message}`);
+      break;
+    }
+    const batch = rows
+      .filter((r) => !processed.has(r.id))
+      .map((s) => ({ ...s, alreadyCancelled: false }));
+    if (pass === 0) {
+      batch.push(...repairs
+        .filter((r) => !processed.has(r.id))
+        .map((s) => ({ ...s, alreadyCancelled: true })));
+    }
+    if (!batch.length) break;
+    for (const svc of batch) {
+      processed.add(svc.id);
+      await processVisit(svc);
+    }
   }
 
-  // 3. Mark the customer churned / inactive and stop all billing.
-  let churned = false;
-  try {
-    const customer = await db('customers')
-      .where({ id: customerId })
-      .first('pipeline_stage', 'active');
-    if (customer) {
-      const wasChurnedStage = customer.pipeline_stage === 'churned';
-      const now = new Date();
-      const update = {
-        active: false,
-        pipeline_stage: 'churned',
-        // Wind down billing: the monthly charge loop skips active=false /
-        // autopay_enabled=false, but the failed-payment retry ladder only skips
-        // soft-deleted customers — so also disable autopay + clear the next
-        // charge, and disarm any armed retry below.
-        autopay_enabled: false,
-        next_charge_date: null,
-        updated_at: now,
-      };
-      // Preserve the original churn timestamp/reason if already churned.
-      if (!wasChurnedStage) {
-        update.pipeline_stage_changed_at = now;
-        // churned_at is a DATE column — stamp the ET calendar date (a JS Date
-        // lands on the wrong day after ET midnight; same rule as the admin
-        // stage-change path).
-        update.churned_at = etDateString();
-        update.churn_reason = CHURN_REASON;
-      }
-      await db('customers').where({ id: customerId }).update(update);
-
-      // Disarm any pending failed-payment retry so the retry ladder can't
-      // re-charge a cancelled customer (it does not check active/churn).
-      await db('payments')
-        .where({ customer_id: customerId, status: 'failed' })
-        .whereNull('superseded_by_payment_id')
-        .whereNotNull('next_retry_at')
-        .update({ next_retry_at: null });
-
-      churned = true;
-
-      // Audit trail on the customer timeline — only the first time we churn.
-      if (!wasChurnedStage) {
-        try {
-          await db('customer_interactions').insert({
-            customer_id: customerId,
-            interaction_type: 'note',
-            subject: 'Cancellation processed — churned + upcoming visits pulled',
-            body:
-              `Portal cancellation request ${requestId || ''}`.trim() +
-              `. Cancelled ${cancelledCount} upcoming visit(s), stopped recurrence, ` +
-              'set pipeline_stage=churned + active=false, disabled autopay.',
-          });
-        } catch (noteErr) {
-          logger.warn(`[cancellation-processor] audit note failed for ${customerId}: ${noteErr.message}`);
-        }
-      }
+  // Audit trail on the customer timeline — only the first time we churn, and
+  // written AFTER the sweep so the note carries the final visit count.
+  if (churned && !wasChurnedStage) {
+    try {
+      await db('customer_interactions').insert({
+        customer_id: customerId,
+        interaction_type: 'note',
+        subject: 'Cancellation processed — churned + upcoming visits pulled',
+        body:
+          `Portal cancellation request ${requestId || ''}`.trim() +
+          `. Cancelled ${cancelledCount} upcoming visit(s), stopped recurrence, ` +
+          'set pipeline_stage=churned + active=false, disabled autopay.',
+      });
+    } catch (noteErr) {
+      logger.warn(`[cancellation-processor] audit note failed for ${customerId}: ${noteErr.message}`);
     }
-  } catch (err) {
-    errors.push('churn');
-    logger.error(`[cancellation-processor] failed to churn customer ${customerId}: ${err.message}`);
   }
 
   const ok = errors.length === 0;

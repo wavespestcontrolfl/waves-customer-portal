@@ -3,7 +3,7 @@ const router = express.Router();
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, authenticateAllowInactive } = require('../middleware/auth');
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -63,12 +63,21 @@ function validatePhoto(p) {
 // =========================================================================
 // POST /api/requests — Create a new service request
 // =========================================================================
-router.post('/', authenticate, createLimiter, async (req, res, next) => {
+// authenticateAllowInactive (NOT authenticate): the cancellation auto-processor
+// churns the account (active=false) mid-flight, so a client retry after a lost
+// response would otherwise 401 before reaching the dedupe/repair sweep below.
+// The gate right after validation keeps every OTHER category blocked for
+// inactive accounts, matching the strict middleware's behavior.
+router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next) => {
   try {
     const { value, error } = createSchema.validate(req.body, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
 
     const { category, subject, description, urgency, locationOnProperty, photos } = value;
+
+    if (req.customerInactive && category !== 'cancellation') {
+      return res.status(401).json({ error: 'Customer not found or inactive' });
+    }
     const validUrgency = urgency || 'routine';
     const validLocation = locationOnProperty || null;
 
