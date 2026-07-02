@@ -2430,6 +2430,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:05AM ET — Unclaimed bridge-target leads → organic funnel rows.
+  // Calls to the Google Ads call-bridge number are held out of organic
+  // attribution at call time so the bridge gets first claim on them; leads the
+  // bridge never claims within BRIDGE_UNCLAIMED_ORGANIC_DAYS (default 7) are
+  // declared organic here via the normal recordCallPpcAttribution path
+  // (idempotent, dedup by lead_id). Runs before the morning attribution/upload
+  // jobs so newly-attributed leads advance + report the same day. Opt-out via
+  // BRIDGE_UNCLAIMED_ORGANIC_DISABLED=true.
+  // =========================================================================
+  cron.schedule('5 6 * * *', async () => {
+    if (process.env.BRIDGE_UNCLAIMED_ORGANIC_DISABLED === 'true') return;
+    logger.info('Running: bridge-unclaimed organic attribution');
+    try {
+      await runExclusive('bridge-unclaimed-organic', async () => {
+        const { attributeUnclaimedBridgeLeads } = require('./ads/call-attribution');
+        const days = parseInt(process.env.BRIDGE_UNCLAIMED_ORGANIC_DAYS, 10) || 7;
+        const r = await attributeUnclaimedBridgeLeads({ olderThanDays: days });
+        logger.info(`[bridge-unclaimed] candidates ${r.candidates}, recorded ${r.recorded}, skipped ${r.skipped}`);
+      });
+    } catch (err) {
+      logger.error(`Bridge-unclaimed organic attribution failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:40AM — Google Ads offline conversion upload (Data Manager API)
   // Automates the EXISTING DataManager.uploadConversions (qualified leads +
   // completed-job revenue) — previously admin-trigger only. Opt-in via
