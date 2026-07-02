@@ -245,7 +245,7 @@ function apptStamp(apptTime) {
   return apptTime ? String(apptTime.getTime()) : 'na';
 }
 
-async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, idempotencyKey } = {}) {
+async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey } = {}) {
   const apptTime = toDate(appointmentTime);
   return sendTemplate({
     customerId,
@@ -256,6 +256,9 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
+      // Empty string hides the template's "Reschedule appointment" CTA block
+      // (renderBlocks skips a cta with no href) — never a broken button.
+      reschedule_url: clean(rescheduleUrl),
     },
     idempotencyKey: idempotencyKey || `appointment.confirmation:${scheduledServiceId || customerId}:${apptStamp(apptTime)}`,
     categories: ['appointment_confirmation'],
@@ -265,20 +268,24 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
 }
 
 // kind: '72h' | '24h'
-async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, idempotencyKey } = {}) {
+async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey } = {}) {
   const apptTime = toDate(appointmentTime);
   const is72 = String(kind) === '72h';
   const templateKey = is72 ? 'appointment.reminder_72h' : 'appointment.reminder_24h';
+  // Empty reschedule_url hides the template's "Reschedule appointment" CTA
+  // block (renderBlocks skips a cta with no href) — never a broken button.
   const payload = is72
     ? {
       service_type: clean(serviceLabel) || 'service',
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
+      reschedule_url: clean(rescheduleUrl),
     }
     : {
       service_type: clean(serviceLabel) || 'service',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
+      reschedule_url: clean(rescheduleUrl),
     };
   return sendTemplate({
     customerId,

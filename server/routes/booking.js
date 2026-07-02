@@ -453,13 +453,17 @@ async function loadBookingConfig() {
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [] }) {
   const result = await findAvailableSlots({
     lat,
     lng,
     durationMinutes: duration,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
+    // Relocating an existing visit (public self-reschedule): drop its own row
+    // from the occupied-route set so it doesn't block the slot it's moving
+    // out of. Default [] = identical behavior for every other caller.
+    excludeServiceIds,
     dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
     dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
     // The default best-4 window is narrow, so 200 ranked candidates is ample.

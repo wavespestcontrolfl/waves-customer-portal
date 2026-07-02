@@ -293,6 +293,10 @@ describe("TwilioService.sendServiceReminder", () => {
         first_name: "Sam",
         service_type: "Pest Control",
         time: "8:00 AM",
+        // No reschedule token resolvable under this mock — the clause var is
+        // still passed (empty) so the template renders with clean copy
+        // instead of an unresolved {reschedule_line} suppressing the SMS.
+        reschedule_line: "",
       },
       { workflow: "twilio_reminder_24h", entity_type: "scheduled_service", entity_id: "svc-1" },
     );
