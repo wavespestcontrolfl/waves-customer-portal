@@ -330,3 +330,90 @@ describe('last-day notice (touch 3)', () => {
     expect(updates).toEqual([]);
   });
 });
+
+// ── PR-bot round 1 ───────────────────────────────────────────────────────
+
+describe('live-customer contact fallback (Codex P1: ID-less estimates)', () => {
+  test('estimate with no customer_id but a live customer on the same phone is skipped', async () => {
+    enqueue('estimates', { rows: [baseEstimate({ customer_id: null })] });
+    enqueue('customers', { first: { id: 'cust-converted-elsewhere' } }); // contact match
+
+    const sent = await _private.checkQuestionsTouch(NOW);
+
+    expect(sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+  });
+
+  test('linked customer not live → contact fallback still catches a live duplicate record', async () => {
+    enqueue('estimates', { rows: [baseEstimate()] });
+    enqueue('customers', { first: undefined }); // linked record: CRM lead row, not live
+    enqueue('customers', { first: { id: 'cust-dup-live' } }); // same phone, live
+
+    const sent = await _private.checkQuestionsTouch(NOW);
+
+    expect(sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+  });
+
+  test('no customer_id and no contact match → touch proceeds', async () => {
+    const est = baseEstimate({ customer_id: null });
+    enqueue('estimates', { rows: [est] });
+    enqueue('customers', { first: undefined }); // no live contact match
+    enqueue('estimates', { update: 1 }); // claim
+    enqueue('estimates', { update: 1 }); // counters
+
+    const sent = await _private.checkQuestionsTouch(NOW);
+
+    expect(sent).toBe(1);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('no customer_id and no phone/email at all → not treated as live', async () => {
+    expect(
+      await _private.isLiveCustomer({
+        id: 'est-bare',
+        customer_id: null,
+        customer_phone: null,
+        customer_email: null,
+      }),
+    ).toBe(false);
+    // No contactable identity → no customers query should even run.
+    expect(db).not.toHaveBeenCalled();
+  });
+});
+
+describe('per-stage SMS kill-switch keys (Codex P2: shared messageType)', () => {
+  test('questions touch (viewed) sends original_message_type estimate_followup_questions', async () => {
+    enqueueHappyPath(baseEstimate());
+    await _private.checkQuestionsTouch(NOW);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.original_message_type)
+      .toBe('estimate_followup_questions');
+  });
+
+  test('questions touch (unviewed) sends the unviewed variant key', async () => {
+    enqueueHappyPath(baseEstimate({ viewed_at: null, last_viewed_at: null }));
+    await _private.checkQuestionsTouch(NOW);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.original_message_type)
+      .toBe('estimate_followup_questions_unviewed');
+  });
+
+  test('day-5 check-in sends estimate_followup_credit', async () => {
+    enqueueHappyPath(baseEstimate({
+      sent_at: new Date('2026-06-04T15:00:00Z'), // 6 days before NOW
+    }));
+    await _private.checkCheckInTouch(NOW);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.original_message_type)
+      .toBe('estimate_followup_credit');
+  });
+
+  test('last-day notice sends estimate_followup_expiring', async () => {
+    enqueueHappyPath(baseEstimate({
+      expires_at: new Date('2026-06-11T10:00:00Z'), // inside the 30h horizon
+    }));
+    await _private.checkExpiringTouch(NOW);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.original_message_type)
+      .toBe('estimate_followup_expiring');
+  });
+});

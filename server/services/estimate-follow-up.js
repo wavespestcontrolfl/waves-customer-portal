@@ -137,16 +137,50 @@ function whereCustomerNotLive(query) {
   return query;
 }
 
+// Last-10-digit phone rule, mirroring lead-estimate-link (kept private —
+// that module doesn't export its helper).
+function normalizeFollowupPhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  if (digits.length === 10) return digits;
+  return digits || null;
+}
+
 async function isLiveCustomer(est) {
-  if (!est.customer_id) return false;
   try {
-    const row = await db("customers")
-      .where({ id: est.customer_id })
+    if (est.customer_id) {
+      const row = await db("customers")
+        .where({ id: est.customer_id })
+        .where("active", true)
+        .whereNull("deleted_at")
+        .whereIn("pipeline_stage", CUSTOMER_STAGES)
+        .first("id");
+      if (row) return true;
+    }
+    // Contact fallback: ID-less estimates (IB pending drafts, legacy lead
+    // quotes) and estimates linked to a non-live record — the same person
+    // may be live under ANOTHER customer row (converted via phone booking
+    // or a second estimate). Same last-10-digit / lowercased-email match as
+    // lead-estimate-link. Skipping a follow-up for a shared-household
+    // contact is the cheap failure; texting a paying customer is not.
+    const phone = normalizeFollowupPhone(est.customer_phone);
+    const email = String(est.customer_email || "").trim().toLowerCase() || null;
+    if (!phone && !email) return false;
+    const contactMatch = await db("customers")
       .where("active", true)
       .whereNull("deleted_at")
       .whereIn("pipeline_stage", CUSTOMER_STAGES)
+      .andWhere(function () {
+        if (phone) {
+          this.orWhereRaw(
+            "RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?",
+            [phone],
+          );
+        }
+        if (email) this.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [email]);
+      })
       .first("id");
-    return !!row;
+    return !!contactMatch;
   } catch (e) {
     // Fail CLOSED: a skipped touch retries next tick (the claim is never
     // burned on a skip); texting a paying customer can't be taken back.
@@ -266,7 +300,11 @@ function templateContext(est) {
 // `idempotencyKey` is stable per (stage, estimate) — duplicate cron ticks
 // hit the email_messages unique index instead of resending. The atomic
 // claimStage() timestamp is still primary; idempotency is belt-and-suspenders.
-async function sendDualChannel(est, { sms, email }) {
+// `smsMessageType` is the rendered SMS template key. It feeds the per-
+// template ops kill switch in TwilioService (isTemplateActive) — a coarse
+// shared key would let disabling ONE stage's template silently swallow every
+// stage's SMS after its claim was already taken.
+async function sendDualChannel(est, { sms, email, smsMessageType }) {
   let attempted = false;
   if (est.customer_phone && sms) {
     try {
@@ -289,7 +327,9 @@ async function sendDualChannel(est, { sms, email }) {
               capturedAt: est.created_at || new Date().toISOString(),
             },
         entryPoint: "estimate_follow_up_cron",
-        metadata: { original_message_type: "estimate_followup" },
+        metadata: {
+          original_message_type: smsMessageType || "estimate_followup",
+        },
       });
       if (result.blocked || result.sent === false) {
         logger.warn(
@@ -367,8 +407,8 @@ async function runTouch(est, cfg, now = new Date()) {
       entityId: est.id,
       customerId: est.customer_id,
     });
-    const { sms, email } = await cfg.render(est, { firstName, url }, now);
-    if (!sms && cfg.smsRequired) {
+    const rendered = await cfg.render(est, { firstName, url }, now);
+    if (!rendered.sms && cfg.smsRequired) {
       logger.warn(
         `[est-followup] ${cfg.label} SMS unavailable — skipping est ${est.id} without claiming`,
       );
@@ -379,7 +419,7 @@ async function runTouch(est, cfg, now = new Date()) {
       return 0;
     }
     claimed = true;
-    const ok = await sendDualChannel(est, { sms, email });
+    const ok = await sendDualChannel(est, rendered);
     if (ok) {
       await bumpFollowUpCounters(est.id);
       claimed = false; // success path keeps the timestamp set
@@ -457,6 +497,7 @@ const QUESTIONS_TOUCH = {
     }
     return {
       sms,
+      smsMessageType: templateKey,
       email: {
         templateKey: viewed
           ? "estimate.viewed_followup"
@@ -506,7 +547,7 @@ const CHECKIN_TOUCH = {
       },
       templateContext(est),
     );
-    return { sms, email: null };
+    return { sms, smsMessageType: "estimate_followup_credit", email: null };
   },
 };
 
@@ -568,6 +609,7 @@ const EXPIRING_TOUCH = {
     }
     return {
       sms,
+      smsMessageType: "estimate_followup_expiring",
       email: {
         templateKey: "estimate.expiring_notice",
         stage: "expiring",
@@ -706,7 +748,10 @@ async function checkDepositAbandoned(now = new Date()) {
         continue;
       }
       claimed = true;
-      const ok = await sendDualChannel(est, { sms: smsBody });
+      const ok = await sendDualChannel(est, {
+        sms: smsBody,
+        smsMessageType: "estimate_followup_deposit",
+      });
       if (ok) {
         await bumpFollowUpCounters(est.id);
         sent++;

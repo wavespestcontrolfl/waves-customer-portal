@@ -4,12 +4,22 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { formatSmsTemplateVars } = require('../utils/sms-time-format');
 const { TEMPLATES: CLEAN_DEFAULT_SMS_TEMPLATES } = require('../models/migrations/20260514000002_tighten_sms_template_copy');
+const { RETIRED_KEYS: RETIRED_SMS_TEMPLATE_KEYS } = require('../models/migrations/20260702000031_estimate_followup_cadence_templates');
 const SmsTemplateVariants = require('../services/sms-template-variants');
 const { auditNotificationTemplateIssue } = require('../services/audit-log');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-const PROTECTED_SMS_TEMPLATE_KEYS = new Set(CLEAN_DEFAULT_SMS_TEMPLATES.map((template) => template.template_key));
+// The default seed still carries keys later migrations retired — filter them
+// or ensureTable's onConflict-ignore reinsert resurrects deleted templates on
+// the next admin visit after every deploy (and, via the protected set below,
+// makes the zombies undeletable).
+const RETIRED_SEED_KEYS = new Set(RETIRED_SMS_TEMPLATE_KEYS);
+const SEED_SMS_TEMPLATES = CLEAN_DEFAULT_SMS_TEMPLATES.filter(
+  (template) => !RETIRED_SEED_KEYS.has(template.template_key),
+);
+
+const PROTECTED_SMS_TEMPLATE_KEYS = new Set(SEED_SMS_TEMPLATES.map((template) => template.template_key));
 
 function canDeleteSmsTemplate(template) {
   return !!template
@@ -96,7 +106,7 @@ async function ensureTable() {
   _seededThisProcess = true;
   // Upsert default templates — onConflict.ignore means existing rows are untouched,
   // new template_keys (like newly-added seeds) get inserted on deploy.
-  const templates = CLEAN_DEFAULT_SMS_TEMPLATES.map(template => ({
+  const templates = SEED_SMS_TEMPLATES.map(template => ({
     ...template,
     variables: JSON.stringify(template.variables),
   }));
@@ -323,7 +333,6 @@ const MSG_TYPE_TO_TEMPLATE = {
   estimate_sent: 'estimate_sent',
   estimate_accepted_onetime: 'estimate_accepted_onetime',
   estimate_auto_renewed: 'estimate_auto_renewed',
-  estimate_followup: 'estimate_followup_questions',
   reactivation: 'seasonal_reactivation',
 };
 
@@ -375,3 +384,4 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}) {
 };
 
 module.exports = router;
+module.exports._private = { SEED_SMS_TEMPLATES, RETIRED_SEED_KEYS, MSG_TYPE_TO_TEMPLATE, canDeleteSmsTemplate };

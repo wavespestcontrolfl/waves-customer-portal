@@ -2,20 +2,23 @@
  * Estimate expiration worker (Estimates v2 spec §5).
  *
  * Runs daily at 6am ET via scheduler.js. Flips any `sent` or `viewed`
- * estimate older than `ESTIMATE_EXPIRATION_DAYS` (default 7) to `expired`,
- * and also flips anything whose `expires_at` has passed regardless of
- * inactivity. Writes `declined_at = now()` only when the row also moves
- * to expired via the age rule (so Virginia can see when it flipped).
+ * estimate older than `ESTIMATE_EXPIRATION_DAYS` (default 10, matching the
+ * follow-up cadence's default `expires_at`) to `expired` — but only rows
+ * WITHOUT an explicit `expires_at`: a stamped expiry is a customer-visible
+ * price-lock promise ("locked until {date}") and the date rule below governs
+ * it. Age-expiring those rows early broke the promise and starved the
+ * last-day follow-up touch. Also flips anything whose `expires_at` has
+ * passed regardless of inactivity.
  *
  * Threshold lives in env so Virginia can tune without a deploy:
- *   ESTIMATE_EXPIRATION_DAYS=7
+ *   ESTIMATE_EXPIRATION_DAYS=10
  */
 const db = require('../models/db');
 const logger = require('./logger');
 
 function getThresholdDays() {
   const raw = parseInt(process.env.ESTIMATE_EXPIRATION_DAYS, 10);
-  if (!Number.isFinite(raw) || raw <= 0) return 7;
+  if (!Number.isFinite(raw) || raw <= 0) return 10;
   return raw;
 }
 
@@ -25,9 +28,11 @@ async function runEstimateExpiration() {
   const now = new Date();
 
   // Rule 1: aged-out — sent/viewed with sent_at older than the cutoff and
-  // no accept/decline yet. Only flips live rows.
+  // no accept/decline yet. Only flips live rows, and only rows WITHOUT an
+  // explicit expires_at (those carry a price-lock promise; Rule 2 owns them).
   const agedResult = await db('estimates')
     .whereIn('status', ['sent', 'viewed'])
+    .whereNull('expires_at')
     .whereNotNull('sent_at')
     .where('sent_at', '<', ageCutoff)
     .whereNull('accepted_at')
