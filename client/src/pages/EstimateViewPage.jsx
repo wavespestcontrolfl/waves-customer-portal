@@ -2456,11 +2456,13 @@ export default function EstimateViewPage() {
       setError(null);
       return;
     }
-    if (manualScheduleAccept) {
+    if (manualScheduleAccept && serviceMode !== 'one_time') {
       // Held commercial accept: no slot to reserve — the team schedules after
       // approval. The sentinel keeps the review phase rendered (it's gated on
       // a truthy reservation) and tells ReviewPhase to show the manual-
-      // scheduling line instead of a slot + countdown.
+      // scheduling line instead of a slot + countdown. Recurring only: the
+      // one-time toggle is hidden for this mode (a one-time card-hold/deposit
+      // accept requires a booked appointment that can't exist here).
       setPaymentPreference(pref);
       setReservation({ manualScheduling: true });
       setCtaPhase('review');
@@ -3035,8 +3037,12 @@ export default function EstimateViewPage() {
           {/* One-time mode toggle — only rendered when admin opted this
               estimate into the one-time option AND there's a non-zero
               one-time price to offer. Default mode is 'recurring' so
-              estimates without the flag behave identically to before. */}
-          {!estimate.isOneTimeOnly && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
+              estimates without the flag behave identically to before.
+              Hidden for the no-slot (site-confirmation) commercial mode: its
+              ranged price is a recurring concept, and a one-time accept there
+              dead-ends — no slots exist, and the one-time card-hold/deposit
+              gates require a booked appointment the customer can't pick. */}
+          {!estimate.isOneTimeOnly && !manualScheduleAccept && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
@@ -3080,7 +3086,7 @@ export default function EstimateViewPage() {
             <ExistingAppointmentCard appointment={existingAppointment} />
           ) : null}
 
-          {(existingAppointment || (canShowSlotPicker && selectedSlotId) || manualScheduleAccept) ? (
+          {(existingAppointment || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
             <PaymentPreferenceButtons
               onSelect={handlePaymentChoice}
               disabled={ctaPhase === 'submitting'}
