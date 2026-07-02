@@ -152,12 +152,13 @@ describe('scheduler wiring', () => {
     expect(block.match(/attributeUnclaimedBridgeLeads/g)).toHaveLength(2);
   });
 
-  test('fallback is gated on a healthy scan — a failed Google call-report scan skips it', () => {
-    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 3500);
-    // scanFailed captured from applyBridge, checked BEFORE the fallback runs
-    expect(block).toMatch(/scanFailed = !!r\.scanFailed/);
-    expect(block).toMatch(/if \(scanFailed\)/);
-    expect(block.indexOf('if (scanFailed)')).toBeLessThan(block.indexOf('attributeUnclaimedBridgeLeads'));
+  test('fallback requires a COMPLETE healthy bridge pass — outage, row cap, or write failure blocks it', () => {
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 4500);
+    expect(block).toMatch(/bridgeBlockedReason = 'scan_failed'/);
+    expect(block).toMatch(/bridgeBlockedReason = 'row_cap_hit'/);
+    expect(block).toMatch(/bridgeBlockedReason = 'bridge_write_failed'/);
+    expect(block).toMatch(/if \(bridgeBlockedReason\)/);
+    expect(block.indexOf('if (bridgeBlockedReason)')).toBeLessThan(block.indexOf('attributeUnclaimedBridgeLeads'));
   });
 
   test('manual admin bridge-apply is serialized under the same lease', () => {

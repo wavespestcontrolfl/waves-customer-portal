@@ -2395,7 +2395,10 @@ function initScheduledJobs() {
     try {
       await runExclusive('google-call-bridge-organic', async () => {
         const googleAds = require('./ads/google-ads');
-        let scanFailed = false;
+        // The fallback below may only run after a COMPLETE, HEALTHY bridge
+        // pass — an organic row can never be flipped to paid later, so any
+        // doubt about the day's claim means the fallback waits a day.
+        let bridgeBlockedReason = null;
         if (googleAds.isConfigured()) {
           logger.info('Running: Google Ads call→campaign bridge');
           const callBridge = require('./ads/google-call-bridge');
@@ -2405,13 +2408,19 @@ function initScheduledJobs() {
           // calls would go unbridged and need pagination, a wider refactor that's
           // unwarranted today at ~0 Google-Ads-driven calls).
           const r = await callBridge.applyBridge({ days: 30, limit: 500 });
-          scanFailed = !!r.scanFailed;
-          if ((r.summary?.googleCalls || 0) >= 500 || (r.summary?.crmMainLineCalls || 0) >= 500) {
+          const capHit = (r.summary?.googleCalls || 0) >= 500 || (r.summary?.crmMainLineCalls || 0) >= 500;
+          if (capHit) {
             logger.warn('[google-call-bridge cron] 30-day scan hit the 500-row cap — older calls may be unbridged; add pagination if call volume grows');
           }
+          // Any write failure means a claim the bridge ATTEMPTED may not have
+          // repointed the lead yet — the sweep must not take it organic today.
+          const writeFailed = (r.skipped || []).some((m) => m?.skipReason === 'write_failed' || m?.skipReason === 'lead_retry_failed');
+          if (r.scanFailed) bridgeBlockedReason = 'scan_failed';
+          else if (capHit) bridgeBlockedReason = 'row_cap_hit';
+          else if (writeFailed) bridgeBlockedReason = 'bridge_write_failed';
           logger.info(`[google-call-bridge cron] ${JSON.stringify({
             configured: r.configured,
-            scanFailed,
+            scanFailed: !!r.scanFailed,
             applied: r.appliedCount,
             skipped: r.skippedCount,
             googleCalls: r.summary?.googleCalls,
@@ -2420,14 +2429,15 @@ function initScheduledJobs() {
         }
 
         // AFTER the bridge has had the day's claim: unclaimed bridge-target
-        // leads older than the window become organic. Runs when the Google Ads
-        // API is unconfigured (no bridge at all ⇒ no call could ever be
-        // claimed) but NOT when a configured scan FAILED — a blind scan claims
-        // nothing, and declaring boundary-age leads organic off it would
-        // permanently misreport any paid call the outage hid (the organic row
-        // can't be flipped later). Those leads simply age one more day.
-        if (scanFailed) {
-          logger.warn('[bridge-unclaimed] skipped — Google call-report scan failed this run; unclaimed leads age another day');
+        // leads older than the window become organic. DESIGN DECISION: this
+        // still runs when the Google Ads API is UNCONFIGURED — with no API
+        // there is no data source that could ever mark these calls paid, so
+        // gating on configuration would recreate the permanent hole this
+        // fallback exists to close (52 leads at ship time). A configured but
+        // incomplete/unhealthy pass (outage, row cap, write failure) DOES
+        // block it — those leads simply age one more day.
+        if (bridgeBlockedReason) {
+          logger.warn(`[bridge-unclaimed] skipped — bridge pass incomplete (${bridgeBlockedReason}); unclaimed leads age another day`);
         } else if (process.env.BRIDGE_UNCLAIMED_ORGANIC_DISABLED !== 'true') {
           const { attributeUnclaimedBridgeLeads } = require('./ads/call-attribution');
           const days = parseInt(process.env.BRIDGE_UNCLAIMED_ORGANIC_DAYS, 10) || 7;
