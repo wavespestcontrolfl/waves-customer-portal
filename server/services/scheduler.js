@@ -475,6 +475,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY IRRIGATION RECOMMENDATION EMAIL (gated: cronJobs AND irrigationWeeklyEmail)
+  // Monday 7:00am ET — emails lawn-care customers who entered weekly irrigation
+  // inches in the portal a "cut back" / "add water" / "you're on track"
+  // check-in based on last week's rainfall + ET₀ at their coordinates vs. the
+  // seasonal target for their grass, plus the upcoming week's rain forecast.
+  // Only rain-unknown weeks send nothing. The gate check lives INSIDE the
+  // sweep so the off state still shadow-logs candidate counts (booking-abandon
+  // pattern).
+  // =========================================================================
+  cron.schedule('0 7 * * 1', async () => {
+    try {
+      // runExclusive: customer-facing email sends — a deploy overlap must not
+      // double-sweep (idempotency keys are the second line of defense).
+      await runExclusive('irrigation-weekly-email', async () => {
+        const { runWeeklyIrrigationEmailSweep } = require('./irrigation-weekly-email');
+        const result = await runWeeklyIrrigationEmailSweep();
+        logger.info(`[irrigation-weekly-email] cron run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Weekly irrigation email sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY BACKLINK PROFILE → ASTRO sameAs SYNC (gated: cronJobs AND backlinkProfileSync)
   // Opens a PR adding verifier-confirmed (status='live') directory/citation/social
   // profile URLs from seo_link_prospects to the marketing site's
