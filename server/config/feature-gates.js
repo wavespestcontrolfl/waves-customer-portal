@@ -387,6 +387,15 @@ const gates = {
   // customer-facing messaging, so off by default in prod until verified.
   divertMicrodepositDunning: isProd ? process.env.GATE_MICRODEPOSIT_DUNNING_DIVERSION === 'true' : true,
 
+  // Weekly Irrigation Recommendation Email — Monday-morning "cut back / add
+  // water" email to lawn-care customers who entered weekly irrigation inches
+  // in the portal, based on last week's rainfall at their coordinates vs. the
+  // seasonal target. Customer-facing auto-send, so explicit opt-in in EVERY
+  // environment (off in dev/preview too) — a preview env with real SendGrid
+  // creds + cronJobs on must NOT email real customers. Until the gate is on,
+  // the Monday sweep only shadow-logs candidate counts and never sends.
+  irrigationWeeklyEmail: process.env.GATE_IRRIGATION_WEEKLY_EMAIL === 'true',
+
   // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
   // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"
   // checked, mint the visit's invoice, apply the prepaid amount as payment, and
