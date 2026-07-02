@@ -626,17 +626,22 @@ describe('estimate v2 service toggle adapter', () => {
   test('does not apply the recurring-customer one-time perk to the rodent guarantee', () => {
     // The guarantee is excluded from % discounts (RODENT.excludeFromPctDiscount).
     // A recurring customer must still pay the full per-tier price, not 15% off.
+    // recurringCustomer must ride the adapter OPTIONS (the real call path): the
+    // adapter always emits input.recurringCustomer, which the engine prefers
+    // over isRecurringCustomer — a post-translate isRecurringCustomer mutation
+    // is ignored and would let this regression pass vacuously.
     const input = translateV2CallToV1Input(
       baseProfile(),
       ['RODENT_GUARANTEE'],
       {
+        recurringCustomer: true,
         rgTrappingCompleted: true,
         rgExclusionCompleted: true,
         rgSanitationBaseline: true,
         rgNoActivityAfterFinalCheck: true,
       }
     );
-    input.isRecurringCustomer = true;
+    expect(input.recurringCustomer).toBe(true);
 
     const estimate = generateEstimate(input);
     const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
