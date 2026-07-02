@@ -449,6 +449,27 @@ export default function CreateProjectModal({
     [typeCfg],
   );
   const hasApplicatorFields = typeFieldKeys.has('applicator_name') && typeFieldKeys.has('applicator_fdacs_id');
+  // Picker options carry the technician id as the value so two techs who
+  // share a display name stay distinct picks (the label gets the license #
+  // appended only in that duplicate case, so the human can tell them apart).
+  const applicatorOptions = useMemo(() => {
+    const nameCounts = new Map();
+    applicators.forEach((a) => nameCounts.set(a.name, (nameCounts.get(a.name) || 0) + 1));
+    return applicators.map((a) => ({
+      value: a.id,
+      label: nameCounts.get(a.name) > 1 ? `${a.name} (${a.fdacsId || 'no license # on file'})` : a.name,
+    }));
+  }, [applicators]);
+  // The stored findings are the printed name + FDACS ID pair, so the select's
+  // current value is recovered by matching that pair back to a technician
+  // (an unmatched pair — restored free-text draft or hand-edited ID — falls
+  // back to showing the raw name).
+  const selectedApplicator = useMemo(() => (
+    applicators.find((a) => (
+      a.name === String(findings.applicator_name || '').trim()
+      && String(a.fdacsId || '') === String(findings.applicator_fdacs_id || '').trim()
+    )) || null
+  ), [applicators, findings.applicator_name, findings.applicator_fdacs_id]);
   const hasChemistryFields = typeFieldKeys.has('product_name')
     && typeFieldKeys.has('concentration_pct')
     && typeFieldKeys.has('gallons_applied');
@@ -644,11 +665,14 @@ export default function CreateProjectModal({
     setFindings(prev => ({ ...prev, [key]: value }));
   }
 
-  function handleApplicatorChange(name) {
-    const match = applicators.find((a) => a.name === name);
+  function handleApplicatorChange(value) {
+    // Option values are technician ids. No match means the injected
+    // current-value option (a restored draft's free-text name) — keep it as
+    // the name and leave the ID alone.
+    const match = applicators.find((a) => String(a.id) === String(value));
     setFindings(prev => ({
       ...prev,
-      applicator_name: name,
+      applicator_name: match ? match.name : value,
       // The FDACS ID prints beside the name on the certificate — re-bind it
       // on every pick (blank when none is on file) so a previous applicator's
       // number can never carry over to the new name.
@@ -1165,9 +1189,7 @@ export default function CreateProjectModal({
                 // the list loads (free text remains the offline fallback).
                 const isApplicatorPicker = field.key === 'applicator_name' && applicators.length > 0;
                 const renderField = isApplicatorPicker
-                  // Deduped: handleApplicatorChange resolves a name via first
-                  // match, so one option per name keeps pick and ID in step.
-                  ? { ...field, type: 'select', options: [...new Set(applicators.map((a) => a.name))] }
+                  ? { ...field, type: 'select', options: applicatorOptions }
                   : field;
                 return (
                 <div key={field.key}>
@@ -1214,7 +1236,12 @@ export default function CreateProjectModal({
                     field={renderField}
                     id={`create-project-${projectType}-${field.key}`}
                     name={`findings.${field.key}`}
-                    value={findings[field.key] || ''}
+                    value={isApplicatorPicker
+                      // The picker's value is the matched technician id; an
+                      // unmatched name+ID pair shows as the raw name via the
+                      // select's injected current-value option.
+                      ? (selectedApplicator ? selectedApplicator.id : (findings.applicator_name || ''))
+                      : (findings[field.key] || '')}
                     onChange={(value) => (
                       isApplicatorPicker ? handleApplicatorChange(value) : handleFindingChange(field.key, value)
                     )}

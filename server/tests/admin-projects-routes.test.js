@@ -1223,4 +1223,41 @@ describe('admin projects routes', () => {
       }));
     });
   });
+
+  test('applicators endpoint withholds expired license numbers and only defaults a tech to themselves', async () => {
+    const technicianRows = [
+      { id: 'tech-1', name: 'Adam Benetti', fl_applicator_license: 'JF111111', license_expiry: '2099-01-01' },
+      { id: 'tech-2', name: 'Jose Alvarado', fl_applicator_license: 'JF222222', license_expiry: '2020-01-01' },
+      { id: 'tech-3', name: 'Jacob Heaton', fl_applicator_license: 'JF333333', license_expiry: null },
+      { id: 'tech-4', name: 'Sam Rivera', fl_applicator_license: '', license_expiry: null },
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return chain({ select: jest.fn().mockResolvedValue(technicianRows) });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/applicators`, {
+        headers: { Authorization: 'Bearer tech-1' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.applicators).toEqual([
+        { id: 'tech-1', name: 'Adam Benetti', fdacsId: 'JF111111' },
+        // Expired license: the tech stays pickable, the number is withheld.
+        { id: 'tech-2', name: 'Jose Alvarado', fdacsId: null },
+        // No expiry on file counts as active (same as admin-compliance-v2).
+        { id: 'tech-3', name: 'Jacob Heaton', fdacsId: 'JF333333' },
+        { id: 'tech-4', name: 'Sam Rivera', fdacsId: null },
+      ]);
+      expect(body.defaultTechnicianId).toBe('tech-1');
+
+      const adminRes = await fetch(`${baseUrl}/admin/projects/applicators`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const adminBody = await adminRes.json();
+      expect(adminRes.status).toBe(200);
+      expect(adminBody.defaultTechnicianId).toBe(null);
+    });
+  });
 });

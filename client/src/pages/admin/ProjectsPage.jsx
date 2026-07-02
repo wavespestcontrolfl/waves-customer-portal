@@ -352,6 +352,9 @@ function evaluateProjectReadiness({
     const isBaitSystem = rawMethod === "Bait system";
     const isWoodTreatment = rawMethod === "Wood treatment (borate)";
     const needsGallons = !isBaitSystem && !isWoodTreatment;
+    // A finished-solution concentration only exists for liquid soil barriers
+    // — same rule as the server gate.
+    const needsConcentration = needsGallons;
     const hasArea =
       hasMeaningfulValue(findings?.square_footage) ||
       hasMeaningfulValue(findings?.linear_feet);
@@ -383,10 +386,12 @@ function evaluateProjectReadiness({
         ok: hasMeaningfulValue(productName),
       },
       {
-        label: "Active ingredient + concentration",
+        label: needsConcentration
+          ? "Active ingredient + concentration"
+          : "Active ingredient",
         ok:
           hasMeaningfulValue(findings?.active_ingredient) &&
-          hasMeaningfulValue(findings?.concentration_pct),
+          (!needsConcentration || hasMeaningfulValue(findings?.concentration_pct)),
       },
       {
         label: coverageLabel,

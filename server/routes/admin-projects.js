@@ -1012,13 +1012,21 @@ router.get('/applicators', async (req, res, next) => {
     const techs = await db('technicians')
       .where({ active: true })
       .orderBy('name')
-      .select('id', 'name', 'fl_applicator_license');
+      .select('id', 'name', 'fl_applicator_license', 'license_expiry');
+    const now = new Date();
     res.json({
-      applicators: techs.map((t) => ({
-        id: t.id,
-        name: t.name,
-        fdacsId: String(t.fl_applicator_license || '').trim() || null,
-      })),
+      applicators: techs.map((t) => {
+        // Same expiry rule as admin-compliance-v2: a past license_expiry is
+        // expired, no expiry on file counts as active. An expired number is
+        // withheld (never auto-filled onto a state compliance certificate) —
+        // the tech stays pickable by name and types their renewed number.
+        const expired = t.license_expiry && new Date(t.license_expiry) < now;
+        return {
+          id: t.id,
+          name: t.name,
+          fdacsId: expired ? null : (String(t.fl_applicator_license || '').trim() || null),
+        };
+      }),
       // Admins create certificates on behalf of the treating tech, so only a
       // tech's own session defaults the applicator to themselves.
       defaultTechnicianId: isAdmin(req) ? null : req.technicianId || null,
