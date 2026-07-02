@@ -2845,13 +2845,16 @@ const CallRecordingProcessor = {
       if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
       // Catalog-anchored booking fields: the gate validated this extraction, so
       // the booking must use ITS specific service / quoted price / follow-up
-      // signal, not the unvalidated legacy extraction's.
-      if (v2Flat.specific_service_name) extracted.specific_service_name = v2Flat.specific_service_name;
-      if (typeof v2Flat.quoted_price === 'number') extracted.quoted_price = v2Flat.quoted_price;
-      if (v2Flat.follow_up_visit_mentioned) extracted.follow_up_visit_mentioned = true;
-      if (v2Flat.follow_up_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.follow_up_date_time)) {
-        extracted.follow_up_date_time = v2Flat.follow_up_date_time.slice(0, 16);
-      }
+      // signal — INCLUDING null/false clears. A truthy-only merge would let a
+      // stale unvalidated V1 value (hallucinated price, phantom follow-up)
+      // drive catalog selection, estimated_price, or follow-up creation on a
+      // V2-approved booking.
+      extracted.specific_service_name = v2Flat.specific_service_name || null;
+      extracted.quoted_price = typeof v2Flat.quoted_price === 'number' ? v2Flat.quoted_price : null;
+      extracted.follow_up_visit_mentioned = v2Flat.follow_up_visit_mentioned === true;
+      extracted.follow_up_date_time = (v2Flat.follow_up_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.follow_up_date_time))
+        ? v2Flat.follow_up_date_time.slice(0, 16)
+        : null;
       // (AV-normalized address was already written into `extracted` at the gate
       // approval branch above, before the customer/lead upsert — see there.)
       logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
@@ -3147,7 +3150,19 @@ const CallRecordingProcessor = {
                       parent_service_id: created.id,
                       status: 'pending',
                       customer_confirmed: false,
-                      estimated_price: priceInfo.price != null ? 0 : null,
+                      // Same no-charge shape as the completion-CTA follow-up
+                      // flow (admin-dispatch schedule-followup): $0 +
+                      // followup_included bypasses the one-time billing
+                      // pre-gate, create_invoice_on_complete=false blocks the
+                      // completion invoice, and followup_source_service_id's
+                      // partial unique index prevents a second follow-up from
+                      // being double-booked off this visit later. Without
+                      // these, completion billing can fall back to a monthly
+                      // rate and invoice an included second treatment.
+                      estimated_price: 0,
+                      followup_included: true,
+                      followup_source_service_id: created.id,
+                      create_invoice_on_complete: false,
                       estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
                       notes: [
                         'Follow-up treatment (visit 2) booked from phone call — confirm exact time with the customer before dispatch.',

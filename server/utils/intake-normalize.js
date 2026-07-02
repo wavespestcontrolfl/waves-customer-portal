@@ -140,12 +140,21 @@ function normalizeCallPhone(extractedPhone, callerPhone) {
   return normalizeE164Phone(extractedPhone) || normalizeE164Phone(callerPhone);
 }
 
-// Model-emitted quoted price: a finite positive number (or numeric string) or
-// null. Range plausibility is enforced at booking time by the call-booking
-// catalog's sanitizer — this only guards type garbage out of the extraction.
+// Model-emitted quoted price: a finite positive number, or a string holding
+// EXACTLY ONE numeric amount ("$350", "1,350.50"). Strings with multiple
+// amounts ("50 to 60") are ranges, which the prompt requires to be null —
+// naive digit-stripping would inflate them into 5060. Range plausibility
+// bounds are enforced at booking time by the call-booking catalog's sanitizer.
 function normalizeQuotedPrice(value) {
   if (value === null || value === undefined || value === '') return null;
-  const n = typeof value === 'string' ? Number(value.replace(/[^0-9.]/g, '')) : Number(value);
+  let n;
+  if (typeof value === 'number') {
+    n = value;
+  } else {
+    const tokens = String(value).replace(/,/g, '').match(/\d+(?:\.\d+)?/g) || [];
+    if (tokens.length !== 1) return null;
+    n = Number(tokens[0]);
+  }
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 

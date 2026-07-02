@@ -147,8 +147,17 @@ describe('resolveCallBookingPrice', () => {
   test('numeric strings are coerced', () => {
     expect(sanitizeQuotedCallPrice('$350')).toBe(350);
     expect(sanitizeQuotedCallPrice('350.50')).toBe(350.5);
+    expect(sanitizeQuotedCallPrice('$1,350')).toBe(1350);
     expect(sanitizeQuotedCallPrice('abc')).toBeNull();
     expect(sanitizeQuotedCallPrice(null)).toBeNull();
+  });
+
+  test('range-like strings are rejected, never concatenated into an inflated price', () => {
+    expect(sanitizeQuotedCallPrice('50 to 60')).toBeNull();
+    expect(sanitizeQuotedCallPrice('350 or 450')).toBeNull();
+    expect(sanitizeQuotedCallPrice('2 treatments at 175')).toBeNull();
+    expect(resolveCallBookingPrice({ quotedPrice: '50 to 60', catalogRow: roach }))
+      .toEqual({ price: 350, source: 'catalog' });
   });
 });
 
@@ -385,6 +394,10 @@ describe('extraction plumbing for the new booking fields', () => {
     const junk = normalizeCallExtraction({ quoted_price: 'call me', follow_up_visit_mentioned: 'yes' });
     expect(junk.quoted_price).toBeNull();
     expect(junk.follow_up_visit_mentioned).toBe(false);
+
+    // Ranges must not collapse into a concatenated number ("50 to 60" -> 5060).
+    expect(normalizeCallExtraction({ quoted_price: '50 to 60' }).quoted_price).toBeNull();
+    expect(normalizeCallExtraction({ quoted_price: '$1,350' }).quoted_price).toBe(1350);
   });
 
   test('extraction prompt lists the bookable catalog when provided', () => {

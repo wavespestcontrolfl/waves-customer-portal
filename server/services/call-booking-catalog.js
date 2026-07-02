@@ -115,7 +115,17 @@ function resolveCallBookingCatalogService({ extracted = {}, transcription = '', 
 
 function sanitizeQuotedCallPrice(value) {
   if (value === null || value === undefined || value === '') return null;
-  const n = typeof value === 'string' ? Number(value.replace(/[^0-9.]/g, '')) : Number(value);
+  let n;
+  if (typeof value === 'number') {
+    n = value;
+  } else {
+    // Exactly one numeric amount ("$350", "1,350.50"). Multi-amount strings
+    // ("50 to 60") are ranges, not an agreed price — digit-stripping would
+    // inflate them into 5060.
+    const tokens = String(value).replace(/,/g, '').match(/\d+(?:\.\d+)?/g) || [];
+    if (tokens.length !== 1) return null;
+    n = Number(tokens[0]);
+  }
   if (!Number.isFinite(n)) return null;
   if (n < MIN_QUOTED_CALL_PRICE || n > MAX_QUOTED_CALL_PRICE) return null;
   return Math.round(n * 100) / 100;
