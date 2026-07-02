@@ -1013,14 +1013,18 @@ router.get('/applicators', async (req, res, next) => {
       .where({ active: true })
       .orderBy('name')
       .select('id', 'name', 'fl_applicator_license', 'license_expiry');
-    const now = new Date();
+    const todayEt = etDateString();
     res.json({
       applicators: techs.map((t) => {
-        // Same expiry rule as admin-compliance-v2: a past license_expiry is
-        // expired, no expiry on file counts as active. An expired number is
-        // withheld (never auto-filled onto a state compliance certificate) —
-        // the tech stays pickable by name and types their renewed number.
-        const expired = t.license_expiry && new Date(t.license_expiry) < now;
+        // Same expiry rule as admin-compliance-v2 (past = expired, no expiry
+        // on file = active), but compared as ET calendar dates: the license
+        // is good through the end of its expiry day, and a date-only column
+        // must not flip early because UTC midnight lands at 8pm ET. An
+        // expired number is withheld (never auto-filled onto a state
+        // compliance certificate) — the tech stays pickable by name and
+        // types their renewed number.
+        const expiryDate = normalizeDateOnly(t.license_expiry);
+        const expired = Boolean(expiryDate && expiryDate < todayEt);
         return {
           id: t.id,
           name: t.name,

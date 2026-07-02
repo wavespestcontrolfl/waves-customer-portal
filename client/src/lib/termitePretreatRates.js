@@ -18,7 +18,11 @@
 
 const HORIZONTAL_GAL_PER_SQFT = 1 / 10;
 const VERTICAL_GAL_PER_LF_PER_FT_DEPTH = 4 / 10;
-const DEFAULT_TRENCH_DEPTH_FT = 1;
+// 6 in / 0.5 ft is the label-standard residential trench depth — the same
+// default the pricing engine's finished-gallons math uses
+// (server/services/pricing-engine/constants.js defaultTrenchDepthFt), so a
+// certificate never prints different chemistry than the priced work order.
+const DEFAULT_TRENCH_DEPTH_FT = 0.5;
 
 export const PRETREAT_PRODUCT_RATES = {
   'termidor sc': {
@@ -94,7 +98,7 @@ function formatGallons(value) {
  *     — soil liquid. `gallons` is null when neither sq ft nor linear feet
  *       is filled in yet (concentration still applies). `assumedDepth` is
  *       true when linear feet were given without a trench depth and the
- *       1-ft label basis was used.
+ *       0.5-ft label-standard depth was used.
  */
 export function computePretreatChemistry({ productName, squareFootage, linearFeet, trenchDepthFt } = {}) {
   const product = lookupPretreatProduct(productName);
@@ -118,7 +122,7 @@ export function computePretreatChemistry({ productName, squareFootage, linearFee
   if (sqFt) noteParts.push(`${formatGallons(horizontalGallons)} gal horizontal (1 gal / 10 sq ft)`);
   if (lf) {
     noteParts.push(
-      `${formatGallons(verticalGallons)} gal vertical (4 gal / 10 LF per ft of depth${assumedDepth ? ', assuming 1 ft depth' : ''})`,
+      `${formatGallons(verticalGallons)} gal vertical (4 gal / 10 LF per ft of depth${assumedDepth ? ', assuming the 0.5 ft label-standard depth' : ''})`,
     );
   }
 

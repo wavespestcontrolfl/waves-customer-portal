@@ -58,7 +58,7 @@ describe("computePretreatChemistry", () => {
     expect(result.assumedDepth).toBe(false);
   });
 
-  it("combines horizontal + vertical and assumes 1 ft depth when blank", () => {
+  it("combines horizontal + vertical and assumes the 0.5 ft label-standard depth when blank", () => {
     const result = computePretreatChemistry({
       productName: "Premise 2",
       squareFootage: "1,500 sq ft",
@@ -67,10 +67,12 @@ describe("computePretreatChemistry", () => {
     expect(result.status).toBe("ok");
     expect(result.concentrationPct).toBe("0.050");
     expect(result.horizontalGallons).toBe(150);
-    expect(result.verticalGallons).toBe(88); // 220/10 * 4 * 1
-    expect(result.gallons).toBe(238);
+    // Same 0.5 ft default as the pricing engine's finished-gallons math —
+    // the certificate must not print different chemistry than the work order.
+    expect(result.verticalGallons).toBe(44); // 220/10 * 4 * 0.5
+    expect(result.gallons).toBe(194);
     expect(result.assumedDepth).toBe(true);
-    expect(result.note).toMatch(/assuming 1 ft depth/);
+    expect(result.note).toMatch(/assuming the 0.5 ft label-standard depth/);
   });
 
   it("returns concentration with null gallons when no dimensions are entered", () => {

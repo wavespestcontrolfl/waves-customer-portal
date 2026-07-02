@@ -87,6 +87,7 @@ jest.mock('../services/property-lookup/ai-property-lookup', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+const { etDateString } = require('../utils/datetime-et');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const ProjectEmail = require('../services/project-email');
 const projectsRouter = require('../routes/admin-projects');
@@ -1230,6 +1231,9 @@ describe('admin projects routes', () => {
       { id: 'tech-2', name: 'Jose Alvarado', fl_applicator_license: 'JF222222', license_expiry: '2020-01-01' },
       { id: 'tech-3', name: 'Jacob Heaton', fl_applicator_license: 'JF333333', license_expiry: null },
       { id: 'tech-4', name: 'Sam Rivera', fl_applicator_license: '', license_expiry: null },
+      // Expires today (ET): still valid through the end of the expiry day —
+      // the date-only comparison must not flip early at UTC midnight.
+      { id: 'tech-5', name: 'Dana Ortiz', fl_applicator_license: 'JF555555', license_expiry: etDateString() },
     ];
     db.mockImplementation((table) => {
       if (table === 'technicians') return chain({ select: jest.fn().mockResolvedValue(technicianRows) });
@@ -1249,6 +1253,7 @@ describe('admin projects routes', () => {
         // No expiry on file counts as active (same as admin-compliance-v2).
         { id: 'tech-3', name: 'Jacob Heaton', fdacsId: 'JF333333' },
         { id: 'tech-4', name: 'Sam Rivera', fdacsId: null },
+        { id: 'tech-5', name: 'Dana Ortiz', fdacsId: 'JF555555' },
       ]);
       expect(body.defaultTechnicianId).toBe('tech-1');
 
