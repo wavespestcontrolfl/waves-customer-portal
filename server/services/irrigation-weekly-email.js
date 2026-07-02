@@ -40,8 +40,10 @@ const TEMPLATE_ADD_WATER = 'irrigation.weekly_add_water';
 
 // Sequential per-customer weather fetches; Open-Meteo caching in
 // application-conditions dedupes nearby customers (coords keyed at 2 decimals).
-// Hard cap so a runaway query can never blast the whole book of business.
-const MAX_SENDS_PER_RUN = 500;
+// Hard cap on send ATTEMPTS (counted before the provider call, so a downstream
+// failure after SendGrid accepts still consumes the budget) — a runaway query
+// can never blast the whole book of business.
+const MAX_SEND_ATTEMPTS_PER_RUN = 500;
 
 function isEmailLike(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim().toLowerCase());
@@ -197,7 +199,7 @@ function buildWeeklyEmailDecision({
   const differential = Math.abs(numberOrNull(advice.differentialInchesPerWeek) ?? 0);
   const payload = {
     first_name: String(firstName || '').trim() || 'there',
-    grass_label: grassTypeLabel(grassType) || 'St. Augustine',
+    grass_label: customerGrassLabel(grassType),
     week_ending: weekEnding,
     rain_last_week: formatInches(rainfallInches7d),
     irrigation_inches: formatInches(irrigationInchesPerWeek),
@@ -241,6 +243,11 @@ async function findEligibleCustomers() {
     })
     .leftJoin('notification_prefs as np', 'np.customer_id', 'c.id')
     .whereRaw('np.email_enabled IS DISTINCT FROM false')
+    // This email IS a seasonal lawn tip — the portal labels seasonal_tips
+    // "Watering, mowing height, and care tips for SW Florida" — so the
+    // dedicated opt-out is honored too (the SMS tip path gates on the same
+    // pref in twilio.js).
+    .whereRaw('np.seasonal_tips IS DISTINCT FROM false')
     .where('c.active', true)
     .whereNull('c.deleted_at')
     .whereNotNull('c.email')
@@ -287,6 +294,16 @@ function resolveGrassType(candidate = {}) {
   return candidate.grass_type || normalizeGrassType(candidate.lawn_type) || null;
 }
 
+// Customer-facing grass label. A real grass renders by name ("your St.
+// Augustine"); unknown / mixed / missing render as "your lawn" — never "your
+// Unknown" (turf profiles can legitimately store grass_type='unknown'), and
+// never a named-grass claim we can't back.
+const CUSTOMER_GRASS_LABELS = new Set(['st_augustine', 'bermuda', 'zoysia', 'bahia']);
+function customerGrassLabel(grassType) {
+  const key = String(grassType || '').trim().toLowerCase();
+  return CUSTOMER_GRASS_LABELS.has(key) ? grassTypeLabel(key) : 'lawn';
+}
+
 async function logEmailAttempt({ customerId, templateKey, status, providerMessageId = null, sentAt = null, failureReason = null, weekEnding }) {
   try {
     await db('customer_interactions').insert({
@@ -323,7 +340,7 @@ async function logEmailAttempt({ customerId, templateKey, status, providerMessag
  * or overlapping deploy tick dedupes inside the template library, and
  * runExclusive in the cron wiring prevents concurrent sweeps.
  */
-async function runWeeklyIrrigationEmailSweep({ now = new Date() } = {}) {
+async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts = MAX_SEND_ATTEMPTS_PER_RUN } = {}) {
   const weekEnding = lastCompletedWeekEnding(now);
   const candidates = await findEligibleCustomers();
 
@@ -336,6 +353,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date() } = {}) {
     shadow: false,
     weekEnding,
     candidates: candidates.length,
+    attempted: 0,
     sent: 0,
     deduped: 0,
     blocked: 0,
@@ -344,7 +362,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date() } = {}) {
   };
 
   for (const customer of candidates) {
-    if (summary.sent >= MAX_SENDS_PER_RUN) {
+    if (summary.attempted >= maxSendAttempts) {
       summary.skipped.capped += 1;
       continue;
     }
@@ -389,6 +407,9 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date() } = {}) {
         .update(String(customer.email).trim().toLowerCase())
         .digest('hex')
         .slice(0, 16);
+      // Consume the cap BEFORE the provider call: an error thrown after
+      // SendGrid accepts (audit/DB failure) must still count as an attempt.
+      summary.attempted += 1;
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: decision.templateKey,
         to: String(customer.email).trim(),
@@ -399,6 +420,9 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date() } = {}) {
         idempotencyKey: `irrigation.weekly:${customer.id}:${weekEnding}:${recipientToken}`,
         categories: ['irrigation', 'irrigation_weekly', decision.reason],
         suppressionGroupKey: SUPPRESSION_GROUP,
+        // sendOne must not log the raw SendGrid body (it can echo the
+        // recipient address) — this sweep logs sanitizeFailureReason instead.
+        suppressProviderErrorLog: true,
       });
 
       if (result.deduped) {
@@ -454,5 +478,5 @@ module.exports = {
   fetchUpcomingWeekRainForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
-  _private: { forecastLine, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, sanitizeFailureReason },
+  _private: { forecastLine, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason },
 };

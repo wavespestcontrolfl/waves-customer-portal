@@ -664,6 +664,12 @@ async function sendTemplate({
   categories = [],
   attachments = [],
   suppressionGroupKey,
+  // PII-sensitive bulk callers (e.g. the weekly irrigation sweep) set this so
+  // sendOne does NOT log the raw SendGrid response body — provider rejections
+  // can echo the recipient address, and email addresses in logs are a P1. The
+  // caller is responsible for logging a sanitized reason itself; the thrown
+  // error (status/body) still propagates for classification.
+  suppressProviderErrorLog = false,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   let template;
@@ -925,6 +931,7 @@ async function sendTemplate({
       // SendGrid returns no X-Message-Id). The attempt token lets the webhook
       // reject a stale prior-attempt event. See email-bounce-recovery.js.
       customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken },
+      suppressErrorLog: suppressProviderErrorLog,
     });
     // Record provider id + send time, and advance status to 'sent' ONLY while
     // still 'queued' — a fast delivery/bounce webhook (resolvable via

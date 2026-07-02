@@ -162,6 +162,21 @@ describe('resolveGrassType', () => {
   });
 });
 
+describe('customerGrassLabel', () => {
+  const { customerGrassLabel } = _private;
+
+  test('real grasses render by name', () => {
+    expect(customerGrassLabel('st_augustine')).toBe('St. Augustine');
+    expect(customerGrassLabel('bahia')).toBe('Bahia');
+  });
+
+  test("unknown / mixed / missing render as 'lawn' — never 'your Unknown'", () => {
+    expect(customerGrassLabel('unknown')).toBe('lawn');
+    expect(customerGrassLabel('mixed')).toBe('lawn');
+    expect(customerGrassLabel(null)).toBe('lawn');
+  });
+});
+
 describe('sanitizeFailureReason', () => {
   const { sanitizeFailureReason } = _private;
 
@@ -292,6 +307,9 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(call.suppressionGroupKey).toBe('service_operational');
     expect(call.idempotencyKey).toMatch(new RegExp(`^irrigation\\.weekly:cust-1:${WEEK_ENDING}:[0-9a-f]{16}$`));
     expect(call.payload.total_inches).toBe('3');
+    // Raw SendGrid bodies can echo the address — the transport log must be
+    // suppressed; this sweep logs its own sanitized reason.
+    expect(call.suppressProviderErrorLog).toBe(true);
 
     // Audit trail row recorded for the send.
     expect(inserts.some((row) => row.interaction_type === 'email_outbound')).toBe(true);
@@ -355,6 +373,24 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(summary.sent).toBe(0);
     expect(summary.deduped).toBe(1);
+  });
+
+  test('the run cap counts ATTEMPTS, not successes — downstream failures cannot bypass it', async () => {
+    isEnabled.mockReturnValue(true);
+    db.mockImplementation((table) => makeBuilder(
+      String(table).startsWith('customers')
+        ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
+        : {},
+    ));
+    // The first attempt throws AFTER the provider might have accepted (e.g. a
+    // DB/audit failure). sent stays 0, but the attempt must consume the cap so
+    // the second candidate is capped, not attempted.
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('audit write failed'));
+    const summary = await runWeeklyIrrigationEmailSweep({ now: NOW, maxSendAttempts: 1 });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(summary.attempted).toBe(1);
+    expect(summary.failed).toBe(1);
+    expect(summary.skipped.capped).toBe(1);
   });
 
   test('per-customer failure is contained: one bad send does not abort the sweep', async () => {
