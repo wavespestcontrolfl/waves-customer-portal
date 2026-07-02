@@ -734,7 +734,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         zip: quoteZip || null,
         service_interest: serviceInterest,
         monthly_value: leadMonthlyValue,
-        extracted_data: extractedData,
+        // quote_wizard leads keep the historical replace semantics (each stage
+        // snapshot supersedes the last). A lead the wizard ATTACHED to via the
+        // voicemail text-back prefill token is a call-pipeline lead
+        // (lead_type voicemail/inbound_call) — MERGE so the voicemail
+        // provenance and the text-back one-shot stamp survive this stage, same
+        // rule as the attach in public-property-lookup.js. CASE keeps the
+        // ownership-predicated UPDATE atomic (no read-then-write).
+        extracted_data: db.raw(
+          "CASE WHEN lead_type = 'quote_wizard' THEN ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
+          [extractedData, extractedData]
+        ),
         updated_at: new Date(),
       };
       if (gclid) updateFields.gclid = gclid;

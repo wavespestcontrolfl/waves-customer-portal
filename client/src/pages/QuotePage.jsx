@@ -355,6 +355,22 @@ export default function QuotePage({ serviceSlug = '' }) {
     catch { return false; }
   });
 
+  // Voicemail text-back prefill — /estimate?vlead=<leadId>&vt=<token>, minted
+  // ONLY by the voicemail quote-link SMS. Locked at mount like `addons`. The
+  // pair is exchanged for that lead's own contact fields so the form arrives
+  // prefilled, and rides every submit path so the wizard's lead capture
+  // UPDATES the same call-pipeline lead instead of minting a duplicate. Any
+  // failure (expired token, network) degrades to the normal blank wizard.
+  const [prefillAuth] = useState(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const p = new URLSearchParams(window.location.search);
+      const vlead = p.get('vlead');
+      const vt = p.get('vt');
+      return vlead && vt ? { leadId: vlead, token: vt } : null;
+    } catch { return null; }
+  });
+
   const inputRef = useRef(null);
   const submitInFlightRef = useRef(false);
 
@@ -373,6 +389,32 @@ export default function QuotePage({ serviceSlug = '' }) {
     setNewsletterOptIn(false);
     setSubscribeStatus('idle');
   }, [normalizedServiceSlug]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Exchange the prefill pair for the lead's contact fields. Fill-blank-only:
+  // never clobber anything the visitor already typed. A voicemail lead often
+  // has just a first name + phone — partial prefill is the expected case.
+  useEffect(() => {
+    if (!prefillAuth) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/public/estimator/lead-prefill?lead_id=${encodeURIComponent(prefillAuth.leadId)}&token=${encodeURIComponent(prefillAuth.token)}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        if (cancelled || !d) return;
+        const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
+        const phoneDigits = String(d.phone || '').replace(/\D/g, '').slice(-10);
+        setIntake(prev => ({
+          ...prev,
+          ...(name && !prev.name ? { name } : {}),
+          ...(d.email && !prev.email ? { email: d.email } : {}),
+          ...(phoneDigits.length === 10 && !prev.phone ? { phone: phoneDigits } : {}),
+          ...(d.address && !prev.address ? { address: d.address } : {}),
+        }));
+      } catch { /* prefill is best-effort */ }
+    })();
+    return () => { cancelled = true; };
+  }, [prefillAuth]);
 
   useEffect(() => {
     if (!serviceConfig) {
@@ -521,6 +563,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           frequency: intake.frequency,
           service_interest: selectedServiceInterest(intake),
           attribution: attribution || undefined,
+          ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
         }),
       });
       const d = await r.json();
@@ -581,6 +624,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           service_interest: otherLabel,
           source: normalizedServiceSlug ? `quote-page-${normalizedServiceSlug}` : 'quote-page-divert',
           attribution: attribution || undefined,
+          ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -620,6 +664,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           service_interest: selectedServiceInterest(intake),
           source: `quote-page-${intake.frequency}`,
           attribution: attribution || undefined,
+          ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

@@ -1,0 +1,262 @@
+/**
+ * Voicemail lead text-back (services/voicemail-lead-sms.js).
+ *
+ * Pins the send-gate ladder in order: feature gate (fails closed), one-text-
+ * per-phone-ever sms_log dedupe (read failure = fail closed), the atomic
+ * per-lead claim, the landline pre-check (fails open on lookup errors), the
+ * no-token-secret fail-closed, the template kill switch, and the three
+ * sendCustomerMessage outcomes (sent / quiet-hours re-queue onto the
+ * scheduled-SMS rail / terminal block keeps the claim). Mirrors the
+ * booking-abandon-recovery mock harness.
+ */
+
+jest.mock('../models/db', () => {
+  const mockDb = jest.fn();
+  mockDb.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  return mockDb;
+});
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+19415550000') }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(async () => ({ sent: true })),
+}));
+jest.mock('../services/sms-template-renderer', () => ({
+  renderSmsTemplate: jest.fn(async (key, vars) => `Hi ${vars.first_name} — ${vars.service_label}: ${vars.quote_url}`),
+}));
+jest.mock('../services/messaging/validators/line-type', () => ({
+  readCachedLineType: jest.fn(async () => ({ state: 'miss' })),
+  cacheLineType: jest.fn(async () => {}),
+  lookupLineType: jest.fn(async () => 'mobile'),
+}));
+jest.mock('../utils/lead-prefill-token', () => ({
+  mintLeadPrefillToken: jest.fn(() => '1760000000.test-signature'),
+}));
+jest.mock('../services/short-url', () => ({
+  shortenOrPassthrough: jest.fn(async (url) => url),
+}));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const db = require('../models/db');
+const { isEnabled } = require('../config/feature-gates');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const lineType = require('../services/messaging/validators/line-type');
+const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
+const { sendVoicemailQuoteLink, MESSAGE_TYPE } = require('../services/voicemail-lead-sms');
+
+const LEAD_ID = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
+const PHONE = '+19415550101';
+
+// Per-table scripting: firstResults queue feeds .first(), updateResults queue
+// feeds .update() (claim = affected-row count), inserts/updates are recorded.
+let state;
+
+function makeBuilder(table) {
+  const b = {};
+  for (const m of ['where', 'whereRaw', 'whereNotIn', 'whereNull', 'select']) {
+    b[m] = jest.fn(() => b);
+  }
+  b.first = jest.fn(() => {
+    const q = state.firstResults[table] || [];
+    const entry = q.length ? q.shift() : null;
+    if (entry instanceof Error) return Promise.reject(entry);
+    return Promise.resolve(entry);
+  });
+  b.update = jest.fn((payload) => {
+    state.updates.push({ table, payload });
+    const q = state.updateResults[table] || [];
+    return Promise.resolve(q.length ? q.shift() : 1);
+  });
+  b.insert = jest.fn((payload) => {
+    state.inserts.push({ table, payload });
+    if (state.insertError && state.insertError[table]) return Promise.reject(state.insertError[table]);
+    return Promise.resolve([{ id: 'row-1' }]);
+  });
+  return b;
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  state = { firstResults: {}, updateResults: {}, updates: [], inserts: [], insertError: {} };
+  db.mockImplementation((table) => makeBuilder(table));
+  db.raw.mockImplementation((sql, bindings) => ({ __raw: sql, bindings }));
+  isEnabled.mockReturnValue(true);
+  // clearAllMocks does NOT reset mockResolvedValue implementations — restore
+  // every default so a per-test override can't leak into the next test.
+  lineType.readCachedLineType.mockResolvedValue({ state: 'miss' });
+  lineType.lookupLineType.mockResolvedValue('mobile');
+  lineType.cacheLineType.mockResolvedValue(undefined);
+  mintLeadPrefillToken.mockReturnValue('1760000000.test-signature');
+  renderSmsTemplate.mockImplementation(async (key, vars) => `Hi ${vars.first_name} — ${vars.service_label}: ${vars.quote_url}`);
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+});
+
+function args(overrides = {}) {
+  return {
+    leadId: LEAD_ID,
+    extracted: { first_name: 'dana', matched_service: 'termite' },
+    call: { twilio_call_sid: 'CA-test-1' },
+    phone: PHONE,
+    ...overrides,
+  };
+}
+
+function stampsFor(table = 'leads') {
+  return state.updates
+    .filter((u) => u.table === table && u.payload.extracted_data?.bindings)
+    .map((u) => u.payload.extracted_data.bindings[0]);
+}
+
+describe('voicemail lead text-back gates', () => {
+  test('feature gate off — skipped before any db touch (fails closed everywhere)', async () => {
+    isEnabled.mockReturnValue(false);
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'gate_off' });
+    expect(db).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('missing lead or phone — skipped', async () => {
+    expect(await sendVoicemailQuoteLink(args({ leadId: null }))).toEqual({ sent: false, skipped: 'missing_input' });
+    expect(await sendVoicemailQuoteLink(args({ phone: null }))).toEqual({ sent: false, skipped: 'missing_input' });
+  });
+
+  test('one text per phone number ever — a prior sms_log row skips before the claim', async () => {
+    state.firstResults.sms_log = [{ id: 'prior-sms' }];
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'already_sent_to_phone' });
+    // No claim attempted — the leads table was never touched.
+    expect(state.updates.filter((u) => u.table === 'leads')).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('dedupe read failure fails CLOSED — never risk a duplicate automated text', async () => {
+    state.firstResults.sms_log = [new Error('db down')];
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'dedupe_read_failed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('atomic claim lost (0 rows) — concurrent processor already owns the send', async () => {
+    state.updateResults.leads = [0];
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'already_claimed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('landline pre-check blocks the send and stamps the lead', async () => {
+    lineType.readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'landline' });
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'landline' });
+    expect(lineType.lookupLineType).not.toHaveBeenCalled(); // cache hit = no paid Lookup
+    expect(stampsFor()).toContain('blocked');
+    const notes = state.inserts.filter((i) => i.table === 'lead_activities');
+    expect(notes).toHaveLength(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('cache miss does one paid Lookup and caches it; mobile proceeds', async () => {
+    lineType.readCachedLineType.mockResolvedValue({ state: 'miss' });
+    lineType.lookupLineType.mockResolvedValue('mobile');
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: true });
+    expect(lineType.lookupLineType).toHaveBeenCalledWith(PHONE);
+    expect(lineType.cacheLineType).toHaveBeenCalledWith(PHONE, 'mobile');
+  });
+
+  test('line-type pre-check failure fails OPEN — the reactive 30006 suppression is the backstop', async () => {
+    lineType.readCachedLineType.mockRejectedValue(new Error('lookup exploded'));
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: true });
+  });
+
+  test('no prefill-token secret — fails closed instead of texting a broken link', async () => {
+    mintLeadPrefillToken.mockReturnValue(null);
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'no_token_secret' });
+    expect(stampsFor()).toContain('failed');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('template missing or admin-disabled — kill switch respected', async () => {
+    renderSmsTemplate.mockResolvedValue(undefined);
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'template_disabled' });
+    expect(stampsFor()).toContain('blocked');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('voicemail lead text-back send outcomes', () => {
+  test('happy path — sends under the missed_call_followup policy with the prefill link', async () => {
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: true });
+
+    expect(renderSmsTemplate).toHaveBeenCalledWith(MESSAGE_TYPE, expect.objectContaining({
+      first_name: 'Dana', // capitalized
+      service_label: 'termite',
+      quote_url: expect.stringContaining(`vlead=${encodeURIComponent(LEAD_ID)}`),
+    }), expect.any(Object));
+    expect(renderSmsTemplate.mock.calls[0][1].quote_url).toContain('vt=');
+
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: PHONE,
+      audience: 'lead',
+      purpose: 'missed_call_followup',
+      identityTrustLevel: 'phone_provided_unverified',
+      consentBasis: expect.objectContaining({ status: 'transactional_allowed' }),
+    }));
+
+    expect(stampsFor()).toContain('sent');
+    const activity = state.inserts.find((i) => i.table === 'lead_activities');
+    expect(activity.payload.activity_type).toBe('sms_sent');
+    // PII discipline: the activity masks the phone.
+    expect(activity.payload.description).not.toContain(PHONE);
+    expect(activity.payload.description).toContain('***0101');
+  });
+
+  test('missing name/service falls back to "there" + "pest control"', async () => {
+    await sendVoicemailQuoteLink(args({ extracted: {} }));
+    expect(renderSmsTemplate).toHaveBeenCalledWith(MESSAGE_TYPE, expect.objectContaining({
+      first_name: 'there',
+      service_label: 'pest control',
+    }), expect.any(Object));
+  });
+
+  test('quiet-hours hold re-queues onto the scheduled-SMS rail for the next allowed morning', async () => {
+    const nextAllowedAt = '2026-07-02T12:00:00.000Z';
+    sendCustomerMessage.mockResolvedValue({
+      sent: false, blocked: true, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt,
+    });
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, scheduled: true, nextAllowedAt });
+
+    const queued = state.inserts.find((i) => i.table === 'sms_log');
+    expect(queued.payload).toEqual(expect.objectContaining({
+      status: 'scheduled',
+      message_type: MESSAGE_TYPE,
+      to_phone: PHONE,
+      scheduled_for: new Date(nextAllowedAt),
+    }));
+    expect(stampsFor()).toContain('scheduled');
+  });
+
+  test('re-queue insert failure downgrades to failed (never throws into call processing)', async () => {
+    sendCustomerMessage.mockResolvedValue({
+      sent: false, blocked: true, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: '2026-07-02T12:00:00.000Z',
+    });
+    state.insertError.sms_log = new Error('insert failed');
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'requeue_failed' });
+    expect(stampsFor()).toContain('failed');
+  });
+
+  test('terminal block (STOP suppression etc.) keeps the claim — a blocked prospect is never retried', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SUPPRESSED', reason: 'STOP on file' });
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'SUPPRESSED' });
+    expect(stampsFor()).toContain('blocked');
+    // No re-queue row.
+    expect(state.inserts.filter((i) => i.table === 'sms_log')).toHaveLength(0);
+  });
+});

@@ -150,5 +150,8 @@ module.exports = {
   // isLandline so the two landline checks share one Lookup per number.
   readCachedLineType,
   cacheLineType,
+  // Exported for callers that need an explicit pre-send landline check outside
+  // the gated validator (voicemail lead text-back) — same cache, same Lookup.
+  lookupLineType,
   _internals: { lookupLineType, normalizeE164, NON_SMS_LINE_TYPES },
 };

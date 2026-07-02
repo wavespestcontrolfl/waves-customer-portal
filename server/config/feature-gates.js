@@ -267,6 +267,15 @@ const gates = {
   // get a non_mobile suppression row.
   proactiveLineTypeLookup: process.env.GATE_PROACTIVE_LINETYPE_LOOKUP === 'true',
 
+  // Voicemail lead text-back — when a NEW prospect's voicemail produces a
+  // workable lead, text them a prefilled quote-wizard link ("got your message
+  // about X — get your quote: …"). A customer-facing auto-send, so it FAILS
+  // CLOSED (explicit opt-in in EVERY environment) per the house rule — a
+  // preview/dev env with real Twilio creds must NOT auto-text prospects.
+  // Owner sets GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the
+  // voicemail still becomes a Needs-Review lead; only the SMS is skipped.
+  voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
+
   // Email Template Automations — executes trigger-mapped template sends from
   // the email template automation catalog. Off by default in prod until each
   // trigger has been verified with run history and idempotency checks.

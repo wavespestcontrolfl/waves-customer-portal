@@ -26,6 +26,10 @@ function purposeForScheduledMessageType(messageType) {
   if (type.includes('retention') || type.includes('renewal') || type.includes('save')) return 'retention';
   if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
   if (type.includes('appointment') || type.includes('reminder') || type.includes('confirmation') || type.includes('en_route')) return 'appointment';
+  // Deferred voicemail text-back (voicemail_quote_link) must re-send under its
+  // own quiet-enforced purpose, not fall through to conversational — the
+  // quiet-hours re-check at dispatch is what keeps a re-queued row honest.
+  if (type.includes('voicemail') || type.includes('missed_call')) return 'missed_call_followup';
   return 'conversational';
 }
 
