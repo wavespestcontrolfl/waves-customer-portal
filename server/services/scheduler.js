@@ -26,6 +26,10 @@ function purposeForScheduledMessageType(messageType) {
   if (type.includes('retention') || type.includes('renewal') || type.includes('save')) return 'retention';
   if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
   if (type.includes('appointment') || type.includes('reminder') || type.includes('confirmation') || type.includes('en_route')) return 'appointment';
+  // Deferred voicemail text-back (voicemail_quote_link) must re-send under its
+  // own quiet-enforced purpose, not fall through to conversational — the
+  // quiet-hours re-check at dispatch is what keeps a re-queued row honest.
+  if (type.includes('voicemail') || type.includes('missed_call')) return 'missed_call_followup';
   return 'conversational';
 }
 
@@ -1442,6 +1446,16 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
+            // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
+            // quiet-hours-held voicemail text-back persists transactional_allowed)
+            // — without it an anonymous-lead transactional replay blocks as
+            // NO_CONSENT_RECORD. Safe to forward blindly: the consent validator
+            // only honors a consentBasis on transactional-grade policies for the
+            // lead audience; marketing/retention purposes still require a real
+            // stored consent record regardless of what a row's metadata claims.
+            consentBasis: (claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
+              ? claimMeta.consent_basis
+              : undefined,
             // NOTE: marketing/retention scheduled sends must arrive with a real
             // stored consent record — we no longer manufacture opted_in here.
             // Routes that queue marketing-grade types are responsible for

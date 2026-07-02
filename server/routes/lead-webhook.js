@@ -20,6 +20,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
+const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
 const {
@@ -31,6 +32,8 @@ const {
   buildAutomatedLeadDraftEstimate,
   evaluateLeadEstimateAutomationReadiness,
 } = require('../services/lead-estimate-automation');
+
+const LEAD_PREFILL_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((alertErr) => {
@@ -650,52 +653,101 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
 
     // Create leads table record for pipeline tracking
     let leadRecord = null;
+    let attachedViaPrefill = false;
     try {
-      const [newLead] = await db('leads').insert({
-        first_name: firstName, last_name: lastName,
-        phone: phoneFormatted, email: email || null,
-        address: fullAddress || '',
-        city: resolvedCity,
-        lead_source_id: leadSourceId,
-        lead_type: 'form_submission',
+      const webhookStage = {
+        stage: 'lead_webhook_received',
         service_interest: serviceInterest || null,
-        extracted_data: JSON.stringify({
-          stage: 'lead_webhook_received',
+        automation: {
+          leadEstimateAutomation: estimateAutomationReadiness,
+          draftEstimateAutomation: automatedDraftEstimate?.automation || null,
+        },
+        attribution: {
+          leadSource,
+          formId,
+          formName,
+          pageUrl,
+          landingUrl,
+          utm: {
+            source: utmSource,
+            medium: utmMedium,
+            campaign: utmCampaign,
+            content: utmContent,
+            term: utmTerm,
+          },
+          clickIds: { gclid: gclid || null, wbraid: wbraid || null, gbraid: gbraid || null, fbclid: fbclid || null, fbc: fbc || null, fbp: fbp || null },
+        },
+        address: normalizedAddress,
+      };
+
+      // Voicemail text-back prefill attach — same contract as the quote-wizard
+      // priced path (public-property-lookup.js): a valid lead-prefill token
+      // (minted ONLY by the voicemail text-back SMS) UPDATES that existing
+      // call-pipeline lead instead of minting a duplicate form_submission row.
+      // Typed values win over the voicemail extraction; call attribution
+      // (lead_source_id / lead_type / first_contact_*) is preserved;
+      // extracted_data is MERGED so the voicemail provenance and the one-shot
+      // SMS stamp survive. Terminal or converted leads never re-attach.
+      const prefillLeadId = cleanText(body.prefill_lead_id || body.prefillLeadId || '');
+      const prefillToken = cleanText(body.prefill_token || body.prefillToken || '');
+      if (prefillLeadId && prefillToken && LEAD_PREFILL_UUID_RE.test(prefillLeadId)
+        && verifyLeadPrefillToken(prefillLeadId, prefillToken)) {
+        try {
+          const [attached] = await db('leads')
+            .where({ id: prefillLeadId })
+            .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
+            .whereNull('converted_at')
+            .update({
+              first_name: firstName, last_name: lastName,
+              phone: phoneFormatted, email: email || null,
+              address: fullAddress || '',
+              city: resolvedCity,
+              service_interest: serviceInterest || null,
+              customer_id: customer.id,
+              // Reopen a lead the office parked as 'unresponsive' — they just
+              // responded, and that status buckets as closed in the admin UI.
+              status: db.raw("CASE WHEN status = 'unresponsive' THEN 'new' ELSE status END"),
+              extracted_data: db.raw(
+                "COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb",
+                [JSON.stringify(webhookStage)]
+              ),
+              updated_at: new Date(),
+            })
+            .returning('*');
+          if (attached) {
+            leadRecord = attached;
+            attachedViaPrefill = true;
+            logger.info(`[lead-webhook] attached form submission to existing lead ${prefillLeadId} via prefill token`);
+          }
+        } catch (attachErr) {
+          logger.warn(`[lead-webhook] prefill attach failed — falling back to new lead: ${attachErr.message}`);
+        }
+      }
+
+      if (!leadRecord) {
+        const [newLead] = await db('leads').insert({
+          first_name: firstName, last_name: lastName,
+          phone: phoneFormatted, email: email || null,
+          address: fullAddress || '',
+          city: resolvedCity,
+          lead_source_id: leadSourceId,
+          lead_type: 'form_submission',
           service_interest: serviceInterest || null,
-          automation: {
-            leadEstimateAutomation: estimateAutomationReadiness,
-            draftEstimateAutomation: automatedDraftEstimate?.automation || null,
-          },
-          attribution: {
-            leadSource,
-            formId,
-            formName,
-            pageUrl,
-            landingUrl,
-            utm: {
-              source: utmSource,
-              medium: utmMedium,
-              campaign: utmCampaign,
-              content: utmContent,
-              term: utmTerm,
-            },
-            clickIds: { gclid: gclid || null, wbraid: wbraid || null, gbraid: gbraid || null, fbclid: fbclid || null, fbc: fbc || null, fbp: fbp || null },
-          },
-          address: normalizedAddress,
-        }),
-        first_contact_at: new Date(),
-        first_contact_channel: 'form',
-        status: 'new',
-        customer_id: customer.id,
-        gclid: gclid || null,
-        wbraid: wbraid || null,
-        gbraid: gbraid || null,
-        fbclid: fbclid || null,
-        fbc: fbc || null,
-        fbp: fbp || null,
-        is_residential: true,
-      }).returning('*');
-      leadRecord = newLead;
+          extracted_data: JSON.stringify(webhookStage),
+          first_contact_at: new Date(),
+          first_contact_channel: 'form',
+          status: 'new',
+          customer_id: customer.id,
+          gclid: gclid || null,
+          wbraid: wbraid || null,
+          gbraid: gbraid || null,
+          fbclid: fbclid || null,
+          fbc: fbc || null,
+          fbp: fbp || null,
+          is_residential: true,
+        }).returning('*');
+        leadRecord = newLead;
+      }
     } catch (leadErr) {
       logger.error(`Lead record creation failed: ${leadErr.message}`);
     }
@@ -716,7 +768,14 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
               updates.service_interest = triageServiceInterestUpdate;
             }
             if (triageResult.urgency) updates.urgency = triageResult.urgency;
-            if (triageResult.extractedData) updates.extracted_data = JSON.stringify(triageResult.extractedData);
+            if (triageResult.extractedData) {
+              // On an attached call-pipeline lead, MERGE — a wholesale replace
+              // here would clobber the voicemail provenance and the text-back
+              // one-shot stamp the prefill attach just preserved.
+              updates.extracted_data = attachedViaPrefill
+                ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
+                : JSON.stringify(triageResult.extractedData);
+            }
             if (Object.keys(updates).length > 0) {
               updates.updated_at = new Date();
               await db('leads').where('id', leadRecord.id).update(updates);
@@ -817,35 +876,42 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // call that used to live here caused every lead to ring the bell twice.
     // Removed intentionally; do NOT re-add without deduping upstream.
 
-    // Ad service attribution — track the full funnel from lead onward
+    // Ad service attribution — track the full funnel from lead onward.
+    // Skipped for a lead ATTACHED via the voicemail text-back prefill token:
+    // that funnel row belongs to the CALL source (the tracking number the
+    // prospect dialed), stamped by the call-attribution path on the same
+    // lead_id — a web-channel row here would win the unique slot first and
+    // permanently misattribute a paid/GBP voicemail to the website.
     try {
-      await db('ad_service_attribution').insert({
-        customer_id: customer.id,
-        // Stamp the lead so the call-attribution path dedupes against this row
-        // (a customer who fills the web form and later calls the paid number is
-        // one lead, not two) — see services/ads/call-attribution.js.
-        lead_id: leadRecord?.id || null,
-        service_line: inferServiceLine(serviceInterest),
-        specific_service: inferSpecificService(serviceInterest),
-        service_bucket: inferServiceBucket(serviceInterest),
-        lead_date: etDateString(),
-        lead_source: leadSource.source,
-        lead_source_detail: leadSource.detail,
-        gclid: gclid || null,
-        wbraid: wbraid || null,
-        gbraid: gbraid || null,
-        fbclid: fbclid || null,
-        fbc: fbc || null,
-        fbp: fbp || null,
-        utm_campaign: utmCampaign,
-        utm_term: utmTerm,
-        funnel_stage: 'lead',
-        // determineLeadSource marks every paid classification (google cpc,
-        // gclid/wbraid/gbraid, fbclid/_fbc, facebook cpc) channel='paid'.
-        // Without this stamp even gclid rows sit at is_paid NULL and the paid
-        // funnel views undercount.
-        is_paid: leadSource.channel === 'paid',
-      }).onConflict('lead_id').ignore();
+      if (!attachedViaPrefill) {
+        await db('ad_service_attribution').insert({
+          customer_id: customer.id,
+          // Stamp the lead so the call-attribution path dedupes against this row
+          // (a customer who fills the web form and later calls the paid number is
+          // one lead, not two) — see services/ads/call-attribution.js.
+          lead_id: leadRecord?.id || null,
+          service_line: inferServiceLine(serviceInterest),
+          specific_service: inferSpecificService(serviceInterest),
+          service_bucket: inferServiceBucket(serviceInterest),
+          lead_date: etDateString(),
+          lead_source: leadSource.source,
+          lead_source_detail: leadSource.detail,
+          gclid: gclid || null,
+          wbraid: wbraid || null,
+          gbraid: gbraid || null,
+          fbclid: fbclid || null,
+          fbc: fbc || null,
+          fbp: fbp || null,
+          utm_campaign: utmCampaign,
+          utm_term: utmTerm,
+          funnel_stage: 'lead',
+          // determineLeadSource marks every paid classification (google cpc,
+          // gclid/wbraid/gbraid, fbclid/_fbc, facebook cpc) channel='paid'.
+          // Without this stamp even gclid rows sit at is_paid NULL and the paid
+          // funnel views undercount.
+          is_paid: leadSource.channel === 'paid',
+        }).onConflict('lead_id').ignore();
+      }
     } catch (attrErr) {
       logger.error(`Ad attribution insert failed: ${attrErr.message}`);
     }

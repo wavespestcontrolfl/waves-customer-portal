@@ -233,7 +233,15 @@ function captureAttribution() {
     const fbc = readCookie('_fbc');
     const fbp = readCookie('_fbp');
     const referrer = document.referrer || null;
-    const landing_url = window.location.href || null;
+    // Strip a voicemail-prefill fragment (#vlead=…&vt=…) before persisting —
+    // the token is a bearer credential and landing_url is stored on the lead.
+    let landing_url = window.location.href || null;
+    if (landing_url) {
+      const hashIdx = landing_url.indexOf('#');
+      if (hashIdx !== -1 && /(^|[#&])vt=/.test(landing_url.slice(hashIdx))) {
+        landing_url = landing_url.slice(0, hashIdx);
+      }
+    }
     // Keep _fbp too: it's a Conversions API match key even when it's the only
     // signal (view-through / direct return with no fbclid/_fbc/UTM/referrer).
     if (!hasUtm && !gclid && !wbraid && !gbraid && !fbclid && !fbc && !fbp && !referrer) return null;
@@ -355,6 +363,29 @@ export default function QuotePage({ serviceSlug = '' }) {
     catch { return false; }
   });
 
+  // Voicemail text-back prefill — /estimate#vlead=<leadId>&vt=<token>, minted
+  // ONLY by the voicemail quote-link SMS. The pair rides the URL FRAGMENT (a
+  // bearer credential must never hit server request logs or Referer headers),
+  // is locked at mount, then scrubbed from the address bar so a copied/shared
+  // URL doesn't carry it. It is exchanged (POST) for that lead's own contact
+  // fields so the form arrives prefilled, and rides every submit path so the
+  // wizard's lead capture UPDATES the same call-pipeline lead instead of
+  // minting a duplicate. Any failure (expired token, network) degrades to the
+  // normal blank wizard.
+  const [prefillAuth] = useState(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const p = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+      const vlead = p.get('vlead');
+      const vt = p.get('vt');
+      if (!vlead || !vt) return null;
+      try {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      } catch { /* scrub is best-effort */ }
+      return { leadId: vlead, token: vt };
+    } catch { return null; }
+  });
+
   const inputRef = useRef(null);
   const submitInFlightRef = useRef(false);
 
@@ -373,6 +404,37 @@ export default function QuotePage({ serviceSlug = '' }) {
     setNewsletterOptIn(false);
     setSubscribeStatus('idle');
   }, [normalizedServiceSlug]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Exchange the prefill pair for the lead's contact fields. Fill-blank-only:
+  // never clobber anything the visitor already typed. A voicemail lead often
+  // has just a first name + phone — partial prefill is the expected case.
+  useEffect(() => {
+    if (!prefillAuth) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        // POST body, not query string — the token must stay out of URL logs.
+        const r = await fetch(`${API_BASE}/public/estimator/lead-prefill`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lead_id: prefillAuth.leadId, token: prefillAuth.token }),
+        });
+        if (!r.ok) return;
+        const d = await r.json();
+        if (cancelled || !d) return;
+        const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
+        const phoneDigits = String(d.phone || '').replace(/\D/g, '').slice(-10);
+        setIntake(prev => ({
+          ...prev,
+          ...(name && !prev.name ? { name } : {}),
+          ...(d.email && !prev.email ? { email: d.email } : {}),
+          ...(phoneDigits.length === 10 && !prev.phone ? { phone: phoneDigits } : {}),
+          ...(d.address && !prev.address ? { address: d.address } : {}),
+        }));
+      } catch { /* prefill is best-effort */ }
+    })();
+    return () => { cancelled = true; };
+  }, [prefillAuth]);
 
   useEffect(() => {
     if (!serviceConfig) {
@@ -521,6 +583,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           frequency: intake.frequency,
           service_interest: selectedServiceInterest(intake),
           attribution: attribution || undefined,
+          ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
         }),
       });
       const d = await r.json();
@@ -581,6 +644,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           service_interest: otherLabel,
           source: normalizedServiceSlug ? `quote-page-${normalizedServiceSlug}` : 'quote-page-divert',
           attribution: attribution || undefined,
+          ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -620,6 +684,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           service_interest: selectedServiceInterest(intake),
           source: `quote-page-${intake.frequency}`,
           attribution: attribution || undefined,
+          ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
