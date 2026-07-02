@@ -338,7 +338,25 @@ finding and warns on P1. Reviewers must return JSON matching
   parcel lookup for the estimator — no auth, no token, 5 req/hour rate limit.
   REQUIRES and stores customer PII — first name, last name, email, phone, and
   address — into `leads`, and returns county parcel facts. Treat as a
-  PII-accepting public endpoint: scope any change to what it stores or logs).
+  PII-accepting public endpoint: scope any change to what it stores or logs.
+  Also accepts an OPTIONAL `prefill_lead_id` + `prefill_token` pair — the
+  lead-prefill HMAC below — which, when valid, makes the lead capture UPDATE
+  that existing open call-pipeline lead instead of inserting a new row; the
+  same pair is accepted by `/api/lead-webhook` with identical semantics).
+  `/api/public/estimator/lead-prefill` (read-only; exchanges the voicemail
+  text-back link's `lead_id` + HMAC token for that ONE lead's own contact
+  fields — first/last name, email, phone, address, city, zip,
+  service_interest — so the /estimate quote wizard arrives prefilled. Token
+  is minted ONLY by the voicemail-lead SMS (`utils/lead-prefill-token.js`):
+  `<expEpochSec>.<base64url(HMAC-SHA256("lead-prefill:<leadId>:<exp>"))>`,
+  14-day TTL, keyed on `LEAD_PREFILL_SECRET` (falls back to `JWT_SECRET`),
+  constant-time compare, fail-closed when no secret is configured. UUID
+  format gate on lead_id, 30 req/hour rate limit, privacy headers
+  `no-store`/`noindex`/`no-referrer`, and a generic 404 for invalid, expired,
+  mismatched, or unknown ids — indistinguishable on purpose (no oracle).
+  PREFILL/attach authority ONLY: it returns the contact data we already
+  texted the link-holder about, and is never accepted as identity or pricing
+  authority on any money path).
   `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
   instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
   limit. Persists a quote/lead and may text the quote via a Twilio short-link;

@@ -1446,6 +1446,16 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
+            // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
+            // quiet-hours-held voicemail text-back persists transactional_allowed)
+            // — without it an anonymous-lead transactional replay blocks as
+            // NO_CONSENT_RECORD. Safe to forward blindly: the consent validator
+            // only honors a consentBasis on transactional-grade policies for the
+            // lead audience; marketing/retention purposes still require a real
+            // stored consent record regardless of what a row's metadata claims.
+            consentBasis: (claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
+              ? claimMeta.consent_basis
+              : undefined,
             // NOTE: marketing/retention scheduled sends must arrive with a real
             // stored consent record — we no longer manufacture opted_in here.
             // Routes that queue marketing-grade types are responsible for

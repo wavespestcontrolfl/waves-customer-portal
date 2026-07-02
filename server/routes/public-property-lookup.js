@@ -31,6 +31,14 @@ const prefillLimiter = rateLimit({
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
+// PII responses on a public token route are never cached, indexed, or leaked
+// via referrer — same contract as prep-public.js / lawn-diagnostic.
+const PRIVACY_HEADERS = {
+  'Cache-Control': 'private, no-store',
+  'X-Robots-Tag': 'noindex, nofollow',
+  'Referrer-Policy': 'no-referrer',
+};
+
 function normalizePhone(raw) {
   const digits = String(raw || '').replace(/\D/g, '');
   if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
@@ -164,6 +172,7 @@ function normalizeServiceInterest(body = {}) {
 // texted the link-holder; it is never accepted as identity or pricing
 // authority on a money path.
 router.get('/lead-prefill', prefillLimiter, async (req, res) => {
+  res.set(PRIVACY_HEADERS);
   try {
     const leadId = String(req.query.lead_id || '').trim();
     const token = String(req.query.token || '').trim();

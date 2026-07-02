@@ -238,6 +238,12 @@ describe('voicemail lead text-back send outcomes', () => {
       to_phone: PHONE,
       scheduled_for: new Date(nextAllowedAt),
     }));
+    // The scheduled-SMS cron replays through sendCustomerMessage — the
+    // transactional consent basis must ride in the row's metadata or the
+    // anonymous-lead replay blocks as NO_CONSENT_RECORD (pre-push Codex P1).
+    const meta = JSON.parse(queued.payload.metadata);
+    expect(meta.consent_basis).toEqual(expect.objectContaining({ status: 'transactional_allowed' }));
+    expect(meta.lead_id).toBe(LEAD_ID);
     expect(stampsFor()).toContain('scheduled');
   });
 

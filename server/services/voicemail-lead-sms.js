@@ -225,6 +225,11 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
           lead_id: leadId,
           call_sid: call.twilio_call_sid || null,
           original_block_code: result.code || null,
+          // The scheduled-SMS cron replays this row through sendCustomerMessage,
+          // and an anonymous-lead transactional send only clears the consent
+          // validator when the consentBasis rides along — persist it so the
+          // deferred send carries the same basis as the immediate one.
+          consent_basis: { status: 'transactional_allowed', source: 'voicemail_text_back' },
         }),
       });
       await stampStatus(leadId, 'scheduled');
