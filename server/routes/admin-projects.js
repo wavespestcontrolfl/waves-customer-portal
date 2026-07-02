@@ -503,6 +503,11 @@ function evaluateProjectSendReadiness({ project, customer }) {
     const isBaitSystem = rawMethod === 'Bait system';
     const isWoodTreatment = rawMethod === 'Wood treatment (borate)';
     const needsGallons = !isBaitSystem && !isWoodTreatment;
+    // A finished-solution concentration only exists for liquid soil barriers.
+    // Bait stations and direct wood treatments have no dilution to record —
+    // the create form deliberately leaves concentration_pct blank for them,
+    // so requiring it here would dead-end those certificates at send.
+    const needsConcentration = needsGallons;
     const hasArea = hasMeaningfulValue(findings.square_footage) || hasMeaningfulValue(findings.linear_feet);
     const coverageOk = needsGallons
       ? hasArea && hasMeaningfulValue(findings.gallons_applied)
@@ -515,7 +520,12 @@ function evaluateProjectSendReadiness({ project, customer }) {
       { key: 'cert_treatment_date', label: 'Date of treatment', ok: hasMeaningfulValue(findings.treatment_date) || hasMeaningfulValue(project?.project_date) },
       { key: 'cert_treatment_method', label: 'Method of treatment', ok: hasMeaningfulValue(method) },
       { key: 'cert_product', label: 'Product used', ok: hasMeaningfulValue(productName) },
-      { key: 'cert_active_ingredient', label: 'Active ingredient + concentration', ok: hasMeaningfulValue(findings.active_ingredient) && hasMeaningfulValue(findings.concentration_pct) },
+      {
+        key: 'cert_active_ingredient',
+        label: needsConcentration ? 'Active ingredient + concentration' : 'Active ingredient',
+        ok: hasMeaningfulValue(findings.active_ingredient)
+          && (!needsConcentration || hasMeaningfulValue(findings.concentration_pct)),
+      },
       { key: 'cert_coverage', label: coverageLabel, ok: coverageOk },
       { key: 'cert_applicator_name', label: "Applicator's printed name", ok: hasMeaningfulValue(findings.applicator_name) },
       { key: 'cert_applicator_fdacs_id', label: 'Applicator FDACS ID #', ok: hasMeaningfulValue(findings.applicator_fdacs_id) },
@@ -987,6 +997,44 @@ router.get('/service-search', async (req, res, next) => {
       limit: Math.min(Number(limit) || 10, 25),
     });
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/projects/applicators — licensed-applicator picker for the
+// pre-treatment certificate. Tech-reachable (the timetracking tech route
+// sanitizes license fields away, so the create form needs its own source).
+// License numbers print on the public certificate, so exposing them to a
+// logged-in tech is not a data leak.
+// ---------------------------------------------------------------------------
+router.get('/applicators', async (req, res, next) => {
+  try {
+    const techs = await db('technicians')
+      .where({ active: true })
+      .orderBy('name')
+      .select('id', 'name', 'fl_applicator_license', 'license_expiry');
+    const todayEt = etDateString();
+    res.json({
+      applicators: techs.map((t) => {
+        // Same expiry rule as admin-compliance-v2 (past = expired, no expiry
+        // on file = active), but compared as ET calendar dates: the license
+        // is good through the end of its expiry day, and a date-only column
+        // must not flip early because UTC midnight lands at 8pm ET. An
+        // expired number is withheld (never auto-filled onto a state
+        // compliance certificate) — the tech stays pickable by name and
+        // types their renewed number.
+        const expiryDate = normalizeDateOnly(t.license_expiry);
+        const expired = Boolean(expiryDate && expiryDate < todayEt);
+        return {
+          id: t.id,
+          name: t.name,
+          fdacsId: expired ? null : (String(t.fl_applicator_license || '').trim() || null),
+        };
+      }),
+      // Admins create certificates on behalf of the treating tech, so only a
+      // tech's own session defaults the applicator to themselves.
+      defaultTechnicianId: isAdmin(req) ? null : req.technicianId || null,
+    });
   } catch (err) { next(err); }
 });
 

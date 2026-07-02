@@ -129,11 +129,17 @@ function deriveOpportunityStage({ lead, estimate }) {
     || estimateStatus === 'rejected'
     || leadStatus === 'lost'
     || leadStatus === 'disqualified'
+    // Closed lead statuses that previously fell through to an ACTIVE
+    // new_lead stage. unresponsive is now assigned at scale by the daily
+    // staleness sweep; duplicate is the same closed class (see the
+    // CLOSED_LEAD_STATUSES sets in admin-agents / lead-estimate-link).
+    || leadStatus === 'unresponsive'
+    || leadStatus === 'duplicate'
   ) {
     return {
       stage: PIPELINE_STAGES.LOST,
       status: 'lost',
-      stageReason: 'Estimate declined or lead marked lost/disqualified',
+      stageReason: 'Estimate declined or lead marked lost/disqualified/unresponsive/duplicate',
     };
   }
 

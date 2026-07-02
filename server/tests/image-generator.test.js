@@ -242,3 +242,52 @@ describe('ImageGenerator: attempts breadcrumb on failure', () => {
     }
   });
 });
+
+// ── image-native Gemini slugs (creative engine) ─────────────────────
+
+describe('gemini image-native models', () => {
+  test('MODEL_MAP registers the nano-banana slugs with aspect support', () => {
+    expect(MODEL_MAP['gemini-image-best']).toMatchObject({ api: 'gemini', imageAspect: true });
+    expect(MODEL_MAP['gemini-image']).toMatchObject({ api: 'gemini', imageAspect: true });
+    // legacy text-model slug must NOT get imageConfig (it would 400)
+    expect(MODEL_MAP.gemini.imageAspect).toBeUndefined();
+  });
+
+  test('image-native slug sends imageConfig.aspectRatio; legacy gemini does not', async () => {
+    process.env.GEMINI_API_KEY = 'k';
+    delete process.env.OPENAI_API_KEY;
+    const bodies = [];
+    const fetchFn = jest.fn().mockImplementation((url, opts) => {
+      bodies.push(JSON.parse(opts.body));
+      return ok(GEMINI_OK_BODY);
+    });
+
+    const withAspect = new ImageGenerator({ envChain: 'gemini-image-best', fetchFn });
+    await withAspect.generate({ title: 't', mode: 'social-square' });
+    expect(bodies[0].generationConfig.imageConfig).toEqual({ aspectRatio: '1:1' });
+
+    const legacy = new ImageGenerator({ envChain: 'gemini', fetchFn });
+    await legacy.generate({ title: 't', mode: 'social-square' });
+    expect(bodies[1].generationConfig.imageConfig).toBeUndefined();
+  });
+
+  test('blog-hero mode maps to 3:2 for image-native models', async () => {
+    process.env.GEMINI_API_KEY = 'k';
+    const bodies = [];
+    const fetchFn = jest.fn().mockImplementation((url, opts) => {
+      bodies.push(JSON.parse(opts.body));
+      return ok(GEMINI_OK_BODY);
+    });
+    const gen = new ImageGenerator({ envChain: 'gemini-image', fetchFn });
+    await gen.generate({ title: 't', mode: 'blog-hero' });
+    expect(bodies[0].generationConfig.imageConfig).toEqual({ aspectRatio: '3:2' });
+  });
+
+  test('default prompt style is brand palette, not teal', () => {
+    const prompt = buildPrompt({ title: 'x', mode: 'social-square' });
+    expect(prompt).toContain('#009CDE');
+    expect(prompt).toContain('#FFD700');
+    expect(prompt).toContain('no teal');
+    expect(prompt).not.toContain('#0ea5e9');
+  });
+});

@@ -27,11 +27,12 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
+const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
-const { buildExtractionPrompt, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const { buildExtractionPrompt, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
@@ -43,6 +44,7 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
+const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -327,14 +329,19 @@ function leadContactCompleteness(fields = {}) {
 // customer-less and UNqualified so they land in Needs Review for the office to
 // complete — they are never auto-converted to a customer and, because Step 6 and
 // the newsletter subscribe stay gated on `customerId`, never trigger outbound.
-// Spam/voicemail are early-returned before this runs; the caller still guards
-// is_spam + the non-lead content veto (isNonLeadCallContent) at the gate.
-function hasWorkableLeadSignal({ extracted = {}, phone = null } = {}) {
+// Spam is early-returned before this runs; the caller still guards is_spam +
+// the non-lead content veto (isNonLeadCallContent) at the gate.
+// For a VOICEMAIL the email/address reachback requirement is waived: a prospect
+// who left a message asking about service gave us a callback number by
+// definition, and that number IS the reachback (we text the quote link / call
+// back). Requiring email/address would drop exactly the "call me back about
+// pest control" messages the voicemail lead path exists to capture.
+function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false } = {}) {
   if (!phone) return false;
   const text = (v) => String(v == null ? '' : v).trim();
   const hasServiceIntent = !!(text(extracted.matched_service) || text(extracted.requested_service));
   const hasReachback = !!(text(extracted.email) || text(extracted.address_line1));
-  return hasServiceIntent && hasReachback;
+  return hasServiceIntent && (hasReachback || voicemail === true);
 }
 
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
@@ -407,6 +414,112 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 }
 
+// Resolve which existing lead (if any) this call should reuse, by caller phone.
+// Soft-deleted leads never absorb a new call — a fresh lead is made.
+// - Customer-less recovery path (workableUnnamedLead): only an ACTIVE lead
+//   (status not terminal, not converted), so a recovered inquiry lands on an
+//   open row or a fresh one — never silently attached to a won/lost/
+//   disqualified/duplicate lead where it would not surface.
+// - Customer-attached path: only a lead that is UNCLAIMED (customer_id NULL)
+//   or already owned by this customer. A phone-matched lead can BELONG to
+//   another customer (shared/household numbers): reusing it would write this
+//   caller's extraction + ai_triage activity onto the other customer's lead,
+//   and the booking-conversion ownership guard would then (rightly) refuse to
+//   close it — stranding this caller's booked deal with no convertible lead.
+//   A foreign-owned lead is invisible here; the caller gets a fresh row.
+async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead }) {
+  if (!phone) return null;
+  let query = database('leads').where('phone', phone).whereNull('deleted_at');
+  if (workableUnnamedLead) {
+    query = query.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
+  }
+  if (customerId) {
+    query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+  }
+  return query.orderBy('created_at', 'desc').first();
+}
+
+// Convert the call's lead to won when the pipeline books an appointment,
+// on the SAME transaction as the scheduled_services insert (mirrors the
+// admin-leads schedule-appointment route: conversion cannot commit without
+// the appointment row). Skips only `won` (idempotent reprocessing) and
+// `duplicate` (the deal belongs to another lead row) — a lost/unresponsive
+// lead that books DID close, so won is the correct terminal state for it.
+// Runs in a NESTED transaction (savepoint): a plain try/catch inside the
+// booking txn would leave it aborted after a SQL error and doom the COMMIT,
+// rolling back the booking. The savepoint contains a conversion failure to
+// the conversion alone; the booking still commits.
+async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid }) {
+  if (!leadId) return false;
+  try {
+    return await trx.transaction(async (inner) => {
+      // Ownership guard: leadId can come from the phone-only existing-lead
+      // lookup, and a caller phone can be shared across leads. Only a lead
+      // that is unclaimed (customer_id NULL) or already belongs to the
+      // booked customer may be closed here — never reassign another
+      // customer's lead. Repeated in the UPDATE predicate so a concurrent
+      // claim between the read and the write can't slip through.
+      const ownedOrUnclaimed = (q) =>
+        q.whereNull('customer_id').orWhere('customer_id', customerId);
+      const convertible = await inner('leads')
+        .where({ id: leadId })
+        .whereNotIn('status', ['won', 'duplicate'])
+        .where(ownedOrUnclaimed)
+        .first('id');
+      if (!convertible) return false;
+      const updated = await inner('leads')
+        .where({ id: leadId })
+        .whereNotIn('status', ['won', 'duplicate'])
+        .where(ownedOrUnclaimed)
+        .update({
+          status: 'won',
+          customer_id: customerId,
+          converted_at: new Date(),
+          is_qualified: true,
+          updated_at: new Date(),
+        });
+      if (!updated) return false;
+      await inner('lead_activities').insert({
+        lead_id: leadId,
+        activity_type: 'converted',
+        description: `Converted to customer (${customerId}) — appointment booked by phone`,
+        performed_by: 'system',
+        metadata: JSON.stringify({
+          customerId,
+          triggerSource: 'appointment_booked',
+          scheduledServiceId,
+          callSid,
+        }),
+      });
+      // Promote the customer row alongside the lead (the shared
+      // booking-promotion helper, same as the admin paths): a phone-booked
+      // account left at new_lead falls outside the canonical live-customer
+      // stages and is under-counted by every dashboard.
+      await promoteCustomerOnBooking(inner, customerId);
+      // Re-own the lead's estimates to the customer, like the canonical
+      // booking path (admin-leads → linkLeadEstimatesToCustomer): a won
+      // lead's quote left at customer_id NULL stays invisible to
+      // customer-keyed estimate flows and EstimateConverter refuses it.
+      // Deliberately INSIDE the savepoint: the helper swallows SQL errors,
+      // which leave the transaction it ran on aborted — contained here that
+      // dooms only this savepoint (conversion retries on reprocessing via
+      // the reuse paths), never the booking commit.
+      const convertedLead = await inner('leads')
+        .where({ id: leadId })
+        .first('id', 'estimate_id');
+      if (convertedLead) {
+        const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
+        await linkLeadEstimatesToCustomer({ database: inner, lead: convertedLead, customerId });
+      }
+      logger.info(`[call-proc] Lead ${leadId} converted to won (appointment_booked) for ${callSid}`);
+      return true;
+    });
+  } catch (err) {
+    logger.error(`[call-proc] Lead conversion on phone booking failed for ${callSid}: ${err.message}`);
+    return false;
+  }
+}
+
 async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }) {
   const emailLc = String(email || '').trim().toLowerCase();
   if (!customerId || !emailLc) return null;
@@ -461,8 +574,14 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   if (!customerId) return null;
 
   const marker = `Call SID: ${call.twilio_call_sid}`;
+  // Both lookups answer "was the PRIMARY appointment for this call already
+  // created?" — a linked follow-up child (visit 2) carries the same Call SID
+  // marker and booking_source, so child rows must be excluded or a reprocess
+  // whose primary was cancelled/rescheduled would adopt the pending follow-up
+  // as the confirmed booking and never recreate the actual visit.
   const marked = await trx('scheduled_services')
     .where({ customer_id: customerId })
+    .whereNull('parent_service_id')
     .whereNotIn('status', ['cancelled', 'rescheduled'])
     .where('notes', 'like', `%${marker}%`)
     .orderBy('created_at', 'asc')
@@ -474,6 +593,7 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   const callCreatedAt = call.created_at ? new Date(call.created_at) : null;
   const query = trx('scheduled_services')
     .where({ customer_id: customerId, booking_source: 'phone_call' })
+    .whereNull('parent_service_id')
     .where('scheduled_date', scheduledDate)
     .whereRaw('window_start::time = ?::time', [windowStart])
     .whereRaw('LOWER(TRIM(service_type)) = LOWER(TRIM(?))', [serviceType])
@@ -857,7 +977,10 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   if (!service && hasConfirmedGenericAppointment(extracted, fullContextText)) {
     return { ok: true, reason: null, service: GENERIC_CALL_APPOINTMENT_SERVICE };
   }
-  if (!service) return { ok: false, reason: 'unsupported_service', service: null };
+  // noMatch distinguishes "no coarse label fit" (rescuable by an exact
+  // bookable-catalog match) from the context vetoes above (unsupported topic /
+  // admin-only call), which a catalog match must never override.
+  if (!service) return { ok: false, reason: 'unsupported_service', service: null, noMatch: true };
   return { ok: true, reason: null, service };
 }
 
@@ -884,11 +1007,23 @@ async function resolveDefaultCallBookingTechnician(conn = db) {
       this.where({ active: true }).orWhereNull('active');
     })
     .first('id', 'name');
-  if (!tech?.id) {
-    logger.warn(`[call-proc] Default call-booking technician not found: ${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}`);
-    return null;
+  if (tech?.id) return { id: tech.id, name: tech.name || DEFAULT_CALL_BOOKING_TECHNICIAN_NAME };
+
+  // Name mismatch (e.g. the row is "Adam", not "Adam B.") used to silently
+  // book with no technician. When exactly one active technician exists there
+  // is no ambiguity — assign them and say so.
+  const activeTechs = await conn('technicians')
+    .where(function () {
+      this.where({ active: true }).orWhereNull('active');
+    })
+    .select('id', 'name');
+  if (activeTechs.length === 1) {
+    logger.info(`[call-proc] Default call-booking technician name "${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}" not found; using sole active technician ${activeTechs[0].name}`);
+    return { id: activeTechs[0].id, name: activeTechs[0].name || null };
   }
-  return { id: tech.id, name: tech.name || DEFAULT_CALL_BOOKING_TECHNICIAN_NAME };
+
+  logger.warn(`[call-proc] Default call-booking technician not found: ${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}`);
+  return null;
 }
 
 async function resolveDefaultCallBookingTechnicianId(conn = db) {
@@ -1305,6 +1440,16 @@ async function extractCallData(transcription, callerPhone, opts = {}) {
   // (a lead) apart from an existing customer coordinating a visit, reporting a
   // problem, or asking about billing (not leads).
   const knownCaller = opts.knownCaller || null;
+  // matched_service picks from the live bookable catalog first (specific
+  // services like "Cockroach Control Service"), backstopped by the legacy
+  // coarse labels so intent gating (canonicalWavesService) keeps working.
+  const LEGACY_MATCHED_SERVICES = [
+    'General Pest Control', 'Lawn Care', 'Mosquito Control', 'Termite Inspection', 'WDO Inspection',
+    'Pre-Slab Termidor', 'Liquid Termite Perimeter', 'Termite Wood Treatment', 'Termite Foam Drill',
+    'Rodent Control', 'Bed Bug Treatment', 'Tree & Shrub Care',
+  ];
+  const bookableNames = Array.isArray(opts.bookableServiceNames) ? opts.bookableServiceNames.filter(Boolean) : [];
+  const matchedServiceList = [...new Set([...bookableNames, ...LEGACY_MATCHED_SERVICES])].join(', ');
   const knownCallerBlock = knownCaller
     ? `\nKNOWN CALLER: This phone number matches an EXISTING Waves ${
         knownCaller.accountType === 'established_customer' ? 'customer' : 'contact'
@@ -1342,7 +1487,10 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "pain_points": "brief summary of customer concerns or pest issues",
   "call_summary": "2-3 sentence summary of the call",
   "lead_quality": "hot/warm/cold/spam",
-  "matched_service": "best match from: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, or null",
+  "matched_service": "best match from: ${matchedServiceList}, or null — prefer the MOST SPECIFIC service that fits (e.g. a German/kitchen cockroach infestation cleanout is Cockroach Control Service, not General Pest Control)",
+  "quoted_price": number or null,
+  "follow_up_visit_mentioned": true/false,
+  "follow_up_date_time": "same ISO format as preferred_date_time, or null",
   "referred_by": "if the caller EXPLICITLY says a friend / neighbor / existing customer referred or recommended them, the referrer's name — or 'unnamed' if they say they were referred but don't name who. Else null."
 }
 
@@ -1358,9 +1506,10 @@ IMPORTANT — is this a new lead? Set call_type and is_lead together:
 - "billing" (is_lead=false): an invoice, payment, receipt, refund, or account-balance question.
 - "spam" (is_lead=false): a solicitor, vendor pitch, robocall, or marketing call (also set is_spam=true).
 - "wrong_number" (is_lead=false): a misdial or a call clearly not meant for Waves.
-- "voicemail" (is_lead=false): no live two-way conversation took place (also set is_voicemail=true).
+- "voicemail" (is_lead=false): a voicemail with NO workable content — a hang-up, dead air, unintelligible audio, or a message that states no reason for calling (also set is_voicemail=true).
 - "other" (is_lead=false): none of the above.
 An EXISTING customer requesting a NEW, different service they have not purchased is still a lead (new_inquiry, is_lead=true).
+Voicemail is a CHANNEL, not a content type: whenever no live two-way conversation took place (the caller left a message), set is_voicemail=true — then classify call_type by what the MESSAGE says, exactly as if it had been a live call. A NEW prospect leaving a message asking about service, pricing, or a callback about service is "new_inquiry" (is_lead=true) even though it arrived as a voicemail. Reserve call_type "voicemail" for messages whose content fits none of the other categories.
 
 IMPORTANT — lead_quality (only meaningful when is_lead=true; use "cold" otherwise):
 - "hot": ready to buy now — asking to book, requesting the soonest opening, an urgent active infestation, or explicitly says "sign me up".
@@ -1379,6 +1528,11 @@ IMPORTANT — appointment_confirmed rules:
   - Do set appointment_confirmed to true when a builder or construction company explicitly books a Waves pre-slab/preconstruction termite, soil-treatment, or concrete-pour field-service appointment with a specific date and time.
 - Do not set appointment_confirmed to true for follow-up/admin calls about an invoice, payment, receipt, compliance report, sticker, certificate, W-9, report, or paperwork unless the caller and agent also explicitly book a new Waves field-service visit.
 - If the caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, new-construction termite treatment, or treatment before a slab/concrete pour, matched_service must be "Pre-Slab Termidor" — not "Termite Inspection".
+
+IMPORTANT — quoted_price and follow-up visit:
+- quoted_price: the TOTAL price in US dollars the agent quoted AND the caller accepted for the service being booked (agent: "that runs around 350 total", caller agrees -> 350). Use the total package price when quoted as a total across multiple treatments. null when no price was quoted, the caller didn't accept, or the amount is uncertain or a range. Never estimate or invent a price.
+- follow_up_visit_mentioned: true ONLY when the agent and caller specifically discussed a SECOND/follow-up treatment visit as part of this booking (e.g. "our standard protocol is two treatments", "we'll come back in two weeks"). A generic "call us if it comes back" is NOT a follow-up visit.
+- follow_up_date_time: set ONLY when a specific follow-up date (and time) was explicitly agreed on the call. Most calls: null — the office schedules the follow-up at the standard interval.
 
 IMPORTANT — customer name rules:
 - Capture both first_name and last_name whenever the caller clearly states both.
@@ -1443,8 +1597,8 @@ Return ONLY valid JSON.`;
 // embed the schema as prompt guidance. Correctness is guaranteed by the two-pass
 // ajv validation in finalizeV2Extraction — the model output is never trusted directly.
 // Shared by the live Gemini path and the OpenAI shadow so both send the identical prompt.
-function buildV2ExtractionPrompt(transcription, callerPhone, callDateET) {
-  return buildExtractionPrompt(transcription, callerPhone, callDateET)
+function buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptOpts = {}) {
+  return buildExtractionPrompt(transcription, callerPhone, callDateET, promptOpts)
     + '\n\n═══ OUTPUT CONTRACT ═══\n'
     + 'Return ONLY a single JSON object that conforms EXACTLY to this JSON Schema: '
     + 'every required field present, every enum value exact, no extra fields, '
@@ -1455,7 +1609,7 @@ function buildV2ExtractionPrompt(transcription, callerPhone, callDateET) {
 // Parse → validate(model-output) → inject server meta → normalize → validate(persisted).
 // Provider-agnostic tail shared by the Gemini and OpenAI extraction paths. Fails closed
 // to a status string; never trusts model output directly.
-function finalizeV2Extraction(rawText, { callId = null, extractionModel } = {}) {
+function finalizeV2Extraction(rawText, { callId = null, extractionModel, promptVersion = null } = {}) {
   // Pass 1: parse JSON
   let parsed;
   try {
@@ -1480,7 +1634,7 @@ function finalizeV2Extraction(rawText, { callId = null, extractionModel } = {}) 
     schema_version: SCHEMA_VERSION,
     extracted_at: new Date().toISOString(),
     extraction_model: extractionModel,
-    extraction_prompt_version: PROMPT_HASH,
+    extraction_prompt_version: promptVersion || PROMPT_HASH,
   };
 
   // Normalize
@@ -1506,7 +1660,9 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   if (!process.env.GEMINI_API_KEY) return { status: 'not_run', extraction: null, errors: null };
 
   const callDateET = etDateString(opts.callStartedAt || new Date());
-  const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET);
+  const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
+    bookableServiceNames: opts.bookableServiceNames,
+  });
 
   let rawText;
   try {
@@ -1538,7 +1694,13 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     return { status: 'parse_failed', extraction: null, errors: [{ message: err.message }] };
   }
 
-  return finalizeV2Extraction(rawText, { callId: opts.callId || null, extractionModel: GEMINI_EXTRACTION_MODEL });
+  return finalizeV2Extraction(rawText, {
+    callId: opts.callId || null,
+    extractionModel: GEMINI_EXTRACTION_MODEL,
+    // The catalog block is part of the rendered prompt, so the stamped
+    // version must carry its hash or cohorts mix under one version.
+    promptVersion: extractionPromptVersion(opts.bookableServiceNames),
+  });
 }
 
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
@@ -1848,9 +2010,18 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
     }
 
+    // Bookable service catalog: fed to both extraction prompts (so the model
+    // can name a specific bookable service) and to the booking block below
+    // (service_id / price / duration / follow-up interval). Fails open to [].
+    const bookableCallServices = await loadBookableCallServices(db);
+    const bookableServiceNames = bookableCallServices.map((s) => s.name).filter(Boolean);
+    // Catalog-aware provenance: the catalog block is part of the rendered
+    // V2 prompt, so every stamp for this call must carry its hash.
+    const v2PromptVersion = extractionPromptVersion(bookableServiceNames);
+
     let extracted;
     try {
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       await db('call_log').where({ id: call.id }).update({
@@ -1870,6 +2041,7 @@ const CallRecordingProcessor = {
         v2Result = await extractCallDataV2(transcription, contactPhone, {
           callStartedAt: call.created_at,
           callId: call.id,
+          bookableServiceNames,
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -1891,7 +2063,7 @@ const CallRecordingProcessor = {
           ai_address_validation: v2AddressValidation ? JSON.stringify(v2AddressValidation) : null,
           v2_extraction_status: v2Result.status,
           ai_extraction_model: GEMINI_EXTRACTION_MODEL,
-          ai_extraction_prompt_version: PROMPT_HASH,
+          ai_extraction_prompt_version: v2PromptVersion,
           updated_at: new Date(),
         };
         await db('call_log').where({ id: call.id }).update(v2Update);
@@ -1906,14 +2078,70 @@ const CallRecordingProcessor = {
           v2_extraction_status: 'parse_failed',
           ai_extraction_validation_errors: JSON.stringify([{ message: err.message }]),
           ai_extraction_model: GEMINI_EXTRACTION_MODEL,
-          ai_extraction_prompt_version: PROMPT_HASH,
+          ai_extraction_prompt_version: v2PromptVersion,
           updated_at: new Date(),
         });
       }
     }
 
-    // Skip voicemail/spam
-    if (extracted.is_voicemail || extracted.is_spam) {
+    // ── Voicemail routing ──
+    // Voicemail detection is deterministic-first: the voice webhook stamps
+    // answered_by/call_outcome='voicemail' on call_log when the caller hit the
+    // voicemail <Record> path (twilio-voice-webhook.js resolveInboundDialCompletion),
+    // so OR that signal with the model's is_voicemail flag. Model-only detection
+    // was inconsistent — some voicemails slipped through as live calls and minted
+    // partial-data customers, others were dropped entirely.
+    const voicemailChannel = !!(
+      extracted.is_voicemail
+      || call.answered_by === 'voicemail'
+      || call.call_outcome === 'voicemail'
+    );
+    if (voicemailChannel) extracted.is_voicemail = true;
+
+    // A voicemail from a NEW prospect with a callback number and concrete
+    // service intent is a workable lead, not a skip: it continues into the
+    // normal pipeline and lands as a customer-less UNqualified Needs-Review
+    // lead (Step 4b). Customer creation stays hard-off for voicemails (Step 3
+    // create branch gates on !is_voicemail), so a mangled voicemail
+    // transcription can never mint a partial-data customer. Existing-customer
+    // voicemails keep today's behavior: terminal 'voicemail' status, no lead —
+    // a normal missed call the office sees in the comms inbox.
+    // The content veto for voicemails keys on the content TYPE only. A stale
+    // model output can keep the legacy `call_type='voicemail', is_lead=false`
+    // shape even when it extracted a concrete requested service, and that
+    // boolean must not out-vote deterministic service intent on exactly the
+    // channel this path exists to recover (isNonLeadCallContent would veto on
+    // it). Real non-lead content — billing, complaint, existing-customer
+    // scheduling/service, wrong number — still vetoes.
+    const voicemailContentVeto = NON_LEAD_CALL_TYPES.has(
+      String(extracted?.call_type || '').trim().toLowerCase()
+    );
+    let voicemailLeadPath = false;
+    if (voicemailChannel && !extracted.is_spam && !isOutboundCall(call) && !voicemailContentVeto) {
+      const vmPhone = resolveCallContactPhone(call, extracted.phone);
+      if (vmPhone && hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) {
+        const vmCustomer = call.customer_id
+          ? { id: call.customer_id }
+          : await findCustomerForCallContact(vmPhone, extracted).catch(() => null);
+        voicemailLeadPath = !vmCustomer;
+      }
+    }
+    if (voicemailLeadPath && extracted.is_lead === false) {
+      // Reconcile the stale legacy shape so every downstream consumer (the
+      // Step 4b nonLeadCall gate, the ai_triage stamp, route decisions) sees
+      // what the deterministic signals decided: channel voicemail + callback
+      // number + concrete service intent IS a lead. Without this, the same
+      // stale boolean that the gate above ignores would re-veto lead creation
+      // via isNonLeadCallContent at shouldCreateLead.
+      extracted.is_lead = true;
+      const staleType = String(extracted.call_type || '').trim().toLowerCase();
+      if (!staleType || staleType === 'voicemail' || staleType === 'other') {
+        extracted.call_type = 'new_inquiry';
+      }
+    }
+
+    // Skip spam and non-workable voicemail
+    if (extracted.is_spam || (voicemailChannel && !voicemailLeadPath)) {
       await writeLegacyShadowRouteDecision({
         call,
         extracted,
@@ -1945,6 +2173,23 @@ const CallRecordingProcessor = {
       );
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
+    }
+
+    if (voicemailChannel) {
+      // Workable voicemail continuing to lead creation: stamp the channel on
+      // the call log NOW (non-terminal — the row stays claimed as 'processing')
+      // so the call reads as a voicemail even if a later step fails, and mirror
+      // it to the unified inbox thread exactly like the skip path does.
+      await db('call_log').where({ id: call.id }).update({
+        answered_by: 'voicemail',
+        call_outcome: 'voicemail',
+        updated_at: new Date(),
+      });
+      await updateUnifiedVoiceMessage(
+        { ...call, transcription, answered_by: 'voicemail' },
+        { body: transcription, answered_by: 'voicemail' }
+      );
+      logger.info(`[call-proc] Voicemail ${callSid} has workable lead signal — continuing to lead creation`);
     }
 
     // ── V2 routing gate — evaluated BEFORE canonical customer/lead writes ──
@@ -2216,8 +2461,12 @@ const CallRecordingProcessor = {
         if (Object.keys(updates).length > 0) {
           await db('customers').where({ id: customerId }).update(updates);
         }
-      } else if (extracted.first_name && phone) {
-        // Create new customer
+      } else if (extracted.first_name && phone && !extracted.is_voicemail) {
+        // Create new customer. NEVER from a voicemail — a one-sided message
+        // transcription is too lossy to mint a customer record from (the Josh
+        // incident: first name + mangled address became a "real" customer).
+        // A workable voicemail becomes a customer-less Needs-Review lead in
+        // Step 4b instead; the office completes it into a customer by hand.
         const loc = resolveLocation(extracted.city || '');
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
         const numberConfig = TWILIO_NUMBERS.findByNumber(call.to_phone);
@@ -2498,6 +2747,7 @@ const CallRecordingProcessor = {
     // because Step 3 already created the customer — attribution would find the customer
     // and skip lead creation (race condition).
     let leadId = null;
+    let voicemailSmsResult = null;
     const leadCustomer = customerId
       ? await db('customers').where({ id: customerId }).select('id', 'pipeline_stage').first().catch(() => null)
       : null;
@@ -2515,10 +2765,14 @@ const CallRecordingProcessor = {
     // to a silent no_op. Still gated by the non-lead content veto, so existing-
     // customer / spam / wrong-number calls never take this path.
     const workableUnnamedLead = !customerId && !nonLeadCall
-      && hasWorkableLeadSignal({ extracted, phone });
+      && hasWorkableLeadSignal({ extracted, phone, voicemail: extracted.is_voicemail === true });
+    // The customer-attached path additionally vetoes voicemails: an existing-
+    // customer voicemail terminal-skips before Step 3, so a voicemail reaching
+    // here with a customerId means a late/racy phone match — treat it like the
+    // skip path (no lead), never like a live-call inquiry.
     const shouldCreateLead = !extracted.is_spam && !nonLeadCall
       && (
-        (customerId && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall }))
+        (customerId && !extracted.is_voicemail && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall }))
         || workableUnnamedLead
       );
     if (!shouldCreateLead && !extracted.is_spam && (customerId || nonLeadCall)) {
@@ -2529,18 +2783,12 @@ const CallRecordingProcessor = {
     }
     if (shouldCreateLead) {
       try {
-        // Check if lead already exists for this phone. On the customer-less
-        // recovery path, reuse only an ACTIVE lead (status not terminal, not
-        // converted) so a recovered inquiry lands on an open row or a fresh one
-        // — never silently attached to a won/lost/disqualified/duplicate lead
-        // where it would not surface. The customer-attached path is unchanged —
-        // its shouldCreateCallLeadForCustomer gate already limits it to
-        // open-lead / newly-created customers.
-        let existingLeadQuery = phone ? db('leads').where('phone', phone) : null;
-        if (existingLeadQuery && workableUnnamedLead) {
-          existingLeadQuery = existingLeadQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
-        }
-        const existingLead = existingLeadQuery ? await existingLeadQuery.orderBy('created_at', 'desc').first() : null;
+        // Check if lead already exists for this phone (see findReusableCallLead
+        // for the per-path filters: soft-deleted excluded always; active-only
+        // on the customer-less recovery path; unclaimed-or-ours on the
+        // customer-attached path, so a shared-phone lead owned by another
+        // customer is never reused/overwritten).
+        const existingLead = await findReusableCallLead(db, { phone, customerId, workableUnnamedLead });
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -2590,7 +2838,11 @@ const CallRecordingProcessor = {
             first_name: capitalizeName(extracted.first_name) || null,
             last_name: capitalizeName(extracted.last_name) || null,
             email: extracted.email || null,
-            lead_type: 'inbound_call',
+            // 'voicemail' is an established lead_type (admin-agents
+            // isMissedCallLead treats it as a missed call needing outreach).
+            // first_contact_channel stays 'call' — attribution sweeps and the
+            // channel-mix dashboards key on it, and a voicemail IS a call.
+            lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
             first_contact_at: new Date(),
             first_contact_channel: 'call',
             twilio_call_sid: call.twilio_call_sid,
@@ -2622,6 +2874,31 @@ const CallRecordingProcessor = {
               );
             } catch (notifyErr) {
               logger.warn(`[call-proc] untracked-call admin notify failed: ${notifyErr.message}`);
+            }
+          } else {
+            // Tracked call lead (GBP/spoke/paid tracking number): fire the same
+            // new_lead bell + Web Push the web-form path sends. Until now ONLY
+            // untracked call leads notified anyone — a tracked marketing call
+            // lead (the common case) landed silently and relied on someone
+            // happening to open the Leads page. Best-effort; a notify failure
+            // must never break call processing.
+            try {
+              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+                .filter(Boolean)
+                .join(' ');
+              const { triggerNotification } = require('./notification-triggers');
+              await triggerNotification('new_lead', {
+                title: extracted.is_voicemail ? 'New voicemail lead' : 'New call lead',
+                name: callerName || (phone ? maskPhone(phone) : null),
+                source: leadSourceRow?.name || null,
+                zip: extracted.zip || null,
+                service: extracted.matched_service || extracted.requested_service || null,
+                phone,
+                message: !!extracted.call_summary,
+                leadId,
+              });
+            } catch (notifyErr) {
+              logger.warn(`[call-proc] tracked-call new_lead notify failed: ${notifyErr.message}`);
             }
           }
         }
@@ -2715,24 +2992,45 @@ const CallRecordingProcessor = {
             preferred_date_time: extracted.preferred_date_time,
             sentiment: extracted.sentiment,
             call_type: extracted.call_type || null,
+            ...(extracted.is_voicemail ? { voicemail: true } : {}),
             ...(contact.missing.length ? { missing_for_qualification: contact.missing } : {}),
             ...(bridgeNeedsConfirmation.length ? { needs_confirmation: bridgeNeedsConfirmation } : {}),
           });
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
           // Only ever SET the customer link, never clear it. The unnamed-lead
-          // path runs with customerId null and can reuse an existing lead found
-          // by phone — writing customer_id = null there would detach a lead
-          // already linked to a customer. Attach when we have one; otherwise
-          // leave whatever link the lead already had.
+          // path runs with customerId null and can reuse an existing lead
+          // found by phone — writing customer_id = null there would detach a
+          // lead already linked to a customer.
           if (customerId) leadUpdates.customer_id = customerId;
+          // Reopen a reused lead the office parked as 'unresponsive' — the
+          // prospect just called back, and 'unresponsive' buckets under
+          // closed/lost in the admin leads UI, so a silently reused row would
+          // stay hidden from Needs Review. Same reopen semantics as the
+          // webhook prefill attach ('unresponsive' → 'new'; real terminal
+          // statuses are excluded from reuse upstream on the recovery path
+          // and never reopened here).
+          if (existingLead && current?.status === 'unresponsive') leadUpdates.status = 'new';
           leadUpdates.updated_at = new Date();
-          await db('leads').where({ id: leadId }).update(leadUpdates);
+          // findReusableCallLead already excludes a lead owned by ANOTHER
+          // customer from the lookup, so `current` is never foreign here. The
+          // write repeats that ownership predicate as the race backstop: a
+          // concurrent claim between the lookup and this update leaves the
+          // just-claimed lead untouched (0 rows) instead of overwriting the
+          // other customer's lead with this caller's extraction.
+          let enrichmentWrite = db('leads').where({ id: leadId });
+          if (customerId) {
+            enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+          }
+          const enriched = await enrichmentWrite.update(leadUpdates);
 
-          // Log AI triage activity. When the bridge flagged anything, append a
-          // plain-language "confirm before dispatch" line so it's visible on the
-          // lead timeline Virginia works, not just in extracted_data.
-          const triageBase = `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`;
+          // Log AI triage activity — gated on the enrichment write landing, so
+          // a lead lost to the ownership race above never gets this caller's
+          // triage on its timeline either. When the bridge flagged anything,
+          // append a plain-language "confirm before dispatch" line so it's
+          // visible on the lead timeline Virginia works, not just in
+          // extracted_data.
+          const triageBase = `AI extracted from ${extracted.is_voicemail ? 'voicemail' : 'call'}: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`;
           const triageNotes = [];
           if (contact.missing.length) {
             triageNotes.push(`needs for qualification: ${contact.missing.map((f) => QUALIFYING_CONTACT_LABELS[f] || f).join(', ')}`);
@@ -2741,7 +3039,7 @@ const CallRecordingProcessor = {
             triageNotes.push(`⚠ CONFIRM BEFORE DISPATCH: ${bridgeNeedsConfirmation.map(describeConfirmReason).join('; ')}`);
           }
           const triageDesc = triageNotes.length ? `${triageBase} — ${triageNotes.join(' — ')}` : triageBase;
-          await db('lead_activities').insert({
+          if (enriched) await db('lead_activities').insert({
             lead_id: leadId,
             activity_type: 'ai_triage',
             description: triageDesc,
@@ -2758,6 +3056,27 @@ const CallRecordingProcessor = {
                 : {}),
             }),
           }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
+        }
+
+        // Voicemail lead text-back (Layer 3): text the prospect a prefilled
+        // quote-wizard link. Only on the voicemail lead path — new prospect,
+        // workable signal, no existing customer. All send gates (feature
+        // gate, one-shot dedupe, landline, quiet hours, STOP suppression,
+        // template kill switch) live in the service. Best-effort: a text-back
+        // failure must never break call processing or the lead that was just
+        // created.
+        if (voicemailLeadPath && leadId) {
+          try {
+            const VoicemailLeadSms = require('./voicemail-lead-sms');
+            voicemailSmsResult = await VoicemailLeadSms.sendVoicemailQuoteLink({
+              leadId,
+              extracted,
+              call,
+              phone,
+            });
+          } catch (smsErr) {
+            logger.warn(`[call-proc] voicemail text-back failed (non-blocking): ${smsErr.message}`);
+          }
         }
       } catch (leadErr) {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
@@ -2800,6 +3119,18 @@ const CallRecordingProcessor = {
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
       if (v2Flat.matched_service) extracted.matched_service = v2Flat.matched_service;
       if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
+      // Catalog-anchored booking fields: the gate validated this extraction, so
+      // the booking must use ITS specific service / quoted price / follow-up
+      // signal — INCLUDING null/false clears. A truthy-only merge would let a
+      // stale unvalidated V1 value (hallucinated price, phantom follow-up)
+      // drive catalog selection, estimated_price, or follow-up creation on a
+      // V2-approved booking.
+      extracted.specific_service_name = v2Flat.specific_service_name || null;
+      extracted.quoted_price = typeof v2Flat.quoted_price === 'number' ? v2Flat.quoted_price : null;
+      extracted.follow_up_visit_mentioned = v2Flat.follow_up_visit_mentioned === true;
+      extracted.follow_up_date_time = (v2Flat.follow_up_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.follow_up_date_time))
+        ? v2Flat.follow_up_date_time.slice(0, 16)
+        : null;
       // (AV-normalized address was already written into `extracted` at the gate
       // approval branch above, before the customer/lead upsert — see there.)
       logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
@@ -2812,12 +3143,23 @@ const CallRecordingProcessor = {
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
     const customerServiceContext = customerId ? await loadCustomerServiceContext(customerId) : null;
     const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext });
+    // Catalog anchor: the specific bookable service this call maps to, when
+    // one resolves. Drives service_type/service_id/price/duration/follow-up on
+    // the booking. Also rescues catalog services whose names don't hit the
+    // coarse canonicalWavesService buckets (every bookable service must be
+    // bookable by phone). null -> legacy coarse-label behavior.
+    const callBookingCatalogRow = resolveCallBookingCatalogService({
+      extracted,
+      transcription,
+      services: bookableCallServices,
+    });
     // Use the module-level isOutboundCall(call) helper — a local `const
     // isOutboundCall` here shadows it for the WHOLE function scope, putting the
     // phantom-guard references above (Step 0) in the temporal dead zone:
     // "Cannot access 'isOutboundCall' before initialization" on every call that
     // reaches them with a pre-linked customer_id.
-    const canCreateAppointmentFromCall = !isOutboundCall(call) && serviceResolution.ok;
+    const canCreateAppointmentFromCall = !isOutboundCall(call)
+      && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
@@ -2861,7 +3203,13 @@ const CallRecordingProcessor = {
             );
           } else {
             const firstName = customerValidation.details.firstName || '';
-            const serviceType = serviceResolution.service;
+            const serviceType = callBookingCatalogRow?.name || serviceResolution.service;
+            // Price: transcript-quoted (what the agent and caller agreed)
+            // first, catalog list price fallback (one_time services only).
+            const priceInfo = resolveCallBookingPrice({
+              quotedPrice: extracted.quoted_price,
+              catalogRow: callBookingCatalogRow,
+            });
             const smsPhone = customerValidation.details.phone;
 
           // Use SMS template if available, fall back to inline
@@ -2916,6 +3264,7 @@ const CallRecordingProcessor = {
           let scheduledDateForLog = null;
           let windowStartForLog = null;
           let scheduleWasReused = false;
+          let followUpCreated = null;
           try {
             const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
@@ -2975,12 +3324,143 @@ const CallRecordingProcessor = {
                 const displayH = hh % 12 || 12;
                 windowDisplay = `${displayH}:${String(mm).padStart(2, '0')} ${ampm}`;
               }
+              // Follow-up visit plan — only when the call specifically
+              // discussed a second/follow-up treatment (transcript-driven);
+              // date from the transcript when agreed, else parent date + the
+              // service's catalog interval (default 14 days).
+              const callFollowUpPlan = resolveCallFollowUpPlan({
+                extracted,
+                catalogRow: callBookingCatalogRow,
+                parentDate: scheduledDate,
+                parentWindowStart: windowStart || '09:00',
+              });
               let reusedExistingSchedule = false;
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
                 const defaultTechnicianName = defaultTechnician?.name || null;
+                // Linked follow-up visit (visit 2). PENDING, not customer-
+                // confirmed: the exact time gets confirmed by a human at
+                // dispatch. No confirmation SMS and no reminder registration
+                // for this row — customer comms go out for the initial
+                // visit only (owner directive).
+                // Called on the fresh-insert path AND both reuse paths (marker/
+                // slot match, idempotency-key conflict) so a retry whose first
+                // attempt lost the savepointed follow-up insert — or a
+                // reprocess after the primary already exists — still creates
+                // the promised second treatment.
+                const ensureCallFollowUpVisit = async (primaryRow) => {
+                  if (!callFollowUpPlan || !primaryRow?.id) return null;
+                  // A terminal primary gets no visit 2 — reprocessing an old
+                  // call whose booking since completed or was cancelled must
+                  // not book a stray child off it.
+                  if (['cancelled', 'completed', 'skipped'].includes(primaryRow.status)) return null;
+                  // Any existing follow-up off this primary — whatever its
+                  // status or origin (AI child OR a completion-CTA follow-up)
+                  // — means dispatch already owns the outcome (a cancelled
+                  // child was cancelled on purpose; don't resurrect it). The
+                  // idempotency key alone can't catch a reprocess whose
+                  // extracted date differs.
+                  const existingChild = await trx('scheduled_services')
+                    .where((qb) => qb
+                      .where({ parent_service_id: primaryRow.id, source_action: 'ai_call_pipeline_followup' })
+                      .orWhere({ followup_source_service_id: primaryRow.id }))
+                    .first('id');
+                  if (existingChild) return null;
+                  // A reused primary may have been RESCHEDULED since the call
+                  // was first processed — callFollowUpPlan above was spaced
+                  // from the extraction's date, so a retry that lost the child
+                  // insert would book visit 2 at old-date + interval. Re-space
+                  // the plan from the row's actual date (an explicit transcript
+                  // date re-validates against it; a plan that no longer
+                  // resolves fails closed to no child — dispatch books by hand).
+                  let fuPlan = callFollowUpPlan;
+                  const primaryActualDate = callBookingDateOnly(primaryRow.scheduled_date);
+                  if (primaryActualDate && primaryActualDate !== scheduledDate) {
+                    fuPlan = resolveCallFollowUpPlan({
+                      extracted,
+                      catalogRow: callBookingCatalogRow,
+                      parentDate: primaryActualDate,
+                      parentWindowStart: String(primaryRow.window_start || '').slice(0, 5) || windowStart || '09:00',
+                    });
+                    if (!fuPlan) return null;
+                  }
+                  // Runs in a SAVEPOINT (nested trx): a rejected follow-up
+                  // insert must never roll back the confirmed primary
+                  // appointment sharing this transaction.
+                  const fuStart = fuPlan.windowStart;
+                  const [fuH, fuM] = fuStart.split(':').map(Number);
+                  const fuEndH = fuH >= 23 ? 23 : fuH + 1;
+                  try {
+                    return await trx.transaction(async (sp) => {
+                      const [fuRow] = await sp('scheduled_services')
+                        .insert({
+                          customer_id: customerId,
+                          technician_id: primaryRow.technician_id || defaultTechnicianId,
+                          scheduled_date: fuPlan.scheduledDate,
+                          window_start: fuStart,
+                          window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
+                          window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
+                          service_type: serviceType,
+                          service_id: callBookingCatalogRow?.id || null,
+                          parent_service_id: primaryRow.id,
+                          status: 'pending',
+                          customer_confirmed: false,
+                          // Billing shape rides the price: a priced package
+                          // total covers both treatments → $0 "included" child
+                          // (same no-charge shape as the completion-CTA flow:
+                          // followup_included bypasses the one-time billing
+                          // pre-gate and completion billing can't fall back to
+                          // a monthly rate). An UNPRICED booking's second visit
+                          // was never prepaid → billable-neutral like its
+                          // unpriced primary, office prices at completion.
+                          // followup_source_service_id is stamped either way:
+                          // its partial unique index blocks a duplicate
+                          // follow-up off this visit and carries no free
+                          // semantics of its own.
+                          ...callFollowUpBillingShape(priceInfo.price),
+                          followup_source_service_id: primaryRow.id,
+                          estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
+                          // Customer-safe only: once dispatch confirms this row
+                          // the portal filter no longer hides it and
+                          // GET /api/schedule returns notes verbatim. The
+                          // dispatch instruction + Call SID live in
+                          // internal_notes (JobDrawer) — the reuse lookup
+                          // (findExistingCallAppointment) excludes child rows,
+                          // so the child needs no marker in notes.
+                          notes: [
+                            'Follow-up treatment (visit 2) booked from your phone call.',
+                            priceInfo.price != null ? 'Included in the package price on the initial visit.' : null,
+                          ].filter(Boolean).join(' '),
+                          internal_notes: [
+                            'Booked from phone call — confirm exact time with the customer before dispatch.',
+                            `Call SID: ${callSid}.`,
+                          ].join(' '),
+                          booking_source: 'phone_call',
+                          source_call_log_id: call.id,
+                          source_action: 'ai_call_pipeline_followup',
+                          idempotency_key: computeAppointmentIdempotencyKey({
+                            callLogId: call.id,
+                            schedulingStatus: 'follow_up',
+                            confirmedStartAt: `${fuPlan.scheduledDate}T${fuStart}`,
+                            primaryServiceCategory: serviceType,
+                            addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
+                          }),
+                        })
+                        .onConflict('idempotency_key')
+                        .ignore()
+                        .returning('*');
+                      return fuRow || null;
+                    });
+                  } catch (fuErr) {
+                    // Savepoint rolled back: visit 2 is lost but the confirmed
+                    // primary appointment commits. Dispatch confirms follow-ups
+                    // by hand, so surface it in the log for manual recovery.
+                    logger.warn(`[call-proc] Follow-up visit insert failed for ${callSid}; primary booking kept: ${fuErr.message}`);
+                    return null;
+                  }
+                };
                 const existing = await findExistingCallAppointment({
                   customerId,
                   call,
@@ -2991,14 +3471,28 @@ const CallRecordingProcessor = {
                 });
                 if (existing) {
                   reusedExistingSchedule = true;
+                  let primaryRow = existing;
                   if (!existing.technician_id && defaultTechnicianId) {
                     const [updatedExisting] = await trx('scheduled_services')
                       .where({ id: existing.id })
                       .update({ technician_id: defaultTechnicianId, updated_at: new Date() })
                       .returning('*');
-                    return updatedExisting || existing;
+                    primaryRow = updatedExisting || existing;
                   }
-                  return existing;
+                  // A reused appointment still closed the deal: reprocessing a
+                  // call (or recovering from an earlier savepoint-contained
+                  // conversion failure) must not strand the lead as open. The
+                  // helper's won/duplicate + ownership guards make this a no-op
+                  // when the lead already converted.
+                  await convertCallLeadOnPhoneBooking(trx, {
+                    leadId,
+                    customerId,
+                    scheduledServiceId: primaryRow.id,
+                    callSid,
+                  });
+                  // After the backfill so the child inherits the assigned tech.
+                  followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                  return primaryRow;
                 }
                 const insertData = {
                   customer_id: customerId,
@@ -3008,6 +3502,13 @@ const CallRecordingProcessor = {
                   window_end: windowEnd || '10:00',
                   window_display: windowDisplay,
                   service_type: serviceType,
+                  service_id: callBookingCatalogRow?.id || null,
+                  estimated_price: priceInfo.price,
+                  create_invoice_on_complete: callBookingInvoiceOnComplete({
+                    price: priceInfo.price,
+                    catalogRow: callBookingCatalogRow,
+                  }),
+                  estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
                   status: 'confirmed',
                   customer_confirmed: true,
                   confirmed_at: new Date(),
@@ -3015,8 +3516,21 @@ const CallRecordingProcessor = {
                     'Booked via phone call.',
                     `Call SID: ${callSid}.`,
                     defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
+                    priceInfo.price != null
+                      ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
+                      : null,
                     extracted.call_summary || null,
                   ].filter(Boolean).join(' ').trim(),
+                  // Dispatcher-only price provenance: scheduled_services.notes
+                  // is customer-visible (GET /api/schedule returns it verbatim),
+                  // so the catalog-vs-quote review cue lives in internal_notes
+                  // (surfaced in the dispatch JobDrawer), never in notes.
+                  internal_notes: (priceInfo.source === 'transcript'
+                    && callBookingCatalogRow
+                    && Number(callBookingCatalogRow.base_price) > 0
+                    && Math.abs(Number(callBookingCatalogRow.base_price) - priceInfo.price) >= 0.01)
+                    ? `Catalog list price: $${Number(callBookingCatalogRow.base_price).toFixed(2)} — quote differs, review.`
+                    : null,
                   booking_source: 'phone_call',
                   source_call_log_id: call.id,
                   source_action: 'ai_call_pipeline',
@@ -3033,7 +3547,22 @@ const CallRecordingProcessor = {
                   .onConflict('idempotency_key')
                   .ignore()
                   .returning('*');
-                if (created) return created;
+                if (created) {
+                  // A phone-booked appointment is the deal closing — convert the
+                  // call's lead to won in the SAME transaction (mirrors the
+                  // admin-leads schedule-appointment route), so the conversion
+                  // can't commit without the appointment row. Every other booking
+                  // path already converts; this one silently didn't, stranding
+                  // phone-booked callers as `new` in the pipeline.
+                  await convertCallLeadOnPhoneBooking(trx, {
+                    leadId,
+                    customerId,
+                    scheduledServiceId: created.id,
+                    callSid,
+                  });
+                  followUpCreated = await ensureCallFollowUpVisit(created);
+                  return created;
+                }
                 // Idempotency conflict: another writer already created a row with this key.
                 // Fetch it and mark as reused so downstream skips duplicate side effects.
                 const existingByKey = await trx('scheduled_services')
@@ -3042,6 +3571,17 @@ const CallRecordingProcessor = {
                 if (existingByKey) {
                   reusedExistingSchedule = true;
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
+                  // Same as the reuse path above: the appointment exists, so
+                  // the lead must still convert (idempotent, ownership-guarded).
+                  await convertCallLeadOnPhoneBooking(trx, {
+                    leadId,
+                    customerId,
+                    scheduledServiceId: existingByKey.id,
+                    callSid,
+                  });
+                  // This is exactly the retry whose first attempt may have
+                  // lost the savepointed follow-up insert — ensure visit 2.
+                  followUpCreated = await ensureCallFollowUpVisit(existingByKey);
                   return existingByKey;
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
@@ -3062,6 +3602,11 @@ const CallRecordingProcessor = {
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
                 });
+              }
+              if (followUpCreated) {
+                // Intentionally NO registerScheduleSideEffects here: the
+                // follow-up is pending and must not message the customer.
+                logger.info(`[call-proc] Follow-up visit created: ${followUpCreated.id} on ${followUpCreated.scheduled_date} (parent ${svc.id}); pending, no customer comms until confirmed`);
               }
 
             } else {
@@ -3156,6 +3701,13 @@ const CallRecordingProcessor = {
               logger.info(`[call-proc] Skipping duplicate appointment SMS to customer ${customerId} (sent within last 10 min)`);
               appointmentResult = { smsSent: false, smsSkippedReason: 'duplicate', scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time };
             }
+          }
+          if (followUpCreated) {
+            appointmentResult = {
+              ...(appointmentResult || {}),
+              followUpScheduledServiceId: followUpCreated.id,
+              followUpDate: followUpCreated.scheduled_date,
+            };
           }
         }
         }
@@ -3374,6 +3926,7 @@ const CallRecordingProcessor = {
       appointmentResult,
       newsletterResult,
       beehiivResult,
+      voicemailSmsResult,
     };
     } catch (procErr) {
       logger.error(`[call-proc] Unhandled error processing ${callSid}: ${procErr.message}\n${procErr.stack || ''}`);
@@ -3599,6 +4152,7 @@ CallRecordingProcessor._test = {
   findCustomerForCallContact,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
+  findExistingCallAppointment,
   classifyCallerAccount,
   summarizeKnownCaller,
   isNonLeadCallContent,
@@ -3607,6 +4161,8 @@ CallRecordingProcessor._test = {
   transcribeRecording,
   extractCallDataV2,
   normalizeOpenAISegments,
+  convertCallLeadOnPhoneBooking,
+  findReusableCallLead,
 };
 
 module.exports = CallRecordingProcessor;

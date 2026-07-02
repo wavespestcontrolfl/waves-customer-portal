@@ -67,8 +67,10 @@ export default function DashboardJumpNav({
     setShowRangePicker(false);
   };
 
+  // Mobile sticky offset clears the fixed AdminLayoutV2 header (52px + safe
+  // area, z-90) — its isMobile cutoff is 768px, i.e. Tailwind's md:.
   return (
-    <div className="sticky top-0 z-20 -mx-3 sm:-mx-6 px-3 sm:px-6 pt-2 pb-0 mb-4 bg-surface-page border-b border-hairline border-zinc-200">
+    <div className="sticky top-[calc(52px+env(safe-area-inset-top))] md:top-0 z-20 -mx-3 sm:-mx-6 px-3 sm:px-6 pt-2 pb-0 mb-4 bg-surface-page border-b border-hairline border-zinc-200">
       <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-1 md:gap-3">
         {/* Section tabs */}
         <nav

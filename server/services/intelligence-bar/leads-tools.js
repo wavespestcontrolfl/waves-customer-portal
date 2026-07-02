@@ -172,7 +172,7 @@ async function executeLeadsTool(toolName, input) {
 async function getLeadOverview(days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
 
-  const leads = await db('leads').where('first_contact_at', '>=', since);
+  const leads = await db('leads').whereNull('deleted_at').where('first_contact_at', '>=', since);
   const total = leads.length;
   const won = leads.filter(l => l.status === 'won').length;
   const lost = leads.filter(l => l.status === 'lost').length;
@@ -219,7 +219,8 @@ async function queryLeads(input) {
     .select(
       'leads.*', 'lead_sources.name as source_name', 'lead_sources.channel',
       'technicians.name as assigned_name',
-    );
+    )
+    .whereNull('leads.deleted_at');
 
   if (status) query = query.where('leads.status', status);
   if (source) query = query.whereILike('lead_sources.name', `%${source}%`);
@@ -271,6 +272,7 @@ async function getStaleLeads(input) {
   let query = db('leads')
     .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
     .select('leads.*', 'lead_sources.name as source_name')
+    .whereNull('leads.deleted_at')
     .where('leads.updated_at', '<', cutoff);
 
   if (status) {
@@ -303,7 +305,7 @@ async function getStaleLeads(input) {
 async function getLeadFunnel(days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
 
-  const stages = await db('leads').where('first_contact_at', '>=', since)
+  const stages = await db('leads').whereNull('deleted_at').where('first_contact_at', '>=', since)
     .select('status', db.raw('COUNT(*) as count'))
     .groupBy('status').orderByRaw('COUNT(*) DESC');
 
@@ -341,6 +343,7 @@ async function getSourcePerformance(days) {
 
   const sources = await db('leads')
     .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
+    .whereNull('leads.deleted_at')
     .where('leads.first_contact_at', '>=', since)
     .select(
       'lead_sources.name as source',
@@ -391,6 +394,7 @@ async function getLostAnalysis(days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
 
   const reasons = await db('leads')
+    .whereNull('deleted_at')
     .where('status', 'lost')
     .where('first_contact_at', '>=', since)
     .select('lost_reason', db.raw('COUNT(*) as count'), db.raw("string_agg(DISTINCT competitor, ', ') as competitors"))
@@ -424,6 +428,7 @@ async function getResponseTimes(days) {
   const since = new Date(Date.now() - (days || 30) * 86400000).toISOString();
 
   const leads = await db('leads')
+    .whereNull('deleted_at')
     .where('first_contact_at', '>=', since)
     .whereNotNull('response_time_minutes')
     .select('response_time_minutes', 'status');
@@ -470,13 +475,13 @@ async function updateLeadStatus(input) {
 
   let lead;
   if (lead_id) {
-    lead = await db('leads').where('id', lead_id).first();
+    lead = await db('leads').where('id', lead_id).whereNull('deleted_at').first();
   } else if (lead_name) {
     lead = await db('leads').where(function () {
       const s = `%${lead_name}%`;
       this.whereILike('first_name', s).orWhereILike('last_name', s)
         .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
-    }).whereIn('status', ACTIVE_STATUSES).first();
+    }).whereIn('status', ACTIVE_STATUSES).whereNull('deleted_at').first();
   }
   if (!lead) return { error: 'Lead not found' };
 
@@ -513,7 +518,7 @@ async function bulkUpdateLeads(input) {
   }
   const cutoff = older_than_days ? new Date(Date.now() - older_than_days * 86400000).toISOString() : null;
 
-  let query = db('leads').where('status', current_status);
+  let query = db('leads').where('status', current_status).whereNull('deleted_at');
   if (cutoff) query = query.where('updated_at', '<', cutoff);
 
   const matching = await query.clone().select('id', 'first_name', 'last_name', 'status', 'updated_at');

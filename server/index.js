@@ -28,6 +28,41 @@ const { errorHandler, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
 
+// Fail closed on missing critical secrets in production. A missing JWT_SECRET
+// would otherwise let the app boot and then break auth at runtime — jwt.sign
+// throws on every request — instead of refusing to start. DATABASE_URL gets the
+// same treatment so a misconfigured deploy fails loudly at boot, not on the
+// first query. Non-production only warns so local dev/tests run without a full
+// .env.
+function assertRequiredSecrets() {
+  // knexfile resolves Railway's alternate DB env shapes (DATABASE_PRIVATE_URL,
+  // DATABASE_PUBLIC_URL, POSTGRES_URL, PG* vars) and backfills
+  // process.env.DATABASE_URL as a require-time side effect — models/db pulls
+  // it in moments later anyway. Trigger that resolution BEFORE deciding the
+  // URL is missing, and check the post-resolution env var rather than the
+  // config snapshot (which may have been cached before the backfill).
+  require('./knexfile');
+  const required = {
+    JWT_SECRET: config.jwt.secret,
+    DATABASE_URL: process.env.DATABASE_URL,
+  };
+  const missing = Object.entries(required)
+    .filter(([, value]) => !value || !String(value).trim())
+    .map(([name]) => name);
+  if (!missing.length) return;
+  const message = `Missing required environment variable(s): ${missing.join(', ')}`;
+  if (config.nodeEnv === 'production') {
+    // The global uncaughtException handler above deliberately never exits, so
+    // a top-level throw here would be swallowed — leaving a zombie process
+    // that logs once and never binds the port. Exit explicitly instead.
+    console.error(`[startup] ${message} — refusing to start.`);
+    logger.error(`[startup] ${message} — refusing to start.`);
+    process.exit(1);
+  }
+  logger.warn(`[startup] ${message} — continuing (non-production).`);
+}
+assertRequiredSecrets();
+
 // Route imports
 const authRoutes = require('./routes/auth');
 const serviceRoutes = require('./routes/services');
@@ -229,6 +264,27 @@ app.use('/api/auth/send-code', authLimiter);
 app.use('/api/auth/verify-code', authLimiter);
 app.use('/api/admin/auth/login', authLimiter);
 
+// Public, unauthenticated surfaces that hit paid third-party APIs get tight
+// per-IP caps on top of the global limiter so a bot flood can't run up spend.
+// Lead intake fires Twilio SMS (new-lead alerts + customer confirmations); the
+// estimators call Google Maps + AI per lookup. Keyed like the global limiter
+// (IP fallback for no-auth traffic) and skipped outside production so local
+// dev and tests aren't throttled.
+const leadIntakeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 15,
+  message: { error: 'Too many submissions, please try again later.' },
+  keyGenerator: rateLimitKey,
+  skip: () => process.env.NODE_ENV !== 'production',
+});
+const paidEstimatorDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 60,
+  message: { error: 'Daily limit reached, please try again tomorrow.' },
+  keyGenerator: rateLimitKey,
+  skip: () => process.env.NODE_ENV !== 'production',
+});
+
 // Body parsing
 // Stripe webhook must use raw body for signature verification — mount BEFORE json parser
 app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }), require('./routes/stripe-webhook'));
@@ -310,8 +366,8 @@ app.get('/estimate/:token', (req, res, next) => {
   if (SERVICE_ESTIMATE_SLUGS.has(slug)) return next();
   return estimatePublicRoutes.handleEstimateView(req, res, next);
 });
-app.use('/api/public/quote', publicQuoteRoutes);
-app.use('/api/public/estimator', publicPropertyLookupRoutes);
+app.use('/api/public/quote', paidEstimatorDailyLimiter, publicQuoteRoutes);
+app.use('/api/public/estimator', paidEstimatorDailyLimiter, publicPropertyLookupRoutes);
 app.use('/api/admin/reviews', adminReviewRoutes);
 app.use('/api/admin/settings', adminSettingsRoutes);
 app.use('/api/admin/backlink-agent', adminBacklinkAgentRoutes);
@@ -358,8 +414,8 @@ const { validateTwilioSignature } = require('./middleware/twilio-signature');
 // twilio-webhook.js handles /sms + /status; twilio-voice-webhook.js handles /voice, /call-complete,
 // /recording-status, /transcription, /outbound-admin-prompt — no path conflicts under same mount.
 app.use('/api/webhooks/twilio', validateTwilioSignature, twilioWebhookRoutes);
-app.use('/api/webhooks/lead', require('./routes/lead-webhook'));
-app.use('/api/leads', require('./routes/lead-webhook'));
+app.use('/api/webhooks/lead', leadIntakeLimiter, require('./routes/lead-webhook'));
+app.use('/api/leads', leadIntakeLimiter, require('./routes/lead-webhook'));
 // Bilingual AI voice agent posts captured leads here (fail-closed shared-secret
 // auth inside the route). JSON body — mounted after express.json above.
 app.use('/api/webhooks/voice-agent', require('./routes/webhooks-voice-agent'));
