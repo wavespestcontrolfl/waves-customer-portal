@@ -77,6 +77,14 @@ const gates = {
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
+  // Ask Waves — public conversational intake on the marketing site (hub). The
+  // brain answers pest questions and steers visitors to the instant quote; it
+  // can NEVER state a price (pricing only comes from the existing contact-gated
+  // /api/public/quote/calculate path). Replies only when a visitor asks — not
+  // an auto-send — so dev is open like aiAssistantAutoReply; prod ships dark
+  // until Adam sets GATE_ASK_WAVES=true.
+  askWaves: isProd ? process.env.GATE_ASK_WAVES === 'true' : true,
+
   // Legacy SMS AI Drafts — creates message_drafts rows and owner "Approve"
   // alerts from inbound customer SMS. Off by default in prod until the
   // approval workflow is ready.

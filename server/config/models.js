@@ -86,6 +86,7 @@ const ROUTES = Object.freeze({
   leadClassify:      Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // lead-triage.js — live, Claude fallback
   knowledgeAnswer:   Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // knowledge-bridge.js — live, Claude fallback
   estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // estimate-assistant.js — live, Claude fallback
+  askWaves:          Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // ask-waves-intake.js — live, Claude fallback
 });
 
 module.exports = {

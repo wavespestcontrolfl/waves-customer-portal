@@ -166,6 +166,15 @@ function derivePerApplication(estimate) {
   };
 }
 
+// Which SURFACE converted the visitor (Ask Waves chat vs the classic wizard) —
+// strict allowlist so a public caller can't invent channels. Acquisition
+// attribution (resolveLeadSource) is deliberately untouched: a paid click that
+// converts via chat is still a paid click. lead_type / estimates.source stay
+// 'quote_wizard' — they are dedup/replace discriminators, not cohorts.
+function resolveEntryChannel(attr) {
+  return attr?.channel === 'ai_chat' ? 'ai_chat' : 'quote_wizard';
+}
+
 // Same-phone wizard re-runs may refresh ONLY the wizard's own open draft.
 // Estimates from any other source (admin/tech/lead automation) or already
 // promoted past draft keep the duplicate hard-block.
@@ -684,12 +693,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const fbc = attr?.fbc ? String(attr.fbc).slice(0, 255) : null;
     const fbp = attr?.fbp ? String(attr.fbp).slice(0, 255) : null;
     const sourceMeta = await resolveLeadSource(attr);
+    const entryChannel = resolveEntryChannel(attr);
 
     const isOneTimeOnly = !monthly && !annual && oneTimeTotal > 0;
     const leadMonthlyValue = quoteRequired ? null : (monthly || null);
 
     const extractedData = JSON.stringify({
       stage: 'quote_calculated',
+      entry_channel: entryChannel,
       homeSqFt: sqft,
       lotSqFt: lot,
       services,
@@ -830,7 +841,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         };
         if (!existingCust.lead_source) updates.lead_source = 'website_quote';
         if (!existingCust.lead_source_detail) updates.lead_source_detail = sourceMeta.leadSourceDetail;
-        if (!existingCust.lead_source_channel) updates.lead_source_channel = 'quote_wizard';
+        if (!existingCust.lead_source_channel) updates.lead_source_channel = entryChannel;
         if (!existingCust.lead_source_area && quoteCity) updates.lead_source_area = String(quoteCity).slice(0, 50);
         if (!existingCust.email && emailLc) updates.email = emailLc;
         if (!existingCust.address_line1 && quoteAddress) updates.address_line1 = quoteAddress;
@@ -864,7 +875,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           pipeline_stage_changed_at: new Date(),
           lead_source: 'website_quote',
           lead_source_detail: sourceMeta.leadSourceDetail,
-          lead_source_channel: 'quote_wizard',
+          lead_source_channel: entryChannel,
           lead_source_area: quoteCity ? String(quoteCity).slice(0, 50) : null,
           lead_service_interest: serviceInterestForCustomer,
           landing_page_url: landingForCustomer,
@@ -1451,4 +1462,5 @@ module.exports._internals = {
   derivePerApplication,
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
+  resolveEntryChannel,
 };
