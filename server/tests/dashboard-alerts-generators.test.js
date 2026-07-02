@@ -152,6 +152,18 @@ describe('Action Inbox generators', () => {
     expect(item.label).toContain('Autopay covers 23%');
   });
 
+  test('autopay_coverage_low: thresholds on the raw ratio — 49.9% must fire, not round up to 50 and skip', async () => {
+    primeDb({
+      customers: { c: '1000' },
+      'customers as c': { c: '499' },
+    });
+    const { alerts } = await computeDashboardAlertsUncached();
+    const item = alerts.find((a) => a.id === 'autopay_coverage_low');
+    expect(item).toMatchObject({ kind: 'action', count: 501 });
+    // Label shows the tile's one-decimal form, never a rounded-up 50.
+    expect(item.label).toContain('Autopay covers 49.9%');
+  });
+
   test('autopay_coverage_low: silent at/above target and on an empty base', async () => {
     primeDb({ customers: { c: '100' }, 'customers as c': { c: '60' } });
     let { alerts } = await computeDashboardAlertsUncached();

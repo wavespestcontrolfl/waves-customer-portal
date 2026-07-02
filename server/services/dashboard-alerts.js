@@ -363,7 +363,11 @@ async function computeDashboardAlertsUncached() {
         .count({ c: '*' })
         .first();
       const covered = parseInt(coveredRow?.c || 0);
-      const pct = Math.round((covered / base) * 100);
+      // Threshold on the raw ratio — rounding first would let 49.5-49.9%
+      // round up to the 50% target and silently skip the alert. Display uses
+      // the tile's one-decimal form (admin-dashboard autopayPct) so the two
+      // surfaces always show the same number.
+      const pct = (covered / base) * 100;
       if (pct < AUTOPAY_COVERAGE_TARGET_PCT) {
         const manual = base - covered;
         alerts.push({
@@ -371,7 +375,7 @@ async function computeDashboardAlertsUncached() {
           kind: 'action',
           severity: 'warn',
           count: manual,
-          label: `Autopay covers ${pct}% of customers — ${manual} billed manually`,
+          label: `Autopay covers ${Math.round(pct * 10) / 10}% of customers — ${manual} billed manually`,
           href: '/admin/customers',
         });
       }
