@@ -59,11 +59,17 @@ function tableMock(spec) {
   return chain;
 }
 
+// Chains created per table, so tests can assert the filters a query applied.
+let mockChains = {};
 function configureDb(tables) {
+  mockChains = {};
   mockDbHandler = (tableName) => {
     if (!(tableName in tables)) throw new Error(`unexpected table ${tableName}`);
     const spec = tables[tableName];
-    return typeof spec === 'function' ? spec() : tableMock(spec);
+    const chain = typeof spec === 'function' ? spec() : tableMock(spec);
+    if (!mockChains[tableName]) mockChains[tableName] = [];
+    mockChains[tableName].push(chain);
+    return chain;
   };
 }
 
@@ -337,6 +343,11 @@ describe('buildEstimatePaymentContext', () => {
       setupFeeAmount: 99,
       firstApplicationAmount: 135.67,
     });
+    // Annual-prepay invoices carry the same accepted-estimate marker — the
+    // lookup must also require the converter's pay-per-application phrase so
+    // a legacy/manual prepay invoice can't render as per-application billing.
+    const invoiceChain = mockChains.invoices[0];
+    expect(invoiceChain.where).toHaveBeenCalledWith('notes', 'like', '%selected pay per application%');
   });
 
   it('flags a chosen-but-unrecorded prepay so the card never invents an amount', async () => {

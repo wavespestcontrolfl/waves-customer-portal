@@ -172,11 +172,17 @@ async function summarizeTermVisitUsage(term, scheduledServiceId) {
   }
 }
 
-// The invoice the converter minted at accept. Its id is not persisted on the
-// estimate row, but the converter always writes "accepted estimate #<uuid>"
-// into the invoice notes, and a uuid in that marker is unambiguous — so the
-// notes match IS the link. Earliest live invoice wins (the acceptance invoice
-// predates any later manual billing that might echo the phrase).
+// The pay-per-application invoice the converter minted at accept. Its id is
+// not persisted on the estimate row, but the converter always writes
+// "accepted estimate #<uuid>" into the invoice notes, and a uuid in that
+// marker is unambiguous — so the notes match IS the link. Annual-prepay
+// invoices carry the SAME estimate marker, so also require the converter's
+// pay-per-application phrase ("Customer selected pay per application") —
+// otherwise a legacy/manual prepay whose term row can't be read would render
+// under "Billing: Per application". A standard invoice without the phrase
+// simply isn't found (fail closed to no billing claim). Earliest live invoice
+// wins (the acceptance invoice predates any later manual billing that might
+// echo the phrase).
 async function findAcceptanceInvoice(estimate) {
   if (!estimate?.id || !estimate?.customer_id) return null;
   try {
@@ -184,6 +190,7 @@ async function findAcceptanceInvoice(estimate) {
       .where({ customer_id: estimate.customer_id })
       .whereNotIn('status', INVOICE_DEAD_STATUSES)
       .where('notes', 'like', `%accepted estimate #${estimate.id}%`)
+      .where('notes', 'like', '%selected pay per application%')
       .orderBy('created_at', 'asc')
       .first() || null;
   } catch (err) {

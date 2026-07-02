@@ -82,6 +82,18 @@ function fmtPaidDate(value) {
   });
 }
 
+// Unpaid-invoice wording keyed off the invoice's real status — a draft prepay
+// left for the office to send (manual-acceptance path sets autoSendInvoice
+// false) must not claim "Invoice sent". Unknown statuses make no delivery
+// claim at all.
+function invoicePendingNote(status) {
+  const s = String(status || '').toLowerCase();
+  if (['draft', 'scheduled', 'sending'].includes(s)) return 'Invoice drafted — not sent to the customer yet';
+  if (s === 'processing') return 'Payment processing — not settled yet';
+  if (s === 'sent' || s === 'overdue') return 'Invoice sent, payment not received yet';
+  return 'Payment not received yet';
+}
+
 // Payment-posture rows: what the customer actually paid (or still owes) at
 // acceptance, from persisted invoice/term figures. Same row shape as
 // depositRow so all money facts render in one list.
@@ -141,7 +153,7 @@ function paymentRows(payment) {
       rows.push({
         label: 'Annual prepay — pending',
         value: amount,
-        sub: `Invoice sent, payment not received yet${usage}${left}${through}`,
+        sub: `${invoicePendingNote(ap.invoiceStatus)}${usage}${left}${through}`,
         tone: 'muted',
       });
     }
@@ -166,7 +178,7 @@ function paymentRows(payment) {
     if (inv) {
       const paidSub = inv.paid
         ? `Paid${fmtPaidDate(inv.paidAt) ? ` ${fmtPaidDate(inv.paidAt)}` : ''}`
-        : 'Invoiced — not paid yet';
+        : invoicePendingNote(inv.status);
       const paidTone = inv.paid ? 'paid' : 'muted';
       if (inv.setupFeeAmount != null) {
         rows.push({ label: 'WaveGuard setup fee', value: money(inv.setupFeeAmount), sub: paidSub, tone: paidTone });
