@@ -250,12 +250,25 @@ class AppointmentTagger {
     const automationKey = PREP_AUTOMATION_BY_PEST_TYPE[pestType] || null;
     if (!automationKey) return;
     if (!isEnabled('emailTemplateAutomations')) return;
-    if (!service.email) {
-      logger.info(`[appointment-tagger] No email on file; ${automationKey} prep email skipped for service ${service.id}`);
-      return;
-    }
 
     try {
+      // Route like the other prep/project emails: service contact first (the
+      // on-site person who actually does the prep), then primary contact.
+      const { resolveProjectEmailRecipient } = require('./project-email');
+      const customer = service.customer_id
+        ? await db('customers').where({ id: service.customer_id }).first()
+        : null;
+      const recipient = customer
+        ? resolveProjectEmailRecipient(customer)
+        : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim(), role: 'primary' };
+      if (!recipient.email) {
+        logger.info(`[appointment-tagger] No valid email on file; ${automationKey} prep email skipped for service ${service.id}`);
+        return;
+      }
+      const firstName = String(recipient.name || '').trim().split(/\s+/)[0]
+        || String(service.first_name || '').trim()
+        || 'there';
+
       const executor = require('./email-template-automation-executor');
       const portalVisitsUrl = portalUrl('/?tab=visits');
       await executor.processTrigger({
@@ -264,12 +277,12 @@ class AppointmentTagger {
         automationKey,
         entityType: 'scheduled_service',
         entityId: service.id,
-        recipient: { email: service.email, type: 'customer', id: service.customer_id || '' },
+        recipient: { email: recipient.email, type: 'customer', id: service.customer_id || '' },
         payload: {
           scheduled_service_id: service.id,
           customer_id: service.customer_id || '',
-          customer_email: service.email,
-          first_name: service.first_name || 'there',
+          customer_email: recipient.email,
+          first_name: firstName,
           service_type: service.service_type || '',
           project_type: this.classifyAppointmentType(service.service_type).label,
           service_date: formatDisplayDate(service.scheduled_date, { fallback: '' }),

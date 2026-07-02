@@ -22,7 +22,11 @@ jest.mock('../config/feature-gates', () => ({
 jest.mock('../services/email-template-automation-executor', () => ({
   processTrigger: jest.fn(async () => ({ automation_count: 1, results: [] })),
 }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: jest.fn(),
+}));
 
+const db = require('../models/db');
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
 const executor = require('../services/email-template-automation-executor');
@@ -45,10 +49,27 @@ function service(overrides = {}) {
   };
 }
 
+let customerRow;
+
+function customersQuery() {
+  const q = {
+    where: jest.fn(() => q),
+    first: jest.fn(async () => customerRow),
+  };
+  return q;
+}
+
 describe('appointment tagger prep email automation', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     isEnabled.mockReturnValue(true);
+    customerRow = {
+      id: 'cust-1',
+      first_name: 'Taylor',
+      last_name: 'Example',
+      email: 'taylor@example.com',
+    };
+    db.mockImplementation(() => customersQuery());
   });
 
   test('cockroach booking emits appointment.booked scoped to prep.cockroach', async () => {
@@ -128,7 +149,38 @@ describe('appointment tagger prep email automation', () => {
     expect(executor.processTrigger).not.toHaveBeenCalled();
   });
 
-  test('skips when the customer has no email on file', async () => {
+  test('routes to the service contact when one is set', async () => {
+    customerRow = {
+      ...customerRow,
+      service_contact_name: 'Jamie Onsite',
+      service_contact_email: 'onsite@example.com',
+    };
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    const call = executor.processTrigger.mock.calls[0][0];
+    expect(call.recipient.email).toBe('onsite@example.com');
+    expect(call.payload.customer_email).toBe('onsite@example.com');
+    expect(call.payload.first_name).toBe('Jamie');
+  });
+
+  test('still sends via the service contact when the primary email is blank', async () => {
+    customerRow = {
+      ...customerRow,
+      email: '',
+      service_contact_name: 'Jamie Onsite',
+      service_contact_email: 'onsite@example.com',
+    };
+
+    await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
+
+    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+    expect(executor.processTrigger.mock.calls[0][0].recipient.email).toBe('onsite@example.com');
+  });
+
+  test('skips when the customer has no valid email on any contact', async () => {
+    customerRow = { ...customerRow, email: '' };
+
     await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
 
     expect(executor.processTrigger).not.toHaveBeenCalled();
