@@ -263,3 +263,119 @@ describe('syncCustomerAdAttribution', () => {
     expect(await syncCustomerAdAttribution('c1', db)).toEqual({ updated: 0, reason: 'no_advanceable_rows' });
   });
 });
+
+// ---------------------------------------------------------------------------
+// sweepPendingAdAttribution — daily backstop. Candidates = customers with a
+// funnel row, NO completed funnel row, and at least one completed visit.
+// ---------------------------------------------------------------------------
+const { sweepPendingAdAttribution } = require('../services/ad-attribution-sync');
+
+// Wraps makeDb: intercepts the sweep's candidate query on
+// 'ad_service_attribution as asa' and delegates every other table (including
+// the inner per-customer sync) to the plain makeDb fake.
+function makeSweepDb(state) {
+  const inner = makeDb(state);
+  const db = (table) => {
+    if (String(table) === 'ad_service_attribution as asa') {
+      const b = {
+        whereNotNull: () => b,
+        where: () => b,
+        whereNotExists: () => b,
+        whereExists: () => b,
+        distinct: () => b,
+        limit: (n) => { state.captured.limit = n; return b; },
+        pluck: () => Promise.resolve(state.candidates || []),
+      };
+      return b;
+    }
+    return inner(table);
+  };
+  db.raw = inner.raw;
+  db.transaction = (cb) => cb(db);
+  state.captured = state.captured || {};
+  return db;
+}
+
+describe('sweepPendingAdAttribution', () => {
+  test('advances a stuck customer with completed costed visits', async () => {
+    const state = {
+      captured: {},
+      candidates: ['c1'],
+      asaCols: { completed_revenue: 1 },
+      asaRows: [{ id: 'a1', customer_id: 'c1', funnel_stage: 'lead', lead_date: '2026-06-01' }],
+      agg: { revenue: 214, gross_profit: 120, visits: 1 },
+      customer: { id: 'c1', monthly_rate: 0 },
+      financials: { target_gross_margin_pct: 55 },
+    };
+    const res = await sweepPendingAdAttribution(makeSweepDb(state));
+    expect(res).toMatchObject({ candidates: 1, advanced: 1, skipped: 0 });
+    expect(state.captured.update.where).toEqual({ id: 'a1' });
+    expect(state.captured.update.patch.funnel_stage).toBe('completed');
+  });
+
+  test('counts a no-op sync (no completed visits since lead) as skipped, not advanced', async () => {
+    const state = {
+      captured: {},
+      candidates: ['c1'],
+      asaCols: { completed_revenue: 1 },
+      asaRows: [{ id: 'a1', customer_id: 'c1', funnel_stage: 'lead', lead_date: '2026-06-01' }],
+      agg: { revenue: 0, gross_profit: 0, visits: 0 },
+      financials: { target_gross_margin_pct: 55 },
+    };
+    const res = await sweepPendingAdAttribution(makeSweepDb(state));
+    expect(res).toMatchObject({ candidates: 1, advanced: 0, skipped: 1 });
+    expect(state.captured.update).toBeUndefined(); // nothing written
+  });
+
+  test('no candidates → zeros without touching sync', async () => {
+    const state = { captured: {}, candidates: [], asaCols: { completed_revenue: 1 } };
+    const res = await sweepPendingAdAttribution(makeSweepDb(state));
+    expect(res).toEqual({ candidates: 0, advanced: 0, skipped: 0 });
+  });
+
+  test('missing completed_revenue column → safe zeros (env without the migration)', async () => {
+    const state = { captured: {}, candidates: ['c1'], asaCols: {} };
+    const res = await sweepPendingAdAttribution(makeSweepDb(state));
+    expect(res).toEqual({ candidates: 0, advanced: 0, skipped: 0 });
+  });
+
+  test('passes the batch limit through to the candidate query', async () => {
+    const state = { captured: {}, candidates: [], asaCols: { completed_revenue: 1 } };
+    await sweepPendingAdAttribution(makeSweepDb(state), { limit: 50 });
+    expect(state.captured.limit).toBe(50);
+  });
+});
+
+// PR #2257 P2: a late/backfilled EARLIER first-touch row must re-take primary
+// from a previously-synced completed row — the sweep must hand sync those
+// customers (predicate guarded by wiring test below; behavior via sync).
+describe('sweepPendingAdAttribution re-pick (stale completed primary)', () => {
+  test('candidate with a completed row + earlier backfilled row → primary re-picked, stale cleared', async () => {
+    const state = {
+      captured: {},
+      candidates: ['c1'],
+      asaCols: { completed_revenue: 1, gross_profit: 1 },
+      asaRows: [
+        { id: 'stale', customer_id: 'c1', funnel_stage: 'completed', lead_date: '2026-06-20', completed_revenue: 300 },
+        { id: 'backfilled', customer_id: 'c1', funnel_stage: 'lead', lead_date: '2026-05-01' },
+      ],
+      agg: { revenue: 300, gross_profit: 150, visits: 2 },
+      customer: { id: 'c1', monthly_rate: 0 },
+      financials: { target_gross_margin_pct: 55 },
+      clearedCount: 1,
+    };
+    const res = await sweepPendingAdAttribution(makeSweepDb(state));
+    expect(res.advanced).toBe(1);
+    expect(state.captured.update.where).toEqual({ id: 'backfilled' }); // earlier first-touch wins
+    expect(state.captured.clear.ids).toEqual(['stale']);               // old primary demoted
+  });
+
+  test('candidate-query predicate includes the stale-primary re-pick branch', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/ad-attribution-sync.js'), 'utf8');
+    expect(src).toMatch(/orWhereExists\(function backfilledEarlierFirstTouch/);
+    expect(src).toMatch(/pend\.lead_date < \(SELECT MIN\(done2\.lead_date\)/);
+    expect(src).toMatch(/whereNotIn\('pend\.funnel_stage', \['completed', 'lost'\]\)/);
+  });
+});

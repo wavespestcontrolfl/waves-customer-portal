@@ -2430,6 +2430,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:15AM ET — Ad-attribution completion sweep. Backstop for the
+  // completion-time syncCustomerAdAttribution (its only live trigger is
+  // job-costing at visit completion): a funnel row created AFTER the
+  // customer's visits completed — late attribution insert or backfill — would
+  // otherwise never advance to 'completed' and the customer stays invisible
+  // to revenue attribution. Runs before the 6:40/6:45 Google/Meta conversion
+  // uploads so freshly-advanced revenue ships the same morning. Idempotent
+  // and default-ON (it repairs data the dashboards already read); opt-out via
+  // AD_ATTRIBUTION_SWEEP_DISABLED=true.
+  // =========================================================================
+  cron.schedule('15 6 * * *', async () => {
+    if (process.env.AD_ATTRIBUTION_SWEEP_DISABLED === 'true') return;
+    logger.info('Running: ad-attribution completion sweep');
+    try {
+      await runExclusive('ad-attribution-sweep', async () => {
+        const { sweepPendingAdAttribution } = require('./ad-attribution-sync');
+        const r = await sweepPendingAdAttribution();
+        logger.info(`[ad-attribution sweep] candidates ${r.candidates}, advanced ${r.advanced}, skipped ${r.skipped}`);
+      });
+    } catch (err) {
+      logger.error(`Ad-attribution sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:40AM — Google Ads offline conversion upload (Data Manager API)
   // Automates the EXISTING DataManager.uploadConversions (qualified leads +
   // completed-job revenue) — previously admin-trigger only. Opt-in via
