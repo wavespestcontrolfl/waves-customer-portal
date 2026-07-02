@@ -5,6 +5,9 @@ const MODELS = require('../config/models');
 const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
 const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
 const { renderSmsTemplate } = require('./sms-template-renderer');
+const { isEnabled } = require('../config/feature-gates');
+const { formatDisplayDate } = require('../utils/date-only');
+const { portalUrl } = require('../utils/portal-url');
 
 class AppointmentTagger {
 
@@ -180,8 +183,11 @@ class AppointmentTagger {
     }
   }
 
-  // Pest prep — SMS (Beehiiv email if configured)
+  // Pest prep — email prep guide (prep.cockroach / prep.bed_bug automations)
+  // plus the legacy SMS companion if an SMS template exists.
   async triggerPestPrep(service, pestType) {
+    await this.triggerPrepEmailGuide(service, pestType);
+
     const prepSMS = await this.getPrepSMS(pestType, service);
     if (!prepSMS) return;
 
@@ -220,6 +226,56 @@ class AppointmentTagger {
       customer_id: service.customer_id, interaction_type: 'sms_outbound',
       subject: `${pestType} prep info sent`, body: `Prep SMS sent for ${pestType} treatment.`,
     });
+  }
+
+  // Emit the appointment.booked trigger for the matching prep automation
+  // (email_template_automations). The run is queued and sent by the
+  // every-minute automation scheduler tick — not inline — so appointment
+  // creation stays fast and sends get the executor's retry policy. The
+  // automation's own conditions (service_type_contains) and exit checks
+  // (appointment.cancelled, re-evaluated against the live row at send time)
+  // still apply, and the once-per-appointment idempotency key makes re-runs
+  // of onServiceScheduled (e.g. regenerate-brief) safe.
+  async triggerPrepEmailGuide(service, pestType) {
+    const automationKey = pestType === 'cockroach'
+      ? 'prep.cockroach'
+      : pestType === 'bed_bug'
+        ? 'prep.bed_bug'
+        : null;
+    if (!automationKey) return;
+    if (!isEnabled('emailTemplateAutomations')) return;
+    if (!service.email) {
+      logger.info(`[appointment-tagger] No email on file; ${automationKey} prep email skipped for service ${service.id}`);
+      return;
+    }
+
+    try {
+      const executor = require('./email-template-automation-executor');
+      const portalVisitsUrl = portalUrl('/?tab=visits');
+      await executor.processTrigger({
+        triggerEventKey: 'appointment.booked',
+        triggerEventId: `appointment_booked:${service.id}`,
+        automationKey,
+        entityType: 'scheduled_service',
+        entityId: service.id,
+        recipient: { email: service.email, type: 'customer', id: service.customer_id || '' },
+        payload: {
+          scheduled_service_id: service.id,
+          customer_id: service.customer_id || '',
+          customer_email: service.email,
+          first_name: service.first_name || 'there',
+          service_type: service.service_type || '',
+          project_type: this.classifyAppointmentType(service.service_type).label,
+          service_date: formatDisplayDate(service.scheduled_date, { fallback: '' }),
+          property_address: [service.address_line1, service.city, service.zip].filter(Boolean).join(', '),
+          prep_url: portalVisitsUrl,
+          customer_portal_url: portalVisitsUrl,
+        },
+        executeImmediately: false,
+      });
+    } catch (err) {
+      logger.error(`[appointment-tagger] Prep email automation failed for service ${service.id}: ${err.message}`);
+    }
   }
 
   async getPrepSMS(pestType, service) {
