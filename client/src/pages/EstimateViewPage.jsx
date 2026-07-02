@@ -1476,7 +1476,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
             </div>
           ) : null}
           {showLowConfidenceRange ? (
-            <div style={{ fontSize: 13, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5, maxWidth: 320 }}>
+            <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5, maxWidth: 320 }}>
               Estimated range — we confirm your exact price with a quick site visit.
             </div>
           ) : null}
