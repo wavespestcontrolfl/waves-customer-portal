@@ -19,13 +19,13 @@ async function executeLeadTool(toolName, input) {
     case 'get_lead_details': {
       let lead;
       if (input.lead_id) {
-        lead = await db('leads').where('id', input.lead_id).first();
+        lead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first();
       } else if (input.phone) {
         const clean = (input.phone || '').replace(/\D/g, '');
         if (!clean || clean.length < 10) return { found: false };
         lead = await db('leads').where(function () {
           this.where('phone', clean).orWhere('phone', `+1${clean}`).orWhere('phone', `+${clean}`);
-        }).orderBy('first_contact_at', 'desc').first();
+        }).whereNull('deleted_at').orderBy('first_contact_at', 'desc').first();
       }
 
       if (!lead) return { found: false };

@@ -1397,7 +1397,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
     // mirror in estimate_data.lead_id.
     let leadId = null;
     try {
-      const lead = await db('leads').where({ estimate_id: estimate.id }).first('id');
+      const lead = await db('leads').where({ estimate_id: estimate.id }).whereNull('deleted_at').first('id');
       leadId = lead?.id || null;
       if (!leadId) {
         const data = typeof estimate.estimate_data === 'string'

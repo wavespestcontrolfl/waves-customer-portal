@@ -92,6 +92,7 @@ async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAY
   // leads whose linked customer is a LIVE customer.
   const rows = await db('leads')
     .whereRaw(`LOWER(COALESCE(status, '')) NOT IN (${placeholders})`, LEAD_CLOSED)
+    .whereNull('deleted_at')
     .where('created_at', '>=', cutoff)
     .where((q) => q.whereNotNull('email').orWhereNotNull('phone'))
     .whereNotExists(function existsLiveCustomer() {

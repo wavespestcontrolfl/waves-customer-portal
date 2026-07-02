@@ -407,6 +407,7 @@ async function loadOperatorInboxTasks() {
 async function loadLeadTasks() {
   if (!(await tableExists('leads'))) return { missing: true, tasks: [] };
   const rows = await db('leads')
+    .whereNull('deleted_at')
     .where(function activeLeadWork() {
       this.where('status', 'new')
         .orWhere('next_follow_up_at', '<=', db.fn.now())
@@ -557,9 +558,11 @@ async function loadLeadConversionDetails() {
   const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const since7 = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const activeRows = await db('leads')
+    .whereNull('deleted_at')
     .whereIn('status', ACTIVE_LEAD_STATUSES)
     .select('id', 'status', 'lead_type', 'first_contact_at', 'next_follow_up_at', 'response_time_minutes', 'call_duration_seconds');
   const recentRows = await db('leads')
+    .whereNull('deleted_at')
     .where('first_contact_at', '>=', since30)
     .select('status', 'response_time_minutes', 'first_contact_at');
 
@@ -1044,7 +1047,7 @@ router.post('/leads/:id/mark-contacted', async (req, res, next) => {
   try {
     if (!(await tableExists('leads'))) return res.status(404).json({ error: 'Lead pipeline is not available' });
 
-    const lead = await db('leads').where('id', req.params.id).first();
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     if (CLOSED_LEAD_STATUSES.includes(lead.status)) {
       return res.status(409).json({ error: 'Closed leads cannot be marked contacted from Agent Ops' });
@@ -1077,7 +1080,7 @@ router.post('/leads/:id/schedule-follow-up', async (req, res, next) => {
   try {
     if (!(await tableExists('leads'))) return res.status(404).json({ error: 'Lead pipeline is not available' });
 
-    const lead = await db('leads').where('id', req.params.id).first();
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     if (CLOSED_LEAD_STATUSES.includes(lead.status)) {
       return res.status(409).json({ error: 'Closed leads cannot be scheduled from Agent Ops' });
@@ -1119,7 +1122,7 @@ router.post('/leads/:id/draft-response', async (req, res, next) => {
     if (!(await tableExists('leads'))) return res.status(404).json({ error: 'Lead pipeline is not available' });
     if (!(await tableExists('message_drafts'))) return res.status(404).json({ error: 'Message draft queue is not available' });
 
-    const lead = await db('leads').where('id', req.params.id).first();
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     if (CLOSED_LEAD_STATUSES.includes(lead.status)) {
       return res.status(409).json({ error: 'Closed leads cannot have Agent Ops drafts created' });

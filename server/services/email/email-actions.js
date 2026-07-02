@@ -119,11 +119,14 @@ async function handleLeadInquiry(email, classification) {
         }
       })
       .whereNotIn('status', ['won', 'lost'])
+      .whereNull('deleted_at')
       .first();
   }
   if (!existingLead && email.from_address) {
     existingLead = await db('leads').where('email', email.from_address)
-      .whereNotIn('status', ['won', 'lost']).first();
+      .whereNotIn('status', ['won', 'lost'])
+      .whereNull('deleted_at')
+      .first();
   }
 
   if (!existingLead) {

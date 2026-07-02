@@ -170,6 +170,7 @@ class ConversionFeedbackMiner {
     // sent/accepted counts and revenue.
     try {
       const leads = await db('leads')
+        .whereNull('leads.deleted_at')
         .where('leads.first_contact_at', '>=', sinceCutoff)
         .leftJoin('estimates', 'leads.estimate_id', 'estimates.id')
         .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
@@ -244,6 +245,7 @@ class ConversionFeedbackMiner {
       try {
         const leadRows = await db('leads')
           .whereNotNull('phone')
+          .whereNull('deleted_at')
           .orderBy('created_at', 'desc')
           .select('phone', 'city', 'service_interest');
         for (const l of leadRows) {

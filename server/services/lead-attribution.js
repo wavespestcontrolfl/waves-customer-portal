@@ -47,9 +47,11 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
     return { type: 'existing_customer', customerId: existingCustomer.id, leadSourceId: leadSource?.id };
   }
 
-  // Check if we already have a lead with this phone
+  // Check if we already have a lead with this phone. Soft-deleted leads are
+  // excluded — a new touch from that number should make a FRESH lead, not
+  // silently update a row an operator removed from the pipeline.
   const existingLead = normalizedFrom
-    ? await db('leads').where('phone', normalizedFrom).orderBy('created_at', 'desc').first()
+    ? await db('leads').where('phone', normalizedFrom).whereNull('deleted_at').orderBy('created_at', 'desc').first()
     : null;
 
   if (existingLead) {
@@ -258,6 +260,7 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
   // ROI over the same population as its lead counts.
   const leads = await db('leads')
     .where('lead_source_id', leadSourceId)
+    .whereNull('deleted_at')
     .where('first_contact_at', '>=', start)
     .where('first_contact_at', '<=', end)
     .modify((qb) => applyNameExclusion(qb, excludeCustomerNames));
@@ -457,6 +460,7 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
   if (allSources.length) {
     const wonLeads = await db('leads')
       .whereIn('lead_source_id', allSources.map((s) => s.id))
+      .whereNull('deleted_at')
       .where('status', 'won')
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)

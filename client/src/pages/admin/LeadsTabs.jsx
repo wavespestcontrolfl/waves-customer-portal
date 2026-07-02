@@ -602,6 +602,10 @@ function readSourceDrillParams() {
     start_date: sp.get("from") || "",
     end_date: sp.get("to") || "",
     period_label: sp.get("period_label") || "",
+    // An explicitly passed status wins over the table's "open" default; a
+    // drill without one shows ALL statuses so the rows match the panel count
+    // the operator clicked (dashboard panels count won/lost leads too).
+    status: sp.get("status") || "",
   };
 }
 
@@ -642,7 +646,10 @@ export function LeadsSection() {
     // Initialized from the URL so the first load is already scoped.
     const drill = readSourceDrillParams();
     return {
-      status: "",
+      // The pipeline table defaults to OPEN statuses (new / contacted /
+      // estimate sent / estimate viewed) — the server expands `status=open`.
+      // A dashboard drill overrides the default (see readSourceDrillParams).
+      status: drill ? drill.status : "open",
       search: "",
       sort: "first_contact_at",
       page: 1,
@@ -671,7 +678,12 @@ export function LeadsSection() {
     try {
       if (!silent) setLoadError(null);
       const params = new URLSearchParams();
-      if (filters.status) params.set("status", filters.status);
+      // The board view needs EVERY status (its Won / Lost columns would be
+      // emptied by the table's default "open" filter), so it always fetches
+      // unfiltered; the table's status selection is preserved for switching
+      // back. Filtering stays server-side — the list is paginated.
+      const status = pipelineView === "board" ? "" : filters.status;
+      if (status) params.set("status", status);
       if (filters.search) params.set("search", filters.search);
       if (filters.source_name) params.set("source_name", filters.source_name);
       if (filters.start_date) params.set("start_date", filters.start_date);
@@ -686,7 +698,7 @@ export function LeadsSection() {
       console.error("loadLeads", e);
       if (!silent) setLoadError(e);
     }
-  }, [filters]);
+  }, [filters, pipelineView]);
 
   const loadSources = useCallback(async ({ silent = false } = {}) => {
     try {
@@ -875,7 +887,9 @@ export function LeadsSection() {
     if (!sp.get("source_name")) return;
     setTab("pipeline");
     setPipelineView("table");
-    ["source_name", "from", "to", "period_label"].forEach((k) => sp.delete(k));
+    ["source_name", "from", "to", "period_label", "status"].forEach((k) =>
+      sp.delete(k),
+    );
     setSearchParams(sp, { replace: true });
   }, [setSearchParams]);
 
@@ -908,7 +922,7 @@ export function LeadsSection() {
       "this lead";
     if (
       !window.confirm(
-        `Delete ${label} from the lead pipeline?\n\nThis removes the lead and its activity timeline. Existing estimates stay in Estimates.`,
+        `Delete ${label} from the lead pipeline?\n\nThis removes the lead from the pipeline (an admin can recover it). The activity timeline is kept, and existing estimates stay in Estimates.`,
       )
     ) {
       return;
@@ -1171,9 +1185,12 @@ export function LeadsSection() {
                 key={view}
                 type="button"
                 onClick={() => {
+                  // Keep filters.status intact — loadLeads ignores it while
+                  // the board is active (the board fetches all statuses), so
+                  // the table's selection survives a round-trip to the board.
                   setPipelineView(view);
                   if (view === "board")
-                    setFilters((f) => ({ ...f, status: "", page: 1 }));
+                    setFilters((f) => ({ ...f, page: 1 }));
                 }}
                 style={{
                   background: pipelineView === view ? C.heading : "transparent",
@@ -1208,6 +1225,7 @@ export function LeadsSection() {
               }}
             >
               {" "}
+              <option value="open">Open</option>
               <option value="">All Statuses</option>
               {STATUSES.map((s) => (
                 <option key={s} value={s}>

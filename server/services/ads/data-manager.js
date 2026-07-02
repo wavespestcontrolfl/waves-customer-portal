@@ -427,6 +427,7 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
   const eventTimestampSql = 'COALESCE(l.converted_at, l.first_contact_at, l.created_at)';
   const rows = await db('leads as l')
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
+    .whereNull('l.deleted_at')
     .whereRaw(`${eventTimestampSql} >= ?::timestamptz`, [since])
     .whereRaw(`${eventTimestampSql} < ?::timestamptz`, [addDateStringDays(endDate, 1)])
     .where((q) => {
