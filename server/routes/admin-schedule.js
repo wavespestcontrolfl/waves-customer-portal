@@ -21,7 +21,7 @@ const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
+const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
 const {
   isNewRecurringSignupCandidate,
   sendNewRecurringWelcome,
@@ -2497,6 +2497,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               const AppointmentReminders = require('../services/appointment-reminders');
               await AppointmentReminders.handleCancellation(id);
             } catch {}
+            // Cancelling a call-booked primary pulls its pending follow-up
+            // (visit 2) off the schedule too — shared with the track-
+            // transitions cancel path; best-effort after the parent commit.
+            try {
+              const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: id });
+              if (cancelled > 0) {
+                logger.info(`[admin-schedule] bulk cancel cascaded to ${cancelled} call-created follow-up visit(s) of ${id}`);
+              }
+            } catch (e) {
+              logger.error(`[admin-schedule] bulk-cancel call follow-up cascade failed for ${id}: ${e.message}`);
+            }
             // Void any still-open invoice pre-minted for this visit so
             // dunning doesn't chase a cancelled job. Paid/processing stay put.
             await voidOpenInvoicesForCancelledService(id);
@@ -4405,6 +4416,15 @@ router.put('/:id/status', async (req, res, next) => {
         const AppointmentReminders = require('../services/appointment-reminders');
         await AppointmentReminders.handleCancellation(req.params.id);
       } catch (e) { logger.error(`Appointment cancellation handler failed: ${e.message}`); }
+      // Cancelling a call-booked primary pulls its pending follow-up
+      // (visit 2) off the schedule too — shared with the track-transitions
+      // cancel path; best-effort after the parent commit.
+      try {
+        const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: svc.id });
+        if (cancelled > 0) {
+          logger.info(`[admin-schedule] status cancel cascaded to ${cancelled} call-created follow-up visit(s) of ${svc.id}`);
+        }
+      } catch (e) { logger.error(`[admin-schedule] status-cancel call follow-up cascade failed for ${svc.id}: ${e.message}`); }
       // Void any still-open invoice pre-minted for this visit ("Charge now")
       // so dunning doesn't chase a cancelled job. Paid/processing stay put.
       await voidOpenInvoicesForCancelledService(svc.id);

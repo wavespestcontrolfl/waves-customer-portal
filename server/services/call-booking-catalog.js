@@ -292,6 +292,61 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
     });
 }
 
+// A call-created follow-up (visit 2) is part of the same package as its
+// parent: cancelling the primary — via track-transitions, the admin bulk
+// action, or the admin status route — must pull the still-pending,
+// never-confirmed child off the schedule too, or dispatch would keep a
+// follow-up for a cancelled booking. Each child's status change goes
+// through transitionJobStatus — the sole scheduled_services.status writer
+// (atomic status update + job_status_history audit row + dispatch
+// broadcast) — with the tracking columns updated on the SAME trx.
+// transitioned_by stays null (the column FKs technicians; the actor is
+// carried by the notes). Narrow filter (source_action) keeps every other
+// parent-linked flow untouched. Best-effort per child, and callers invoke
+// this after their own parent-cancel commits — a cascade failure must
+// never fail the parent cancel.
+async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId }) {
+  if (!parentServiceId) return 0;
+  const { transitionJobStatus } = require('./job-status');
+  const now = new Date();
+  const children = await conn('scheduled_services')
+    .where({
+      parent_service_id: parentServiceId,
+      source_action: 'ai_call_pipeline_followup',
+      status: 'pending',
+      customer_confirmed: false,
+    })
+    .select('id');
+  let cancelled = 0;
+  for (const child of children) {
+    try {
+      await conn.transaction(async (trx) => {
+        await transitionJobStatus({
+          jobId: child.id,
+          fromStatus: 'pending',
+          toStatus: 'cancelled',
+          transitionedBy: null,
+          notes: `Cancelled with parent call booking ${parentServiceId}`,
+          trx,
+        });
+        await trx('scheduled_services')
+          .where({ id: child.id })
+          .update({
+            track_state: 'cancelled',
+            cancelled_at: now,
+            cancellation_reason: 'parent_call_booking_cancelled',
+            updated_at: now,
+          });
+      });
+      cancelled += 1;
+      logger.info(`[call-booking] cancelled call-created follow-up ${child.id} with parent ${parentServiceId}`);
+    } catch (childErr) {
+      logger.error(`[call-booking] call follow-up cancel cascade failed for child ${child.id} of ${parentServiceId}: ${childErr.message}`);
+    }
+  }
+  return cancelled;
+}
+
 module.exports = {
   loadBookableCallServices,
   resolveCallBookingCatalogService,
@@ -300,5 +355,6 @@ module.exports = {
   callBookingInvoiceOnComplete,
   sanitizeQuotedCallPrice,
   shiftCallFollowUpsForParentMove,
+  cancelCallFollowUpsForParentCancel,
   DEFAULT_FOLLOW_UP_INTERVAL_DAYS,
 };

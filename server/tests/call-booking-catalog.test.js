@@ -1,3 +1,12 @@
+// cancelCallFollowUpsForParentCancel routes each child status flip through
+// transitionJobStatus (the sole scheduled_services.status writer) — stub it
+// so the helper's own behavior (narrow filter, tracking columns, per-child
+// best-effort) is what's under test.
+jest.mock('../services/job-status', () => ({
+  transitionJobStatus: jest.fn().mockResolvedValue(undefined),
+}));
+const { transitionJobStatus } = require('../services/job-status');
+
 const {
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
@@ -5,6 +14,7 @@ const {
   callBookingInvoiceOnComplete,
   sanitizeQuotedCallPrice,
   shiftCallFollowUpsForParentMove,
+  cancelCallFollowUpsForParentCancel,
 } = require('../services/call-booking-catalog');
 const { validateModelOutput } = require('../schemas/validate-extraction');
 const { flatView } = require('../utils/extraction-compat');
@@ -703,5 +713,88 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     expect(await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-p', fromDate: '2026-07-02', toDate: null })).toBe(0);
     expect(await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-p', fromDate: new Date('invalid'), toDate: '2026-07-05' })).toBe(0);
     expect(log.table).toBeNull();
+  });
+});
+
+describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade)', () => {
+  // Chain-recording fake knex conn: the child SELECT resolves to the canned
+  // rows; transaction() hands each callback a trx whose update payloads are
+  // captured for assertion.
+  function fakeConn({ children = [] } = {}) {
+    const log = { table: null, selectWhere: null, updates: [], trxCount: 0 };
+    const conn = (table) => {
+      log.table = table;
+      const chain = {
+        where: (arg) => { log.selectWhere = arg; return chain; },
+        select: () => Promise.resolve(children),
+      };
+      return chain;
+    };
+    conn.transaction = async (fn) => {
+      log.trxCount += 1;
+      const trx = (table) => {
+        let whereArg = null;
+        const chain = {
+          where: (arg) => { whereArg = arg; return chain; },
+          update: (payload) => { log.updates.push({ table, where: whereArg, payload }); return Promise.resolve(1); },
+        };
+        return chain;
+      };
+      return fn(trx);
+    };
+    return { conn, log };
+  }
+
+  beforeEach(() => {
+    transitionJobStatus.mockClear();
+    transitionJobStatus.mockResolvedValue(undefined);
+  });
+
+  test('cancels each pending, never-confirmed child through transitionJobStatus + tracking columns', async () => {
+    const { conn, log } = fakeConn({ children: [{ id: 'child-1' }, { id: 'child-2' }] });
+    const cancelled = await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent' });
+    expect(cancelled).toBe(2);
+    // Narrow filter: only the AI-call child, still pending, never confirmed.
+    expect(log.selectWhere).toEqual({
+      parent_service_id: 'svc-parent',
+      source_action: 'ai_call_pipeline_followup',
+      status: 'pending',
+      customer_confirmed: false,
+    });
+    expect(transitionJobStatus).toHaveBeenCalledTimes(2);
+    expect(transitionJobStatus.mock.calls[0][0]).toMatchObject({
+      jobId: 'child-1',
+      fromStatus: 'pending',
+      toStatus: 'cancelled',
+      transitionedBy: null,
+      notes: 'Cancelled with parent call booking svc-parent',
+    });
+    // Tracking columns land on the same per-child trx.
+    expect(log.updates).toHaveLength(2);
+    expect(log.updates[0].where).toEqual({ id: 'child-1' });
+    expect(log.updates[0].payload).toMatchObject({
+      track_state: 'cancelled',
+      cancellation_reason: 'parent_call_booking_cancelled',
+    });
+  });
+
+  test('best-effort per child: one failed flip does not stop the rest', async () => {
+    const { conn } = fakeConn({ children: [{ id: 'child-1' }, { id: 'child-2' }] });
+    transitionJobStatus
+      .mockRejectedValueOnce(new Error('racing transition'))
+      .mockResolvedValueOnce(undefined);
+    const cancelled = await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent' });
+    expect(cancelled).toBe(1);
+    expect(transitionJobStatus).toHaveBeenCalledTimes(2);
+  });
+
+  test('no children → 0, no transactions; missing parent id → 0, no query', async () => {
+    const empty = fakeConn({ children: [] });
+    expect(await cancelCallFollowUpsForParentCancel({ conn: empty.conn, parentServiceId: 'svc-parent' })).toBe(0);
+    expect(empty.log.trxCount).toBe(0);
+
+    const untouched = fakeConn();
+    expect(await cancelCallFollowUpsForParentCancel({ conn: untouched.conn, parentServiceId: null })).toBe(0);
+    expect(untouched.log.table).toBeNull();
   });
 });

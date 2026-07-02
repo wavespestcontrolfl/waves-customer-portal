@@ -136,6 +136,16 @@ router.post('/:id/reschedule', async (req, res, next) => {
       return res.status(404).json({ error: 'Appointment not found' });
     }
 
+    // Same dispatch-owned guard as list/confirm: a call-created follow-up
+    // dispatch hasn't confirmed yet is hidden from the customer, so a
+    // direct reschedule against its id must refuse too (same 404 shape,
+    // no info leak).
+    if (service.source_action === 'ai_call_pipeline_followup'
+      && service.status === 'pending'
+      && !service.customer_confirmed) {
+      return res.status(404).json({ error: 'Appointment not found' });
+    }
+
     await db('scheduled_services')
       .where({ id: req.params.id })
       .update({
@@ -168,6 +178,14 @@ router.get('/next', async (req, res, next) => {
     const nextService = await db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId })
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+      // Same dispatch-owned guard as the list above: a still-pending,
+      // never-confirmed call-created follow-up can't surface as the
+      // customer's next appointment (NULL-safe De Morgan legs).
+      .where((qb) => qb
+        .whereNull('scheduled_services.source_action')
+        .orWhereNot('scheduled_services.source_action', 'ai_call_pipeline_followup')
+        .orWhereNot('scheduled_services.status', 'pending')
+        .orWhere('scheduled_services.customer_confirmed', true))
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select('scheduled_services.*', 'technicians.name as technician_name')

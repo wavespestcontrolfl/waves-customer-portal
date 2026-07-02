@@ -656,52 +656,13 @@ async function cancel(serviceId, { reason, actorId } = {}) {
       logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
     }
   }
-  // A call-created follow-up (visit 2) is part of the same package as its
-  // parent: cancelling the primary must pull the pending, never-confirmed
-  // child off the schedule too, or dispatch would still see a follow-up for
-  // a cancelled booking. Each child's status change goes through
-  // transitionJobStatus — the sole scheduled_services.status writer (atomic
-  // status update + job_status_history audit row + dispatch broadcast) —
-  // with the tracking columns updated on the SAME trx. transitioned_by
-  // stays null (the column FKs technicians; the admin actor is carried by
-  // the notes). Narrow filter (source_action) keeps every other
-  // parent-linked flow untouched; best-effort per child — a cascade
-  // failure must not fail the primary cancel.
+  // Cancelling the primary pulls its pending, never-confirmed call-created
+  // follow-up (visit 2) off the schedule too — shared helper, also invoked
+  // by the admin bulk-cancel and status-route cancel paths. Best-effort:
+  // a cascade failure must not fail the primary cancel.
   try {
-    const { transitionJobStatus } = require('./job-status');
-    const children = await db('scheduled_services')
-      .where({
-        parent_service_id: serviceId,
-        source_action: 'ai_call_pipeline_followup',
-        status: 'pending',
-        customer_confirmed: false,
-      })
-      .select('id');
-    for (const child of children) {
-      try {
-        await db.transaction(async (trx) => {
-          await transitionJobStatus({
-            jobId: child.id,
-            fromStatus: 'pending',
-            toStatus: 'cancelled',
-            transitionedBy: null,
-            notes: `Cancelled with parent call booking ${serviceId}`,
-            trx,
-          });
-          await trx('scheduled_services')
-            .where({ id: child.id })
-            .update({
-              track_state: 'cancelled',
-              cancelled_at: now,
-              cancellation_reason: 'parent_call_booking_cancelled',
-              updated_at: now,
-            });
-        });
-        logger.info(`[track-transitions] cancelled call-created follow-up ${child.id} with parent ${serviceId}`);
-      } catch (childErr) {
-        logger.error(`[track-transitions] call follow-up cancel cascade failed for child ${child.id} of ${serviceId}: ${childErr.message}`);
-      }
-    }
+    const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
+    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: serviceId });
   } catch (err) {
     logger.error(`[track-transitions] call follow-up cancel cascade failed for ${serviceId}: ${err.message}`);
   }
