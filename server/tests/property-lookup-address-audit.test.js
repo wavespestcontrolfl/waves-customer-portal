@@ -157,6 +157,58 @@ describe('auditAddressHouseNumber', () => {
     expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
   });
 
+  test('a typed suffix must match the roll suffix — PINE WAY is not PINE RD', async () => {
+    mockSitusResponse(['100 PINE RD', '104 PINE RD']);
+
+    const audit = await auditAddressHouseNumber('100 Pine Way, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: false, hasExactMatch: false });
+  });
+
+  test('bare # unit markers are stripped before the street is derived', async () => {
+    mockSitusResponse(['123 MAIN ST', '125 MAIN ST']);
+
+    const audit = await auditAddressHouseNumber('123 Main St #4, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetLabel: 'MAIN ST', streetExists: true, hasExactMatch: true });
+  });
+
+  test('the targeted truncation recheck requires the typed number itself, not any LIKE hit', async () => {
+    // Typed 57; the street page is truncated and the targeted '%57 TOBERMORY%'
+    // query LIKE-matches 4857 — which is NOT number 57, so no exact match.
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          exceededTransferLimit: true,
+          features: [{ attributes: { SITUS_ADDRESS: '4857 TOBERMORY WAY' } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ features: [{ attributes: { SITUS_ADDRESS: '4857 TOBERMORY WAY' } }] }),
+      });
+
+    const audit = await auditAddressHouseNumber('57 Tobermory Way, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: false });
+    expect(audit.nearestNumbers).toContain(4857);
+  });
+
+  test('ANY candidate county failure suppresses negative verdicts (fail-open)', async () => {
+    // Geocoded Sarasota fails; the Manatee zip gate answers empty. The street
+    // could have lived on the failed county's roll — no verdict at all.
+    global.fetch = jest.fn()
+      .mockRejectedValueOnce(new Error('sarasota gis down'))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ features: [] }) });
+
+    const audit = await auditAddressHouseNumber(BAD_ADDRESS, {
+      state: 'FL', county: 'Sarasota', partialMatch: false,
+    });
+
+    expect(audit).toBeNull();
+  });
+
   test('a later candidate county with the exact number beats an earlier missing verdict', async () => {
     // Geocoded Sarasota (candidate 1) has the street but not the number;
     // the zip gate also opens Manatee (candidate 2), whose roll has it.

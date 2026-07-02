@@ -1737,7 +1737,10 @@ function nearestHouseNumbers(numbers, target, count = 3) {
  */
 async function auditAddressHouseNumber(address, geoContext = null, options = {}) {
   try {
-    const street = normalizeCountyStreetLine(address); // "4867 TOBERMORY WAY"
+    // Bare "#4"-style unit markers lose their '#' in normalization (leaving a
+    // phantom "MAIN ST 4" street), so peel them from the raw string first.
+    const cleanedAddress = String(address || '').replace(/#\s*[A-Za-z0-9-]+/g, ' ');
+    const street = normalizeCountyStreetLine(cleanedAddress); // "4867 TOBERMORY WAY"
     const m = /^(\d+)\s+(.{3,})$/.exec(street || '');
     if (!m) return null;
     const houseNumber = parseInt(m[1], 10);
@@ -1747,17 +1750,19 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // Query WITHOUT the suffix for recall (counties abbreviate differently),
     // then extract numbers with the full street tokens for precision.
     const likeText = removeStreetSuffix(streetLabel) || streetLabel;
+    const typedSuffix = extractStreetSuffix(streetLabel);
     const counties = auditCountyCandidates(address, geoContext);
     if (!counties.length) return null;
 
     const strictPattern = new RegExp(`\\b(\\d+)\\s+${escapeAuditRegex(streetLabel)}\\b`, 'gi');
-    // The relaxed fallback (suffix mismatch between typed address and roll)
-    // still requires the street NAME to end there: at most one suffix token
-    // (+ optional directional) before a separator/end. Without that bound,
-    // "100 PINE WAY" would collect numbers from "100 PINE RIDGE WAY" and a
-    // missing street could masquerade as an exact match.
+    // The relaxed fallback (suffix formatting mismatch between typed address
+    // and roll) still requires the street NAME to end there — and when the
+    // typed address HAS a suffix, the roll's suffix must be THAT suffix or
+    // absent, never a different one: "100 PINE WAY" must not match
+    // "100 PINE RD" (different street) or "100 PINE RIDGE WAY" (longer name).
+    const relaxedSuffixAlt = typedSuffix ? escapeAuditRegex(typedSuffix) : AUDIT_SUFFIX_ALT;
     const relaxedPattern = new RegExp(
-      `\\b(\\d+)\\s+${escapeAuditRegex(likeText)}(?:\\s+${AUDIT_SUFFIX_ALT}(?:\\s+[NSEW])?)?(?=\\s*(?:[;,]|$))`,
+      `\\b(\\d+)\\s+${escapeAuditRegex(likeText)}(?:\\s+${relaxedSuffixAlt}(?:\\s+[NSEW])?)?(?=\\s*(?:[;,]|$))`,
       'gi',
     );
 
@@ -1770,17 +1775,18 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     };
 
     // queryStreetSitusAddresses returns { situs: [] } for "roll answered, no
-    // matches" and null for a failure — a GIS outage must not read as "street
-    // missing", so the street-not-found verdict below requires at least one
-    // county to have actually answered. ALL candidate counties are scanned
-    // before a missing-number verdict is returned: with a multi-county zip
-    // (Englewood) the number may simply live on the other county's roll.
-    let answeredCounty = null;
+    // matches" and null for a failure. Fail-open rule: an exact match is
+    // positive evidence and returns immediately, but every NEGATIVE verdict
+    // (number missing, street not found) requires ALL candidate counties to
+    // have answered — if any query failed, the missing evidence could have
+    // lived exactly there, so the audit returns null (no signal) instead.
+    let anyAnswered = false;
+    let anyFailed = false;
     let missingVerdict = null;
     for (const county of counties) {
       const result = await queryStreetSitusAddresses(county, likeText, options);
-      if (result === null) continue;
-      answeredCounty = answeredCounty || county;
+      if (result === null) { anyFailed = true; continue; }
+      anyAnswered = true;
       if (!result.situs.length) continue;
 
       let numbers = collect(result.situs, strictPattern);
@@ -1789,14 +1795,15 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
 
       let hasExactMatch = numbers.has(houseNumber);
       // The 2000-row page cap can hide the real number on a long street — a
-      // truncated "missing" is not evidence. Confirm with a targeted query
-      // for the exact house number before letting the verdict stand.
+      // truncated "missing" is not evidence. Confirm with a targeted query,
+      // and only accept it when the collected numbers actually CONTAIN the
+      // typed number ("57" must not ride a LIKE hit on "4857").
       if (!hasExactMatch && result.truncated) {
         const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
-        if (targeted === null) continue; // can't verify → no verdict from this county
-        if (collect(targeted.situs, strictPattern).size || collect(targeted.situs, relaxedPattern).size) {
-          hasExactMatch = true;
-        }
+        if (targeted === null) { anyFailed = true; continue; }
+        const targetedNumbers = collect(targeted.situs, strictPattern);
+        for (const n of collect(targeted.situs, relaxedPattern)) targetedNumbers.add(n);
+        if (targetedNumbers.has(houseNumber)) hasExactMatch = true;
       }
 
       const verdict = {
@@ -1811,13 +1818,14 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       if (hasExactMatch) return verdict;
       missingVerdict = missingVerdict || verdict;
     }
+    if (anyFailed) return null;
     if (missingVerdict) return missingVerdict;
-    if (!answeredCounty) return null;
+    if (!anyAnswered) return null;
 
-    // A serviced county answered but the street isn't on its roll — a
+    // Every serviced county answered but the street isn't on any roll — a
     // misspelled street name or a brand-new plat.
     return {
-      county: answeredCounty,
+      county: counties[0],
       houseNumber,
       streetLabel,
       streetExists: false,
