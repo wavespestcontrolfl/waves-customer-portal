@@ -20,29 +20,21 @@ const SERVICE_FROM = 'contact@wavespestcontrol.com';
 
 const SHARED_VARIABLES = ['first_name', 'customer_portal_url', 'company_phone', 'company_email'];
 
-// The two action templates (cut back / add water) quote the differential; the
-// on-track template instead carries a computed summary_line (its lead sentence
-// differs between a truly balanced week and a light week that incoming
-// forecast rain covers). Required variables must be referenced by the
-// template's blocks, so the lists are per-template.
-const REQUIRED_ACTION = [
+// The cut-back template quotes the differential in a static lead; the add-water
+// and on-track templates carry a computed summary_line because their lead
+// sentence differs by situation (light-last-week vs rain-fed-but-dry-ahead;
+// truly balanced vs rain-covered). Required variables must be referenced by
+// the template's blocks, so the lists are per-template.
+const REQUIRED_NUMBERS = [
   'first_name',
   'grass_label',
   'rain_last_week',
   'irrigation_inches',
   'total_inches',
   'target_inches',
-  'difference_inches',
 ];
-const REQUIRED_ON_TRACK = [
-  'first_name',
-  'grass_label',
-  'rain_last_week',
-  'irrigation_inches',
-  'total_inches',
-  'target_inches',
-  'summary_line',
-];
+const REQUIRED_CUT_BACK = [...REQUIRED_NUMBERS, 'difference_inches'];
+const REQUIRED_SUMMARY = [...REQUIRED_NUMBERS, 'summary_line'];
 const OPTIONAL = ['forecast_line', 'week_ending'];
 
 const WATER_DETAILS_BLOCK = {
@@ -57,7 +49,7 @@ const WATER_DETAILS_BLOCK = {
 
 const FOOTER_NOTE_BLOCK = {
   type: 'small_note',
-  content: 'This tip is based on the irrigation schedule you shared in your customer portal, rainfall and weather measured near your home, and University of Florida turf guidance. Local watering restrictions still apply — check your county\'s assigned days.',
+  content: 'This tip is based on the irrigation schedule you shared in your customer portal, rainfall and weather measured near your home, and University of Florida turf guidance. Local watering restrictions still apply — check your county\'s assigned days. Prefer not to get these weekly check-ins? Turn off Seasonal Lawn Tips under Notification Preferences in your portal, or just reply and we\'ll take care of it.',
 };
 
 const TEMPLATES = [
@@ -67,7 +59,7 @@ const TEMPLATES = [
     category: 'lawn',
     sensitivity: 'account',
     description: 'Weekly watering check-in when no change is needed: the week was balanced, or a light week is covered by the upcoming rain forecast. The lead sentence arrives as summary_line because those two cases read differently.',
-    required: REQUIRED_ON_TRACK,
+    required: REQUIRED_SUMMARY,
     subject: 'Your lawn\'s watering is right on track, {{first_name}}',
     preview: 'No changes needed this week — your current schedule has it covered.',
     ctaLabel: 'UPDATE MY IRRIGATION INFO',
@@ -90,6 +82,7 @@ const TEMPLATES = [
     category: 'lawn',
     sensitivity: 'account',
     description: 'Weekly watering check-in when last week\'s rain + the customer\'s irrigation schedule ran above the seasonal target for their grass. Recommends easing back.',
+    required: REQUIRED_CUT_BACK,
     // Neutral on the water source: a surplus can be all sprinkler in a dry
     // week (rain 0"), so the subject must not credit the rain.
     subject: 'You can ease up on the sprinklers this week, {{first_name}}',
@@ -113,14 +106,15 @@ const TEMPLATES = [
     name: 'Irrigation Weekly — Add Water (Deficit)',
     category: 'lawn',
     sensitivity: 'account',
-    description: 'Weekly watering check-in when last week\'s rain + the customer\'s irrigation schedule ran below the seasonal target for their grass. Recommends adding a little time.',
+    description: 'Weekly watering check-in when the week ahead needs more water: last week ran short (and the forecast will not cover it), or a balanced-by-rain week is followed by a dry forecast. The lead sentence arrives as summary_line because those cases read differently.',
+    required: REQUIRED_SUMMARY,
     subject: 'Your lawn could use a little more water this week, {{first_name}}',
-    preview: 'Rain was light near your home — your lawn came up about {{difference_inches}}" short. A small bump will help.',
+    preview: 'A small bump in sprinkler time this week will keep your {{grass_label}} happy — here are the numbers.',
     ctaLabel: 'UPDATE MY IRRIGATION INFO',
     ctaUrlVariable: 'customer_portal_url',
     blocks: [
       { type: 'heading', content: 'Quick watering check-in, {{first_name}}' },
-      { type: 'paragraph', content: 'Rain was light near your home last week ({{rain_last_week}}"), so with your irrigation schedule ({{irrigation_inches}}" per week) your lawn got about {{total_inches}}" of water — roughly {{difference_inches}}" short of the {{target_inches}}" your {{grass_label}} needs this time of year.' },
+      { type: 'paragraph', content: '{{summary_line}}' },
       WATER_DETAILS_BLOCK,
       { type: 'callout', content: 'This week: add a few minutes per zone, or one extra watering day if your county\'s restrictions allow it. Water in the early morning — evening watering invites fungus.' },
       { type: 'paragraph', content: '{{forecast_line}}' },
@@ -149,7 +143,7 @@ const PREVIEW_PAYLOAD = {
 };
 
 function templateRow(t) {
-  const required = [...new Set(t.required || REQUIRED_ACTION)];
+  const required = [...new Set(t.required || REQUIRED_CUT_BACK)];
   const allowed = [...new Set([...SHARED_VARIABLES, ...required, ...OPTIONAL])];
   const optional = allowed.filter((key) => !required.includes(key));
   return {
@@ -259,4 +253,4 @@ exports.down = async function down(knex) {
 };
 
 exports.TEMPLATES = TEMPLATES;
-exports.__private = { TEMPLATES, templateRow, PREVIEW_PAYLOAD, SHARED_VARIABLES, REQUIRED_ACTION, REQUIRED_ON_TRACK, OPTIONAL };
+exports.__private = { TEMPLATES, templateRow, PREVIEW_PAYLOAD, SHARED_VARIABLES, REQUIRED_CUT_BACK, REQUIRED_SUMMARY, OPTIONAL };

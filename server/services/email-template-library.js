@@ -960,9 +960,14 @@ async function sendTemplate({
       // Superseded by a newer attempt (token changed). This attempt's send still
       // reached SendGrid, but the row belongs to the live attempt — leave it.
       const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
-      return { sent: true, deduped: true, superseded: true, message: current || message, rendered };
+      return { sent: true, deduped: true, superseded: true, providerAttempted: true, message: current || message, rendered };
     }
-    return { sent: true, message: updated, rendered };
+    // providerAttempted distinguishes a real SendGrid call THIS invocation from
+    // the pre-send idempotency/suppression short-circuits (which return without
+    // it) — callers that budget provider attempts key off this, not `sent`,
+    // because a pre-send dedupe of a previously-sent message also reports
+    // sent: true.
+    return { sent: true, providerAttempted: true, message: updated, rendered };
   } catch (err) {
     // PII-sensitive callers suppress the transport log — the persisted error
     // and the audit reason must honor the same flag, or the raw provider body
@@ -984,13 +989,13 @@ async function sendTemplate({
     // caller no longer owns it — don't audit/throw (which would make upstream jobs
     // report failure or schedule another retry while the live attempt is in flight).
     if (current && current.send_attempt_token && String(current.send_attempt_token) !== String(sendAttemptToken)) {
-      return { sent: true, deduped: true, superseded: true, message: current, rendered };
+      return { sent: true, deduped: true, superseded: true, providerAttempted: true, message: current, rendered };
     }
     // If a webhook already moved the row to a terminal status, the send actually
     // reached SendGrid — report success (deduped) so callers don't retry a send
     // that landed (and may already have triggered bounce recovery).
     if (current && currentStatus !== 'queued' && currentStatus !== 'failed') {
-      return { sent: true, deduped: true, message: current, rendered };
+      return { sent: true, deduped: true, providerAttempted: true, message: current, rendered };
     }
     await auditEmailTemplateIssue({
       templateKey: template.template_key,

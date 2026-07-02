@@ -201,21 +201,29 @@ function buildWeeklyEmailDecision({
   }
 
   // The instruction is for the week AHEAD. The programmed schedule keeps
-  // running, so the projected week is irrigation + forecast rain: when that is
-  // no longer a deficit (inside the same quarter-inch band the advice uses),
-  // "add more water" would likely be wrong by mid-week — route to the
-  // on-track email instead of instructing against a week that is already
-  // covered (forecast unavailable → fail soft to last week's facts). A
-  // surplus is NOT forecast-rerouted: after an over-watered week the soil is
-  // already saturated, so easing back stays correct whatever this week brings.
+  // running but last week's rain doesn't, so the projected week is irrigation
+  // + forecast rain (same quarter-inch band the advice uses):
+  //   - a deficit whose projection is covered → on-track ("rain has it
+  //     covered"), not "add water" against incoming rain;
+  //   - a balanced week whose projection runs short (rain did part of last
+  //     week's work, this week looks dry) → "add water", not "no changes
+  //     needed".
+  // Forecast unavailable → fail soft to last week's facts. A surplus is NOT
+  // forecast-rerouted: after an over-watered week the soil is already
+  // saturated, so easing back stays correct whatever this week brings.
   const forecast = numberOrNull(forecastRainInches);
+  const projectedDifferential = forecast == null
+    ? null
+    : (numberOrNull(irrigationInchesPerWeek) + forecast) - advice.recommendedInchesPerWeek;
   let reason = advice.status;
-  if (advice.status === 'deficit' && forecast != null) {
-    const projectedDifferential = (numberOrNull(irrigationInchesPerWeek) + forecast) - advice.recommendedInchesPerWeek;
-    if (projectedDifferential > -0.25) reason = 'deficit_rain_forecast';
+  if (advice.status === 'deficit' && projectedDifferential != null && projectedDifferential > -0.25) {
+    reason = 'deficit_rain_forecast';
+  }
+  if (advice.status === 'balanced' && projectedDifferential != null && projectedDifferential <= -0.25) {
+    reason = 'balanced_dry_forecast';
   }
   const templateKey = reason === 'surplus' ? TEMPLATE_CUT_BACK
-    : reason === 'deficit' ? TEMPLATE_ADD_WATER
+    : (reason === 'deficit' || reason === 'balanced_dry_forecast') ? TEMPLATE_ADD_WATER
       : TEMPLATE_ON_TRACK; // 'balanced' and 'deficit_rain_forecast'
 
   const differential = Math.abs(numberOrNull(advice.differentialInchesPerWeek) ?? 0);
@@ -225,14 +233,20 @@ function buildWeeklyEmailDecision({
   const total = formatInches(advice.appliedInchesPerWeek);
   const target = formatInches(advice.recommendedInchesPerWeek);
 
-  // Lead sentence for the on-track template — a truly balanced week and a
-  // light week that incoming rain covers read differently, so the copy is
-  // computed here rather than baked into the template.
+  // Lead sentence for the on-track and add-water templates — the situations
+  // they cover read differently (balanced vs rain-covered; light-last-week vs
+  // rain-fed-last-week-but-dry-ahead), so the copy is computed here rather
+  // than baked into the template. Cut-back keeps its static template lead.
   let summaryLine = null;
   if (reason === 'balanced') {
     summaryLine = `Between last week's rain (${rain}") and your irrigation schedule (${irrigationFmt}" per week), your lawn got about ${total}" of water — right in line with the ${target}" your ${grassLabel} needs this time of year.`;
   } else if (reason === 'deficit_rain_forecast') {
     summaryLine = `Last week ran a touch light (${total}" against the ${target}" your ${grassLabel} needs), but with about ${formatInches(forecast)}" of rain in this week's forecast, your current schedule has it covered.`;
+  } else if (reason === 'deficit') {
+    summaryLine = `Rain was light near your home last week (${rain}"), so with your irrigation schedule (${irrigationFmt}" per week) your lawn got about ${total}" of water — roughly ${formatInches(differential)}" short of the ${target}" your ${grassLabel} needs this time of year.`;
+  } else if (reason === 'balanced_dry_forecast') {
+    const projectedShortfall = formatInches(Math.round(Math.abs(projectedDifferential) * 4) / 4);
+    summaryLine = `Last week landed right on target (${total}"), but rain did part of the work. With little rain in this week's forecast, your current schedule (${irrigationFmt}" per week) would come up about ${projectedShortfall}" short of the ${target}" your ${grassLabel} needs — a small bump this week will cover it.`;
   }
 
   const payload = {
@@ -245,9 +259,9 @@ function buildWeeklyEmailDecision({
     target_inches: target,
     difference_inches: formatInches(differential),
     ...(summaryLine ? { summary_line: summaryLine } : {}),
-    // The rain-covers-it case explains the forecast in its summary_line — a
-    // second forecast sentence would repeat it.
-    forecast_line: reason === 'deficit_rain_forecast' ? '' : forecastLine({
+    // The forecast-rerouted cases explain the forecast in their summary_line —
+    // a second forecast sentence would repeat it.
+    forecast_line: (reason === 'deficit_rain_forecast' || reason === 'balanced_dry_forecast') ? '' : forecastLine({
       forecastRainInches,
       status: advice.status,
       targetInches: advice.recommendedInchesPerWeek,
@@ -302,15 +316,26 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
     .where('pp.irrigation_inches_per_week', '>', 0)
     .where(function lawnMembership() {
       this.whereNotNull('tp.id')
-        .orWhereNotNull('c.waveguard_tier')
+        // A tier counts only when it names a real WaveGuard plan — 'One-Time',
+        // 'Commercial', 'None' etc. are non-membership markers. Key
+        // normalization + set mirror membershipTierKey / NON_MEMBERSHIP_TIER_KEYS
+        // in waveguard-existing-services.js.
+        .orWhere(function membershipTier() {
+          this.whereNotNull('c.waveguard_tier')
+            .whereRaw("LOWER(REGEXP_REPLACE(c.waveguard_tier, '[^a-zA-Z0-9]+', '', 'g')) NOT IN ('none', 'onetime', 'na', 'no', 'notset', 'commercial')");
+        })
         .orWhereNotNull('c.lawn_type')
         .orWhereExists(function lawnService() {
           this.select(db.raw('1'))
             .from('scheduled_services as ss')
             .whereRaw('ss.customer_id = c.id')
-            // Current membership only: cancelled/skipped visits don't count,
-            // and the visit must be upcoming or within the recency window.
-            .whereNotIn('ss.status', ['cancelled', 'skipped'])
+            // Current membership only: the visit must be upcoming or within
+            // the recency window, and live — cancelled/skipped/no_show visits
+            // and 'rescheduled' phantom rows (see waveguard-existing-services
+            // TERMINAL_STATUSES) don't count. 'completed' DOES count here: a
+            // recent completed lawn visit is exactly the evidence of current
+            // service this predicate wants.
+            .whereNotIn('ss.status', ['cancelled', 'skipped', 'no_show', 'rescheduled'])
             .where('ss.scheduled_date', '>=', lawnServiceCutoff)
             .where(function serviceTypes() {
               this.whereRaw("LOWER(ss.service_type) LIKE ?", ['%lawn%'])
@@ -480,12 +505,13 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         suppressProviderErrorLog: true,
       });
 
-      // Idempotency-dedupe and suppression both short-circuit inside the
-      // library BEFORE any SendGrid call — refund the budget so a long run of
-      // already-sent/suppressed rows cannot starve the rest of the list. A
-      // thrown error keeps its attempt consumed (the provider may have been
-      // reached).
-      if (result.deduped || result.blocked) summary.attempted -= 1;
+      // Idempotency-dedupe and suppression short-circuit inside the library
+      // BEFORE any SendGrid call — refund the budget so a long run of
+      // already-sent/suppressed rows cannot starve the rest of the list. The
+      // library marks results that DID reach the provider this call
+      // (providerAttempted) — those keep their attempt even when reported as
+      // deduped (webhook/supersede races), as does a thrown error.
+      if ((result.deduped || result.blocked) && !result.providerAttempted) summary.attempted -= 1;
 
       if (result.deduped) {
         summary.deduped += 1;

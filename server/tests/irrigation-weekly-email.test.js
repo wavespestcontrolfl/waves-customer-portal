@@ -171,10 +171,40 @@ describe('buildWeeklyEmailDecision', () => {
       ...base, irrigationInchesPerWeek: 0.25, rainfallInches7d: 0, forecastRainInches: 0.5,
     });
     expect(short.templateKey).toBe(TEMPLATE_ADD_WATER); // projected 0.75" vs 1.25" — still a deficit
+    expect(short.payload.summary_line).toContain('short of the 1.25"');
     const noForecast = buildWeeklyEmailDecision({
       ...base, irrigationInchesPerWeek: 0.25, rainfallInches7d: 0, forecastRainInches: null,
     });
     expect(noForecast.templateKey).toBe(TEMPLATE_ADD_WATER); // fail soft to last week's facts
+  });
+
+  test('a rain-fed balanced week followed by a dry forecast says add-water, not on-track', () => {
+    // 0.25" schedule + 1" rain hit last week's 1.25" target, but the schedule
+    // alone cannot carry a dry week — "no changes needed" would under-water.
+    const decision = buildWeeklyEmailDecision({
+      ...base,
+      irrigationInchesPerWeek: 0.25,
+      rainfallInches7d: 1,
+      forecastRainInches: 0,
+    });
+    expect(decision.shouldSend).toBe(true);
+    expect(decision.templateKey).toBe(TEMPLATE_ADD_WATER);
+    expect(decision.reason).toBe('balanced_dry_forecast');
+    expect(decision.payload.summary_line).toContain('rain did part of the work');
+    expect(decision.payload.summary_line).toContain('1" short'); // 1.25 − 0.25 − 0
+    expect(decision.payload.forecast_line).toBe('');
+  });
+
+  test('a balanced week whose schedule carries the dry week ahead stays on-track', () => {
+    // Schedule 1.25" alone meets the target — no rain dependence, no reroute.
+    const decision = buildWeeklyEmailDecision({
+      ...base,
+      irrigationInchesPerWeek: 1.25,
+      rainfallInches7d: 0,
+      forecastRainInches: 0,
+    });
+    expect(decision.templateKey).toBe(TEMPLATE_ON_TRACK);
+    expect(decision.reason).toBe('balanced');
   });
 
   test('surplus is NOT forecast-vetoed — a saturated lawn should ease back regardless', () => {
@@ -469,17 +499,33 @@ describe('runWeeklyIrrigationEmailSweep', () => {
         ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
         : {},
     ));
-    // First candidate already sent this week (idempotency dedupe — no provider
+    // First candidate already sent this week (pre-send idempotency dedupe: the
+    // library reports sent+deduped WITHOUT providerAttempted — no SendGrid
     // call); with a cap of 1, the second candidate must still be attempted.
     EmailTemplateLibrary.sendTemplate
-      .mockResolvedValueOnce({ deduped: true })
-      .mockResolvedValueOnce({ sent: true, message: {} });
+      .mockResolvedValueOnce({ sent: true, deduped: true })
+      .mockResolvedValueOnce({ sent: true, providerAttempted: true, message: {} });
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW, maxSendAttempts: 1 });
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
     expect(summary.deduped).toBe(1);
     expect(summary.sent).toBe(1);
     expect(summary.skipped.capped).toBe(0);
     expect(summary.attempted).toBe(1); // only the real provider attempt counts
+  });
+
+  test('a deduped result that DID reach the provider (webhook/supersede race) keeps its attempt', async () => {
+    isEnabled.mockReturnValue(true);
+    db.mockImplementation((table) => makeBuilder(
+      String(table).startsWith('customers')
+        ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
+        : {},
+    ));
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, deduped: true, providerAttempted: true, message: {} });
+    const summary = await runWeeklyIrrigationEmailSweep({ now: NOW, maxSendAttempts: 1 });
+    // Provider was reached — the cap must hold: second candidate is capped.
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(summary.attempted).toBe(1);
+    expect(summary.skipped.capped).toBe(1);
   });
 
   test('per-customer failure is contained: one bad send does not abort the sweep', async () => {

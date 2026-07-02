@@ -86,6 +86,8 @@ describe('irrigation weekly email template seeds', () => {
     ['balanced', TEMPLATE_ON_TRACK, { irrigationInchesPerWeek: 1.25, rainfallInches7d: 0, forecastRainInches: 0.5 }],
     // Light week + forecast that covers the projection → on-track variant.
     ['deficit_rain_forecast', TEMPLATE_ON_TRACK, { irrigationInchesPerWeek: 0.5, rainfallInches7d: 0, forecastRainInches: 0.8 }],
+    // Rain-fed balanced week + dry forecast → add-water variant.
+    ['balanced_dry_forecast', TEMPLATE_ADD_WATER, { irrigationInchesPerWeek: 0.25, rainfallInches7d: 1, forecastRainInches: 0 }],
   ])('%s payload from the sender renders %s with no unresolved placeholders', (status, key, water) => {
     const decision = buildWeeklyEmailDecision({
       firstName: 'Dana',
