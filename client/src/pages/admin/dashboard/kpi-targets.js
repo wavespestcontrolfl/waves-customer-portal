@@ -26,12 +26,13 @@ export const DEFAULT_KPI_TARGETS = {
 
 // Owner-facing labels for the Settings tab + tile tooltips, in dashboard
 // section order. Metrics without a default target still appear so the owner
-// can set one.
+// can set one — but ONLY metrics some tile actually reads (metricKey) are
+// listed: tech_utilization and stops_per_hour are snapshot-only today (no
+// tile), so an editable target for them would silently do nothing. Add them
+// back here when their tiles exist.
 export const KPI_METRIC_LABELS = {
   completion_rate: "Completion rate (%)",
   callback_rate: "Callback rate (%)",
-  tech_utilization: "Tech utilization (%)",
-  stops_per_hour: "Stops per hour",
   revenue_per_job: "Revenue per job ($)",
   revenue_per_man_hour: "Revenue per man-hour ($)",
   gross_margin: "Gross margin (%)",

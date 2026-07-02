@@ -957,11 +957,24 @@ function KpiTargetsSettingsTab({ canAdmin }) {
         body: JSON.stringify({ targets }),
       });
       if (result?.error) throw new Error(result.error);
-      setRows((prev) => {
-        const next = { ...(prev || {}) };
-        for (const t of targets) next[t.metric] = { ...(next[t.metric] || {}), ...t };
-        return next;
-      });
+      // Re-fetch instead of merging locally: the server stamps
+      // updated_by/updated_at (and the save busted its GET cache), so the
+      // table shows the authoritative row, not stale "seeded"/old-editor
+      // metadata until a reload.
+      const fresh = await adminFetch("/admin/kpi-targets").catch(() => null);
+      if (Array.isArray(fresh?.targets)) {
+        const byMetric = {};
+        for (const row of fresh.targets) byMetric[row.metric] = row;
+        setRows(byMetric);
+      } else {
+        // Refresh hiccup after a successful save — keep the UI reflecting
+        // what was saved rather than blanking.
+        setRows((prev) => {
+          const next = { ...(prev || {}) };
+          for (const t of targets) next[t.metric] = { ...(next[t.metric] || {}), ...t };
+          return next;
+        });
+      }
       setDirty({});
       setMessage({ text: `Saved ${targets.length} target${targets.length === 1 ? "" : "s"}. Dashboard tiles pick this up on their next refresh.`, error: false });
     } catch (err) {

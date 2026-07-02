@@ -53,9 +53,10 @@ describe('getKpiHistory', () => {
       const db = makeFakeDb([]);
       const out = await getKpiHistory(input, db);
       expect(out.days).toBe(expected);
-      // The clamped value is what binds into the date floor.
+      // days-1 binds into the INCLUSIVE date floor, so the window is exactly
+      // `days` calendar days counting today (not days+1).
       const floor = db._calls.raw.find((c) => String(c.sql).includes('::date - ?::int'));
-      expect(floor.bindings).toEqual([expected]);
+      expect(floor.bindings).toEqual([expected - 1]);
     }
   });
 

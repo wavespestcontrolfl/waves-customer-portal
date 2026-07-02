@@ -100,8 +100,10 @@ async function getKpiHistory(days = 90, conn) {
     .where(
       'snapshot_date', '>=',
       // date - int = date in Postgres; ET-anchored "today" matches the cron's
-      // etDateString snapshot dates.
-      conn.raw("(NOW() AT TIME ZONE 'America/New_York')::date - ?::int", [clamped]),
+      // etDateString snapshot dates. days-1 back keeps the INCLUSIVE bound to
+      // exactly `days` calendar days counting today — subtracting the full
+      // count would return days+1 snapshots once today's row exists.
+      conn.raw("(NOW() AT TIME ZONE 'America/New_York')::date - ?::int", [clamped - 1]),
     )
     .select(
       conn.raw("to_char(snapshot_date, 'YYYY-MM-DD') as date"),
