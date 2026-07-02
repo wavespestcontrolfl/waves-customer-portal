@@ -644,6 +644,8 @@ export function LeadsSection() {
   const [lostReasons, setLostReasons] = useState([]);
   const [expandedLead, setExpandedLead] = useState(null);
   const expandedLeadRef = useRef(null);
+  // Monotonic id of the newest loadLeads request — stale responses bail.
+  const leadsRequestRef = useRef(0);
   const [leadActivities, setLeadActivities] = useState([]);
   const [leadActivitiesLoading, setLeadActivitiesLoading] = useState(false);
   const [leadActivitiesError, setLeadActivitiesError] = useState(null);
@@ -689,6 +691,11 @@ export function LeadsSection() {
   }, []);
 
   const loadLeads = useCallback(async ({ silent = false } = {}) => {
+    // The requested scope depends on the view + filters, so a slow response
+    // from a superseded request (quick Table↔Board toggle, filter change)
+    // must never overwrite the current view's rows — only the newest
+    // request commits.
+    const requestId = ++leadsRequestRef.current;
     try {
       if (!silent) setLoadError(null);
       const params = new URLSearchParams();
@@ -706,9 +713,11 @@ export function LeadsSection() {
       params.set("page", filters.page);
       params.set("limit", "50");
       const data = await adminFetch(`/admin/leads?${params}`);
+      if (requestId !== leadsRequestRef.current) return; // superseded
       setLeads(data.leads || []);
       setLeadsTotal(data.total || 0);
     } catch (e) {
+      if (requestId !== leadsRequestRef.current) return; // superseded
       console.error("loadLeads", e);
       if (!silent) setLoadError(e);
     }
