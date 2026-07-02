@@ -6549,6 +6549,15 @@ router.put('/:token/accept', async (req, res, next) => {
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
     const rawEstData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
     const estData = withSupplementedRecurringServices(rawEstData) || rawEstData || {};
+    // A guarantee-only renewal has NO visit: its invoice-mode accept never
+    // books, and /reserve rejects it — so a slotId here can only come from a
+    // crafted/stale client holding a pre-gate reservation. Reject rather than
+    // commit a phantom Rodent Control appointment alongside the warranty
+    // invoice. An existing LINKED appointment keeps precedence (the acceptance
+    // contract yields to it), so existingAppointmentId stays accepted.
+    if (slotId && isRodentGuaranteeOnlyEstimate(estimate, estData)) {
+      return res.status(409).json({ error: 'No appointment is needed for this renewal — accept without selecting a slot.' });
+    }
     const existingAppointmentRow = existingAppointmentId
       ? await findLinkedUpcomingAppointment(estimate, estData, { appointmentId: existingAppointmentId })
       : null;

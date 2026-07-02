@@ -157,6 +157,17 @@ router.get('/:token/available-slots', async (req, res) => {
         message: 'A Waves team member will reach out to schedule your commercial service.',
       });
     }
+    // A guarantee-only renewal accepts through the payment-only invoice path —
+    // there is NO visit to book, so the slot picker never renders. Return the
+    // empty no-booking shape (mirroring the accept-time gate) so a crafted or
+    // stale client can't browse slots for an estimate whose accept takes none.
+    if (isRodentGuaranteeOnlyEstimate(estimate, parseEstimateData(estimate))) {
+      return res.json({
+        primary: [], expander: [], availableSlots: [], summary: null,
+        invoiceOnlyAcceptance: true,
+        message: 'No appointment is needed — this renewal is accepted with an invoice.',
+      });
+    }
 
     const windowDays = Number.parseInt(req.query.windowDays, 10);
     const opts = {};
@@ -268,6 +279,16 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
         message: 'A Waves team member will reach out to schedule your commercial service.',
       });
     }
+    // No-visit guarantee-only renewal: same no-booking shape as
+    // /available-slots — the AI date search must not surface bookable slots
+    // for an estimate whose accept takes none.
+    if (isRodentGuaranteeOnlyEstimate(estimate, parseEstimateData(estimate))) {
+      return res.json({
+        primary: [], expander: [], availableSlots: [], summary: null,
+        invoiceOnlyAcceptance: true,
+        message: 'No appointment is needed — this renewal is accepted with an invoice.',
+      });
+    }
     const serviceMode = resolveSlotServiceMode(estimate, req.body?.serviceMode);
     const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
       ? req.body.selectedFrequency.trim()
@@ -329,6 +350,16 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       return res.status(409).json({
         error: 'Commercial service is scheduled by our team — no self-booking.',
         commercialManualScheduling: true,
+      });
+    }
+    // A guarantee-only renewal has no visit: reserving would mint a
+    // scheduled_services hold that accept could then commit — a phantom
+    // Rodent Control appointment for a warranty that books nothing. Reject
+    // here AND at accept (both halves of the gate, per the half-gate lesson).
+    if (isRodentGuaranteeOnlyEstimate(estimate, parseEstimateData(estimate))) {
+      return res.status(409).json({
+        error: 'No appointment is needed for this renewal — accept without booking.',
+        invoiceOnlyAcceptance: true,
       });
     }
 
