@@ -810,6 +810,12 @@ async function refundUnconsumedDeposits({ estimateId, reason }) {
 // the accept request failed, or they later declined — has no other refund
 // path and would strand forever. Accepted estimates are deliberately NOT
 // swept: their unapplied remainder rolls forward to later service invoices.
+// ARCHIVED sent/viewed rows are terminal-EQUIVALENT here: archived rows are
+// excluded from expiration (parked status-neutral), so a received deposit on
+// one has no other route to this sweep. The archive endpoint and the
+// converted-customer auto-sweep both refuse to park a deposit-holding
+// estimate, so this arm only catches rows archived before those guards
+// existed plus the webhook race (deposit lands mid-archive).
 // Runs daily from the estimate-expiration worker (self-healing for any
 // terminal flip regardless of origin, including admin-side status changes)
 // and inline from the public decline route for immediacy. Per-estimate
@@ -819,7 +825,12 @@ async function sweepTerminalEstimateDeposits() {
   const rows = await db('estimate_deposits as ed')
     .join('estimates as e', 'e.id', 'ed.estimate_id')
     .where('ed.status', 'received')
-    .whereIn('e.status', ['declined', 'expired'])
+    .where((qb) => {
+      qb.whereIn('e.status', ['declined', 'expired'])
+        .orWhere((archivedLive) => {
+          archivedLive.whereNotNull('e.archived_at').whereIn('e.status', ['sent', 'viewed']);
+        });
+    })
     .distinct('ed.estimate_id');
 
   let estimatesSwept = 0;
