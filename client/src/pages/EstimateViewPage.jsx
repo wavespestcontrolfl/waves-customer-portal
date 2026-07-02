@@ -1116,6 +1116,17 @@ export function oneTimePriceCopy(breakdown = {}) {
   if (boraCareOnly) {
     return 'Bora-Care is a borate wood treatment applied to the measured attic and surface areas. It treats bare wood for termites, wood-boring beetles, and wood-decay fungi. Pay on the service day, no recurring schedule.';
   }
+  // A guarantee-only renewal is a 12-month re-entry warranty with NO service
+  // visit — it accepts through the payment-only invoice path, so the default
+  // "One visit, pay on service day" copy would contradict the "No appointment
+  // needed" acceptance card below it. Gated on guarantee-ONLY (mirrors the
+  // server's isRodentGuaranteeOnlyEstimate shape) so a bundled rodent job
+  // keeps the visit copy.
+  const rodentGuaranteeOnly = items.some((item) => item?.service === 'rodent_guarantee')
+    && items.every((item) => item?.service === 'rodent_guarantee' || isNonBillableBreakdownRow(item));
+  if (rodentGuaranteeOnly) {
+    return 'Annual rodent guarantee — 12-month re-entry warranty, renewable annually. No service visit to schedule: accept below and we send your invoice.';
+  }
   return 'One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pests return after this visit.';
 }
 
@@ -1797,7 +1808,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
   );
 }
 
-export function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
+export function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -1815,8 +1826,10 @@ export function ReviewPhase({ slotId, existingAppointment, paymentPreference, se
         : paymentPreference === 'prepay_annual'
           ? 'Pay the 12-month plan in full'
           : 'Pay at the visit';
-  const confirmLabel = heldForSiteConfirmation
-    ? (usingExistingAppointment ? 'Confirm approval' : 'Approve estimate')
+  const confirmLabel = invoiceOnly
+    ? 'Accept + send invoice'
+    : heldForSiteConfirmation
+      ? (usingExistingAppointment ? 'Confirm approval' : 'Approve estimate')
     : usingExistingAppointment
       ? recurringPayPerApplication
         ? 'Confirm invoice'
@@ -1824,10 +1837,12 @@ export function ReviewPhase({ slotId, existingAppointment, paymentPreference, se
           ? 'Confirm annual prepay'
           : 'Confirm appointment'
       : 'Confirm booking';
-  const confirmSub = heldForSiteConfirmation
-    ? (usingExistingAppointment
-      ? 'Your existing appointment stays scheduled. No payment needed now — we confirm your exact price on a quick site visit, then send your first invoice.'
-      : 'No payment needed now. Your account manager confirms the exact price on a quick site visit, then sends your first invoice.')
+  const confirmSub = invoiceOnly
+    ? 'No appointment needed. Next step creates your invoice and makes secure payment available.'
+    : heldForSiteConfirmation
+      ? (usingExistingAppointment
+        ? 'Your existing appointment stays scheduled. No payment needed now — we confirm your exact price on a quick site visit, then send your first invoice.'
+        : 'No payment needed now. Your account manager confirms the exact price on a quick site visit, then sends your first invoice.')
     : usingExistingAppointment
       ? recurringPayPerApplication
         ? 'Your existing appointment stays scheduled. Next step creates your invoice and makes secure payment available.'
@@ -1842,22 +1857,26 @@ export function ReviewPhase({ slotId, existingAppointment, paymentPreference, se
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-        {heldForSiteConfirmation
-          ? 'Confirm your approval'
-          : usingExistingAppointment ? 'Confirm invoice option' : 'Confirm your booking'}
+        {invoiceOnly
+          ? 'Confirm your acceptance'
+          : heldForSiteConfirmation
+            ? 'Confirm your approval'
+            : usingExistingAppointment ? 'Confirm invoice option' : 'Confirm your booking'}
       </div>
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
         {heldForSiteConfirmation ? 'Payment: ' : usingExistingAppointment ? 'Selected invoice option: ' : 'Pay option: '}
         <strong>{paymentLabel}</strong>{usingExistingAppointment ? '.' : null}
       </div>
       <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
-        {usingExistingAppointment
-          ? `Appointment: ${formatAppointmentLabel(existingAppointment)}`
-          : manualScheduling
-            ? 'Scheduling: a Waves team member will reach out to set up your visit.'
-            : `Slot: ${slotId}`}
+        {invoiceOnly
+          ? 'No appointment to schedule.'
+          : usingExistingAppointment
+            ? `Appointment: ${formatAppointmentLabel(existingAppointment)}`
+            : manualScheduling
+              ? 'Scheduling: a Waves team member will reach out to set up your visit.'
+              : `Slot: ${slotId}`}
       </div>
-      {!usingExistingAppointment && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
+      {!usingExistingAppointment && !invoiceOnly && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
       <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
         <button
           type="button"
@@ -2064,6 +2083,27 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
 
 function AcceptanceModeCard({ acceptance }) {
   if (!acceptance || acceptance.mode === 'standard_slot_pick' || acceptance.mode === 'existing_appointment') return null;
+  if (acceptance.mode === 'invoice_only') {
+    // Payment-only accept (guarantee-only renewal) — informational, no call
+    // CTA: the accept button below handles the whole flow.
+    return (
+      <div style={{
+        background: COLORS.white,
+        borderRadius: 16,
+        padding: 24,
+        border: `1px solid ${ESTIMATE_BORDER}`,
+        marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+          No appointment needed.
+        </div>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+          This renews your annual guarantee coverage — there is no service visit to
+          schedule. Accept below and we will send your invoice by text and email.
+        </div>
+      </div>
+    );
+  }
   // Held (site-confirmation) commercial estimate: the customer approves online
   // WITHOUT picking a slot — the accept CTA renders right below this card — so
   // this is informational (no call-to-book), explaining who schedules the visit.
@@ -2089,10 +2129,14 @@ function AcceptanceModeCard({ acceptance }) {
   }
   const title = acceptance.mode === 'quote_required'
     ? 'This treatment needs a custom quote.'
-    : 'Waves will help schedule this estimate.';
+    : acceptance.mode === 'contact_office'
+      ? 'Call Waves to finish this renewal.'
+      : 'Waves will help schedule this estimate.';
   const body = acceptance.mode === 'inspection_request'
     ? 'This plan needs an inspection before a normal service slot can be reserved online.'
-    : 'Call Waves and we will finish the next step with you.';
+    : acceptance.mode === 'contact_office'
+      ? 'No appointment is needed — call and we will set up your invoice and activate your coverage.'
+      : 'Call Waves and we will finish the next step with you.';
   return (
     <div style={{
       background: COLORS.white,
@@ -2264,6 +2308,9 @@ export default function EstimateViewPage() {
   const services = useMemo(() => pricingServices(data?.pricing), [data]);
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
   const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
+  // Payment-only accept (guarantee-only renewal): no slot picker, no
+  // reservation — accept goes straight to review, then invoice.
+  const invoiceOnlyAccept = acceptance.mode === 'invoice_only';
   // Held (site-confirmation) commercial estimate with no linked appointment:
   // no self-servable slots exist (the slots endpoints return the empty
   // commercial-manual list), so the accept CTA renders WITHOUT a slot pick —
@@ -2456,6 +2503,15 @@ export default function EstimateViewPage() {
       setError(null);
       return;
     }
+    if (invoiceOnlyAccept) {
+      // Nothing to reserve — the synthetic reservation only satisfies the
+      // review-phase render gate; accept sends no slot/appointment.
+      setPaymentPreference(pref);
+      setReservation({ invoiceOnly: true });
+      setCtaPhase('review');
+      setError(null);
+      return;
+    }
     if (manualScheduleAccept && serviceMode !== 'one_time') {
       // Held commercial accept: no slot to reserve — the team schedules after
       // approval. The sentinel keeps the review phase rendered (it's gated on
@@ -2520,7 +2576,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [existingAppointment, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
+  }, [existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -3007,13 +3063,16 @@ export default function EstimateViewPage() {
             onConfirm={handleConfirm}
             onCancel={handleReviewCancel}
             invoiceMode={!!estimate.billByInvoice}
+            invoiceOnly={invoiceOnlyAccept}
             siteConfirmationHold={!!estimate.siteConfirmationHold}
             manualScheduling={!!reservation?.manualScheduling}
             serviceMode={serviceMode}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
               ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
               : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime)) && paymentPreference !== 'prepay_annual'
-                ? `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`
+                ? (invoiceOnlyAccept
+                  ? `A ${fmtMoney(data.depositPolicy.oneTimeAmount)} deposit is due today — it is applied to your invoice.`
+                  : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`)
                 : null)}
           />
           {depositIntent ? (
@@ -3086,7 +3145,7 @@ export default function EstimateViewPage() {
             <ExistingAppointmentCard appointment={existingAppointment} />
           ) : null}
 
-          {(existingAppointment || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
+          {(existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
             <PaymentPreferenceButtons
               onSelect={handlePaymentChoice}
               disabled={ctaPhase === 'submitting'}
@@ -3094,6 +3153,7 @@ export default function EstimateViewPage() {
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
+              invoiceOnly={invoiceOnlyAccept}
               siteConfirmationHold={!!estimate.siteConfirmationHold}
               selectedFrequency={combinedFrequency}
               cardHold={data?.cardHoldPolicy || null}

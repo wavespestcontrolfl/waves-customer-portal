@@ -6223,11 +6223,16 @@ async function handleEstimateView(req, res, next) {
     // card hold can be captured — otherwise the legacy server-HTML page would
     // accept without a hold and the server would reject with CARD_HOLD_REQUIRED.
     // Dark by default: isCardHoldEnabled() is false until ONE_TIME_CARD_HOLD.
+    // Effective invoice mode (admin bill_by_invoice OR derived guarantee-only
+    // renewal) always routes to React — the payment-only accept UI (no slot
+    // picker) only exists there; the legacy server-HTML page would demand a
+    // booking the server no longer requires.
+    const effectiveInvoiceMode = resolveEstimateInvoiceMode(estimate, estData);
     const cardHoldForcesReactView = CardHolds.isCardHoldEnabled()
-      && estimate.bill_by_invoice !== true
+      && !effectiveInvoiceMode
       && (estimate.show_one_time_option === true || isStructuralOneTimeOnlyEstimate(estData, estimate));
     const shouldUseReactEstimateView = (estimate.use_v2_view === true
-      || estimate.bill_by_invoice === true
+      || effectiveInvoiceMode
       || cardHoldForcesReactView)
       // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
       // renderer so office staff can still preview a draft via /estimate/<token>
@@ -6326,14 +6331,15 @@ async function handleEstimateView(req, res, next) {
       paymentMethodPreference: null,
       membership,
       oneTime: depositStructuralOneTime,
-      oneTimeUninvoiced: depositStructuralOneTime && estimate.bill_by_invoice !== true,
+      oneTimeUninvoiced: depositStructuralOneTime && !effectiveInvoiceMode,
+      noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
     });
     // Card-hold policy "as if one-time" — surfaced so the page can require a
     // card when the customer books a single visit (enforced client-side only
     // in one_time mode).
     const cardHoldOneTimePolicyForView = CardHolds.resolveCardHoldPolicy({
       treatAsOneTime: true,
-      billByInvoice: estimate.bill_by_invoice === true,
+      billByInvoice: effectiveInvoiceMode,
       paymentMethodPreference: null,
     });
 
@@ -6499,10 +6505,11 @@ router.put('/:token/accept', async (req, res, next) => {
       const raw = req.body?.selectedFrequency;
       return typeof raw === 'string' ? raw.trim() : '';
     })();
-    // Invoice-mode: admin opted the estimate into legacy auto-invoicing.
-    // Standard recurring accepts now also use invoice payment links, while
-    // this flag keeps the older bill-by-invoice amount rules in place.
-    const billByInvoice = !!estimate.bill_by_invoice;
+    // Invoice-mode: admin opted the estimate into legacy auto-invoicing, OR
+    // the estimate is a guarantee-only renewal (derived — see
+    // resolveEstimateInvoiceMode): no visit to book, so accept creates the
+    // invoice directly with no slot, no card hold, no booking SMS.
+    const billByInvoice = resolveEstimateInvoiceMode(estimate);
     if (annualPrepaySelected && billByInvoice) {
       return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
     }
@@ -6542,6 +6549,15 @@ router.put('/:token/accept', async (req, res, next) => {
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
     const rawEstData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
     const estData = withSupplementedRecurringServices(rawEstData) || rawEstData || {};
+    // A guarantee-only renewal has NO visit: its invoice-mode accept never
+    // books, and /reserve rejects it — so a slotId here can only come from a
+    // crafted/stale client holding a pre-gate reservation. Reject rather than
+    // commit a phantom Rodent Control appointment alongside the warranty
+    // invoice. An existing LINKED appointment keeps precedence (the acceptance
+    // contract yields to it), so existingAppointmentId stays accepted.
+    if (slotId && isRodentGuaranteeOnlyEstimate(estimate, estData)) {
+      return res.status(409).json({ error: 'No appointment is needed for this renewal — accept without selecting a slot.' });
+    }
     const existingAppointmentRow = existingAppointmentId
       ? await findLinkedUpcomingAppointment(estimate, estData, { appointmentId: existingAppointmentId })
       : null;
@@ -6661,13 +6677,22 @@ router.put('/:token/accept', async (req, res, next) => {
     // (legacy customer-linked estimates have no membershipSnapshot) and
     // oneTimeUninvoiced forces a booking on one-time pay-at-visit accepts —
     // without an appointment there is no source_estimate_id for the
-    // roll-forward to credit the deposit against.
+    // roll-forward to credit the deposit against. Keyed off the RESOLVED
+    // invoice mode (not the raw column): a guarantee-only renewal mints its
+    // invoice right here at accept, so its deposit has an invoice to credit
+    // with no booking. The raw column would re-grow APPOINTMENT_REQUIRED on
+    // the payment-only UI (which has no slot picker) — AFTER /deposit-intent
+    // (already resolved-mode-aware) collected the deposit.
     const depositPolicy = await resolveDepositPolicyForEstimate({
       estimate,
       paymentMethodPreference,
       membership: acceptMembership,
       oneTime: treatAsOneTime,
-      oneTimeUninvoiced: treatAsOneTime && estimate.bill_by_invoice !== true,
+      oneTimeUninvoiced: treatAsOneTime && !billByInvoice,
+      // Guarantee-only renewal: no appointment exists to book, so the plan-
+      // customer booking commitment gate must not 400 the no-slot accept —
+      // the renewal's audience IS a plan customer.
+      noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
       scheduledServiceId: acceptLinkedSsId,
       // Scope already resolved above to the accepted appointment — don't let the
       // resolver re-derive an unrelated linked appointment when this is null.
@@ -9105,6 +9130,41 @@ function isStructuralOneTimeOnlyEstimate(estData, estimate = {}) {
     && !hasRecurringAmount
     && oneTimeBreakdown.items.length > 0
     && Number(oneTimeBreakdown.total || 0) > 0;
+}
+
+// The annual rodent guarantee ($199/$249/$299, 12-month re-entry warranty) is
+// sold AFTER trapping/exclusion/sanitation are complete — a guarantee-only
+// estimate is a warranty RENEWAL with no service visit to perform. The
+// booking-path machinery (slot picker, APPOINTMENT_REQUIRED, one-time card
+// hold) would force the customer to reserve a Rodent Control visit just to
+// buy the warranty, so these estimates accept through the invoice-mode
+// payment-only path instead. Strict single-service match on the
+// rodent_guarantee key: rodent_guarantee_combo carries real exclusion work,
+// and any mixed one-time estimate keeps the normal booking path. Discount
+// rows (a manual discount's one-time slice etc.) are ignored — a discounted
+// renewal is still a renewal, and a discount is not a service needing a
+// visit; every remaining row must be the guarantee (fail-closed to booking).
+function isRodentGuaranteeOnlyEstimate(estimate = {}, estData = null) {
+  let data = estData;
+  if (data == null) {
+    data = estimate.estimate_data;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
+    data = data || {};
+  }
+  if (!isStructuralOneTimeOnlyEstimate(data, estimate)) return false;
+  const rows = (normalizeOneTimeBreakdown(data).items || []).filter((row) => row?.kind !== 'discount');
+  return rows.length > 0 && rows.every((row) => row?.service === 'rodent_guarantee');
+}
+
+// Effective invoice mode: the admin's bill_by_invoice opt-in OR the derived
+// guarantee-only renewal above. Derived (not persisted) so every estimate
+// creation path gets it, and every public money surface — view routing,
+// accept, /:token/data, deposit-intent, card-hold-intent — must read THIS
+// rather than the raw column: a surface that reads estimate.bill_by_invoice
+// directly re-grows the forced-booking path for guarantee-only accepts.
+function resolveEstimateInvoiceMode(estimate = {}, estData = null) {
+  if (estimate?.bill_by_invoice === true) return true;
+  return isRodentGuaranteeOnlyEstimate(estimate, estData);
 }
 
 function defaultServiceModeForEstimate(estData, estimate = {}) {
@@ -11640,7 +11700,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   };
 }
 
-function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, commercialNoSlotAccept = false } = {}) {
+function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false } = {}) {
   if (quoteRequirement.quoteRequired) {
     return {
       mode: 'quote_required',
@@ -11654,6 +11714,27 @@ function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppoin
       ctaLabel: 'Confirm invoice option',
       reason: null,
       appointment: shapeLinkedAppointment(existingAppointment),
+    };
+  }
+  // Payment-only accept (guarantee-only renewal): nothing to schedule, so the
+  // view offers accept directly and the server bills by invoice.
+  if (invoiceOnly) {
+    return {
+      mode: 'invoice_only',
+      ctaLabel: 'Accept estimate',
+      reason: null,
+    };
+  }
+  // A guarantee-only renewal with NO linked customer and NO customer phone
+  // can't accept online: accept and deposit-intent both reject an invoice-mode
+  // estimate they can't bill/deliver. Don't advertise an "Accept + send
+  // invoice" the server will refuse — route the customer to the office
+  // (there's still no visit, so a slot pick would be an equal dead end).
+  if (invoiceOnlyContactRequired) {
+    return {
+      mode: 'contact_office',
+      ctaLabel: 'Call Waves',
+      reason: 'invoice_contact_required',
     };
   }
   // A ranged narrow low-confidence commercial estimate has no self-servable
@@ -12218,7 +12299,24 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       recurringServicesForIntelligence,
       pricingBundle?.oneTimeBreakdown?.items || []
     );
-    const acceptance = buildEstimateAcceptanceContract({ quoteRequirement, existingAppointment: linkedAppointment, commercialNoSlotAccept });
+    // Guarantee-only renewals accept with NO appointment: the acceptance
+    // contract tells the React view to skip the slot picker and offer the
+    // payment-only (invoice) accept. An existing linked appointment keeps
+    // precedence inside the contract — accepting against it works as-is.
+    const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estimateDataForIntelligence);
+    const effectiveInvoiceMode = estimate.bill_by_invoice === true || guaranteeOnlyAccept;
+    // Accept + deposit-intent reject an invoice-mode estimate with no linked
+    // customer and no customer phone (nothing to bill / deliver the invoice
+    // to) — an email-only renewal must not advertise an accept the server
+    // refuses. Contact-required renewals get the call-office contract.
+    const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
+    const acceptance = buildEstimateAcceptanceContract({
+      quoteRequirement,
+      existingAppointment: linkedAppointment,
+      invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
+      invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
+      commercialNoSlotAccept,
+    });
     const intelligence = buildWaveGuardIntelligencePayload(
       {
         ...estimate,
@@ -12272,14 +12370,15 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       paymentMethodPreference: null,
       membership,
       oneTime: depositStructuralOneTime,
-      oneTimeUninvoiced: depositStructuralOneTime && estimate.bill_by_invoice !== true,
+      oneTimeUninvoiced: depositStructuralOneTime && !effectiveInvoiceMode,
+      noVisit: guaranteeOnlyAccept,
     });
     // One-time card-on-file hold policy ("as if one-time") for the React
     // capture UI — the page only enforces it once serviceMode is one_time.
     // Inert ({enforced:false}) while ONE_TIME_CARD_HOLD is off.
     const cardHoldOneTimePolicyForData = CardHolds.resolveCardHoldPolicy({
       treatAsOneTime: true,
-      billByInvoice: estimate.bill_by_invoice === true,
+      billByInvoice: effectiveInvoiceMode,
       paymentMethodPreference: null,
     });
 
@@ -12361,7 +12460,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // derived mode/frequency when null.
         acceptedServiceMode: estimate.accepted_service_mode || null,
         acceptedFrequencyKey: estimate.accepted_frequency_key || null,
-        billByInvoice: !!estimate.bill_by_invoice,
+        // Effective (incl. derived guarantee-only) — the React view's accept
+        // copy and payment buttons key off this, and accept resolves the same
+        // derived value server-side.
+        billByInvoice: effectiveInvoiceMode,
         siteConfirmationHold,
         serviceCategory,
         acceptance,
@@ -12483,6 +12585,8 @@ module.exports.resolveAnnualPrepayInvoiceAmount = resolveAnnualPrepayInvoiceAmou
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
 module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
+module.exports.isRodentGuaranteeOnlyEstimate = isRodentGuaranteeOnlyEstimate;
+module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;

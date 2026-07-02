@@ -41,9 +41,11 @@ const {
   findLinkedUpcomingAppointment,
   handleEstimateAsk,
   isEstimateAcceptActive,
+  isRodentGuaranteeOnlyEstimate,
   isStructuralOneTimeOnlyEstimate,
   reconcileFrozenMembershipSnapshot,
   resolveAcceptOneTimeTotal,
+  resolveEstimateInvoiceMode,
   resolveEstimateQuoteRequirement,
   verifyEstimateAskToken,
 } = require('./estimate-public');
@@ -153,6 +155,17 @@ router.get('/:token/available-slots', async (req, res) => {
         primary: [], expander: [], availableSlots: [], summary: null,
         commercialManualScheduling: true,
         message: 'A Waves team member will reach out to schedule your commercial service.',
+      });
+    }
+    // A guarantee-only renewal accepts through the payment-only invoice path —
+    // there is NO visit to book, so the slot picker never renders. Return the
+    // empty no-booking shape (mirroring the accept-time gate) so a crafted or
+    // stale client can't browse slots for an estimate whose accept takes none.
+    if (isRodentGuaranteeOnlyEstimate(estimate, parseEstimateData(estimate))) {
+      return res.json({
+        primary: [], expander: [], availableSlots: [], summary: null,
+        invoiceOnlyAcceptance: true,
+        message: 'No appointment is needed — this renewal is accepted with an invoice.',
       });
     }
 
@@ -266,6 +279,16 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
         message: 'A Waves team member will reach out to schedule your commercial service.',
       });
     }
+    // No-visit guarantee-only renewal: same no-booking shape as
+    // /available-slots — the AI date search must not surface bookable slots
+    // for an estimate whose accept takes none.
+    if (isRodentGuaranteeOnlyEstimate(estimate, parseEstimateData(estimate))) {
+      return res.json({
+        primary: [], expander: [], availableSlots: [], summary: null,
+        invoiceOnlyAcceptance: true,
+        message: 'No appointment is needed — this renewal is accepted with an invoice.',
+      });
+    }
     const serviceMode = resolveSlotServiceMode(estimate, req.body?.serviceMode);
     const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
       ? req.body.selectedFrequency.trim()
@@ -327,6 +350,16 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       return res.status(409).json({
         error: 'Commercial service is scheduled by our team — no self-booking.',
         commercialManualScheduling: true,
+      });
+    }
+    // A guarantee-only renewal has no visit: reserving would mint a
+    // scheduled_services hold that accept could then commit — a phantom
+    // Rodent Control appointment for a warranty that books nothing. Reject
+    // here AND at accept (both halves of the gate, per the half-gate lesson).
+    if (isRodentGuaranteeOnlyEstimate(estimate, parseEstimateData(estimate))) {
+      return res.status(409).json({
+        error: 'No appointment is needed for this renewal — accept without booking.',
+        invoiceOnlyAcceptance: true,
       });
     }
 
@@ -422,6 +455,14 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       }
     }
     const oneTime = req.body?.serviceMode === 'one_time' || isOneTimeOnly;
+    // Mirror accept's invoice-mode customer gate BEFORE collecting money:
+    // accept rejects an invoice-mode estimate (admin flag OR derived
+    // guarantee-only renewal) with no linked customer and no customer phone —
+    // it can't create/deliver the invoice — so minting the deposit here first
+    // would strand money on an acceptance the server will reject.
+    if (resolveEstimateInvoiceMode(estimate, estData) && !estimate.customer_id && !estimate.customer_phone) {
+      return res.status(400).json({ error: 'Please call Waves to complete this estimate.' });
+    }
     // The ForEstimate wrapper adds the LIVE plan-customer fallback — legacy
     // customer-linked estimates have no membershipSnapshot, and minting an
     // intent here would charge a current WaveGuard member who owes nothing.
@@ -430,7 +471,12 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
       membership,
       oneTime,
-      oneTimeUninvoiced: oneTime && estimate.bill_by_invoice !== true,
+      // Effective invoice mode (admin flag OR derived guarantee-only renewal)
+      // — mirrors accept, so a guarantee-only deposit never demands a booking
+      // (noVisit also lifts the plan-customer booking commitment gate: a
+      // renewal has no appointment to book).
+      oneTimeUninvoiced: oneTime && !resolveEstimateInvoiceMode(estimate, estData),
+      noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
     });
     // A narrow low-confidence commercial RECURRING accept is held for on-site
     // price confirmation — whatever the billing mode, no money moves at accept
@@ -540,7 +586,9 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
 
     const policy = resolveCardHoldPolicy({
       treatAsOneTime,
-      billByInvoice: estimate.bill_by_invoice === true,
+      // Effective invoice mode (admin flag OR derived guarantee-only renewal)
+      // — mirrors accept's card-hold gate: invoice-mode accepts owe no hold.
+      billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
     });
     if (!policy.required) {

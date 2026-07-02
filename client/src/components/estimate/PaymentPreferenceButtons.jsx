@@ -86,12 +86,16 @@ export default function PaymentPreferenceButtons({
   serviceMode,
   setupFee,
   invoiceMode = false,
+  // Payment-only accept (guarantee-only renewal): invoice mode with NO visit
+  // to book — the one-time copy must not say "Book".
+  invoiceOnly = false,
   annualPrepayEligible = false,
   selectedFrequency = null,
   cardHold = null,
   siteConfirmationHold = false,
 }) {
   const isOneTime = serviceMode === 'one_time';
+  const oneTimeBooking = isOneTime && !invoiceOnly;
   // A narrow low-confidence commercial estimate is approved online but its exact
   // price is confirmed on site before any invoice — so the recurring flow must
   // NOT promise (or preview) an invoice, whatever the billing mode: the server
@@ -168,7 +172,7 @@ export default function PaymentPreferenceButtons({
       }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
           textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
-          {isOneTime ? 'Book your visit' : 'Accept your estimate'}
+          {oneTimeBooking ? 'Book your visit' : 'Accept your estimate'}
         </div>
 
         <button
@@ -179,7 +183,7 @@ export default function PaymentPreferenceButtons({
         >
           {heldForSiteConfirmation
             ? 'Accept your estimate'
-            : isOneTime ? 'Book + send invoice' : 'Accept + send invoice'}
+            : oneTimeBooking ? 'Book + send invoice' : 'Accept + send invoice'}
         </button>
 
         <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
