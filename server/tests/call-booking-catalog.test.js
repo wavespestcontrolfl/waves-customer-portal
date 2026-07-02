@@ -4,6 +4,7 @@ const {
   resolveCallFollowUpPlan,
   callBookingInvoiceOnComplete,
   sanitizeQuotedCallPrice,
+  shiftCallFollowUpsForParentMove,
 } = require('../services/call-booking-catalog');
 const { validateModelOutput } = require('../schemas/validate-extraction');
 const { flatView } = require('../utils/extraction-compat');
@@ -628,5 +629,79 @@ describe('extraction plumbing for the new booking fields', () => {
     expect(prompt).toContain('- Cockroach Control Service');
     // Without the option the list block is absent (keeps PROMPT_HASH inputs stable).
     expect(buildExtractionPrompt('t', 'p', 'd')).not.toContain('- Cockroach Control Service');
+  });
+});
+
+describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () => {
+  // Chain-recording fake knex conn: captures the where filter and update
+  // payload; update() resolves to the canned row count.
+  function fakeConn({ updatedCount = 1 } = {}) {
+    const log = { table: null, where: null, update: null, raws: [] };
+    const conn = (table) => {
+      log.table = table;
+      const chain = {
+        where: (arg) => { log.where = arg; return chain; },
+        update: (arg) => { log.update = arg; return Promise.resolve(updatedCount); },
+      };
+      return chain;
+    };
+    conn.raw = (sql, bindings) => { const raw = { sql, bindings }; log.raws.push(raw); return raw; };
+    conn.fn = { now: () => 'NOW()' };
+    return { conn, log };
+  }
+
+  test('shifts the still-pending, never-confirmed child by the parent delta', async () => {
+    const { conn, log } = fakeConn({ updatedCount: 1 });
+    const shifted = await shiftCallFollowUpsForParentMove({
+      conn,
+      parentServiceId: 'svc-parent',
+      fromDate: '2026-07-02',
+      toDate: '2026-07-05',
+    });
+    expect(shifted).toBe(1);
+    expect(log.table).toBe('scheduled_services');
+    // Narrow filter: only the AI-call child, still pending, never confirmed.
+    expect(log.where).toEqual({
+      parent_service_id: 'svc-parent',
+      source_action: 'ai_call_pipeline_followup',
+      status: 'pending',
+      customer_confirmed: false,
+    });
+    // Delta applied in SQL: scheduled_date + (to - from).
+    expect(log.raws[0].bindings).toEqual(['2026-07-05', '2026-07-02']);
+  });
+
+  test('pg date hydration (JS Date at LOCAL midnight) recovers the calendar date', async () => {
+    const { conn, log } = fakeConn();
+    // new Date(y, m, d) is local midnight — exactly how pg hydrates a `date`
+    // column; toISOString here would roll back a day in any UTC- timezone.
+    await shiftCallFollowUpsForParentMove({
+      conn,
+      parentServiceId: 'svc-parent',
+      fromDate: new Date(2026, 6, 2),
+      toDate: '2026-07-09T00:00:00.000Z',
+    });
+    expect(log.raws[0].bindings).toEqual(['2026-07-09', '2026-07-02']);
+  });
+
+  test('no-ops (0, no query) when the date did not change', async () => {
+    const { conn, log } = fakeConn();
+    const shifted = await shiftCallFollowUpsForParentMove({
+      conn,
+      parentServiceId: 'svc-parent',
+      fromDate: new Date(2026, 6, 2),
+      toDate: '2026-07-02',
+    });
+    expect(shifted).toBe(0);
+    expect(log.table).toBeNull();
+  });
+
+  test('no-ops on missing parent id or unparseable dates', async () => {
+    const { conn, log } = fakeConn();
+    expect(await shiftCallFollowUpsForParentMove({ conn, parentServiceId: null, fromDate: '2026-07-02', toDate: '2026-07-05' })).toBe(0);
+    expect(await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-p', fromDate: 'not-a-date', toDate: '2026-07-05' })).toBe(0);
+    expect(await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-p', fromDate: '2026-07-02', toDate: null })).toBe(0);
+    expect(await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-p', fromDate: new Date('invalid'), toDate: '2026-07-05' })).toBe(0);
+    expect(log.table).toBeNull();
   });
 });

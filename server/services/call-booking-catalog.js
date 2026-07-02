@@ -254,6 +254,44 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
   return { scheduledDate, windowStart: isValidWindowTime(finalWindowStart) ? finalWindowStart : '09:00' };
 }
 
+// scheduled_date is a pg `date` column → Knex hydrates it as a JS Date at
+// LOCAL midnight; local getters recover the calendar date regardless of
+// process TZ (toISOString risks an off-by-one through the tz cast).
+function callBookingDateOnly(value) {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+  }
+  if (value == null) return null;
+  const s = String(value).split('T')[0];
+  return isValidCalendarDate(s) ? s : null;
+}
+
+// A call-created follow-up (visit 2) is anchored an interval after its
+// parent: when the primary moves — via the rebooker OR a direct admin
+// schedule edit — shift the still-pending, never-confirmed child by the
+// same delta so the package keeps its spacing. Narrow filter
+// (source_action) leaves every other parent-linked flow untouched.
+// Callers invoke this best-effort outside their transaction: a failed
+// shift leaves the child where it was, and dispatch confirms follow-up
+// dates with the customer before dispatch anyway.
+async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate }) {
+  const fromStr = callBookingDateOnly(fromDate);
+  const toStr = callBookingDateOnly(toDate);
+  if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return 0;
+  return conn('scheduled_services')
+    .where({
+      parent_service_id: parentServiceId,
+      source_action: 'ai_call_pipeline_followup',
+      status: 'pending',
+      customer_confirmed: false,
+    })
+    .update({
+      scheduled_date: conn.raw('scheduled_date + (?::date - ?::date)', [toStr, fromStr]),
+      updated_at: conn.fn.now(),
+    });
+}
+
 module.exports = {
   loadBookableCallServices,
   resolveCallBookingCatalogService,
@@ -261,5 +299,6 @@ module.exports = {
   resolveCallFollowUpPlan,
   callBookingInvoiceOnComplete,
   sanitizeQuotedCallPrice,
+  shiftCallFollowUpsForParentMove,
   DEFAULT_FOLLOW_UP_INTERVAL_DAYS,
 };

@@ -3071,80 +3071,34 @@ const CallRecordingProcessor = {
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
                 const defaultTechnicianName = defaultTechnician?.name || null;
-                const existing = await findExistingCallAppointment({
-                  customerId,
-                  call,
-                  scheduledDate,
-                  windowStart: windowStart || '09:00',
-                  serviceType,
-                  trx,
-                });
-                if (existing) {
-                  reusedExistingSchedule = true;
-                  if (!existing.technician_id && defaultTechnicianId) {
-                    const [updatedExisting] = await trx('scheduled_services')
-                      .where({ id: existing.id })
-                      .update({ technician_id: defaultTechnicianId, updated_at: new Date() })
-                      .returning('*');
-                    return updatedExisting || existing;
-                  }
-                  return existing;
-                }
-                const insertData = {
-                  customer_id: customerId,
-                  technician_id: defaultTechnicianId,
-                  scheduled_date: scheduledDate,
-                  window_start: windowStart || '09:00',
-                  window_end: windowEnd || '10:00',
-                  window_display: windowDisplay,
-                  service_type: serviceType,
-                  service_id: callBookingCatalogRow?.id || null,
-                  estimated_price: priceInfo.price,
-                  create_invoice_on_complete: callBookingInvoiceOnComplete({
-                    price: priceInfo.price,
-                    catalogRow: callBookingCatalogRow,
-                  }),
-                  estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
-                  status: 'confirmed',
-                  customer_confirmed: true,
-                  confirmed_at: new Date(),
-                  notes: [
-                    'Booked via phone call.',
-                    `Call SID: ${callSid}.`,
-                    defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
-                    priceInfo.price != null
-                      ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
-                      : null,
-                    (priceInfo.source === 'transcript'
-                      && callBookingCatalogRow
-                      && Number(callBookingCatalogRow.base_price) > 0
-                      && Math.abs(Number(callBookingCatalogRow.base_price) - priceInfo.price) >= 0.01)
-                      ? `Catalog list price: $${Number(callBookingCatalogRow.base_price).toFixed(2)} — quote differs, review.`
-                      : null,
-                    extracted.call_summary || null,
-                  ].filter(Boolean).join(' ').trim(),
-                  booking_source: 'phone_call',
-                  source_call_log_id: call.id,
-                  source_action: 'ai_call_pipeline',
-                  idempotency_key: computeAppointmentIdempotencyKey({
-                    callLogId: call.id,
-                    schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
-                    confirmedStartAt: extracted.preferred_date_time,
-                    primaryServiceCategory: serviceType,
-                    addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
-                  }),
-                };
-                const [created] = await trx('scheduled_services')
-                  .insert(insertData)
-                  .onConflict('idempotency_key')
-                  .ignore()
-                  .returning('*');
-                if (created && callFollowUpPlan) {
-                  // Linked follow-up visit (visit 2). PENDING, not customer-
-                  // confirmed: the exact time gets confirmed by a human at
-                  // dispatch. No confirmation SMS and no reminder registration
-                  // for this row — customer comms go out for the initial
-                  // visit only (owner directive).
+                // Linked follow-up visit (visit 2). PENDING, not customer-
+                // confirmed: the exact time gets confirmed by a human at
+                // dispatch. No confirmation SMS and no reminder registration
+                // for this row — customer comms go out for the initial
+                // visit only (owner directive).
+                // Called on the fresh-insert path AND both reuse paths (marker/
+                // slot match, idempotency-key conflict) so a retry whose first
+                // attempt lost the savepointed follow-up insert — or a
+                // reprocess after the primary already exists — still creates
+                // the promised second treatment.
+                const ensureCallFollowUpVisit = async (primaryRow) => {
+                  if (!callFollowUpPlan || !primaryRow?.id) return null;
+                  // A terminal primary gets no visit 2 — reprocessing an old
+                  // call whose booking since completed or was cancelled must
+                  // not book a stray child off it.
+                  if (['cancelled', 'completed', 'skipped'].includes(primaryRow.status)) return null;
+                  // Any existing follow-up off this primary — whatever its
+                  // status or origin (AI child OR a completion-CTA follow-up)
+                  // — means dispatch already owns the outcome (a cancelled
+                  // child was cancelled on purpose; don't resurrect it). The
+                  // idempotency key alone can't catch a reprocess whose
+                  // extracted date differs.
+                  const existingChild = await trx('scheduled_services')
+                    .where((qb) => qb
+                      .where({ parent_service_id: primaryRow.id, source_action: 'ai_call_pipeline_followup' })
+                      .orWhere({ followup_source_service_id: primaryRow.id }))
+                    .first('id');
+                  if (existingChild) return null;
                   // Runs in a SAVEPOINT (nested trx): a rejected follow-up
                   // insert must never roll back the confirmed primary
                   // appointment sharing this transaction.
@@ -3152,18 +3106,18 @@ const CallRecordingProcessor = {
                   const [fuH, fuM] = fuStart.split(':').map(Number);
                   const fuEndH = fuH >= 23 ? 23 : fuH + 1;
                   try {
-                    followUpCreated = await trx.transaction(async (sp) => {
+                    return await trx.transaction(async (sp) => {
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,
-                          technician_id: defaultTechnicianId,
+                          technician_id: primaryRow.technician_id || defaultTechnicianId,
                           scheduled_date: callFollowUpPlan.scheduledDate,
                           window_start: fuStart,
                           window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
                           window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
                           service_type: serviceType,
                           service_id: callBookingCatalogRow?.id || null,
-                          parent_service_id: created.id,
+                          parent_service_id: primaryRow.id,
                           status: 'pending',
                           customer_confirmed: false,
                           // Same no-charge shape as the completion-CTA follow-up
@@ -3177,7 +3131,7 @@ const CallRecordingProcessor = {
                           // rate and invoice an included second treatment.
                           estimated_price: 0,
                           followup_included: true,
-                          followup_source_service_id: created.id,
+                          followup_source_service_id: primaryRow.id,
                           create_invoice_on_complete: false,
                           estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
                           notes: [
@@ -3206,9 +3160,88 @@ const CallRecordingProcessor = {
                     // primary appointment commits. Dispatch confirms follow-ups
                     // by hand, so surface it in the log for manual recovery.
                     logger.warn(`[call-proc] Follow-up visit insert failed for ${callSid}; primary booking kept: ${fuErr.message}`);
+                    return null;
                   }
+                };
+                const existing = await findExistingCallAppointment({
+                  customerId,
+                  call,
+                  scheduledDate,
+                  windowStart: windowStart || '09:00',
+                  serviceType,
+                  trx,
+                });
+                if (existing) {
+                  reusedExistingSchedule = true;
+                  let primaryRow = existing;
+                  if (!existing.technician_id && defaultTechnicianId) {
+                    const [updatedExisting] = await trx('scheduled_services')
+                      .where({ id: existing.id })
+                      .update({ technician_id: defaultTechnicianId, updated_at: new Date() })
+                      .returning('*');
+                    primaryRow = updatedExisting || existing;
+                  }
+                  // After the backfill so the child inherits the assigned tech.
+                  followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                  return primaryRow;
                 }
-                if (created) return created;
+                const insertData = {
+                  customer_id: customerId,
+                  technician_id: defaultTechnicianId,
+                  scheduled_date: scheduledDate,
+                  window_start: windowStart || '09:00',
+                  window_end: windowEnd || '10:00',
+                  window_display: windowDisplay,
+                  service_type: serviceType,
+                  service_id: callBookingCatalogRow?.id || null,
+                  estimated_price: priceInfo.price,
+                  create_invoice_on_complete: callBookingInvoiceOnComplete({
+                    price: priceInfo.price,
+                    catalogRow: callBookingCatalogRow,
+                  }),
+                  estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
+                  status: 'confirmed',
+                  customer_confirmed: true,
+                  confirmed_at: new Date(),
+                  notes: [
+                    'Booked via phone call.',
+                    `Call SID: ${callSid}.`,
+                    defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
+                    priceInfo.price != null
+                      ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
+                      : null,
+                    extracted.call_summary || null,
+                  ].filter(Boolean).join(' ').trim(),
+                  // Dispatcher-only price provenance: scheduled_services.notes
+                  // is customer-visible (GET /api/schedule returns it verbatim),
+                  // so the catalog-vs-quote review cue lives in internal_notes
+                  // (surfaced in the dispatch JobDrawer), never in notes.
+                  internal_notes: (priceInfo.source === 'transcript'
+                    && callBookingCatalogRow
+                    && Number(callBookingCatalogRow.base_price) > 0
+                    && Math.abs(Number(callBookingCatalogRow.base_price) - priceInfo.price) >= 0.01)
+                    ? `Catalog list price: $${Number(callBookingCatalogRow.base_price).toFixed(2)} — quote differs, review.`
+                    : null,
+                  booking_source: 'phone_call',
+                  source_call_log_id: call.id,
+                  source_action: 'ai_call_pipeline',
+                  idempotency_key: computeAppointmentIdempotencyKey({
+                    callLogId: call.id,
+                    schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
+                    confirmedStartAt: extracted.preferred_date_time,
+                    primaryServiceCategory: serviceType,
+                    addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
+                  }),
+                };
+                const [created] = await trx('scheduled_services')
+                  .insert(insertData)
+                  .onConflict('idempotency_key')
+                  .ignore()
+                  .returning('*');
+                if (created) {
+                  followUpCreated = await ensureCallFollowUpVisit(created);
+                  return created;
+                }
                 // Idempotency conflict: another writer already created a row with this key.
                 // Fetch it and mark as reused so downstream skips duplicate side effects.
                 const existingByKey = await trx('scheduled_services')
@@ -3217,6 +3250,9 @@ const CallRecordingProcessor = {
                 if (existingByKey) {
                   reusedExistingSchedule = true;
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
+                  // This is exactly the retry whose first attempt may have
+                  // lost the savepointed follow-up insert — ensure visit 2.
+                  followUpCreated = await ensureCallFollowUpVisit(existingByKey);
                   return existingByKey;
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
