@@ -207,6 +207,13 @@ async function executeLeadTool(toolName, input) {
     // ── Response actions ────────────────────────────────────────
 
     case 'send_lead_response': {
+      // A lead an admin removed from the pipeline must never be contacted:
+      // the agent's prompt can carry a lead id captured before the delete,
+      // so re-check liveness at send time — refuse instead of texting.
+      if (input.lead_id) {
+        const liveLead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first('id');
+        if (!liveLead) return { error: 'Lead was removed from the pipeline — do not contact' };
+      }
       const customer = await db('customers').where('id', input.customer_id).first();
       if (!customer?.phone) return { error: 'Customer has no phone number' };
 
@@ -269,12 +276,13 @@ async function executeLeadTool(toolName, input) {
           metadata: JSON.stringify({ audit_log_id: result.auditLogId }),
         }).catch(() => {});
 
-        // Pipeline + response-time only advance on real send.
+        // Pipeline + response-time only advance on real send — and only on
+        // a still-live lead (a mid-flight delete must not be overwritten).
         if (result.sent) {
-          const lead = await db('leads').where('id', input.lead_id).first();
+          const lead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first();
           if (lead?.first_contact_at) {
             const responseMinutes = Math.round((Date.now() - new Date(lead.first_contact_at).getTime()) / 60000);
-            await db('leads').where('id', input.lead_id).update({
+            await db('leads').where('id', input.lead_id).whereNull('deleted_at').update({
               response_time_minutes: responseMinutes,
               status: 'contacted',
               updated_at: new Date(),
@@ -342,6 +350,12 @@ async function executeLeadTool(toolName, input) {
     }
 
     case 'queue_for_adam': {
+      // Same liveness rule as send_lead_response: a removed lead must not
+      // generate an SLA ping or a queued draft.
+      if (input.lead_id) {
+        const liveLead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first('id');
+        if (!liveLead) return { error: 'Lead was removed from the pipeline — nothing to queue' };
+      }
       const customer = await db('customers').where('id', input.customer_id).first();
 
       // Save draft
