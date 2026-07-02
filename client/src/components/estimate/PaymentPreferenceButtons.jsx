@@ -86,11 +86,15 @@ export default function PaymentPreferenceButtons({
   serviceMode,
   setupFee,
   invoiceMode = false,
+  // Payment-only accept (guarantee-only renewal): invoice mode with NO visit
+  // to book — the one-time copy must not say "Book".
+  invoiceOnly = false,
   annualPrepayEligible = false,
   selectedFrequency = null,
   cardHold = null,
 }) {
   const isOneTime = serviceMode === 'one_time';
+  const oneTimeBooking = isOneTime && !invoiceOnly;
   const waivableSetupFee = setupFee && setupFee.waivedWithPrepay ? setupFee : null;
   const offerPrepay = !invoiceMode && !isOneTime && (annualPrepayEligible || !!waivableSetupFee);
   const setupAmount = Number(setupFee?.amount);
@@ -149,7 +153,7 @@ export default function PaymentPreferenceButtons({
       }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
           textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
-          {isOneTime ? 'Book your visit' : 'Accept your estimate'}
+          {oneTimeBooking ? 'Book your visit' : 'Accept your estimate'}
         </div>
 
         <button
@@ -158,7 +162,7 @@ export default function PaymentPreferenceButtons({
           onClick={() => onSelect('pay_at_visit')}
           style={{ ...btnBase, background: ACTION_BG, color: W.white }}
         >
-          {isOneTime ? 'Book + send invoice' : 'Accept + send invoice'}
+          {oneTimeBooking ? 'Book + send invoice' : 'Accept + send invoice'}
         </button>
 
         <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>

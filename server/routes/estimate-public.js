@@ -9066,7 +9066,10 @@ function isStructuralOneTimeOnlyEstimate(estData, estimate = {}) {
 // buy the warranty, so these estimates accept through the invoice-mode
 // payment-only path instead. Strict single-service match on the
 // rodent_guarantee key: rodent_guarantee_combo carries real exclusion work,
-// and any mixed one-time estimate keeps the normal booking path.
+// and any mixed one-time estimate keeps the normal booking path. Discount
+// rows (a manual discount's one-time slice etc.) are ignored — a discounted
+// renewal is still a renewal, and a discount is not a service needing a
+// visit; every remaining row must be the guarantee (fail-closed to booking).
 function isRodentGuaranteeOnlyEstimate(estimate = {}, estData = null) {
   let data = estData;
   if (data == null) {
@@ -9075,7 +9078,7 @@ function isRodentGuaranteeOnlyEstimate(estimate = {}, estData = null) {
     data = data || {};
   }
   if (!isStructuralOneTimeOnlyEstimate(data, estimate)) return false;
-  const rows = normalizeOneTimeBreakdown(data).items || [];
+  const rows = (normalizeOneTimeBreakdown(data).items || []).filter((row) => row?.kind !== 'discount');
   return rows.length > 0 && rows.every((row) => row?.service === 'rodent_guarantee');
 }
 

@@ -44,6 +44,7 @@ const {
   isStructuralOneTimeOnlyEstimate,
   reconcileFrozenMembershipSnapshot,
   resolveAcceptOneTimeTotal,
+  resolveEstimateInvoiceMode,
   resolveEstimateQuoteRequirement,
   verifyEstimateAskToken,
 } = require('./estimate-public');
@@ -421,6 +422,14 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       }
     }
     const oneTime = req.body?.serviceMode === 'one_time' || isOneTimeOnly;
+    // Mirror accept's invoice-mode customer gate BEFORE collecting money:
+    // accept rejects an invoice-mode estimate (admin flag OR derived
+    // guarantee-only renewal) with no linked customer and no customer phone —
+    // it can't create/deliver the invoice — so minting the deposit here first
+    // would strand money on an acceptance the server will reject.
+    if (resolveEstimateInvoiceMode(estimate, estData) && !estimate.customer_id && !estimate.customer_phone) {
+      return res.status(400).json({ error: 'Please call Waves to complete this estimate.' });
+    }
     // The ForEstimate wrapper adds the LIVE plan-customer fallback — legacy
     // customer-linked estimates have no membershipSnapshot, and minting an
     // intent here would charge a current WaveGuard member who owes nothing.
@@ -429,7 +438,9 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
       membership,
       oneTime,
-      oneTimeUninvoiced: oneTime && estimate.bill_by_invoice !== true,
+      // Effective invoice mode (admin flag OR derived guarantee-only renewal)
+      // — mirrors accept, so a guarantee-only deposit never demands a booking.
+      oneTimeUninvoiced: oneTime && !resolveEstimateInvoiceMode(estimate, estData),
     });
     if (!policy.required) {
       return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: policy.exemptReason || null });
@@ -526,7 +537,9 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
 
     const policy = resolveCardHoldPolicy({
       treatAsOneTime,
-      billByInvoice: estimate.bill_by_invoice === true,
+      // Effective invoice mode (admin flag OR derived guarantee-only renewal)
+      // — mirrors accept's card-hold gate: invoice-mode accepts owe no hold.
+      billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
     });
     if (!policy.required) {
