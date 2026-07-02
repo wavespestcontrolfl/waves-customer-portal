@@ -156,6 +156,20 @@ function buildScenePrompt({ topic, city, concept } = {}) {
   ].join(' ');
 }
 
+// Mirror publishToAll's hosting preflight: every published image needs a
+// public https URL (S3 + CloudFront). Without complete hosting config,
+// uploadImageToS3 returns null — but only AFTER generating (and possibly
+// PUTting an orphan object), so check BEFORE spending image credits.
+function hasImageHosting() {
+  try {
+    const config = require('../config');
+    return !!(config.s3?.accessKeyId && config.s3?.secretAccessKey && config.s3?.bucket)
+      && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+  } catch {
+    return false;
+  }
+}
+
 // Generate ONE scene per concept and composite the brand overlay at each
 // requested size. Returns [{ imageUrl, gbpImageUrl, conceptKey, sceneModel }]
 // with failed variants dropped; [] on total failure — never throws.
@@ -170,6 +184,11 @@ async function generateVariants({
   wantGbp = false,
   now = new Date(),
 } = {}) {
+  if (!hasImageHosting()) {
+    logger.warn('[social-creative] image hosting not configured (S3 creds/bucket + SOCIAL_MEDIA_CDN_DOMAIN) — skipping scene generation');
+    return [];
+  }
+
   let uploadImageToS3;
   let ImageGenerator;
   try {

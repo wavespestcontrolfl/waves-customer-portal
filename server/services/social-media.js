@@ -980,13 +980,16 @@ const SocialMediaService = {
         // Block on a row that went out or is queued ('scheduled'), but NOT on a
         // prior 'failed' row — a transient outage (here or in the merge-time
         // shareUrlOnce path) should stay retryable on the next 4h tick, not be
-        // permanently suppressed.
+        // permanently suppressed. 'rejected' is excluded for the same reason:
+        // an approval-queue draft whose suggestedLink pointed at this blog URL
+        // must not permanently suppress the RSS share of the post itself when
+        // an admin rejects that draft.
         const existing = await trx('social_media_posts')
           .where(function() {
             this.where({ source_url: normalizedUrl })
               .orWhere({ source_guid: normalizedGuid });
           })
-          .whereNotIn('status', ['dry_run', 'failed'])
+          .whereNotIn('status', ['dry_run', 'failed', 'rejected'])
           .first();
 
         if (existing) continue;

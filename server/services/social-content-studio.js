@@ -1534,27 +1534,39 @@ async function rejectAutonomousRun(runId, { reason } = {}) {
   if (!(await hasTable('social_content_studio_runs'))) {
     return { ok: false, status: 503, error: 'social_content_studio_runs table is unavailable' };
   }
-  const run = await db('social_content_studio_runs')
-    .where({ id: runId, run_type: 'autonomous' })
-    .first()
-    .catch(() => null); // malformed :id → 404, not a 500
-  if (!run) return { ok: false, status: 404, error: 'autonomous run not found' };
-  if (run.status !== 'draft_created') {
-    return { ok: false, status: 409, error: `run is '${run.status}' — only draft_created runs can be rejected` };
-  }
-  const note = cleanText(reason, 300);
-  const updated = await updateAutonomousRun(run.id, {
-    status: 'rejected',
-    skipReason: note ? `rejected by admin: ${note}` : 'rejected by admin',
-    socialMediaPostId: run.social_media_post_id,
+  // SAME per-run lock as approve: a reject racing an in-flight approve would
+  // otherwise read stale draft_created and mark the run rejected while the
+  // approve is mid-publish on Meta/GBP — the finishing approve then flips the
+  // "rejected" run to published and a draft the admin rejected is live anyway.
+  // Serializing on the shared lock means the reject either runs first (and the
+  // approve 409s on the status guard) or arrives during a publish and 409s here.
+  const result = await runExclusive(`social_autonomous_approve_${runId}`, async () => {
+    const run = await db('social_content_studio_runs')
+      .where({ id: runId, run_type: 'autonomous' })
+      .first()
+      .catch(() => null); // malformed :id → 404, not a 500
+    if (!run) return { ok: false, status: 404, error: 'autonomous run not found' };
+    if (run.status !== 'draft_created') {
+      return { ok: false, status: 409, error: `run is '${run.status}' — only draft_created runs can be rejected` };
+    }
+    const note = cleanText(reason, 300);
+    const updated = await updateAutonomousRun(run.id, {
+      status: 'rejected',
+      skipReason: note ? `rejected by admin: ${note}` : 'rejected by admin',
+      socialMediaPostId: run.social_media_post_id,
+    });
+    if (run.social_media_post_id) {
+      await db('social_media_posts')
+        .where({ id: run.social_media_post_id })
+        .update({ status: 'rejected' })
+        .catch(() => null);
+    }
+    return { ok: true, run: updated };
   });
-  if (run.social_media_post_id) {
-    await db('social_media_posts')
-      .where({ id: run.social_media_post_id })
-      .update({ status: 'rejected' })
-      .catch(() => null);
+  if (result?.skipped) {
+    return { ok: false, status: 409, error: 'an approval for this run is in progress — retry once it finishes' };
   }
-  return { ok: true, run: updated };
+  return result;
 }
 
 function initials(name) {

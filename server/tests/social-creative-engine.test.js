@@ -6,6 +6,9 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/social-media', () => ({ uploadImageToS3: jest.fn() }));
 jest.mock('../services/content/image-generator', () => ({ ImageGenerator: jest.fn() }));
+// Hosting preflight reads S3 creds from config; make them present by default so
+// generateVariants tests exercise the pipeline (one test blanks them below).
+jest.mock('../config', () => ({ s3: { accessKeyId: 'ak', secretAccessKey: 'sk', bucket: 'bkt', region: 'us-east-1' } }));
 jest.mock('../services/social-card-renderer', () => ({
   filenameSlug: (v) => String(v || 'seed').toLowerCase().replace(/[^a-z0-9]+/g, '-'),
   renderPhotoCardJpegBase64: jest.fn(),
@@ -19,9 +22,12 @@ const Renderer = require('../services/social-card-renderer');
 const NOW = new Date('2026-07-02T12:00:00Z');
 
 const ORIGINAL_ENV = { ...process.env };
+beforeEach(() => {
+  process.env.SOCIAL_MEDIA_CDN_DOMAIN = 'cdn.test'; // hosting preflight
+});
 afterEach(() => {
   jest.clearAllMocks();
-  for (const k of ['SOCIAL_CREATIVE_ENGINE_ENABLED', 'SOCIAL_CREATIVE_VARIANTS', 'SOCIAL_IMAGE_PROVIDER']) {
+  for (const k of ['SOCIAL_CREATIVE_ENGINE_ENABLED', 'SOCIAL_CREATIVE_VARIANTS', 'SOCIAL_IMAGE_PROVIDER', 'SOCIAL_MEDIA_CDN_DOMAIN']) {
     if (ORIGINAL_ENV[k] === undefined) delete process.env[k];
     else process.env[k] = ORIGINAL_ENV[k];
   }
@@ -232,5 +238,20 @@ describe('generateVariants', () => {
     });
     const variants = await Engine.generateVariants({ topic: 'ants', count: 1, now: NOW });
     expect(variants).toEqual([]);
+  });
+
+  test('skips generation entirely when image hosting is not configured (no credits spent)', async () => {
+    const generate = jest.fn();
+    mockProviders({
+      generate,
+      render: okRender,
+      upload: jest.fn().mockResolvedValue('https://cdn.test/x.jpg'),
+    });
+
+    delete process.env.SOCIAL_MEDIA_CDN_DOMAIN; // hosting incomplete → preflight fails
+    const variants = await Engine.generateVariants({ topic: 'ants', count: 2, now: NOW });
+    expect(variants).toEqual([]);
+    expect(generate).not.toHaveBeenCalled(); // provider never invoked
+    expect(ImageGenerator).not.toHaveBeenCalled();
   });
 });
