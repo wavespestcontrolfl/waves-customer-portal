@@ -164,18 +164,20 @@ function normalizeServiceInterest(body = {}) {
   return frequency ? formatServiceInterestForFrequency(serviceLabel, frequency) : serviceLabel;
 }
 
-// GET /lead-prefill?lead_id=&token= — exchange a voicemail text-back link's
+// POST /lead-prefill {lead_id, token} — exchange a voicemail text-back link's
 // HMAC token (utils/lead-prefill-token.js) for that lead's own contact fields,
-// so the /estimate wizard arrives prefilled. 404 on ANY failure — invalid,
-// expired, or mismatched token and unknown lead are indistinguishable (no
-// oracle). PREFILL authority only: this returns the contact data we already
-// texted the link-holder; it is never accepted as identity or pricing
-// authority on a money path.
-router.get('/lead-prefill', prefillLimiter, async (req, res) => {
+// so the /estimate wizard arrives prefilled. POST with a JSON body on purpose:
+// the token is a bearer credential and query strings land verbatim in
+// morgan/Railway request logs (the AGENTS.md PII-in-logs rule); bodies don't.
+// 404 on ANY failure — invalid, expired, or mismatched token and unknown lead
+// are indistinguishable (no oracle). PREFILL authority only: this returns the
+// contact data we already texted the link-holder; it is never accepted as
+// identity or pricing authority on a money path.
+router.post('/lead-prefill', prefillLimiter, async (req, res) => {
   res.set(PRIVACY_HEADERS);
   try {
-    const leadId = String(req.query.lead_id || '').trim();
-    const token = String(req.query.token || '').trim();
+    const leadId = String(req.body?.lead_id || '').trim();
+    const token = String(req.body?.token || '').trim();
     if (!leadId || !token || !UUID_RE.test(leadId) || !verifyLeadPrefillToken(leadId, token)) {
       return res.status(404).json({ error: 'not_found' });
     }

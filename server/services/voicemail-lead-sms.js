@@ -8,9 +8,14 @@
  * path (new prospect, workable signal, no existing customer). Gates, in order:
  *   1. GATE_VOICEMAIL_LEAD_SMS — a customer-facing auto-send, fails CLOSED in
  *      every environment until the owner enables it.
- *   2. One text per phone number EVER (sms_log message_type check), plus an
- *      atomic per-lead claim on leads.extracted_data so concurrent processing
- *      can't double-send.
+ *   2. One text per phone number EVER — a DB-atomic claim on
+ *      voicemail_sms_claims (phone PRIMARY KEY, INSERT ... ON CONFLICT DO
+ *      NOTHING: two concurrently-processed voicemails from the same phone
+ *      race to one winner), belt-and-suspenders sms_log history check, plus
+ *      an atomic per-lead claim on leads.extracted_data for same-lead
+ *      idempotency. The phone claim is released ONLY on outcomes that never
+ *      consumed the one-shot (template disabled, missing secret, re-queue
+ *      failure, unexpected error).
  *   3. Landline pre-check via the shared phone_line_types cache + one paid
  *      Twilio Lookup per uncached number (a voicemail caller can easily be on
  *      a landline — don't burn the one-shot on an undeliverable send).
@@ -23,10 +28,12 @@
  *   5. Template kill switch — voicemail_quote_link is admin-editable and
  *      is_active-toggleable like every automated template.
  *
- * The link carries a lead-prefill HMAC token (utils/lead-prefill-token.js):
- * the wizard exchanges it for the lead's own contact fields and attaches its
- * submission to the SAME lead row — prefill/attach authority only, never
- * identity or pricing.
+ * The link carries a lead-prefill HMAC token (utils/lead-prefill-token.js) in
+ * the URL FRAGMENT (#vlead=…&vt=…) — fragments never reach the server, so the
+ * bearer token stays out of morgan/Railway request logs and Referer headers
+ * (the AGENTS.md PII-in-logs rule). The wizard exchanges it via POST for the
+ * lead's own contact fields and attaches its submission to the SAME lead
+ * row — prefill/attach authority only, never identity or pricing.
  */
 
 const db = require('../models/db');
@@ -85,6 +92,28 @@ async function logActivity(leadId, activityType, description, metadata = {}) {
   }
 }
 
+// Release the per-phone claim for outcomes that never consumed the one-shot
+// (template disabled, missing secret, re-queue failure, unexpected error) so
+// a LATER voicemail from the same prospect can be texted once the config
+// issue is fixed. Best-effort; a leaked claim fails safe (no text, no dup).
+async function releasePhoneClaim(phone) {
+  try {
+    await db('voicemail_sms_claims').where({ phone }).del();
+  } catch (e) {
+    logger.warn(`[voicemail-sms] phone claim release failed for ${maskPhone(phone)}: ${e.message}`);
+  }
+}
+
+// Stamp the final outcome on the kept claim row (visibility only; the row's
+// existence is the dedupe, the outcome column is the breadcrumb).
+async function stampPhoneClaim(phone, outcome) {
+  try {
+    await db('voicemail_sms_claims').where({ phone }).update({ outcome });
+  } catch (e) {
+    logger.warn(`[voicemail-sms] phone claim stamp failed for ${maskPhone(phone)}: ${e.message}`);
+  }
+}
+
 async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone } = {}) {
   if (!isEnabled('voicemailLeadSms')) {
     logger.info(`[voicemail-sms] Gate off — text-back skipped for lead ${leadId || 'unknown'}`);
@@ -92,9 +121,9 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
   }
   if (!leadId || !phone) return { sent: false, skipped: 'missing_input' };
 
-  // One text per phone number, ever — covers duplicate lead rows on the same
-  // phone and a reused lead whose claim marker was overwritten by a later
-  // enrichment pass. A 'scheduled' rail row counts as sent.
+  // Belt-and-suspenders history check: pre-claim-table sends (or hand-sent
+  // rows tagged with the message_type) also consume the one-shot. Advisory
+  // only for ordering — the ATOMIC gate is the claim insert below.
   try {
     const prior = await db('sms_log')
       .where({ to_phone: phone, message_type: MESSAGE_TYPE })
@@ -108,7 +137,41 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
     return { sent: false, skipped: 'dedupe_read_failed' };
   }
 
-  // Atomic per-lead claim: only the caller whose UPDATE affects a row proceeds.
+  // One text per phone number, EVER — DB-atomic: phone is the PRIMARY KEY of
+  // voicemail_sms_claims, so of two concurrently-processed voicemails from
+  // the same phone (two calls → two lead rows) exactly one insert wins.
+  // Fails closed: if the claim can't be taken (conflict OR error), no text.
+  let phoneClaimed = false;
+  try {
+    const inserted = await db('voicemail_sms_claims')
+      .insert({ phone, lead_id: leadId, outcome: 'claimed' })
+      .onConflict('phone')
+      .ignore()
+      .returning('phone');
+    phoneClaimed = Array.isArray(inserted) ? inserted.length > 0 : !!inserted;
+  } catch (e) {
+    logger.warn(`[voicemail-sms] phone claim insert failed — skipping (fail closed): ${e.message}`);
+    return { sent: false, skipped: 'claim_insert_failed' };
+  }
+  if (!phoneClaimed) {
+    return { sent: false, skipped: 'already_sent_to_phone' };
+  }
+
+  try {
+    return await sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone });
+  } catch (err) {
+    // An unexpected throw never consumed the one-shot — release so a later
+    // voicemail can retry — and rethrows into the caller's non-blocking catch.
+    await releasePhoneClaim(phone);
+    throw err;
+  }
+}
+
+// Runs with the per-phone claim held. Every return path must either keep the
+// claim (one-shot consumed) or release it (config/transient failure).
+async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone }) {
+  // Atomic per-lead claim: same-lead idempotency (re-processing, admin
+  // Reprocess). Losing it means THIS lead already ran; keep the phone claim.
   const claimed = await db('leads')
     .where({ id: leadId })
     .whereRaw("COALESCE(extracted_data->>'quote_link_sms_status', '') = ''")
@@ -136,6 +199,7 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
     }
     if (lineType === 'landline') {
       await stampStatus(leadId, 'blocked');
+      await stampPhoneClaim(phone, 'landline'); // keep — a landline stays a landline
       await logActivity(leadId, 'note', 'Quote-link text-back skipped — caller number is a landline', {
         message_type: MESSAGE_TYPE,
         reason: 'landline',
@@ -151,10 +215,14 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
   const token = mintLeadPrefillToken(leadId);
   if (!token) {
     await stampStatus(leadId, 'failed');
+    await releasePhoneClaim(phone); // config failure — never consumed the one-shot
     logger.warn('[voicemail-sms] No prefill token secret configured — skipping (fail closed)');
     return { sent: false, skipped: 'no_token_secret' };
   }
-  const longUrl = `${PORTAL_BASE_URL}/estimate?vlead=${encodeURIComponent(leadId)}&vt=${encodeURIComponent(token)}`;
+  // The token rides in the URL FRAGMENT: fragments are never sent to the
+  // server (no morgan/Railway log line, no Referer leak) and survive the
+  // short-link 302 because the Location target carries them verbatim.
+  const longUrl = `${PORTAL_BASE_URL}/estimate#vlead=${encodeURIComponent(leadId)}&vt=${encodeURIComponent(token)}`;
   const quoteUrl = await shortenOrPassthrough(longUrl, {
     kind: 'quote_prefill',
     entityType: 'leads',
@@ -174,8 +242,11 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
     entity_id: leadId,
   });
   if (!body) {
-    // Template missing or admin-disabled — respect the kill switch.
+    // Template missing or admin-disabled — respect the kill switch. Release
+    // the phone claim: re-enabling the template should let a LATER voicemail
+    // from this prospect get its text.
     await stampStatus(leadId, 'blocked');
+    await releasePhoneClaim(phone);
     logger.info(`[voicemail-sms] Template ${MESSAGE_TYPE} missing/disabled — text-back skipped for lead ${leadId}`);
     return { sent: false, skipped: 'template_disabled' };
   }
@@ -198,6 +269,7 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
 
   if (result.sent) {
     await stampStatus(leadId, 'sent');
+    await stampPhoneClaim(phone, 'sent');
     await logActivity(leadId, 'sms_sent', `Auto-texted quote link after voicemail to ${maskPhone(phone)}`, {
       message_type: MESSAGE_TYPE,
       quote_url: quoteUrl,
@@ -233,6 +305,7 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
         }),
       });
       await stampStatus(leadId, 'scheduled');
+      await stampPhoneClaim(phone, 'scheduled');
       await logActivity(leadId, 'note',
         `Quote-link text-back queued for ${new Date(result.nextAllowedAt).toISOString()} (${result.code || 'hold'})`,
         { message_type: MESSAGE_TYPE, code: result.code || null });
@@ -241,13 +314,15 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
     } catch (queueErr) {
       logger.error(`[voicemail-sms] Re-queue failed for lead ${leadId}: ${queueErr.message}`);
       await stampStatus(leadId, 'failed');
+      await releasePhoneClaim(phone); // transient failure — one-shot not consumed
       return { sent: false, skipped: 'requeue_failed' };
     }
   }
 
   // Terminal block: suppression (STOP), no consent, landline validator, etc.
-  // Keep the claim — a blocked prospect must not be retried.
+  // Keep both claims — a blocked prospect must not be retried.
   await stampStatus(leadId, 'blocked');
+  await stampPhoneClaim(phone, result.code || 'blocked');
   await logActivity(leadId, 'note', `Quote-link text-back blocked: ${result.code || 'unknown'}`, {
     message_type: MESSAGE_TYPE,
     code: result.code || null,

@@ -343,14 +343,20 @@ finding and warns on P1. Reviewers must return JSON matching
   lead-prefill HMAC below — which, when valid, makes the lead capture UPDATE
   that existing open call-pipeline lead instead of inserting a new row; the
   same pair is accepted by `/api/lead-webhook` with identical semantics).
-  `/api/public/estimator/lead-prefill` (read-only; exchanges the voicemail
-  text-back link's `lead_id` + HMAC token for that ONE lead's own contact
-  fields — first/last name, email, phone, address, city, zip,
-  service_interest — so the /estimate quote wizard arrives prefilled. Token
-  is minted ONLY by the voicemail-lead SMS (`utils/lead-prefill-token.js`):
+  `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
+  swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
+  lead's own contact fields — first/last name, email, phone, address, city,
+  zip, service_interest — so the /estimate quote wizard arrives prefilled.
+  Token is minted ONLY by the voicemail-lead SMS
+  (`utils/lead-prefill-token.js`):
   `<expEpochSec>.<base64url(HMAC-SHA256("lead-prefill:<leadId>:<exp>"))>`,
   14-day TTL, keyed on `LEAD_PREFILL_SECRET` (falls back to `JWT_SECRET`),
-  constant-time compare, fail-closed when no secret is configured. UUID
+  constant-time compare, fail-closed when no secret is configured. The token
+  is a bearer credential and stays OUT of URLs end-to-end: the SMS link
+  carries it in the /estimate URL FRAGMENT (never sent to the server, never
+  in Referer), the client scrubs it from the address bar at mount and strips
+  it from attribution landing_url, and the exchange is a POST body — never a
+  query string — so it can't land in morgan/Railway request logs. UUID
   format gate on lead_id, 30 req/hour rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, and a generic 404 for invalid, expired,
   mismatched, or unknown ids — indistinguishable on purpose (no oracle).

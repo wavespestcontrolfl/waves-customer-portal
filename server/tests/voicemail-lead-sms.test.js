@@ -48,12 +48,14 @@ const LEAD_ID = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
 const PHONE = '+19415550101';
 
 // Per-table scripting: firstResults queue feeds .first(), updateResults queue
-// feeds .update() (claim = affected-row count), inserts/updates are recorded.
+// feeds .update() (claim = affected-row count), insertResults queue feeds
+// awaited inserts (the phone claim's onConflict().ignore().returning() chain
+// resolves through the builder thenable). Inserts/updates/deletes recorded.
 let state;
 
 function makeBuilder(table) {
   const b = {};
-  for (const m of ['where', 'whereRaw', 'whereNotIn', 'whereNull', 'select']) {
+  for (const m of ['where', 'whereRaw', 'whereNotIn', 'whereNull', 'select', 'onConflict', 'ignore', 'returning']) {
     b[m] = jest.fn(() => b);
   }
   b.first = jest.fn(() => {
@@ -67,17 +69,26 @@ function makeBuilder(table) {
     const q = state.updateResults[table] || [];
     return Promise.resolve(q.length ? q.shift() : 1);
   });
+  b.del = jest.fn(() => {
+    state.deletes.push({ table });
+    return Promise.resolve(1);
+  });
   b.insert = jest.fn((payload) => {
     state.inserts.push({ table, payload });
-    if (state.insertError && state.insertError[table]) return Promise.reject(state.insertError[table]);
-    return Promise.resolve([{ id: 'row-1' }]);
+    return b;
   });
+  b.then = (resolve, reject) => {
+    if (state.insertError[table]) return Promise.reject(state.insertError[table]).then(resolve, reject);
+    const q = state.insertResults[table] || [];
+    const val = q.length ? q.shift() : [{ id: 'row-1', phone: PHONE }];
+    return Promise.resolve(val).then(resolve, reject);
+  };
   return b;
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
-  state = { firstResults: {}, updateResults: {}, updates: [], inserts: [], insertError: {} };
+  state = { firstResults: {}, updateResults: {}, insertResults: {}, updates: [], inserts: [], deletes: [], insertError: {} };
   db.mockImplementation((table) => makeBuilder(table));
   db.raw.mockImplementation((sql, bindings) => ({ __raw: sql, bindings }));
   isEnabled.mockReturnValue(true);
@@ -105,6 +116,16 @@ function stampsFor(table = 'leads') {
   return state.updates
     .filter((u) => u.table === table && u.payload.extracted_data?.bindings)
     .map((u) => u.payload.extracted_data.bindings[0]);
+}
+
+function phoneClaimReleased() {
+  return state.deletes.some((d) => d.table === 'voicemail_sms_claims');
+}
+
+function phoneClaimOutcomes() {
+  return state.updates
+    .filter((u) => u.table === 'voicemail_sms_claims')
+    .map((u) => u.payload.outcome);
 }
 
 describe('voicemail lead text-back gates', () => {
@@ -137,11 +158,29 @@ describe('voicemail lead text-back gates', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('atomic claim lost (0 rows) — concurrent processor already owns the send', async () => {
+  test('phone claim conflict — of two concurrent voicemails from one phone, the loser skips atomically', async () => {
+    // ON CONFLICT DO NOTHING returns no row for the loser.
+    state.insertResults.voicemail_sms_claims = [[]];
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'already_sent_to_phone' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // The loser never touches the winner's claim.
+    expect(phoneClaimReleased()).toBe(false);
+  });
+
+  test('phone claim insert failure fails CLOSED', async () => {
+    state.insertError.voicemail_sms_claims = new Error('claims table unavailable');
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'claim_insert_failed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('per-lead claim lost (0 rows) — this lead already ran; the phone claim is kept', async () => {
     state.updateResults.leads = [0];
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'already_claimed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(phoneClaimReleased()).toBe(false);
   });
 
   test('landline pre-check blocks the send and stamps the lead', async () => {
@@ -150,6 +189,9 @@ describe('voicemail lead text-back gates', () => {
     expect(result).toEqual({ sent: false, skipped: 'landline' });
     expect(lineType.lookupLineType).not.toHaveBeenCalled(); // cache hit = no paid Lookup
     expect(stampsFor()).toContain('blocked');
+    // A landline stays a landline — the phone claim is consumed, not released.
+    expect(phoneClaimReleased()).toBe(false);
+    expect(phoneClaimOutcomes()).toContain('landline');
     const notes = state.inserts.filter((i) => i.table === 'lead_activities');
     expect(notes).toHaveLength(1);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -176,6 +218,8 @@ describe('voicemail lead text-back gates', () => {
     expect(result).toEqual({ sent: false, skipped: 'no_token_secret' });
     expect(stampsFor()).toContain('failed');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // Config failure never consumed the one-shot — a later voicemail can retry.
+    expect(phoneClaimReleased()).toBe(true);
   });
 
   test('template missing or admin-disabled — kill switch respected', async () => {
@@ -184,6 +228,8 @@ describe('voicemail lead text-back gates', () => {
     expect(result).toEqual({ sent: false, skipped: 'template_disabled' });
     expect(stampsFor()).toContain('blocked');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // Re-enabling the template should let a LATER voicemail get its text.
+    expect(phoneClaimReleased()).toBe(true);
   });
 });
 
@@ -195,9 +241,11 @@ describe('voicemail lead text-back send outcomes', () => {
     expect(renderSmsTemplate).toHaveBeenCalledWith(MESSAGE_TYPE, expect.objectContaining({
       first_name: 'Dana', // capitalized
       service_label: 'termite',
-      quote_url: expect.stringContaining(`vlead=${encodeURIComponent(LEAD_ID)}`),
+      // Token rides the FRAGMENT — never a query string a server would log.
+      quote_url: expect.stringContaining(`/estimate#vlead=${encodeURIComponent(LEAD_ID)}`),
     }), expect.any(Object));
     expect(renderSmsTemplate.mock.calls[0][1].quote_url).toContain('vt=');
+    expect(renderSmsTemplate.mock.calls[0][1].quote_url).not.toContain('?vlead');
 
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: PHONE,
@@ -245,6 +293,8 @@ describe('voicemail lead text-back send outcomes', () => {
     expect(meta.consent_basis).toEqual(expect.objectContaining({ status: 'transactional_allowed' }));
     expect(meta.lead_id).toBe(LEAD_ID);
     expect(stampsFor()).toContain('scheduled');
+    expect(phoneClaimOutcomes()).toContain('scheduled');
+    expect(phoneClaimReleased()).toBe(false);
   });
 
   test('re-queue insert failure downgrades to failed (never throws into call processing)', async () => {
@@ -255,6 +305,8 @@ describe('voicemail lead text-back send outcomes', () => {
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'requeue_failed' });
     expect(stampsFor()).toContain('failed');
+    // Transient failure — the one-shot was not consumed.
+    expect(phoneClaimReleased()).toBe(true);
   });
 
   test('terminal block (STOP suppression etc.) keeps the claim — a blocked prospect is never retried', async () => {
@@ -262,7 +314,9 @@ describe('voicemail lead text-back send outcomes', () => {
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'SUPPRESSED' });
     expect(stampsFor()).toContain('blocked');
-    // No re-queue row.
+    // No re-queue row, and the phone claim is consumed with the block code.
     expect(state.inserts.filter((i) => i.table === 'sms_log')).toHaveLength(0);
+    expect(phoneClaimReleased()).toBe(false);
+    expect(phoneClaimOutcomes()).toContain('SUPPRESSED');
   });
 });
