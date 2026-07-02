@@ -32,6 +32,18 @@ const GOOGLE_KEY = () => process.env.GOOGLE_ADDRESS_VALIDATION_API_KEY
 
 const ENABLED = () => process.env.ADDRESS_VALIDATION_ENABLED === 'true';
 
+// Bare fetch() has no response deadline, so a stalled Google connection would
+// hang whatever run called validateAddress (e.g. the call-recording processor,
+// which otherwise sits in processing_status='processing' until the 10-min
+// stale reclaim). Every fetch below runs under an AbortSignal that fires after
+// this per-call cap, combined with any caller-supplied run deadline.
+const ADDRESS_VALIDATION_TIMEOUT_MS = Number(process.env.ADDRESS_VALIDATION_TIMEOUT_MS) || 30000;
+
+function requestSignal(signal) {
+  const timeout = AbortSignal.timeout(ADDRESS_VALIDATION_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 const STATUSES = {
   NOT_ATTEMPTED: 'not_attempted',       // flag off / no key / no address
   VALIDATED_ACCEPT: 'validated_accept', // PREMISE/SUB_PREMISE, in-area, no caller value overridden (benign normalization/fill ok) — auto-routable
@@ -54,12 +66,12 @@ function pickComponent(components, type) {
 // in addressComponents — only street/route/locality/state/postal/country. It
 // does return geocode.location (lat/lng), so we reverse-geocode that through the
 // Geocoding API (which DOES return county) to determine service area.
-async function reverseGeocodeCounty(location, key) {
+async function reverseGeocodeCounty(location, key, signal = null) {
   if (!location || typeof location.latitude !== 'number') return null;
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${location.latitude},${location.longitude}`
       + `&result_type=administrative_area_level_2&key=${key}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal });
     if (!res.ok) return null;
     const data = await res.json();
     for (const r of data.results || []) {
@@ -126,7 +138,7 @@ function deriveStatus(result, county) {
   return { status: STATUSES.VALIDATED_ACCEPT, ...base };
 }
 
-async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
+async function validateAddress({ addressLines, regionCode = 'US', signal = null } = {}) {
   const lines = (addressLines || []).filter(Boolean);
   if (!ENABLED() || lines.length === 0) {
     return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false };
@@ -138,10 +150,12 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
   }
 
   try {
+    const abortSignal = requestSignal(signal);
     const res = await fetch(`https://addressvalidation.googleapis.com/v1:validateAddress?key=${key}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: { regionCode, addressLines: lines } }),
+      signal: abortSignal,
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -149,7 +163,7 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
       return { status: STATUSES.API_UNAVAILABLE, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false };
     }
     const data = await res.json();
-    const county = await reverseGeocodeCounty(data.result?.geocode?.location, key);
+    const county = await reverseGeocodeCounty(data.result?.geocode?.location, key, abortSignal);
     const out = deriveStatus(data.result, county);
     out.providerResponseId = data.responseId || null;
     return out;

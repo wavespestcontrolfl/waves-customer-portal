@@ -1187,3 +1187,61 @@ describe('referrerNameFromExtracted (word-of-mouth referral detection)', () => {
     expect(referrerNameFromExtracted({})).toBe('');
   });
 });
+
+describe('fetchWithTimeout (provider deadline)', () => {
+  const { fetchWithTimeout } = CallRecordingProcessor._test;
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+
+  test('returns a response-like object whose body reads the drained bytes', async () => {
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      arrayBuffer: async () => Buffer.from(JSON.stringify({ hello: 'world' })),
+    });
+    const res = await fetchWithTimeout('https://x', {}, { label: 'test' });
+    expect(res.ok).toBe(true);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ hello: 'world' });
+    expect(await res.text()).toBe('{"hello":"world"}');
+  });
+
+  // The core P1 fix: fetch() resolves at headers, so a body that never settles
+  // must still be aborted by the per-call timeout — not left hanging after the
+  // timer was cleared at header time.
+  test('times out when the body stalls after headers arrive', async () => {
+    global.fetch = async (_url, { signal }) => ({
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      // Body never resolves until the abort signal fires.
+      arrayBuffer: () => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          const err = new Error('aborted');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      }),
+    });
+    await expect(
+      fetchWithTimeout('https://x', {}, { label: 'stalling body', timeoutMs: 40 }),
+    ).rejects.toThrow(/stalling body request timed out \(40ms\)/);
+  });
+
+  test('aborts immediately when the shared run deadline is already exceeded', async () => {
+    const spent = new AbortController();
+    spent.abort();
+    global.fetch = async (_url, { signal }) => {
+      if (signal.aborted) {
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
+      return { ok: true, status: 200, headers: new Map(), arrayBuffer: async () => Buffer.from('') };
+    };
+    await expect(
+      fetchWithTimeout('https://x', {}, { label: 'over budget', deadlineSignal: spent.signal }),
+    ).rejects.toThrow(/over budget request timed out \(run deadline\)/);
+  });
+});
