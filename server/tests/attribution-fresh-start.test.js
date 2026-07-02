@@ -78,6 +78,14 @@ describe('applyAttributionFreshStart', () => {
     expect(floored.from).toBe('2026-07-01');
     expect(floored.label).toBe('Since 2026-06-01 (data since 2026-07-01)');
   });
+
+  test('a label-less window (the reconciliation script shape) clips + stamps without minting a bogus label', () => {
+    const bare = { from: '2026-01-01', to: '2026-07-02' };
+    const floored = applyAttributionFreshStart(bare, '2026-07-01');
+    expect(floored.from).toBe('2026-07-01');
+    expect(floored.freshStart).toBe('2026-07-01');
+    expect(floored.label).toBeUndefined();
+  });
 });
 
 // Route wiring guards (house style — see attribution-funnel-wiring.test.js):
@@ -92,5 +100,24 @@ describe('admin-dashboard attribution window wiring', () => {
 
   test('every attribution window passes through the floor', () => {
     expect(src).toMatch(/return applyAttributionFreshStart\(win, ATTRIBUTION_FRESH_START\)/);
+  });
+});
+
+// The prod reconciliation script mirrors the widget's windows by hand, so it
+// must carry the same floor or its ytd/wtd counts stop reconciling with the
+// dashboard (Codex P3 on #2265). "all" intentionally stays raw.
+describe('dump-unmapped-call-numbers script wiring', () => {
+  const src = fs.readFileSync(
+    path.join(__dirname, '../scripts/dump-unmapped-call-numbers.js'),
+    'utf8',
+  );
+
+  test('shares the env-driven floor helper', () => {
+    expect(src).toMatch(/const ATTRIBUTION_FRESH_START = resolveAttributionFreshStart\(\)/);
+  });
+
+  test('every non-"all" window passes through the floor', () => {
+    expect(src).toMatch(/return applyAttributionFreshStart\(win, ATTRIBUTION_FRESH_START\)/);
+    expect(src).toMatch(/if \(period === 'all'\) return null/);
   });
 });

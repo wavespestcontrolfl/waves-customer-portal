@@ -40,7 +40,9 @@ function applyAttributionFreshStart(win, freshStart) {
     ...win,
     from: freshStart,
     freshStart,
-    label: `${win.label} (data since ${freshStart})`,
+    // Label-less windows (the reconciliation script's {from, to}) still get
+    // clipped + stamped with `freshStart`; they just render their own note.
+    ...(win.label ? { label: `${win.label} (data since ${freshStart})` } : {}),
   };
 }
 
