@@ -279,6 +279,17 @@ describe('VIDEO_FLAGS + isVideoDay', () => {
     expect(Engine.isVideoDay(NOW)).toBe(true);
     expect(Engine.isVideoDay(new Date('2026-07-03T12:00:00Z'))).toBe(true);
   });
+
+  test('cadence is monotonic across month boundaries (epoch-day, not month*31+day)', () => {
+    const jun30 = new Date('2026-06-30T12:00:00Z');
+    const jul1 = new Date('2026-07-01T12:00:00Z');
+    // consecutive ET days differ by exactly 1…
+    expect(Engine.etEpochDay(jul1) - Engine.etEpochDay(jun30)).toBe(1);
+    // …so an every-2-days paid cadence can never fire on both of them
+    // (the old month*31+day seed skipped 217 between Jun 30=216 and Jul 1=218)
+    process.env.SOCIAL_VIDEO_INTERVAL_DAYS = '2';
+    expect(Engine.isVideoDay(jun30)).not.toBe(Engine.isVideoDay(jul1));
+  });
 });
 
 describe('buildVideoPrompt', () => {

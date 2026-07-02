@@ -723,6 +723,21 @@ async function recentCreativeConceptKeys(limit = 6) {
 // [] when the engine is disabled or every variant fails, so callers keep the
 // legacy SVG-card path as the fallback. Draft runs get the multi-variant batch
 // for the approval queue; publish runs render exactly one.
+// A Veo clip only ever publishes to Facebook/Instagram — publishToAll routes
+// video to Meta while GBP keeps the still — so don't spend on a clip unless a
+// REQUESTED channel can actually take it. E.g. SOCIAL_AUTONOMOUS_CHANNELS=gbp,
+// or FB/IG disabled/missing credentials, would otherwise buy a clip that can
+// never publish and put a misleading video option in the approval queue.
+// Mirrors publishToAll's fbReady/igReady env checks.
+function hasVideoCapableChannel(channels) {
+  const list = Array.isArray(channels) ? channels : [];
+  const fbReady = SOCIAL_FLAGS.facebookEnabled
+    && !!process.env.FACEBOOK_ACCESS_TOKEN && !!process.env.FACEBOOK_PAGE_ID;
+  const igReady = SOCIAL_FLAGS.instagramEnabled
+    && !!process.env.FACEBOOK_ACCESS_TOKEN && !!process.env.INSTAGRAM_ACCOUNT_ID;
+  return (list.includes('facebook') && fbReady) || (list.includes('instagram') && igReady);
+}
+
 async function creativeVariantsForRun(plan, preview, { isReviewRun, wantsGbp, effectiveMode, now }) {
   if (!CreativeEngine.CREATIVE_FLAGS.enabled) return [];
   try {
@@ -754,6 +769,7 @@ async function creativeVariantsForRun(plan, preview, { isReviewRun, wantsGbp, ef
       && effectiveMode === 'draft'
       && CreativeEngine.VIDEO_FLAGS.enabled
       && CreativeEngine.isVideoDay(now)
+      && hasVideoCapableChannel(plan.channels)
     ) {
       const video = await CreativeEngine.generateVideoVariant({
         topic: plan.topic,

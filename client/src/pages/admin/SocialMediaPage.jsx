@@ -999,10 +999,13 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
             const variants = isPendingDraft ? draftRunVariants(run) : [];
             const chosenIdx = Math.min(variantChoice[run.id] ?? 0, Math.max(0, variants.length - 1));
             const chosenVariant = isPendingDraft && variants.length ? variants[chosenIdx] : null;
-            const chosenIsVideo = chosenVariant?.type === "video";
+            // A published run that shipped a Reel records preview.visual.videoUrl —
+            // show the actual video in the audit row, not just the fallback still.
+            const publishedVideoUrl = !isPendingDraft ? safeHttpHref(run.preview?.visual?.videoUrl) : null;
+            const chosenIsVideo = chosenVariant ? chosenVariant.type === "video" : !!publishedVideoUrl;
             const displayImage = chosenVariant
               ? (chosenIsVideo ? chosenVariant.videoUrl : chosenVariant.imageUrl)
-              : run.imageUrl;
+              : (publishedVideoUrl || run.imageUrl);
             const drafts = run.preview?.drafts || {};
             const busy = acting === `approve-${run.id}` || acting === `reject-${run.id}`;
             return (

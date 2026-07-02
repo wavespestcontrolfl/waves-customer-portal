@@ -906,13 +906,18 @@ async function postToInstagramReel(caption, videoUrl) {
 // upload session. Publishes as a page VIDEO (the dedicated FB "Reels" surface
 // needs the rupload.facebook.com session flow — deferred; a page video still
 // reaches the feed). Graph ingests asynchronously, so success here means
-// "accepted", not "transcoded".
-async function postToFacebookVideo(description, videoUrl) {
+// "accepted", not "transcoded". Video uploads go through the dedicated
+// graph-video.facebook.com host (Meta's Video API publishing guide) — the
+// regular graph host can reject them. A page video has no separate link
+// preview parameter, so the CTA link rides in the description (same as the
+// photo path's caption).
+async function postToFacebookVideo(message, link, videoUrl) {
   const token = process.env.FACEBOOK_ACCESS_TOKEN;
   if (!token) throw new Error('FACEBOOK_ACCESS_TOKEN not configured');
   if (!videoUrl) throw new Error('Facebook video post requires a video URL');
 
-  const res = await fetch(`https://graph.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/videos`, {
+  const description = link ? `${message}\n\n${link}` : message;
+  const res = await fetch(`https://graph-video.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/videos`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ file_url: videoUrl, description, access_token: token }),
@@ -1368,7 +1373,7 @@ const SocialMediaService = {
           let r;
           try {
             r = hasVideo
-              ? await withRetry(() => postToFacebookVideo(content, videoUrl), { label: 'facebook' })
+              ? await withRetry(() => postToFacebookVideo(content, link, videoUrl), { label: 'facebook' })
               : await withRetry(() => postToFacebook(content, link, generatedImageUrl), { label: 'facebook' });
           } catch (fbErr) {
             if (hasVideo && /Facebook video API/i.test(String(fbErr.message))) {

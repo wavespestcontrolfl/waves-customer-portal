@@ -53,10 +53,24 @@ const VIDEO_FLAGS = {
   },
 };
 
-// Deterministic ET-anchored "is today a video day" — same seed the concept
-// rotation uses, so it never flips mid-day and retried runs agree with the cron.
+// Monotonic ET day counter (days since Unix epoch, of the Eastern calendar
+// date). rotationSeed() is month*31+day — fine for picking a concept start
+// index, but NOT monotonic across month boundaries (Jun 30 → 216, Jul 1 → 218
+// skips 217), which would let an "every 2 days" PAID video cadence fire on two
+// consecutive days. Cadence needs a real day count.
+function etEpochDay(now = new Date()) {
+  const { year, month, day } = etParts(now);
+  return Math.floor(Date.UTC(
+    Number(year) || 1970,
+    (Number(month) || 1) - 1,
+    Number(day) || 1
+  ) / 86400000);
+}
+
+// Deterministic ET-anchored "is today a video day" — never flips mid-day, and
+// retried runs agree with the cron.
 function isVideoDay(now = new Date()) {
-  return rotationSeed(now) % VIDEO_FLAGS.intervalDays === 0;
+  return etEpochDay(now) % VIDEO_FLAGS.intervalDays === 0;
 }
 
 // ── Scene concept library ────────────────────────────────────────────────────
@@ -336,6 +350,7 @@ module.exports = {
   VIDEO_FLAGS,
   buildScenePrompt,
   buildVideoPrompt,
+  etEpochDay,
   generateVariants,
   generateVideoVariant,
   isVideoDay,
