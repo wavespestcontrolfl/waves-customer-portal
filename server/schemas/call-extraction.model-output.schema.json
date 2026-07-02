@@ -288,6 +288,14 @@
         "waveguard_tier_mentioned": {
           "type": ["string", "null"],
           "enum": ["bronze", "silver", "gold", "platinum", null]
+        },
+        "specific_service_name": {
+          "type": ["string", "null"],
+          "description": "Verbatim name from the bookable service catalog list in the prompt when the request maps to one specific bookable service; null otherwise. Never a name outside that list."
+        },
+        "quoted_price_usd": {
+          "type": ["number", "null"],
+          "description": "Total USD price the agent quoted AND the caller accepted for the service being booked. null when no price was quoted/accepted or the amount is uncertain."
         }
       }
     },
@@ -333,6 +341,15 @@
         },
         "callback_window_start": { "type": ["string", "null"], "format": "time" },
         "callback_window_end": { "type": ["string", "null"], "format": "time" },
+        "follow_up_mentioned": {
+          "type": ["boolean", "null"],
+          "description": "true ONLY when a second/follow-up treatment visit was specifically discussed as part of this booking (e.g. a two-treatment protocol). A generic 'call us if it comes back' is not a follow-up visit."
+        },
+        "follow_up_start_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO 8601 Eastern Time datetime ONLY when a specific follow-up date/time was explicitly agreed; null otherwise."
+        },
         "blackout_dates": {
           "type": "array",
           "items": { "type": "string", "format": "date" }

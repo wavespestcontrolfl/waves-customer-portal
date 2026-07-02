@@ -43,6 +43,7 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
+const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan } = require('./call-booking-catalog');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -857,7 +858,10 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   if (!service && hasConfirmedGenericAppointment(extracted, fullContextText)) {
     return { ok: true, reason: null, service: GENERIC_CALL_APPOINTMENT_SERVICE };
   }
-  if (!service) return { ok: false, reason: 'unsupported_service', service: null };
+  // noMatch distinguishes "no coarse label fit" (rescuable by an exact
+  // bookable-catalog match) from the context vetoes above (unsupported topic /
+  // admin-only call), which a catalog match must never override.
+  if (!service) return { ok: false, reason: 'unsupported_service', service: null, noMatch: true };
   return { ok: true, reason: null, service };
 }
 
@@ -884,11 +888,23 @@ async function resolveDefaultCallBookingTechnician(conn = db) {
       this.where({ active: true }).orWhereNull('active');
     })
     .first('id', 'name');
-  if (!tech?.id) {
-    logger.warn(`[call-proc] Default call-booking technician not found: ${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}`);
-    return null;
+  if (tech?.id) return { id: tech.id, name: tech.name || DEFAULT_CALL_BOOKING_TECHNICIAN_NAME };
+
+  // Name mismatch (e.g. the row is "Adam", not "Adam B.") used to silently
+  // book with no technician. When exactly one active technician exists there
+  // is no ambiguity — assign them and say so.
+  const activeTechs = await conn('technicians')
+    .where(function () {
+      this.where({ active: true }).orWhereNull('active');
+    })
+    .select('id', 'name');
+  if (activeTechs.length === 1) {
+    logger.info(`[call-proc] Default call-booking technician name "${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}" not found; using sole active technician ${activeTechs[0].name}`);
+    return { id: activeTechs[0].id, name: activeTechs[0].name || null };
   }
-  return { id: tech.id, name: tech.name || DEFAULT_CALL_BOOKING_TECHNICIAN_NAME };
+
+  logger.warn(`[call-proc] Default call-booking technician not found: ${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}`);
+  return null;
 }
 
 async function resolveDefaultCallBookingTechnicianId(conn = db) {
@@ -1305,6 +1321,16 @@ async function extractCallData(transcription, callerPhone, opts = {}) {
   // (a lead) apart from an existing customer coordinating a visit, reporting a
   // problem, or asking about billing (not leads).
   const knownCaller = opts.knownCaller || null;
+  // matched_service picks from the live bookable catalog first (specific
+  // services like "Cockroach Control Service"), backstopped by the legacy
+  // coarse labels so intent gating (canonicalWavesService) keeps working.
+  const LEGACY_MATCHED_SERVICES = [
+    'General Pest Control', 'Lawn Care', 'Mosquito Control', 'Termite Inspection', 'WDO Inspection',
+    'Pre-Slab Termidor', 'Liquid Termite Perimeter', 'Termite Wood Treatment', 'Termite Foam Drill',
+    'Rodent Control', 'Bed Bug Treatment', 'Tree & Shrub Care',
+  ];
+  const bookableNames = Array.isArray(opts.bookableServiceNames) ? opts.bookableServiceNames.filter(Boolean) : [];
+  const matchedServiceList = [...new Set([...bookableNames, ...LEGACY_MATCHED_SERVICES])].join(', ');
   const knownCallerBlock = knownCaller
     ? `\nKNOWN CALLER: This phone number matches an EXISTING Waves ${
         knownCaller.accountType === 'established_customer' ? 'customer' : 'contact'
@@ -1342,7 +1368,10 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "pain_points": "brief summary of customer concerns or pest issues",
   "call_summary": "2-3 sentence summary of the call",
   "lead_quality": "hot/warm/cold/spam",
-  "matched_service": "best match from: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, or null",
+  "matched_service": "best match from: ${matchedServiceList}, or null — prefer the MOST SPECIFIC service that fits (e.g. a German/kitchen cockroach infestation cleanout is Cockroach Control Service, not General Pest Control)",
+  "quoted_price": number or null,
+  "follow_up_visit_mentioned": true/false,
+  "follow_up_date_time": "same ISO format as preferred_date_time, or null",
   "referred_by": "if the caller EXPLICITLY says a friend / neighbor / existing customer referred or recommended them, the referrer's name — or 'unnamed' if they say they were referred but don't name who. Else null."
 }
 
@@ -1379,6 +1408,11 @@ IMPORTANT — appointment_confirmed rules:
   - Do set appointment_confirmed to true when a builder or construction company explicitly books a Waves pre-slab/preconstruction termite, soil-treatment, or concrete-pour field-service appointment with a specific date and time.
 - Do not set appointment_confirmed to true for follow-up/admin calls about an invoice, payment, receipt, compliance report, sticker, certificate, W-9, report, or paperwork unless the caller and agent also explicitly book a new Waves field-service visit.
 - If the caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, new-construction termite treatment, or treatment before a slab/concrete pour, matched_service must be "Pre-Slab Termidor" — not "Termite Inspection".
+
+IMPORTANT — quoted_price and follow-up visit:
+- quoted_price: the TOTAL price in US dollars the agent quoted AND the caller accepted for the service being booked (agent: "that runs around 350 total", caller agrees -> 350). Use the total package price when quoted as a total across multiple treatments. null when no price was quoted, the caller didn't accept, or the amount is uncertain or a range. Never estimate or invent a price.
+- follow_up_visit_mentioned: true ONLY when the agent and caller specifically discussed a SECOND/follow-up treatment visit as part of this booking (e.g. "our standard protocol is two treatments", "we'll come back in two weeks"). A generic "call us if it comes back" is NOT a follow-up visit.
+- follow_up_date_time: set ONLY when a specific follow-up date (and time) was explicitly agreed on the call. Most calls: null — the office schedules the follow-up at the standard interval.
 
 IMPORTANT — customer name rules:
 - Capture both first_name and last_name whenever the caller clearly states both.
@@ -1443,8 +1477,8 @@ Return ONLY valid JSON.`;
 // embed the schema as prompt guidance. Correctness is guaranteed by the two-pass
 // ajv validation in finalizeV2Extraction — the model output is never trusted directly.
 // Shared by the live Gemini path and the OpenAI shadow so both send the identical prompt.
-function buildV2ExtractionPrompt(transcription, callerPhone, callDateET) {
-  return buildExtractionPrompt(transcription, callerPhone, callDateET)
+function buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptOpts = {}) {
+  return buildExtractionPrompt(transcription, callerPhone, callDateET, promptOpts)
     + '\n\n═══ OUTPUT CONTRACT ═══\n'
     + 'Return ONLY a single JSON object that conforms EXACTLY to this JSON Schema: '
     + 'every required field present, every enum value exact, no extra fields, '
@@ -1506,7 +1540,9 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   if (!process.env.GEMINI_API_KEY) return { status: 'not_run', extraction: null, errors: null };
 
   const callDateET = etDateString(opts.callStartedAt || new Date());
-  const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET);
+  const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
+    bookableServiceNames: opts.bookableServiceNames,
+  });
 
   let rawText;
   try {
@@ -1848,9 +1884,15 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
     }
 
+    // Bookable service catalog: fed to both extraction prompts (so the model
+    // can name a specific bookable service) and to the booking block below
+    // (service_id / price / duration / follow-up interval). Fails open to [].
+    const bookableCallServices = await loadBookableCallServices(db);
+    const bookableServiceNames = bookableCallServices.map((s) => s.name).filter(Boolean);
+
     let extracted;
     try {
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       await db('call_log').where({ id: call.id }).update({
@@ -1870,6 +1912,7 @@ const CallRecordingProcessor = {
         v2Result = await extractCallDataV2(transcription, contactPhone, {
           callStartedAt: call.created_at,
           callId: call.id,
+          bookableServiceNames,
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -2800,6 +2843,15 @@ const CallRecordingProcessor = {
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
       if (v2Flat.matched_service) extracted.matched_service = v2Flat.matched_service;
       if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
+      // Catalog-anchored booking fields: the gate validated this extraction, so
+      // the booking must use ITS specific service / quoted price / follow-up
+      // signal, not the unvalidated legacy extraction's.
+      if (v2Flat.specific_service_name) extracted.specific_service_name = v2Flat.specific_service_name;
+      if (typeof v2Flat.quoted_price === 'number') extracted.quoted_price = v2Flat.quoted_price;
+      if (v2Flat.follow_up_visit_mentioned) extracted.follow_up_visit_mentioned = true;
+      if (v2Flat.follow_up_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.follow_up_date_time)) {
+        extracted.follow_up_date_time = v2Flat.follow_up_date_time.slice(0, 16);
+      }
       // (AV-normalized address was already written into `extracted` at the gate
       // approval branch above, before the customer/lead upsert — see there.)
       logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
@@ -2812,12 +2864,23 @@ const CallRecordingProcessor = {
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
     const customerServiceContext = customerId ? await loadCustomerServiceContext(customerId) : null;
     const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext });
+    // Catalog anchor: the specific bookable service this call maps to, when
+    // one resolves. Drives service_type/service_id/price/duration/follow-up on
+    // the booking. Also rescues catalog services whose names don't hit the
+    // coarse canonicalWavesService buckets (every bookable service must be
+    // bookable by phone). null -> legacy coarse-label behavior.
+    const callBookingCatalogRow = resolveCallBookingCatalogService({
+      extracted,
+      transcription,
+      services: bookableCallServices,
+    });
     // Use the module-level isOutboundCall(call) helper — a local `const
     // isOutboundCall` here shadows it for the WHOLE function scope, putting the
     // phantom-guard references above (Step 0) in the temporal dead zone:
     // "Cannot access 'isOutboundCall' before initialization" on every call that
     // reaches them with a pre-linked customer_id.
-    const canCreateAppointmentFromCall = !isOutboundCall(call) && serviceResolution.ok;
+    const canCreateAppointmentFromCall = !isOutboundCall(call)
+      && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
@@ -2861,7 +2924,13 @@ const CallRecordingProcessor = {
             );
           } else {
             const firstName = customerValidation.details.firstName || '';
-            const serviceType = serviceResolution.service;
+            const serviceType = callBookingCatalogRow?.name || serviceResolution.service;
+            // Price: transcript-quoted (what the agent and caller agreed)
+            // first, catalog list price fallback (one_time services only).
+            const priceInfo = resolveCallBookingPrice({
+              quotedPrice: extracted.quoted_price,
+              catalogRow: callBookingCatalogRow,
+            });
             const smsPhone = customerValidation.details.phone;
 
           // Use SMS template if available, fall back to inline
@@ -2916,6 +2985,7 @@ const CallRecordingProcessor = {
           let scheduledDateForLog = null;
           let windowStartForLog = null;
           let scheduleWasReused = false;
+          let followUpCreated = null;
           try {
             const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
@@ -2975,6 +3045,16 @@ const CallRecordingProcessor = {
                 const displayH = hh % 12 || 12;
                 windowDisplay = `${displayH}:${String(mm).padStart(2, '0')} ${ampm}`;
               }
+              // Follow-up visit plan — only when the call specifically
+              // discussed a second/follow-up treatment (transcript-driven);
+              // date from the transcript when agreed, else parent date + the
+              // service's catalog interval (default 14 days).
+              const callFollowUpPlan = resolveCallFollowUpPlan({
+                extracted,
+                catalogRow: callBookingCatalogRow,
+                parentDate: scheduledDate,
+                parentWindowStart: windowStart || '09:00',
+              });
               let reusedExistingSchedule = false;
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
@@ -3008,6 +3088,9 @@ const CallRecordingProcessor = {
                   window_end: windowEnd || '10:00',
                   window_display: windowDisplay,
                   service_type: serviceType,
+                  service_id: callBookingCatalogRow?.id || null,
+                  estimated_price: priceInfo.price,
+                  estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
                   status: 'confirmed',
                   customer_confirmed: true,
                   confirmed_at: new Date(),
@@ -3015,6 +3098,15 @@ const CallRecordingProcessor = {
                     'Booked via phone call.',
                     `Call SID: ${callSid}.`,
                     defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
+                    priceInfo.price != null
+                      ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
+                      : null,
+                    (priceInfo.source === 'transcript'
+                      && callBookingCatalogRow
+                      && Number(callBookingCatalogRow.base_price) > 0
+                      && Math.abs(Number(callBookingCatalogRow.base_price) - priceInfo.price) >= 0.01)
+                      ? `Catalog list price: $${Number(callBookingCatalogRow.base_price).toFixed(2)} — quote differs, review.`
+                      : null,
                     extracted.call_summary || null,
                   ].filter(Boolean).join(' ').trim(),
                   booking_source: 'phone_call',
@@ -3033,6 +3125,51 @@ const CallRecordingProcessor = {
                   .onConflict('idempotency_key')
                   .ignore()
                   .returning('*');
+                if (created && callFollowUpPlan) {
+                  // Linked follow-up visit (visit 2). PENDING, not customer-
+                  // confirmed: the exact time gets confirmed by a human at
+                  // dispatch. No confirmation SMS and no reminder registration
+                  // for this row — customer comms go out for the initial
+                  // visit only (owner directive).
+                  const fuStart = callFollowUpPlan.windowStart;
+                  const [fuH, fuM] = fuStart.split(':').map(Number);
+                  const fuEndH = fuH >= 23 ? 23 : fuH + 1;
+                  const [fuRow] = await trx('scheduled_services')
+                    .insert({
+                      customer_id: customerId,
+                      technician_id: defaultTechnicianId,
+                      scheduled_date: callFollowUpPlan.scheduledDate,
+                      window_start: fuStart,
+                      window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
+                      window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
+                      service_type: serviceType,
+                      service_id: callBookingCatalogRow?.id || null,
+                      parent_service_id: created.id,
+                      status: 'pending',
+                      customer_confirmed: false,
+                      estimated_price: priceInfo.price != null ? 0 : null,
+                      estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
+                      notes: [
+                        'Follow-up treatment (visit 2) booked from phone call — confirm exact time with the customer before dispatch.',
+                        priceInfo.price != null ? 'Included in the package price on the initial visit.' : null,
+                        `Call SID: ${callSid}.`,
+                      ].filter(Boolean).join(' '),
+                      booking_source: 'phone_call',
+                      source_call_log_id: call.id,
+                      source_action: 'ai_call_pipeline_followup',
+                      idempotency_key: computeAppointmentIdempotencyKey({
+                        callLogId: call.id,
+                        schedulingStatus: 'follow_up',
+                        confirmedStartAt: `${callFollowUpPlan.scheduledDate}T${fuStart}`,
+                        primaryServiceCategory: serviceType,
+                        addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
+                      }),
+                    })
+                    .onConflict('idempotency_key')
+                    .ignore()
+                    .returning('*');
+                  followUpCreated = fuRow || null;
+                }
                 if (created) return created;
                 // Idempotency conflict: another writer already created a row with this key.
                 // Fetch it and mark as reused so downstream skips duplicate side effects.
@@ -3062,6 +3199,11 @@ const CallRecordingProcessor = {
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
                 });
+              }
+              if (followUpCreated) {
+                // Intentionally NO registerScheduleSideEffects here: the
+                // follow-up is pending and must not message the customer.
+                logger.info(`[call-proc] Follow-up visit created: ${followUpCreated.id} on ${followUpCreated.scheduled_date} (parent ${svc.id}); pending, no customer comms until confirmed`);
               }
 
             } else {
@@ -3156,6 +3298,13 @@ const CallRecordingProcessor = {
               logger.info(`[call-proc] Skipping duplicate appointment SMS to customer ${customerId} (sent within last 10 min)`);
               appointmentResult = { smsSent: false, smsSkippedReason: 'duplicate', scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time };
             }
+          }
+          if (followUpCreated) {
+            appointmentResult = {
+              ...(appointmentResult || {}),
+              followUpScheduledServiceId: followUpCreated.id,
+              followUpDate: followUpCreated.scheduled_date,
+            };
           }
         }
         }

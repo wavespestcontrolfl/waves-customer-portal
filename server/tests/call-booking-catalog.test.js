@@ -1,0 +1,399 @@
+const {
+  resolveCallBookingCatalogService,
+  resolveCallBookingPrice,
+  resolveCallFollowUpPlan,
+  sanitizeQuotedCallPrice,
+} = require('../services/call-booking-catalog');
+const { validateModelOutput } = require('../schemas/validate-extraction');
+const { flatView } = require('../utils/extraction-compat');
+const { normalizeCallExtraction } = require('../utils/intake-normalize');
+const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+
+const CATALOG = [
+  {
+    id: 'svc-roach',
+    service_key: 'cockroach_control',
+    name: 'Cockroach Control Service',
+    short_name: 'Cockroach Control',
+    billing_type: 'one_time',
+    base_price: '350.00',
+    default_duration_minutes: 60,
+    requires_follow_up: true,
+    follow_up_interval_days: 14,
+  },
+  {
+    id: 'svc-bedbug',
+    service_key: 'bed_bug_treatment',
+    name: 'Bed Bug Treatment',
+    short_name: 'Bed Bug',
+    billing_type: 'one_time',
+    base_price: '850.00',
+    default_duration_minutes: 120,
+    requires_follow_up: true,
+    follow_up_interval_days: 14,
+  },
+  {
+    id: 'svc-pest-q',
+    service_key: 'pest_general_quarterly',
+    name: 'General Pest Control (Quarterly)',
+    short_name: 'Pest Quarterly',
+    billing_type: 'recurring',
+    base_price: '65.00',
+    default_duration_minutes: 45,
+    requires_follow_up: false,
+    follow_up_interval_days: null,
+  },
+];
+
+describe('resolveCallBookingCatalogService', () => {
+  test('model specific_service_name pick wins (verbatim catalog name)', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Cockroach Control Service' },
+      transcription: 'unrelated text',
+      services: CATALOG,
+    });
+    expect(row?.service_key).toBe('cockroach_control');
+  });
+
+  test('matched_service naming a catalog entry exactly resolves', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'bed bug treatment' },
+      services: CATALOG,
+    });
+    expect(row?.service_key).toBe('bed_bug_treatment');
+  });
+
+  test('model pick outranks keyword rules', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Bed Bug Treatment' },
+      transcription: 'we found roaches and bed bugs everywhere',
+      services: CATALOG,
+    });
+    expect(row?.service_key).toBe('bed_bug_treatment');
+  });
+
+  test('roach keywords in transcript resolve to cockroach_control', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control', matched_service: 'General Pest Control' },
+      transcription: 'I have little roaches all up under my dishwasher, hundreds came out of my suitcase',
+      services: CATALOG,
+    });
+    expect(row?.service_key).toBe('cockroach_control');
+  });
+
+  test('german cockroach mention in extraction text resolves without transcript', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { pain_points: 'German cockroach nymphs under the dishwasher' },
+      services: CATALOG,
+    });
+    expect(row?.service_key).toBe('cockroach_control');
+  });
+
+  test('palmetto-bug-only calls do NOT map to the cockroach program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control' },
+      transcription: 'I keep seeing big palmetto bugs in the lanai at night',
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
+  test('keyword rule is skipped when the service_key is not in the catalog', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: {},
+      transcription: 'roaches in the kitchen',
+      services: CATALOG.filter((s) => s.service_key !== 'cockroach_control'),
+    });
+    expect(row).toBeNull();
+  });
+
+  test('empty catalog fails open to null', () => {
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Cockroach Control Service' },
+      transcription: 'roaches',
+      services: [],
+    })).toBeNull();
+  });
+});
+
+describe('resolveCallBookingPrice', () => {
+  const roach = CATALOG[0];
+
+  test('transcript-quoted price wins over catalog', () => {
+    expect(resolveCallBookingPrice({ quotedPrice: 375, catalogRow: roach }))
+      .toEqual({ price: 375, source: 'transcript' });
+  });
+
+  test('catalog base_price backstops a one_time service with no quote', () => {
+    expect(resolveCallBookingPrice({ quotedPrice: null, catalogRow: roach }))
+      .toEqual({ price: 350, source: 'catalog' });
+  });
+
+  test('recurring services never take the catalog fallback', () => {
+    expect(resolveCallBookingPrice({ quotedPrice: null, catalogRow: CATALOG[2] }))
+      .toEqual({ price: null, source: null });
+  });
+
+  test('no quote and no catalog row -> null', () => {
+    expect(resolveCallBookingPrice({ quotedPrice: null, catalogRow: null }))
+      .toEqual({ price: null, source: null });
+  });
+
+  test('implausible quotes are rejected, catalog backstop applies', () => {
+    expect(resolveCallBookingPrice({ quotedPrice: 3.5, catalogRow: roach }).source).toBe('catalog');
+    expect(resolveCallBookingPrice({ quotedPrice: 9415551234, catalogRow: roach }).source).toBe('catalog');
+  });
+
+  test('numeric strings are coerced', () => {
+    expect(sanitizeQuotedCallPrice('$350')).toBe(350);
+    expect(sanitizeQuotedCallPrice('350.50')).toBe(350.5);
+    expect(sanitizeQuotedCallPrice('abc')).toBeNull();
+    expect(sanitizeQuotedCallPrice(null)).toBeNull();
+  });
+});
+
+describe('resolveCallFollowUpPlan', () => {
+  const roach = CATALOG[0];
+
+  test('mention with no date -> parent date + catalog interval, parent window', () => {
+    const plan = resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true },
+      catalogRow: roach,
+      parentDate: '2026-07-02',
+      parentWindowStart: '08:00',
+    });
+    expect(plan).toEqual({ scheduledDate: '2026-07-16', windowStart: '08:00' });
+  });
+
+  test('default interval is 14 days when the catalog row has none', () => {
+    const plan = resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true },
+      catalogRow: null,
+      parentDate: '2026-07-02',
+      parentWindowStart: '10:00',
+    });
+    expect(plan.scheduledDate).toBe('2026-07-16');
+  });
+
+  test('explicitly agreed future follow-up date and time win', () => {
+    const plan = resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: '2026-07-20T13:00' },
+      catalogRow: roach,
+      parentDate: '2026-07-02',
+      parentWindowStart: '08:00',
+    });
+    expect(plan).toEqual({ scheduledDate: '2026-07-20', windowStart: '13:00' });
+  });
+
+  test('a follow_up_date_time alone (no boolean) still counts as mentioned', () => {
+    const plan = resolveCallFollowUpPlan({
+      extracted: { follow_up_date_time: '2026-07-20T13:00' },
+      catalogRow: roach,
+      parentDate: '2026-07-02',
+    });
+    expect(plan?.scheduledDate).toBe('2026-07-20');
+  });
+
+  test('a stated date on/before the initial visit falls back to the interval', () => {
+    const plan = resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: '2026-07-02T08:00' },
+      catalogRow: roach,
+      parentDate: '2026-07-02',
+      parentWindowStart: '08:00',
+    });
+    expect(plan.scheduledDate).toBe('2026-07-16');
+  });
+
+  test('no mention -> no follow-up', () => {
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: false },
+      catalogRow: roach,
+      parentDate: '2026-07-02',
+    })).toBeNull();
+  });
+
+  test('invalid parent date -> no follow-up', () => {
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true },
+      catalogRow: roach,
+      parentDate: 'July 2',
+    })).toBeNull();
+  });
+});
+
+describe('extraction plumbing for the new booking fields', () => {
+  test('V2 model output with the new optional fields passes schema validation', () => {
+    const output = {
+      meta: {
+        is_voicemail: false,
+        is_spam: false,
+        transcript_word_count: 342,
+        transcript_duration_seconds: 185,
+        call_summary: 'Caller reports roaches under the dishwasher, booked treatment.',
+      },
+      caller: {
+        name_full: 'Adam Pitts',
+        first_name: 'Adam',
+        last_name: 'Pitts',
+        organization_name: null,
+        name_confidence: 0.9,
+        phone_e164: '+19415551234',
+        phone_raw_spoken: null,
+        phone_source: 'caller_id',
+        email: null,
+        relationship_to_property: 'owner',
+        on_site_authorization: true,
+        decision_maker_present: true,
+        preferred_contact_method: 'phone',
+      },
+      consent: {
+        sms_consent_given: true,
+        sms_consent_quote: 'Yes, text me the confirmation.',
+        call_recording_disclosed: true,
+        do_not_contact_request: false,
+      },
+      property: {
+        service_address: {
+          raw_text: '14506 20th Street East, Parrish',
+          street_line_1: '14506 20th Street East',
+          street_line_2: null,
+          city: 'Parrish',
+          state: 'FL',
+          postal_code: '34219',
+          county: 'Manatee',
+          subdivision_or_community: null,
+          normalization_status: 'not_attempted',
+        },
+        property_type: 'single_family',
+        hoa_community_flag: false,
+        hoa_common_area_service: false,
+        commercial_subtype: null,
+        approximate_lot_size_acres: null,
+        approximate_living_sqft: null,
+        pets_on_property: { present: false, species_notes: null },
+        access_notes: null,
+      },
+      service_request: {
+        primary_service_category: 'pest_general',
+        secondary_categories: [],
+        pests_observed_status: 'observed',
+        pests_observed: [
+          {
+            pest_type: 'roaches_german',
+            location_on_property: 'kitchen',
+            severity_signal: 'sighting_multiple',
+            first_observed: 'this week',
+            prior_treatment_attempts: null,
+          },
+        ],
+        service_intent: 'active_infestation_treatment',
+        urgency: 'within_48_hours',
+        waveguard_tier_mentioned: null,
+        specific_service_name: 'Cockroach Control Service',
+        quoted_price_usd: 350,
+      },
+      customer_history: {
+        status: 'new_customer',
+        competitor_name: null,
+        referral_source: null,
+        prior_complaint_mentioned: false,
+      },
+      scheduling: {
+        status: 'confirmed',
+        confirmed_start_at: '2026-07-02T08:00:00-04:00',
+        requested_date_range_start: null,
+        requested_date_range_end: null,
+        preferred_time_of_day: 'morning',
+        callback_window_start: null,
+        callback_window_end: null,
+        follow_up_mentioned: true,
+        follow_up_start_at: null,
+        blackout_dates: [],
+        scheduling_notes_raw: null,
+      },
+      sentiment_and_lead: {
+        sentiment: 'neutral',
+        lead_quality: 'hot',
+        objections_raised: [],
+        buying_signals: ['just come, that is fine'],
+      },
+      evidence: [
+        {
+          field_path: '/scheduling/status',
+          quote: 'First thing tomorrow morning will be fine.',
+          speaker: 'caller',
+          transcript_offset_ms: null,
+        },
+      ],
+      confidence: {
+        caller_identity: 0.9,
+        service_address: 0.95,
+        property_type: 0.8,
+        primary_service_category: 0.95,
+        urgency: 0.85,
+        scheduling_window: 0.9,
+        consent_capture: 0.92,
+        overall: 0.91,
+      },
+      triage_flags: [],
+    };
+    const withNewFields = validateModelOutput(output);
+    expect(withNewFields.valid).toBe(true);
+
+    // Backward compat: the same output WITHOUT the new optional fields must
+    // still validate (old prompt versions / models that omit them).
+    delete output.service_request.specific_service_name;
+    delete output.service_request.quoted_price_usd;
+    delete output.scheduling.follow_up_mentioned;
+    delete output.scheduling.follow_up_start_at;
+    expect(validateModelOutput(output).valid).toBe(true);
+  });
+
+  test('flatView exposes specific service, quoted price, and follow-up fields', () => {
+    const flat = flatView({
+      meta: { schema_version: '1.0.0' },
+      service_request: {
+        primary_service_category: 'pest_general',
+        specific_service_name: 'Cockroach Control Service',
+        quoted_price_usd: 350,
+      },
+      scheduling: {
+        status: 'confirmed',
+        confirmed_start_at: '2026-07-02T08:00:00-04:00',
+        follow_up_mentioned: true,
+        follow_up_start_at: null,
+      },
+    });
+    expect(flat.specific_service_name).toBe('Cockroach Control Service');
+    expect(flat.quoted_price).toBe(350);
+    expect(flat.follow_up_visit_mentioned).toBe(true);
+    expect(flat.follow_up_date_time).toBeNull();
+  });
+
+  test('normalizeCallExtraction sanitizes the new V1 fields', () => {
+    const out = normalizeCallExtraction({
+      quoted_price: '350',
+      follow_up_visit_mentioned: true,
+      follow_up_date_time: ' 2026-07-16T08:00 ',
+      specific_service_name: ' Cockroach Control Service ',
+    });
+    expect(out.quoted_price).toBe(350);
+    expect(out.follow_up_visit_mentioned).toBe(true);
+    expect(out.follow_up_date_time).toBe('2026-07-16T08:00');
+    expect(out.specific_service_name).toBe('Cockroach Control Service');
+
+    const junk = normalizeCallExtraction({ quoted_price: 'call me', follow_up_visit_mentioned: 'yes' });
+    expect(junk.quoted_price).toBeNull();
+    expect(junk.follow_up_visit_mentioned).toBe(false);
+  });
+
+  test('extraction prompt lists the bookable catalog when provided', () => {
+    const prompt = buildExtractionPrompt('transcript', '+19415550000', '2026-07-01', {
+      bookableServiceNames: ['Cockroach Control Service', 'Bed Bug Treatment'],
+    });
+    expect(prompt).toContain('BOOKABLE SERVICE CATALOG');
+    expect(prompt).toContain('- Cockroach Control Service');
+    // Without the option the list block is absent (keeps PROMPT_HASH inputs stable).
+    expect(buildExtractionPrompt('t', 'p', 'd')).not.toContain('- Cockroach Control Service');
+  });
+});

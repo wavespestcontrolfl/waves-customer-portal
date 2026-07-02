@@ -140,6 +140,15 @@ function normalizeCallPhone(extractedPhone, callerPhone) {
   return normalizeE164Phone(extractedPhone) || normalizeE164Phone(callerPhone);
 }
 
+// Model-emitted quoted price: a finite positive number (or numeric string) or
+// null. Range plausibility is enforced at booking time by the call-booking
+// catalog's sanitizer — this only guards type garbage out of the extraction.
+function normalizeQuotedPrice(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = typeof value === 'string' ? Number(value.replace(/[^0-9.]/g, '')) : Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
   const source = extracted && typeof extracted === 'object' && !Array.isArray(extracted)
     ? extracted
@@ -163,6 +172,10 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     call_summary: cleanNullableText(source.call_summary),
     lead_quality: cleanNullableText(source.lead_quality),
     matched_service: cleanNullableText(source.matched_service),
+    specific_service_name: cleanNullableText(source.specific_service_name),
+    quoted_price: normalizeQuotedPrice(source.quoted_price),
+    follow_up_visit_mentioned: source.follow_up_visit_mentioned === true,
+    follow_up_date_time: cleanNullableText(source.follow_up_date_time),
     is_lead: normalizeIsLead(source.is_lead),
     call_type: normalizeCallType(source.call_type),
   };
