@@ -2601,34 +2601,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 6AM ET — Estimate expiration (Estimates v2 spec §5)
-  // Flips sent/viewed estimates past ESTIMATE_EXPIRATION_DAYS (default 7) to
-  // expired; also flips anything past explicit expires_at.
+  // DAILY 6AM ET — Converted-estimate archive sweep, THEN estimate expiration
+  // (Estimates v2 spec §5). One job, hard-ordered: the sweep must stamp
+  // archived_at on converted customers' open estimates BEFORE expiration
+  // scans, or an overnight age-out flips them to expired first and the sweep
+  // (sent/viewed-only) can never reclaim them. If the sweep fails, expiration
+  // is skipped this run — a one-day expiration delay is harmless (7-day
+  // threshold), misclassifying a converted customer's estimate is permanent.
+  // See estimate-conversion-guard.js for why the sweep never auto-flips
+  // status to accepted.
   // =========================================================================
   cron.schedule('0 6 * * *', async () => {
+    logger.info('Running: converted-customer estimate archive sweep');
+    try {
+      const { archiveConvertedOpenEstimates } = require('./estimate-conversion-guard');
+      await archiveConvertedOpenEstimates();
+    } catch (err) {
+      logger.error(`Converted-estimate archive sweep failed — skipping estimate expiration this run: ${err.message}`);
+      return;
+    }
     logger.info('Running: Estimate expiration sweep');
     try {
       const { runEstimateExpiration } = require('./estimate-expiration');
       await runEstimateExpiration();
     } catch (err) {
       logger.error(`Estimate expiration sweep failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // DAILY 6:05AM ET — Archive open estimates for already-converted customers
-  // A customer who converted out-of-band (booked/invoiced/paid without ever
-  // accepting) leaves the estimate stuck at sent/viewed; the sweep stamps
-  // archived_at so lists and the follow-up stages treat it as closed. See
-  // estimate-conversion-guard.js for why it never auto-flips to accepted.
-  // =========================================================================
-  cron.schedule('5 6 * * *', async () => {
-    logger.info('Running: converted-customer estimate archive sweep');
-    try {
-      const { archiveConvertedOpenEstimates } = require('./estimate-conversion-guard');
-      await archiveConvertedOpenEstimates();
-    } catch (err) {
-      logger.error(`Converted-estimate archive sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
