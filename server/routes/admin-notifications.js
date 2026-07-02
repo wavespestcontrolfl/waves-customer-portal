@@ -225,22 +225,37 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
   }
   const targets = alertIdFilter ? alerts.filter((a) => a.id === alertIdFilter) : alerts;
   if (targets.length === 0) return 0;
+  const dismissalRows = targets.map((a) => ({
+    admin_user_id: adminUserId,
+    alert_id: a.id,
+    dismissed_at_count: a.count,
+    // Queue alerts carry their member ids — record them so the bell can
+    // re-show when a NEW member enters, not just on count growth.
+    dismissed_members: Array.isArray(a.members) && a.members.length
+      ? a.members.join(',')
+      : null,
+  }));
   try {
-    await db('dashboard_alert_dismissed').insert(
-      targets.map((a) => ({
-        admin_user_id: adminUserId,
-        alert_id: a.id,
-        dismissed_at_count: a.count,
-        // Queue alerts carry their member ids — record them so the bell can
-        // re-show when a NEW member enters, not just on count growth.
-        dismissed_members: Array.isArray(a.members) && a.members.length
-          ? a.members.join(',')
-          : null,
-      })),
-    );
+    await db('dashboard_alert_dismissed').insert(dismissalRows);
   } catch (err) {
-    logger.warn(`[admin-notifications] dismiss insert failed: ${err.message}`);
-    return 0;
+    // Pre-migration tolerance (mirrors the read path above): before
+    // 20260702000001 adds dismissed_members, Postgres rejects the column —
+    // retry the legacy shape so dismissals keep working (count-only
+    // semantics, the documented fallback) instead of the bell badge
+    // bouncing straight back until the migration lands.
+    if (/dismissed_members/i.test(String(err.message))) {
+      try {
+        await db('dashboard_alert_dismissed').insert(
+          dismissalRows.map(({ dismissed_members, ...legacy }) => legacy),
+        );
+      } catch (retryErr) {
+        logger.warn(`[admin-notifications] dismiss insert failed (legacy retry): ${retryErr.message}`);
+        return 0;
+      }
+    } else {
+      logger.warn(`[admin-notifications] dismiss insert failed: ${err.message}`);
+      return 0;
+    }
   }
   // Best-effort: mark the corresponding persisted bell rows read so the
   // unread-count doesn't double-count after the live alert clears. Read
