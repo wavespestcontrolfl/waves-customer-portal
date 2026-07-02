@@ -213,8 +213,109 @@ async function recordCallPpcAttribution({
   }
 }
 
+// ---------------------------------------------------------------------------
+// Unclaimed bridge-target leads → organic, after a claim window.
+//
+// Calls to the Google Ads call-bridge target (the shared Bradenton city-page /
+// office number) are NOT organically pre-attributed at call time: writing the
+// funnel row first would lock out the bridge (recordCallPpcAttribution never
+// flips an existing row's lead_source), so the call processor skips them and
+// the bridge gets first claim. But when the bridge never matches the call to a
+// Google Ads call report, the lead stayed funnel-invisible FOREVER — 57 leads
+// in 90d on the busiest city page when this shipped, with the bridge having
+// claimed none of them, ever.
+//
+// This daily job closes the hole: a lead still sitting on a bridge-target
+// lead_sources row (an actual bridge claim repoints leads.lead_source_id to
+// the bridge source, so claimed leads self-exclude) with no funnel row after
+// `olderThanDays` is declared organic and recorded through the normal
+// recordCallPpcAttribution path (channel from the shared source_type map).
+// Google call reports surface within hours and the bridge re-scans a 30-day
+// window, so a claim after 7 quiet days is not a real scenario; if one ever
+// happened it would still repoint the LEAD row to paid — only the funnel row
+// would stay organic (accepted tradeoff: the window IS the decision boundary).
+// ---------------------------------------------------------------------------
+async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } = {}) {
+  // Lazy: google-call-bridge lazily requires this module (applyBridge), so a
+  // module-scope import back at it would be a require cycle.
+  const { isBridgeTargetNumber } = require('./google-call-bridge');
+
+  let bridgeSources = [];
+  try {
+    const rows = await db('lead_sources').whereNotNull('twilio_phone_number');
+    bridgeSources = (rows || []).filter((s) => {
+      try { return isBridgeTargetNumber(s.twilio_phone_number); } catch { return false; }
+    });
+  } catch (err) {
+    logger.error(`[call-attribution] bridge-unclaimed source scan failed: ${err.message}`);
+    return { candidates: 0, recorded: 0, skipped: 0 };
+  }
+  if (!bridgeSources.length) return { candidates: 0, recorded: 0, skipped: 0 };
+
+  const sourceById = new Map(bridgeSources.map((s) => [s.id, s]));
+  const days = Math.max(1, parseInt(olderThanDays, 10) || 7);
+  const cap = Math.max(1, parseInt(limit, 10) || 200);
+
+  const leads = await db('leads as l')
+    .whereIn('l.lead_source_id', bridgeSources.map((s) => s.id))
+    // CALL leads only. Bridge suppression only ever applied to the call path;
+    // web leads on this source row got their funnel row at webhook time — and
+    // the LEGACY ones link it by customer_id with lead_id NULL, which the
+    // lead_id NOT EXISTS below cannot see (prod check: every form lead in the
+    // first-run selection carried such a row → 18 guaranteed duplicates).
+    .where('l.first_contact_channel', 'call')
+    .whereRaw("COALESCE(l.first_contact_at, l.created_at) < now() - (? * interval '1 day')", [days])
+    .whereRaw("COALESCE(l.status,'') NOT IN ('duplicate','disqualified','spam')")
+    // Lead-level only — the funnel table's model (and recordCallPpcAttribution's
+    // contract) is one row per LEAD: a returning customer's new unclaimed bridge
+    // lead still counts, exactly as a second webhook form lead would. Revenue
+    // can't double-count: ad-attribution-sync credits one primary row per
+    // customer and demotes the rest.
+    .whereNotExists(function noFunnelRow() {
+      this.select(1).from('ad_service_attribution as a').whereRaw('a.lead_id = l.id');
+    })
+    // A bridged CALL whose lead was never repointed (e.g. no lead matched at
+    // claim time, or the funnel write skipped on a then-customer-less lead) is
+    // still a CLAIMED Google Ads call — "unclaimed" means no bridge stamp
+    // anywhere, not just an un-repointed lead row. call_log has NO lead_id
+    // column: the lead↔call linkage is twilio_call_sid, the same join the
+    // bridge's own fetchCrmCalls uses (a NULL sid on the lead matches nothing
+    // and passes, correctly — no linked call, no bridge stamp).
+    .whereNotExists(function callAlreadyBridged() {
+      this.select(1).from('call_log as cl')
+        .whereRaw('cl.twilio_call_sid = l.twilio_call_sid')
+        .whereNotNull('cl.google_ads_call_resource_name');
+    })
+    .orderBy('l.created_at')
+    .limit(cap)
+    .select('l.id', 'l.customer_id', 'l.service_interest', 'l.first_contact_at', 'l.created_at', 'l.lead_source_id');
+
+  let recorded = 0;
+  let skipped = 0;
+  for (const lead of leads) {
+    const source = sourceById.get(lead.lead_source_id);
+    const channel = attributionForSourceType(source?.source_type);
+    if (!channel) { skipped += 1; continue; } // unmapped source_type → fail closed
+    const res = await recordCallPpcAttribution({
+      customerId: lead.customer_id,
+      leadId: lead.id,
+      leadSource: channel.leadSource,
+      leadSourceDetail: source.name || null,
+      leadDate: lead.first_contact_at || lead.created_at, // date by the call, not this run
+      serviceInterest: lead.service_interest || null,
+      isPaid: channel.isPaid, // main_site → false: unclaimed ⇒ organic
+    });
+    if (res.recorded) recorded += 1; else skipped += 1;
+  }
+  if (leads.length) {
+    logger.info(`[call-attribution] bridge-unclaimed sweep — candidates ${leads.length}, recorded ${recorded}, skipped ${skipped}`);
+  }
+  return { candidates: leads.length, recorded, skipped };
+}
+
 module.exports = {
   recordCallPpcAttribution,
   attributionForSourceType,
+  attributeUnclaimedBridgeLeads,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION },
 };

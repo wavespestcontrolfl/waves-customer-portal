@@ -4813,6 +4813,21 @@ function normalizeTrenchingWarrantyTier(value, product = {}) {
   };
 }
 
+// Linear depth premium measured from the baseline trench depth. At the default
+// 0.15 premium per additional half-foot the standard depth tiers land on
+// 0.5 ft ×1.00 · 1.0 ft ×1.15 · 1.5 ft ×1.30. Depths at/below the baseline get
+// no discount (multiplier floored at 1.0) so the baseline never prices below the
+// LF install model.
+function resolveTrenchDepthPriceMultiplier(cfg = {}, trenchDepthFt) {
+  const baseline = Number(cfg.baselineTrenchDepthFt) > 0 ? Number(cfg.baselineTrenchDepthFt) : 0.5;
+  const premiumPerHalfFt = Number(cfg.trenchDepthPremiumPerHalfFt) >= 0
+    ? Number(cfg.trenchDepthPremiumPerHalfFt)
+    : 0;
+  const depth = Number(trenchDepthFt) > 0 ? Number(trenchDepthFt) : baseline;
+  const halfFeetAboveBaseline = Math.max(0, (depth - baseline) / 0.5);
+  return 1 + halfFeetAboveBaseline * premiumPerHalfFt;
+}
+
 function priceTrenching(property = {}, options = {}) {
   const measurements = resolveTrenchingMeasurements(property || {}, options || {});
   const cfg = SPECIALTY.trenching;
@@ -4944,6 +4959,9 @@ function priceTrenching(property = {}, options = {}) {
     productSurcharge: null,
     chemicalCostPerLF: null,
     containersRequired: null,
+    baseInstallBeforePremium: null,
+    trenchDepthPriceMultiplier: null,
+    highRatePriceMultiplier: null,
     baseInstallPrice: null,
     warrantyTier,
     requestedWarrantyTier: warrantyResolution.requestedWarrantyTier,
@@ -5017,9 +5035,19 @@ function priceTrenching(property = {}, options = {}) {
   const totalLF = Math.max(1, measurements.dirtLF + measurements.concreteLF);
   const chemicalCostPerLF = allocatedChemicalCost / totalLF;
   const containersRequired = Math.max(1, Math.ceil(productOz / containerOz));
-  const baseInstallPrice = Math.max(
+  // LF install model, floored, then scaled by the trench-depth and high-rate
+  // install premiums. At the 0.5 ft baseline + standard rate both multipliers are
+  // 1.0, so the LF model (and every previously-quoted standard job) is unchanged.
+  const baseInstallBeforePremium = Math.max(
     cfg.floor,
     measurements.dirtLF * cfg.dirtPerLF + measurements.concreteLF * cfg.concretePerLF,
+  );
+  const trenchDepthPriceMultiplier = resolveTrenchDepthPriceMultiplier(cfg, trenchDepthFt);
+  const highRatePriceMultiplier = rateResolution.applicationRate === 'high'
+    ? (Number(cfg.highRatePriceMultiplier) >= 1 ? Number(cfg.highRatePriceMultiplier) : 1)
+    : 1;
+  const baseInstallPrice = Math.round(
+    baseInstallBeforePremium * trenchDepthPriceMultiplier * highRatePriceMultiplier,
   );
   const priceBeforeWarranty = baseInstallPrice + productSurcharge;
   const warrantyAdder = Math.round(priceBeforeWarranty * (Number(warrantyConfig.priceAdderPct) || 0));
@@ -5045,6 +5073,9 @@ function priceTrenching(property = {}, options = {}) {
     productSurcharge,
     chemicalCostPerLF: roundMoney(chemicalCostPerLF),
     containersRequired,
+    baseInstallBeforePremium,
+    trenchDepthPriceMultiplier: roundMoney(trenchDepthPriceMultiplier),
+    highRatePriceMultiplier: roundMoney(highRatePriceMultiplier),
     baseInstallPrice,
     warrantyAdder,
     priceBeforeWarranty,

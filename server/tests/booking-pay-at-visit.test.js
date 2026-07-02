@@ -1,20 +1,17 @@
 /**
- * Booking "pay per application" price resolution.
+ * Booking "pay per application" — LINKED-estimate price resolution.
  *
- * Pins the money-path contract that keeps this safe:
- *  - a billable price is stamped ONLY from the estimate the booking is
- *    explicitly linked to (never guessed from other quotes);
- *  - and ONLY when that estimate's recurring line is the SAME service that was
- *    booked (service binding — service_type is client-influenced);
- *  - the amount is the NET (after-discount) annual ÷ cadence — NEVER the gross
- *    `perApp` the quote stores raw, so a discounted plan is never overbilled;
- *  - only an UNAMBIGUOUS single recurring, per-application-billable line prices;
- *  - cents are preserved (this is the billable estimated_price, not a display);
- *  - production estimate_data shapes (engineResult/result) are read.
+ * Money-path contract:
+ *  - AMOUNT = estimate-level NET recurring annual (annual_total, else
+ *    monthly_total×12) ÷ the BOOKING'S cadence — and only when the estimate's
+ *    cadence equals the booking series cadence (else fail closed, so a monthly
+ *    quote isn't billed onto a quarterly series, and non-pest/no-series bookings
+ *    stay price-less);
+ *  - service binding via serviceKeyFor; fail closed on any supplemental
+ *    recurring program (rodent/palm) in EITHER recurring container;
+ *  - all estimate shapes read via the converter's extractor.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-// Stub the seeder helpers so the binding + cadence logic is exercised without
-// pulling the real seeder (and its deps) into scope.
 jest.mock('../services/recurring-appointment-seeder', () => ({
   serviceKeyFor: (v) => v?.service || v?.service_type || null,
   normalizeRecurringPattern: (v) => {
@@ -22,110 +19,130 @@ jest.mock('../services/recurring-appointment-seeder', () => ({
     if (s === 'quarterly') return 'quarterly';
     if (s === 'monthly') return 'monthly';
     if (s === 'bimonthly') return 'bimonthly';
-    if (s === 'annual' || s === 'yearly') return 'annual';
     return null;
   },
+}));
+jest.mock('../services/estimate-converter', () => ({
+  recurringServicesFromEstimateData: (data = {}) => (
+    Array.isArray(data.services) ? data.services
+      : Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems
+        : Array.isArray(data.result?.recurring?.services) ? data.result.recurring.services
+          : []
+  ),
 }));
 
 const { derivePerApplicationAmount, resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
 
-describe('derivePerApplicationAmount', () => {
-  test('single recurring line → net monthly × 12 ÷ cadence, cents preserved', () => {
-    expect(derivePerApplicationAmount([{ monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }])).toBe(96.99);
+const Q = 4; // quarterly visits/yr
+const est = (annual_total, services, extra = {}) => ({ annual_total, estimate_data: { services }, ...extra });
+const pest = (o = {}) => ({ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4, ...o });
+
+describe('derivePerApplicationAmount — estimate-level net ÷ booking cadence', () => {
+  test('annual_total ÷ visits at matching cadence, cents preserved', () => {
+    expect(derivePerApplicationAmount(est(387.96, [pest()]), Q)).toBe(96.99);
   });
 
-  test('bills NET, not gross perApp — a discount on the line is honored', () => {
-    expect(derivePerApplicationAmount([
-      { monthly: 30, monthlyAfterDiscount: 24, perApp: 90, visitsPerYear: 4 },
-    ])).toBe(72); // 24*12/4, not gross 90
+  test('honors an ESTIMATE-LEVEL discount (ignores pre-discount line mo)', () => {
+    expect(derivePerApplicationAmount(est(288, [{ mo: 30, perApp: 90, visitsPerYear: 4 }]), Q)).toBe(72);
   });
 
-  test('prefers net annual (annualAfterCredits → annualAfterDiscount → annual)', () => {
-    expect(derivePerApplicationAmount([
-      { monthly: 30, annual: 360, annualAfterDiscount: 320, annualAfterCredits: 300, perApp: 100, visitsPerYear: 4 },
-    ])).toBe(75);
-    expect(derivePerApplicationAmount([{ monthly: 30, annual: 360, perApp: 100, visitsPerYear: 4 }])).toBe(90);
+  test('falls back to monthly_total × 12 when annual_total absent', () => {
+    expect(derivePerApplicationAmount({ monthly_total: 25.25, estimate_data: { services: [pest({ perApp: 99 })] } }, Q)).toBe(75.75);
   });
 
-  test('never whole-dollar rounds a billable amount', () => {
-    expect(derivePerApplicationAmount([{ monthly: 25.25, perApp: 99, visitsPerYear: 4 }])).toBe(75.75);
+  test('mapped aliases (mo/perTreatment, monthlyTotal/perVisit/pa) + string cadence', () => {
+    expect(derivePerApplicationAmount(est(387.96, [{ mo: 32.33, perTreatment: 96.99, frequency: 'quarterly' }]), Q)).toBe(96.99);
+    expect(derivePerApplicationAmount(est(387.96, [{ monthlyTotal: 32.33, perVisit: 96.99, visitsPerYear: 4 }]), Q)).toBe(96.99);
+    expect(derivePerApplicationAmount(est(387.96, [{ monthly_total: 32.33, pa: 96.99, visitsPerYear: 4 }]), Q)).toBe(96.99);
   });
 
-  test('uses numeric frequency when no visitsPerYear (lawn)', () => {
-    expect(derivePerApplicationAmount([{ monthlyAfterDiscount: 50, perApp: 60, frequency: 10 }])).toBe(60);
+  test('CADENCE MISMATCH → null (monthly quote, quarterly booking)', () => {
+    expect(derivePerApplicationAmount(est(387.96, [pest({ visitsPerYear: 12 })]), Q)).toBeNull();
   });
 
-  test('normalizes a STRING cadence — quarterly pest line (no numeric visitsPerYear)', () => {
-    expect(derivePerApplicationAmount([{ monthly: 32.33, perApp: 96.99, frequency: 'quarterly' }])).toBe(96.99);
+  test('no booking cadence → null (fail closed — non-pest / no series seeded)', () => {
+    expect(derivePerApplicationAmount(est(387.96, [pest()]))).toBeNull();
+    expect(derivePerApplicationAmount(est(387.96, [pest()]), 0)).toBeNull();
   });
 
-  test('unrecognized string cadence → null (no guess)', () => {
-    expect(derivePerApplicationAmount([{ monthly: 30, perApp: 90, frequency: 'whenever' }])).toBeNull();
-  });
-
-  test('multiple recurring lines → null', () => {
-    expect(derivePerApplicationAmount([
-      { monthly: 30, perApp: 90, visitsPerYear: 4 },
-      { monthly: 20, perApp: 60, visitsPerYear: 4 },
-    ])).toBeNull();
-  });
-
-  test('no per-app caption (monthly-billed tier) → null', () => {
-    expect(derivePerApplicationAmount([{ monthly: 30, annual: 360, visitsPerYear: 4 }])).toBeNull();
-  });
-
-  test('per-app caption but no cadence → null', () => {
-    expect(derivePerApplicationAmount([{ monthly: 30, perApp: 90 }])).toBeNull();
-  });
-
-  test('one-time-only / empty / missing → null', () => {
-    expect(derivePerApplicationAmount([{ monthly: 0, perApp: 150 }])).toBeNull();
-    expect(derivePerApplicationAmount([])).toBeNull();
-    expect(derivePerApplicationAmount(undefined)).toBeNull();
+  test('ambiguity / no-perApp / no-cadence / no-total / empty → null', () => {
+    expect(derivePerApplicationAmount(est(600, [pest(), pest({ perApp: 60 })]), Q)).toBeNull();
+    expect(derivePerApplicationAmount(est(360, [{ monthly: 30, visitsPerYear: 4 }]), Q)).toBeNull();
+    expect(derivePerApplicationAmount(est(360, [{ monthly: 30, perApp: 90 }]), Q)).toBeNull();
+    expect(derivePerApplicationAmount({ estimate_data: { services: [pest()] } }, Q)).toBeNull();
+    expect(derivePerApplicationAmount({ estimate_data: { services: [] } }, Q)).toBeNull();
+    expect(derivePerApplicationAmount({}, Q)).toBeNull();
   });
 });
 
-describe('resolveBookingVisitPrice', () => {
-  const lineFor = (service, extra = {}) => ({ service, monthly: 32.33, perApp: 96.99, visitsPerYear: 4, ...extra });
-
-  test('prices from engineResult.lineItems when the service matches the booking', () => {
-    const estimate = { id: 'est-1', estimate_data: { engineResult: { lineItems: [lineFor('pest_control')] } } };
-    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control' }))
-      .toEqual({ amount: 96.99, sourceEstimateId: 'est-1', serviceKey: 'pest_control' });
+describe('resolveBookingVisitPrice — linked estimate (shapes, service + cadence)', () => {
+  test('engineResult shape, service + cadence match', () => {
+    const estimate = { id: 'e1', annual_total: 387.96, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] } } };
+    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: Q }))
+      .toEqual({ amount: 96.99, sourceEstimateId: 'e1', serviceKey: 'pest_control' });
   });
 
-  test('also reads estimate_data.result.lineItems and a live .lineItems object', () => {
-    const viaResult = { id: 'r', estimate_data: { result: { lineItems: [lineFor('lawn_care', { monthly: 40, perApp: 120 })] } } };
-    expect(resolveBookingVisitPrice({ estimate: viaResult, serviceKey: 'lawn_care' }).amount).toBe(120);
-    const live = { id: 'L', lineItems: [lineFor('pest_control')] };
-    expect(resolveBookingVisitPrice({ estimate: live, serviceKey: 'pest_control' }).amount).toBe(96.99);
+  test('V2 result.recurring.services with an estimate-level discount', () => {
+    const estimate = { id: 'e2', annual_total: 288, estimate_data: { result: { recurring: { services: [{ service: 'lawn_care', mo: 40, perTreatment: 120, visitsPerYear: 4 }] } } } };
+    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'lawn_care', bookingVisits: Q }).amount).toBe(72);
   });
 
-  test('service MISMATCH → null (price is bound to the booked service)', () => {
-    const estimate = { id: 'est-2', estimate_data: { engineResult: { lineItems: [lineFor('pest_control')] } } };
-    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'lawn_care' })).toBeNull();
+  test('cadence MISMATCH on linked estimate → null', () => {
+    const estimate = { id: 'e3', annual_total: 387.96, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 12 }] } } };
+    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: Q })).toBeNull();
   });
 
-  test('missing booked serviceKey → null (fail closed)', () => {
-    const estimate = { id: 'est-3', estimate_data: { engineResult: { lineItems: [lineFor('pest_control')] } } };
-    expect(resolveBookingVisitPrice({ estimate })).toBeNull();
-  });
-
-  test('no linked estimate → null (never guesses from other quotes)', () => {
-    expect(resolveBookingVisitPrice({ estimate: null, serviceKey: 'pest_control' })).toBeNull();
-    expect(resolveBookingVisitPrice({})).toBeNull();
-  });
-
-  test('unpriceable linked estimate → null (stays price-less)', () => {
-    const estimate = { id: 'x', estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 30, annual: 360 }] } } };
+  test('no booking cadence (non-pest / no series) → null', () => {
+    const estimate = { id: 'e4', annual_total: 387.96, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] } } };
     expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control' })).toBeNull();
   });
 
-  test('multi-service linked estimate → null (ambiguous)', () => {
-    const estimate = { id: 'm', estimate_data: { engineResult: { lineItems: [
-      lineFor('pest_control'),
-      lineFor('lawn_care', { monthly: 20, perApp: 60 }),
-    ] } } };
-    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control' })).toBeNull();
+  test('service MISMATCH / missing serviceKey / no estimate → null', () => {
+    const estimate = { id: 'e5', annual_total: 387.96, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] } } };
+    expect(resolveBookingVisitPrice({ estimate, serviceKey: 'lawn_care', bookingVisits: Q })).toBeNull();
+    expect(resolveBookingVisitPrice({ estimate, bookingVisits: Q })).toBeNull();
+    expect(resolveBookingVisitPrice({ serviceKey: 'pest_control', bookingVisits: Q })).toBeNull();
+  });
+
+  test('supplemental program in EITHER recurring container → null', () => {
+    const rootOnly = { id: 'e6', annual_total: 500, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] }, recurring: { rodentBaitMo: 49 } } };
+    const nestedOnly = { id: 'e7', annual_total: 500, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] }, recurring: {}, result: { recurring: { palmInjectionMo: 39 } } } };
+    expect(resolveBookingVisitPrice({ estimate: rootOnly, serviceKey: 'pest_control', bookingVisits: Q })).toBeNull();
+    expect(resolveBookingVisitPrice({ estimate: nestedOnly, serviceKey: 'pest_control', bookingVisits: Q })).toBeNull();
+  });
+});
+
+// The quote→book handoff mint gate (public-quote.js) calls
+// resolveBookingVisitPrice({ estimate: {estimate_data, annual_total,
+// monthly_total}, serviceKey: 'pest_control', bookingVisits: 4 }) over the
+// wizard-mirror shape it just stored, and mints a token only when that prices —
+// so a token is never minted for a shape /booking/confirm can't price. These
+// pin that predicate over the STORED wizard shape (services is an OBJECT in the
+// wizard payload, so engineResult.lineItems is the only recurring source).
+describe('quote→book handoff mint gate — wizard-mirror shape priceability', () => {
+  const wizardEst = (lineItems, annual, monthly = null) => ({
+    annual_total: annual,
+    monthly_total: monthly,
+    estimate_data: { services: { pest: true }, engineResult: { lineItems } },
+  });
+  const mintGate = (estimate) => !!resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: 4 });
+
+  test('single quarterly pest line (stored frequency:4) → mints', () => {
+    expect(mintGate(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 96.99, frequency: 4 }], 387.96))).toBe(true);
+  });
+
+  test('lawn-only quote → NO token (confirm only prices quarterly pest)', () => {
+    expect(mintGate(wizardEst([{ service: 'lawn_care', monthly: 40, perApp: 120, frequency: 4 }], 480))).toBe(false);
+  });
+
+  test('pest+lawn (two priced recurring lines) → NO token (ambiguous total)', () => {
+    expect(mintGate(wizardEst([
+      { service: 'pest_control', monthly: 32.33, perApp: 96.99, frequency: 4 },
+      { service: 'lawn_care', monthly: 40, perApp: 120, frequency: 4 },
+    ], 867.96))).toBe(false);
+  });
+
+  test('monthly pest quote → NO token (cadence ≠ the quarterly series confirm seeds)', () => {
+    expect(mintGate(wizardEst([{ service: 'pest_control', monthly: 32.33, perApp: 32.33, frequency: 12 }], 387.96))).toBe(false);
   });
 });

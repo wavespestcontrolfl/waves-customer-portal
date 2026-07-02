@@ -99,7 +99,11 @@ describe('termite measurement overrides and safeguards', () => {
     expect(existing.productKey).toBe('taurus_sc');
     expect(existing.productSurcharge).toBe(0);
     expect(existing.baseInstallPrice).toBe(2784);
-    expect(existing.finishedGallons).toBe(103.68);
+    // Default trench depth is now the 0.5 ft baseline (×1.0 install premium), so
+    // finished gallons halve vs. the retired 1.0 ft default; base price is unchanged.
+    expect(existing.trenchDepthPriceMultiplier).toBe(1);
+    expect(existing.highRatePriceMultiplier).toBe(1);
+    expect(existing.finishedGallons).toBe(51.84);
 
     const manual = priceTrenching({}, {
       measurements: { perimeterLF: 240, concreteLF: 120 },
@@ -120,6 +124,37 @@ describe('termite measurement overrides and safeguards', () => {
     expect(allDirt.concreteLFSource).toBe('manual_override');
   });
 
+  test('trench depth and high application rate scale the install price (Phase 2 premiums)', () => {
+    const measured = {
+      measurements: { perimeterLF: 240, concreteLF: 96 },
+      productKey: 'taurus_sc',
+      labelConfirmed: true,
+    };
+    const shallow = priceTrenching({}, { ...measured, trenchDepthFt: 0.5 });
+    const medium = priceTrenching({}, { ...measured, trenchDepthFt: 1 });
+    const deep = priceTrenching({}, { ...measured, trenchDepthFt: 1.5 });
+
+    // Baseline 0.5 ft leaves the $2,784 LF install model untouched.
+    expect(shallow.trenchDepthPriceMultiplier).toBe(1);
+    expect(shallow.baseInstallBeforePremium).toBe(2784);
+    expect(shallow.baseInstallPrice).toBe(2784);
+    expect(shallow.price).toBe(2784);
+
+    // 1.0 ft = +15%, 1.5 ft = +30% on the install model (owner-approved "Moderate").
+    expect(medium.trenchDepthPriceMultiplier).toBe(1.15);
+    expect(medium.baseInstallPrice).toBe(3202); // round(2784 × 1.15)
+    expect(medium.price).toBe(3202);
+    expect(deep.trenchDepthPriceMultiplier).toBe(1.3);
+    expect(deep.baseInstallPrice).toBe(3619); // round(2784 × 1.30)
+    expect(deep.price).toBe(3619);
+
+    // High/problem-soil application rate = +12% install premium (isolated on baseInstallPrice;
+    // the pre-existing high-rate chemical surcharge stacks on top of this in the total price).
+    const highRate = priceTrenching({}, { ...measured, trenchDepthFt: 0.5, applicationRate: 'high' });
+    expect(highRate.highRatePriceMultiplier).toBe(1.12);
+    expect(highRate.baseInstallPrice).toBe(3118); // round(2784 × 1.0 × 1.12)
+  });
+
   test('trenching normalizes products, rates, and chemical cost per LF', () => {
     expect(normalizeTrenchingTermiticideProduct('termidor sc').productKey).toBe('termidor_sc');
     expect(normalizeTrenchingTermiticideProduct('basf').productKey).toBe('termidor_sc');
@@ -129,7 +164,9 @@ describe('termite measurement overrides and safeguards', () => {
     expect(normalizeTrenchingApplicationRate('0.06%').applicationRate).toBe('standard');
     expect(normalizeTrenchingApplicationRate('problem soil').applicationRate).toBe('high');
 
-    const base = { measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 }, concreteVolumePadPct: 0 };
+    // Pin depth to 1 ft so the documented per-LF chemical costs are independent
+    // of the 0.5 ft default (chemical volume scales linearly with trench depth).
+    const base = { measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 }, concreteVolumePadPct: 0, trenchDepthFt: 1 };
     expect(priceTrenching({}, { ...base, productKey: 'termidor_sc' }).chemicalCostPerLF).toBeCloseTo(1.54, 2);
     expect(priceTrenching({}, { ...base, productKey: 'taurus_sc' }).chemicalCostPerLF).toBeCloseTo(0.35, 2);
     expect(priceTrenching({}, { ...base, productKey: 'bifen_it' }).chemicalCostPerLF).toBeCloseTo(0.23, 2);
@@ -142,13 +179,13 @@ describe('termite measurement overrides and safeguards', () => {
       productKey: 'termidor_sc',
       labelConfirmed: true,
     });
-    expect(termidor.finishedGallons).toBe(103.68);
-    expect(termidor.productOz).toBeCloseTo(82.94, 2);
-    expect(termidor.allocatedChemicalCost).toBeCloseTo(398.77, 2);
-    expect(termidor.includedChemicalCost).toBeCloseTo(90.39, 2);
-    expect(termidor.chemicalPremiumCost).toBeCloseTo(308.38, 2);
-    expect(termidor.productSurcharge).toBeGreaterThanOrEqual(447);
-    expect(termidor.productSurcharge).toBeLessThanOrEqual(448);
+    // Chemical figures reflect the 0.5 ft baseline default (half the retired 1.0 ft).
+    expect(termidor.finishedGallons).toBe(51.84);
+    expect(termidor.productOz).toBeCloseTo(41.47, 2);
+    expect(termidor.allocatedChemicalCost).toBeCloseTo(199.38, 2);
+    expect(termidor.includedChemicalCost).toBeCloseTo(45.19, 2);
+    expect(termidor.chemicalPremiumCost).toBeCloseTo(154.19, 2);
+    expect(termidor.productSurcharge).toBe(224);
     expect(termidor.price).toBe(termidor.baseInstallPrice + termidor.productSurcharge);
 
     const bifen = priceTrenching({}, {
@@ -645,6 +682,29 @@ describe('termite measurement overrides and safeguards', () => {
     const pricedTrench = allowedEstimate.lineItems.find((item) => item.service === 'trenching');
     expect(pricedTrench.quoteRequired).not.toBe(true);
     expect(pricedTrench.perimeter).toBeGreaterThan(0);
+  });
+
+  test('v2 adapter defaults trenching depth to the 0.5 ft baseline (no +15% on depth-less estimates)', () => {
+    const v1Input = translateV2CallToV1Input(
+      { homeSqFt: 2400, stories: 1, lotSqFt: 9000 },
+      ['TRENCHING'],
+      {
+        trenchingPerimeterLF: 240,
+        trenchingConcreteLF: 96,
+        trenchingLabelConfirmed: true,
+        // no trenchingDepthFt — must fall back to the 0.5 ft canonical baseline,
+        // not the retired 1.0 ft (+15%) tier with doubled chemical volume.
+      }
+    );
+    expect(v1Input.services.trenching.trenchDepthFt).toBe(0.5);
+
+    const estimate = generateEstimate(v1Input);
+    const trench = estimate.lineItems.find((item) => item.service === 'trenching');
+    expect(trench.trenchDepthFt).toBe(0.5);
+    expect(trench.trenchDepthPriceMultiplier).toBe(1);
+    // 144 LF dirt + 96 LF concrete at the baseline → the unchanged LF install model.
+    expect(trench.baseInstallPrice).toBe(2784);
+    expect(trench.price).toBe(2784);
   });
 
   test('missing termite bait measurement is not listed as priced recurring service', () => {

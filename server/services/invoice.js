@@ -3260,4 +3260,15 @@ InvoiceService._internals = {
   isInvoiceNumberCollision,
 };
 
+// Invoice statuses that need NO further money handling when their linked
+// scheduled service is cancelled: nothing left to collect, send, refund, or
+// review. Exported for callers of voidOpenInvoicesForCancelledService that
+// post-check its silent skips — the sweep intentionally leaves what it can't
+// safely void OPEN without throwing, so a caller reporting an auto-processing
+// outcome must re-query for anything OUTSIDE this set: still-collectible
+// statuses the sweep skipped, a transient 'sending' claim, or captured /
+// in-flight money ('paid' / 'processing') that now needs a refund/credit
+// decision because the service won't happen.
+InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
+
 module.exports = InvoiceService;

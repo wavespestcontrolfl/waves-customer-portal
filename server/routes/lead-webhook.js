@@ -221,10 +221,24 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           .first();
       }
       if (!sourceRecord && leadSource.source === 'waves_website') {
-        sourceRecord = await db('lead_sources')
-          .where('domain', 'like', '%wavespestcontrol%')
-          .where('is_active', true)
-          .first();
+        // Prefer the city-specific hub row when the classifier resolved an area
+        // (e.g. a Parrish page → "Website — Parrish (city page)") instead of an
+        // arbitrary .first() over every wavespestcontrol row (which mis-tagged
+        // Parrish leads as Bradenton). Fall back to the generic Main Site row.
+        if (leadSource.area) {
+          sourceRecord = await db('lead_sources')
+            .where('source_type', 'main_site')
+            .where('is_active', true)
+            .whereRaw('name ILIKE ?', [`%${leadSource.area}%`])
+            .first();
+        }
+        if (!sourceRecord) {
+          sourceRecord = await db('lead_sources')
+            .where('domain', 'like', '%wavespestcontrol%')
+            .where('is_active', true)
+            .orderByRaw("(name ILIKE '%Main Site (%') DESC")
+            .first();
+        }
       }
       if (!sourceRecord && leadSource.source === 'nextdoor') {
         sourceRecord = await db('lead_sources')
@@ -826,6 +840,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         utm_campaign: utmCampaign,
         utm_term: utmTerm,
         funnel_stage: 'lead',
+        // determineLeadSource marks every paid classification (google cpc,
+        // gclid/wbraid/gbraid, fbclid/_fbc, facebook cpc) channel='paid'.
+        // Without this stamp even gclid rows sit at is_paid NULL and the paid
+        // funnel views undercount.
+        is_paid: leadSource.channel === 'paid',
       }).onConflict('lead_id').ignore();
     } catch (attrErr) {
       logger.error(`Ad attribution insert failed: ${attrErr.message}`);
@@ -1183,13 +1202,25 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
   const spokeDomain = SPOKE_DOMAIN_KEYS.find((domain) => url.includes(domain));
   if (spokeDomain) return { source: 'domain_website', detail: spokeDomain, channel: 'organic', area: SPOKE_AREA[spokeDomain] || null };
 
-  // Waves main site pages
+  // Waves main site (hub) pages. Detect the CITY anywhere in the URL path — not just
+  // a fixed /pest-control-<city> list — so quote pages (/pest-control-quote-parrish-fl/),
+  // lawn/mosquito city pages, etc. get the right area instead of falling to a generic
+  // "Main site". Channel is always waves_website (organic hub); the page slug is the
+  // detail so it stays specific for any page type.
   if (url.includes('wavespestcontrol.com')) {
-    const pages = { '/pest-control-bradenton': 'Bradenton', '/pest-control-sarasota': 'Sarasota', '/pest-control-venice': 'Venice', '/pest-control-parrish': 'Parrish', '/pest-control-lakewood': 'Lakewood Ranch', '/lawn-care': null, '/mosquito': null, '/termite': null };
-    for (const [path, area] of Object.entries(pages)) {
-      if (url.includes(path)) return { source: 'waves_website', detail: `${path.replace('/', '')} page`, channel: 'organic', area };
-    }
-    return { source: 'waves_website', detail: 'Main site', channel: 'organic' };
+    const path = String(url).replace(/^https?:\/\/[^/]+/i, '').split(/[?#]/)[0].replace(/\/+$/, '');
+    const seg = path.split('/').filter(Boolean).pop() || '';
+    // Anchor single-word cities to the "-fl" city/quote-page suffix so an incidental
+    // mention in a slug isn't read as a city — most importantly "palmetto-bug" (a FL
+    // cockroach) must NOT resolve to Palmetto and skew office routing. Compound names
+    // (north-port, lakewood-ranch) are unambiguous on their own and need no anchor.
+    const HUB_CITIES = [
+      [/north[-_ ]?port/i, 'North Port'], [/lakewood[-_ ]?ranch/i, 'Lakewood Ranch'],
+      [/bradenton-fl/i, 'Bradenton'], [/parrish-fl/i, 'Parrish'], [/sarasota-fl/i, 'Sarasota'],
+      [/venice-fl/i, 'Venice'], [/palmetto-fl/i, 'Palmetto'], [/ellenton-fl/i, 'Ellenton'],
+    ];
+    const hit = HUB_CITIES.find(([re]) => re.test(path));
+    return { source: 'waves_website', detail: seg ? `${seg} page` : 'Main site', channel: 'organic', area: hit ? hit[1] : undefined };
   }
 
   return { source: utmSource || 'website', detail: utmMedium || '', channel: 'unknown' };

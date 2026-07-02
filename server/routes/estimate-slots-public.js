@@ -50,6 +50,7 @@ const {
   verifyEstimateAskToken,
 } = require('./estimate-public');
 const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
+const { commercialLowConfidenceRange } = require('../services/estimate-delivery-options');
 const {
   createDepositIntentForEstimate,
   resolveDepositPolicyForEstimate,
@@ -446,6 +447,19 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       oneTimeUninvoiced: oneTime && !resolveEstimateInvoiceMode(estimate, estData),
       noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
     });
+    // A narrow low-confidence commercial RECURRING accept is held for on-site
+    // price confirmation — whatever the billing mode, no money moves at accept
+    // (invoice-mode holds the first-invoice mint; non-invoice bills per
+    // application after the confirmed visit), so there's nothing to credit a
+    // deposit against. Exempt it here too (matches the accept handler + the
+    // /data deposit policy), so a "no payment now" estimate never collects a
+    // deposit at the confirm step.
+    if (!oneTime) {
+      const lc = commercialLowConfidenceRange(estData);
+      if (lc.hasLowConfidence && !lc.forceSiteQuote) {
+        return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'commercial_manual_billing' });
+      }
+    }
     if (!policy.required) {
       return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: policy.exemptReason || null });
     }

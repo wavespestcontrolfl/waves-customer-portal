@@ -2083,7 +2083,7 @@ export function calculateEstimate(inputs) {
       const productKey = normalizeTrenchingProductKey(trenchingProductKey);
       const product = TRENCHING_TERMITICIDE_PRODUCTS[productKey];
       const applicationRate = normalizeTrenchingRate(trenchingApplicationRate);
-      const depth = toPositiveNumber(trenchingDepthFt) || 1;
+      const depth = toPositiveNumber(trenchingDepthFt) || 0.5;
       const concretePad = 0.20;
       const dirtFinishedGallons = dl * 0.4 * depth;
       const concreteFinishedGallons = cl * 0.4 * depth * (1 + concretePad);
@@ -2095,7 +2095,12 @@ export function calculateEstimate(inputs) {
       const includedChemicalCost = finishedGallons * included.standardOzPerGal * (included.containerCost / included.containerOz);
       const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
       const productSurcharge = Math.round(chemicalPremiumCost * 1.45);
-      const baseInstallPrice = Math.max(600, dl * 10 + cl * 14);
+      // Depth + high-rate install premiums (mirror of server SPECIALTY.trenching:
+      // baseline 0.5 ft, +15%/half-foot, high rate +12%). 0.5 ft + standard = ×1.0.
+      const baseInstallBeforePremium = Math.max(600, dl * 10 + cl * 14);
+      const depthPriceMult = 1 + Math.max(0, (depth - 0.5) / 0.5) * 0.15;
+      const highRateMult = applicationRate === 'high' ? 1.12 : 1;
+      const baseInstallPrice = Math.round(baseInstallBeforePremium * depthPriceMult * highRateMult);
       const warrantyTier = normalizeTrenchingWarranty(trenchingWarrantyTier, product);
       const warrantyPct = warrantyTier === 'five_year_repair_retreat' ? 0.25 : warrantyTier === 'three_year_repair_retreat' ? 0.15 : 0;
       const warrantyAdder = Math.round((baseInstallPrice + productSurcharge) * warrantyPct);
@@ -2130,6 +2135,9 @@ export function calculateEstimate(inputs) {
         allocatedChemicalCost: Math.round(allocatedChemicalCost * 100) / 100,
         includedChemicalCost: Math.round(includedChemicalCost * 100) / 100,
         productSurcharge,
+        baseInstallBeforePremium,
+        trenchDepthPriceMultiplier: Math.round(depthPriceMult * 100) / 100,
+        highRatePriceMultiplier: Math.round(highRateMult * 100) / 100,
         baseInstallPrice,
         warrantyTier,
         warrantyAdder,

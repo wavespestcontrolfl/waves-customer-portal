@@ -338,7 +338,7 @@ function buildCallViewQuery(days = 30, limit = 200) {
   `;
 }
 
-async function fetchCallViews(days = 30, limit = 200) {
+async function fetchCallViews(days = 30, limit = 200, { strict = false } = {}) {
   const customer = getCustomer();
   if (!customer) return [];
 
@@ -347,6 +347,10 @@ async function fetchCallViews(days = 30, limit = 200) {
     return await customer.query(buildCallViewQuery(days, limit));
   } catch (err) {
     logger.error(`[google-ads] fetchCallViews failed: ${err.message}`);
+    // strict: the call bridge must be able to tell "no calls" apart from
+    // "scan failed" — its unclaimed→organic fallback would otherwise declare
+    // boundary-age paid calls organic off a blind scan during an API outage.
+    if (strict) throw err;
     return [];
   }
 }

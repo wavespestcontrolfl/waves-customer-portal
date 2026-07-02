@@ -11,6 +11,9 @@ const { subscribeOrResubscribe } = require('../services/newsletter-subscribers')
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
+const { attributionForSourceType } = require('../services/ads/call-attribution');
+const { etDateString } = require('../utils/datetime-et');
+const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplateLibrary = require('../services/email-template-library');
@@ -870,6 +873,48 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       logger.error(`[public-quote] Customer upsert failed: ${e.message}`);
     }
 
+    // Ad service attribution — the quote wizard is a lead entry point just like
+    // the lead webhook, so it must stamp its own funnel row (nothing downstream
+    // does): without this a wizard lead never appears in the ad-dollar funnel,
+    // even after they pay. Channel key + paid flag come from the shared
+    // source_type map so the wizard can't drift from the call/webhook paths.
+    // onConflict(lead_id) dedupes against a row the webhook (or a prior wizard
+    // submit updating the same property-lookup lead) already stamped. Outside
+    // the customer-upsert try: a customer failure must not cost the funnel row
+    // (customer_id may be null; such a row counts lead volume and simply can
+    // never advance — correct, since it never converted).
+    try {
+      const channelAttr = attributionForSourceType(sourceMeta.sourceType);
+      if (channelAttr) {
+        await db('ad_service_attribution').insert({
+          customer_id: customerId,
+          lead_id: lead.id,
+          service_line: inferServiceLine(serviceInterest),
+          specific_service: inferSpecificService(serviceInterest),
+          service_bucket: inferServiceBucket(serviceInterest),
+          lead_date: etDateString(),
+          lead_source: channelAttr.leadSource,
+          lead_source_detail: sourceMeta.leadSourceDetail,
+          gclid: gclid || null,
+          wbraid: wbraid || null,
+          gbraid: gbraid || null,
+          fbclid: fbclid || null,
+          fbc: fbc || null,
+          fbp: fbp || null,
+          utm_campaign: attr?.utm?.campaign || null,
+          utm_term: attr?.utm?.term || null,
+          funnel_stage: 'lead',
+          // The map's isPaid says the CHANNEL is a paid one; the resolver's
+          // isPaidClick says THIS visit carried paid evidence (click id / cpc).
+          // Both must hold — organic utm_source=facebook traffic lands in the
+          // Facebook channel but must not count as paid spend attribution.
+          is_paid: channelAttr.isPaid && sourceMeta.isPaidClick === true,
+        }).onConflict('lead_id').ignore();
+      }
+    } catch (attrErr) {
+      logger.error(`[public-quote] Ad attribution insert failed: ${attrErr.message}`);
+    }
+
     // Mirror the priced quote into the estimates pipeline so wizard-generated
     // quotes show up alongside admin/tech estimates in /admin/estimates. Keyed
     // off lead_id in estimate_data — re-submits update the same draft instead
@@ -877,6 +922,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // estimate_data is jsonb — pass the object directly so the ->>'lead_id'
     // lookup resolves; pre-stringifying risks pg storing it as a json string
     // scalar.
+    let draftEstimateId = null;
+    let handoffPriceable = false;
     try {
       const estimateDataObj = {
         lead_id: lead.id,
@@ -946,8 +993,22 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         lead_source_detail: sourceMeta.leadSourceDetail,
         estimate_data: estimateDataObj,
       };
+      // Mint a quote→book handoff ONLY for shapes /booking/confirm can actually
+      // price today: a single quarterly PEST recurring line (confirm seeds a
+      // series cadence — bookingVisits=4 — only for quarterly pest_control).
+      // Same resolver over the same stored fields confirm will read back, so
+      // mint-time and confirm-time agree by construction. Lawn/tree/mosquito
+      // quotes get NO token rather than one that silently prices nothing;
+      // widening the handoff means extending confirm's cadence support first.
+      const { resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
+      handoffPriceable = !!resolveBookingVisitPrice({
+        estimate: { estimate_data: estimateDataObj, annual_total: annual || null, monthly_total: monthly || null },
+        serviceKey: 'pest_control',
+        bookingVisits: 4,
+      });
       if (existingEst) {
         await db('estimates').where({ id: existingEst.id }).update({ ...estFields, updated_at: new Date() });
+        draftEstimateId = existingEst.id;
       } else {
         await withAutomatedEstimatePhoneLock(contactPhone, async (trx) => {
           const duplicateBlock = await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx });
@@ -965,12 +1026,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               await trx('estimates')
                 .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
                 .update({ ...estFields, updated_at: new Date() });
+              draftEstimateId = duplicateBlock.existingEstimateId;
               logger.info(`[public-quote] Estimate mirror refreshed wizard draft ${duplicateBlock.existingEstimateId} for lead ${lead.id} (same-phone re-run)`);
             } else {
               logger.info(`[public-quote] Estimate mirror blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for lead ${lead.id}`);
             }
           } else {
-            await trx('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' });
+            const [inserted] = await trx('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' }).returning('id');
+            draftEstimateId = inserted?.id || inserted || null;
           }
         });
       }
@@ -1041,6 +1104,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const bookingSource = isOneTimeOnly ? 'quote-wizard-onetime' : 'quote-wizard';
         const bookingParams = new URLSearchParams({ service: bookingServiceId, source: bookingSource });
         if (isOneTimeOnly && bookingServiceLabel) bookingParams.set('service_label', bookingServiceLabel);
+        // Quote→book handoff on the emailed/texted booking link too, so an invite
+        // booking is priced from this exact estimate (not just the astro CTA).
+        // Recurring-only — one-time bookings aren't pay-at-visit-priced — and
+        // handoffPriceable-only (quarterly pest, the one shape confirm prices).
+        if (draftEstimateId && handoffPriceable && !isOneTimeOnly) {
+          const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+          const inviteToken = mintEstimateHandoffToken(draftEstimateId);
+          if (inviteToken) {
+            bookingParams.set('estimate_id', draftEstimateId);
+            bookingParams.set('estimate_token', inviteToken);
+          }
+        }
         const longBookingUrl = `${PORTAL_BASE_URL}/book?${bookingParams.toString()}`;
         bookingUrl = await shortenOrPassthrough(longBookingUrl, {
           kind: 'booking', entityType: 'leads', entityId: lead.id,
@@ -1218,6 +1293,20 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (commercialDisclaimer) {
       response.estimated_pricing = true;
       response.disclaimer = commercialDisclaimer;
+    }
+    // Quote→book handoff: expose the draft estimate id + a server-trusted token
+    // so a booking made from this quote can be priced from THIS exact estimate
+    // (see /booking/confirm), instead of inferring which quote it came from.
+    // Gated like the self-booking link above (!quoteRequired && !commercialDetected)
+    // plus recurring-only (!isOneTimeOnly) plus handoffPriceable (a single
+    // quarterly pest line — the one shape /booking/confirm prices today).
+    // Commercial/manual/one-time/non-pest shapes get no handoff (they'd
+    // otherwise mint a token booking.js can't price).
+    if (draftEstimateId && handoffPriceable && !quoteRequired && !commercialDetected && !isOneTimeOnly) {
+      const { mintEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+      response.estimate_id = draftEstimateId;
+      const estimateToken = mintEstimateHandoffToken(draftEstimateId);
+      if (estimateToken) response.estimate_token = estimateToken;
     }
     res.json(response);
   } catch (err) {
