@@ -98,6 +98,32 @@ describe('resolveCallBookingCatalogService', () => {
     expect(row).toBeNull();
   });
 
+  test('"palmetto roaches" wording does NOT map to the cockroach program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control' },
+      transcription: 'We get those big palmetto roaches on the pool deck every summer',
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
+  test('"palmetto cockroach" wording does NOT map to the cockroach program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { pain_points: 'a palmetto cockroach in the garage now and then' },
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
+  test('a real roach problem alongside palmetto wording still maps to the program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control' },
+      transcription: 'It is not just palmetto roaches outside — there are german roaches inside the kitchen cabinets',
+      services: CATALOG,
+    });
+    expect(row?.service_key).toBe('cockroach_control');
+  });
+
   test('keyword rule is skipped when the service_key is not in the catalog', () => {
     const row = resolveCallBookingCatalogService({
       extracted: {},

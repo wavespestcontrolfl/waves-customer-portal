@@ -41,9 +41,10 @@ const MAX_QUOTED_CALL_PRICE = 20000;
 const DEFAULT_FOLLOW_UP_INTERVAL_DAYS = 14;
 
 // "Palmetto bug" callers are American-roach one-offs handled under General
-// Pest Control — strip the phrase so it can't trip the German-roach cleanout
-// rule, which is a $350 two-treatment program.
-const PALMETTO_BUG_RE = /\bpalmetto\s+bugs?\b/gi;
+// Pest Control — strip the phrase (in all its wordings: palmetto bug/roach/
+// cockroach) so it can't trip the German-roach cleanout rule, which is a
+// $350 two-treatment program.
+const PALMETTO_BUG_RE = /\bpalmetto\s+(?:bugs?|(?:cock)?roach(?:es)?)\b/gi;
 const ROACH_RE = /\b(?:german\s+)?(?:cock)?roach(?:es)?\b/i;
 
 // Deterministic transcript-keyword rules, tried only after the model's own
