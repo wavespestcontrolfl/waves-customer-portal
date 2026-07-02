@@ -910,4 +910,8 @@ module.exports = {
   findUnconvertedLeadsByContact,
   linkLeadEstimatesToCustomer,
   attributeSelfBooking,
+  // Exported for the one-off leads-pipeline-audit cleanup script, which must
+  // apply the SAME originating / prior-won guards as the live conversion path.
+  isOriginatingLead,
+  customerHasWonLead,
 };
