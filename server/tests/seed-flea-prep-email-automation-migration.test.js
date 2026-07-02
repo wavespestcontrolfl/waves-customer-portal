@@ -34,7 +34,9 @@ describe('seed flea prep email automation migration', () => {
     expect(row.status).toBe('active');
     expect(row.suppression_group_key).toBe('service_operational');
     expect(JSON.parse(row.conditions)).toEqual({ service_type_contains: ['flea'] });
-    expect(JSON.parse(row.exit_conditions)).toEqual({ stop_if: ['appointment.cancelled'] });
+    expect(JSON.parse(row.exit_conditions)).toEqual({
+      stop_if: ['appointment.cancelled', 'appointment.closed', 'appointment.past'],
+    });
     expect(row.idempotency_key_template).toBe('prep.flea:{scheduled_service_id}');
   });
 
@@ -62,12 +64,12 @@ describe('seed flea prep email automation migration', () => {
     expect(knex).not.toHaveBeenCalled();
   });
 
-  test('down removes the seeded row', async () => {
+  test('down is a no-op (never deletes an operator-created row)', async () => {
     const { knex, automationsQuery } = knexStub();
 
     await migration.down(knex);
 
-    expect(automationsQuery.where).toHaveBeenCalledWith({ automation_key: 'prep.flea' });
-    expect(automationsQuery.del).toHaveBeenCalledTimes(1);
+    expect(knex).not.toHaveBeenCalled();
+    expect(automationsQuery.del).not.toHaveBeenCalled();
   });
 });

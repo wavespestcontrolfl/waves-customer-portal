@@ -9,7 +9,8 @@ jest.mock('../services/logger', () => ({
 }));
 
 const db = require('../models/db');
-const { livePayloadForRun } = require('../services/email-template-automation-executor');
+const { livePayloadForRun, exitReasonFor } = require('../services/email-template-automation-executor');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 function mockTables(rows) {
   db.mockImplementation((table) => {
@@ -46,6 +47,7 @@ describe('livePayloadForRun — scheduled_service refresh', () => {
     expect(live.service_status).toBe('confirmed');
     expect(live.service_type).toBe('Cockroach Treatment');
     expect(live.service_date).toBe('August 1, 2026');
+    expect(live.service_date_ymd).toBe('2026-08-01');
     expect(live.property_address).toBe('9 Corrected St, Venice, 34285');
   });
 
@@ -78,5 +80,30 @@ describe('livePayloadForRun — scheduled_service refresh', () => {
 
     expect(live).not.toHaveProperty('service_date');
     expect(live).not.toHaveProperty('property_address');
+  });
+});
+
+describe('exitReasonFor — send-time appointment guards', () => {
+  const PREP_EXITS = { stop_if: ['appointment.cancelled', 'appointment.closed', 'appointment.past'] };
+
+  test('appointment.closed exits on every terminal status', () => {
+    for (const status of ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show']) {
+      expect(exitReasonFor(PREP_EXITS, { appointment_status: status })).toBeTruthy();
+    }
+  });
+
+  test('open upcoming appointments do not exit', () => {
+    const future = etDateString(addETDays(new Date(), 3));
+    expect(exitReasonFor(PREP_EXITS, { appointment_status: 'confirmed', service_date_ymd: future })).toBeNull();
+  });
+
+  test('appointment.past exits when the visit date has passed', () => {
+    const past = etDateString(addETDays(new Date(), -2));
+    expect(exitReasonFor(PREP_EXITS, { appointment_status: 'confirmed', service_date_ymd: past }))
+      .toBe('appointment date already passed');
+  });
+
+  test('appointment.past tolerates a missing date', () => {
+    expect(exitReasonFor(PREP_EXITS, { appointment_status: 'confirmed' })).toBeNull();
   });
 });

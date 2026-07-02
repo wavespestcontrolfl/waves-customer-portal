@@ -18,6 +18,11 @@ const PREP_AUTOMATION_BY_PEST_TYPE = Object.freeze({
   flea: 'prep.flea',
 });
 
+// Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
+// appointment in any of these states is no longer an upcoming visit
+// (rescheduled rows are phantom placeholders kept while staff rebooks).
+const PREP_TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show']);
+
 class AppointmentTagger {
 
   async onServiceScheduled(scheduledServiceId) {
@@ -254,9 +259,11 @@ class AppointmentTagger {
 
     // Upcoming open visits only: regenerate-brief re-runs onServiceScheduled
     // for past/closed appointments too, and "prepare for your treatment"
-    // must never land after the visit.
+    // must never land after the visit. The automation's exit conditions
+    // (appointment.closed / appointment.past) re-check this against the live
+    // row at send time for queued runs.
     const status = String(service.status || '').toLowerCase();
-    if (status === 'cancelled' || status === 'completed') return;
+    if (PREP_TERMINAL_STATUSES.has(status)) return;
     const serviceDateStr = dateOnlyString(service.scheduled_date);
     if (!serviceDateStr || serviceDateStr < etDateString()) return;
 
@@ -295,6 +302,7 @@ class AppointmentTagger {
           service_type: service.service_type || '',
           project_type: this.classifyAppointmentType(service.service_type).label,
           service_date: formatDisplayDate(service.scheduled_date, { fallback: '' }),
+          service_date_ymd: serviceDateStr,
           property_address: [service.address_line1, service.city, service.zip].filter(Boolean).join(', '),
           prep_url: portalVisitsUrl,
           customer_portal_url: portalVisitsUrl,

@@ -153,11 +153,18 @@ describe('appointment tagger prep email automation', () => {
     expect(executor.processTrigger).not.toHaveBeenCalled();
   });
 
-  test('skips completed and cancelled appointments', async () => {
-    await AppointmentTagger.triggerPestPrep(service({ status: 'completed' }), 'cockroach');
-    await AppointmentTagger.triggerPestPrep(service({ status: 'cancelled' }), 'bed_bug');
+  test('skips terminal-status appointments', async () => {
+    for (const status of ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show']) {
+      await AppointmentTagger.triggerPestPrep(service({ status }), 'cockroach');
+    }
 
     expect(executor.processTrigger).not.toHaveBeenCalled();
+  });
+
+  test('payload carries the calendar date for the send-time appointment.past exit', async () => {
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(executor.processTrigger.mock.calls[0][0].payload.service_date_ymd).toBe(FUTURE_DATE);
   });
 
   test('skips when the emailTemplateAutomations gate is off', async () => {

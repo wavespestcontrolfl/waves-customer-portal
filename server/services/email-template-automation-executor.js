@@ -1,7 +1,12 @@
 const db = require('../models/db');
 const EmailTemplates = require('./email-template-library');
 const logger = require('./logger');
-const { formatDisplayDate } = require('../utils/date-only');
+const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
+
+// Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
+// appointment in any of these states is no longer an upcoming visit.
+const APPOINTMENT_CLOSED_STATUSES = ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'];
 
 const FINAL_STATUSES = new Set(['sent', 'blocked', 'skipped', 'failed']);
 const RUNNABLE_STATUSES = ['queued', 'scheduled', 'retry_scheduled'];
@@ -178,6 +183,12 @@ function exitReasonFor(exitConditions, payload = {}) {
 
   const appointmentStatus = normalizeStatus(payload.appointment_status || payload.service_status || payload.status);
   if (stopIf.includes('appointment.cancelled') && appointmentStatus === 'cancelled') return 'appointment already cancelled';
+  if (stopIf.includes('appointment.closed') && APPOINTMENT_CLOSED_STATUSES.includes(appointmentStatus)) {
+    return `appointment status is ${appointmentStatus}`;
+  }
+  if (stopIf.includes('appointment.past') && payload.service_date_ymd && payload.service_date_ymd < etDateString()) {
+    return 'appointment date already passed';
+  }
 
   const customerStatus = normalizeStatus(payload.customer_status || payload.status);
   if (stopIf.includes('customer.cancelled') && (customerStatus === 'cancelled' || payload.active === false)) return 'customer cancelled';
@@ -671,6 +682,8 @@ async function livePayloadForRun(run, storedPayload = {}) {
     if (hasOwn(row, 'scheduled_date')) {
       const liveServiceDate = formatDisplayDate(row.scheduled_date, { fallback: '' });
       if (liveServiceDate) setLiveValue(live, 'service_date', liveServiceDate);
+      const liveServiceDateYmd = dateOnlyString(row.scheduled_date);
+      if (liveServiceDateYmd) setLiveValue(live, 'service_date_ymd', liveServiceDateYmd);
     }
     if (row.customer_id) {
       const customer = await loadEntityRow('customers', row.customer_id);

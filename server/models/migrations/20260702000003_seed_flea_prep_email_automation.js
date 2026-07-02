@@ -25,7 +25,7 @@ const AUTOMATION = {
   frequency_cap: 'once_per_appointment',
   idempotency_key_template: 'prep.flea:{scheduled_service_id}',
   conditions: JSON.stringify({ service_type_contains: ['flea'] }),
-  exit_conditions: JSON.stringify({ stop_if: ['appointment.cancelled'] }),
+  exit_conditions: JSON.stringify({ stop_if: ['appointment.cancelled', 'appointment.closed', 'appointment.past'] }),
   retry_policy: JSON.stringify({ max_attempts: 2, backoff_minutes: [15, 60] }),
   quiet_hours: JSON.stringify({ enabled: false }),
   timezone: 'America/New_York',
@@ -55,10 +55,8 @@ exports.up = async function up(knex) {
   });
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('email_template_automations'))) return;
-
-  await knex('email_template_automations')
-    .where({ automation_key: AUTOMATION.automation_key })
-    .del();
+exports.down = async function down() {
+  // Intentionally no-op. up() skips when a prep.flea row already exists, so
+  // an unconditional delete here could remove an operator-created (or
+  // operator-edited) automation the migration never inserted.
 };
