@@ -45,8 +45,12 @@ function assertRequiredSecrets() {
   if (!missing.length) return;
   const message = `Missing required environment variable(s): ${missing.join(', ')}`;
   if (config.nodeEnv === 'production') {
+    // The global uncaughtException handler above deliberately never exits, so
+    // a top-level throw here would be swallowed — leaving a zombie process
+    // that logs once and never binds the port. Exit explicitly instead.
+    console.error(`[startup] ${message} — refusing to start.`);
     logger.error(`[startup] ${message} — refusing to start.`);
-    throw new Error(message);
+    process.exit(1);
   }
   logger.warn(`[startup] ${message} — continuing (non-production).`);
 }

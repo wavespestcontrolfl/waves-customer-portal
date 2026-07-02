@@ -19,7 +19,7 @@ const createLeadSchema = Joi.object({
   address: Joi.string().trim().max(255).allow('', null),
   city: Joi.string().trim().max(120).allow('', null),
   zip: Joi.string().trim().max(20).allow('', null),
-  lead_source_id: Joi.alternatives(Joi.number().integer(), Joi.string().trim().max(40)).allow(null),
+  lead_source_id: Joi.alternatives(Joi.number().integer(), Joi.string().trim().max(40)).allow('', null),
   lead_type: Joi.string().trim().max(60).allow('', null),
   service_interest: Joi.string().trim().max(255).allow('', null),
   urgency: Joi.string().trim().max(40).allow('', null),
