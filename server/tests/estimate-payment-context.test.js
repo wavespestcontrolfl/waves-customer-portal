@@ -23,6 +23,9 @@ jest.mock('../services/logger', () => ({
 // term-status fallback.
 let mockCoveredTermRow = null;
 let mockCoveredThrows = false;
+// Visit-level billing gate (annualPrepayCoversVisit) — controls whether THIS
+// visit counts as covered, independent of the term's money being valid.
+let mockCoversVisit = false;
 jest.mock('../services/annual-prepay-renewals', () => ({
   coveredTermsAsOf: jest.fn(() => {
     if (mockCoveredThrows) throw new Error('coverage predicate down');
@@ -31,6 +34,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
     chain.first = jest.fn(async () => mockCoveredTermRow);
     return chain;
   }),
+  annualPrepayCoversVisit: jest.fn(async () => mockCoversVisit),
 }));
 
 const {
@@ -68,6 +72,7 @@ beforeEach(() => {
   mockDbHandler = () => { throw new Error('db handler not configured'); };
   mockCoveredTermRow = null;
   mockCoveredThrows = false;
+  mockCoversVisit = false;
 });
 
 describe('sumMatchingLines — exact cents from persisted line items', () => {
@@ -133,12 +138,14 @@ describe('buildEstimatePaymentContext', () => {
       invoices: { id: 'inv-9', status: 'paid', paid_at: '2026-06-12T15:00:00Z', total: '743.06' },
     });
     mockCoveredTermRow = { id: 'term-1' };
+    mockCoversVisit = true;
 
     const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-1' });
     expect(ctx.billingTerm).toBe('prepay_annual');
     expect(ctx.annualPrepay).toMatchObject({
       termId: 'term-1',
       paid: true,
+      coversThisVisit: true,
       prepayAmount: 743.06,
       coverageVisitCount: 4,
       invoiceStatus: 'paid',
@@ -151,6 +158,50 @@ describe('buildEstimatePaymentContext', () => {
       visitNumber: 2,
     });
     expect(ctx.acceptanceInvoice).toBe(null);
+  });
+
+  it('reports a paid term whose visit-level gate fails as NOT covering this visit', async () => {
+    // The term's money is valid, but this visit was detached/unstamped — the
+    // completion gate (annualPrepayCoversVisit, fail-closed) will bill it, so
+    // the card must not say "do not collect".
+    configureDb({
+      scheduled_services: {
+        first: { annual_prepay_term_id: null, payment_method_preference: null },
+        rows: [],
+      },
+      annual_prepay_terms: {
+        id: 'term-7',
+        status: 'active',
+        prepay_amount: '743.06',
+        prepay_invoice_id: null,
+      },
+      invoices: null,
+    });
+    mockCoveredTermRow = { id: 'term-7' };
+    mockCoversVisit = false;
+
+    const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-detached' });
+    expect(ctx.annualPrepay.paid).toBe(true);
+    expect(ctx.annualPrepay.coversThisVisit).toBe(false);
+  });
+
+  it('leaves coversThisVisit null when there is no visit to answer for', async () => {
+    configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: null },
+      annual_prepay_terms: {
+        id: 'term-8',
+        status: 'active',
+        prepay_amount: '743.06',
+        prepay_invoice_id: null,
+      },
+      invoices: null,
+    });
+    mockCoveredTermRow = { id: 'term-8' };
+    mockCoversVisit = true;
+
+    const ctx = await buildEstimatePaymentContext(estimate, {});
+    expect(ctx.annualPrepay.paid).toBe(true);
+    expect(ctx.annualPrepay.coversThisVisit).toBe(null);
   });
 
   it('reports used/remaining without a visit number when this visit is not linked to the term', async () => {

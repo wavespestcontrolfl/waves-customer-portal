@@ -112,10 +112,20 @@ function paymentRows(payment) {
     const through = ap.termEnd ? ` through ${fmtDate(ap.termEnd)}` : '';
     if (ap.paid) {
       const paidOn = fmtPaidDate(ap.invoicePaidAt);
+      // "Do not collect" only when the visit-level billing gate confirms THIS
+      // visit is covered (coversThisVisit true). false = the prepay is real
+      // but this visit isn't covered (detached/unstamped/service mismatch) and
+      // completion billing WILL bill it — say so instead of contradicting the
+      // invoice. null = no visit context (pre-booking); make no claim.
+      const collect = ap.coversThisVisit === true
+        ? ' — do not collect at the visit'
+        : ap.coversThisVisit === false
+          ? ' — not applied to this visit; it bills normally'
+          : '';
       rows.push({
         label: 'Annual prepay — paid',
         value: amount,
-        sub: `Paid${paidOn ? ` ${paidOn}` : ''}${usage}${left}${through} — do not collect at the visit`,
+        sub: `Paid${paidOn ? ` ${paidOn}` : ''}${usage}${left}${through}${collect}`,
         tone: 'paid',
       });
     } else if (ap.refunded || ['cancelled', 'canceled', 'refunded'].includes(status)) {

@@ -245,10 +245,30 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
     // predicate can't be read.
     const covered = await termCoverageStillValid(term);
     const paid = covered != null ? covered : TERM_PAID_STATUSES.has(status);
+    // Visit-level coverage: the term's money being valid ≠ THIS visit covered
+    // (detached after a coverage-window change, service mismatch, date outside
+    // the term, missing stamp). Mirror the completion-billing gate
+    // (annualPrepayCoversVisit — fail-closed) so the card never says "do not
+    // collect" for a visit completion billing would bill. null when there's no
+    // visit to answer for (e.g. New Appointment modal before booking).
+    let coversThisVisit = null;
+    if (scheduledServiceId) {
+      try {
+        const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+        const svcRow = await db('scheduled_services').where({ id: scheduledServiceId }).first();
+        coversThisVisit = svcRow
+          ? !!(await AnnualPrepayRenewals.annualPrepayCoversVisit(svcRow, db))
+          : false;
+      } catch (err) {
+        logger.warn('[estimate-payment-context] visit coverage check failed — failing closed', { error: err.message });
+        coversThisVisit = false;
+      }
+    }
     annualPrepay = {
       termId: term.id,
       status: term.status,
       paid,
+      coversThisVisit,
       // Money came in but coverage was killed (void/refund) — the card must
       // say "bill normally", not fall through to "payment not received yet".
       refunded: !paid && invoiceIsPaid(invoice),
