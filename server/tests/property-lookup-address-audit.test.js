@@ -115,6 +115,67 @@ describe('auditAddressHouseNumber', () => {
 
     expect(audit).toBeNull();
   });
+
+  test('unit designators are stripped before auditing the street', async () => {
+    mockSitusResponse(['123 MAIN ST', '125 MAIN ST']);
+
+    const audit = await auditAddressHouseNumber('123 Main St Apt 4, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetLabel: 'MAIN ST', streetExists: true, hasExactMatch: true });
+  });
+
+  test('relaxed matcher does not treat a longer street name as this street', async () => {
+    // Typed "100 Pine Way"; roll only has "Pine Ridge Way". The relaxed
+    // fallback must not collect 100 from the longer street and fake an
+    // exact match — the correct verdict is street-not-found.
+    mockSitusResponse(['100 PINE RIDGE WAY', '104 PINE RIDGE WAY']);
+
+    const audit = await auditAddressHouseNumber('100 Pine Way, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: false, hasExactMatch: false });
+  });
+
+  test('a truncated (2000-row-capped) page triggers a targeted exact-number recheck', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          exceededTransferLimit: true,
+          features: [{ attributes: { SITUS_ADDRESS: '100 TOBERMORY WAY' } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          features: [{ attributes: { SITUS_ADDRESS: '4857 TOBERMORY WAY' } }],
+        }),
+      });
+
+    const audit = await auditAddressHouseNumber(GOOD_ADDRESS);
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
+  });
+
+  test('a later candidate county with the exact number beats an earlier missing verdict', async () => {
+    // Geocoded Sarasota (candidate 1) has the street but not the number;
+    // the zip gate also opens Manatee (candidate 2), whose roll has it.
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ features: [{ attributes: { fulladdress: '100 TOBERMORY WAY' } }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ features: [{ attributes: { SITUS_ADDRESS: '4857 TOBERMORY WAY' } }] }),
+      });
+
+    const audit = await auditAddressHouseNumber(GOOD_ADDRESS, {
+      state: 'FL', county: 'Sarasota', partialMatch: false,
+    });
+
+    expect(audit).toMatchObject({ county: 'Manatee', streetExists: true, hasExactMatch: true });
+  });
 });
 
 describe('queryStreetSitusAddresses', () => {
@@ -127,7 +188,7 @@ describe('queryStreetSitusAddresses', () => {
     expect(url.searchParams.get('where')).toBe("UPPER(SITUS_ADDRESS) LIKE '%TOBER MORY DROP TABLE%'");
   });
 
-  test('returns null (not []) on an HTTP error so failure is distinguishable', async () => {
+  test('returns null (not answered-empty) on an HTTP error so failure is distinguishable', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503 });
 
     expect(await queryStreetSitusAddresses('Manatee', 'TOBERMORY')).toBeNull();
@@ -138,6 +199,39 @@ describe('queryStreetSitusAddresses', () => {
 
     expect(await queryStreetSitusAddresses('Broward', 'TOBERMORY')).toBeNull();
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('surfaces the ArcGIS page-cap flag as truncated', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        exceededTransferLimit: true,
+        features: [{ attributes: { SITUS_ADDRESS: '100 TOBERMORY WAY' } }],
+      }),
+    });
+
+    const out = await queryStreetSitusAddresses('Manatee', 'TOBERMORY');
+
+    expect(out).toEqual({ situs: ['100 TOBERMORY WAY'], truncated: true });
+  });
+
+  test('Charlotte queries and extracts BOTH address fields', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        features: [
+          { attributes: { FullPropertyAddress: null, propertyaddress: '200 HARBOR BLVD' } },
+          { attributes: { FullPropertyAddress: '204 HARBOR BLVD', propertyaddress: null } },
+        ],
+      }),
+    });
+
+    const out = await queryStreetSitusAddresses('Charlotte', 'HARBOR');
+
+    const url = new URL(global.fetch.mock.calls[0][0]);
+    expect(url.searchParams.get('where'))
+      .toBe("UPPER(FullPropertyAddress) LIKE '%HARBOR%' OR UPPER(propertyaddress) LIKE '%HARBOR%'");
+    expect(out.situs).toEqual(['200 HARBOR BLVD', '204 HARBOR BLVD']);
   });
 });
 

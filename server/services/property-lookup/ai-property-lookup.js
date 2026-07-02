@@ -1676,6 +1676,28 @@ function escapeAuditRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Trailing unit designator + its value ("APT 4", "UNIT B", "# 12", "STE 200",
+// possibly before a trailing directional) — must come off the street line
+// before the roll query, or "MAIN ST APT 4" searches for a street that can't
+// exist and a valid address reads as street-not-found. Suffix list mirrors
+// removeStreetSuffix; designators are the USPS secondary-unit set we see in
+// typed/spoken addresses.
+const AUDIT_UNIT_DESIGNATOR_RE = /\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM|FL|#)\s*#?\s*[A-Z0-9-]+\s*$/i;
+function stripUnitDesignators(street) {
+  let s = String(street || '').trim();
+  // Peel repeatedly — "STE 200 BLDG C" carries two designators.
+  for (let i = 0; i < 3; i += 1) {
+    const next = s.replace(AUDIT_UNIT_DESIGNATOR_RE, '').trim();
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+}
+
+// The street suffix alternation shared by the audit's relaxed matcher — keep
+// in sync with removeStreetSuffix above.
+const AUDIT_SUFFIX_ALT = '(?:AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)';
+
 // Which county rolls could vouch for this address — geocoded county first
 // (mirrors lookupPropertyFromCountyRecords' ordering), then any county whose
 // zip/city gate matches the raw address. Multi-county zips (Englewood) get
@@ -1719,7 +1741,9 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     const m = /^(\d+)\s+(.{3,})$/.exec(street || '');
     if (!m) return null;
     const houseNumber = parseInt(m[1], 10);
-    const streetLabel = m[2].trim();
+    // "123 MAIN ST APT 4" must audit MAIN ST, not a street named MAIN ST APT 4.
+    const streetLabel = stripUnitDesignators(m[2].trim());
+    if (streetLabel.length < 3) return null;
     // Query WITHOUT the suffix for recall (counties abbreviate differently),
     // then extract numbers with the full street tokens for precision.
     const likeText = removeStreetSuffix(streetLabel) || streetLabel;
@@ -1727,40 +1751,67 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     if (!counties.length) return null;
 
     const strictPattern = new RegExp(`\\b(\\d+)\\s+${escapeAuditRegex(streetLabel)}\\b`, 'gi');
-    const relaxedPattern = new RegExp(`\\b(\\d+)\\s+${escapeAuditRegex(likeText)}\\b`, 'gi');
+    // The relaxed fallback (suffix mismatch between typed address and roll)
+    // still requires the street NAME to end there: at most one suffix token
+    // (+ optional directional) before a separator/end. Without that bound,
+    // "100 PINE WAY" would collect numbers from "100 PINE RIDGE WAY" and a
+    // missing street could masquerade as an exact match.
+    const relaxedPattern = new RegExp(
+      `\\b(\\d+)\\s+${escapeAuditRegex(likeText)}(?:\\s+${AUDIT_SUFFIX_ALT}(?:\\s+[NSEW])?)?(?=\\s*(?:[;,]|$))`,
+      'gi',
+    );
 
-    // queryStreetSitusAddresses returns [] for "roll answered, no matches"
-    // and null for a failure — a GIS outage must not read as "street
+    const collect = (situs, pattern) => {
+      const numbers = new Set();
+      for (const s of situs) {
+        for (const hit of String(s).matchAll(pattern)) numbers.add(parseInt(hit[1], 10));
+      }
+      return numbers;
+    };
+
+    // queryStreetSitusAddresses returns { situs: [] } for "roll answered, no
+    // matches" and null for a failure — a GIS outage must not read as "street
     // missing", so the street-not-found verdict below requires at least one
-    // county to have actually answered.
+    // county to have actually answered. ALL candidate counties are scanned
+    // before a missing-number verdict is returned: with a multi-county zip
+    // (Englewood) the number may simply live on the other county's roll.
     let answeredCounty = null;
+    let missingVerdict = null;
     for (const county of counties) {
-      const situs = await queryStreetSitusAddresses(county, likeText, options);
-      if (situs === null) continue;
+      const result = await queryStreetSitusAddresses(county, likeText, options);
+      if (result === null) continue;
       answeredCounty = answeredCounty || county;
-      if (!situs.length) continue;
+      if (!result.situs.length) continue;
 
-      const collect = (pattern) => {
-        const numbers = new Set();
-        for (const s of situs) {
-          for (const hit of String(s).matchAll(pattern)) numbers.add(parseInt(hit[1], 10));
-        }
-        return numbers;
-      };
-      let numbers = collect(strictPattern);
-      if (!numbers.size) numbers = collect(relaxedPattern);
+      let numbers = collect(result.situs, strictPattern);
+      if (!numbers.size) numbers = collect(result.situs, relaxedPattern);
       if (!numbers.size) continue;
 
-      return {
+      let hasExactMatch = numbers.has(houseNumber);
+      // The 2000-row page cap can hide the real number on a long street — a
+      // truncated "missing" is not evidence. Confirm with a targeted query
+      // for the exact house number before letting the verdict stand.
+      if (!hasExactMatch && result.truncated) {
+        const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
+        if (targeted === null) continue; // can't verify → no verdict from this county
+        if (collect(targeted.situs, strictPattern).size || collect(targeted.situs, relaxedPattern).size) {
+          hasExactMatch = true;
+        }
+      }
+
+      const verdict = {
         county,
         houseNumber,
         streetLabel,
         streetExists: true,
-        hasExactMatch: numbers.has(houseNumber),
-        parcelCount: situs.length,
-        nearestNumbers: numbers.has(houseNumber) ? [] : nearestHouseNumbers(numbers, houseNumber),
+        hasExactMatch,
+        parcelCount: result.situs.length,
+        nearestNumbers: hasExactMatch ? [] : nearestHouseNumbers(numbers, houseNumber),
       };
+      if (hasExactMatch) return verdict;
+      missingVerdict = missingVerdict || verdict;
     }
+    if (missingVerdict) return missingVerdict;
     if (!answeredCounty) return null;
 
     // A serviced county answered but the street isn't on its roll — a

@@ -23,6 +23,7 @@ const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-
 const {
   attachFloodZoneToCachedLookup,
   attachPoolPermitsToCachedLookup,
+  attachAddressAuditToCachedLookup,
   applyVerifiedOverrides,
   getCachedLookup,
   getVerifiedOverrides,
@@ -156,6 +157,23 @@ async function performPropertyLookup(address, options = {}) {
         if (permits) {
           cached.property_record._poolPermits = permits;
           await attachPoolPermitsToCachedLookup(address, permits);
+        }
+      }
+      // House-number-audit backfill, same pattern: record-bearing rows cached
+      // before the audit shipped have no _addressAudit key, so the panel's
+      // typo hint would stay dark until the 180-day TTL. Audit once on hit
+      // (county gates resolve from the raw address zip/city — no geocode on
+      // this path), attach, persist. A null audit (GIS failure) is NOT
+      // persisted — it simply retries next hit.
+      if (
+        cached.property_record
+        && cached.property_record._addressAudit === undefined
+        && !hasCountyEvidence(cached.property_record)
+      ) {
+        const audit = await auditAddressHouseNumber(address, null).catch(() => null);
+        if (audit) {
+          cached.property_record._addressAudit = audit;
+          await attachAddressAuditToCachedLookup(address, audit);
         }
       }
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);

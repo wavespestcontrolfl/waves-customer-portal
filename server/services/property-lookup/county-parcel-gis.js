@@ -398,31 +398,36 @@ async function lookupCountyParcelByPoint(lat, lng, options = {}) {
   return null;
 }
 
-// Situs-address field per county for street-level roll queries (the
+// Situs-address field(s) per county for street-level roll queries (the
 // house-number audit in ai-property-lookup). Same layers as the
 // point-in-polygon path above, so availability and casing stay in lockstep.
+// Charlotte populates either FullPropertyAddress or the lowercase fallback —
+// mirror the parser's dual-field read or fallback-only parcels vanish.
 const SITUS_QUERY_FIELDS = {
-  Manatee: 'SITUS_ADDRESS',
-  Sarasota: 'fulladdress',
-  Charlotte: 'FullPropertyAddress',
+  Manatee: ['SITUS_ADDRESS'],
+  Sarasota: ['fulladdress'],
+  Charlotte: ['FullPropertyAddress', 'propertyaddress'],
 };
 
 // All situs strings on the county roll whose address contains the given
 // street text ("TOBERMORY" → every parcel on Tobermory Way, including
-// multi-situs paired-villa rows). Fail-open null on error/timeout — the audit
-// is a diagnostic hint, never worth sinking a lookup for. The street text is
-// stripped to [A-Z0-9 ] before interpolation, so no quoting is reachable.
+// multi-situs paired-villa rows). Returns { situs, truncated } — truncated
+// mirrors the ArcGIS exceededTransferLimit flag so the caller knows a "number
+// missing" verdict could be an artifact of the page cap on a long street.
+// Fail-open null on error/timeout — the audit is a diagnostic hint, never
+// worth sinking a lookup for. The street text is stripped to [A-Z0-9 ] before
+// interpolation, so no quoting is reachable.
 async function queryStreetSitusAddresses(county, streetText, options = {}) {
   if (isDisabled()) return null;
   const layer = COUNTY_LAYERS[county];
-  const field = SITUS_QUERY_FIELDS[county];
+  const fields = SITUS_QUERY_FIELDS[county];
   const text = String(streetText || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!layer || !field || text.length < 3) return null;
+  if (!layer || !fields || text.length < 3) return null;
 
   const params = new URLSearchParams({
     f: 'json',
-    where: `UPPER(${field}) LIKE '%${text}%'`,
-    outFields: field,
+    where: fields.map((f) => `UPPER(${f}) LIKE '%${text}%'`).join(' OR '),
+    outFields: fields.join(','),
     returnGeometry: 'false',
     resultRecordCount: '2000',
   });
@@ -437,12 +442,16 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
     if (data?.error) throw new Error(`${county} street GIS error: ${data.error.message || data.error.code}`);
     const features = Array.isArray(data?.features) ? data.features : [];
     const situs = features
-      .map((f) => cleanStr(ciAttr(f.attributes || {})(field)))
+      .map((f) => {
+        const g = ciAttr(f.attributes || {});
+        return fields.map((field) => cleanStr(g(field))).filter(Boolean).join(';');
+      })
       .filter(Boolean);
+    const truncated = !!data?.exceededTransferLimit;
     logger.info('[county-parcel-gis] street situs query', {
-      county, matches: situs.length, elapsedMs: Date.now() - t0,
+      county, matches: situs.length, truncated, elapsedMs: Date.now() - t0,
     });
-    return situs;
+    return { situs, truncated };
   } catch (err) {
     const aborted = err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
     // County + error only — no street/address values in logs (PII rule).

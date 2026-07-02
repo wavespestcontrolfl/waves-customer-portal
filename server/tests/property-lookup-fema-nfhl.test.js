@@ -15,6 +15,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/property-lookup/lookup-cache', () => ({
   attachFloodZoneToCachedLookup: jest.fn(async () => {}),
+  attachAddressAuditToCachedLookup: jest.fn(async () => {}),
   applyVerifiedOverrides: jest.fn((record) => record),
   getCachedLookup: jest.fn(async () => null),
   getVerifiedOverrides: jest.fn(async () => null),
@@ -193,6 +194,10 @@ describe('cache-hit backfill (#1698 review P2)', () => {
   const cachedRow = (recordOverrides = {}) => ({
     property_record: {
       formattedAddress: '123 Test St, Bradenton, FL',
+      // Pin the audit key so the house-number-audit backfill (its own suite:
+      // property-lookup-address-audit.test.js) never fires inside these
+      // FEMA-focused fixtures.
+      _addressAudit: null,
       squareFootage: 1800,
       lotSize: 9000,
       stories: 1,
