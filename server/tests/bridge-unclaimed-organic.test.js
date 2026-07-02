@@ -134,12 +134,22 @@ describe('scheduler wiring', () => {
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
 
-  test('daily 6:25am ET cron (after the 6:20 bridge claim), serialized, default-ON with opt-out + window env', () => {
-    expect(src).toMatch(/cron\.schedule\('25 6 \* \* \*'/); // AFTER the 6:20 bridge claim cron
-    expect(src).toMatch(/runExclusive\('bridge-unclaimed-organic'/);
-    expect(src).toMatch(/attributeUnclaimedBridgeLeads/);
-    expect(src).toMatch(/BRIDGE_UNCLAIMED_ORGANIC_DISABLED/);
-    expect(src).toMatch(/BRIDGE_UNCLAIMED_ORGANIC_DAYS/);
+  test('fallback runs INSIDE the 6:20 bridge cron, after applyBridge, under one shared lease', () => {
+    // One cron body, one runExclusive: the fallback can never run while a
+    // bridge scan is mid-claim, and a deploy-overlap instance skips the pair
+    // atomically — never the fallback without the bridge.
+    expect(src).toMatch(/runExclusive\('google-call-bridge-organic'/);
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 3000);
+    const bridgeIdx = block.indexOf('applyBridge');
+    const sweepIdx = block.indexOf('attributeUnclaimedBridgeLeads');
+    expect(bridgeIdx).toBeGreaterThan(-1);
+    expect(sweepIdx).toBeGreaterThan(bridgeIdx); // strict order: claim, then fallback
+    expect(block).toMatch(/BRIDGE_UNCLAIMED_ORGANIC_DISABLED/);
+    expect(block).toMatch(/BRIDGE_UNCLAIMED_ORGANIC_DAYS/);
+    // No separate fallback cron remains: exactly one require + one call site,
+    // both inside this block.
+    expect(src.match(/attributeUnclaimedBridgeLeads/g)).toHaveLength(2);
+    expect(block.match(/attributeUnclaimedBridgeLeads/g)).toHaveLength(2);
   });
 
   test('selection is limited to CALL leads (web leads got their funnel row at webhook time)', () => {
