@@ -291,6 +291,147 @@ function renderSocialCardSvg(input = {}, logoDataUri = null) {
   return renderCampaignSvg(input, logoDataUri);
 }
 
+// ── Photo cards (creative engine) ────────────────────────────────────────────
+// An AI-generated photoreal scene is the full-bleed background; the brand layer
+// (scrim, eyebrow, logo chip, headline, gold CTA, footer) is composited over it
+// deterministically — so the photo changes every day but the logo, palette, and
+// CTA can never come out AI-mangled. Overlays are TRANSPARENT SVGs (no ground
+// rect) rasterized onto the photo by sharp in renderPhotoCardJpegBase64.
+
+// Shared photo-card chrome: legibility gradients (top + bottom), eyebrow pill,
+// logo on a white chip (the mark needs solid backing on arbitrary photos), and
+// the footer domain. Returns { svg, box } like chrome().
+function photoChrome({ W, H, eyebrowLabel, eyebrowFill, logoDataUri }) {
+  const padX = Math.round(W * 0.052);
+  const chipSize = Math.round(H * 0.115);
+  const chipPad = 14;
+  const chipX = W - padX - chipSize - chipPad * 2;
+  const chipY = Math.round(H * 0.038);
+  const logo = logoDataUri
+    ? `<rect x="${chipX}" y="${chipY}" width="${chipSize + chipPad * 2}" height="${chipSize + chipPad * 2}" rx="20" fill="${COLORS.white}" opacity="0.94"/>
+       <image x="${chipX + chipPad}" y="${chipY + chipPad}" width="${chipSize}" height="${chipSize}" href="${logoDataUri}" preserveAspectRatio="xMidYMid meet"/>`
+    : `<text x="${W - padX}" y="${chipY + 52}" text-anchor="end" font-family="${FONTS.display}" font-size="46" font-weight="800" fill="${COLORS.white}" letter-spacing="1">WAVES</text>`;
+
+  const svg = `
+    <defs>
+      <linearGradient id="scrimBottom" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="${COLORS.navy}" stop-opacity="0"/>
+        <stop offset="0.42" stop-color="${COLORS.navy}" stop-opacity="0.62"/>
+        <stop offset="1" stop-color="${COLORS.navy}" stop-opacity="0.94"/>
+      </linearGradient>
+      <linearGradient id="scrimTop" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="${COLORS.navy}" stop-opacity="0.5"/>
+        <stop offset="1" stop-color="${COLORS.navy}" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <rect x="0" y="${Math.round(H * 0.42)}" width="${W}" height="${Math.round(H * 0.58)}" fill="url(#scrimBottom)"/>
+    <rect x="0" y="0" width="${W}" height="${Math.round(H * 0.2)}" fill="url(#scrimTop)"/>
+    ${eyebrow(eyebrowLabel, padX, Math.round(H * 0.045), eyebrowFill)}
+    ${logo}
+    <text x="${padX}" y="${H - Math.round(H * 0.037)}" font-family="${FONTS.body}" font-size="${Math.round(W * 0.02)}" font-weight="700" fill="${COLORS.white}" opacity="0.95">wavespestcontrol.com</text>
+  `;
+  return { svg, box: { padX, padR: W - padX } };
+}
+
+function renderPhotoCampaignOverlaySvg(input = {}) {
+  const { w: W, h: H } = resolveSize(input.platform);
+  const city = cleanText(input.city || input.location, 60);
+  const topic = cleanText(input.topic || input.title, 150) || 'Seasonal pest pressure';
+  const service = cleanText(input.service, 70);
+  const cta = cleanText(input.cta || 'Schedule an inspection', 40);
+
+  const { svg: frame, box } = photoChrome({
+    W, H,
+    eyebrowLabel: city ? `${city} · local pest pressure` : 'Local pest pressure',
+    eyebrowFill: COLORS.wavesBlue,
+    logoDataUri: input.logoDataUri,
+  });
+
+  const availW = box.padR - box.padX;
+  const titleSize = topic.length > 38 ? Math.round(W * 0.052) : Math.round(W * 0.062);
+  const titleLines = wrapText(topic, fitChars(availW, titleSize, 0.60), 3);
+  // Bottom-anchor the text stack: footer < CTA < headline < service caption.
+  const ctaH = 76;
+  const ctaY = H - Math.round(H * 0.075) - ctaH;
+  const titleBlockH = titleLines.length * titleSize * 1.08;
+  const titleY = ctaY - 38 - titleBlockH + titleSize;
+  const captionY = titleY - titleSize - 22;
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+      ${frame}
+      ${service ? `<text x="${box.padX}" y="${captionY}" font-family="${FONTS.heading}" font-size="${Math.round(W * 0.021)}" font-weight="700" fill="${COLORS.gold}" letter-spacing="2">${escapeXml(service.toUpperCase())}</text>` : ''}
+      ${textBlock(titleLines, { x: box.padX, y: titleY, size: titleSize, weight: 800, fill: COLORS.white, family: FONTS.display, lineHeight: 1.08 })}
+      ${ctaButton(cta, box.padX, ctaY)}
+      ${waveMotif(box.padR - 70, ctaY + 30, W / 1080)}
+    </svg>
+  `;
+}
+
+function renderPhotoReviewOverlaySvg(input = {}) {
+  const { w: W, h: H } = resolveSize(input.platform);
+  const city = cleanText(input.city || input.location, 60);
+  const reviewer = cleanText(input.reviewerDisplayName || input.reviewer || `Waves customer${city ? `, ${city}` : ''}`, 100);
+  const excerpt = cleanText(input.excerpt || input.reviewText, 300) || 'Helpful, professional, and local service.';
+
+  const { svg: frame, box } = photoChrome({
+    W, H,
+    eyebrowLabel: '5-star Google review',
+    eyebrowFill: COLORS.green,
+    logoDataUri: input.logoDataUri,
+  });
+
+  const availW = box.padR - box.padX;
+  const quoteSize = excerpt.length > 160 ? Math.round(W * 0.036) : Math.round(W * 0.043);
+  const quoteLines = wrapText(`“${excerpt}”`, fitChars(availW, quoteSize, 0.56), 5);
+  // Bottom-anchor: footer < caption < reviewer < quote < stars.
+  const reviewerY = H - Math.round(H * 0.078) - 34;
+  const captionY = reviewerY + 32;
+  const quoteBlockH = quoteLines.length * quoteSize * 1.28;
+  const quoteY = reviewerY - 44 - quoteBlockH + quoteSize;
+  const starsY = quoteY - quoteSize - 30;
+  const stars = [0, 1, 2, 3, 4].map((i) => (
+    `<path transform="translate(${box.padX + 20 + i * 48} ${starsY})" d="M0 -18 L5.3 -5.5 L18.6 -5.5 L7.9 2.9 L12 15.7 L0 7.9 L-12 15.7 L-7.9 2.9 L-18.6 -5.5 L-5.3 -5.5 Z" fill="${COLORS.star}"/>`
+  )).join('');
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+      ${frame}
+      ${stars}
+      ${textBlock(quoteLines, { x: box.padX, y: quoteY, size: quoteSize, weight: 700, fill: COLORS.white, family: FONTS.heading, lineHeight: 1.28 })}
+      <text x="${box.padX}" y="${reviewerY}" font-family="${FONTS.display}" font-size="${Math.round(W * 0.028)}" font-weight="800" fill="${COLORS.gold}" letter-spacing="0.5">${escapeXml(reviewer)}</text>
+      <text x="${box.padX}" y="${captionY}" font-family="${FONTS.body}" font-size="${Math.round(W * 0.017)}" font-weight="600" fill="${COLORS.white}" opacity="0.85">Verified Google review · privacy-safe display</text>
+    </svg>
+  `;
+}
+
+function renderPhotoOverlaySvg(input = {}, logoDataUri = null) {
+  const withLogo = { ...input, logoDataUri };
+  if (input.variant === 'photo_review') return renderPhotoReviewOverlaySvg(withLogo);
+  return renderPhotoCampaignOverlaySvg(withLogo);
+}
+
+// Composite an AI scene (base64 image bytes) under the brand overlay and return
+// JPEG base64. The scene is cover-cropped to the platform size ('attention'
+// keeps the salient region when squaring/cropping to 4:3), so ONE generated 1:1
+// scene serves both the square and GBP renditions.
+async function renderPhotoCardJpegBase64(input = {}, opts = {}) {
+  const sharp = require('sharp');
+  const platform = opts.platform || input.platform;
+  const { w: W, h: H } = resolveSize(platform);
+  if (!opts.backgroundBase64) throw new Error('renderPhotoCardJpegBase64 requires backgroundBase64');
+  const logoDataUri = await getLogoDataUri();
+  const overlaySvg = renderPhotoOverlaySvg({ ...input, platform }, logoDataUri);
+  const background = await sharp(Buffer.from(opts.backgroundBase64, 'base64'))
+    .resize(W, H, { fit: 'cover', position: sharp.strategy.attention })
+    .toBuffer();
+  const buffer = await sharp(background)
+    .composite([{ input: Buffer.from(overlaySvg) }])
+    .jpeg({ quality: 84, mozjpeg: true, progressive: true, chromaSubsampling: '4:2:0' })
+    .toBuffer();
+  return buffer.toString('base64');
+}
+
 // Load + downscale the brand logo once, cached. librsvg renders <image> data
 // URIs reliably (unlike @font-face), so the real mark always appears.
 let _logoPromise = null;
@@ -337,6 +478,8 @@ module.exports = {
   COLORS,
   PLATFORM_SIZES,
   filenameSlug,
+  renderPhotoCardJpegBase64,
+  renderPhotoOverlaySvg,
   renderSocialCardJpegBase64,
   renderSocialCardSvg,
   wrapText,

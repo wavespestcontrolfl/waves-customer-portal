@@ -1078,7 +1078,10 @@ const SocialMediaService = {
   /**
    * Publish content to all configured platforms.
    */
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, customContent, channels, gbpLocationIds, noAiImage = false }) {
+  // postId: update that existing social_media_posts row (a draft being approved
+  // from the studio queue) with the publish outcome instead of inserting a new
+  // history row — one row follows the post through its draft → published life.
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -1366,7 +1369,20 @@ const SocialMediaService = {
     const isAutoSource = autoSources.includes(postRow.source_type);
 
     try {
-      if (isAutoSource) {
+      if (postId) {
+        // Approval-queue publish: fold the outcome into the existing draft row
+        // (status, per-platform results, final image incl. the admin's chosen
+        // variant). Falls back to an insert if the draft row vanished, so the
+        // audit trail never loses a publish.
+        const updated = await db('social_media_posts')
+          .where('id', postId)
+          .update({
+            ...updateCols,
+            image_url: postRow.image_url,
+            ...(postStatus === 'published' ? { published_at: new Date() } : {}),
+          });
+        if (!updated) await db('social_media_posts').insert(postRow);
+      } else if (isAutoSource) {
         const existingByUrl = normalizedLink
           ? await db('social_media_posts').where('source_url', normalizedLink).whereIn('source_type', autoSources).first()
           : null;
