@@ -57,6 +57,12 @@ describe('scrubPriceTalk — the no-price invariant', () => {
     'Somewhere around ninety-nine per year.',
     'Como cuarenta al mes.',
     'Serían treinta y cinco por visita.',
+    // article/each/every cadence connectors (Codex round 4 P1)
+    'That runs 45 a month.',
+    'Roughly forty five a month there.',
+    'About 25 each visit.',
+    'Around fifty every treatment.',
+    'Como cuarenta cada mes.',
   ])('replaces a reply containing a price: %s', (reply) => {
     const out = scrubPriceTalk({ ...base, reply });
     expect(out.reply).not.toMatch(PRICE_TALK_RE);
@@ -71,6 +77,8 @@ describe('scrubPriceTalk — the no-price invariant', () => {
     'One of our techs will confirm measurements on the first visit.',
     'Tratamos su casa 12 veces al año, con re-tratamientos gratis.',
     'La visita dura unos 30 minutos.',
+    'The barrier is guaranteed for 12 months.',
+    'We come back once a month during mosquito season.',
   ])('leaves price-free replies untouched: %s', (reply) => {
     expect(scrubPriceTalk({ ...base, reply }).reply).toBe(reply);
   });
@@ -108,6 +116,31 @@ describe('normalizeIntakeResult', () => {
   test('markdown is stripped from the reply', () => {
     const out = normalizeIntakeResult({ reply: '**Roof rats** are [common](http://x.com) here.\n- seal entry points', intent: 'question' }, 'openai');
     expect(out.reply).toBe('Roof rats are common here. seal entry points');
+  });
+
+  test.each(['emergency', 'existing_customer'])(
+    '%s intent forces the quote CTA off even if the provider set it', (intent) => {
+      const out = normalizeIntakeResult({
+        reply: 'Please call us right away.',
+        intent,
+        service_keys: ['pest', 'mosquito'],
+        ready_for_quote: true,
+      }, 'openai');
+      expect(out.intent).toBe(intent);
+      expect(out.ready_for_quote).toBe(false);
+      expect(out.service_keys).toEqual([]);
+    },
+  );
+
+  test('emergency intent beats the price-scrub CTA force', () => {
+    const out = normalizeIntakeResult({
+      reply: 'Plans are $45 a month but call 911 first.',
+      intent: 'emergency',
+      ready_for_quote: false,
+    }, 'openai');
+    expect(out.reply).not.toMatch(PRICE_TALK_RE);
+    expect(out.ready_for_quote).toBe(false);
+    expect(out.service_keys).toEqual([]);
   });
 
   test('missing/empty reply returns null so the caller falls down the ladder', () => {

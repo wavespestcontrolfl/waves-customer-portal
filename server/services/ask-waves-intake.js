@@ -69,8 +69,8 @@ const PRICE_TALK_RE = new RegExp(
   '\\$\\s*\\d' // $45, $ 100
   + `|\\b${EN_AMOUNT}\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks
   + `|\\b${ES_AMOUNT}\\s+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, cuarenta y cinco dólares
-  + `|\\b${EN_AMOUNT}\\s*(?:\\/|per\\s+)(?:mo\\b|month|visit|treatment|application|year|yr\\b)` // 45/mo, forty five per month
-  + `|\\b${ES_AMOUNT}\\s+(?:al|por)\\s+(?:mes|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b`, // 45 al mes, cuarenta al mes
+  + `|\\b${EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|visit|treatment|application|year|yr\\b)` // 45/mo, forty five per month, 45 a month, 45 each visit
+  + `|\\b${ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b`, // 45 al mes, cuarenta cada mes
   'i',
 );
 const PRICE_REDIRECT_REPLY = `Exact pricing comes straight from your property details — square footage, lot size, the works — so I never have to guess. Tap "Get my price" and I'll pull your real number in about 20 seconds, or call us at ${COMPANY.phone}.`;
@@ -192,13 +192,21 @@ function normalizeIntakeResult(json, source) {
   const serviceKeys = Array.isArray(json.service_keys)
     ? [...new Set(json.service_keys.filter((k) => QUOTABLE_KEYS.has(k)))]
     : [];
-  return scrubPriceTalk({
+  const result = scrubPriceTalk({
     reply,
     intent,
     service_keys: serviceKeys,
     ready_for_quote: json.ready_for_quote === true,
     source,
   });
+  // Intent-consistent CTA, enforced in code not just the prompt (and AFTER the
+  // price scrub, which forces ready_for_quote on): a provider that classifies
+  // emergency or existing_customer must never also steer into the quote flow.
+  if (result.intent === 'emergency' || result.intent === 'existing_customer') {
+    result.ready_for_quote = false;
+    result.service_keys = [];
+  }
+  return result;
 }
 
 // Best-effort conversation log into the existing assistant tables so Ask Waves

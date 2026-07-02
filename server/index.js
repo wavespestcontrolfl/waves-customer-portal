@@ -252,15 +252,20 @@ const paidEstimatorDailyLimiter = rateLimit({
 // then Anthropic fallback), so the 30/15min in-route limiter gets a daily
 // ceiling on top — same spend rationale as paidEstimatorDailyLimiter, higher
 // cap because a real quote conversation is many turns while an estimator
-// session is one lookup. Counts ONLY POST /message: GET /status is a cheap,
-// LLM-free gate check the island fires on page view — it must not burn the
-// paid budget for a shared/NAT'd IP and lock out later real chat turns.
+// session is one lookup. Counts ONLY requests that can actually reach the
+// model: POST /message with the gate on. GET /status (page-view gate check),
+// non-POST scanner probes of /message, and dark-launch probes while
+// GATE_ASK_WAVES is off all get 503/404s without an LLM call — none of them
+// may burn the paid budget for a shared/NAT'd IP and 429 later real turns.
 const askWavesDailyLimiter = rateLimit({
   windowMs: 24 * 60 * 60 * 1000, // 24 hours
   max: 120,
   message: { error: 'Daily limit reached — call (941) 297-5749 and a real person will help right away.' },
   keyGenerator: rateLimitKey,
-  skip: (req) => process.env.NODE_ENV !== 'production' || !/^\/message\/?$/.test(req.path),
+  skip: (req) => process.env.NODE_ENV !== 'production'
+    || req.method !== 'POST'
+    || !/^\/message\/?$/.test(req.path)
+    || !require('./config/feature-gates').isEnabled('askWaves'),
 });
 
 // Body parsing

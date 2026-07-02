@@ -25,7 +25,9 @@ const { processIntakeMessage, _internals } = require('../services/ask-waves-inta
 // conversation is several turns), but stays tight enough that a scraper
 // burning LLM calls gets cut off fast. Keyed by the shared rateLimitKey
 // (/64-collapsed IPv6) so one client can't rotate subnet addresses past the
-// throttle straight into the daily paid-LLM cap.
+// throttle straight into the daily paid-LLM cap. Skipped while the gate is
+// off: dark-launch probes must get the documented 503 (not a 429) and must
+// not pre-spend the 15-minute bucket for the moment the gate flips on.
 const intakeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
@@ -33,6 +35,7 @@ const intakeLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many messages — please call (941) 297-5749 and we will help right away.' },
   keyGenerator: rateLimitKey,
+  skip: () => !isEnabled('askWaves'),
 });
 
 router.get('/status', (req, res) => {
