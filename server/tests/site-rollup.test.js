@@ -146,6 +146,7 @@ describe('getRollup', () => {
   function thenableBuilder(rows) {
     const builder = {
       where: jest.fn(() => builder),
+      whereNull: jest.fn(() => builder),
       leftJoin: jest.fn(() => builder),
       groupBy: jest.fn(() => builder),
       select: jest.fn(() => builder),

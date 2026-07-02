@@ -202,12 +202,18 @@ function createFakeDb(seed = {}) {
 
   function table(name) {
     const wheres = [];
+    const nullColumns = [];
     let updatePayload = null;
     let insertPayload = null;
     let conflictKey = null;
     let lastUpdatedRows = [];
-    const rowMatches = (row) => wheres.every(([key, value]) => row[key] === value);
+    const rowMatches = (row) => wheres.every(([key, value]) => row[key] === value)
+      && nullColumns.every((column) => row[column] === null || row[column] === undefined);
     const query = {
+      whereNull(column) {
+        nullColumns.push(column);
+        return this;
+      },
       where(key, value) {
         if (typeof key === 'object') {
           for (const [objectKey, objectValue] of Object.entries(key)) wheres.push([objectKey, objectValue]);

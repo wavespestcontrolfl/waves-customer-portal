@@ -464,13 +464,14 @@ async function resolveEstimateContext({ customer, phone, body }) {
 
 async function resolveLeadContext({ customer, phone, estimate }) {
   if (estimate?.id) {
-    const lead = await db('leads').where({ estimate_id: estimate.id }).orderBy('created_at', 'desc').first();
+    const lead = await db('leads').where({ estimate_id: estimate.id }).whereNull('deleted_at').orderBy('created_at', 'desc').first();
     if (lead) return lead;
   }
 
   if (customer?.id) {
     const lead = await db('leads')
       .where({ customer_id: customer.id })
+      .whereNull('deleted_at')
       .whereIn('status', OPEN_LEAD_STATUSES)
       .orderBy('created_at', 'desc')
       .first();
@@ -480,6 +481,7 @@ async function resolveLeadContext({ customer, phone, estimate }) {
   const last10 = normalizePhoneLast10(phone);
   if (last10) {
     return db('leads')
+      .whereNull('deleted_at')
       .whereIn('status', OPEN_LEAD_STATUSES)
       .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
       .orderBy('created_at', 'desc')

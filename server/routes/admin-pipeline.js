@@ -575,6 +575,7 @@ async function getOpportunityHistory({
         .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
         .select('leads.*', database.raw('lead_sources.name as source_name'))
         .where('leads.id', cleanLeadId)
+        .whereNull('leads.deleted_at')
         .first()
       : null,
     cleanEstimateId
@@ -729,6 +730,7 @@ async function getLinkCandidateLeads({ database = db, estimateId }) {
   let query = database('leads')
     .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
     .select('leads.*', 'lead_sources.name as source_name')
+    .whereNull('leads.deleted_at')
     .limit(10);
 
   query = query.where(function () {
@@ -788,7 +790,7 @@ async function linkOpportunityRecords({
   }
 
   return database.transaction(async (trx) => {
-    const lead = await trx('leads').where('id', cleanLeadId).first();
+    const lead = await trx('leads').where('id', cleanLeadId).whereNull('deleted_at').first();
     if (!lead) {
       const err = new Error('Lead not found');
       err.status = 404;
@@ -872,7 +874,7 @@ async function dismissDuplicateRisk({
     }
 
     if (cleanLeadId) {
-      const lead = await trx('leads').where('id', cleanLeadId).first();
+      const lead = await trx('leads').where('id', cleanLeadId).whereNull('deleted_at').first();
       if (!lead) {
         const err = new Error('Lead not found');
         err.status = 404;
@@ -970,7 +972,7 @@ async function reopenReviewedDuplicate({
 
   if (cleanAction === 'linked') {
     return database.transaction(async (trx) => {
-      const lead = await trx('leads').where('id', cleanLeadId).first();
+      const lead = await trx('leads').where('id', cleanLeadId).whereNull('deleted_at').first();
       if (!lead) {
         const err = new Error('Lead not found');
         err.status = 404;
@@ -1108,6 +1110,7 @@ async function fetchLeads({ search, source, ownerId }) {
       'lead_sources.channel as source_channel',
       db.raw('technicians.name as assigned_name'),
     )
+    .whereNull('leads.deleted_at')
     .orderBy('leads.first_contact_at', 'desc')
     .limit(MAX_CANDIDATES + 1);
 

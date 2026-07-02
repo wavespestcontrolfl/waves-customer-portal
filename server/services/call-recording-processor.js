@@ -2536,7 +2536,8 @@ const CallRecordingProcessor = {
         // where it would not surface. The customer-attached path is unchanged —
         // its shouldCreateCallLeadForCustomer gate already limits it to
         // open-lead / newly-created customers.
-        let existingLeadQuery = phone ? db('leads').where('phone', phone) : null;
+        // Soft-deleted leads never absorb a new call — a fresh lead is made.
+        let existingLeadQuery = phone ? db('leads').where('phone', phone).whereNull('deleted_at') : null;
         if (existingLeadQuery && workableUnnamedLead) {
           existingLeadQuery = existingLeadQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
         }

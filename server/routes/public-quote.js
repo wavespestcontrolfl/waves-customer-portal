@@ -745,6 +745,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (fbp) updateFields.fbp = fbp;
       const rows = await db('leads')
         .where({ id: leadId })
+        .whereNull('deleted_at')
         .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
         .update(updateFields)
         .returning(['id', 'lead_source_id']);
@@ -1341,6 +1342,7 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     // email in the same session). Avoids any-id-overwrite abuse.
     const lead = await db('leads')
       .where({ id: leadId })
+      .whereNull('deleted_at')
       .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
       .first();
     if (!lead) return res.status(404).json({ error: 'Lead not found.' });

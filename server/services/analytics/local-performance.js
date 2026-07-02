@@ -208,6 +208,7 @@ async function getGbpRows(since, endDate) {
 async function getCrmRows(since, endDate) {
   try {
     const rows = await db('leads')
+      .whereNull('leads.deleted_at')
       .where('leads.first_contact_at', '>=', since)
       .where('leads.first_contact_at', '<', addDateStringDays(endDate, 1))
       .leftJoin('lead_sources as ls', 'leads.lead_source_id', 'ls.id')
