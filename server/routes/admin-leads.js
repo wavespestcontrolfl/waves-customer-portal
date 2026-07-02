@@ -1196,13 +1196,21 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
 
       // Mark the lead converted (mirrors leadAttribution.markConverted, but on the
       // same transaction so the conversion can't commit without the appointment).
-      await trx('leads').where('id', req.params.id).update({
+      // Re-gated on deleted_at inside the transaction: the pre-transaction read
+      // can race a concurrent soft delete, and a deleted lead must not book —
+      // 0 rows updated rolls the whole booking back.
+      const converted = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update({
         status: 'won',
         customer_id: customerId,
         converted_at: new Date(),
         is_qualified: true,
         updated_at: new Date(),
       });
+      if (!converted) {
+        const gone = new Error('Lead was deleted while booking — appointment not created');
+        gone.status = 409;
+        throw gone;
+      }
       // Attach the lead's quote to this customer (same txn) so it becomes a
       // customer estimate visible in the New Appointment "Estimate source".
       // Best-effort — a backfill miss must not fail the booking.

@@ -654,11 +654,16 @@ export function LeadsSection() {
     // single source name, scoped to the period window the panel was showing.
     // Initialized from the URL so the first load is already scoped.
     const drill = readSourceDrillParams();
+    // A ?lead= deep link must start UNFILTERED: the target's status is
+    // unknown before the list loads, and loadLeads has no stale-response
+    // guard — an initial open-filtered fetch could resolve after the
+    // widened one and hide a closed lead's expanded row.
+    const leadDeepLink = new URLSearchParams(window.location.search).get("lead");
     return {
       // The pipeline table defaults to OPEN statuses (new / contacted /
       // estimate sent / estimate viewed) — the server expands `status=open`.
       // A dashboard drill overrides the default (see readSourceDrillParams).
-      status: drill ? drill.status : "open",
+      status: leadDeepLink ? "" : drill ? drill.status : "open",
       search: "",
       sort: "first_contact_at",
       page: 1,
@@ -875,10 +880,9 @@ export function LeadsSection() {
     if (!leadId) return;
     setTab("pipeline");
     setPipelineView("table");
-    // The lead's status is unknown before the list loads, and the table's
-    // `open` default would hide a converted/closed lead's row (and with it
-    // the expanded detail this deep link exists to show) — load unfiltered.
-    setFilters((f) => (f.status ? { ...f, status: "", page: 1 } : f));
+    // The status filter already initialized to "" for lead deep-links (see
+    // the filters useState) so even the FIRST fetch is unfiltered and a
+    // closed lead's row can render its expanded detail.
     setActiveLead(leadId);
     loadLeadActivities(leadId);
   }, [setActiveLead, loadLeadActivities]);
