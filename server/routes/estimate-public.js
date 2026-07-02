@@ -11700,7 +11700,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   };
 }
 
-function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, commercialNoSlotAccept = false } = {}) {
+function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false } = {}) {
   if (quoteRequirement.quoteRequired) {
     return {
       mode: 'quote_required',
@@ -11723,6 +11723,18 @@ function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppoin
       mode: 'invoice_only',
       ctaLabel: 'Accept estimate',
       reason: null,
+    };
+  }
+  // A guarantee-only renewal with NO linked customer and NO customer phone
+  // can't accept online: accept and deposit-intent both reject an invoice-mode
+  // estimate they can't bill/deliver. Don't advertise an "Accept + send
+  // invoice" the server will refuse — route the customer to the office
+  // (there's still no visit, so a slot pick would be an equal dead end).
+  if (invoiceOnlyContactRequired) {
+    return {
+      mode: 'contact_office',
+      ctaLabel: 'Call Waves',
+      reason: 'invoice_contact_required',
     };
   }
   // A ranged narrow low-confidence commercial estimate has no self-servable
@@ -12293,10 +12305,16 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // precedence inside the contract — accepting against it works as-is.
     const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estimateDataForIntelligence);
     const effectiveInvoiceMode = estimate.bill_by_invoice === true || guaranteeOnlyAccept;
+    // Accept + deposit-intent reject an invoice-mode estimate with no linked
+    // customer and no customer phone (nothing to bill / deliver the invoice
+    // to) — an email-only renewal must not advertise an accept the server
+    // refuses. Contact-required renewals get the call-office contract.
+    const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
     const acceptance = buildEstimateAcceptanceContract({
       quoteRequirement,
       existingAppointment: linkedAppointment,
-      invoiceOnly: guaranteeOnlyAccept,
+      invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
+      invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
       commercialNoSlotAccept,
     });
     const intelligence = buildWaveGuardIntelligencePayload(

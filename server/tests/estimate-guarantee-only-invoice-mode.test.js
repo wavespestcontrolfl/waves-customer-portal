@@ -144,6 +144,27 @@ describe('buildEstimateAcceptanceContract invoice_only mode', () => {
     const contract = buildEstimateAcceptanceContract({ quoteRequirement: {} });
     expect(contract.mode).toBe('standard_slot_pick');
   });
+
+  test('email-only renewal (no billable contact) routes to the office instead of a dead-end accept', () => {
+    // Accept + deposit-intent reject an invoice-mode estimate with no linked
+    // customer and no phone — the contract must not advertise invoice-only.
+    const contract = buildEstimateAcceptanceContract({ quoteRequirement: {}, invoiceOnlyContactRequired: true });
+    expect(contract.mode).toBe('contact_office');
+    expect(contract.reason).toBe('invoice_contact_required');
+    expect(contract.ctaLabel).toBe('Call Waves');
+  });
+
+  test('quote_required and an existing linked appointment take precedence over contact_office', () => {
+    expect(buildEstimateAcceptanceContract({
+      quoteRequirement: { quoteRequired: true, reason: 'commercial_proposal' },
+      invoiceOnlyContactRequired: true,
+    }).mode).toBe('quote_required');
+    expect(buildEstimateAcceptanceContract({
+      quoteRequirement: {},
+      existingAppointment: { id: 'a1', scheduled_date: '2026-07-10', window_start: '09:00' },
+      invoiceOnlyContactRequired: true,
+    }).mode).toBe('existing_appointment');
+  });
 });
 
 describe('resolveDepositPolicy noVisit — plan-customer booking gate lifted for renewals', () => {

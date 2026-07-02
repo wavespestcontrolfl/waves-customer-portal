@@ -1116,6 +1116,17 @@ export function oneTimePriceCopy(breakdown = {}) {
   if (boraCareOnly) {
     return 'Bora-Care is a borate wood treatment applied to the measured attic and surface areas. It treats bare wood for termites, wood-boring beetles, and wood-decay fungi. Pay on the service day, no recurring schedule.';
   }
+  // A guarantee-only renewal is a 12-month re-entry warranty with NO service
+  // visit — it accepts through the payment-only invoice path, so the default
+  // "One visit, pay on service day" copy would contradict the "No appointment
+  // needed" acceptance card below it. Gated on guarantee-ONLY (mirrors the
+  // server's isRodentGuaranteeOnlyEstimate shape) so a bundled rodent job
+  // keeps the visit copy.
+  const rodentGuaranteeOnly = items.some((item) => item?.service === 'rodent_guarantee')
+    && items.every((item) => item?.service === 'rodent_guarantee' || isNonBillableBreakdownRow(item));
+  if (rodentGuaranteeOnly) {
+    return 'Annual rodent guarantee — 12-month re-entry warranty, renewable annually. No service visit to schedule: accept below and we send your invoice.';
+  }
   return 'One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pests return after this visit.';
 }
 
@@ -2118,10 +2129,14 @@ function AcceptanceModeCard({ acceptance }) {
   }
   const title = acceptance.mode === 'quote_required'
     ? 'This treatment needs a custom quote.'
-    : 'Waves will help schedule this estimate.';
+    : acceptance.mode === 'contact_office'
+      ? 'Call Waves to finish this renewal.'
+      : 'Waves will help schedule this estimate.';
   const body = acceptance.mode === 'inspection_request'
     ? 'This plan needs an inspection before a normal service slot can be reserved online.'
-    : 'Call Waves and we will finish the next step with you.';
+    : acceptance.mode === 'contact_office'
+      ? 'No appointment is needed — call and we will set up your invoice and activate your coverage.'
+      : 'Call Waves and we will finish the next step with you.';
   return (
     <div style={{
       background: COLORS.white,
