@@ -913,8 +913,11 @@ function KpiTargetsSettingsTab({ canAdmin }) {
     const targets = [];
     for (const metric of changed) {
       const e = effective(metric);
+      // Blank must be rejected BEFORE coercion — Number("") is 0, which would
+      // silently save a 0 target (always-green for higher-is-better tiles).
+      const blank = e.target == null || (typeof e.target === "string" && e.target.trim() === "");
       const target = Number(e.target);
-      if (!Number.isFinite(target)) {
+      if (blank || !Number.isFinite(target)) {
         setMessage(`Enter a numeric target for "${KPI_METRIC_LABELS[metric] || metric}" (or discard the edit).`);
         return;
       }

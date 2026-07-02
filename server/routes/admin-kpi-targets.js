@@ -54,9 +54,19 @@ router.put('/', requireAdmin, async (req, res, next) => {
       if (!VALID_METRICS.has(metric)) {
         return res.status(400).json({ error: `Unknown metric: ${metric || '(empty)'}` });
       }
-      const target = Number(t?.target);
+      // Explicit blank check BEFORE coercion — Number('') and Number(null)
+      // are 0, which would silently persist a 0 target for a cleared input.
+      if (t?.target == null || (typeof t.target === 'string' && t.target.trim() === '')) {
+        return res.status(400).json({ error: `Missing target for ${metric}` });
+      }
+      const target = Number(t.target);
       if (!Number.isFinite(target)) {
         return res.status(400).json({ error: `Invalid target for ${metric}` });
+      }
+      // numeric(14,4) bound — reject before the DB does so a batch can't
+      // half-apply on an overflow.
+      if (Math.abs(target) >= 1e10) {
+        return res.status(400).json({ error: `Target out of range for ${metric}` });
       }
       const amber = t?.amberBandPct == null ? 10 : Number(t.amberBandPct);
       if (!Number.isFinite(amber) || amber < 0 || amber > 100) {
@@ -71,12 +81,16 @@ router.put('/', requireAdmin, async (req, res, next) => {
     }
 
     const updatedBy = req.technician?.name || req.technician?.email || null;
-    for (const row of clean) {
-      await db('kpi_targets')
-        .insert({ ...row, updated_by: updatedBy, updated_at: new Date() })
-        .onConflict('metric')
-        .merge();
-    }
+    // One transaction: a row Postgres still rejects (despite the validation
+    // above) must not leave earlier rows of the batch applied.
+    await db.transaction(async (trx) => {
+      for (const row of clean) {
+        await trx('kpi_targets')
+          .insert({ ...row, updated_by: updatedBy, updated_at: new Date() })
+          .onConflict('metric')
+          .merge();
+      }
+    });
     // The saving admin must see their change immediately (60s GET cache).
     clearRouteCacheForRequest(req, ['/admin/kpi-targets']);
     res.json({ updated: clean.length });

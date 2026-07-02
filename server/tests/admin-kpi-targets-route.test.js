@@ -16,7 +16,11 @@ jest.mock('../models/db', () => {
       }),
     }),
   });
-  return jest.fn(() => builder());
+  const mockDb = jest.fn(() => builder());
+  // The PUT wraps its upserts in a transaction; hand the callback the same
+  // fake connection so trx('kpi_targets') records into mockUpserts too.
+  mockDb.transaction = (fn) => fn(mockDb);
+  return mockDb;
 });
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -124,6 +128,12 @@ describe('admin kpi-targets route', () => {
 
       expect((await put([{ metric: 'not_a_metric', target: 5 }])).status).toBe(400);
       expect((await put([{ metric: 'ar_days', target: 'soon' }])).status).toBe(400);
+      // Blank/null must NOT coerce to 0 (Number('') === 0) and save a 0 target.
+      expect((await put([{ metric: 'ar_days', target: '' }])).status).toBe(400);
+      expect((await put([{ metric: 'ar_days', target: '   ' }])).status).toBe(400);
+      expect((await put([{ metric: 'ar_days' }])).status).toBe(400);
+      // numeric(14,4) overflow rejected before any write.
+      expect((await put([{ metric: 'ar_days', target: 1e12 }])).status).toBe(400);
       expect((await put([{ metric: 'ar_days', target: 30, amberBandPct: 150 }])).status).toBe(400);
       // A bad row anywhere in the batch blocks the whole batch.
       expect((await put([

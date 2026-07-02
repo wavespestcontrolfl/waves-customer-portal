@@ -43,14 +43,19 @@ export function KpiStrip({ loading, error, ready, gridClassName, children }) {
 // targets/history are the metric-keyed maps DashboardPageV2 fetches in wave3
 // (falling back to DEFAULT_KPI_TARGETS / no sparkline while unfetched). The
 // resolved target drives red/amber/green; a caller-passed `alert` only
-// applies when no target resolves. `n` fades a small-sample rate (< 5) and
-// says so, mirroring the capital-allocation small-N treatment.
-export function KpiTile({ label, value, sub, alert, chart, metricKey, targets, history, n }) {
+// applies when no target resolves. `metricValue` supplies the numeric for
+// target evaluation when the tile has no usable `chart.value` (no chart, or
+// a diverging chart that only carries positive/negative parts) — without it
+// an owner-set target for those metrics would silently do nothing. `n` fades
+// a small-sample rate (< 5) and says so, mirroring the capital-allocation
+// small-N treatment.
+export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValue, targets, history, n }) {
   const targetDef = resolveTargetDef(metricKey, targets);
   const lowConfidence = n != null && Number.isFinite(Number(n)) && Number(n) < MIN_CONFIDENT_N;
   // A small-sample rate never paints red/amber/green — noise isn't a verdict
   // (the old Collection Rate tile's issuedCount >= 5 alert guard, generalized).
-  const tone = lowConfidence ? null : kpiTargetTone(chart?.value, targetDef);
+  const toneValue = metricValue !== undefined ? metricValue : chart?.value;
+  const tone = lowConfidence ? null : kpiTargetTone(toneValue, targetDef);
   const alertResolved = tone ? tone === "bad" : !lowConfidence && !!alert;
   const warn = tone === "warn";
   const series = metricKey ? history?.[metricKey] : null;
@@ -95,10 +100,12 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, targets, h
   return (
     <div className={cn("bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3", lowConfidence && "opacity-70")}>
       <div className="u-label text-ink-secondary">{label}</div>
+      {/* Diverging/no-chart tiles have no ring or bar to carry the tone, so
+          the number itself shows the amber near-miss (red stays alert-only). */}
       <div
         className={cn(
           "u-nums text-22 font-medium tracking-tight mt-2 leading-none",
-          alertResolved ? "text-alert-fg" : "text-zinc-900",
+          alertResolved ? "text-alert-fg" : warn ? "text-amber-600" : "text-zinc-900",
         )}
       >
         {value}

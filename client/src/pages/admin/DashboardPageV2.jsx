@@ -463,7 +463,16 @@ export default function DashboardPageV2() {
     timeZone: "America/New_York",
   });
   const firstName = adminFirstName();
-  const kpiStripProps = { kpis, kpisLoading, kpisError, kpiTargets, kpiHistory };
+  // Sparklines are daily MONTH-TO-DATE snapshots (kpi-snapshot cron) — under
+  // any other period the tile's number and the trend would silently disagree
+  // on basis, so the series only render while the selector is on MTD.
+  const kpiStripProps = {
+    kpis,
+    kpisLoading,
+    kpisError,
+    kpiTargets,
+    kpiHistory: period === "mtd" ? kpiHistory : null,
+  };
 
   return (
     <div className="dashboard-blackout font-sans bg-surface-page min-h-full p-3 sm:p-6 pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6 text-zinc-900">

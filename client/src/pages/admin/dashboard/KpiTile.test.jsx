@@ -90,4 +90,35 @@ describe("KpiTile target-store integration", () => {
     );
     expect(screen.getByText("−$120").className).toContain("text-alert-fg");
   });
+
+  it("metricValue lets diverging/no-chart tiles honor an owner-set target", () => {
+    // Diverging charts carry only positive/negative — without metricValue an
+    // owner target for net_mrr would silently never tone the tile.
+    render(
+      <KpiTile
+        label="Net MRR"
+        metricKey="net_mrr"
+        metricValue={-120}
+        targets={{ net_mrr: { target: 500, lowerIsBetter: false, amberBandPct: 10 } }}
+        value="−$120"
+        chart={{ kind: "diverging", positive: 100, negative: 220 }}
+      />,
+    );
+    expect(screen.getByText("−$120").className).toContain("text-alert-fg");
+  });
+
+  it("a near-miss shows amber on the number for tiles with no ring/bar to carry it", () => {
+    render(
+      <KpiTile
+        label="Revenue / Job"
+        metricKey="revenue_per_job"
+        metricValue={96}
+        targets={{ revenue_per_job: { target: 100, lowerIsBetter: false, amberBandPct: 10 } }}
+        value="$96.00"
+      />,
+    );
+    const num = screen.getByText("$96.00");
+    expect(num.className).toContain("text-amber-600");
+    expect(num.className).not.toContain("text-alert-fg");
+  });
 });

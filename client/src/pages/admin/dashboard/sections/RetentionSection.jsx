@@ -46,6 +46,7 @@ export default function RetentionSection({
                   <KpiTile
                     label="Net MRR"
                     metricKey="net_mrr"
+                    metricValue={kpis.momentum.mrr?.net}
                     targets={kpiTargets}
                     history={kpiHistory}
                     value={signed(kpis.momentum.mrr?.net, fmtMoney)}
@@ -60,6 +61,7 @@ export default function RetentionSection({
                   <KpiTile
                     label="Net Customers"
                     metricKey="net_customers"
+                    metricValue={kpis.momentum.customers?.net}
                     targets={kpiTargets}
                     history={kpiHistory}
                     value={signed(kpis.momentum.customers?.net, fmtInt)}

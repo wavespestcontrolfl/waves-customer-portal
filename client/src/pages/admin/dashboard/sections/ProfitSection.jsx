@@ -64,6 +64,7 @@ export default function ProfitSection({
               <KpiTile
                 label="Revenue / Job"
                 metricKey="revenue_per_job"
+                metricValue={kpis.financial.revPerJob}
                 targets={kpiTargets}
                 history={kpiHistory}
                 value={
