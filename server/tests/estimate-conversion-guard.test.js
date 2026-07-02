@@ -152,13 +152,19 @@ describe('customerConvertedSince', () => {
     const calls = wireDb({ invoices: { first: { id: 'inv-1' } } });
     const res = await customerConvertedSince(BASE_EST);
     expect(res).toEqual({ converted: true, reason: 'paid-invoice' });
-    // Time-bounded to the estimate's own lifetime, not any historic payment.
+    // Time-bounded to the estimate's own lifetime, not any historic payment —
+    // EXCEPT a status-paid row with null paid_at, which is a valid collected
+    // invoice of unknown pay time and must fail toward suppression.
     const bound = calls.find(
-      (c) => c.table === 'invoices' && c.m === 'where' && c.args[0] === 'paid_at',
+      (c) => c.table === 'invoices' && c.m === 'orWhere' && c.args[0] === 'paid_at',
     );
     expect(bound).toBeTruthy();
     expect(bound.args[1]).toBe('>=');
     expect(bound.args[2]).toEqual(new Date(BASE_EST.created_at));
+    const nullPaidAt = calls.find(
+      (c) => c.table === 'invoices' && c.m === 'whereNull' && c.args[0] === 'paid_at',
+    );
+    expect(nullPaidAt).toBeTruthy();
   });
 
   test('no invoice, live appointment created after estimate → appointment-booked', async () => {
@@ -175,15 +181,23 @@ describe('customerConvertedSince', () => {
     expect(notCancelled.args).toEqual(['status', 'cancelled']);
   });
 
-  test('no invoice/appointment, active_customer stage → active-customer', async () => {
-    wireDb({
-      invoices: { first: null },
-      scheduled_services: { first: null },
-      customers: { first: { pipeline_stage: 'active_customer' } },
-    });
-    const res = await customerConvertedSince(BASE_EST);
-    expect(res).toEqual({ converted: true, reason: 'active-customer' });
-  });
+  // The canonical real-customer set (customer-stages.js) — not just
+  // active_customer; admin/intelligence-bar flows park customers at won.
+  test.each(['active_customer', 'won', 'at_risk'])(
+    'no invoice/appointment, %s stage → customer-stage',
+    async (stage) => {
+      wireDb({
+        invoices: { first: null },
+        scheduled_services: { first: null },
+        customers: { first: { pipeline_stage: stage } },
+      });
+      const res = await customerConvertedSince(BASE_EST);
+      expect(res).toEqual({
+        converted: true,
+        reason: `customer-stage:${stage}`,
+      });
+    },
+  );
 
   test('no conversion signal anywhere → not converted', async () => {
     wireDb({
@@ -279,6 +293,17 @@ describe('archiveConvertedOpenEstimates', () => {
     expect(calls.filter((c) => c.m === 'whereExists')).toHaveLength(1);
     expect(calls.filter((c) => c.m === 'orWhereExists')).toHaveLength(1);
     expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(2);
+
+    // A null-paid_at paid invoice reads as paid at its creation time in the
+    // none-before branch, so an ambiguous pre-estimate invoice counts as
+    // predating and the estimate is KEPT (fail toward keeping upsells).
+    const coalesceBound = calls.find(
+      (c) =>
+        c.m === 'whereRaw' &&
+        typeof c.args?.[0] === 'string' &&
+        c.args[0].includes('COALESCE(invoices.paid_at, invoices.created_at)'),
+    );
+    expect(coalesceBound).toBeTruthy();
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('Archived 2'),
     );
@@ -291,5 +316,27 @@ describe('archiveConvertedOpenEstimates', () => {
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('nothing to archive'),
     );
+  });
+});
+
+describe('claimStage', () => {
+  test('re-checks archived_at at claim time (archive landing between the candidate read and the claim blocks the send)', async () => {
+    const calls = wireDb({ estimates: { update: 0 } });
+    const won = await _private.claimStage('est-1', 'followup_viewed_sent');
+    expect(won).toBe(false);
+    const archGuard = calls.find(
+      (c) =>
+        c.table === 'estimates' &&
+        c.m === 'whereNull' &&
+        c.args[0] === 'archived_at',
+    );
+    expect(archGuard).toBeTruthy();
+  });
+
+  test('winning claim returns true on exactly one affected row', async () => {
+    wireDb({ estimates: { update: 1 } });
+    await expect(
+      _private.claimStage('est-1', 'followup_viewed_sent'),
+    ).resolves.toBe(true);
   });
 });

@@ -25,9 +25,12 @@ async function runEstimateExpiration() {
   const now = new Date();
 
   // Rule 1: aged-out — sent/viewed with sent_at older than the cutoff and
-  // no accept/decline yet. Only flips live rows.
+  // no accept/decline yet. Only flips live rows. Archived rows are parked
+  // status-neutral (manual archive + converted-customer sweep) — expiring
+  // them would rewrite their status and ping Virginia about dead courtships.
   const agedResult = await db('estimates')
     .whereIn('status', ['sent', 'viewed'])
+    .whereNull('archived_at')
     .whereNotNull('sent_at')
     .where('sent_at', '<', ageCutoff)
     .whereNull('accepted_at')
@@ -38,6 +41,7 @@ async function runEstimateExpiration() {
   // passed. Accepted/declined estimates are left alone.
   const dateResult = await db('estimates')
     .whereNotNull('expires_at')
+    .whereNull('archived_at')
     .where('expires_at', '<', now)
     .whereNotIn('status', ['expired', 'accepted', 'declined'])
     .update({ status: 'expired', updated_at: now });

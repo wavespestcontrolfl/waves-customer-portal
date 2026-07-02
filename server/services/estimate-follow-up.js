@@ -129,10 +129,13 @@ async function renderTemplate(templateKey, vars, context = {}) {
 // true only if THIS caller won the race. Two concurrent crons (server restart,
 // overlapping runs) both load the same candidate row; the one whose UPDATE
 // affects 1 row sends, the other gets 0 rows and skips. Prevents duplicate
-// SMS/email to the customer.
+// SMS/email to the customer. Re-checks archived_at at claim time: the
+// candidate queries filter on it, but a manual/sweep archive landing between
+// the read and this UPDATE must still block the send.
 async function claimStage(estId, flag) {
   const affected = await db("estimates")
     .where({ id: estId })
+    .whereNull("archived_at")
     .where((q) => q.where(flag, false).orWhereNull(flag))
     .update({ [flag]: true });
   return affected === 1;
@@ -785,4 +788,5 @@ module.exports._private = {
   renderTemplate,
   checkDepositAbandoned,
   safetyGate,
+  claimStage,
 };

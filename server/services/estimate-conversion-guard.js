@@ -29,6 +29,7 @@
 
 const db = require("../models/db");
 const logger = require("./logger");
+const { CUSTOMER_STAGES } = require("./customer-stages");
 
 /**
  * Has this estimate's customer converted since the estimate was created?
@@ -44,10 +45,12 @@ async function customerConvertedSince(est) {
   if (!est || !est.customer_id) return { converted: false };
   const createdAt = new Date(est.created_at || 0);
   try {
+    // status='paid' with a null paid_at is a valid collected invoice (the
+    // dashboard counts it); its pay time is unknown, so it fails toward
+    // suppression rather than toward nagging.
     const paid = await db("invoices")
       .where({ customer_id: est.customer_id, status: "paid" })
-      .whereNotNull("paid_at")
-      .where("paid_at", ">=", createdAt)
+      .where((q) => q.whereNull("paid_at").orWhere("paid_at", ">=", createdAt))
       .first("id");
     if (paid) return { converted: true, reason: "paid-invoice" };
 
@@ -61,8 +64,8 @@ async function customerConvertedSince(est) {
     const customer = await db("customers")
       .where({ id: est.customer_id })
       .first("pipeline_stage");
-    if (customer && customer.pipeline_stage === "active_customer")
-      return { converted: true, reason: "active-customer" };
+    if (customer && CUSTOMER_STAGES.includes(customer.pipeline_stage))
+      return { converted: true, reason: `customer-stage:${customer.pipeline_stage}` };
 
     return { converted: false };
   } catch (e) {
@@ -103,8 +106,7 @@ async function archiveConvertedOpenEstimates() {
           this.select(db.raw("1"))
             .from("invoices")
             .whereRaw("invoices.customer_id = estimates.customer_id")
-            .where("invoices.status", "paid")
-            .whereNotNull("invoices.paid_at");
+            .where("invoices.status", "paid");
         })
         .orWhereExists(function () {
           this.select(db.raw("1"))
@@ -115,12 +117,17 @@ async function archiveConvertedOpenEstimates() {
         }),
     )
     .whereNotExists(function () {
+      // A paid invoice with null paid_at reads as paid at its creation time
+      // (the lower bound). An ambiguous invoice minted before the estimate
+      // therefore counts as PREDATING it, and the estimate is left alone —
+      // the sweep fails toward keeping a possibly-live upsell estimate.
       this.select(db.raw("1"))
         .from("invoices")
         .whereRaw("invoices.customer_id = estimates.customer_id")
         .where("invoices.status", "paid")
-        .whereNotNull("invoices.paid_at")
-        .whereRaw("invoices.paid_at < estimates.created_at");
+        .whereRaw(
+          "COALESCE(invoices.paid_at, invoices.created_at) < estimates.created_at",
+        );
     })
     .whereNotExists(function () {
       this.select(db.raw("1"))
