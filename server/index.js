@@ -35,9 +35,16 @@ const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
 // first query. Non-production only warns so local dev/tests run without a full
 // .env.
 function assertRequiredSecrets() {
+  // knexfile resolves Railway's alternate DB env shapes (DATABASE_PRIVATE_URL,
+  // DATABASE_PUBLIC_URL, POSTGRES_URL, PG* vars) and backfills
+  // process.env.DATABASE_URL as a require-time side effect — models/db pulls
+  // it in moments later anyway. Trigger that resolution BEFORE deciding the
+  // URL is missing, and check the post-resolution env var rather than the
+  // config snapshot (which may have been cached before the backfill).
+  require('./knexfile');
   const required = {
     JWT_SECRET: config.jwt.secret,
-    DATABASE_URL: config.db.connectionString,
+    DATABASE_URL: process.env.DATABASE_URL,
   };
   const missing = Object.entries(required)
     .filter(([, value]) => !value || !String(value).trim())
