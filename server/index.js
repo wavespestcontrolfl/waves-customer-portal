@@ -284,6 +284,18 @@ const paidEstimatorDailyLimiter = rateLimit({
   keyGenerator: rateLimitKey,
   skip: () => process.env.NODE_ENV !== 'production',
 });
+// Ask Waves chat: every accepted /message turn is a paid LLM call (OpenAI,
+// then Anthropic fallback), so the 30/15min in-route limiter gets a daily
+// ceiling on top — same spend rationale as paidEstimatorDailyLimiter, higher
+// cap because a real quote conversation is many turns while an estimator
+// session is one lookup.
+const askWavesDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 120,
+  message: { error: 'Daily limit reached — call (941) 297-5749 and a real person will help right away.' },
+  keyGenerator: rateLimitKey,
+  skip: () => process.env.NODE_ENV !== 'production',
+});
 
 // Body parsing
 // Stripe webhook must use raw body for signature verification — mount BEFORE json parser
@@ -397,7 +409,7 @@ app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
-app.use('/api/public/ai-intake', require('./routes/public-ai-intake'));
+app.use('/api/public/ai-intake', askWavesDailyLimiter, require('./routes/public-ai-intake'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
 // Twilio webhook signature validation. Runs before BOTH Twilio routers

@@ -367,6 +367,20 @@ finding and warns on P1. Reviewers must return JSON matching
   instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
   limit. Persists a quote/lead and may text the quote via a Twilio short-link;
   returns pricing only).
+  `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
+  marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
+  (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on
+  /message + a 120 req/day per-IP cap at the mount (paid-LLM surface, same
+  rationale as paidEstimatorDailyLimiter). PII contract: requires NO PII and
+  asks for none — visitor free-text + client-echoed history (both length- and
+  turn-clamped, roles allowlisted) is sent to the LLM and logged best-effort to
+  agent_sessions/agent_messages (channel `ask_waves`); treat message content as
+  untrusted input, never as identity. HARD INVARIANT: this surface can never
+  emit a price — prompt rule + PRICE_TALK_RE post-scrub + no pricing endpoint;
+  the chat's quote step posts to the existing `/api/public/quote/calculate`
+  above, which owns the four-field contact gate, lead minting, and attribution.
+  Deterministic emergency-safe fallback when both LLM providers miss. NOT
+  CORS-open — credentialed allowlist origins only (hub site)).
   `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
   token, public `Cache-Control`. Consumed by the Astro build and the admin blog
   UI; no PII).

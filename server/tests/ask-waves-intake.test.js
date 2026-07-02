@@ -24,7 +24,8 @@ const { dispatch, callAnthropic } = require('../services/llm/call');
 const { processIntakeMessage, _internals } = require('../services/ask-waves-intake');
 const {
   normalizeIntakeResult, sanitizeHistory, scrubPriceTalk,
-  QUOTABLE_SERVICES, FALLBACK_RESULT, PRICE_TALK_RE,
+  QUOTABLE_SERVICES, FALLBACK_RESULT, EMERGENCY_FALLBACK_RESULT,
+  looksLikeEmergency, PRICE_TALK_RE,
 } = _internals;
 
 afterEach(() => jest.clearAllMocks());
@@ -37,6 +38,14 @@ describe('scrubPriceTalk — the no-price invariant', () => {
     'Usually around $ 100 for that.',
     'It runs about 50 dollars per visit.',
     'maybe 20 bucks',
+    // spelled-out amounts (Codex round 1 P1)
+    'It starts at forty five dollars.',
+    'Usually forty-five bucks a visit.',
+    'Runs about a hundred and twenty dollars.',
+    'Just a few bucks more than DIY.',
+    // per-cadence rates without a $ sign
+    'Plans run 45/mo for your size home.',
+    'That would be about 79 per month.',
   ])('replaces a reply containing a price: %s', (reply) => {
     const out = scrubPriceTalk({ ...base, reply });
     expect(out.reply).not.toMatch(PRICE_TALK_RE);
@@ -44,8 +53,12 @@ describe('scrubPriceTalk — the no-price invariant', () => {
     expect(out.ready_for_quote).toBe(true);
   });
 
-  test('leaves price-free replies untouched (incl. digits that are not money)', () => {
-    const reply = 'Ghost ants are common in Sarasota kitchens — colonies can hold 1000s of workers.';
+  test.each([
+    'Ghost ants are common in Sarasota kitchens — colonies can hold 1000s of workers.',
+    'We treat 12 times a year and re-treat free between visits.',
+    'Give it 24 hours after treatment before mopping.',
+    'One of our techs will confirm measurements on the first visit.',
+  ])('leaves price-free replies untouched: %s', (reply) => {
     expect(scrubPriceTalk({ ...base, reply }).reply).toBe(reply);
   });
 });
@@ -141,6 +154,15 @@ describe('processIntakeMessage provider ladder', () => {
     callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
     const out = await processIntakeMessage({ message: 'help' });
     expect(out).toEqual(FALLBACK_RESULT);
+  });
+
+  test('both providers miss on an emergency message → emergency-safe fallback, no quote CTA', async () => {
+    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
+    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+    const out = await processIntakeMessage({ message: 'My son got stung and his throat is swelling' });
+    expect(out).toEqual(EMERGENCY_FALLBACK_RESULT);
+    expect(out.reply).toContain('911');
+    expect(out.ready_for_quote).toBe(false);
   });
 
   test('live returns unusable JSON (no reply) → falls through the ladder', async () => {
@@ -246,6 +268,30 @@ describe('GATE_ASK_WAVES fails closed', () => {
       jest.dontMock('../config/feature-gates');
       jest.resetModules();
     }
+  });
+});
+
+describe('looksLikeEmergency', () => {
+  test.each([
+    'I think I need to call 911',
+    "he can't breathe after a wasp sting",
+    'having an allergic reaction to bites',
+    'anaphylaxis from a bee sting',
+    'my daughter got bit and now has hives',
+    'stung and feeling dizzy',
+    'trouble breathing after mosquito bites',
+  ])('flags urgent/medical text: %s', (text) => {
+    expect(looksLikeEmergency(text)).toBe(true);
+  });
+
+  test.each([
+    'ants bite my plants every summer',
+    'do mosquitoes bite during the day?',
+    'wasps keep stinging our fence posts',
+    'rats in the attic',
+    'how much for pest control?',
+  ])('does not flag routine pest talk: %s', (text) => {
+    expect(looksLikeEmergency(text)).toBe(false);
   });
 });
 

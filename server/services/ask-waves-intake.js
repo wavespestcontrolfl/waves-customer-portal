@@ -50,10 +50,19 @@ const MESSAGE_MAX_LEN = 2000;
 const HISTORY_MAX_TURNS = 12;
 const HISTORY_TURN_MAX_LEN = 600;
 
-// Fires when a reply contains a dollar figure (or spelled-out dollars). The
+// Fires when a reply contains a price in ANY common phrasing: a dollar figure
+// ($45), digits + dollars/bucks (45 bucks), spelled-out amounts (forty-five
+// dollars, a hundred bucks), or a per-cadence rate (45/mo, 45 per visit). The
 // visitor was clearly talking price, so the replacement steers them to the
-// only surface allowed to show one.
-const PRICE_TALK_RE = /\$\s*\d|\b\d+\s*(?:dollars|bucks)\b/i;
+// only surface allowed to show one. A false positive costs one redirect reply;
+// a false negative leaks a model-invented price — err toward matching.
+const NUM_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|few|couple)';
+const PRICE_TALK_RE = new RegExp(
+  '\\$\\s*\\d' // $45, $ 100
+  + `|\\b(?:\\d+|a|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NUM_WORD})*)\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks
+  + '|\\b\\d+(?:\\.\\d+)?\\s*(?:\\/|per\\s+)(?:mo\\b|month|visit|treatment|application|year|yr\\b)', // 45/mo, 45 per visit
+  'i',
+);
 const PRICE_REDIRECT_REPLY = `Exact pricing comes straight from your property details — square footage, lot size, the works — so I never have to guess. Tap "Get my price" and I'll pull your real number in about 20 seconds, or call us at ${COMPANY.phone}.`;
 
 const FALLBACK_RESULT = Object.freeze({
@@ -61,6 +70,27 @@ const FALLBACK_RESULT = Object.freeze({
   intent: 'other',
   service_keys: [],
   ready_for_quote: true,
+  source: 'fallback',
+});
+
+// The deterministic fallback must stay safe when BOTH providers are down: a
+// visitor describing a medical reaction must never get the generic quote CTA.
+// Explicit medical/urgent phrases fire alone; sting/bite words fire only when
+// paired with a reaction word (plain "ants bite" stays a normal fallback).
+const EMERGENCY_RE = /\b(?:911|can'?t\s+breathe|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|allergic(?:\s+reaction)?|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|emergency\s+room|\be\.?r\.?\b|hospital|poison(?:ed|ing)?)\b/i;
+const BITE_STING_RE = /\b(?:stung|sting(?:s|ing)?|bit(?:e|es|ten)?)\b/i;
+const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|nause\w*|fever|reaction|breath\w*|baby|infant|toddler)\b/i;
+
+function looksLikeEmergency(text) {
+  const t = String(text || '');
+  return EMERGENCY_RE.test(t) || (BITE_STING_RE.test(t) && REACTION_RE.test(t));
+}
+
+const EMERGENCY_FALLBACK_RESULT = Object.freeze({
+  reply: `If anyone is having a medical reaction — trouble breathing, swelling, or feeling faint — please call 911 or seek medical care right away. For an urgent pest problem at your home, call us now at ${COMPANY.phone} and a real person will help.`,
+  intent: 'emergency',
+  service_keys: [],
+  ready_for_quote: false,
   source: 'fallback',
 });
 
@@ -213,7 +243,7 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
 
   if (!result) {
     logger.warn('[ask-waves] both providers missed; serving deterministic fallback');
-    result = { ...FALLBACK_RESULT };
+    result = looksLikeEmergency(message) ? { ...EMERGENCY_FALLBACK_RESULT } : { ...FALLBACK_RESULT };
   }
 
   await logIntakeExchange({ sessionId, message, reply: result.reply, intent: result.intent });
@@ -232,6 +262,8 @@ module.exports = {
     SYSTEM_PROMPT,
     PRICE_TALK_RE,
     FALLBACK_RESULT,
+    EMERGENCY_FALLBACK_RESULT,
+    looksLikeEmergency,
     MESSAGE_MAX_LEN,
   },
 };
