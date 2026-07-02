@@ -292,6 +292,7 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/dashboard', adminDashboardRoutes);
+app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
 app.use('/api/admin/command-center', require('./routes/admin-command-center'));
 app.use('/api/admin/feature-flags', require('./routes/admin-feature-flags'));
 app.use('/api/admin/turf-height', require('./routes/admin-turf-height'));

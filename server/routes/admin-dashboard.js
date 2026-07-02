@@ -953,6 +953,19 @@ router.get('/mrr-trend', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/kpi-history?days=90
+// Per-metric daily series from kpi_snapshots (the daily cron's month-to-date
+// captures) for the KPI-tile sparklines. Series start at the first snapshot
+// date — the cron is young, so early tiles show short lines, not backfill.
+router.get('/kpi-history', dashboardCache, async (req, res, next) => {
+  try {
+    // Lazy-require mirrors kpi-snapshot's own lazy require of this router
+    // (it pulls computeCoreKpis) — a top-level require would be circular.
+    const { getKpiHistory } = require('../services/kpi-snapshot');
+    res.json(await getKpiHistory(req.query.days));
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dashboard/retention-cohort?months=12
 // Signup-cohort retention grid: rows = the ET month a customer converted
 // (member_since, via the canonical CONVERSION_DATE_SQL), columns = whole months
