@@ -2176,7 +2176,27 @@ const CallRecordingProcessor = {
           extracted.email = correctedEmail;
           logger.info(`[call-proc] Adopted high-confidence email domain correction for ${maskSid(callSid)}`);
         }
-        if (emailReasons.length) bridgeNeedsConfirmation.push(...emailReasons);
+        if (emailReasons.length) {
+          bridgeNeedsConfirmation.push(...emailReasons);
+          // Same Needs Review surfacing as the shadow branch: the inbox is
+          // driven by triage_items rows, so without these an auto-routed call
+          // in enforce/V2-off mode would never show the read-back prompt.
+          for (const flag of emailReasons.slice(0, 10)) {
+            try {
+              await db('triage_items')
+                .insert(buildTriageItem({
+                  callLogId: call.id,
+                  flag,
+                  extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                  severity: 'advisory',
+                }))
+                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                .ignore();
+            } catch (triageErr) {
+              logger.warn(`[call-proc] email triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+            }
+          }
+        }
       } catch (emailErr) {
         logger.warn(`[call-proc] email review skipped for ${maskSid(callSid)}: ${emailErr.message}`);
       }

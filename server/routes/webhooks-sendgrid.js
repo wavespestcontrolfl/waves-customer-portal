@@ -347,8 +347,18 @@ async function handleEvent(ev) {
     }
     return;
   }
-  // Untracked send — no ledger row to update, but a hard bounce on an
-  // operational contact still needs to reach a human.
+  // Fully untracked send (direct sendgrid.sendOne callers) — no ledger row to
+  // update, but a suppression-worthy event must still land in
+  // email_suppressions (the template-library send gate reads it; without this
+  // future sends keep attempting the dead address) and a hard bounce on an
+  // operational contact must reach a human. recordEmailSuppressionForEvent is
+  // idempotent (update-else-insert), so webhook redeliveries are safe even
+  // without the event ledger.
+  try {
+    await recordEmailSuppressionForEvent(ev, null, null, eventOccurredAt(ev));
+  } catch (err) {
+    logger.error(`[sendgrid-webhook] untracked suppression record failed: ${err.message}`);
+  }
   alertUntrackedHardBounce();
   return;
 }
