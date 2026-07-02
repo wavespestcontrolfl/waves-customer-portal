@@ -14,8 +14,11 @@
  * --period defaults to "mtd" and uses the same ET-day boundaries as the
  * Dashboard widget (resolveAttributionWindow in admin-dashboard.js), so
  * counts reconcile across UTC date rollovers. Accepts today | wtd | mtd
- * | ytd | all. Pass "all" to see every unmapped number ever seen in
- * call_log (useful for deciding which to seed vs. mark is_active=false).
+ * | ytd | all. Windows are floored at the attribution fresh start exactly
+ * like the widget (ATTRIBUTION_FRESH_START env overrides/disables — see
+ * utils/attribution-fresh-start.js) so reconciliation keeps lining up.
+ * Pass "all" to see every unmapped number ever seen in call_log with NO
+ * floor (useful for deciding which to seed vs. mark is_active=false).
  *
  * For prod: export DATABASE_URL to the prod DB before running, e.g.:
  *   export DATABASE_URL="$(railway variables --kv --service Postgres \
@@ -24,23 +27,31 @@
 
 const db = require('../models/db');
 const { etDateString, etMonthStart, etYearStart, etWeekStart } = require('../utils/datetime-et');
+const { resolveAttributionFreshStart, applyAttributionFreshStart } = require('../utils/attribution-fresh-start');
 
 const periodArg = (process.argv.find((a) => a.startsWith('--period=')) || '').split('=')[1] || 'mtd';
 
+const ATTRIBUTION_FRESH_START = resolveAttributionFreshStart();
+
 // Mirror resolveAttributionWindow() in server/routes/admin-dashboard.js so
-// reconciliation numbers line up with the widget. Day boundaries follow
-// America/New_York, not UTC.
+// reconciliation numbers line up with the widget — including its fresh-start
+// floor (the widget excludes pre-baseline calls; without the same clip a
+// --period=ytd run would send operators chasing numbers the dashboard never
+// shows). "all" stays raw on purpose: it's the seed-vs-deactivate census.
+// Day boundaries follow America/New_York, not UTC.
 function windowFor(period) {
   if (period === 'all') return null;
   const today = etDateString();
+  let win;
   switch (String(period).toLowerCase()) {
-    case 'today': return { from: today,           to: today };
-    case 'wtd':   return { from: etWeekStart(),   to: today };
-    case 'ytd':   return { from: etYearStart(),   to: today };
-    case 'mtd':   return { from: etMonthStart(),  to: today };
+    case 'today': win = { from: today,           to: today }; break;
+    case 'wtd':   win = { from: etWeekStart(),   to: today }; break;
+    case 'ytd':   win = { from: etYearStart(),   to: today }; break;
+    case 'mtd':   win = { from: etMonthStart(),  to: today }; break;
     default:
       throw new Error(`unknown --period=${period} (use today|wtd|mtd|ytd|all)`);
   }
+  return applyAttributionFreshStart(win, ATTRIBUTION_FRESH_START);
 }
 
 (async () => {
@@ -68,7 +79,9 @@ function windowFor(period) {
   const rows = await q;
 
   const totalCalls = rows.reduce((acc, r) => acc + r.calls, 0);
-  const periodLabel = win ? `${win.from} → ${win.to}` : 'all time';
+  const periodLabel = win
+    ? `${win.from} → ${win.to}${win.freshStart ? ` (floored at attribution fresh start ${win.freshStart})` : ''}`
+    : 'all time';
 
   console.log(`\nUnmapped inbound to_phone values — ${periodLabel}`);
   console.log(`${rows.length} distinct number(s), ${totalCalls} call(s) total\n`);
