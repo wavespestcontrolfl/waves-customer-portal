@@ -142,10 +142,24 @@ describe('buildWeeklyEmailDecision', () => {
     expect(decision.reason).toBe('deficit_rain_forecast');
   });
 
-  test('deficit still sends when the forecast is short of the target, and when it is unknown', () => {
+  test('deficit is VETOED when schedule + forecast together cover the week ahead', () => {
+    // 0.5" scheduled irrigation keeps running; 0.8" forecast rain (alone below
+    // the 1.25" target) brings the projected week to 1.3" — no longer a
+    // deficit, so "add water" must not send.
+    const decision = buildWeeklyEmailDecision({
+      ...base,
+      irrigationInchesPerWeek: 0.5,
+      rainfallInches7d: 0,
+      forecastRainInches: 0.8,
+    });
+    expect(decision.shouldSend).toBe(false);
+    expect(decision.reason).toBe('deficit_rain_forecast');
+  });
+
+  test('deficit still sends when schedule + forecast stay short of the target, and when the forecast is unknown', () => {
     expect(buildWeeklyEmailDecision({
       ...base, irrigationInchesPerWeek: 0.25, rainfallInches7d: 0, forecastRainInches: 0.5,
-    }).shouldSend).toBe(true);
+    }).shouldSend).toBe(true); // projected 0.75" vs 1.25" target — still a deficit
     expect(buildWeeklyEmailDecision({
       ...base, irrigationInchesPerWeek: 0.25, rainfallInches7d: 0, forecastRainInches: null,
     }).shouldSend).toBe(true); // fail soft to last week's facts
@@ -426,6 +440,26 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(summary.attempted).toBe(1);
     expect(summary.failed).toBe(1);
     expect(summary.skipped.capped).toBe(1);
+  });
+
+  test('deduped and suppressed results refund the cap — they cannot starve the rest of the list', async () => {
+    isEnabled.mockReturnValue(true);
+    db.mockImplementation((table) => makeBuilder(
+      String(table).startsWith('customers')
+        ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
+        : {},
+    ));
+    // First candidate already sent this week (idempotency dedupe — no provider
+    // call); with a cap of 1, the second candidate must still be attempted.
+    EmailTemplateLibrary.sendTemplate
+      .mockResolvedValueOnce({ deduped: true })
+      .mockResolvedValueOnce({ sent: true, message: {} });
+    const summary = await runWeeklyIrrigationEmailSweep({ now: NOW, maxSendAttempts: 1 });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+    expect(summary.deduped).toBe(1);
+    expect(summary.sent).toBe(1);
+    expect(summary.skipped.capped).toBe(0);
+    expect(summary.attempted).toBe(1); // only the real provider attempt counts
   });
 
   test('per-customer failure is contained: one bad send does not abort the sweep', async () => {

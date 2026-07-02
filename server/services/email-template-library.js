@@ -65,6 +65,13 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
+// For suppressProviderErrorLog callers: strip anything address-shaped from a
+// provider error before it is persisted or audited (SendGrid 4xx bodies can
+// echo the recipient address).
+function redactEmailAddresses(text) {
+  return String(text || '').replace(/[^\s@:<>()"']+@[^\s@:<>()"']+\.[^\s@:<>()"']+/g, '[redacted-email]');
+}
+
 function textFor(payload, key) {
   const value = payload?.[key];
   if (value == null) return '';
@@ -957,12 +964,18 @@ async function sendTemplate({
     }
     return { sent: true, message: updated, rendered };
   } catch (err) {
+    // PII-sensitive callers suppress the transport log — the persisted error
+    // and the audit reason must honor the same flag, or the raw provider body
+    // (which can echo the recipient address) leaks anyway.
+    const persistedErrorMessage = suppressProviderErrorLog
+      ? redactEmailAddresses(err.message)
+      : String(err.message || '');
     // SendGrid may have accepted the send and a webhook already terminalized the
     // row (lost-response race) — only mark failed while still queued AND only for
     // THIS attempt (a superseded attempt must not fail the live retry's row).
     await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
       status: 'failed',
-      error_message: err.message.slice(0, 1000),
+      error_message: persistedErrorMessage.slice(0, 1000),
       updated_at: new Date(),
     });
     const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
@@ -983,7 +996,7 @@ async function sendTemplate({
       templateKey: template.template_key,
       versionId: version.id,
       eventType: 'provider_send_error',
-      reason: err.message,
+      reason: persistedErrorMessage,
       recipientType,
       recipientId,
       triggerEventId,

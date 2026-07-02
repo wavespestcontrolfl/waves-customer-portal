@@ -195,15 +195,20 @@ function buildWeeklyEmailDecision({
     return { shouldSend: false, reason: advice.rainKnown ? advice.status : 'rain_unknown', advice };
   }
 
-  // The instruction is for the week AHEAD. When the forecast alone covers the
-  // full weekly target, "add more water" would likely be wrong by mid-week —
-  // suppress instead of instructing against incoming rain (forecast
-  // unavailable → fail soft to last week's facts). A surplus is NOT forecast-
-  // suppressed: after an over-watered week the soil is already saturated, so
-  // easing back stays correct whatever this week brings.
+  // The instruction is for the week AHEAD. The programmed schedule keeps
+  // running, so the projected week is irrigation + forecast rain: when that is
+  // no longer a deficit (inside the same quarter-inch band the advice uses),
+  // "add more water" would likely be wrong by mid-week — suppress instead of
+  // instructing against a week that is already covered (forecast unavailable
+  // → fail soft to last week's facts). A surplus is NOT forecast-suppressed:
+  // after an over-watered week the soil is already saturated, so easing back
+  // stays correct whatever this week brings.
   const forecast = numberOrNull(forecastRainInches);
-  if (advice.status === 'deficit' && forecast != null && forecast >= advice.recommendedInchesPerWeek) {
-    return { shouldSend: false, reason: 'deficit_rain_forecast', advice };
+  if (advice.status === 'deficit' && forecast != null) {
+    const projectedDifferential = (numberOrNull(irrigationInchesPerWeek) + forecast) - advice.recommendedInchesPerWeek;
+    if (projectedDifferential > -0.25) {
+      return { shouldSend: false, reason: 'deficit_rain_forecast', advice };
+    }
   }
 
   const surplus = advice.status === 'surplus';
@@ -454,6 +459,13 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // recipient address) — this sweep logs sanitizeFailureReason instead.
         suppressProviderErrorLog: true,
       });
+
+      // Idempotency-dedupe and suppression both short-circuit inside the
+      // library BEFORE any SendGrid call — refund the budget so a long run of
+      // already-sent/suppressed rows cannot starve the rest of the list. A
+      // thrown error keeps its attempt consumed (the provider may have been
+      // reached).
+      if (result.deduped || result.blocked) summary.attempted -= 1;
 
       if (result.deduped) {
         summary.deduped += 1;
