@@ -19,9 +19,13 @@ const logger = require('./logger');
 function getThresholdDays() {
   const raw = process.env.LEAD_STALENESS_DAYS;
   if (raw === undefined) return 21;
-  const parsed = parseInt(raw, 10);
-  // Any explicit falsy/zero/non-numeric value is the off switch — fail
-  // safe to "do nothing" rather than guessing at a threshold.
+  // Whole-string positive integer only. parseInt accepts numeric prefixes
+  // ('21days', '30 disabled'), which would silently ENABLE the sweep on an
+  // operator typo that was meant to be the off switch. Any other shape —
+  // empty, zero, non-numeric, partial — fails safe to "do nothing".
+  const trimmed = String(raw).trim();
+  if (!/^\d+$/.test(trimmed)) return 0;
+  const parsed = parseInt(trimmed, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
   return parsed;
 }
@@ -51,16 +55,28 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
         .where('lead_activities.created_at', '>=', cutoff);
     })
     // A lead linked to a customer with booked (or already-delivered) service
-    // is pending won-conversion, not unresponsive. Cancelled/rescheduled
-    // rows don't count: a reschedule is replaced by a live row that still
-    // matches, and a customer whose only visit was cancelled has no standing
-    // service — without the status filter one dead visit from months ago
-    // would exempt the lead forever. The correlated subquery can never match
-    // when customer_id is NULL, so unlinked leads pass through.
+    // FROM THIS LEAD'S COURTSHIP is pending won-conversion, not
+    // unresponsive. Two scopes keep one dead or unrelated visit from
+    // exempting the lead forever:
+    //  - status: cancelled/rescheduled/skipped/no_show rows don't count —
+    //    the repo's terminal convention (waveguard-existing-services
+    //    TERMINAL_STATUSES minus 'completed'). A reschedule is replaced by
+    //    a live row that still matches; a skipped/no_show visit is a
+    //    terminal miss, not a standing booking.
+    //  - time: the visit must be created on/after the lead (1-day grace for
+    //    the call-processing flow where the booking row can precede the
+    //    lead row inside one run — same predicate as the cleanup script's
+    //    Part A, so the sweep exempts exactly the leads that lane would
+    //    convert). A tech-field add-on lead on an established customer is
+    //    NOT exempted by that customer's historical services — if nobody
+    //    works it, it goes unresponsive like any other stale lead.
+    // The correlated subquery can never match when customer_id is NULL, so
+    // unlinked leads pass through.
     .whereNotExists(function () {
       this.select(1).from('scheduled_services')
         .whereRaw('scheduled_services.customer_id = leads.customer_id')
-        .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled']);
+        .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled', 'skipped', 'no_show'])
+        .whereRaw("scheduled_services.created_at >= COALESCE(leads.first_contact_at, leads.created_at) - interval '1 day'");
     })
     .update({ status: 'unresponsive', updated_at: now })
     .returning('id');

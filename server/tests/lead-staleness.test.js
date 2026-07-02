@@ -8,9 +8,11 @@
  *   - status = 'new' and created_at <= now - N days
  *   - no lead_activities row inside the window (recent activity skips)
  *   - next_follow_up_at NULL or past (future callback skips)
- *   - NOT EXISTS non-cancelled/non-rescheduled scheduled_services for the
- *     linked customer (booked customer skips — pending won-conversion, not
- *     unresponsive; a lone cancelled visit does NOT exempt)
+ *   - NOT EXISTS a non-terminal scheduled_services row for the linked
+ *     customer created on/after the lead (booked-from-this-courtship
+ *     customer skips — pending won-conversion, not unresponsive; a
+ *     cancelled/rescheduled/skipped/no_show visit or the customer's
+ *     historical pre-lead services do NOT exempt)
  *   - deleted_at IS NULL, gated on the column existing (the leads
  *     soft-delete lane ships separately; either merge order must work)
  * Effects (activity rows, summary counts, env off switch) are covered with
@@ -89,6 +91,19 @@ describe('lead staleness sweep', () => {
         expect(getThresholdDays()).toBe(0);
       }
     });
+
+    test('partially numeric values are the off switch too (parseInt prefix trap)', () => {
+      // '21days' must NOT silently enable a 21-day sweep — an operator who
+      // typed a malformed value expecting the documented fail-closed off
+      // switch would otherwise have old leads auto-closed.
+      for (const off of ['21days', '30 disabled', '7d']) {
+        process.env.LEAD_STALENESS_DAYS = off;
+        expect(getThresholdDays()).toBe(0);
+      }
+      // Surrounding whitespace alone is still a valid integer.
+      process.env.LEAD_STALENESS_DAYS = ' 14 ';
+      expect(getThresholdDays()).toBe(14);
+    });
   });
 
   describe('WHERE semantics (compiled SQL)', () => {
@@ -109,10 +124,11 @@ describe('lead staleness sweep', () => {
         + 'where lead_activities.lead_id = leads.id and "lead_activities"."created_at" >= ?) '
         + 'and not exists (select 1 from "scheduled_services" '
         + 'where scheduled_services.customer_id = leads.customer_id '
-        + 'and "scheduled_services"."status" not in (?, ?)) '
+        + 'and "scheduled_services"."status" not in (?, ?, ?, ?) '
+        + "and scheduled_services.created_at >= COALESCE(leads.first_contact_at, leads.created_at) - interval '1 day') "
         + 'returning "id"'
       );
-      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, 'cancelled', 'rescheduled']);
+      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show']);
 
       return knex.destroy();
     });
