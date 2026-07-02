@@ -865,6 +865,76 @@ async function notifyRecoverySuccess({ recovery, bouncedEmail, correctedEmail, r
   });
 }
 
+/**
+ * Feedback loop for hard bounces on emails sent OUTSIDE the email_messages
+ * ledger (newsletter confirmations, automation one-offs, any direct SendGrid
+ * send). attemptRecovery can only see tracked sends; before this, an untracked
+ * bounce created its suppression silently and the dead address was discovered
+ * hours later when an estimate send hit it ("Suppressed: bounce"). When the
+ * bounced address is on file for a customer or an open lead — i.e. it is an
+ * OPERATIONAL contact, which is also what filters marketing-list cruft out —
+ * alert the office (deduped) and stamp the lead's needs_confirmation so the
+ * Leads UI shows the dead email without a click-through.
+ */
+async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
+  try {
+    const email = String(bouncedEmail || '').trim().toLowerCase();
+    if (!email) return { skipped: 'no_email' };
+
+    // CUSTOMER_EMAIL_FIELDS is a hardcoded constant — safe to interpolate.
+    const customer = await db('customers')
+      .whereRaw(CUSTOMER_EMAIL_FIELDS.map((f) => `LOWER(${f}) = ?`).join(' OR '), CUSTOMER_EMAIL_FIELDS.map(() => email))
+      .whereNull('deleted_at')
+      .first('id', 'first_name', 'last_name', 'phone')
+      .catch(() => null);
+    const leads = await db('leads')
+      .whereRaw('LOWER(email) = ?', [email])
+      .where(function openOnly() { this.whereNull('status').orWhereNotIn('status', ['won', 'lost']); })
+      .select('id', 'first_name', 'last_name', 'extracted_data')
+      .catch(() => []);
+    if (!customer && !leads.length) return { skipped: 'no_contact_match' };
+
+    for (const lead of leads) {
+      try {
+        const data = typeof lead.extracted_data === 'string'
+          ? JSON.parse(lead.extracted_data || '{}')
+          : (lead.extracted_data || {});
+        const needs = Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
+        if (!needs.includes('email_bounced')) {
+          data.needs_confirmation = [...needs, 'email_bounced'];
+          await db('leads').where({ id: lead.id })
+            .update({ extracted_data: JSON.stringify(data), updated_at: new Date() });
+        }
+      } catch (err) {
+        logger.warn(`[bounce-recovery] email_bounced stamp failed for lead ${lead.id}: ${err.message}`);
+      }
+    }
+
+    const who = customer
+      ? (`${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'customer')
+      : (`${leads[0].first_name || ''} ${leads[0].last_name || ''}`.trim() || 'lead');
+    const phoneHint = customer?.phone ? ` Confirm by phone: ${customer.phone}.` : '';
+    const reason = String(ev.reason || ev.response || '').trim() || 'mailbox rejected';
+    await adminAlertDeduped({
+      dedupeKey: `bounced-contact:${email}`,
+      windowHours: 168,
+      category: 'alert',
+      title: 'Email bounced — needs a correct address',
+      body: `${email} for ${who} hard-bounced (${reason}) and is now suppressed — estimates and receipts will not deliver until it is corrected.${phoneHint}`,
+      link: customer ? `/admin/customers/${customer.id}` : '/admin/leads',
+      metadata: {
+        customer_id: customer?.id || null,
+        lead_id: leads[0]?.id || null,
+        source: 'untracked_bounce',
+      },
+    });
+    return { alerted: true, customerId: customer?.id || null, leadsStamped: leads.length };
+  } catch (err) {
+    logger.error(`[bounce-recovery] alertBouncedContactAddress failed: ${err.message}`);
+    return { error: err.message };
+  }
+}
+
 module.exports = {
   RECOVERY_CATEGORY,
   recoveryEnabled,
@@ -874,6 +944,7 @@ module.exports = {
   decideRecoveryAction,
   asmGroupIdForStream,
   attemptRecovery,
+  alertBouncedContactAddress,
   commitRecoveryOnDelivery,
   handleRecoveryBounce,
   // exported for tests

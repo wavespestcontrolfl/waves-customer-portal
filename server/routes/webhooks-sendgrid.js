@@ -298,12 +298,28 @@ async function handleEvent(ev) {
     }
   }
 
+  // Hard-bounce feedback for sends OUTSIDE the email_messages ledger
+  // (newsletter confirmation, automation one-offs, fully untracked sends).
+  // attemptRecovery below can only repair tracked messages; without this, an
+  // untracked bounce creates its suppression silently and the dead address is
+  // discovered hours later when an estimate send hits it. The service alerts
+  // ONLY when the address is on file for a customer/open lead, which filters
+  // marketing-list cruft. Fire-and-forget for the same batch-stall reason as
+  // attemptRecovery; the 168h notification dedupe absorbs webhook redeliveries.
+  const alertUntrackedHardBounce = () => {
+    if (!bounceRecovery.isHardBounceEvent(ev)) return;
+    bounceRecovery.alertBouncedContactAddress(email, ev)
+      .catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
+  };
+
   if (newsletterDelivery) {
     await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));
+    alertUntrackedHardBounce();
     return;
   }
   if (automationSend) {
     await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
+    alertUntrackedHardBounce();
     return;
   }
   if (emailMessage) {
@@ -314,6 +330,8 @@ async function handleEvent(ev) {
     // awaiting — a slow Mail Send must not hold the /events request open and
     // stall the rest of the batch (SendGrid would retry the whole batch even
     // though this event is already marked processed). Best-effort, fire-and-forget.
+    // Tracked bounces are NOT routed through alertBouncedContactAddress —
+    // attemptRecovery has its own richer alert (alertUnrecoverableBounce).
     if (processedNew) {
       if (bounceRecovery.isHardBounceEvent(ev)) {
         bounceRecovery.attemptRecovery(emailMessage, ev)
@@ -325,7 +343,9 @@ async function handleEvent(ev) {
     }
     return;
   }
-  // Untracked send — ignore.
+  // Untracked send — no ledger row to update, but a hard bounce on an
+  // operational contact still needs to reach a human.
+  alertUntrackedHardBounce();
   return;
 }
 

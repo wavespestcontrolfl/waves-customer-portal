@@ -76,6 +76,9 @@ const CONFIRM_REASON_TEXT = {
   missing_last_name: "no last name captured — get the account holder's full name",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
   second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
+  email_unverified: 'email was spelled out on the call — read it back to the caller before relying on it (spelled letters mishear)',
+  email_invalid: 'captured email is not a valid address — re-collect it on the callback',
+  email_bounced: 'email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -2110,7 +2113,7 @@ const CallRecordingProcessor = {
             );
           } catch (_e) { /* fall back to model flags only */ }
         }
-        const { normalizedAddress, needsConfirmation } = deriveCallReviewBridge({
+        const { normalizedAddress, normalizedEmail, needsConfirmation } = deriveCallReviewBridge({
           addressValidation: v2AddressValidation,
           extracted,
           v2TriageFlags: bridgeTriageFlags,
@@ -2126,6 +2129,15 @@ const CallRecordingProcessor = {
           if (v2AddressValidation?.status === 'corrected') {
             logger.info(`[call-proc-bridge] Adopted Google-corrected address for ${maskSid(callSid)}`);
           }
+        }
+        if (normalizedEmail) {
+          // Same adopt-before-upsert contract as the address above: fix the
+          // high-confidence domain typo before the customer/lead writes and the
+          // first-touch emails (newsletter confirmation, lead response) read
+          // extracted.email — catching at intake what bounce-recovery would
+          // otherwise have to repair after a bounce. No address value in the log.
+          extracted.email = normalizedEmail;
+          logger.info(`[call-proc-bridge] Adopted high-confidence email domain correction for ${maskSid(callSid)}`);
         }
         if (needsConfirmation.length) {
           bridgeNeedsConfirmation.push(...needsConfirmation);
