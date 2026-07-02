@@ -16,6 +16,8 @@ export default function TodaySection({
   kpis,
   kpisLoading,
   kpisError,
+  kpiTargets,
+  kpiHistory,
 }) {
   return (
     <DashboardSection id="today" title="Today" caption="What needs attention right now">
@@ -56,33 +58,34 @@ export default function TodaySection({
           >
             {kpis && (
               <>
+                {/* Targets/tones come from the kpi_targets store via metricKey
+                    (DEFAULT_KPI_TARGETS preserves the old thresholds as the
+                    fallback), so tiles no longer hardcode alert conditions. */}
                 <KpiTile
                   label="Service Completion"
+                  metricKey="completion_rate"
+                  targets={kpiTargets}
+                  history={kpiHistory}
                   value={
                     kpis.service.completionRate != null
                       ? `${kpis.service.completionRate}%`
                       : "—"
                   }
                   sub={`${kpis.service.completed}/${kpis.service.scheduled} jobs`}
-                  alert={
-                    kpis.service.completionRate != null &&
-                    kpis.service.completionRate < 85
-                  }
-                  chart={{ kind: "gauge", value: kpis.service.completionRate, max: 100, target: 85 }}
+                  chart={{ kind: "gauge", value: kpis.service.completionRate, max: 100 }}
                 />
                 <KpiTile
                   label="Callback Rate"
+                  metricKey="callback_rate"
+                  targets={kpiTargets}
+                  history={kpiHistory}
                   value={
                     kpis.service.callbackRate != null
                       ? `${kpis.service.callbackRate}%`
                       : "—"
                   }
                   sub={`${kpis.service.callbacks} callbacks`}
-                  alert={
-                    kpis.service.callbackRate != null &&
-                    kpis.service.callbackRate >= 6
-                  }
-                  chart={{ kind: "gauge", value: kpis.service.callbackRate, max: 12, target: 6, lowerIsBetter: true }}
+                  chart={{ kind: "gauge", value: kpis.service.callbackRate, max: 12 }}
                 />
               </>
             )}

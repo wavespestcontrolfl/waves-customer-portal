@@ -14,6 +14,8 @@ export default function CashSection({
   kpis,
   kpisLoading,
   kpisError,
+  kpiTargets,
+  kpiHistory,
   aging,
   billing,
   isMobile,
@@ -28,8 +30,15 @@ export default function CashSection({
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
           {kpis && (
             <>
+              {/* Threshold tones come from the kpi_targets store via
+                  metricKey; Collection Rate's old issuedCount>=5 alert guard
+                  is now the tile's generic small-N fade (`n`). */}
               <KpiTile
                 label="Collection Rate"
+                metricKey="collection_rate"
+                targets={kpiTargets}
+                history={kpiHistory}
+                n={kpis.billing?.issuedCount || null}
                 value={
                   kpis.billing?.collectionRate != null
                     ? `${kpis.billing.collectionRate}%`
@@ -40,22 +49,22 @@ export default function CashSection({
                     ? `${fmtMoneyCompact(kpis.billing.collected)} / ${fmtMoneyCompact(kpis.billing.billed)} · ${kpis.billing.collectedCount}/${kpis.billing.issuedCount} paid`
                     : "no invoices issued"
                 }
-                alert={
-                  kpis.billing?.collectionRate != null &&
-                  kpis.billing.issuedCount >= 5 &&
-                  kpis.billing.collectionRate < 70
-                }
-                chart={{ kind: "gauge", value: kpis.billing?.collectionRate, max: 100, target: 70 }}
+                chart={{ kind: "gauge", value: kpis.billing?.collectionRate, max: 100 }}
               />
               <KpiTile
                 label="AR Days"
+                metricKey="ar_days"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={kpis.ar.days != null ? `${kpis.ar.days}d` : "—"}
                 sub={`${fmtMoneyCompact(kpis.ar.open)} open · ${kpis.ar.overdueCount} overdue`}
-                alert={kpis.ar.days != null && kpis.ar.days > 30}
-                chart={{ kind: "bullet", value: kpis.ar.days, target: 30, lowerIsBetter: true }}
+                chart={{ kind: "bullet", value: kpis.ar.days }}
               />
               <KpiTile
                 label="Autopay Coverage"
+                metricKey="autopay_pct"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   kpis.billing?.autopayPct != null
                     ? `${kpis.billing.autopayPct}%`

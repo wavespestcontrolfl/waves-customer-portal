@@ -17,17 +17,19 @@
 // simply have no target until the owner sets one.
 
 const SEED_TARGETS = [
-  // [metric, target, lower_is_better]
-  ['completion_rate', 85, false],
-  ['callback_rate', 6, true],
-  ['lead_conversion', 20, false],
-  ['response_speed_min', 60, true],
-  ['gross_margin', 40, false],
-  ['revenue_per_man_hour', 120, false],
-  ['retention_pct', 85, false],
-  ['csat_avg', 8, false],
-  ['collection_rate', 70, false],
-  ['ar_days', 30, true],
+  // [metric, target, lower_is_better, amber_band_pct]
+  ['completion_rate', 85, false, 10],
+  ['callback_rate', 6, true, 10],
+  ['lead_conversion', 20, false, 10],
+  ['response_speed_min', 60, true, 10],
+  ['gross_margin', 40, false, 10],
+  // The old tile went red only below $90 against a $120 target — a deliberate
+  // two-threshold design, translated as a 25% amber band.
+  ['revenue_per_man_hour', 120, false, 25],
+  ['retention_pct', 85, false, 10],
+  ['csat_avg', 8, false, 10],
+  ['collection_rate', 70, false, 10],
+  ['ar_days', 30, true, 10],
 ];
 
 exports.up = async function up(knex) {
@@ -42,9 +44,9 @@ exports.up = async function up(knex) {
     });
   }
 
-  for (const [metric, target, lowerIsBetter] of SEED_TARGETS) {
+  for (const [metric, target, lowerIsBetter, amberBandPct] of SEED_TARGETS) {
     await knex('kpi_targets')
-      .insert({ metric, target, lower_is_better: lowerIsBetter })
+      .insert({ metric, target, lower_is_better: lowerIsBetter, amber_band_pct: amberBandPct })
       .onConflict('metric')
       .ignore(); // never clobber an owner-edited row on re-run
   }

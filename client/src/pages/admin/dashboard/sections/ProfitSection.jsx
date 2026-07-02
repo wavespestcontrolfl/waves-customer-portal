@@ -14,6 +14,8 @@ export default function ProfitSection({
   kpis,
   kpisLoading,
   kpisError,
+  kpiTargets,
+  kpiHistory,
   mix,
   isMobile,
 }) {
@@ -27,8 +29,13 @@ export default function ProfitSection({
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
           {kpis && (
             <>
+              {/* Threshold tones come from the kpi_targets store via
+                  metricKey (defaults preserve the old hardcoded values). */}
               <KpiTile
                 label="Gross Margin"
+                metricKey="gross_margin"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   kpis.financial.grossMarginWeighted != null
                     ? `${Math.round(kpis.financial.grossMarginWeighted)}%`
@@ -39,27 +46,26 @@ export default function ProfitSection({
                     ? `per-job avg ${Math.round(kpis.financial.grossMarginAvg)}%`
                     : "revenue-weighted"
                 }
-                alert={
-                  kpis.financial.grossMarginWeighted != null &&
-                  kpis.financial.grossMarginWeighted < 40
-                }
-                chart={{ kind: "gauge", value: kpis.financial.grossMarginWeighted, max: 100, target: 40 }}
+                chart={{ kind: "gauge", value: kpis.financial.grossMarginWeighted, max: 100 }}
               />
               <KpiTile
                 label="Revenue / Man-Hour"
+                metricKey="revenue_per_man_hour"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   kpis.financial.rpmh != null
                     ? fmtMoney(kpis.financial.rpmh)
                     : "—"
                 }
-                sub="target $120"
-                alert={
-                  kpis.financial.rpmh != null && kpis.financial.rpmh < 90
-                }
-                chart={{ kind: "bullet", value: kpis.financial.rpmh, target: 120 }}
+                sub={`target $${kpiTargets?.revenue_per_man_hour?.target ?? 120}`}
+                chart={{ kind: "bullet", value: kpis.financial.rpmh }}
               />
               <KpiTile
                 label="Revenue / Job"
+                metricKey="revenue_per_job"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   kpis.financial.revPerJob != null
                     ? fmtMoney(kpis.financial.revPerJob)

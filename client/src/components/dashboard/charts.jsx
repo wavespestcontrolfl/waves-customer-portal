@@ -188,8 +188,11 @@ export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert,
 // otherwise the Waves sky. Used by DashboardPageV2's KpiTile.
 
 // Pick a fill tone from the row's alert flag + whether it meets its target.
-function kpiTone(value, target, lowerIsBetter, alert) {
+// `warn` (amber) sits between: a target miss inside the amber band
+// (dashboard/kpi-targets.js kpiTargetTone) — alert still wins.
+function kpiTone(value, target, lowerIsBetter, alert, warn = false) {
   if (alert) return CHART_ALERT;
+  if (warn) return CHART_WARN;
   if (target != null && Number.isFinite(value)) {
     const meets = lowerIsBetter ? value <= target : value >= target;
     if (meets) return CHART_SUCCESS;
@@ -197,9 +200,52 @@ function kpiTone(value, target, lowerIsBetter, alert) {
   return CHART_PRIMARY;
 }
 
+// Tiny inline trend for a KPI tile: daily kpi_snapshots values as one muted
+// line, no axes. Gaps (null values — metric unavailable that day) break the
+// line rather than interpolating through missing days. Renders nothing for
+// fewer than two present points — one dot isn't a trend.
+export function Sparkline({ series = [], width = 96, height = 20, stroke = CHART_PRIOR }) {
+  const vals = series.map((p) => (p?.value == null ? null : Number(p.value)));
+  const present = vals.filter((v) => v != null && Number.isFinite(v));
+  if (present.length < 2) return null;
+  const min = Math.min(...present);
+  const max = Math.max(...present);
+  const span = max - min || 1;
+  const stepX = width / Math.max(1, vals.length - 1);
+  const pad = 2;
+  const y = (v) => pad + (1 - (v - min) / span) * (height - pad * 2);
+  const segments = [];
+  let seg = [];
+  vals.forEach((v, i) => {
+    if (v == null || !Number.isFinite(v)) {
+      if (seg.length > 1) segments.push(seg);
+      seg = [];
+      return;
+    }
+    seg.push(`${(i * stepX).toFixed(1)},${y(v).toFixed(1)}`);
+  });
+  if (seg.length > 1) segments.push(seg);
+  if (!segments.length) return null;
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true" className="block">
+      {segments.map((pts, i) => (
+        <polyline
+          key={i}
+          points={pts.join(' ')}
+          fill="none"
+          stroke={stroke}
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ))}
+    </svg>
+  );
+}
+
 // Progress ring with the value in the center. `display` is the formatted
 // label (e.g. "45%", "10/10"); value/max drive the arc fraction.
-export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false, alert = false, display }) {
+export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false, alert = false, warn = false, display }) {
   // null/undefined/'' = metric absent this period. Keep it absent (NaN) so a
   // lower-is-better KPI isn't coerced to 0 and painted "on target" (green) while
   // the tile shows "—"; an absent ring renders a muted, empty track instead.
@@ -210,7 +256,7 @@ export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false
   const stroke = 6;
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
-  const color = present ? kpiTone(v, target, lowerIsBetter, alert) : CHART_PRIOR;
+  const color = present ? kpiTone(v, target, lowerIsBetter, alert, warn) : CHART_PRIOR;
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="flex-shrink-0">
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={CHART_GRID} strokeWidth={stroke} />
@@ -241,7 +287,7 @@ export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false
 
 // Horizontal value bar with a target marker. `max` defaults to leave the
 // value and target both visible with headroom.
-export function KpiBullet({ value, target = null, max = null, lowerIsBetter = false, alert = false }) {
+export function KpiBullet({ value, target = null, max = null, lowerIsBetter = false, alert = false, warn = false }) {
   // Absent metric → no fill + muted tone, so missing data never paints as
   // "on target" (see KpiRing).
   const present = value != null && value !== '' && Number.isFinite(Number(value));
@@ -250,7 +296,7 @@ export function KpiBullet({ value, target = null, max = null, lowerIsBetter = fa
   const ceiling = max || Math.max(v, t || 0) * 1.25 || 1;
   const valFrac = present ? Math.max(0, Math.min(1, v / ceiling)) : 0;
   const tgtFrac = t != null ? Math.max(0, Math.min(1, t / ceiling)) : null;
-  const color = present ? kpiTone(v, t, lowerIsBetter, alert) : CHART_PRIOR;
+  const color = present ? kpiTone(v, t, lowerIsBetter, alert, warn) : CHART_PRIOR;
   return (
     <div className="relative h-2 rounded-sm bg-zinc-200 overflow-hidden">
       <div className="absolute inset-y-0 left-0 rounded-sm" style={{ width: `${valFrac * 100}%`, background: color }} />

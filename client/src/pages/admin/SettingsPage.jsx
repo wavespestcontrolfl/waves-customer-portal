@@ -10,6 +10,7 @@ import {
   Save,
   Server,
   Settings as SettingsIcon,
+  Target,
   ToggleLeft,
   Users,
 } from "lucide-react";
@@ -17,6 +18,10 @@ import MobileSettingsPage from "../../components/admin/MobileSettingsPage";
 import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
+import {
+  DEFAULT_KPI_TARGETS,
+  KPI_METRIC_LABELS,
+} from "./dashboard/kpi-targets";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal folded to zinc-900. Semantic green/amber/red preserved.
@@ -127,6 +132,7 @@ const VALID_TABS = [
   "gates",
   "team",
   "service-reports",
+  "kpi-targets",
   "system",
 ];
 
@@ -137,6 +143,8 @@ const SETTINGS_TAB_GROUPS = [
   { key: "general", label: "General", Icon: Building2, tabs: ["general", "team"] },
   { key: "integrations", label: "Integrations", Icon: Plug, tabs: ["integrations"] },
   { key: "service-reports", label: "Service Reports", Icon: MapPinned, tabs: ["service-reports"] },
+  // Financials grows an "Operating Costs" leaf in the dashboard lane's Phase 5.
+  { key: "financials", label: "Financials", Icon: Target, tabs: ["kpi-targets"] },
   { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system"] },
 ];
 
@@ -146,6 +154,7 @@ const SETTINGS_LEAF_META = {
   team: { label: "Team", Icon: Users },
   integrations: { label: "Integrations", Icon: Plug },
   "service-reports": { label: "Service Reports", Icon: MapPinned },
+  "kpi-targets": { label: "KPI Targets", Icon: Target },
   gates: { label: "Feature Gates", Icon: ToggleLeft },
   system: { label: "System", Icon: Server },
 };
@@ -526,6 +535,9 @@ export default function SettingsPage() {
         </Card>
       )}
       {tab === "service-reports" && <ServiceCoverageSettingsTab />}
+      {tab === "kpi-targets" && (
+        <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />
+      )}
       {/* ── SYSTEM ── */}
       {tab === "system" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -862,6 +874,197 @@ function VisitTimelineSettingsCard() {
       </div>
       {message && <div style={{ marginTop: 12, fontSize: 12, color: message.includes("Could not") ? D.red : D.green }}>{message}</div>}
     </Card>
+  );
+}
+
+// Editable red/amber/green thresholds for the dashboard KPI tiles
+// (/api/admin/kpi-targets, seeded from the old hardcoded values). Every
+// snapshot metric is listed — ones without a target simply have no tone until
+// the owner sets one. The dashboard falls back to DEFAULT_KPI_TARGETS when a
+// row is missing, so clearing a field here never blanks a tile.
+function KpiTargetsSettingsTab({ canAdmin }) {
+  const [rows, setRows] = useState(null); // { [metric]: stored row }
+  const [dirty, setDirty] = useState({}); // { [metric]: { target?, amberBandPct?, lowerIsBetter? } }
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    adminFetch("/admin/kpi-targets")
+      .then((data) => {
+        const byMetric = {};
+        for (const row of data.targets || []) byMetric[row.metric] = row;
+        setRows(byMetric);
+      })
+      .catch((err) => setMessage(err.message || "Could not load KPI targets."));
+  }, []);
+
+  // Stored row, overlaid by unsaved edits, falling back to the tile default.
+  const effective = (metric) => ({
+    ...(DEFAULT_KPI_TARGETS[metric] || {}),
+    ...(rows?.[metric] || {}),
+    ...(dirty[metric] || {}),
+  });
+
+  const edit = (metric, patch) =>
+    setDirty((d) => ({ ...d, [metric]: { ...(d[metric] || {}), ...patch } }));
+
+  const save = async () => {
+    const changed = Object.keys(dirty);
+    const targets = [];
+    for (const metric of changed) {
+      const e = effective(metric);
+      const target = Number(e.target);
+      if (!Number.isFinite(target)) {
+        setMessage(`Enter a numeric target for "${KPI_METRIC_LABELS[metric] || metric}" (or discard the edit).`);
+        return;
+      }
+      targets.push({
+        metric,
+        target,
+        amberBandPct: e.amberBandPct == null || e.amberBandPct === "" ? 10 : Number(e.amberBandPct),
+        lowerIsBetter: !!e.lowerIsBetter,
+      });
+    }
+    if (!targets.length) {
+      setMessage("Nothing to save yet — edit a target first.");
+      return;
+    }
+    setSaving(true);
+    setMessage("");
+    try {
+      const result = await adminFetch("/admin/kpi-targets", {
+        method: "PUT",
+        body: JSON.stringify({ targets }),
+      });
+      if (result?.error) throw new Error(result.error);
+      setRows((prev) => {
+        const next = { ...(prev || {}) };
+        for (const t of targets) next[t.metric] = { ...(next[t.metric] || {}), ...t };
+        return next;
+      });
+      setDirty({});
+      setMessage(`Saved ${targets.length} target${targets.length === 1 ? "" : "s"}. Dashboard tiles pick this up on their next refresh.`);
+    } catch (err) {
+      setMessage(err.message || "Could not save KPI targets.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!rows && !message) {
+    return <Card><div style={{ color: D.muted, fontSize: 13 }}>Loading KPI targets...</div></Card>;
+  }
+
+  const inputStyle = {
+    width: 90,
+    padding: "6px 8px",
+    fontSize: 13,
+    fontFamily: MONO,
+    border: `1px solid ${D.inputBorder}`,
+    borderRadius: 6,
+    background: D.white,
+    color: D.text,
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <Card>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>KPI Targets</div>
+            <div style={{ marginTop: 4, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+              Dashboard tiles color against these: green at/above target, amber within the band, red beyond it.
+              "Lower is better" flips the comparison (callback rate, AR days, response speed).
+            </div>
+          </div>
+          {canAdmin && (
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || Object.keys(dirty).length === 0}
+              style={{ ...settingsButtonStyle("primary"), opacity: saving || Object.keys(dirty).length === 0 ? 0.6 : 1 }}
+            >
+              <Save size={15} /> {saving ? "Saving..." : "Save targets"}
+            </button>
+          )}
+        </div>
+        {message && (
+          <div style={{ marginTop: 12, fontSize: 12, color: /Could not|Enter a numeric/.test(message) ? D.red : D.green }}>
+            {message}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: D.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                <th style={{ padding: "6px 10px 10px 0" }}>Metric</th>
+                <th style={{ padding: "6px 10px 10px 0" }}>Target</th>
+                <th style={{ padding: "6px 10px 10px 0" }}>Direction</th>
+                <th style={{ padding: "6px 10px 10px 0" }}>Amber band %</th>
+                <th style={{ padding: "6px 0 10px 0" }}>Last updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.keys(KPI_METRIC_LABELS).map((metric) => {
+                const e = effective(metric);
+                const stored = rows?.[metric];
+                const isDirty = !!dirty[metric];
+                return (
+                  <tr key={metric} style={{ borderTop: `1px solid ${D.border}` }}>
+                    <td style={{ padding: "10px 10px 10px 0", color: D.text }}>
+                      {KPI_METRIC_LABELS[metric]}
+                      {isDirty && <span style={{ color: D.amber, marginLeft: 6 }}>•</span>}
+                    </td>
+                    <td style={{ padding: "10px 10px 10px 0" }}>
+                      <input
+                        type="number"
+                        step="any"
+                        value={e.target ?? ""}
+                        placeholder="—"
+                        disabled={!canAdmin}
+                        onChange={(ev) => edit(metric, { target: ev.target.value })}
+                        style={inputStyle}
+                      />
+                    </td>
+                    <td style={{ padding: "10px 10px 10px 0" }}>
+                      <select
+                        value={e.lowerIsBetter ? "lower" : "higher"}
+                        disabled={!canAdmin}
+                        onChange={(ev) => edit(metric, { lowerIsBetter: ev.target.value === "lower" })}
+                        style={{ ...inputStyle, width: 130, fontFamily: "inherit" }}
+                      >
+                        <option value="higher">Higher is better</option>
+                        <option value="lower">Lower is better</option>
+                      </select>
+                    </td>
+                    <td style={{ padding: "10px 10px 10px 0" }}>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="any"
+                        value={e.amberBandPct ?? 10}
+                        disabled={!canAdmin}
+                        onChange={(ev) => edit(metric, { amberBandPct: ev.target.value })}
+                        style={inputStyle}
+                      />
+                    </td>
+                    <td style={{ padding: "10px 0", color: D.muted, fontSize: 12 }}>
+                      {stored?.updatedAt
+                        ? `${new Date(stored.updatedAt).toLocaleDateString("en-US", { timeZone: "America/New_York" })}${stored.updatedBy ? ` · ${stored.updatedBy}` : ""}`
+                        : stored ? "seeded" : "no target set"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
   );
 }
 
