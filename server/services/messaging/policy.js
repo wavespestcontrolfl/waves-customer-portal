@@ -89,6 +89,7 @@ const MESSAGE_PURPOSES = [
   'document_request',
   'estimate_followup',
   'booking_abandonment_followup',
+  'missed_call_followup',
   'review_request',
   'referral',
   'retention',
@@ -291,6 +292,18 @@ const PURPOSE_POLICY = {
   // Abandoned-booking recovery — same shape as estimate_followup: a prospect who
   // entered their phone into /book and picked a slot is a transactional contact.
   booking_abandonment_followup: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_provided_unverified',
+    requireIds: [],
+  },
+  // Missed-call / voicemail text-back — same shape as booking_abandonment_followup:
+  // a prospect who called us and left a message asking about service is a
+  // transactional contact; the one automated reply answers their own inquiry.
+  missed_call_followup: {
     allowEmoji: false,
     allowExactPrice: false,
     maxSegments: 2,

@@ -328,14 +328,19 @@ function leadContactCompleteness(fields = {}) {
 // customer-less and UNqualified so they land in Needs Review for the office to
 // complete — they are never auto-converted to a customer and, because Step 6 and
 // the newsletter subscribe stay gated on `customerId`, never trigger outbound.
-// Spam/voicemail are early-returned before this runs; the caller still guards
-// is_spam + the non-lead content veto (isNonLeadCallContent) at the gate.
-function hasWorkableLeadSignal({ extracted = {}, phone = null } = {}) {
+// Spam is early-returned before this runs; the caller still guards is_spam +
+// the non-lead content veto (isNonLeadCallContent) at the gate.
+// For a VOICEMAIL the email/address reachback requirement is waived: a prospect
+// who left a message asking about service gave us a callback number by
+// definition, and that number IS the reachback (we text the quote link / call
+// back). Requiring email/address would drop exactly the "call me back about
+// pest control" messages the voicemail lead path exists to capture.
+function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false } = {}) {
   if (!phone) return false;
   const text = (v) => String(v == null ? '' : v).trim();
   const hasServiceIntent = !!(text(extracted.matched_service) || text(extracted.requested_service));
   const hasReachback = !!(text(extracted.email) || text(extracted.address_line1));
-  return hasServiceIntent && hasReachback;
+  return hasServiceIntent && (hasReachback || voicemail === true);
 }
 
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
@@ -1394,9 +1399,10 @@ IMPORTANT — is this a new lead? Set call_type and is_lead together:
 - "billing" (is_lead=false): an invoice, payment, receipt, refund, or account-balance question.
 - "spam" (is_lead=false): a solicitor, vendor pitch, robocall, or marketing call (also set is_spam=true).
 - "wrong_number" (is_lead=false): a misdial or a call clearly not meant for Waves.
-- "voicemail" (is_lead=false): no live two-way conversation took place (also set is_voicemail=true).
+- "voicemail" (is_lead=false): a voicemail with NO workable content — a hang-up, dead air, unintelligible audio, or a message that states no reason for calling (also set is_voicemail=true).
 - "other" (is_lead=false): none of the above.
 An EXISTING customer requesting a NEW, different service they have not purchased is still a lead (new_inquiry, is_lead=true).
+Voicemail is a CHANNEL, not a content type: whenever no live two-way conversation took place (the caller left a message), set is_voicemail=true — then classify call_type by what the MESSAGE says, exactly as if it had been a live call. A NEW prospect leaving a message asking about service, pricing, or a callback about service is "new_inquiry" (is_lead=true) even though it arrived as a voicemail. Reserve call_type "voicemail" for messages whose content fits none of the other categories.
 
 IMPORTANT — lead_quality (only meaningful when is_lead=true; use "cold" otherwise):
 - "hot": ready to buy now — asking to book, requesting the soonest opening, an urgent active infestation, or explicitly says "sign me up".
@@ -1971,8 +1977,64 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Skip voicemail/spam
-    if (extracted.is_voicemail || extracted.is_spam) {
+    // ── Voicemail routing ──
+    // Voicemail detection is deterministic-first: the voice webhook stamps
+    // answered_by/call_outcome='voicemail' on call_log when the caller hit the
+    // voicemail <Record> path (twilio-voice-webhook.js resolveInboundDialCompletion),
+    // so OR that signal with the model's is_voicemail flag. Model-only detection
+    // was inconsistent — some voicemails slipped through as live calls and minted
+    // partial-data customers, others were dropped entirely.
+    const voicemailChannel = !!(
+      extracted.is_voicemail
+      || call.answered_by === 'voicemail'
+      || call.call_outcome === 'voicemail'
+    );
+    if (voicemailChannel) extracted.is_voicemail = true;
+
+    // A voicemail from a NEW prospect with a callback number and concrete
+    // service intent is a workable lead, not a skip: it continues into the
+    // normal pipeline and lands as a customer-less UNqualified Needs-Review
+    // lead (Step 4b). Customer creation stays hard-off for voicemails (Step 3
+    // create branch gates on !is_voicemail), so a mangled voicemail
+    // transcription can never mint a partial-data customer. Existing-customer
+    // voicemails keep today's behavior: terminal 'voicemail' status, no lead —
+    // a normal missed call the office sees in the comms inbox.
+    // The content veto for voicemails keys on the content TYPE only. A stale
+    // model output can keep the legacy `call_type='voicemail', is_lead=false`
+    // shape even when it extracted a concrete requested service, and that
+    // boolean must not out-vote deterministic service intent on exactly the
+    // channel this path exists to recover (isNonLeadCallContent would veto on
+    // it). Real non-lead content — billing, complaint, existing-customer
+    // scheduling/service, wrong number — still vetoes.
+    const voicemailContentVeto = NON_LEAD_CALL_TYPES.has(
+      String(extracted?.call_type || '').trim().toLowerCase()
+    );
+    let voicemailLeadPath = false;
+    if (voicemailChannel && !extracted.is_spam && !isOutboundCall(call) && !voicemailContentVeto) {
+      const vmPhone = resolveCallContactPhone(call, extracted.phone);
+      if (vmPhone && hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) {
+        const vmCustomer = call.customer_id
+          ? { id: call.customer_id }
+          : await findCustomerForCallContact(vmPhone, extracted).catch(() => null);
+        voicemailLeadPath = !vmCustomer;
+      }
+    }
+    if (voicemailLeadPath && extracted.is_lead === false) {
+      // Reconcile the stale legacy shape so every downstream consumer (the
+      // Step 4b nonLeadCall gate, the ai_triage stamp, route decisions) sees
+      // what the deterministic signals decided: channel voicemail + callback
+      // number + concrete service intent IS a lead. Without this, the same
+      // stale boolean that the gate above ignores would re-veto lead creation
+      // via isNonLeadCallContent at shouldCreateLead.
+      extracted.is_lead = true;
+      const staleType = String(extracted.call_type || '').trim().toLowerCase();
+      if (!staleType || staleType === 'voicemail' || staleType === 'other') {
+        extracted.call_type = 'new_inquiry';
+      }
+    }
+
+    // Skip spam and non-workable voicemail
+    if (extracted.is_spam || (voicemailChannel && !voicemailLeadPath)) {
       await writeLegacyShadowRouteDecision({
         call,
         extracted,
@@ -2004,6 +2066,23 @@ const CallRecordingProcessor = {
       );
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
+    }
+
+    if (voicemailChannel) {
+      // Workable voicemail continuing to lead creation: stamp the channel on
+      // the call log NOW (non-terminal — the row stays claimed as 'processing')
+      // so the call reads as a voicemail even if a later step fails, and mirror
+      // it to the unified inbox thread exactly like the skip path does.
+      await db('call_log').where({ id: call.id }).update({
+        answered_by: 'voicemail',
+        call_outcome: 'voicemail',
+        updated_at: new Date(),
+      });
+      await updateUnifiedVoiceMessage(
+        { ...call, transcription, answered_by: 'voicemail' },
+        { body: transcription, answered_by: 'voicemail' }
+      );
+      logger.info(`[call-proc] Voicemail ${callSid} has workable lead signal — continuing to lead creation`);
     }
 
     // ── V2 routing gate — evaluated BEFORE canonical customer/lead writes ──
@@ -2275,8 +2354,12 @@ const CallRecordingProcessor = {
         if (Object.keys(updates).length > 0) {
           await db('customers').where({ id: customerId }).update(updates);
         }
-      } else if (extracted.first_name && phone) {
-        // Create new customer
+      } else if (extracted.first_name && phone && !extracted.is_voicemail) {
+        // Create new customer. NEVER from a voicemail — a one-sided message
+        // transcription is too lossy to mint a customer record from (the Josh
+        // incident: first name + mangled address became a "real" customer).
+        // A workable voicemail becomes a customer-less Needs-Review lead in
+        // Step 4b instead; the office completes it into a customer by hand.
         const loc = resolveLocation(extracted.city || '');
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
         const numberConfig = TWILIO_NUMBERS.findByNumber(call.to_phone);
@@ -2557,6 +2640,7 @@ const CallRecordingProcessor = {
     // because Step 3 already created the customer — attribution would find the customer
     // and skip lead creation (race condition).
     let leadId = null;
+    let voicemailSmsResult = null;
     const leadCustomer = customerId
       ? await db('customers').where({ id: customerId }).select('id', 'pipeline_stage').first().catch(() => null)
       : null;
@@ -2574,10 +2658,14 @@ const CallRecordingProcessor = {
     // to a silent no_op. Still gated by the non-lead content veto, so existing-
     // customer / spam / wrong-number calls never take this path.
     const workableUnnamedLead = !customerId && !nonLeadCall
-      && hasWorkableLeadSignal({ extracted, phone });
+      && hasWorkableLeadSignal({ extracted, phone, voicemail: extracted.is_voicemail === true });
+    // The customer-attached path additionally vetoes voicemails: an existing-
+    // customer voicemail terminal-skips before Step 3, so a voicemail reaching
+    // here with a customerId means a late/racy phone match — treat it like the
+    // skip path (no lead), never like a live-call inquiry.
     const shouldCreateLead = !extracted.is_spam && !nonLeadCall
       && (
-        (customerId && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall }))
+        (customerId && !extracted.is_voicemail && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall }))
         || workableUnnamedLead
       );
     if (!shouldCreateLead && !extracted.is_spam && (customerId || nonLeadCall)) {
@@ -2650,7 +2738,11 @@ const CallRecordingProcessor = {
             first_name: capitalizeName(extracted.first_name) || null,
             last_name: capitalizeName(extracted.last_name) || null,
             email: extracted.email || null,
-            lead_type: 'inbound_call',
+            // 'voicemail' is an established lead_type (admin-agents
+            // isMissedCallLead treats it as a missed call needing outreach).
+            // first_contact_channel stays 'call' — attribution sweeps and the
+            // channel-mix dashboards key on it, and a voicemail IS a call.
+            lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
             first_contact_at: new Date(),
             first_contact_channel: 'call',
             twilio_call_sid: call.twilio_call_sid,
@@ -2682,6 +2774,31 @@ const CallRecordingProcessor = {
               );
             } catch (notifyErr) {
               logger.warn(`[call-proc] untracked-call admin notify failed: ${notifyErr.message}`);
+            }
+          } else {
+            // Tracked call lead (GBP/spoke/paid tracking number): fire the same
+            // new_lead bell + Web Push the web-form path sends. Until now ONLY
+            // untracked call leads notified anyone — a tracked marketing call
+            // lead (the common case) landed silently and relied on someone
+            // happening to open the Leads page. Best-effort; a notify failure
+            // must never break call processing.
+            try {
+              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+                .filter(Boolean)
+                .join(' ');
+              const { triggerNotification } = require('./notification-triggers');
+              await triggerNotification('new_lead', {
+                title: extracted.is_voicemail ? 'New voicemail lead' : 'New call lead',
+                name: callerName || (phone ? maskPhone(phone) : null),
+                source: leadSourceRow?.name || null,
+                zip: extracted.zip || null,
+                service: extracted.matched_service || extracted.requested_service || null,
+                phone,
+                message: !!extracted.call_summary,
+                leadId,
+              });
+            } catch (notifyErr) {
+              logger.warn(`[call-proc] tracked-call new_lead notify failed: ${notifyErr.message}`);
             }
           }
         }
@@ -2775,6 +2892,7 @@ const CallRecordingProcessor = {
             preferred_date_time: extracted.preferred_date_time,
             sentiment: extracted.sentiment,
             call_type: extracted.call_type || null,
+            ...(extracted.is_voicemail ? { voicemail: true } : {}),
             ...(contact.missing.length ? { missing_for_qualification: contact.missing } : {}),
             ...(bridgeNeedsConfirmation.length ? { needs_confirmation: bridgeNeedsConfirmation } : {}),
           });
@@ -2786,13 +2904,21 @@ const CallRecordingProcessor = {
           // already linked to a customer. Attach when we have one; otherwise
           // leave whatever link the lead already had.
           if (customerId) leadUpdates.customer_id = customerId;
+          // Reopen a reused lead the office parked as 'unresponsive' — the
+          // prospect just called back, and 'unresponsive' buckets under
+          // closed/lost in the admin leads UI, so a silently reused row would
+          // stay hidden from Needs Review. Same reopen semantics as the
+          // webhook prefill attach ('unresponsive' → 'new'; real terminal
+          // statuses are excluded from reuse upstream on the recovery path
+          // and never reopened here).
+          if (existingLead && current?.status === 'unresponsive') leadUpdates.status = 'new';
           leadUpdates.updated_at = new Date();
           await db('leads').where({ id: leadId }).update(leadUpdates);
 
           // Log AI triage activity. When the bridge flagged anything, append a
           // plain-language "confirm before dispatch" line so it's visible on the
           // lead timeline Virginia works, not just in extracted_data.
-          const triageBase = `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`;
+          const triageBase = `AI extracted from ${extracted.is_voicemail ? 'voicemail' : 'call'}: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`;
           const triageNotes = [];
           if (contact.missing.length) {
             triageNotes.push(`needs for qualification: ${contact.missing.map((f) => QUALIFYING_CONTACT_LABELS[f] || f).join(', ')}`);
@@ -2818,6 +2944,27 @@ const CallRecordingProcessor = {
                 : {}),
             }),
           }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
+        }
+
+        // Voicemail lead text-back (Layer 3): text the prospect a prefilled
+        // quote-wizard link. Only on the voicemail lead path — new prospect,
+        // workable signal, no existing customer. All send gates (feature
+        // gate, one-shot dedupe, landline, quiet hours, STOP suppression,
+        // template kill switch) live in the service. Best-effort: a text-back
+        // failure must never break call processing or the lead that was just
+        // created.
+        if (voicemailLeadPath && leadId) {
+          try {
+            const VoicemailLeadSms = require('./voicemail-lead-sms');
+            voicemailSmsResult = await VoicemailLeadSms.sendVoicemailQuoteLink({
+              leadId,
+              extracted,
+              call,
+              phone,
+            });
+          } catch (smsErr) {
+            logger.warn(`[call-proc] voicemail text-back failed (non-blocking): ${smsErr.message}`);
+          }
         }
       } catch (leadErr) {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
@@ -3636,6 +3783,7 @@ const CallRecordingProcessor = {
       appointmentResult,
       newsletterResult,
       beehiivResult,
+      voicemailSmsResult,
     };
     } catch (procErr) {
       logger.error(`[call-proc] Unhandled error processing ${callSid}: ${procErr.message}\n${procErr.stack || ''}`);

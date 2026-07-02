@@ -11,7 +11,7 @@ const { subscribeOrResubscribe } = require('../services/newsletter-subscribers')
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
-const { attributionForSourceType } = require('../services/ads/call-attribution');
+const { attributionForSourceType, backfillCallLeadAttribution } = require('../services/ads/call-attribution');
 const { etDateString } = require('../utils/datetime-et');
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -734,7 +734,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         zip: quoteZip || null,
         service_interest: serviceInterest,
         monthly_value: leadMonthlyValue,
-        extracted_data: extractedData,
+        // quote_wizard leads keep the historical replace semantics (each stage
+        // snapshot supersedes the last). A lead the wizard ATTACHED to via the
+        // voicemail text-back prefill token is a call-pipeline lead
+        // (lead_type voicemail/inbound_call) — MERGE so the voicemail
+        // provenance and the text-back one-shot stamp survive this stage, same
+        // rule as the attach in public-property-lookup.js. CASE keeps the
+        // ownership-predicated UPDATE atomic (no read-then-write).
+        extracted_data: db.raw(
+          "CASE WHEN lead_type = 'quote_wizard' THEN ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
+          [extractedData, extractedData]
+        ),
         updated_at: new Date(),
       };
       if (gclid) updateFields.gclid = gclid;
@@ -748,7 +758,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .whereNull('deleted_at')
         .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
         .update(updateFields)
-        .returning(['id', 'lead_source_id']);
+        .returning(['id', 'lead_source_id', 'lead_type']);
       lead = rows[0];
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
         await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
@@ -886,7 +896,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // never advance — correct, since it never converted).
     try {
       const channelAttr = attributionForSourceType(sourceMeta.sourceType);
-      if (channelAttr) {
+      // A lead ATTACHED via the voicemail text-back prefill token is a
+      // call-pipeline lead: its funnel row belongs to the CALL source (the
+      // tracking number the prospect dialed) — a web-channel row here would
+      // win the unique lead_id slot and permanently misattribute a paid/GBP
+      // voicemail to the website. But the call processor's own attribution is
+      // gated on customerId and voicemail recovery leads are customer-less at
+      // call time, so no call row exists yet either: BACKFILL it now that the
+      // wizard has linked the customer (lead_id dedupe + first-touch inside,
+      // so re-submits and pre-existing rows are safe).
+      const attachedCallLead = ['voicemail', 'inbound_call'].includes(lead?.lead_type);
+      if (attachedCallLead) {
+        await backfillCallLeadAttribution({ leadId: lead.id, customerId, serviceInterest });
+      } else if (channelAttr) {
         await db('ad_service_attribution').insert({
           customer_id: customerId,
           lead_id: lead.id,
