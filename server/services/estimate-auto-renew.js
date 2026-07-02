@@ -53,6 +53,9 @@ const EstimateAutoRenew = {
     try {
       const stale = await db('estimates')
         .whereIn('status', ['sent', 'viewed'])
+        // Archived rows keep sent/viewed status — renewing one would extend
+        // and re-text an estimate whose customer already converted.
+        .whereNull('archived_at')
         .whereNotNull('expires_at')
         .where('expires_at', '<', new Date())
         .where(q => q.where('renewal_count', '<', 1).orWhereNull('renewal_count'))

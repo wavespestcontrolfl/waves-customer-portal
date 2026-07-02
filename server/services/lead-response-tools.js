@@ -408,10 +408,12 @@ async function executeLeadTool(toolName, input) {
     }
 
     case 'flag_for_estimate': {
-      // Check if estimate already exists
+      // Check if estimate already exists. Archived rows keep sent/viewed
+      // status but are closed courtships — they must not block a new one.
       const existing = await db('estimates')
         .where({ customer_id: input.customer_id })
         .whereIn('status', ['draft', 'sent', 'viewed'])
+        .whereNull('archived_at')
         .first();
 
       if (existing) {

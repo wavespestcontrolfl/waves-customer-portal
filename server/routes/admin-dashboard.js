@@ -260,7 +260,9 @@ router.get('/', dashboardCache, async (req, res, next) => {
       db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
         .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [som]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [today])
         .count('* as count').first(),
-      db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
+      // archived_at: the conversion-guard sweep archives converted customers'
+      // estimates WITHOUT changing status, so status alone over-counts.
+      db('estimates').whereIn('status', ['sent', 'viewed']).whereNull('archived_at').where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
       db('scheduled_services').where('scheduled_date', '>=', monW).where('scheduled_date', '<=', sunW).select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed")

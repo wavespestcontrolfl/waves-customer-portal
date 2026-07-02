@@ -441,9 +441,12 @@ async function resolveEstimateContext({ customer, phone, body }) {
   }
 
   if (customer?.id) {
+    // whereNull(archived_at): archived rows keep sent/viewed status but the
+    // courtship already closed — never resolve one as "the open estimate".
     const estimate = await db('estimates')
       .where({ customer_id: customer.id })
       .whereIn('status', OPEN_ESTIMATE_STATUSES)
+      .whereNull('archived_at')
       .orderByRaw('COALESCE(last_viewed_at, viewed_at, sent_at, updated_at, created_at) DESC')
       .first();
     if (estimate) return { estimate, shortCode: null };
@@ -453,6 +456,7 @@ async function resolveEstimateContext({ customer, phone, body }) {
   if (last10) {
     const estimate = await db('estimates')
       .whereIn('status', OPEN_ESTIMATE_STATUSES)
+      .whereNull('archived_at')
       .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
       .orderByRaw('COALESCE(last_viewed_at, viewed_at, sent_at, updated_at, created_at) DESC')
       .first();

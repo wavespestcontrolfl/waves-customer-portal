@@ -250,7 +250,9 @@ async function getKpiSnapshot() {
     db('customers').modify(whereLiveCustomer)
       .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [r.month_start])
       .count('* as c').first(),
-    db('estimates').whereIn('status', ['sent', 'viewed']).count('* as c').first(),
+    // archived_at: the conversion-guard sweep archives converted customers'
+    // estimates WITHOUT changing status, so status alone over-counts.
+    db('estimates').whereIn('status', ['sent', 'viewed']).whereNull('archived_at').count('* as c').first(),
     db('scheduled_services').whereBetween('scheduled_date', [r.week_start, r.week_end]).select(
       db.raw("COUNT(*) as total"),
       db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
@@ -888,7 +890,9 @@ async function getTodayBriefing() {
     }).count('* as c').first(),
 
     // Pending estimates
-    db('estimates').whereIn('status', ['sent', 'viewed']).count('* as c').first(),
+    // archived_at: the conversion-guard sweep archives converted customers'
+    // estimates WITHOUT changing status, so status alone over-counts.
+    db('estimates').whereIn('status', ['sent', 'viewed']).whereNull('archived_at').count('* as c').first(),
 
     // Overdue customers (no service in 90+ days for active pest customers).
     // Uses ET-anchored "today" so the 90-day boundary doesn't drift at

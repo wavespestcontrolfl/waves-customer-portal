@@ -89,6 +89,12 @@ function makeBuilder(table, cfg = {}, calls = []) {
       return b;
     });
   }
+  // knex .modify(fn, ...args) → fn(builder, ...args), returns the builder.
+  b.modify = jest.fn((fn, ...args) => {
+    calls.push({ table, m: 'modify' });
+    if (typeof fn === 'function') fn(b, ...args);
+    return b;
+  });
   b.first = jest.fn((...args) => {
     calls.push({ table, m: 'first', args });
     b._mode = 'first';
@@ -297,14 +303,28 @@ describe('archiveConvertedOpenEstimates', () => {
       'updated_at',
     ]);
 
-    // First-conversion semantics across BOTH signal sources: one has-signal
-    // OR-pair, and a none-before NOT EXISTS per source applied to every row
-    // (a pre-estimate signal of EITHER kind disqualifies — judging sources
-    // independently would archive live upsell estimates). The third
-    // NOT EXISTS is the received-deposit money guard.
+    // First-conversion semantics: one has-signal OR-pair (paid invoice /
+    // completed visit), and a none-before NOT EXISTS per EVIDENCE source —
+    // invoices, scheduled_services, service_records, and the customer row
+    // itself — applied to every row (a pre-estimate signal of ANY kind
+    // disqualifies — judging sources independently would archive live upsell
+    // estimates). The fifth NOT EXISTS is the received-deposit money guard.
     expect(calls.filter((c) => c.m === 'whereExists')).toHaveLength(1);
     expect(calls.filter((c) => c.m === 'orWhereExists')).toHaveLength(1);
-    expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(3);
+    expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(5);
+
+    // Eligibility must NOT gate on completed_at: legacy completed visits
+    // (pre-20260422000009) carry a NULL completed_at, and requiring it here
+    // would leave a legacy-only customer permanently ineligible — their
+    // converted estimate would fall through to expiration instead of
+    // archiving. The none-before branch times those rows via scheduled_date.
+    expect(
+      calls.find(
+        (c) =>
+          c.m === 'whereNotNull' &&
+          c.args?.[0] === 'scheduled_services.completed_at',
+      ),
+    ).toBeUndefined();
 
     // Money guard: a received (unconsumed) acceptance deposit blocks the
     // archive — archived rows never expire, and the terminal-deposit refund
@@ -344,6 +364,38 @@ describe('archiveConvertedOpenEstimates', () => {
         ),
     );
     expect(legacyCompletedFallback).toBeTruthy();
+
+    // Imported/legacy history disqualifies too: a completed service_records
+    // row, or an established real-customer row (CUSTOMER_STAGES stage with a
+    // member_since predating the estimate) — such customers may carry NO
+    // scheduled_services or invoice rows at all, and archiving their live
+    // upsell estimate on a later payment would be wrong.
+    expect(
+      calls.find(
+        (c) =>
+          c.m === 'whereRaw' &&
+          typeof c.args?.[0] === 'string' &&
+          c.args[0].includes(
+            'service_records.service_date::timestamptz < estimates.created_at',
+          ),
+      ),
+    ).toBeTruthy();
+    expect(
+      calls.find(
+        (c) =>
+          c.m === 'whereRaw' &&
+          typeof c.args?.[0] === 'string' &&
+          c.args[0].includes(
+            'customers.member_since::timestamptz < estimates.created_at',
+          ),
+      ),
+    ).toBeTruthy();
+    const stageGate = calls.find(
+      (c) => c.m === 'whereIn' && c.args?.[0] === 'customers.pipeline_stage',
+    );
+    expect(stageGate).toBeTruthy();
+    expect(stageGate.args[1]).toEqual(['active_customer', 'won', 'at_risk']);
+
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('Archived 2'),
     );
@@ -387,14 +439,16 @@ describe('excludePendingFirstBookings (expiration hold)', () => {
     expect(createdBound).toBeTruthy();
 
     // First-ever narrowing in lockstep with the archive sweep's none-before
-    // guards: a customer already converted before the estimate is NOT held —
-    // their pending visits are routine, and the hold would park a dead
-    // upsell estimate out of expiration for as long as they stay on service.
+    // guards (the shared whereNoConversionBeforeEstimate helper): a customer
+    // already converted before the estimate — by invoice, visit, service
+    // record, or established-customer row — is NOT held; their pending
+    // visits are routine, and the hold would park a dead upsell estimate out
+    // of expiration for as long as they stay on service.
     expect(
       calls.filter(
         (c) => c.table === 'estimates:sub' && c.m === 'whereNotExists',
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(4);
     expect(
       calls.find(
         (c) =>
@@ -410,6 +464,26 @@ describe('excludePendingFirstBookings (expiration hold)', () => {
           typeof c.args?.[0] === 'string' &&
           c.args[0].includes(
             'COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz)',
+          ),
+      ),
+    ).toBeTruthy();
+    expect(
+      calls.find(
+        (c) =>
+          c.m === 'whereRaw' &&
+          typeof c.args?.[0] === 'string' &&
+          c.args[0].includes(
+            'service_records.service_date::timestamptz < estimates.created_at',
+          ),
+      ),
+    ).toBeTruthy();
+    expect(
+      calls.find(
+        (c) =>
+          c.m === 'whereRaw' &&
+          typeof c.args?.[0] === 'string' &&
+          c.args[0].includes(
+            'customers.member_since::timestamptz < estimates.created_at',
           ),
       ),
     ).toBeTruthy();

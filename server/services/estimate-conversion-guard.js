@@ -22,9 +22,12 @@
  *  2. archiveConvertedOpenEstimates() — daily sweep that stamps archived_at
  *     on open estimates whose customer's FIRST-ever paid invoice or FIRST
  *     completed service happened after the estimate was created (i.e. the
- *     courtship this estimate belonged to already closed some other way).
- *     Narrower than (1) so a live upsell estimate sent to a long-standing
- *     customer is never archived out from under Virginia.
+ *     courtship this estimate belonged to already closed some other way),
+ *     with NO conversion evidence of any kind — invoice, visit, service
+ *     record, or an established-customer row — predating the estimate
+ *     (whereNoConversionBeforeEstimate). Narrower than (1) so a live upsell
+ *     estimate sent to a long-standing customer is never archived out from
+ *     under Virginia.
  */
 
 const db = require("../models/db");
@@ -86,6 +89,71 @@ async function customerConvertedSince(est) {
 }
 
 /**
+ * None-before disqualifiers shared by the archive sweep and the expiration
+ * hold (knex `.modify` helper; the two callers must stay in lockstep, and
+ * sharing one helper is what keeps them there). Any conversion evidence
+ * PREDATING the estimate proves the customer was already converted when the
+ * quote went out — the estimate is a live upsell and must be left alone.
+ *
+ * Four evidence sources, broader than the sweep's eligibility signals on
+ * purpose (both asymmetries fail toward KEEPING an estimate):
+ *  - paid invoices (null paid_at reads as paid at creation time — the lower
+ *    bound — so an ambiguous invoice counts as predating);
+ *  - completed scheduled_services (legacy rows predate migration
+ *    20260422000009 and carry NULL completed_at; fall back to the visit's
+ *    scheduled_date, NOT NULL since the initial schema);
+ *  - completed service_records — imported/legacy service history often lives
+ *    ONLY here, with no scheduled_services or invoice rows at all;
+ *  - the customer row itself: a real customer stage (CUSTOMER_STAGES) whose
+ *    member_since predates the estimate — a long-standing/imported customer
+ *    may carry NO transactional rows whatsoever. member_since is not
+ *    re-stamped on conversion, so a stale intake-stamped date can only
+ *    over-disqualify (estimate kept, ages to expiration) — never archive.
+ *
+ * DATE-typed columns (scheduled_date, service_date, member_since) cast to
+ * midnight, understating the real event time — which fails toward "predates
+ * the estimate", toward keeping a possibly-live upsell, never toward
+ * archiving it.
+ */
+function whereNoConversionBeforeEstimate(query) {
+  return query
+    .whereNotExists(function () {
+      this.select(db.raw("1"))
+        .from("invoices")
+        .whereRaw("invoices.customer_id = estimates.customer_id")
+        .where("invoices.status", "paid")
+        .whereRaw(
+          "COALESCE(invoices.paid_at, invoices.created_at) < estimates.created_at",
+        );
+    })
+    .whereNotExists(function () {
+      this.select(db.raw("1"))
+        .from("scheduled_services")
+        .whereRaw("scheduled_services.customer_id = estimates.customer_id")
+        .where("scheduled_services.status", "completed")
+        .whereRaw(
+          "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz) < estimates.created_at",
+        );
+    })
+    .whereNotExists(function () {
+      this.select(db.raw("1"))
+        .from("service_records")
+        .whereRaw("service_records.customer_id = estimates.customer_id")
+        .where("service_records.status", "completed")
+        .whereRaw(
+          "service_records.service_date::timestamptz < estimates.created_at",
+        );
+    })
+    .whereNotExists(function () {
+      this.select(db.raw("1"))
+        .from("customers")
+        .whereRaw("customers.id = estimates.customer_id")
+        .whereIn("customers.pipeline_stage", CUSTOMER_STAGES)
+        .whereRaw("customers.member_since::timestamptz < estimates.created_at");
+    });
+}
+
+/**
  * Daily sweep: archive open (sent/viewed, un-archived) estimates whose
  * customer's first-ever conversion signal — first paid invoice or first
  * completed service — landed AFTER the estimate was created. "First-ever"
@@ -99,12 +167,13 @@ async function customerConvertedSince(est) {
  */
 async function archiveConvertedOpenEstimates() {
   const now = new Date();
-  // "First-ever" is judged ACROSS both signal sources: at least one signal
-  // (paid invoice or completed service) exists, and NO signal of EITHER kind
-  // predates the estimate. Judging each source independently would let a
-  // customer with a pre-estimate completed service but no prior invoice
-  // match the invoice branch on a later payment and lose a live upsell
-  // estimate.
+  // "First-ever" is judged ACROSS signal sources: at least one eligibility
+  // signal (paid invoice or completed visit) exists, and NO conversion
+  // evidence of ANY kind (whereNoConversionBeforeEstimate — a deliberately
+  // broader set) predates the estimate. Judging each source independently
+  // would let a customer with a pre-estimate completed service but no prior
+  // invoice match the invoice branch on a later payment and lose a live
+  // upsell estimate.
   const archivedRows = await db("estimates")
     .whereIn("status", ["sent", "viewed"])
     .whereNull("archived_at")
@@ -118,42 +187,19 @@ async function archiveConvertedOpenEstimates() {
             .where("invoices.status", "paid");
         })
         .orWhereExists(function () {
+          // status='completed' alone is the signal — legacy rows (pre
+          // 20260422000009) carry a NULL completed_at, and the none-before
+          // disqualifier below already times them via scheduled_date.
+          // Requiring completed_at here would leave a legacy-only customer
+          // permanently ineligible, so their converted estimate would fall
+          // through to expiration instead of being archived.
           this.select(db.raw("1"))
             .from("scheduled_services")
             .whereRaw("scheduled_services.customer_id = estimates.customer_id")
-            .where("scheduled_services.status", "completed")
-            .whereNotNull("scheduled_services.completed_at");
+            .where("scheduled_services.status", "completed");
         }),
     )
-    .whereNotExists(function () {
-      // A paid invoice with null paid_at reads as paid at its creation time
-      // (the lower bound). An ambiguous invoice minted before the estimate
-      // therefore counts as PREDATING it, and the estimate is left alone —
-      // the sweep fails toward keeping a possibly-live upsell estimate.
-      this.select(db.raw("1"))
-        .from("invoices")
-        .whereRaw("invoices.customer_id = estimates.customer_id")
-        .where("invoices.status", "paid")
-        .whereRaw(
-          "COALESCE(invoices.paid_at, invoices.created_at) < estimates.created_at",
-        );
-    })
-    .whereNotExists(function () {
-      // Legacy completed rows predate the tracking columns (migration
-      // 20260422000009) and carry a NULL completed_at even though
-      // status='completed' is the repo-wide completion signal. Fall back to
-      // the visit's scheduled_date (NOT NULL since the initial schema):
-      // midnight understates the real completion time, which fails toward
-      // "predates the estimate" — toward KEEPING a possibly-live upsell
-      // estimate, never toward archiving it.
-      this.select(db.raw("1"))
-        .from("scheduled_services")
-        .whereRaw("scheduled_services.customer_id = estimates.customer_id")
-        .where("scheduled_services.status", "completed")
-        .whereRaw(
-          "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz) < estimates.created_at",
-        );
-    })
+    .modify(whereNoConversionBeforeEstimate)
     // Never archive an estimate holding a received (unconsumed, unrefunded)
     // acceptance deposit: archived rows are excluded from expiration, and
     // sweepTerminalEstimateDeposits only scans declined/expired estimates —
@@ -200,39 +246,23 @@ async function archiveConvertedOpenEstimates() {
  * expires, and the terminal-deposit sweep refunds.
  *
  * First-ever narrowing, in lockstep with the sweep's none-before guards
- * (identical COALESCE predicates — keep them in sync): a customer who
- * converted BEFORE the estimate is a long-standing customer whose pending
- * visits are routine; holding their open upsell estimate would park it
- * un-expirable for as long as they stay on service.
+ * (the shared whereNoConversionBeforeEstimate helper IS the sync): a
+ * customer who converted BEFORE the estimate is a long-standing customer
+ * whose pending visits are routine; holding their open upsell estimate
+ * would park it un-expirable for as long as they stay on service.
  */
 function excludePendingFirstBookings(query) {
   return query.whereNotExists(function () {
-    this.select(db.raw("1"))
-      .from("scheduled_services as pending_visit")
-      .whereRaw("pending_visit.customer_id = estimates.customer_id")
-      .whereNotIn("pending_visit.status", [
-        ...NON_LIVE_APPOINTMENT_STATUSES,
-        "completed",
-      ])
-      .whereRaw("pending_visit.created_at >= estimates.created_at")
-      .whereNotExists(function () {
-        this.select(db.raw("1"))
-          .from("invoices")
-          .whereRaw("invoices.customer_id = estimates.customer_id")
-          .where("invoices.status", "paid")
-          .whereRaw(
-            "COALESCE(invoices.paid_at, invoices.created_at) < estimates.created_at",
-          );
-      })
-      .whereNotExists(function () {
-        this.select(db.raw("1"))
-          .from("scheduled_services")
-          .whereRaw("scheduled_services.customer_id = estimates.customer_id")
-          .where("scheduled_services.status", "completed")
-          .whereRaw(
-            "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz) < estimates.created_at",
-          );
-      });
+    whereNoConversionBeforeEstimate(
+      this.select(db.raw("1"))
+        .from("scheduled_services as pending_visit")
+        .whereRaw("pending_visit.customer_id = estimates.customer_id")
+        .whereNotIn("pending_visit.status", [
+          ...NON_LIVE_APPOINTMENT_STATUSES,
+          "completed",
+        ])
+        .whereRaw("pending_visit.created_at >= estimates.created_at"),
+    );
   });
 }
 

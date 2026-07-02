@@ -16,6 +16,7 @@ function query(result) {
   const chain = {
     where: jest.fn(() => chain),
     whereIn: jest.fn(() => chain),
+    whereNull: jest.fn(() => chain),
     whereNotNull: jest.fn(() => chain),
     orWhereNull: jest.fn(() => chain),
     orWhereNotNull: jest.fn(() => chain),
