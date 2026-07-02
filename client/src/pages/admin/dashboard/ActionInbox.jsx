@@ -15,10 +15,30 @@ function rank(a) {
 // alerts + action items (/admin/dashboard/alerts), deep-linked to the surface
 // where each one gets fixed. Replaces the old top-4 alerts banner: every item
 // shows, ordered by urgency, and a clean day says so instead of hiding.
+// alerts === null means the fetch never succeeded — render an explicit
+// unavailable state; claiming "all clear" on a failed load would hide any
+// critical alarms behind a green checkmark.
 export default function ActionInbox({ alerts }) {
-  const items = [...(alerts || [])].sort((a, b) => rank(a) - rank(b));
+  const loaded = Array.isArray(alerts);
+  const items = loaded ? [...alerts].sort((a, b) => rank(a) - rank(b)) : [];
   const criticalCount = items.filter((a) => a.severity === "critical").length;
-  const allClear = items.length === 0;
+  const allClear = loaded && items.length === 0;
+
+  if (!loaded) {
+    return (
+      <Card className="mb-4 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
+        <CardHeader className="flex items-center gap-2.5">
+          <CardTitle>Action Inbox</CardTitle>
+          <span className="text-12 text-ink-secondary">unavailable</span>
+        </CardHeader>
+        <CardBody>
+          <div className="text-13 text-ink-secondary py-2">
+            Alerts couldn&apos;t be loaded — refresh to retry.
+          </div>
+        </CardBody>
+      </Card>
+    );
+  }
 
   return (
     <Card className="mb-4 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">

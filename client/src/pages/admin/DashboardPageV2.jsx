@@ -85,7 +85,9 @@ export default function DashboardPageV2() {
   const [reviewTrend, setReviewTrend] = useState(null);
   const [today, setToday] = useState(null);
   const [billing, setBilling] = useState(null);
-  const [alerts, setAlerts] = useState([]);
+  // null = alerts never loaded successfully. ActionInbox renders an explicit
+  // unavailable state for null — only a real [] response may claim all-clear.
+  const [alerts, setAlerts] = useState(null);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);

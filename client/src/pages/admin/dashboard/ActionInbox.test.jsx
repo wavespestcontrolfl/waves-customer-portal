@@ -81,4 +81,15 @@ describe("ActionInbox", () => {
     expect(screen.getByText(/All clear/)).toBeInTheDocument();
     expect(screen.queryAllByRole("link")).toHaveLength(0);
   });
+
+  it("never claims all-clear when alerts failed to load (null)", () => {
+    render(<ActionInbox alerts={null} />);
+    expect(
+      screen.getByText(/Alerts couldn't be loaded/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/All clear/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Nothing needs you right now."),
+    ).not.toBeInTheDocument();
+  });
 });
