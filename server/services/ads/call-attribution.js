@@ -260,15 +260,13 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
     .whereIn('l.lead_source_id', bridgeSources.map((s) => s.id))
     .whereRaw("COALESCE(l.first_contact_at, l.created_at) < now() - (? * interval '1 day')", [days])
     .whereRaw("COALESCE(l.status,'') NOT IN ('duplicate','disqualified','spam')")
+    // Lead-level only — the funnel table's model (and recordCallPpcAttribution's
+    // contract) is one row per LEAD: a returning customer's new unclaimed bridge
+    // lead still counts, exactly as a second webhook form lead would. Revenue
+    // can't double-count: ad-attribution-sync credits one primary row per
+    // customer and demotes the rest.
     .whereNotExists(function noFunnelRow() {
       this.select(1).from('ad_service_attribution as a').whereRaw('a.lead_id = l.id');
-    })
-    // Customer already attributed via another lead → don't add a second
-    // lead-stage row for the same person. A NULL customer_id passes (the
-    // correlated predicate matches nothing) and is then skipped by
-    // recordCallPpcAttribution's no_customer gate, same as the live call path.
-    .whereNotExists(function customerCovered() {
-      this.select(1).from('ad_service_attribution as ac').whereRaw('ac.customer_id = l.customer_id');
     })
     .orderBy('l.created_at')
     .limit(cap)
