@@ -152,6 +152,21 @@ describe('scheduler wiring', () => {
     expect(block.match(/attributeUnclaimedBridgeLeads/g)).toHaveLength(2);
   });
 
+  test('fallback is gated on a healthy scan — a failed Google call-report scan skips it', () => {
+    const block = src.split("runExclusive('google-call-bridge-organic'")[1].slice(0, 3500);
+    // scanFailed captured from applyBridge, checked BEFORE the fallback runs
+    expect(block).toMatch(/scanFailed = !!r\.scanFailed/);
+    expect(block).toMatch(/if \(scanFailed\)/);
+    expect(block.indexOf('if (scanFailed)')).toBeLessThan(block.indexOf('attributeUnclaimedBridgeLeads'));
+  });
+
+  test('manual admin bridge-apply is serialized under the same lease', () => {
+    const adminSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-ads.js'), 'utf8');
+    const applyBlock = adminSrc.split("'/call-bridge/apply'")[1].slice(0, 1200);
+    expect(applyBlock).toMatch(/runExclusive\('google-call-bridge-organic'/);
+    expect(applyBlock).toMatch(/status\(409\)/); // lease held → busy, not silent no-op
+  });
+
   test('selection is limited to CALL leads (web leads got their funnel row at webhook time)', () => {
     const ca = fs.readFileSync(path.join(__dirname, '../services/ads/call-attribution.js'), 'utf8');
     expect(ca).toMatch(/\.where\('l\.first_contact_channel', 'call'\)/);
