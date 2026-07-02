@@ -21,7 +21,7 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
-const { lookupCountyParcelByPoint, countyUseDescToPropertyType, dorMajorCategory } = require('./county-parcel-gis');
+const { lookupCountyParcelByPoint, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -1657,6 +1657,128 @@ function extractPostSuffixDirection(street) {
   return String(street || '').match(/\b(?:AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)\s+([NSEW])\b/i)?.[1]?.toUpperCase() || null;
 }
 
+// ── House-number audit ──────────────────────────────────────────
+// When every property provider comes back empty, distinguish "the county has
+// no data" from "this house number does not exist on the county roll". The
+// second usually means a typo or misheard digits (voice transcription), and
+// saying WHICH nearby numbers exist turns a dead-end 0/100 panel into a
+// one-glance fix (4867 Tobermory Way → street exists, nearest is 4857).
+
+// True when the merged record carries county-roll or cadastral provenance —
+// in that case the county already vouched for the address and no audit runs.
+function hasCountyEvidence(rc) {
+  if (!rc) return false;
+  if (rc._parcel && rc._parcel.parcelId) return true;
+  return ['county', 'cadastral', 'hybrid'].includes(String(rc._source || ''));
+}
+
+function escapeAuditRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Which county rolls could vouch for this address — geocoded county first
+// (mirrors lookupPropertyFromCountyRecords' ordering), then any county whose
+// zip/city gate matches the raw address. Multi-county zips (Englewood) get
+// both, in order.
+function auditCountyCandidates(address, geoContext) {
+  const counties = [];
+  const geoCounty = geoContext && !geoContext.partialMatch && geoContext.state === 'FL'
+    ? normalizeCountyName(geoContext.county)
+    : null;
+  if (geoCounty) counties.push(geoCounty);
+  if (shouldQueryManateePAO(address, geoContext) && !counties.includes('Manatee')) counties.push('Manatee');
+  if (shouldQuerySarasotaPAO(address, geoContext) && !counties.includes('Sarasota')) counties.push('Sarasota');
+  if (shouldQueryCharlottePAO(address, geoContext) && !counties.includes('Charlotte')) counties.push('Charlotte');
+  return counties;
+}
+
+// Nearest existing numbers, closest first (up to 3). Same-parity numbers are
+// usually the same side of the street, so ties prefer matching parity.
+function nearestHouseNumbers(numbers, target, count = 3) {
+  return [...numbers]
+    .sort((a, b) => {
+      const d = Math.abs(a - target) - Math.abs(b - target);
+      if (d !== 0) return d;
+      return (a % 2 === target % 2) ? -1 : 1;
+    })
+    .slice(0, count)
+    .sort((a, b) => a - b);
+}
+
+/**
+ * Check the typed house number against the county roll's situs addresses for
+ * the same street. Returns null when the audit cannot run (no parseable
+ * house number + street, no county candidate, GIS failure) — callers treat
+ * null as "no signal", never as evidence. Shape:
+ *   { county, houseNumber, streetLabel, streetExists, hasExactMatch,
+ *     parcelCount, nearestNumbers }
+ */
+async function auditAddressHouseNumber(address, geoContext = null, options = {}) {
+  try {
+    const street = normalizeCountyStreetLine(address); // "4867 TOBERMORY WAY"
+    const m = /^(\d+)\s+(.{3,})$/.exec(street || '');
+    if (!m) return null;
+    const houseNumber = parseInt(m[1], 10);
+    const streetLabel = m[2].trim();
+    // Query WITHOUT the suffix for recall (counties abbreviate differently),
+    // then extract numbers with the full street tokens for precision.
+    const likeText = removeStreetSuffix(streetLabel) || streetLabel;
+    const counties = auditCountyCandidates(address, geoContext);
+    if (!counties.length) return null;
+
+    const strictPattern = new RegExp(`\\b(\\d+)\\s+${escapeAuditRegex(streetLabel)}\\b`, 'gi');
+    const relaxedPattern = new RegExp(`\\b(\\d+)\\s+${escapeAuditRegex(likeText)}\\b`, 'gi');
+
+    // queryStreetSitusAddresses returns [] for "roll answered, no matches"
+    // and null for a failure — a GIS outage must not read as "street
+    // missing", so the street-not-found verdict below requires at least one
+    // county to have actually answered.
+    let answeredCounty = null;
+    for (const county of counties) {
+      const situs = await queryStreetSitusAddresses(county, likeText, options);
+      if (situs === null) continue;
+      answeredCounty = answeredCounty || county;
+      if (!situs.length) continue;
+
+      const collect = (pattern) => {
+        const numbers = new Set();
+        for (const s of situs) {
+          for (const hit of String(s).matchAll(pattern)) numbers.add(parseInt(hit[1], 10));
+        }
+        return numbers;
+      };
+      let numbers = collect(strictPattern);
+      if (!numbers.size) numbers = collect(relaxedPattern);
+      if (!numbers.size) continue;
+
+      return {
+        county,
+        houseNumber,
+        streetLabel,
+        streetExists: true,
+        hasExactMatch: numbers.has(houseNumber),
+        parcelCount: situs.length,
+        nearestNumbers: numbers.has(houseNumber) ? [] : nearestHouseNumbers(numbers, houseNumber),
+      };
+    }
+    if (!answeredCounty) return null;
+
+    // A serviced county answered but the street isn't on its roll — a
+    // misspelled street name or a brand-new plat.
+    return {
+      county: answeredCounty,
+      houseNumber,
+      streetLabel,
+      streetExists: false,
+      hasExactMatch: false,
+      parcelCount: 0,
+      nearestNumbers: [],
+    };
+  } catch {
+    return null;
+  }
+}
+
 function pickManateeSearchResult(data, address) {
   const rows = Array.isArray(data?.rows) ? data.rows : [];
   if (!rows.length) return null;
@@ -3186,6 +3308,8 @@ function summarizeProviderError(err) {
 }
 
 module.exports = {
+  auditAddressHouseNumber,
+  hasCountyEvidence,
   buildPropertyDataQuality,
   canonicalLookupAddress,
   lookupStoriesFromAI,

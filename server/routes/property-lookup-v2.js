@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -234,6 +234,23 @@ async function performPropertyLookup(address, options = {}) {
         parcelId: parcelMeta.paoParcelId,
       }).catch(() => null);
       if (permits) result.propertyRecord._poolPermits = permits;
+    }
+  }
+
+  // ── STEP 1b: house-number audit ──
+  // Only when no provider produced county evidence: checks the typed house
+  // number against the county roll's situs addresses for the same street, so
+  // the data-quality panel can say "house number not on the county roll —
+  // nearest existing: N" (typo / misheard call transcription) instead of the
+  // unexplained all-zeros panel. Fail-open: a null audit is "no signal". On a
+  // record-bearing lookup it rides the cached property_record like _floodZone;
+  // record-less lookups are never cached, so they re-audit live each time.
+  if (!hasCountyEvidence(result.propertyRecord)) {
+    const audit = await auditAddressHouseNumber(canonicalLookupAddress(address, geo), geo)
+      .catch(() => null);
+    if (audit) {
+      result.addressAudit = audit;
+      if (result.propertyRecord) result.propertyRecord._addressAudit = audit;
     }
   }
 
@@ -523,7 +540,7 @@ async function performPropertyLookup(address, options = {}) {
   if (verifiedOverrides?.stories && result.propertyRecord) {
     result.propertyRecord._storiesSource = 'verified';
   }
-  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm);
+  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit);
 
   // Clean up internal fields before sending to client
   if (result.satellite) {
@@ -1179,7 +1196,11 @@ function applySatelliteAttachmentType(rc, ai) {
   return candidate;
 }
 
-function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
+function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null) {
+  // Record-bearing lookups carry the audit on the cached record (_addressAudit,
+  // like _floodZone); record-less lookups pass it alongside since there is no
+  // record to ride.
+  const addressAudit = addressAuditParam || rc?._addressAudit || null;
   const footprintTurf = computeFootprintTurf(rc);
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
   const waterDistance = ai?.waterDistance || 'NONE';
@@ -1407,7 +1428,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     propertySources: rc?._aiSources || [],
     propertyProviders: rc?._aiProviders || [],
     analysisNotes: ai?.analysisNotes || '',
-    fieldVerifyFlags: buildFieldVerifyFlags(rc, ai),
+    addressAudit,
+    fieldVerifyFlags: buildFieldVerifyFlags(rc, ai, addressAudit),
 
     // ── DATA SOURCE TRACKING ──
     dataSources: {
@@ -2045,8 +2067,28 @@ function calcPestPressureMult(pressure) {
 // ─────────────────────────────────────────────
 // FIELD VERIFY FLAGS
 // ─────────────────────────────────────────────
-function buildFieldVerifyFlags(rc, ai) {
+function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
   const flags = [];
+
+  // Address itself is suspect — first, because it explains every other
+  // missing-data line on the panel. Only set when the county roll ANSWERED
+  // (a GIS outage yields no audit at all, see auditAddressHouseNumber).
+  if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch) {
+    const nearest = addressAudit.nearestNumbers.length
+      ? ` — nearest existing: ${addressAudit.nearestNumbers.join(', ')}`
+      : '';
+    flags.push({
+      field: 'address',
+      reason: `House number ${addressAudit.houseNumber} is not on the ${addressAudit.county} county roll, but ${addressAudit.streetLabel} exists (${addressAudit.parcelCount} parcels)${nearest}. Likely a typo or misheard digits — verify the address before pricing`,
+      priority: 'HIGH',
+    });
+  } else if (addressAudit && !addressAudit.streetExists) {
+    flags.push({
+      field: 'address',
+      reason: `${addressAudit.streetLabel} not found on the ${addressAudit.county} county roll — possible misspelling or brand-new plat; verify the address before pricing`,
+      priority: 'HIGH',
+    });
+  }
 
   // Foundation unknown on older homes, or in a FEMA flood zone where slab is
   // an unsafe default. else-if keeps this to a SINGLE foundationType flag
