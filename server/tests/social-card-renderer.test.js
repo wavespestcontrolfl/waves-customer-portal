@@ -82,3 +82,81 @@ describe('social card renderer', () => {
     expect(base64).toMatch(/^[A-Za-z0-9+/=]+$/);
   });
 });
+
+describe('photo card overlays (creative engine)', () => {
+  test('campaign overlay carries brand chrome but no opaque card ground', () => {
+    const svg = Renderer.renderPhotoOverlaySvg({
+      variant: 'photo',
+      city: 'Sarasota',
+      service: 'general pest',
+      topic: 'Peak summer pest pressure',
+      cta: 'Book inspection',
+      platform: 'square',
+    });
+
+    expect(svg).toContain('SARASOTA');
+    expect(svg).toContain('GENERAL PEST');
+    expect(svg).toContain('BOOK INSPECTION'); // CTA uppercased per brand
+    expect(svg).toContain('wavespestcontrol.com');
+    // legibility scrims exist…
+    expect(svg).toContain('scrimBottom');
+    expect(svg).toContain('scrimTop');
+    // …but the photo must show through: no sand/white full-bleed ground
+    expect(svg).not.toContain(`fill="${Renderer.COLORS.sand}"`);
+    expect(svg).toContain('#FFD700'); // gold CTA/accents survive
+  });
+
+  test('review overlay shows stars, quote, reviewer, and privacy note', () => {
+    const svg = Renderer.renderPhotoOverlaySvg({
+      variant: 'photo_review',
+      city: 'Venice',
+      reviewerDisplayName: 'Karen, Venice',
+      excerpt: 'Great local team, responsive and thorough.',
+      platform: 'square',
+    });
+
+    expect(svg).toContain('5-STAR GOOGLE REVIEW');
+    expect((svg.match(/#FFC400/g) || []).length).toBeGreaterThanOrEqual(5); // 5 stars
+    expect(svg).toContain('Great local team');
+    expect(svg).toContain('Karen, Venice');
+    expect(svg).toContain('privacy-safe display');
+  });
+
+  test('escapes untrusted text in overlays', () => {
+    const svg = Renderer.renderPhotoOverlaySvg({
+      variant: 'photo',
+      topic: 'ants & roaches <script>alert(1)</script>',
+      city: 'Sarasota',
+      platform: 'square',
+    });
+    expect(svg).not.toContain('<script>');
+    expect(svg).toContain('&amp;');
+  });
+
+  test('composites a background into platform-sized JPEGs', async () => {
+    const sharp = require('sharp');
+    const background = await sharp({
+      create: { width: 512, height: 512, channels: 3, background: { r: 60, g: 120, b: 180 } },
+    }).jpeg().toBuffer();
+
+    const square = await Renderer.renderPhotoCardJpegBase64(
+      { variant: 'photo', city: 'Sarasota', topic: 'Chinch bug pressure', cta: 'Request estimate' },
+      { platform: 'square', backgroundBase64: background.toString('base64') }
+    );
+    const gbp = await Renderer.renderPhotoCardJpegBase64(
+      { variant: 'photo_review', city: 'Venice', excerpt: 'Five stars.', reviewerDisplayName: 'K., Venice' },
+      { platform: 'gbp', backgroundBase64: background.toString('base64') }
+    );
+
+    const squareMeta = await sharp(Buffer.from(square, 'base64')).metadata();
+    expect([squareMeta.width, squareMeta.height]).toEqual([1080, 1080]);
+    const gbpMeta = await sharp(Buffer.from(gbp, 'base64')).metadata();
+    expect([gbpMeta.width, gbpMeta.height]).toEqual([1200, 900]);
+  });
+
+  test('refuses to render a photo card without a background', async () => {
+    await expect(
+      Renderer.renderPhotoCardJpegBase64({ variant: 'photo', topic: 'x' }, { platform: 'square' })
+    ).rejects.toThrow(/backgroundBase64/);
+  });
+});

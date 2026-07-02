@@ -150,6 +150,30 @@ router.post('/autonomous/run', requireStudioEnabled, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /autonomous/runs/:id/approve — publish a pending draft run from the
+// approval queue with the admin's chosen creative variant
+router.post('/autonomous/runs/:id/approve', requireStudioEnabled, async (req, res, next) => {
+  try {
+    const result = await SocialContentStudio.approveAutonomousRun(req.params.id, {
+      variantIndex: req.body?.variantIndex,
+    });
+    if (!result.ok) return res.status(result.status || 500).json({ error: result.error });
+    res.json({ success: true, published: result.published, dryRun: result.dryRun, publishResult: result.publishResult, run: result.run });
+  } catch (err) { next(err); }
+});
+
+// POST /autonomous/runs/:id/reject — retire a pending draft run without
+// publishing (feeds the creative engine's quality signal)
+router.post('/autonomous/runs/:id/reject', requireStudioEnabled, async (req, res, next) => {
+  try {
+    const result = await SocialContentStudio.rejectAutonomousRun(req.params.id, {
+      reason: req.body?.reason,
+    });
+    if (!result.ok) return res.status(result.status || 500).json({ error: result.error });
+    res.json({ success: true, run: result.run });
+  } catch (err) { next(err); }
+});
+
 // GET /review-graphics — privacy-safe Google review graphic queue
 router.get('/review-graphics', async (req, res, next) => {
   try {

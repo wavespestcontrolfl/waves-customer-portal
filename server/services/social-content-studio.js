@@ -8,6 +8,7 @@ const {
   normalizeUrl,
 } = require('./social-media');
 const SocialCardRenderer = require('./social-card-renderer');
+const CreativeEngine = require('./social-creative-engine');
 const { runExclusive } = require('../utils/cron-lock');
 const { etParts } = require('../utils/datetime-et');
 
@@ -675,7 +676,7 @@ async function renderReviewGraphicImageUrl(candidate, platform) {
   );
 }
 
-function previewWithVisual(preview, { imageUrl, variant, templateKey }) {
+function previewWithVisual(preview, { imageUrl, variant, templateKey, creative, variants }) {
   if (!imageUrl) return preview;
   return {
     ...preview,
@@ -683,8 +684,63 @@ function previewWithVisual(preview, { imageUrl, variant, templateKey }) {
       imageUrl,
       variant,
       templateKey: templateKey || (variant === 'review' ? 'waves_clean_square' : 'waves_campaign_square'),
+      // Creative-engine metadata: which scene concept made this image (feeds the
+      // no-repeat rotation) and, on draft runs, the alternate variants the admin
+      // can pick from in the approval queue.
+      ...(creative ? { creative } : {}),
+      ...(Array.isArray(variants) && variants.length ? { variants } : {}),
     },
   };
+}
+
+// Concept keys of recently PUBLISHED/chosen creative visuals — the engine skips
+// these so back-to-back posts don't reuse a scene. Only the chosen concept
+// counts (not every draft variant): the banks are ~5 deep per service, and
+// excluding whole draft batches would exhaust a bank in two days and disable
+// exclusion entirely (pickConcepts ignores an exhausted exclusion list).
+async function recentCreativeConceptKeys(limit = 6) {
+  if (!(await hasTable('social_content_studio_runs'))) return [];
+  try {
+    const rows = await db('social_content_studio_runs')
+      .where({ run_type: 'autonomous' })
+      .orderBy('started_at', 'desc')
+      .limit(Math.max(1, Math.min(30, Number(limit) || 6)))
+      .select('preview');
+    const keys = [];
+    for (const row of rows) {
+      const conceptKey = toJson(row.preview, {})?.visual?.creative?.conceptKey;
+      if (conceptKey) keys.push(conceptKey);
+    }
+    return Array.from(new Set(keys));
+  } catch {
+    return [];
+  }
+}
+
+// AI-scene photo card variants for an autonomous run (creative engine). Returns
+// [] when the engine is disabled or every variant fails, so callers keep the
+// legacy SVG-card path as the fallback. Draft runs get the multi-variant batch
+// for the approval queue; publish runs render exactly one.
+async function creativeVariantsForRun(plan, preview, { isReviewRun, wantsGbp, effectiveMode, now }) {
+  if (!CreativeEngine.CREATIVE_FLAGS.enabled) return [];
+  try {
+    const cardInput = isReviewRun
+      ? buildReviewCardInput(plan.reviewGraphic)
+      : buildCampaignCardInput(plan, preview);
+    return await CreativeEngine.generateVariants({
+      cardInput,
+      topic: plan.topic,
+      service: plan.service,
+      city: plan.city,
+      variant: isReviewRun ? 'review' : 'campaign',
+      count: effectiveMode === 'draft' ? CreativeEngine.CREATIVE_FLAGS.variantCount : 1,
+      excludeConcepts: await recentCreativeConceptKeys(),
+      wantGbp: wantsGbp,
+      now,
+    });
+  } catch {
+    return [];
+  }
 }
 
 function selectAutonomousCampaign(now = new Date()) {
@@ -988,10 +1044,15 @@ async function saveCampaignDraft(input) {
   const imageUrl = httpUrlOrNull(input.imageUrl)
     || httpUrlOrNull(preview.visual?.imageUrl)
     || await renderCampaignImageUrl(input, preview);
+  // Preserve an existing visual's identity (photo-card runs pass a preview that
+  // already carries variant/templateKey/creative/variants for the approval
+  // queue) — only default the legacy campaign card when nothing is set.
   const finalPreview = previewWithVisual(preview, {
     imageUrl,
-    variant: 'campaign',
-    templateKey: 'waves_campaign_square',
+    variant: preview.visual?.variant || 'campaign',
+    templateKey: preview.visual?.templateKey || 'waves_campaign_square',
+    creative: preview.visual?.creative,
+    variants: preview.visual?.variants,
   });
   const title = cleanText(input.title || `${preview.inputs.city}: ${preview.inputs.topic}`, 180);
   const [post] = await db('social_media_posts')
@@ -1214,7 +1275,27 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     const wantsGbp = Array.isArray(plan.channels) && plan.channels.includes('gbp');
     const isReviewRun = !!plan.reviewGraphic?.googleReviewId && await hasTable('review_graphics');
 
-    if (isReviewRun) {
+    // Creative engine first (AI photo scene + deterministic brand overlay,
+    // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
+    // provider outage, upload failure — falls through to the legacy SVG brand
+    // card below, so the engine can only ever upgrade a post, never block one.
+    const creativeVariants = await creativeVariantsForRun(plan, preview, {
+      isReviewRun, wantsGbp, effectiveMode, now: startedAt,
+    });
+    if (creativeVariants.length) {
+      imageUrl = creativeVariants[0].imageUrl;
+      gbpImageUrl = creativeVariants[0].gbpImageUrl || null;
+      finalPreview = previewWithVisual(preview, {
+        imageUrl,
+        variant: isReviewRun ? 'review' : 'campaign',
+        templateKey: isReviewRun ? 'waves_photo_review_v1' : 'waves_photo_square_v1',
+        creative: {
+          conceptKey: creativeVariants[0].conceptKey,
+          sceneModel: creativeVariants[0].sceneModel,
+        },
+        variants: creativeVariants,
+      });
+    } else if (isReviewRun) {
       // Render the review card for preview/publish, but do NOT persist or approve
       // the graphic yet. listReviewGraphicCandidates() excludes any review
       // already joined to review_graphics, so creating the row here would consume
@@ -1288,7 +1369,8 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       await createReviewGraphic({
         googleReviewId: plan.reviewGraphic.googleReviewId,
         privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',
-        templateKey: 'waves_clean_square',
+        // Follow the visual that actually published (photo card vs SVG card).
+        templateKey: finalPreview.visual?.templateKey || 'waves_clean_square',
         channels: plan.channels,
         status: 'approved',
         imageUrl,
@@ -1324,6 +1406,167 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
 
 function cityFromLocationId(locationId) {
   return WAVES_LOCATIONS.find((loc) => loc.id === locationId)?.name || 'SWFL';
+}
+
+// ── Approval queue (draft_created runs) ─────────────────────────────────────
+// A draft autonomous run holds everything needed to publish (channel drafts,
+// suggested link, rendered visual + creative-engine variants) in its preview.
+// Approve publishes the stored content with the admin's chosen variant and
+// folds the outcome into the SAME run + draft post row; reject retires both.
+
+// Resolve the publishable variant list for a run preview. Creative-engine runs
+// carry preview.visual.variants; legacy single-card drafts collapse to a
+// one-entry list so the same approve path serves both.
+function runVariants(preview = {}) {
+  const visual = preview.visual || {};
+  if (Array.isArray(visual.variants) && visual.variants.length) return visual.variants;
+  if (visual.imageUrl) {
+    return [{
+      imageUrl: visual.imageUrl,
+      gbpImageUrl: null,
+      conceptKey: visual.creative?.conceptKey || null,
+      sceneModel: visual.creative?.sceneModel || null,
+    }];
+  }
+  return [];
+}
+
+async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
+  if (!(await hasTable('social_content_studio_runs'))) {
+    return { ok: false, status: 503, error: 'social_content_studio_runs table is unavailable' };
+  }
+  // Per-run advisory lock: a double-clicked Approve (or two admin tabs) must
+  // not publish twice. Non-blocking — the loser gets a 409, not a queue.
+  const result = await runExclusive(`social_autonomous_approve_${runId}`, async () => {
+    // .catch(null): a malformed :id (not a UUID) is a 404, not a 500.
+    const run = await db('social_content_studio_runs')
+      .where({ id: runId, run_type: 'autonomous' })
+      .first()
+      .catch(() => null);
+    if (!run) return { ok: false, status: 404, error: 'autonomous run not found' };
+    if (run.status !== 'draft_created') {
+      return { ok: false, status: 409, error: `run is '${run.status}' — only draft_created runs can be approved` };
+    }
+
+    const preview = toJson(run.preview, {});
+    const input = toJson(run.input, {});
+    const variants = runVariants(preview);
+    const idx = Number(variantIndex ?? 0);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= variants.length) {
+      return { ok: false, status: 400, error: variants.length ? `variantIndex must be 0..${variants.length - 1}` : 'run has no publishable image' };
+    }
+    const chosen = variants[idx];
+    // Variants were persisted server-side at run time, but re-validate to http(s)
+    // anyway — preview JSON is also reachable through admin save endpoints.
+    const chosenImageUrl = httpUrlOrNull(chosen?.imageUrl);
+    if (!chosenImageUrl) return { ok: false, status: 400, error: 'selected variant has no hosted image' };
+
+    const channels = normalizeChannels(
+      toJson(run.channels, null) ?? input.channels ?? preview.inputs?.channels
+    );
+    if (!channels.length) return { ok: false, status: 400, error: 'run has no publishable channels' };
+
+    const city = run.city || preview.inputs?.city || input.city;
+    const gbpLocationId = preview.inputs?.locationId || locationForCity(city).id;
+
+    const publishResult = await SocialMediaService.publishToAll({
+      title: run.topic || preview.inputs?.topic || 'Waves update',
+      description: run.service || preview.inputs?.service || '',
+      link: preview.suggestedLink,
+      guid: `${AUTONOMOUS_SOURCE}_approved_${run.id}`,
+      source: AUTONOMOUS_SOURCE,
+      customContent: preview.drafts,
+      channels,
+      imageUrl: chosenImageUrl,
+      gbpImageUrl: httpUrlOrNull(chosen?.gbpImageUrl),
+      noAiImage: true, // stored visual only — never a fresh literal AI image
+      gbpLocationIds: [gbpLocationId],
+      postId: run.social_media_post_id || null,
+    });
+
+    const published = publishResult.success && !SOCIAL_FLAGS.dryRun;
+
+    // Consume the review from the candidate queue only after a REAL publish —
+    // same invariants as the autonomous publish path (never on dry-run/failure,
+    // never without a hosted image).
+    if (published && input.reviewGraphic?.googleReviewId && await hasTable('review_graphics')) {
+      await createReviewGraphic({
+        googleReviewId: input.reviewGraphic.googleReviewId,
+        privacyMode: input.reviewGraphic.privacyMode || 'first_name_city',
+        templateKey: preview.visual?.templateKey || 'waves_clean_square',
+        channels,
+        status: 'approved',
+        imageUrl: chosenImageUrl,
+      }).catch(() => null);
+    }
+
+    // Promote the chosen variant to the run's primary visual so the audit list
+    // shows what actually published. A failed/dry-run attempt keeps the run in
+    // draft_created (still approvable once the blocker clears) but records the
+    // attempt for the audit trail.
+    const approvedPreview = previewWithVisual(preview, {
+      imageUrl: chosenImageUrl,
+      variant: preview.visual?.variant || 'campaign',
+      templateKey: preview.visual?.templateKey,
+      creative: chosen.conceptKey ? { conceptKey: chosen.conceptKey, sceneModel: chosen.sceneModel || null } : preview.visual?.creative,
+      variants,
+    });
+    const updated = await updateAutonomousRun(run.id, {
+      status: published ? 'published' : 'draft_created',
+      preview: approvedPreview,
+      publishResult,
+      socialMediaPostId: run.social_media_post_id,
+      skipReason: published ? null
+        : SOCIAL_FLAGS.dryRun ? 'approve ran in dry-run mode — not published'
+        : 'approve publish failed: all platforms skipped or failed',
+    });
+
+    return { ok: true, published, dryRun: SOCIAL_FLAGS.dryRun, publishResult, run: updated };
+  });
+
+  if (result?.skipped) {
+    return { ok: false, status: 409, error: 'an approval for this run is already in progress' };
+  }
+  return result;
+}
+
+async function rejectAutonomousRun(runId, { reason } = {}) {
+  if (!(await hasTable('social_content_studio_runs'))) {
+    return { ok: false, status: 503, error: 'social_content_studio_runs table is unavailable' };
+  }
+  // SAME per-run lock as approve: a reject racing an in-flight approve would
+  // otherwise read stale draft_created and mark the run rejected while the
+  // approve is mid-publish on Meta/GBP — the finishing approve then flips the
+  // "rejected" run to published and a draft the admin rejected is live anyway.
+  // Serializing on the shared lock means the reject either runs first (and the
+  // approve 409s on the status guard) or arrives during a publish and 409s here.
+  const result = await runExclusive(`social_autonomous_approve_${runId}`, async () => {
+    const run = await db('social_content_studio_runs')
+      .where({ id: runId, run_type: 'autonomous' })
+      .first()
+      .catch(() => null); // malformed :id → 404, not a 500
+    if (!run) return { ok: false, status: 404, error: 'autonomous run not found' };
+    if (run.status !== 'draft_created') {
+      return { ok: false, status: 409, error: `run is '${run.status}' — only draft_created runs can be rejected` };
+    }
+    const note = cleanText(reason, 300);
+    const updated = await updateAutonomousRun(run.id, {
+      status: 'rejected',
+      skipReason: note ? `rejected by admin: ${note}` : 'rejected by admin',
+      socialMediaPostId: run.social_media_post_id,
+    });
+    if (run.social_media_post_id) {
+      await db('social_media_posts')
+        .where({ id: run.social_media_post_id })
+        .update({ status: 'rejected' })
+        .catch(() => null);
+    }
+    return { ok: true, run: updated };
+  });
+  if (result?.skipped) {
+    return { ok: false, status: 409, error: 'an approval for this run is in progress — retry once it finishes' };
+  }
+  return result;
 }
 
 function initials(name) {
@@ -1590,6 +1833,7 @@ module.exports = {
   DEFAULT_COMPETITOR_PATTERNS,
   FASTEST_RISER_PROFILES,
   SEASONAL_AUTONOMOUS_TOPICS,
+  approveAutonomousRun,
   autonomousStatus,
   buildCampaignCardInput,
   buildCampaignDrafts,
@@ -1609,6 +1853,8 @@ module.exports = {
   listReviewGraphicCandidates,
   previewCampaign,
   privacyDisplayName,
+  recentCreativeConceptKeys,
+  rejectAutonomousRun,
   reviewExcerpt,
   serviceIntentKeywords,
   runAutonomous,
