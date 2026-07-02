@@ -435,7 +435,16 @@ async function resolveEstimateContext({ customer, phone, body }) {
       .where({ kind: 'estimate' })
       .first();
     if (short?.entity_id) {
-      const estimate = await db('estimates').where({ id: short.entity_id }).first();
+      // An old short link can point at a closed courtship (accepted /
+      // declined / expired, or archived-by-sweep with its status still
+      // sent/viewed). Only an OPEN un-archived estimate may anchor the
+      // conversion agent — otherwise fall through to the customer/phone
+      // lookups below.
+      const estimate = await db('estimates')
+        .where({ id: short.entity_id })
+        .whereIn('status', OPEN_ESTIMATE_STATUSES)
+        .whereNull('archived_at')
+        .first();
       if (estimate) return { estimate, shortCode };
     }
   }

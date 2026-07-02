@@ -305,13 +305,38 @@ describe('archiveConvertedOpenEstimates', () => {
 
     // First-conversion semantics: one has-signal OR-pair (paid invoice /
     // completed visit), and a none-before NOT EXISTS per EVIDENCE source —
-    // invoices, scheduled_services, service_records, and the customer row
-    // itself — applied to every row (a pre-estimate signal of ANY kind
-    // disqualifies — judging sources independently would archive live upsell
-    // estimates). The fifth NOT EXISTS is the received-deposit money guard.
+    // invoices, pre-estimate bookings, completed visits, service_records,
+    // and the customer row itself — applied to every row (a pre-estimate
+    // signal of ANY kind disqualifies — judging sources independently would
+    // archive live upsell estimates). The sixth NOT EXISTS is the
+    // received-deposit money guard.
     expect(calls.filter((c) => c.m === 'whereExists')).toHaveLength(1);
     expect(calls.filter((c) => c.m === 'orWhereExists')).toHaveLength(1);
-    expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(5);
+    expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(6);
+
+    // A booking CREATED before the estimate (live or since completed)
+    // disqualifies even before its completion/payment evidence lands —
+    // nothing completes before it's created, so the completed-visit guard
+    // alone would archive a live upsell sent to an already-booked customer
+    // once their first visit completes. Dead bookings never disqualify.
+    expect(
+      calls.find(
+        (c) =>
+          c.m === 'whereRaw' &&
+          typeof c.args?.[0] === 'string' &&
+          c.args[0].includes(
+            'scheduled_services.created_at < estimates.created_at',
+          ),
+      ),
+    ).toBeTruthy();
+    const bookedBeforeStatusGate = calls.find(
+      (c) =>
+        c.m === 'whereNotIn' && c.args?.[0] === 'scheduled_services.status',
+    );
+    expect(bookedBeforeStatusGate).toBeTruthy();
+    expect(bookedBeforeStatusGate.args[1]).toEqual(
+      NON_LIVE_APPOINTMENT_STATUSES,
+    );
 
     // Eligibility must NOT gate on completed_at: legacy completed visits
     // (pre-20260422000009) carry a NULL completed_at, and requiring it here
@@ -452,7 +477,7 @@ describe('excludePendingFirstBookings (expiration hold)', () => {
       calls.filter(
         (c) => c.table === 'estimates:sub' && c.m === 'whereNotExists',
       ),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
     expect(
       calls.find(
         (c) =>

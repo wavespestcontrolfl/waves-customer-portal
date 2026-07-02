@@ -95,10 +95,13 @@ async function customerConvertedSince(est) {
  * PREDATING the estimate proves the customer was already converted when the
  * quote went out — the estimate is a live upsell and must be left alone.
  *
- * Four evidence sources, broader than the sweep's eligibility signals on
+ * Five evidence sources, broader than the sweep's eligibility signals on
  * purpose (both asymmetries fail toward KEEPING an estimate):
  *  - paid invoices (null paid_at reads as paid at creation time — the lower
  *    bound — so an ambiguous invoice counts as predating);
+ *  - bookings CREATED before the estimate (live or since completed) — the
+ *    customer had already converted when the quote went out, even if the
+ *    completion/payment evidence only lands afterward;
  *  - completed scheduled_services (legacy rows predate migration
  *    20260422000009 and carry NULL completed_at; fall back to the visit's
  *    scheduled_date, NOT NULL since the initial schema);
@@ -134,6 +137,23 @@ function whereNoConversionBeforeEstimate(query) {
         .whereRaw(
           "COALESCE(invoices.paid_at, invoices.created_at) < estimates.created_at",
         );
+    })
+    .whereNotExists(function () {
+      // A booking CREATED before the estimate — still live or since
+      // completed — proves the courtship closed before the quote went out,
+      // even while its completion/payment evidence hasn't landed yet (the
+      // completed-visit guard below can't see it: nothing completes before
+      // it's created). created_at is a real timestamptz, so no date-cast
+      // ambiguity. Dead bookings (NON_LIVE) prove nothing and never
+      // disqualify.
+      this.select(db.raw("1"))
+        .from("scheduled_services")
+        .whereRaw("scheduled_services.customer_id = estimates.customer_id")
+        .whereNotIn(
+          "scheduled_services.status",
+          NON_LIVE_APPOINTMENT_STATUSES,
+        )
+        .whereRaw("scheduled_services.created_at < estimates.created_at");
     })
     .whereNotExists(function () {
       this.select(db.raw("1"))
