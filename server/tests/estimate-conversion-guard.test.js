@@ -289,10 +289,24 @@ describe('archiveConvertedOpenEstimates', () => {
     // First-conversion semantics across BOTH signal sources: one has-signal
     // OR-pair, and a none-before NOT EXISTS per source applied to every row
     // (a pre-estimate signal of EITHER kind disqualifies — judging sources
-    // independently would archive live upsell estimates).
+    // independently would archive live upsell estimates). The third
+    // NOT EXISTS is the received-deposit money guard.
     expect(calls.filter((c) => c.m === 'whereExists')).toHaveLength(1);
     expect(calls.filter((c) => c.m === 'orWhereExists')).toHaveLength(1);
-    expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(2);
+    expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(3);
+
+    // Money guard: a received (unconsumed) acceptance deposit blocks the
+    // archive — archived rows never expire, and the terminal-deposit refund
+    // sweep only scans declined/expired estimates, so archiving would strand
+    // the customer's deposit forever.
+    const depositGuard = calls.find(
+      (c) =>
+        c.table === 'estimates:sub' &&
+        c.m === 'where' &&
+        c.args[0] === 'estimate_deposits.status' &&
+        c.args[1] === 'received',
+    );
+    expect(depositGuard).toBeTruthy();
 
     // A null-paid_at paid invoice reads as paid at its creation time in the
     // none-before branch, so an ambiguous pre-estimate invoice counts as

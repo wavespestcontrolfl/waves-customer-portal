@@ -137,6 +137,18 @@ async function archiveConvertedOpenEstimates() {
         .whereNotNull("scheduled_services.completed_at")
         .whereRaw("scheduled_services.completed_at < estimates.created_at");
     })
+    // Never archive an estimate holding a received (unconsumed, unrefunded)
+    // acceptance deposit: archived rows are excluded from expiration, and
+    // sweepTerminalEstimateDeposits only scans declined/expired estimates —
+    // archiving would strand the customer's deposit money forever. Left
+    // live, the row ages out → expires → the sweep refunds it; the per-send
+    // conversion guard suppresses follow-up nags in the meantime.
+    .whereNotExists(function () {
+      this.select(db.raw("1"))
+        .from("estimate_deposits")
+        .whereRaw("estimate_deposits.estimate_id = estimates.id")
+        .where("estimate_deposits.status", "received");
+    })
     .update({ archived_at: now, updated_at: now })
     .returning(["id", "customer_name", "status"]);
 
