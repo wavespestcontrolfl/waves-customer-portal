@@ -381,12 +381,15 @@ async function computeDashboardAlertsUncached() {
   // 12. Data quality: this week's leads with no lead_source — they render as
   //     'Unknown' in every attribution panel and silently corrupt LTV:CAC.
   //     Complements calls_unmapped_today (which catches un-catalogued NUMBERS;
-  //     this catches sourceless LEADS). Same ET-date coercion idiom as #3.
+  //     this catches sourceless LEADS). Both comparison sides are coerced to
+  //     naive ET wall-clock — a bare timestamptz created_at against the naive
+  //     ET-date RHS would resolve the week boundary at UTC midnight in a UTC
+  //     session (4-5h shifted week).
   try {
     const unattributed = await db('leads')
       .whereNull('lead_source_id')
       .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
-      .whereRaw("created_at >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '6 days')")
+      .whereRaw("(created_at AT TIME ZONE 'America/New_York') >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '6 days')")
       .count('* as count')
       .first();
     const count = parseInt(unattributed?.count || 0);
