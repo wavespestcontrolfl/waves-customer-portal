@@ -54,6 +54,25 @@ describe('deriveCallReviewBridge — email', () => {
     expect(out.normalizedEmail).toBeNull();
   });
 
+  test('a missing-dot domain is corrected, not classified invalid', () => {
+    // "jane@gmailcom" fails the basic shape (no dot in domain) but is exactly
+    // what the missing-dot correction rule repairs — correction runs first.
+    const out = deriveCallReviewBridge({ extracted: { email: 'jane@gmailcom' } });
+    expect(out.normalizedEmail).toBe('jane@gmail.com');
+    expect(out.needsConfirmation).toContain('email_unverified');
+    expect(out.needsConfirmation).not.toContain('email_invalid');
+  });
+
+  test('an email the intake normalizer rejected still reaches the bridge via email_raw', () => {
+    // normalizeCallExtraction nulls non-regex emails but preserves the raw
+    // capture — the bridge must still emit its reason from that.
+    const out = deriveCallReviewBridge({ extracted: { email: null, email_raw: 'karen allen at kc dot rr' } });
+    expect(out.needsConfirmation).toContain('email_invalid');
+
+    const fixed = deriveCallReviewBridge({ extracted: { email: null, email_raw: 'jane@gmailcom' } });
+    expect(fixed.normalizedEmail).toBe('jane@gmail.com');
+  });
+
   test('no email captured → no email reasons', () => {
     const out = deriveCallReviewBridge({ extracted: { first_name: 'Karen' } });
     expect(out.needsConfirmation).not.toContain('email_unverified');
@@ -85,6 +104,7 @@ describe('alertBouncedContactAddress', () => {
       chain.first = jest.fn(() => Promise.resolve(cfg.first ?? null));
       chain.select = jest.fn(() => Promise.resolve(cfg.select ?? []));
       chain.update = jest.fn((patch) => { updates.push({ table, patch }); return Promise.resolve(1); });
+      chain.insert = jest.fn((row) => { updates.push({ table, insert: row }); return Promise.resolve([1]); });
       return chain;
     });
     return updates;
@@ -109,10 +129,28 @@ describe('alertBouncedContactAddress', () => {
     expect(body).toContain('karrenkllens@kc.rr.com');
     expect(body).toContain('Karen Allen');
     expect(body).toContain('+18165906664');
-    // Lead stamped with email_bounced, existing reasons preserved
+    // Lead stamped with email_bounced, existing reasons preserved, and a
+    // visible timeline row written (the lead card renders warnings from
+    // lead_activities, not extracted_data)
     const leadUpdate = updates.find((u) => u.table === 'leads');
     expect(JSON.parse(leadUpdate.patch.extracted_data).needs_confirmation)
       .toEqual(['address_unverified', 'email_bounced']);
+    const activity = updates.find((u) => u.table === 'lead_activities');
+    expect(activity.insert.lead_id).toBe('lead-1');
+    expect(activity.insert.description).toContain('hard-bounced');
+  });
+
+  test('a lead-only match still gets a callback phone from the lead row', async () => {
+    mockTables({
+      customers: { first: null },
+      leads: { select: [{ id: 'lead-1', first_name: 'Karen', last_name: 'Allen', phone: '+18165906664', extracted_data: {} }] },
+      notifications: { first: null },
+    });
+
+    await alertBouncedContactAddress('karrenkllens@kc.rr.com', {});
+
+    const [, , body] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).toContain('+18165906664');
   });
 
   test('no customer or open lead on file → skipped, no notification', async () => {
@@ -124,7 +162,7 @@ describe('alertBouncedContactAddress', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('lead already stamped email_bounced → no duplicate stamp', async () => {
+  test('lead already stamped email_bounced → no duplicate stamp or activity row', async () => {
     const updates = mockTables({
       customers: { first: null },
       leads: { select: [{ id: 'lead-1', first_name: 'Karen', extracted_data: { needs_confirmation: ['email_bounced'] } }] },
@@ -134,7 +172,7 @@ describe('alertBouncedContactAddress', () => {
     const out = await alertBouncedContactAddress('karrenkllens@kc.rr.com', {});
 
     expect(out).toMatchObject({ alerted: true });
-    expect(updates.filter((u) => u.table === 'leads')).toHaveLength(0);
+    expect(updates.filter((u) => u.table === 'leads' || u.table === 'lead_activities')).toHaveLength(0);
   });
 
   test('a prior alert inside the dedupe window suppresses the notification', async () => {

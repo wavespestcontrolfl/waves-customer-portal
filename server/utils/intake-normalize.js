@@ -151,6 +151,11 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     first_name: cleanNullableText(source.first_name),
     last_name: cleanNullableText(source.last_name),
     email: cleanValidEmailOrNull(source.email),
+    // The raw model email survives normalization when the regex rejects it —
+    // the call-review bridge needs it to flag email_invalid (and to attempt a
+    // missing-dot domain fix) for read-back on the callback; `email` stays the
+    // only value any write path stores.
+    email_raw: cleanValidEmailOrNull(source.email) ? null : (cleanNullableText(source.email) || null),
     phone: normalizedPhone || null,
     address_line1: normalizeNullableStreetLine(source.address_line1),
     city: cleanNullableText(source.city),

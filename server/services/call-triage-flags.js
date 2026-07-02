@@ -452,16 +452,22 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // high-confidence domain typo is corrected up front. Local parts are NEVER
   // touched (email-typo-correction contract): a wrong local part is only
   // discoverable by asking the caller, which is what the reason drives.
+  // extracted.email_raw carries what intake normalization rejected (the
+  // normalizer nulls non-regex emails before this bridge runs) so invalid
+  // captures still get their reason — and a missing-dot typo its fix.
   let normalizedEmail = null;
-  const rawEmail = String(extracted.email || '').trim().toLowerCase();
+  const rawEmail = String(extracted.email || extracted.email_raw || '').trim().toLowerCase();
   if (rawEmail) {
-    if (!BASIC_EMAIL_SHAPE.test(rawEmail)) {
+    // Correction BEFORE shape classification: correctEmailDomain repairs
+    // shapes the basic regex rejects ("jane@gmailcom" → missing-dot rule), so
+    // classifying first would strand exactly the typos the adopt path fixes.
+    const candidate = correctEmailDomain(rawEmail);
+    if (candidate && meetsConfidence(candidate.confidence, 'high')) {
+      normalizedEmail = candidate.corrected;
+      needsConfirmation.push('email_unverified');
+    } else if (!BASIC_EMAIL_SHAPE.test(rawEmail)) {
       needsConfirmation.push('email_invalid');
     } else {
-      const candidate = correctEmailDomain(rawEmail);
-      if (candidate && meetsConfidence(candidate.confidence, 'high')) {
-        normalizedEmail = candidate.corrected;
-      }
       needsConfirmation.push('email_unverified');
     }
   }

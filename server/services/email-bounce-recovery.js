@@ -882,15 +882,24 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
     if (!email) return { skipped: 'no_email' };
 
     // CUSTOMER_EMAIL_FIELDS is a hardcoded constant — safe to interpolate.
+    // The OR chain is GROUPED so the deleted_at filter applies to the whole
+    // disjunction (ungrouped, SQL precedence would AND it onto the last OR
+    // term only and a soft-deleted customer could still be alerted/linked).
     const customer = await db('customers')
-      .whereRaw(CUSTOMER_EMAIL_FIELDS.map((f) => `LOWER(${f}) = ?`).join(' OR '), CUSTOMER_EMAIL_FIELDS.map(() => email))
+      .where(function anyEmailField() {
+        this.whereRaw(CUSTOMER_EMAIL_FIELDS.map((f) => `LOWER(${f}) = ?`).join(' OR '), CUSTOMER_EMAIL_FIELDS.map(() => email));
+      })
       .whereNull('deleted_at')
       .first('id', 'first_name', 'last_name', 'phone')
       .catch(() => null);
+    // Closed set mirrors the lead pipeline's CLOSED_STATUSES (leads-tools) —
+    // a bounce for a duplicate/disqualified lead is exactly the marketing
+    // cruft the contact-match filter exists to keep out.
+    const CLOSED_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
     const leads = await db('leads')
       .whereRaw('LOWER(email) = ?', [email])
-      .where(function openOnly() { this.whereNull('status').orWhereNotIn('status', ['won', 'lost']); })
-      .select('id', 'first_name', 'last_name', 'extracted_data')
+      .where(function openOnly() { this.whereNull('status').orWhereNotIn('status', CLOSED_LEAD_STATUSES); })
+      .select('id', 'first_name', 'last_name', 'phone', 'extracted_data')
       .catch(() => []);
     if (!customer && !leads.length) return { skipped: 'no_contact_match' };
 
@@ -904,6 +913,16 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
           data.needs_confirmation = [...needs, 'email_bounced'];
           await db('leads').where({ id: lead.id })
             .update({ extracted_data: JSON.stringify(data), updated_at: new Date() });
+          // The lead card's visible warning area renders from lead_activities,
+          // not extracted_data — without a timeline row the dead-email marker
+          // would only ever live in the (dismissable) notification.
+          await db('lead_activities').insert({
+            lead_id: lead.id,
+            activity_type: 'ai_triage',
+            description: '⚠ CONFIRM BEFORE DISPATCH: email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
+            performed_by: 'Email Delivery Monitor',
+            metadata: JSON.stringify({ needs_confirmation: ['email_bounced'] }),
+          }).catch((err) => logger.warn(`[bounce-recovery] lead activity insert failed for ${lead.id}: ${err.message}`));
         }
       } catch (err) {
         logger.warn(`[bounce-recovery] email_bounced stamp failed for lead ${lead.id}: ${err.message}`);
@@ -913,7 +932,10 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
     const who = customer
       ? (`${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'customer')
       : (`${leads[0].first_name || ''} ${leads[0].last_name || ''}`.trim() || 'lead');
-    const phoneHint = customer?.phone ? ` Confirm by phone: ${customer.phone}.` : '';
+    // Lead-only matches are precisely the callback case — fall back to the
+    // lead's phone when there is no customer row.
+    const callbackPhone = customer?.phone || leads[0]?.phone || null;
+    const phoneHint = callbackPhone ? ` Confirm by phone: ${callbackPhone}.` : '';
     const reason = String(ev.reason || ev.response || '').trim() || 'mailbox rejected';
     await adminAlertDeduped({
       dedupeKey: `bounced-contact:${email}`,
