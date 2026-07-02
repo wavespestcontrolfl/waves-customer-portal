@@ -26,8 +26,9 @@ jest.mock('../services/job-status', () => ({
 }));
 
 // Stateful mock mirroring trackTransitions.cancel semantics: no-op on an
-// already-cancelled row, refuses a complete row, otherwise stamps the
-// customer-visible track layer.
+// already-cancelled row, refuses a complete row, and — like the real helper's
+// guarded update — only stamps rows whose track_state is a live value (NULL
+// falls through to the ok-with-fallback path without stamping anything).
 jest.mock('../services/track-transitions', () => ({
   cancel: jest.fn(async (serviceId, { reason } = {}) => {
     const db = require('../models/db');
@@ -35,6 +36,10 @@ jest.mock('../services/track-transitions', () => ({
     if (!row) return { ok: false, reason: 'not_found' };
     if (row.track_state === 'cancelled') return { ok: true, state: 'cancelled' };
     if (row.track_state === 'complete') return { ok: false, reason: 'cannot_cancel_complete' };
+    if (!['scheduled', 'en_route', 'on_property'].includes(row.track_state)) {
+      // 0-row guarded update — the real helper re-loads and reports ok.
+      return { ok: true, state: row.track_state || 'cancelled' };
+    }
     Object.assign(row, {
       track_state: 'cancelled',
       cancelled_at: new Date(),
@@ -541,6 +546,11 @@ describe('processCancellationRequest', () => {
     expect(svc('sDrift').status).toBe('confirmed');       // live work untouched
     expect(svc('sStale').status).toBe('completed');       // history untouched
     expect(svc('s1').status).toBe('cancelled');           // NULL track_state still sweeps
+    // A NULL-track legacy row is normalized before the track-layer cancel, so
+    // the guarded update matches and the tracker fields actually get stamped
+    // (the helper's 0-row fallback reports ok WITHOUT stamping).
+    expect(svc('s1').track_state).toBe('cancelled');
+    expect(svc('s1').cancelled_at).toBeInstanceOf(Date);
     expect(result.cancelledCount).toBe(1);
     expect(result.errors).toEqual(['in_progress_visit:sDrift']);
     expect(result.ok).toBe(false);

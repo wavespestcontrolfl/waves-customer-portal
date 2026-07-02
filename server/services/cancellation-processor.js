@@ -362,6 +362,20 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       logger.error(`[cancellation-processor] card-hold handling failed for ${svc.id}: ${err.message}`);
     }
 
+    // Legacy rows predate the track layer (track_state NULL): normalize to
+    // 'scheduled' first so trackTransitions.cancel's guarded update matches
+    // and stamps cancelled_at / cancellation_reason — the helper reports ok
+    // on its 0-row fallback, which would otherwise count this visit as fully
+    // cancelled with the tracker fields never set.
+    try {
+      await db('scheduled_services')
+        .where({ id: svc.id })
+        .whereNull('track_state')
+        .update({ track_state: 'scheduled' });
+    } catch (err) {
+      logger.warn(`[cancellation-processor] track-state normalize failed for ${svc.id}: ${err.message}`);
+    }
+
     // Customer-visible track layer: track_state / cancelled_at /
     // cancellation_reason + tech-status clear + token-expiry extension. It
     // no-ops on a genuinely-complete visit, so it can't un-complete anything.

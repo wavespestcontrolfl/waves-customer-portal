@@ -4617,8 +4617,24 @@ router.put('/:id/status', async (req, res, next) => {
                 if (!existingDates.has(candidate)) { nextStr = candidate; break; }
                 attempt++;
               }
+              // Re-check the ongoing flag immediately before inserting: it was
+              // read once at the top of this block, and a cancellation (the
+              // portal auto-processor or an admin churn) can stop the series
+              // while the slower candidate/add-on math above runs. Without
+              // this, the insert would put a fresh visit — with
+              // recurring_ongoing=true, so it keeps regenerating — on a
+              // customer who just cancelled.
+              let stillOngoing = true;
+              if (nextStr && cols.recurring_ongoing) {
+                const freshParent = await db('scheduled_services')
+                  .where({ id: parentId })
+                  .first('recurring_ongoing');
+                stillOngoing = !!(freshParent && freshParent.recurring_ongoing);
+              }
               if (!nextStr) {
                 logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — every candidate within 12 cadence steps already booked`);
+              } else if (!stillOngoing) {
+                logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
               } else {
                 const nextData = {
                   customer_id: parent.customer_id,

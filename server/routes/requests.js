@@ -135,6 +135,52 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       });
     }
 
+    // An INACTIVE account never creates a fresh request: the allow-inactive
+    // auth exists solely so a churned customer's retry can reach the
+    // idempotent repair, and an unexpired portal JWT must not keep minting
+    // service_requests rows / admin alerts / SMS for days after churn.
+    // Outside the 60s dedupe window, re-run the repair against their most
+    // recent cancellation request and answer with that row; with no prior
+    // cancellation request on file there is nothing to repair — reject like
+    // the strict middleware would have.
+    if (req.customerInactive) {
+      const priorCancellation = await db('service_requests')
+        .where({ customer_id: req.customer.id, category: 'cancellation' })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (!priorCancellation) {
+        return res.status(401).json({ error: 'Customer not found or inactive' });
+      }
+      try {
+        const retry = await processCancellationRequest({
+          customerId: req.customer.id,
+          reason: `Portal cancellation request ${priorCancellation.id}`,
+          requestId: priorCancellation.id,
+        });
+        logger.info(
+          `Re-ran cancellation processing for inactive-account retry ${priorCancellation.id}: ok=${retry.ok}` +
+            (retry.ok ? '' : ` (errors: ${retry.errors.join(', ')})`)
+        );
+      } catch (retryErr) {
+        logger.error(`Inactive-account cancellation re-processing failed for ${priorCancellation.id}: ${retryErr.message}`);
+      }
+      return res.status(200).json({
+        success: true,
+        deduped: true,
+        request: {
+          id: priorCancellation.id,
+          category: priorCancellation.category,
+          subject: priorCancellation.subject,
+          description: priorCancellation.description,
+          urgency: priorCancellation.urgency,
+          locationOnProperty: priorCancellation.location_on_property,
+          status: priorCancellation.status,
+          photoCount: 0,
+          createdAt: priorCancellation.created_at,
+        },
+      });
+    }
+
     const [request] = await db('service_requests')
       .insert({
         customer_id: req.customer.id,
