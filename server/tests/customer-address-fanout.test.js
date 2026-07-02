@@ -77,6 +77,11 @@ describe('addressMatchKey / snapshotMatchesLine1', () => {
     expect(snapshotMatchesLine1('123 Main St, Bradenton, FL 34205', '123 Main St')).toBe(true);
   });
 
+  test('suffix spelling differences compare equal (Street vs St)', () => {
+    expect(snapshotMatchesLine1('123 Main Street', '123 Main St')).toBe(true);
+    expect(snapshotMatchesLine1('123 Main Street, Bradenton, FL 34205', '123 Main St')).toBe(true);
+  });
+
   test('empty snapshot or empty line never matches', () => {
     expect(snapshotMatchesLine1('', '4857 Tobermory Way')).toBe(false);
     expect(snapshotMatchesLine1('4857 Tobermory Way', '')).toBe(false);
@@ -188,6 +193,36 @@ describe('propagateCustomerAddressChange', () => {
 
     expect(counts).toEqual({ leads: 0, estimates: 0 });
     expect(conn.__updates).toHaveLength(0);
+  });
+
+  test('a FULL-string lead snapshot is rewritten with the full address, not just the street line', async () => {
+    const conn = makeConn({
+      leads: [{ id: 'lead-full', address: '4867 Tobermorey Way, Lakewood Ranch, FL 34211' }],
+      estimates: [],
+    });
+
+    const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+
+    expect(counts.leads).toBe(1);
+    const patch = conn.__updates.find((u) => u.table === 'leads').patch;
+    expect(patch.address).toBe('4857 Tobermory Way, Bradenton, FL 34211');
+  });
+
+  test('a resave where the proposal already holds the target address never drops proposalDelivery', async () => {
+    const target = '4857 Tobermory Way, Bradenton, FL 34211';
+    const conn = makeConn({
+      leads: [],
+      estimates: [{
+        id: 'est-current',
+        address: target,
+        estimate_data: { proposal: { propertyAddress: target }, proposalDelivery: { pdfEmailed: true } },
+      }],
+    });
+
+    await propagateCustomerAddressChange({ before: AFTER, after: AFTER }, conn);
+
+    const patch = conn.__updates.find((u) => u.table === 'estimates').patch;
+    expect(patch.estimate_data).toBeUndefined();
   });
 
   test('a street-only customer row patches lead address but never blanks city/zip, and skips estimates', async () => {

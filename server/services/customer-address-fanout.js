@@ -26,7 +26,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { formatAddress } = require('../utils/address-normalizer');
+const { formatAddress, normalizeStreetLine } = require('../utils/address-normalizer');
 
 // Deliverable estimate states — mirrors SENDABLE_ESTIMATE_STATUSES in
 // routes/admin-estimates.js (scheduled/sending/send_failed rows still produce
@@ -57,11 +57,15 @@ const UNIT_SEGMENT_RE = /^\s*(?:apt|apartment|unit|ste|suite|bldg|building|lot|t
 // LATER segment is a unit designator ("123 Main St, Apt 2, Bradenton") is a
 // distinct unit too, so it never matches a unitless customer line.
 function snapshotMatchesLine1(snapshot, line1) {
-  const lineKey = addressMatchKey(line1);
+  // Both sides pass through normalizeStreetLine before keying so suffix
+  // spelling differences compare equal — customer writes store abbreviated
+  // suffixes ("123 Main St") while older lead/estimate snapshots may carry
+  // the unabbreviated form ("123 Main Street").
+  const lineKey = addressMatchKey(normalizeStreetLine(line1));
   if (!lineKey) return false;
   const segments = String(snapshot ?? '').split(',');
   if (segments.slice(1).some((seg) => UNIT_SEGMENT_RE.test(seg))) return false;
-  const segKey = addressMatchKey(segments[0]);
+  const segKey = addressMatchKey(normalizeStreetLine(segments[0]));
   return !!segKey && segKey === lineKey;
 }
 
@@ -85,20 +89,33 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // The updates re-assert the open/terminal predicates from the selects: a
   // concurrent accept/archive/close landing between select and update must
   // not have its now-historical snapshot rewritten.
+  const hasCityZip = !!(addressMatchKey(after.city) && addressMatchKey(after.zip));
+
   const leadRows = await conn('leads')
     .where({ customer_id: customerId })
     .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
     .select('id', 'address');
-  const leadIds = leadRows.filter((r) => matchesCustomerAddress(r.address)).map((r) => r.id);
-  if (leadIds.length) {
+  // Some intake paths store a FULL single-line address in leads.address (the
+  // contact-normalization backfill deliberately left those untouched) —
+  // rewriting one with just the street line would drop its embedded
+  // city/state/zip. Full-string snapshots get the rebuilt full address (which
+  // needs city+zip, same rule as estimates below); street-line snapshots get
+  // the street line.
+  const matched = leadRows.filter((r) => matchesCustomerAddress(r.address));
+  const leadGroups = [
+    { ids: matched.filter((r) => !String(r.address || '').includes(',')).map((r) => r.id), address: after.address_line1 },
+    { ids: hasCityZip ? matched.filter((r) => String(r.address || '').includes(',')).map((r) => r.id) : [], address: fullAddress },
+  ];
+  for (const group of leadGroups) {
+    if (!group.ids.length) continue;
     // city/zip are patched only when the customer row actually HAS them — a
     // street-only customer edit must not erase more complete location data
     // captured on the lead.
-    const leadPatch = { address: after.address_line1, updated_at: now };
+    const leadPatch = { address: group.address, updated_at: now };
     if (addressMatchKey(after.city)) leadPatch.city = after.city;
     if (addressMatchKey(after.zip)) leadPatch.zip = after.zip;
-    counts.leads = await conn('leads')
-      .whereIn('id', leadIds)
+    counts.leads += await conn('leads')
+      .whereIn('id', group.ids)
       .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
       .update(leadPatch);
   }
@@ -106,7 +123,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // Estimates snapshot ONE full display string, so rebuilding it needs the
   // customer's city+zip — with either missing, a rewrite would produce a
   // less complete address than the snapshot already has. Skip instead.
-  if (addressMatchKey(after.city) && addressMatchKey(after.zip)) {
+  if (hasCityZip) {
     const estimateRows = await conn('estimates')
       .where({ customer_id: customerId })
       .whereIn('status', OPEN_ESTIMATE_STATUSES)
@@ -127,7 +144,13 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
       const data = typeof row.estimate_data === 'string'
         ? (() => { try { return JSON.parse(row.estimate_data); } catch { return null; } })()
         : row.estimate_data;
-      if (data?.proposal?.propertyAddress && matchesCustomerAddress(data.proposal.propertyAddress)) {
+      // Skip when the proposal already holds the target address — the callers
+      // run on address-field PRESENCE (unchanged resaves included), and a
+      // no-op rewrite here would still drop proposalDelivery, clearing the
+      // "PDF emailed" marker on an already-sent proposal for nothing.
+      const proposalCurrent = data?.proposal?.propertyAddress;
+      const proposalAlreadyTarget = addressMatchKey(proposalCurrent) === addressMatchKey(fullAddress.slice(0, 200));
+      if (proposalCurrent && !proposalAlreadyTarget && matchesCustomerAddress(proposalCurrent)) {
         patch.estimate_data = conn.raw(
           "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,propertyAddress}', to_jsonb(?::text)) - 'proposalDelivery'",
           [fullAddress.slice(0, 200)],
