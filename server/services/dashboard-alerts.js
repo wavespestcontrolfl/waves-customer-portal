@@ -12,14 +12,13 @@
 // caller can detect them and skip the persistence-backed
 // mark-as-read flow.
 
-const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
 const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
-const { computeMrrBreakdown } = require('./mrr-breakdown');
+const { listAtRiskMrrAccounts } = require('./mrr-breakdown');
 const { whereLiveCustomer } = require('./customer-stages');
 const { autopayActivePredicate } = require('./autopay-eligibility');
 
@@ -41,12 +40,13 @@ const SEVERITY_TO_PRIORITY = {
   info: 'normal',
 };
 
-// Order-independent digest of a queue alert's member ids. Dismissals persist
-// it next to dismissed_at_count (admin-notifications.js) so membership churn
-// at a constant count — one lead contacted, a different one crosses the SLA —
-// re-surfaces the alert during the 24h dismissal window.
-function membershipFingerprint(ids) {
-  return crypto.createHash('md5').update(ids.map(String).sort().join(',')).digest('hex');
+// Sorted member ids for a queue-backed alert. Dismissals persist them next to
+// dismissed_at_count (admin-notifications.js) so the bell re-shows the alert
+// when a member NOT covered by the dismissal enters the queue — and, unlike a
+// digest compare, stays hidden when the queue merely shrinks to a subset of
+// what the admin already dismissed.
+function queueMembers(ids) {
+  return ids.map(String).sort();
 }
 
 // Internal/test leads (QA captures left in status='new') must not page an
@@ -66,9 +66,10 @@ function excludeInternalLeads(qb) {
 // only when its count is > 0 — clean day = empty array.
 //
 // Shape (banner-friendly):
-//   { id, kind: 'action'|'alert', severity: 'critical'|'warn', count, label, href, amount?, fingerprint? }
-// `fingerprint` (queue alerts only) digests the member ids so dismissals can
-// detect membership change at a constant count.
+//   { id, kind: 'action'|'alert', severity: 'critical'|'warn', count, label, href, amount?, members? }
+// `members` (queue alerts only) lists the sorted member ids so dismissals can
+// re-show when a NEW member enters — while a queue that only shrank stays
+// dismissed.
 //
 // The notification bell adapter (toNotifications below) reshapes these
 // into notification-table-shaped objects with `id: 'live:<id>'`,
@@ -312,10 +313,10 @@ async function computeDashboardAlertsUncached() {
         kind: 'action',
         severity: 'critical',
         count,
-        // Queue membership, not just size: a dismissal stores this so a
-        // DIFFERENT lead crossing the SLA at the same count still re-surfaces
-        // the alert instead of hiding behind the count-only dismissal.
-        fingerprint: membershipFingerprint(waitingRows.map((r) => r.id)),
+        // Queue membership, not just size: a dismissal stores this so a NEW
+        // lead crossing the SLA re-surfaces the alert even at an unchanged
+        // (or lower) count, instead of hiding behind the count-only dismissal.
+        members: queueMembers(waitingRows.map((r) => r.id)),
         label: `${count} lead${count === 1 ? '' : 's'} waiting over ${LEAD_RESPONSE_SLA_MINUTES}m for first contact`,
         href: '/admin/leads',
       });
@@ -340,20 +341,24 @@ async function computeDashboardAlertsUncached() {
           INTERNAL_TEST_CUSTOMERS,
         );
     }
-    const expiring = await expiringQuery
+    // Per-row select (not a SQL aggregate) so the alert can carry the member
+    // estimate ids for membership-aware dismissal; the amount formula is the
+    // same annualized expression, summed in JS. The 3-day window keeps this
+    // to a handful of rows.
+    const expiringRows = (await expiringQuery
       .select(
-        db.raw('COUNT(*) as count'),
-        db.raw('COALESCE(SUM(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)), 0) as amount'),
-      )
-      .first();
-    const count = parseInt(expiring?.count || 0);
+        'e.id',
+        db.raw('(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)) as at_stake'),
+      )) || [];
+    const count = expiringRows.length;
     if (count > 0) {
       alerts.push({
         id: 'estimates_expiring',
         kind: 'action',
         severity: 'warn',
         count,
-        amount: parseFloat(expiring.amount || 0),
+        amount: expiringRows.reduce((s, r) => s + parseFloat(r.at_stake || 0), 0),
+        members: queueMembers(expiringRows.map((r) => r.id)),
         label: `${count} open estimate${count === 1 ? '' : 's'} expiring within 3 days`,
         href: '/admin/estimates',
       });
@@ -365,7 +370,12 @@ async function computeDashboardAlertsUncached() {
   //     the MRR hero tile splits on (services/mrr-breakdown.js), so this item
   //     and the tile can never disagree about what "at risk" means.
   try {
-    const { atRisk, atRiskCount } = await computeMrrBreakdown();
+    // The account LIST variant of the same shared definition (identical
+    // population + causes by construction), so the alert can carry member
+    // customer ids for membership-aware dismissal.
+    const atRiskAccounts = await listAtRiskMrrAccounts();
+    const atRisk = atRiskAccounts.reduce((s, a) => s + a.monthlyRate, 0);
+    const atRiskCount = atRiskAccounts.length;
     if (atRisk > 0) {
       alerts.push({
         id: 'at_risk_mrr',
@@ -373,6 +383,7 @@ async function computeDashboardAlertsUncached() {
         severity: 'warn',
         count: atRiskCount,
         amount: atRisk,
+        members: queueMembers(atRiskAccounts.map((a) => a.id)),
         label: `${atRiskCount} recurring account${atRiskCount === 1 ? '' : 's'} with MRR at risk`,
         href: '/admin/billing-recovery',
       });

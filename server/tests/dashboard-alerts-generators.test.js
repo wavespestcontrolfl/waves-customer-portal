@@ -9,11 +9,11 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   info: jest.fn(),
 }));
-jest.mock('../services/mrr-breakdown', () => ({ computeMrrBreakdown: jest.fn() }));
+jest.mock('../services/mrr-breakdown', () => ({ listAtRiskMrrAccounts: jest.fn() }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { computeMrrBreakdown } = require('../services/mrr-breakdown');
+const { listAtRiskMrrAccounts } = require('../services/mrr-breakdown');
 const {
   computeDashboardAlerts,
   computeDashboardAlertsUncached,
@@ -67,13 +67,16 @@ const leadsResult = ({ waiting, unattributed }) => (calls) => {
   return waiting;
 };
 
-const NO_MRR = { total: 0, committed: 0, atRisk: 0, totalCount: 0, atRiskCount: 0 };
+// listAtRiskMrrAccounts-shaped account rows for the at_risk_mrr generator.
+const atRiskAccount = (id, monthlyRate, causes = ['overdue']) => ({
+  id, firstName: 'A', lastName: String(id), monthlyRate, causes,
+});
 
 beforeEach(() => {
   jest.clearAllMocks();
   db.raw.mockImplementation((sql) => ({ sql, rows: [] }));
   db.schema.hasTable.mockResolvedValue(false);
-  computeMrrBreakdown.mockResolvedValue(NO_MRR);
+  listAtRiskMrrAccounts.mockResolvedValue([]);
   primeDb({});
 });
 
@@ -95,7 +98,7 @@ describe('Action Inbox generators', () => {
       href: '/admin/leads',
     });
     expect(item.label).toContain('waiting over 30m');
-    expect(item.fingerprint).toMatch(/^[0-9a-f]{32}$/); // membership digest rides along
+    expect(item.members).toEqual(['lead-a', 'lead-b', 'lead-c']); // membership rides along
 
     // The Speed-to-Lead fresh-start floor must be applied (env unset →
     // default 2026-07-01 baseline), so the pre-reset backlog can't nag.
@@ -116,7 +119,7 @@ describe('Action Inbox generators', () => {
     expect(excluded).toBeDefined();
   });
 
-  test('leads_awaiting_contact: fingerprint digests membership — order-independent, changes when a different lead waits at the same count', async () => {
+  test('leads_awaiting_contact: members are sorted (order-independent) so dismissal subset checks are stable', async () => {
     const alertFor = async (waiting) => {
       primeDb({ leads: leadsResult({ waiting, unattributed: { count: 0 } }) });
       const { alerts } = await computeDashboardAlertsUncached();
@@ -127,18 +130,22 @@ describe('Action Inbox generators', () => {
     const ba = await alertFor([{ id: 'lead-b' }, { id: 'lead-a' }]);
     const ac = await alertFor([{ id: 'lead-a' }, { id: 'lead-c' }]);
 
-    // Same membership, any order → same digest (a re-query can't re-alert).
-    expect(ba.fingerprint).toBe(ab.fingerprint);
-    // Same COUNT but different membership → different digest, so a dismissal
-    // recorded against {a,b} re-surfaces when the queue becomes {a,c}.
+    // Same membership, any query order → identical members list.
+    expect(ba.members).toEqual(ab.members);
+    // Same COUNT but a different lead in the queue → different membership, so
+    // a dismissal recorded against {a,b} re-surfaces when the queue is {a,c}.
     expect(ac.count).toBe(ab.count);
-    expect(ac.fingerprint).not.toBe(ab.fingerprint);
+    expect(ac.members).toEqual(['lead-a', 'lead-c']);
+    expect(ac.members).not.toEqual(ab.members);
   });
 
   test('estimates_expiring: warn action carrying the annualized at-stake amount, internal-test rows excluded', async () => {
     const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
     const capture = primeDb({
-      'estimates as e': { count: '2', amount: '3120.50' },
+      'estimates as e': [
+        { id: 'est-2', at_stake: '2000.50' },
+        { id: 'est-1', at_stake: '1120.00' },
+      ],
     });
     const { alerts } = await computeDashboardAlertsUncached();
 
@@ -147,6 +154,7 @@ describe('Action Inbox generators', () => {
       severity: 'warn',
       count: 2,
       amount: 3120.5,
+      members: ['est-1', 'est-2'], // sorted membership for dismissal checks
       href: '/admin/estimates',
     });
 
@@ -159,18 +167,22 @@ describe('Action Inbox generators', () => {
     expect(exclusions).toHaveLength(2);
   });
 
-  test('at_risk_mrr: reuses the shared MRR breakdown; absent when nothing is at risk', async () => {
-    computeMrrBreakdown.mockResolvedValue({ ...NO_MRR, atRisk: 512.5, atRiskCount: 7 });
+  test('at_risk_mrr: reuses the shared at-risk account list; absent when nothing is at risk', async () => {
+    listAtRiskMrrAccounts.mockResolvedValue([
+      atRiskAccount('cust-b', 400),
+      atRiskAccount('cust-a', 112.5, ['autopay_paused']),
+    ]);
     let { alerts } = await computeDashboardAlertsUncached();
     expect(alerts.find((a) => a.id === 'at_risk_mrr')).toMatchObject({
       kind: 'action',
       severity: 'warn',
-      count: 7,
+      count: 2,
       amount: 512.5,
+      members: ['cust-a', 'cust-b'],
       href: '/admin/billing-recovery',
     });
 
-    computeMrrBreakdown.mockResolvedValue(NO_MRR);
+    listAtRiskMrrAccounts.mockResolvedValue([]);
     ({ alerts } = await computeDashboardAlertsUncached());
     expect(alerts.find((a) => a.id === 'at_risk_mrr')).toBeUndefined();
   });
@@ -254,10 +266,10 @@ describe('Action Inbox generators', () => {
   });
 
   test('fail-soft: one broken generator logs and cannot blank the rest', async () => {
-    computeMrrBreakdown.mockResolvedValue({ ...NO_MRR, atRisk: 100, atRiskCount: 1 });
+    listAtRiskMrrAccounts.mockResolvedValue([atRiskAccount('cust-1', 100)]);
     primeDb({
       leads: () => { throw new Error('boom'); },
-      'estimates as e': { count: '1', amount: '99' },
+      'estimates as e': [{ id: 'est-1', at_stake: '99' }],
     });
     const { alerts } = await computeDashboardAlertsUncached();
 
@@ -278,28 +290,28 @@ describe('computeDashboardAlerts memo', () => {
       let now = 1_750_000_000_000;
       nowSpy.mockImplementation(() => now);
 
-      computeMrrBreakdown.mockResolvedValue({ ...NO_MRR, atRisk: 100, atRiskCount: 1 });
+      listAtRiskMrrAccounts.mockResolvedValue([atRiskAccount('cust-1', 100)]);
       const first = await computeDashboardAlerts();
-      expect(computeMrrBreakdown).toHaveBeenCalledTimes(1);
+      expect(listAtRiskMrrAccounts).toHaveBeenCalledTimes(1);
       expect(first.alerts.find((a) => a.id === 'at_risk_mrr').amount).toBe(100);
 
       // Underlying state changes, but a second read within the TTL is served
       // from the memo — no recompute, same result object.
-      computeMrrBreakdown.mockResolvedValue({ ...NO_MRR, atRisk: 999, atRiskCount: 9 });
+      listAtRiskMrrAccounts.mockResolvedValue([atRiskAccount('cust-9', 999)]);
       now += 10_000;
       const cached = await computeDashboardAlerts();
-      expect(computeMrrBreakdown).toHaveBeenCalledTimes(1);
+      expect(listAtRiskMrrAccounts).toHaveBeenCalledTimes(1);
       expect(cached.alerts.find((a) => a.id === 'at_risk_mrr').amount).toBe(100);
 
       // Write paths (dismissals, cron) must see current state.
       const forced = await computeDashboardAlerts({ fresh: true });
-      expect(computeMrrBreakdown).toHaveBeenCalledTimes(2);
+      expect(listAtRiskMrrAccounts).toHaveBeenCalledTimes(2);
       expect(forced.alerts.find((a) => a.id === 'at_risk_mrr').amount).toBe(999);
 
       // TTL expiry recomputes on the read path too.
       now += 31_000;
       await computeDashboardAlerts();
-      expect(computeMrrBreakdown).toHaveBeenCalledTimes(3);
+      expect(listAtRiskMrrAccounts).toHaveBeenCalledTimes(3);
     } finally {
       nowSpy.mockRestore();
     }
