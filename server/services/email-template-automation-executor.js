@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const EmailTemplates = require('./email-template-library');
 const logger = require('./logger');
+const { formatDisplayDate } = require('../utils/date-only');
 
 const FINAL_STATUSES = new Set(['sent', 'blocked', 'skipped', 'failed']);
 const RUNNABLE_STATUSES = ['queued', 'scheduled', 'retry_scheduled'];
@@ -663,6 +664,21 @@ async function livePayloadForRun(run, storedPayload = {}) {
       setLiveValue(live, 'status', row.status);
     }
     if (hasOwn(row, 'service_type')) setLiveValue(live, 'service_type', row.service_type);
+    // Rendered appointment details refresh at send time: runs queue at
+    // booking (delay/retry can defer the send), and a corrected slot or
+    // address must not reach the customer with the values captured at
+    // queue time.
+    if (hasOwn(row, 'scheduled_date')) {
+      const liveServiceDate = formatDisplayDate(row.scheduled_date, { fallback: '' });
+      if (liveServiceDate) setLiveValue(live, 'service_date', liveServiceDate);
+    }
+    if (row.customer_id) {
+      const customer = await loadEntityRow('customers', row.customer_id);
+      const liveAddress = customer
+        ? [customer.address_line1, customer.city, customer.zip].filter(Boolean).join(', ')
+        : '';
+      if (liveAddress) setLiveValue(live, 'property_address', liveAddress);
+    }
     return live;
   }
 
@@ -879,4 +895,5 @@ module.exports = {
   exitReasonFor,
   recipientFor,
   entityFor,
+  livePayloadForRun,
 };

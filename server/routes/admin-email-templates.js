@@ -398,7 +398,7 @@ async function dryRunAutomation(row) {
     return result;
   }
 
-  if (templateKey === 'prep.bed_bug' || templateKey === 'prep.cockroach') {
+  if (templateKey === 'prep.bed_bug' || templateKey === 'prep.cockroach' || templateKey === 'prep.flea') {
     const cols = await tableInfo('scheduled_services');
     if (!cols) return countsFromHistory();
     let q = db('scheduled_services');
@@ -407,7 +407,9 @@ async function dryRunAutomation(row) {
     if (cols.service_type) {
       q = templateKey === 'prep.bed_bug'
         ? q.where('service_type', 'ilike', '%bed bug%')
-        : q.where((builder) => builder.where('service_type', 'ilike', '%cockroach%').orWhere('service_type', 'ilike', '%roach%'));
+        : templateKey === 'prep.flea'
+          ? q.where('service_type', 'ilike', '%flea%')
+          : q.where((builder) => builder.where('service_type', 'ilike', '%cockroach%').orWhere('service_type', 'ilike', '%roach%'));
     }
     result.source = 'scheduled_services';
     result.candidate_count = await countRows(q);

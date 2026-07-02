@@ -6,7 +6,8 @@ const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-look
 const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { isEnabled } = require('../config/feature-gates');
-const { formatDisplayDate } = require('../utils/date-only');
+const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
 
 // Pest types whose booking triggers an automatic prep guide email
@@ -250,6 +251,14 @@ class AppointmentTagger {
     const automationKey = PREP_AUTOMATION_BY_PEST_TYPE[pestType] || null;
     if (!automationKey) return;
     if (!isEnabled('emailTemplateAutomations')) return;
+
+    // Upcoming open visits only: regenerate-brief re-runs onServiceScheduled
+    // for past/closed appointments too, and "prepare for your treatment"
+    // must never land after the visit.
+    const status = String(service.status || '').toLowerCase();
+    if (status === 'cancelled' || status === 'completed') return;
+    const serviceDateStr = dateOnlyString(service.scheduled_date);
+    if (!serviceDateStr || serviceDateStr < etDateString()) return;
 
     try {
       // Route like the other prep/project emails: service contact first (the

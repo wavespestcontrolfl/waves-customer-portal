@@ -31,6 +31,11 @@ const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
 const executor = require('../services/email-template-automation-executor');
 const AppointmentTagger = require('../services/appointment-tagger');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const { formatDisplayDate } = require('../utils/date-only');
+
+const FUTURE_DATE = etDateString(addETDays(new Date(), 7));
+const PAST_DATE = etDateString(addETDays(new Date(), -1));
 
 function service(overrides = {}) {
   return {
@@ -41,7 +46,8 @@ function service(overrides = {}) {
     email: 'taylor@example.com',
     phone: '+19415550101',
     service_type: 'Cockroach Treatment - Interior',
-    scheduled_date: '2026-07-10',
+    scheduled_date: FUTURE_DATE,
+    status: 'scheduled',
     address_line1: '123 Palm Ave',
     city: 'Bradenton',
     zip: '34211',
@@ -90,7 +96,7 @@ describe('appointment tagger prep email automation', () => {
       customer_email: 'taylor@example.com',
       first_name: 'Taylor',
       service_type: 'Cockroach Treatment - Interior',
-      service_date: 'July 10, 2026',
+      service_date: formatDisplayDate(FUTURE_DATE),
       property_address: '123 Palm Ave, Bradenton, 34211',
     });
     expect(call.payload.prep_url).toContain('?tab=visits');
@@ -134,11 +140,24 @@ describe('appointment tagger prep email automation', () => {
 
   test('DATE column returned as a UTC-midnight Date keeps the ET calendar day', async () => {
     await AppointmentTagger.triggerPestPrep(
-      service({ scheduled_date: new Date('2026-07-10T00:00:00Z') }),
+      service({ scheduled_date: new Date(`${FUTURE_DATE}T00:00:00Z`) }),
       'cockroach',
     );
 
-    expect(executor.processTrigger.mock.calls[0][0].payload.service_date).toBe('July 10, 2026');
+    expect(executor.processTrigger.mock.calls[0][0].payload.service_date).toBe(formatDisplayDate(FUTURE_DATE));
+  });
+
+  test('skips past-dated appointments (regenerate-brief re-runs)', async () => {
+    await AppointmentTagger.triggerPestPrep(service({ scheduled_date: PAST_DATE }), 'cockroach');
+
+    expect(executor.processTrigger).not.toHaveBeenCalled();
+  });
+
+  test('skips completed and cancelled appointments', async () => {
+    await AppointmentTagger.triggerPestPrep(service({ status: 'completed' }), 'cockroach');
+    await AppointmentTagger.triggerPestPrep(service({ status: 'cancelled' }), 'bed_bug');
+
+    expect(executor.processTrigger).not.toHaveBeenCalled();
   });
 
   test('skips when the emailTemplateAutomations gate is off', async () => {

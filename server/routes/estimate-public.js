@@ -7611,6 +7611,12 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) {
         logger.error(`[estimate-accept] Appointment reminder registration failed for ${appointment.id}: ${e.message}`);
       }
+      // Appointment-type automations (tagging, prep guide emails) — same hook
+      // the admin scheduling path runs. Post-commit and fire-and-forget so the
+      // accept response never waits on it.
+      const AppointmentTagger = require('../services/appointment-tagger');
+      void AppointmentTagger.onServiceScheduled(appointment.id)
+        .catch((e) => logger.error(`[estimate-accept] appointment automations failed (non-blocking) for ${appointment.id}: ${e.message}`));
     }
     const deferredFollowUpReminderRows = Array.isArray(annualPrepayConversion?.deferredFollowUpReminderRows)
       ? annualPrepayConversion.deferredFollowUpReminderRows
