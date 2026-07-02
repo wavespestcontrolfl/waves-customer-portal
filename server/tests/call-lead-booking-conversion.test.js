@@ -290,6 +290,7 @@ describe('findReusableCallLead', () => {
     expect(database).toHaveBeenCalledWith('leads');
     expect(database._calls.where).toContainEqual(['phone', PHONE]);
     expect(database._calls.where).toContain('group');
+    expect(database._calls.whereNull).toContain('deleted_at');
     expect(database._calls.whereNull).toContain('customer_id');
     expect(database._calls.orWhere).toContainEqual(['customer_id', 'cust-1']);
     // The customer path keeps its pre-existing status behavior (a lost/
@@ -305,6 +306,7 @@ describe('findReusableCallLead', () => {
 
     expect(lead).toEqual({ id: 'lead-7' });
     expect(database._calls.whereNotIn).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate']]);
+    expect(database._calls.whereNull).toContain('deleted_at');
     expect(database._calls.whereNull).toContain('converted_at');
     // customerId is null on this path — no ownership group.
     expect(database._calls.orWhere).toHaveLength(0);

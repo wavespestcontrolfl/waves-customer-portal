@@ -267,6 +267,15 @@ const gates = {
   // get a non_mobile suppression row.
   proactiveLineTypeLookup: process.env.GATE_PROACTIVE_LINETYPE_LOOKUP === 'true',
 
+  // Voicemail lead text-back — when a NEW prospect's voicemail produces a
+  // workable lead, text them a prefilled quote-wizard link ("got your message
+  // about X — get your quote: …"). A customer-facing auto-send, so it FAILS
+  // CLOSED (explicit opt-in in EVERY environment) per the house rule — a
+  // preview/dev env with real Twilio creds must NOT auto-text prospects.
+  // Owner sets GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the
+  // voicemail still becomes a Needs-Review lead; only the SMS is skipped.
+  voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
+
   // Email Template Automations — executes trigger-mapped template sends from
   // the email template automation catalog. Off by default in prod until each
   // trigger has been verified with run history and idempotency checks.
@@ -386,6 +395,15 @@ const gates = {
   // follow-up sweeps send a verification re-nudge on the same cadence. Changes
   // customer-facing messaging, so off by default in prod until verified.
   divertMicrodepositDunning: isProd ? process.env.GATE_MICRODEPOSIT_DUNNING_DIVERSION === 'true' : true,
+
+  // Weekly Irrigation Recommendation Email — Monday-morning "cut back / add
+  // water" email to lawn-care customers who entered weekly irrigation inches
+  // in the portal, based on last week's rainfall at their coordinates vs. the
+  // seasonal target. Customer-facing auto-send, so explicit opt-in in EVERY
+  // environment (off in dev/preview too) — a preview env with real SendGrid
+  // creds + cronJobs on must NOT email real customers. Until the gate is on,
+  // the Monday sweep only shadow-logs candidate counts and never sends.
+  irrigationWeeklyEmail: process.env.GATE_IRRIGATION_WEEKLY_EMAIL === 'true',
 
   // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
   // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"

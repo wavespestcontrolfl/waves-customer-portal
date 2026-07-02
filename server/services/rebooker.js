@@ -3,6 +3,7 @@ const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
+const { shiftCallFollowUpsForParentMove } = require('./call-booking-catalog');
 const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
@@ -354,6 +355,22 @@ class SmartRebooker {
         }
       }
       emitCustomerJobRefresh({ ...service, ...updates, id: serviceId }, 'confirmed');
+    }
+
+    // Keep a call-created follow-up (visit 2) spaced from its parent —
+    // shared with the admin schedule-edit path; best-effort outside the trx.
+    try {
+      const shifted = await shiftCallFollowUpsForParentMove({
+        conn: db,
+        parentServiceId: serviceId,
+        fromDate: originalDate,
+        toDate: newDateStr,
+      });
+      if (shifted > 0) {
+        logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with parent ${serviceId} (-> ${newDateStr})`);
+      }
+    } catch (err) {
+      logger.error(`[rebooker] call follow-up shift failed for ${serviceId}: ${err.message}`);
     }
 
     // Check escalation

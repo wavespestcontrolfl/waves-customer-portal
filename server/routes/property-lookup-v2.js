@@ -1202,6 +1202,20 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
       ? propertyTypeFromAttachment(ai)
       : null);
 
+  const landscapeComplexity = ai?.landscapeComplexity || 'MODERATE';
+  const footprintSf = rc?.squareFootage
+    ? Math.round(rc.squareFootage / (rc.stories || 1))
+    : 0;
+  // Rough structure perimeter from the ground-floor footprint — the same
+  // 4·√area·layout formula the pricing engine applies for termite bait and
+  // the trenching "estimate from footprint" checkbox. Pre-fills the
+  // estimator's Perimeter LF box; a field-measured value overrides it.
+  const perimeterLayoutFactor =
+    (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
+  const estimatedPerimeterLF = footprintSf > 0
+    ? Math.round(4 * Math.sqrt(footprintSf) * perimeterLayoutFactor)
+    : null;
+
   const profile = {
     // ── ADDRESS ──
     address: rc?.formattedAddress || '',
@@ -1226,9 +1240,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     // amber-nudge the estimator to eyeball the photos. 'ai' = verified public
     // record/search source; 'default' = nobody knew, we fell back to 1.
     storiesSource: rc?._storiesSource || (rc?.stories ? 'ai' : 'default'),
-    footprint: rc?.squareFootage
-      ? Math.round(rc.squareFootage / (rc.stories || 1))
-      : 0,
+    footprint: footprintSf,
+    // Rough pre-fills for the estimator's termite measurement boxes: the
+    // attic deck and the slab both approximate the ground-floor footprint
+    // (top floor ≈ footprint on equal-floor homes). Published under
+    // estimated* names — like estimatedTurfSf / estimatedBedAreaSf — so
+    // translateV2CallToV1Input never forwards them as authoritative
+    // property measurements: headless pricing keeps the quote-required
+    // gates for trenching/pre-slab, and these reach pricing only through
+    // the operator-visible, editable boxes (manual entries override).
+    estimatedPerimeterLF,
+    estimatedAtticSqFt: footprintSf > 0 ? footprintSf : null,
+    estimatedSlabSqFt: footprintSf > 0 ? footprintSf : null,
 
     // ── CONSTRUCTION (merged property record + satellite AI) ──
     yearBuilt: rc?.yearBuilt || null,
@@ -1273,7 +1296,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     // ── LANDSCAPE (from satellite AI, with property-record cross-ref) ──
     shrubDensity: ai?.shrubDensity || 'MODERATE',
     treeDensity: ai?.treeDensity || 'MODERATE',
-    landscapeComplexity: ai?.landscapeComplexity || 'MODERATE',
+    landscapeComplexity,
     estimatedPalmCount: ai?.estimatedPalmCount || 0,
     estimatedTreeCount: ai?.estimatedTreeCount || 0,
     estimatedBedAreaSf: ai?.estimatedBedAreaSf,
@@ -2697,6 +2720,26 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         urgency, afterHours,
       };
     }
+  }
+  // Annual rodent guarantee — gated. The engine drops the line unless all four
+  // eligibility flags are true, so the rep confirms each affirmatively; missing
+  // any → INELIGIBLE and no line item (fail closed). Pass the normalized
+  // homeSqFt/stories/roofType so tiering (standard/complex/estate) keys off the
+  // same authoritative inputs as the rest of the estimate — the engine's
+  // property.footprint fallback is only set when the profile carries a footprint
+  // field, so relying on it can undertier a large home (e.g. 5,000 sf → complex).
+  if (sel.has('RODENT_GUARANTEE')) {
+    services.rodentGuarantee = {
+      homeSqFt,
+      stories,
+      roofType: p.roofType,
+      eligibility: {
+        trappingCompleted: !!o.rgTrappingCompleted,
+        exclusionCompleted: !!o.rgExclusionCompleted,
+        sanitationCompletedOrPhotoBaseline: !!o.rgSanitationBaseline,
+        noActivityAfterFinalTrapCheck: !!o.rgNoActivityAfterFinalCheck,
+      },
+    };
   }
   if (sel.has('TOPDRESS')) {
     const topDressArea = Math.max(0, Number(o.topDressArea) || 0);

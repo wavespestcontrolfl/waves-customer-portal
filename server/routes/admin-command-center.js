@@ -338,6 +338,7 @@ async function getMissedLeads() {
   const staleCutoff = new Date(Date.now() - DEFAULTS.staleLeadHours * 3600000);
   const rows = await db('leads as l')
     .leftJoin('technicians as t', 'l.assigned_to', 't.id')
+    .whereNull('l.deleted_at')
     .whereIn('l.status', OPEN_LEAD_STATUSES)
     .where((qb) => {
       qb.whereNull('l.assigned_to')

@@ -240,6 +240,37 @@ describe('oneTimePriceCopy', () => {
     });
     expect(copy).toMatch(/30-day callback period if pests return/);
   });
+
+  it('returns no-visit renewal copy for a guarantee-only estimate (no "One visit" contradiction)', () => {
+    // The invoice_only acceptance card says "No appointment needed" — the
+    // price copy above it must not promise a service visit.
+    const copy = oneTimePriceCopy({ total: 199, items: [{ service: 'rodent_guarantee', label: 'Rodent Guarantee', amount: 199 }] });
+    expect(copy).toMatch(/no service visit to schedule/i);
+    expect(copy).not.toMatch(/One visit, pay on service day/);
+    expect(copy).not.toMatch(/30-day callback period if pests return/);
+  });
+
+  it('keeps guarantee renewal copy when the only other row is a discount', () => {
+    const copy = oneTimePriceCopy({
+      total: 179,
+      items: [
+        { service: 'rodent_guarantee', label: 'Rodent Guarantee', amount: 199 },
+        { service: 'manual_discount', label: 'Manual discount', amount: -20 },
+      ],
+    });
+    expect(copy).toMatch(/no service visit to schedule/i);
+  });
+
+  it('falls back to the default visit copy when the guarantee is bundled with real work', () => {
+    const copy = oneTimePriceCopy({
+      total: 349,
+      items: [
+        { service: 'rodent_guarantee', label: 'Rodent Guarantee', amount: 199 },
+        { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 150 },
+      ],
+    });
+    expect(copy).toMatch(/30-day callback period if pests return/);
+  });
 });
 
 describe('estimateAddServiceOffer', () => {

@@ -1397,7 +1397,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
     // mirror in estimate_data.lead_id.
     let leadId = null;
     try {
-      const lead = await db('leads').where({ estimate_id: estimate.id }).first('id');
+      const lead = await db('leads').where({ estimate_id: estimate.id }).whereNull('deleted_at').first('id');
       leadId = lead?.id || null;
       if (!leadId) {
         const data = typeof estimate.estimate_data === 'string'
@@ -1468,6 +1468,22 @@ router.post('/:id/archive', async (req, res, next) => {
       });
     }
     if (estimate.archived_at) return res.json(estimate);  // idempotent
+    // Never park a LIVE estimate holding a received (unconsumed, unrefunded)
+    // acceptance deposit: archived rows are excluded from expiration, and
+    // sweepTerminalEstimateDeposits only scans declined/expired estimates —
+    // archiving would strand the customer's deposit money forever. Same rule
+    // as the converted-customer auto-archive sweep. Terminal rows (declined/
+    // expired/accepted) archive freely: the sweep already covers them.
+    if (['sent', 'viewed'].includes(estimate.status)) {
+      const heldDeposit = await db('estimate_deposits')
+        .where({ estimate_id: estimate.id, status: 'received' })
+        .first('id');
+      if (heldDeposit) {
+        return res.status(409).json({
+          error: 'This estimate holds a customer deposit. Decline it or let it expire first — the refund runs automatically from those states; archiving now would strand the deposit.',
+        });
+      }
+    }
     const [updated] = await db('estimates')
       .where({ id: req.params.id })
       .update({ archived_at: db.fn.now(), updated_at: db.fn.now() })

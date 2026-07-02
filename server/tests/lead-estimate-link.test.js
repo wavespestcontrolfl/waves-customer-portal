@@ -24,7 +24,10 @@ function makeDb(lead, estimate = null) {
   const activities = [];
   const database = (table) => ({
     where(clause) {
-      return {
+      const q = {
+        // deleted_at guard on the lead lookup — fixtures are never deleted,
+        // so the guard is a chain no-op here.
+        whereNull: () => q,
         first: async () => {
           if (table === 'leads' && lead && clause.id === lead.id) return lead;
           if (table === 'estimates' && estimate && clause.id === estimate.id) return estimate;
@@ -35,6 +38,7 @@ function makeDb(lead, estimate = null) {
           return 1;
         },
       };
+      return q;
     },
     insert: async (row) => {
       activities.push({ table, row });
@@ -208,7 +212,13 @@ describe('lead-estimate link service', () => {
         return Promise.resolve([]);
       },
       whereNotIn() {
-        return { whereNull: () => ({ andWhere: () => Promise.resolve(opts.contactLeads || []) }) };
+        // Chain tolerates any number of whereNull calls (customer_id guard +
+        // the deleted_at soft-delete guard).
+        const chain = {
+          whereNull: () => chain,
+          andWhere: () => Promise.resolve(opts.contactLeads || []),
+        };
+        return chain;
       },
     });
     database._updates = updates;
@@ -311,24 +321,37 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
           if (table === 'leads' && clause && 'estimate_id' in clause) {
             return Promise.resolve(opts.leadsByEstimate || []);
           }
-          // customerHasWonLead: .where({ customer_id, status: 'won' }).first('id')
+          // customerHasWonLead: .where({ customer_id, status: 'won' })
+          // .whereNull('deleted_at').first('id')
           if (table === 'leads' && clause && 'customer_id' in clause && 'status' in clause) {
-            return { first: async () => opts.customerWonLead || null };
+            const won = {
+              whereNull: () => won,
+              first: async () => opts.customerWonLead || null,
+            };
+            return won;
           }
-          // findOpenLeadsForCustomer: .where({ customer_id }).whereNotIn('status', [...])
+          // findOpenLeadsForCustomer: .where({ customer_id })
+          // .whereNull('deleted_at').whereNotIn('status', [...])
           if (table === 'leads' && clause && 'customer_id' in clause) {
-            return { whereNotIn: () => Promise.resolve(opts.customerOpenLeads || []) };
+            const open = {
+              whereNull: () => open,
+              whereNotIn: () => Promise.resolve(opts.customerOpenLeads || []),
+            };
+            return open;
           }
           return Promise.resolve([]);
         },
         whereNotIn() {
-          // findUnconvertedLeadsByContact: .whereNotIn(...).whereNull('customer_id').andWhere(...)
-          return {
+          // findUnconvertedLeadsByContact: .whereNotIn(...).whereNull('customer_id')
+          // .whereNull('deleted_at').andWhere(...) — record every guard column.
+          const chain = {
             whereNull(col) {
               calls.whereNull.push(col);
-              return { andWhere: () => Promise.resolve(opts.contactLeads || []) };
+              return chain;
             },
+            andWhere: () => Promise.resolve(opts.contactLeads || []),
           };
+          return chain;
         },
       };
     };
@@ -378,8 +401,9 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     // Only the customer + source — no revenue fields, so markConverted preserves
     // any monthly_value/waveguard_tier already on the lead.
     expect(markConverted.mock.calls[0][1]).toEqual({ customerId: 'c1', triggerSource: 'backfill' });
-    // The contact fallback must restrict to unconverted leads.
+    // The contact fallback must restrict to unconverted, non-deleted leads.
     expect(database._calls.whereNull).toContain('customer_id');
+    expect(database._calls.whereNull).toContain('deleted_at');
   });
 
   test('enforceOriginating converts a contact lead first contacted before the customer signed up', async () => {
@@ -726,12 +750,22 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
         where(clause) {
           if (table === 'customers') return { first: async () => opts.customer || null };
           if (table === 'leads' && clause && 'customer_id' in clause) {
-            return { first: async () => opts.linkedLead || null };
+            // existing-lead guard now excludes soft-deleted rows:
+            // .where({customer_id}).whereNull('deleted_at').first('id')
+            const linked = {
+              whereNull: () => linked,
+              first: async () => opts.linkedLead || null,
+            };
+            return linked;
           }
           return { first: async () => null };
         },
         whereNotIn() {
-          return { whereNull: () => ({ andWhere: () => Promise.resolve(opts.contactLeads || []) }) };
+          const chain = {
+            whereNull: () => chain,
+            andWhere: () => Promise.resolve(opts.contactLeads || []),
+          };
+          return chain;
         },
         insert(row) {
           inserted.push({ table, row });
@@ -1027,9 +1061,14 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
         }
         if (table === 'estimates') return { first: async () => opts.estimate || null };
         if (table === 'customers') return { first: async () => opts.customer || null };
-        // customerHasWonLead: .where({ customer_id, status: 'won' }).first('id')
+        // customerHasWonLead: .where({ customer_id, status: 'won' })
+        // .whereNull('deleted_at').first('id')
         if (table === 'leads' && clause && 'customer_id' in clause && 'status' in clause) {
-          return { first: async () => opts.customerWonLead || null };
+          const won = {
+            whereNull: () => won,
+            first: async () => opts.customerWonLead || null,
+          };
+          return won;
         }
         if (table === 'leads' && clause && 'id' in clause) {
           return {
@@ -1057,9 +1096,20 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
         return Promise.resolve([]);
       },
       whereNotIn() {
+        // First guard picks the resolver branch (whereNull('customer_id') =
+        // unconverted; whereNotNull('customer_id') = customer-linked); each
+        // branch then chains the deleted_at soft-delete guard.
+        const unconverted = {
+          whereNull: () => unconverted,
+          andWhere: () => Promise.resolve(opts.contactLeads || []),
+        };
+        const customerLinked = {
+          whereNull: () => customerLinked,
+          andWhere: () => Promise.resolve(opts.customerLinkedLeads || []),
+        };
         return {
-          whereNull: () => ({ andWhere: () => Promise.resolve(opts.contactLeads || []) }),
-          whereNotNull: () => ({ andWhere: () => Promise.resolve(opts.customerLinkedLeads || []) }),
+          whereNull: () => unconverted,
+          whereNotNull: () => customerLinked,
         };
       },
       insert: async (row) => {

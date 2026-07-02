@@ -66,8 +66,11 @@ function computeDepositAmount({ oneTime = false } = {}) {
 // created at accept, so the credit's only path back to the customer is the
 // roll-forward, which traces scheduled_services.source_estimate_id — an
 // unbooked accept would orphan the paid deposit (accepted estimates are
-// deliberately outside the terminal sweep).
-function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, oneTime = false, oneTimeUninvoiced = false }) {
+// deliberately outside the terminal sweep). noVisit marks the payment-only
+// accept (guarantee-only renewal): there is NO appointment to book, so the
+// plan-customer booking commitment gate cannot apply — the invoice minted at
+// accept is the commitment.
+function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, oneTime = false, oneTimeUninvoiced = false, noVisit = false }) {
   if (!isDepositEnforced()) {
     return { enforced: false, required: false, slotRequired: false, exemptReason: 'feature_disabled' };
   }
@@ -76,8 +79,11 @@ function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, o
   }
   if (membership?.isExistingCustomer) {
     // No deposit for plan customers — their commitment gate is booking the
-    // appointment itself.
-    return { enforced: true, required: false, slotRequired: true, exemptReason: 'existing_plan_customer' };
+    // appointment itself. A no-visit (guarantee-only renewal) accept has no
+    // appointment to book: the renewal's primary audience IS a plan customer,
+    // and an unconditional slot requirement would 400 APPOINTMENT_REQUIRED on
+    // a UI with no slot picker.
+    return { enforced: true, required: false, slotRequired: !noVisit, exemptReason: 'existing_plan_customer' };
   }
   return {
     enforced: true,
@@ -129,7 +135,7 @@ async function linkedScheduledServiceId(estimate, explicitId = null, { strict = 
 // CURRENT qualifying recurring services. A failed live check falls back to
 // requiring the deposit — wrongly charged money still credits forward,
 // while a wrongly granted exemption silently loses the commitment gate.
-async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreference = null, membership = null, oneTime = false, oneTimeUninvoiced = false, scheduledServiceId = null, useLinkedFallback = true }) {
+async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreference = null, membership = null, oneTime = false, oneTimeUninvoiced = false, noVisit = false, scheduledServiceId = null, useLinkedFallback = true }) {
   let member = membership;
   if (!member?.isExistingCustomer && estimate?.customer_id && isDepositEnforced()) {
     try {
@@ -142,7 +148,7 @@ async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreferen
       logger.warn('[estimate-deposits] live plan-customer check failed — deposit stays required', { error: err.message });
     }
   }
-  const policy = resolveDepositPolicy({ estimate, paymentMethodPreference, membership: member, oneTime, oneTimeUninvoiced });
+  const policy = resolveDepositPolicy({ estimate, paymentMethodPreference, membership: member, oneTime, oneTimeUninvoiced, noVisit });
   // Third-party Bill-To: a payer-billed customer's invoices route to the payer's
   // AP inbox, and payer invoices reject homeowner deposit credit (invoice.create
   // skips depositCredit when a payer resolves) — so an acceptance deposit
@@ -810,6 +816,12 @@ async function refundUnconsumedDeposits({ estimateId, reason }) {
 // the accept request failed, or they later declined — has no other refund
 // path and would strand forever. Accepted estimates are deliberately NOT
 // swept: their unapplied remainder rolls forward to later service invoices.
+// ARCHIVED sent/viewed rows are terminal-EQUIVALENT here: archived rows are
+// excluded from expiration (parked status-neutral), so a received deposit on
+// one has no other route to this sweep. The archive endpoint and the
+// converted-customer auto-sweep both refuse to park a deposit-holding
+// estimate, so this arm only catches rows archived before those guards
+// existed plus the webhook race (deposit lands mid-archive).
 // Runs daily from the estimate-expiration worker (self-healing for any
 // terminal flip regardless of origin, including admin-side status changes)
 // and inline from the public decline route for immediacy. Per-estimate
@@ -819,7 +831,12 @@ async function sweepTerminalEstimateDeposits() {
   const rows = await db('estimate_deposits as ed')
     .join('estimates as e', 'e.id', 'ed.estimate_id')
     .where('ed.status', 'received')
-    .whereIn('e.status', ['declined', 'expired'])
+    .where((qb) => {
+      qb.whereIn('e.status', ['declined', 'expired'])
+        .orWhere((archivedLive) => {
+          archivedLive.whereNotNull('e.archived_at').whereIn('e.status', ['sent', 'viewed']);
+        });
+    })
     .distinct('ed.estimate_id');
 
   let estimatesSwept = 0;

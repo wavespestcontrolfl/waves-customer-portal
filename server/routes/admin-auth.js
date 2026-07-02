@@ -63,7 +63,7 @@ router.post('/register', adminAuthenticate, requireAdmin, async (req, res, next)
     const existing = await db('technicians').where({ email: email.toLowerCase().trim() }).first();
     if (existing) return res.status(409).json({ error: 'Email already in use' });
 
-    const hash = await bcrypt.hash(password, 10);
+    const hash = await bcrypt.hash(password, 12);
     const [tech] = await db('technicians').insert({
       name, email: email.toLowerCase().trim(), password_hash: hash,
       role: role || 'technician', active: true,

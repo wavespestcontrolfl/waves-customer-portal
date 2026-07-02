@@ -163,4 +163,55 @@ describe('admin project route guards', () => {
       expect(readiness.required.map((item) => item.key)).not.toContain('recommendations');
     }
   });
+
+  test('certificate send readiness requires a finished-solution concentration only for liquid soil barriers', () => {
+    const baseCertFindings = {
+      treatment_address: '123 Main St, Bradenton, FL 34202',
+      applicator_name: 'Adam Benetti',
+      applicator_fdacs_id: 'JF123456',
+      applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).',
+    };
+    const evaluate = (findings) => evaluateProjectSendReadiness({
+      project: {
+        id: 'project-cert',
+        customer_id: 'customer-1',
+        project_date: '2026-05-18',
+        project_type: 'pre_treatment_termite_certificate',
+        findings,
+      },
+      customer: { id: 'customer-1' },
+    });
+
+    // Bait system: no finished solution exists — neither concentration nor
+    // gallons may block the send (the create form leaves both blank).
+    const bait = evaluate({
+      ...baseCertFindings,
+      treatment_method: 'Bait system',
+      product_name: 'Trelona ATBB',
+      active_ingredient: 'novaluron',
+      linear_feet: '180',
+    });
+    expect(bait.missing).toEqual([]);
+
+    // Wood treatment: same — measured by treated area only.
+    const wood = evaluate({
+      ...baseCertFindings,
+      treatment_method: 'Wood treatment (borate)',
+      product_name: 'Bora-Care',
+      active_ingredient: 'disodium octaborate tetrahydrate',
+      square_footage: '2200',
+    });
+    expect(wood.missing).toEqual([]);
+
+    // Liquid soil barrier still requires the dilution.
+    const soil = evaluate({
+      ...baseCertFindings,
+      treatment_method: 'Soil barrier (chemical)',
+      product_name: 'Termidor SC',
+      active_ingredient: 'fipronil',
+      square_footage: '1800',
+      gallons_applied: '180',
+    });
+    expect(soil.missing.map((item) => item.key)).toContain('cert_active_ingredient');
+  });
 });

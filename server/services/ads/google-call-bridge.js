@@ -398,7 +398,7 @@ async function findLeadForCall(callLog) {
   const plan = leadMatchPlan(callLog);
   if (!plan) return null;
 
-  let query = db('leads').select('id', 'customer_id');
+  let query = db('leads').select('id', 'customer_id').whereNull('deleted_at');
   if (plan.strategy === 'customer_id') {
     query = query.where({ customer_id: plan.customerId });
   } else {

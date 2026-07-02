@@ -17,6 +17,7 @@ const { autopayActivePredicate } = require('../services/autopay-eligibility');
 const { generateChartSpec, extractImageIntent } = require('../services/ai-chart-builder');
 const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
+const { resolveAttributionFreshStart, applyAttributionFreshStart } = require('../utils/attribution-fresh-start');
 const rateLimit = require('express-rate-limit');
 
 // Server-side gate for the AI chart builder. The client hides the panel behind
@@ -260,7 +261,9 @@ router.get('/', dashboardCache, async (req, res, next) => {
       db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
         .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [som]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [today])
         .count('* as count').first(),
-      db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
+      // archived_at: the conversion-guard sweep archives converted customers'
+      // estimates WITHOUT changing status, so status alone over-counts.
+      db('estimates').whereIn('status', ['sent', 'viewed']).whereNull('archived_at').where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
       db('scheduled_services').where('scheduled_date', '>=', monW).where('scheduled_date', '<=', sunW).select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed")
@@ -506,7 +509,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     try {
       const leadAgg = await excludeInternalLeads(
         applyETTimestampWindow(
-          db('leads').whereNotIn('status', NON_ENGAGED_LEAD_STATUSES),
+          db('leads').whereNull('deleted_at').whereNotIn('status', NON_ENGAGED_LEAD_STATUSES),
           'first_contact_at',
           start,
           todayStr,
@@ -1486,11 +1489,18 @@ function parseCustomRange(query) {
   return { from: from > today ? today : from };
 }
 
+// Resolved once at boot; ATTRIBUTION_FRESH_START=YYYY-MM-DD overrides, empty
+// disables, invalid fails open. See utils/attribution-fresh-start.js.
+const ATTRIBUTION_FRESH_START = resolveAttributionFreshStart();
+
 function resolveAttributionWindow(period, range) {
-  if (range && range.from) {
-    return { from: range.from, to: etDateString(), label: `Since ${range.from}` };
-  }
-  return { from: periodStartDate(period), to: etDateString(), label: periodLabel(period) };
+  const win = range && range.from
+    ? { from: range.from, to: etDateString(), label: `Since ${range.from}` }
+    : { from: periodStartDate(period), to: etDateString(), label: periodLabel(period) };
+  // Attribution data before the fresh start is known-dirty (city-page buckets
+  // blended with GBP dials, pre-realignment costs) — clip every window at the
+  // baseline. The floored label flows to the card sub + the leads drill.
+  return applyAttributionFreshStart(win, ATTRIBUTION_FRESH_START);
 }
 
 // GET /api/admin/dashboard/calls-by-source?period=mtd
@@ -1560,7 +1570,8 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
     const rows = await excludeInternalLeads(
       applyETTimestampWindow(
         db('leads as l')
-          .leftJoin('lead_sources as s', 'l.lead_source_id', 's.id'),
+          .leftJoin('lead_sources as s', 'l.lead_source_id', 's.id')
+          .whereNull('l.deleted_at'),
         'l.first_contact_at',
         win.from,
         win.to,
@@ -1675,7 +1686,7 @@ router.get('/channel-mix', dashboardCache, async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     const rows = await excludeInternalLeads(
-      applyETTimestampWindow(db('leads'), 'first_contact_at', win.from, win.to)
+      applyETTimestampWindow(db('leads').whereNull('deleted_at'), 'first_contact_at', win.from, win.to)
     ).select(
         db.raw("COALESCE(first_contact_channel, 'unknown') as channel"),
         db.raw('COUNT(*) as leads'),

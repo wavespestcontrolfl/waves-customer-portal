@@ -26,6 +26,10 @@ function purposeForScheduledMessageType(messageType) {
   if (type.includes('retention') || type.includes('renewal') || type.includes('save')) return 'retention';
   if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
   if (type.includes('appointment') || type.includes('reminder') || type.includes('confirmation') || type.includes('en_route')) return 'appointment';
+  // Deferred voicemail text-back (voicemail_quote_link) must re-send under its
+  // own quiet-enforced purpose, not fall through to conversational — the
+  // quiet-hours re-check at dispatch is what keeps a re-queued row honest.
+  if (type.includes('voicemail') || type.includes('missed_call')) return 'missed_call_followup';
   return 'conversational';
 }
 
@@ -471,6 +475,30 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Weekly price scan failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY IRRIGATION RECOMMENDATION EMAIL (gated: cronJobs AND irrigationWeeklyEmail)
+  // Monday 7:00am ET — emails lawn-care customers who entered weekly irrigation
+  // inches in the portal a "cut back" / "add water" / "you're on track"
+  // check-in based on last week's rainfall + ET₀ at their coordinates vs. the
+  // seasonal target for their grass, plus the upcoming week's rain forecast.
+  // Only rain-unknown weeks send nothing. The gate check lives INSIDE the
+  // sweep so the off state still shadow-logs candidate counts (booking-abandon
+  // pattern).
+  // =========================================================================
+  cron.schedule('0 7 * * 1', async () => {
+    try {
+      // runExclusive: customer-facing email sends — a deploy overlap must not
+      // double-sweep (idempotency keys are the second line of defense).
+      await runExclusive('irrigation-weekly-email', async () => {
+        const { runWeeklyIrrigationEmailSweep } = require('./irrigation-weekly-email');
+        const result = await runWeeklyIrrigationEmailSweep();
+        logger.info(`[irrigation-weekly-email] cron run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Weekly irrigation email sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1442,6 +1470,16 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
+            // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
+            // quiet-hours-held voicemail text-back persists transactional_allowed)
+            // — without it an anonymous-lead transactional replay blocks as
+            // NO_CONSENT_RECORD. Safe to forward blindly: the consent validator
+            // only honors a consentBasis on transactional-grade policies for the
+            // lead audience; marketing/retention purposes still require a real
+            // stored consent record regardless of what a row's metadata claims.
+            consentBasis: (claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
+              ? claimMeta.consent_basis
+              : undefined,
             // NOTE: marketing/retention scheduled sends must arrive with a real
             // stored consent record — we no longer manufacture opted_in here.
             // Routes that queue marketing-grade types are responsible for
@@ -2644,17 +2682,57 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 6AM ET — Estimate expiration (Estimates v2 spec §5)
-  // Flips sent/viewed estimates past ESTIMATE_EXPIRATION_DAYS (default 7) to
-  // expired; also flips anything past explicit expires_at.
+  // DAILY 6AM ET — Converted-estimate archive sweep, THEN estimate expiration
+  // (Estimates v2 spec §5). One job, hard-ordered: the sweep must stamp
+  // archived_at on converted customers' open estimates BEFORE expiration
+  // scans, or an overnight age-out flips them to expired first and the sweep
+  // (sent/viewed-only) can never reclaim them. If the sweep fails, expiration
+  // is skipped this run — a one-day expiration delay is harmless (7-day
+  // threshold), misclassifying a converted customer's estimate is permanent.
+  // See estimate-conversion-guard.js for why the sweep never auto-flips
+  // status to accepted.
   // =========================================================================
   cron.schedule('0 6 * * *', async () => {
+    logger.info('Running: converted-customer estimate archive sweep');
+    try {
+      const { archiveConvertedOpenEstimates } = require('./estimate-conversion-guard');
+      await archiveConvertedOpenEstimates();
+    } catch (err) {
+      logger.error(`Converted-estimate archive sweep failed — skipping estimate expiration status flips this run: ${err.message}`);
+      // Skipping expiration must NOT skip the terminal-deposit refund sweep
+      // that runs inside it — that sweep is the only daily self-healing path
+      // for stranded deposit refunds, and an archive-sweep bug must never
+      // block customer money. Run it directly instead.
+      try {
+        const { sweepTerminalEstimateDeposits } = require('./estimate-deposits');
+        await sweepTerminalEstimateDeposits();
+      } catch (e) {
+        logger.error(`Terminal-estimate deposit sweep failed: ${e.message}`);
+      }
+      return;
+    }
     logger.info('Running: Estimate expiration sweep');
     try {
       const { runEstimateExpiration } = require('./estimate-expiration');
       await runEstimateExpiration();
     } catch (err) {
       logger.error(`Estimate expiration sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 6:35AM ET — Lead staleness sweep
+  // Flips `new` leads to unresponsive after LEAD_STALENESS_DAYS (default 21)
+  // with no activity, no future follow-up, and no booked service, so funnel
+  // metrics stop counting dead leads as open pipeline. Env 0/empty disables.
+  // =========================================================================
+  cron.schedule('35 6 * * *', async () => {
+    logger.info('Running: Lead staleness sweep');
+    try {
+      const { runLeadStalenessSweep } = require('./lead-staleness');
+      await runLeadStalenessSweep();
+    } catch (err) {
+      logger.error(`Lead staleness sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

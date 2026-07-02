@@ -274,6 +274,27 @@ describe('pipeline opportunities read model', () => {
     });
   });
 
+  test('unresponsive and duplicate leads are closed, never active new_lead', () => {
+    // Regression: these closed statuses used to fall through to an ACTIVE
+    // new_lead stage. The staleness sweep assigns unresponsive at scale, so
+    // a swept lead must leave the active pipeline immediately.
+    const opportunities = normalizeOpportunities({
+      leads: [
+        lead({ id: 'lead-1', status: 'unresponsive' }),
+        lead({ id: 'lead-2', status: 'duplicate' }),
+      ],
+      estimates: [],
+      now: NOW,
+    });
+
+    for (const opportunity of opportunities) {
+      expect(opportunity).toMatchObject({
+        stage: PIPELINE_STAGES.LOST,
+        status: 'lost',
+      });
+    }
+  });
+
   test('declined unlinked estimate does not collapse a separate active lead', () => {
     const opportunities = normalizeOpportunities({
       leads: [lead({ id: 'lead-1', status: 'contacted' })],

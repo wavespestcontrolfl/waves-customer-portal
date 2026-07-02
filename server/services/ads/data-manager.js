@@ -427,6 +427,7 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
   const eventTimestampSql = 'COALESCE(l.converted_at, l.first_contact_at, l.created_at)';
   const rows = await db('leads as l')
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
+    .whereNull('l.deleted_at')
     .whereRaw(`${eventTimestampSql} >= ?::timestamptz`, [since])
     .whereRaw(`${eventTimestampSql} < ?::timestamptz`, [addDateStringDays(endDate, 1)])
     .where((q) => {
@@ -485,8 +486,13 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
     .leftJoin(invoiceRollup, 'inv.service_record_id', 'ea.service_record_id')
     .leftJoin('customers as c', 'c.id', 'ea.customer_id')
     .leftJoin('leads as l', function joinLeads() {
-      this.on('l.estimate_id', '=', 'e.id')
-        .orOn(db.raw("e.estimate_data->>'lead_id' = l.id::text"));
+      // An operator-removed (soft-deleted) lead's contact/click IDs must not
+      // feed offline-conversion uploads; the LEFT join keeps the job row.
+      this.on(db.raw('l.deleted_at IS NULL'))
+        .andOn(function eitherLink() {
+          this.on('l.estimate_id', '=', 'e.id')
+            .orOn(db.raw("e.estimate_data->>'lead_id' = l.id::text"));
+        });
     })
     .where('ea.service_date', '>=', since)
     .where('ea.service_date', '<', addDateStringDays(endDate, 1))

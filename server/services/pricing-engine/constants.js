@@ -1785,6 +1785,7 @@ const WAVEGUARD = {
   // Services excluded from percentage discounts (flat credits only where explicitly allowed)
   excludedFromPercentDiscount: {
     rodent_bait: true,          // Fully excluded: no tier count, %, setup credit, coupon, or benefit
+    rodent_guarantee: true,     // Gated annual re-entry warranty ($199/$249/$299 by tier): fixed per-tier price, excluded from the recurring-customer one-time perk (enforces RODENT.excludeFromPctDiscount)
     palm_injection: true,       // $10/palm/yr Gold+ flat credit
     bed_bug: true,              // Bed bug services are not eligible for recurring-customer discounts
     bed_bug_chemical: true,     // Legacy key; excluded with no flat credit

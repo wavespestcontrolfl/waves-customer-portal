@@ -611,9 +611,16 @@ export default function ProjectFindingFieldInput({
   }
 
   if (field.type === 'select') {
-    const options = field.options || [];
+    // Options are plain strings, or { value, label } pairs when the stored
+    // value and the display text differ (e.g. the applicator picker stores
+    // a technician id behind a name label).
+    const options = (field.options || []).map((option) => (
+      option && typeof option === 'object'
+        ? { value: String(option.value), label: String(option.label ?? option.value) }
+        : { value: String(option), label: String(option) }
+    ));
     const currentValue = String(value || '').trim();
-    const hasCurrentOption = !currentValue || options.some((option) => String(option) === currentValue);
+    const hasCurrentOption = !currentValue || options.some((option) => option.value === currentValue);
     return (
       <select
         id={id}
@@ -627,8 +634,8 @@ export default function ProjectFindingFieldInput({
           <option value={currentValue}>{currentValue}</option>
         )}
         {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
+          <option key={option.value} value={option.value}>
+            {option.label}
           </option>
         ))}
       </select>

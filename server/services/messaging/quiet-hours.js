@@ -7,6 +7,7 @@ const TIME_ZONE = 'America/New_York';
 const QUIET_ENFORCED_PURPOSES = new Set([
   'estimate_followup',
   'booking_abandonment_followup',
+  'missed_call_followup',
   'review_request',
   'referral',
   'retention',

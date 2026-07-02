@@ -1676,6 +1676,19 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
           linked ? { scheduledServiceId: linked.id, useLinkedFallback: false } : {},
         );
       } catch { deposit = null; }
+      // Exact payment posture (annual prepay paid/pending, setup-fee invoice)
+      // for the same provenance card — fail-soft like the deposit read.
+      // Deliberately NOT scoped to the linked appointment: this payload feeds
+      // the New Appointment modal, which books a NEW visit — visit-level
+      // coverage from an OLD linked visit must not transfer ("do not collect"
+      // would be wrong for a new booking completion billing will invoice).
+      // With no visit in scope, coversThisVisit stays null and the card makes
+      // no collection claim.
+      let payment = null;
+      try {
+        const { buildEstimatePaymentContext } = require('../services/estimate-payment-context');
+        payment = await buildEstimatePaymentContext(estimate, {});
+      } catch { payment = null; }
       return {
         id: estimate.id,
         token: estimate.token,
@@ -1690,6 +1703,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         waveguardTier: estimate.waveguard_tier,
         lines,
         deposit,
+        payment,
         linkedAppointment: linked ? {
           id: linked.id,
           scheduledDate: linked.scheduled_date,

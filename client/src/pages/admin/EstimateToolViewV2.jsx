@@ -422,6 +422,18 @@ const CONTACT_FIELDS = new Set([
 const SEND_FIELDS = new Set(["scheduleSend", "scheduledAt"]);
 const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
 const ONE_TIME_PEST_CHOICE = { floor: 199, multiplier: 2.2 };
+// The four rodent-guarantee eligibility confirmations. They are per-job
+// affirmations (work actually completed for THIS property), so they must reset
+// on a fresh estimate / customer-or-address change / when the guarantee toggle
+// is turned off — and any change must invalidate a generated estimate, since
+// all four gate whether RODENT_GUARANTEE prices at all.
+const RODENT_GUARANTEE_ELIGIBILITY_KEYS = [
+  "rgTrappingCompleted",
+  "rgExclusionCompleted",
+  "rgSanitationBaseline",
+  "rgNoActivityAfterFinalCheck",
+];
+
 const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   "dethatchingCleanupLevel",
   "dethatchingDebrisRemovalIncluded",
@@ -439,6 +451,7 @@ const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
   "commercialRiskType",
   "treeShrubDensity",
   "mosquitoPressure",
+  ...RODENT_GUARANTEE_ELIGIBILITY_KEYS,
 ]);
 
 const MOSQUITO_PROTOCOL_STEPS = [
@@ -698,6 +711,14 @@ function firstPositiveNumber(...values) {
     if (parsed) return parsed;
   }
   return undefined;
+}
+
+// The satellite analyzer emits SPARSE for low vegetation density; the form
+// dropdowns and pricing engine only know LIGHT/MODERATE/HEAVY.
+function normalizeDensityValue(value) {
+  const v = String(value || "").toUpperCase();
+  if (v === "SPARSE") return "LIGHT";
+  return ["LIGHT", "MODERATE", "HEAVY"].includes(v) ? v : undefined;
 }
 
 function lookupTermiteFootprintSqFt(data = {}) {
@@ -2084,6 +2105,11 @@ export default function EstimateToolViewV2({
     svcRoach: false,
     svcBedbug: false,
     svcExclusion: false,
+    svcRodentGuarantee: false,
+    rgTrappingCompleted: false,
+    rgExclusionCompleted: false,
+    rgSanitationBaseline: false,
+    rgNoActivityAfterFinalCheck: false,
     showOneTimeOption: false,
     billByInvoice: false,
   });
@@ -2122,6 +2148,33 @@ export default function EstimateToolViewV2({
     initialLeadId,
     initialServiceInterest,
   ]);
+
+  // Rodent-guarantee eligibility confirmations are per-job. A rep can change the
+  // property/customer identity through many paths (prefill props, address
+  // autocomplete, property lookup, customer search, manual edits) that each call
+  // setForm directly, so enforce the reset centrally: whenever the address or
+  // customer identity changes, drop the four rg* flags so the guarantee can't be
+  // re-priced for a new property without fresh confirmation. (toggle() still
+  // clears them when the guarantee is switched off; nextEstimate resets too.)
+  const rgIdentityKey = `${form.address || ""}|${form.customerId || ""}|${form.customerName || ""}|${form.customerEmail || ""}`;
+  const rgIdentityRef = useRef(rgIdentityKey);
+  useEffect(() => {
+    if (rgIdentityRef.current === rgIdentityKey) return;
+    rgIdentityRef.current = rgIdentityKey;
+    // Only act when confirmations were actually set, so a plain address/contact
+    // edit on a non-guarantee estimate never needlessly wipes a valid quote.
+    if (!RODENT_GUARANTEE_ELIGIBILITY_KEYS.some((k) => form[k])) return;
+    setForm((f) => {
+      const next = { ...f };
+      for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
+      return next;
+    });
+    // The generated estimate baked the (now-reset) flags into its engineRequest;
+    // invalidate it so a stale guarantee line can't be saved or sent.
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }, [rgIdentityKey, form]);
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
@@ -2275,6 +2328,7 @@ export default function EstimateToolViewV2({
       "svcRoach",
       "svcBedbug",
       "svcExclusion",
+      "svcRodentGuarantee",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
     const anySelected = recurringCount > 0 || commercialAutoPricedCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
@@ -2336,7 +2390,18 @@ export default function EstimateToolViewV2({
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
         ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
+        ...(key === "trenchingPerimeterLF" ? { _trenchingPerimeterAuto: false } : {}),
+        ...(key === "boracareSqft" ? { _boracareSqftAuto: false } : {}),
+        ...(key === "preslabSqft" ? { _preslabSqftAuto: false } : {}),
       };
+      // Entering a Bora-Care surface run while the attic box still holds an
+      // untouched lookup estimate signals a surface-only job — drop the auto
+      // attic value so priceBoraCare takes its surface-only path instead of
+      // silently quoting attic + surface. A manually entered attic survives.
+      if (key === "boracareSurfaceLinearFt" && f._boracareSqftAuto && String(val || "").trim() !== "") {
+        next.boracareSqft = "";
+        next._boracareSqftAuto = false;
+      }
       if (key === "palmCount" && String(f.palmTreatmentCount || "").trim() === "") {
         next.palmTreatmentCount = val;
       }
@@ -2357,6 +2422,11 @@ export default function EstimateToolViewV2({
       const next = { ...f, [key]: !f[key] };
       if (key === "svcFlea" && f.svcFlea) {
         next.svcFleaExterior = false;
+      }
+      // Turning the guarantee off drops the per-job eligibility confirmations so
+      // they can't be silently reused if it's re-enabled for a different scope.
+      if (key === "svcRodentGuarantee" && f.svcRodentGuarantee) {
+        for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
       }
       if (key === "svcInjection" && !f.svcInjection && String(f.palmTreatmentCount || "").trim() === "") {
         next.palmTreatmentCount = f.palmCount || "";
@@ -2765,15 +2835,12 @@ export default function EstimateToolViewV2({
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
       const termiteFootprintNumber = lookupTermiteFootprintSqFt(ep);
       if (termiteFootprintNumber) upd.termiteFootprintSqFt = String(Math.round(termiteFootprintNumber));
-      const perimeterLF = ep.perimeterLF || ep.perimeterLf || ep.perimeter;
+      const perimeterLF = ep.estimatedPerimeterLF || ep.perimeterLF || ep.perimeterLf || ep.perimeter;
       const perimeterNumber = parsePositiveNumber(perimeterLF);
-      if (perimeterNumber) upd.trenchingPerimeterLF = String(Math.round(perimeterNumber));
-      const atticSqFt = ep.atticSqFt || ep.atticAreaSqFt || ep.rawWoodSqFt || ep.woodTreatmentSqFt;
+      const atticSqFt = ep.estimatedAtticSqFt || ep.atticSqFt || ep.atticAreaSqFt || ep.rawWoodSqFt || ep.woodTreatmentSqFt;
       const atticNumber = parsePositiveNumber(atticSqFt);
-      if (atticNumber) upd.boracareSqft = String(Math.round(atticNumber));
-      const slabSqFt = ep.slabSqFt || ep.foundationSqFt || ep.buildingSlabSqFt || ep.newConstructionSlabSqFt;
+      const slabSqFt = ep.estimatedSlabSqFt || ep.slabSqFt || ep.foundationSqFt || ep.buildingSlabSqFt || ep.newConstructionSlabSqFt;
       const slabNumber = parsePositiveNumber(slabSqFt);
-      if (slabNumber) upd.preslabSqft = String(Math.round(slabNumber));
 
       setForm((f) => {
         const next = {
@@ -2783,6 +2850,30 @@ export default function EstimateToolViewV2({
           _poolCageSizeEdited: false,
           _storiesEdited: false,
         };
+        // Termite measurement pre-fills honor the section contract: a
+        // manually entered value is never overwritten by a lookup estimate,
+        // and a lookup miss clears a value only if a previous lookup put it
+        // there (never a manual one) so it can't leak onto the next address.
+        const applyTermiteEstimate = (key, flagKey, estimate) => {
+          if (estimate) {
+            if (String(f[key] || "").trim() === "" || f[flagKey]) {
+              next[key] = String(Math.round(estimate));
+              next[flagKey] = true;
+            }
+          } else if (f[flagKey]) {
+            next[key] = "";
+            next[flagKey] = false;
+          }
+        };
+        applyTermiteEstimate("trenchingPerimeterLF", "_trenchingPerimeterAuto", perimeterNumber);
+        // Attic pre-fill also stands down when a surface run is already
+        // entered — that's a surface-only Bora-Care job (see set()).
+        applyTermiteEstimate(
+          "boracareSqft",
+          "_boracareSqftAuto",
+          String(f.boracareSurfaceLinearFt || "").trim() === "" ? atticNumber : undefined,
+        );
+        applyTermiteEstimate("preslabSqft", "_preslabSqftAuto", slabNumber);
         if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
           next.palmTreatmentCount = upd.palmCount;
         }
@@ -2937,8 +3028,10 @@ export default function EstimateToolViewV2({
         upd.bedArea = String(Math.round(data.bed_area_sqft));
       if (data.palm_count) upd.palmCount = String(data.palm_count);
       if (data.tree_count) upd.treeCount = String(data.tree_count);
-      if (data.shrub_density) upd.shrubDensity = data.shrub_density;
-      if (data.tree_density) upd.treeDensity = data.tree_density;
+      const satShrubDensity = normalizeDensityValue(data.shrub_density);
+      if (satShrubDensity) upd.shrubDensity = satShrubDensity;
+      const satTreeDensity = normalizeDensityValue(data.tree_density);
+      if (satTreeDensity) upd.treeDensity = satTreeDensity;
       if (data.landscape_complexity)
         upd.landscapeComplexity = data.landscape_complexity;
       if (data.has_pool) upd.hasPool = "YES";
@@ -3028,6 +3121,7 @@ export default function EstimateToolViewV2({
       if (form.svcRoach) selectedServices.push("ROACH");
       if (form.svcBedbug) selectedServices.push("BEDBUG");
       if (form.svcExclusion) selectedServices.push("EXCLUSION");
+      if (form.svcRodentGuarantee) selectedServices.push("RODENT_GUARANTEE");
 
       const manualDiscountType =
         overrides.manualDiscountType ?? form.manualDiscountType;
@@ -3169,6 +3263,10 @@ export default function EstimateToolViewV2({
         exclMeshSoftLF: parseInt(form.exclMeshSoftLF, 10) || 0,
         exclMeshConcreteLF: parseInt(form.exclMeshConcreteLF, 10) || 0,
         exclWaiveInspection: form.exclWaive === "YES",
+        rgTrappingCompleted: !!form.rgTrappingCompleted,
+        rgExclusionCompleted: !!form.rgExclusionCompleted,
+        rgSanitationBaseline: !!form.rgSanitationBaseline,
+        rgNoActivityAfterFinalCheck: !!form.rgNoActivityAfterFinalCheck,
         rodentTrappingPlan: form.rodentTrappingPlan || "standard",
         rodentTrappingEmergency: !!form.rodentTrappingEmergency,
         callbacksUsed: parseInt(form.callbacksUsed, 10) || 0,
@@ -3762,6 +3860,11 @@ export default function EstimateToolViewV2({
       customerEmail: "",
       leadServiceInterest: "",
       _termiteFootprintAuto: false,
+      _trenchingPerimeterAuto: false,
+      _boracareSqftAuto: false,
+      _preslabSqftAuto: false,
+      // Guarantee eligibility is per-job; the next property must re-confirm.
+      ...Object.fromEntries(RODENT_GUARANTEE_ELIGIBILITY_KEYS.map((k) => [k, false])),
     }));
     setEstimate(null);
     setSavedId(null);
@@ -6098,6 +6201,21 @@ export default function EstimateToolViewV2({
                       ]}
                     />
                   </FieldV2>
+                </div>
+              )}
+              <CheckboxV2 k="svcRodentGuarantee" label="Rodent Guarantee (annual, renewable)" />
+              {form.svcRodentGuarantee && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium mb-2">
+                    Guarantee Eligibility — all four required
+                  </p>
+                  <CheckboxV2 k="rgTrappingCompleted" label="Trapping completed" />
+                  <CheckboxV2 k="rgExclusionCompleted" label="Exclusion completed" />
+                  <CheckboxV2 k="rgSanitationBaseline" label="Sanitation completed or photo baseline on file" />
+                  <CheckboxV2 k="rgNoActivityAfterFinalCheck" label="No activity after final trap check" />
+                  <div className="text-12 text-zinc-600 mt-2">
+                    $199–$299/yr by property tier. 12-month re-entry warranty, renewable annually — free re-service during the term. All four boxes must be confirmed or the guarantee will not be added.
+                  </div>
                 </div>
               )}
             </div>

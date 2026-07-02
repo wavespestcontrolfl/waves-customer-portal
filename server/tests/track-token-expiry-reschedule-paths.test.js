@@ -56,6 +56,8 @@ describe('track token expiry on reschedule paths', () => {
       update: jest.fn().mockResolvedValue(1),
     });
     const logInsert = chain();
+    // Post-commit best-effort shift of a call-created follow-up child.
+    const followupShift = chain({ update: jest.fn().mockResolvedValue(0) });
     const logCount = chain({
       first: jest.fn().mockResolvedValue({ count: '1' }),
     });
@@ -67,8 +69,9 @@ describe('track token expiry on reschedule paths', () => {
     });
     trx.raw = rawFactory('trx.raw');
     db.transaction = jest.fn(async (callback) => callback(trx));
+    db.fn = { now: jest.fn(() => 'now()') };
 
-    const dbQueries = [serviceLookup, logCount];
+    const dbQueries = [serviceLookup, followupShift, logCount];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return dbQueries.shift();
