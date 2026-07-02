@@ -18,7 +18,7 @@ jest.mock('../services/logger', () => ({
 
 const { auditAddressHouseNumber, hasCountyEvidence } = require('../services/property-lookup/ai-property-lookup');
 const { queryStreetSitusAddresses } = require('../services/property-lookup/county-parcel-gis');
-const { buildFieldVerifyFlags } = require('../routes/property-lookup-v2')._private;
+const { buildFieldVerifyFlags, typedNumberDisagreesWithRecord } = require('../routes/property-lookup-v2')._private;
 
 // Manatee layer response shape; multi-situs strings (paired villas share a
 // parcel) carry several addresses in one field, semicolon-delimited.
@@ -258,6 +258,42 @@ describe('auditAddressHouseNumber', () => {
     });
 
     expect(audit).toMatchObject({ county: 'Manatee', streetExists: true, hasExactMatch: true });
+  });
+});
+
+describe('round-4 matcher hardening', () => {
+  test('strict match is end-pinned — MAIN ST is not MAIN ST CIR', async () => {
+    mockSitusResponse(['123 MAIN ST CIR', '125 MAIN ST CIR']);
+
+    const audit = await auditAddressHouseNumber('123 Main St, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: false, hasExactMatch: false });
+  });
+
+  test('roll rows with spelled-out suffixes/directions are normalized before matching', async () => {
+    mockSitusResponse(['123 MAIN STREET', '125 MAIN STREET']);
+    expect(await auditAddressHouseNumber('123 Main St, Bradenton, FL 34211'))
+      .toMatchObject({ streetExists: true, hasExactMatch: true });
+
+    mockSitusResponse(['123 17TH STREET EAST']);
+    expect(await auditAddressHouseNumber('123 17th St E, Bradenton, FL 34211'))
+      .toMatchObject({ streetExists: true, hasExactMatch: true });
+  });
+});
+
+describe('typedNumberDisagreesWithRecord (snapped-parcel gate)', () => {
+  test('disagreeing leading numbers → true (audit runs despite county evidence)', () => {
+    expect(typedNumberDisagreesWithRecord(
+      '4867 Tobermory Way, Bradenton, FL 34211',
+      { addressLine1: '4857 TOBERMORY WAY', _source: 'county' },
+    )).toBe(true);
+  });
+
+  test('agreeing numbers, missing numbers, or no record → false', () => {
+    expect(typedNumberDisagreesWithRecord('4857 Tobermory Way', { addressLine1: '4857 TOBERMORY WAY' })).toBe(false);
+    expect(typedNumberDisagreesWithRecord('Tobermory Way', { addressLine1: '4857 TOBERMORY WAY' })).toBe(false);
+    expect(typedNumberDisagreesWithRecord('4867 Tobermory Way', { _parcel: { situsAddress: ';4834 X;4836 X;' } })).toBe(false);
+    expect(typedNumberDisagreesWithRecord('4867 Tobermory Way', null)).toBe(false);
   });
 });
 

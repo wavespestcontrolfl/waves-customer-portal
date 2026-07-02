@@ -263,7 +263,14 @@ async function performPropertyLookup(address, options = {}) {
   // unexplained all-zeros panel. Fail-open: a null audit is "no signal". On a
   // record-bearing lookup it rides the cached property_record like _floodZone;
   // record-less lookups are never cached, so they re-audit live each time.
-  if (!hasCountyEvidence(result.propertyRecord)) {
+  // County evidence normally means the roll vouched for the address — but if
+  // Google snapped a mistyped house number to a nearby premise, the parcel/
+  // county record describes the SNAPPED address, not the typed one. When the
+  // record's own house number disagrees with the typed one, run the audit
+  // anyway so the panel flags the customer's number instead of silently
+  // pricing the neighbor's parcel.
+  if (!hasCountyEvidence(result.propertyRecord)
+      || typedNumberDisagreesWithRecord(address, result.propertyRecord)) {
     // Canonical address for the street (typo-fixed names make the roll
     // findable); typedAddress so the audit checks the CUSTOMER'S house number
     // even when Google snapped a nonexistent number to the nearest premise.
@@ -1495,6 +1502,17 @@ function buildProviderStatus() {
     },
     maps: !!(process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY),
   };
+}
+
+// Leading house number of the typed address vs the county/parcel record's
+// own situs line — a disagreement means the geocoder snapped the typed
+// number to a different premise and the "county evidence" describes the
+// wrong building.
+function typedNumberDisagreesWithRecord(address, rc) {
+  const typed = (String(address || '').match(/^\s*(\d+)\s/) || [])[1] || null;
+  const recordLine = rc?.addressLine1 || rc?._parcel?.situsAddress || '';
+  const record = (String(recordLine).match(/^\s*(\d+)\s/) || [])[1] || null;
+  return !!(typed && record && typed !== record);
 }
 
 const FALLBACK_CRITICAL_FIELDS = ['squareFootage', 'lotSize', 'stories', 'propertyType'];
@@ -3228,6 +3246,7 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyParcelTurfBound,
+  typedNumberDisagreesWithRecord,
   applySatelliteAttachmentType,
   applyVisionPropertyTypeEvidence,
   buildFallbackPropertyDataQuality,

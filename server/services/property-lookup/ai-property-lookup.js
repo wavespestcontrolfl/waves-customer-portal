@@ -1768,7 +1768,10 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     const counties = auditCountyCandidates(address, geoContext);
     if (!counties.length) return null;
 
-    const strictPattern = new RegExp(`\\b(\\d+)\\s+${escapeAuditRegex(streetLabel)}\\b`, 'gi');
+    // End-pinned like the relaxed pattern below: `\b` alone would let
+    // "123 MAIN ST" prefix-match a "123 MAIN ST CIR" roll row and fake an
+    // exact match for a different street.
+    const strictPattern = new RegExp(`\\b(\\d+)\\s+${escapeAuditRegex(streetLabel)}(?=\\s*(?:[;,]|$))`, 'gi');
     // The relaxed fallback (suffix formatting mismatch between typed address
     // and roll) still requires the street NAME to end there — and when the
     // typed address HAS a suffix, the roll's suffix must be THAT suffix or
@@ -1786,10 +1789,19 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       'gi',
     );
 
+    // Multi-situs rows are split on ';' and each piece runs through
+    // normalizeCountyStreetLine, so a roll that spells suffixes/directions
+    // out ("123 MAIN STREET", "123 17TH STREET EAST") compares against the
+    // same abbreviated form as the typed street — and the end-pinned
+    // patterns see one address per piece.
     const collect = (situs, pattern) => {
       const numbers = new Set();
       for (const s of situs) {
-        for (const hit of String(s).matchAll(pattern)) numbers.add(parseInt(hit[1], 10));
+        for (const piece of String(s).split(';')) {
+          const norm = normalizeCountyStreetLine(piece);
+          if (!norm) continue;
+          for (const hit of norm.matchAll(pattern)) numbers.add(parseInt(hit[1], 10));
+        }
       }
       return numbers;
     };
