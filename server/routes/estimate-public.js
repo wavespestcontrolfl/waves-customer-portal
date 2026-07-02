@@ -2166,6 +2166,27 @@ function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
 // created for a quote that /accept would reject (AGENTS.md money-gate mirroring).
 function estimateTrenchingReviewRequired(estData) {
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+  if (recurringSvcList.length === 0 && oneTimeList.length === 0) {
+    // EngineInputs-only estimates (no stored result/engineResult rows) are a
+    // supported path — buildPricingBundle replays the inputs into priced rows at
+    // view/accept time, so this gate must replay too or an inputs-only trenching
+    // quote walks straight past every mirrored money gate (/data CTA, accept,
+    // reserve, deposit/card-hold intents) and self-books. Mirrors the
+    // recurring-side replay in withSupplementedRecurringServices.
+    const engineInputs = extractEngineInputs(estData);
+    if (!engineInputs) return false;
+    try {
+      // Classify the REPLAYED rows with this same predicate so the
+      // foam-companion / discount / positive-charge semantics live in one place.
+      // The wrapper carries no inputs, so this cannot recurse a second time.
+      return estimateTrenchingReviewRequired({ engineResult: generateEstimate(engineInputs) });
+    } catch (err) {
+      logger.error(`[estimate-public] trenching review gate engine replay failed: ${err.message}`);
+      // Liability gate: a trenching-flagged quote that can't be classified must
+      // fail CLOSED (review/call-to-confirm) rather than self-book.
+      return !!(engineInputs.services?.trenching || engineInputs.svcTrenching);
+    }
+  }
   if (!hasOnlyTermiteTrenchingServiceMix(recurringSvcList, oneTimeList)) return false;
   // acceptanceServiceLists returns the RAW one-time rows whenever any exist, so a
   // positive charge that exists only as the normalized difference between

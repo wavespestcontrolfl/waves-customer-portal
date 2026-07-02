@@ -2632,6 +2632,39 @@ describe('public estimate one-time breakdown', () => {
     expect(estimateTrenchingReviewRequired({})).toBe(false);
   });
 
+  test('engineInputs-only trenching quote (inputs replayed at view/accept) is review-gated', () => {
+    // buildPricingBundle replays engineInputs into a priced trenching row for
+    // inputs-only estimates (no stored result/engineResult rows). The shared gate
+    // must replay too — otherwise the /data CTA, /accept, /reserve and the Stripe
+    // intent endpoints all see "no rows" and let the trenching quote self-book.
+    const inputsOnlyTrenching = {
+      engineInputs: {
+        homeSqFt: 2400,
+        stories: 1,
+        lotSqFt: 9000,
+        propertyType: 'single_family',
+        services: { trenching: { measurements: { perimeterLF: 240, concreteLF: 0 } } },
+      },
+    };
+    // Mixed inputs stay self-bookable: the replayed rows include a recurring pest
+    // line, which defeats the trenching-only classification like any stored row.
+    const inputsTrenchingPlusPest = {
+      engineInputs: {
+        homeSqFt: 2400,
+        stories: 1,
+        lotSqFt: 9000,
+        propertyType: 'single_family',
+        services: {
+          pest: { frequency: 'quarterly' },
+          trenching: { measurements: { perimeterLF: 240, concreteLF: 0 } },
+        },
+      },
+    };
+
+    expect(estimateTrenchingReviewRequired(inputsOnlyTrenching)).toBe(true);
+    expect(estimateTrenchingReviewRequired(inputsTrenchingPlusPest)).toBe(false);
+  });
+
   test('termite foam is never trenching: foam-only quotes stay self-bookable, foam add-ons keep the gate', () => {
     // The engine's one-time foam row (service-pricing.js calculateFoamPrice) reads
     // "termite_foam / Termidor Foam Spot Treatment" — it matches the trenching
