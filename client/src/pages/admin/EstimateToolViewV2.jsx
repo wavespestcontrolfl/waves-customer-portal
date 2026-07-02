@@ -2824,13 +2824,13 @@ export default function EstimateToolViewV2({
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
       const termiteFootprintNumber = lookupTermiteFootprintSqFt(ep);
       if (termiteFootprintNumber) upd.termiteFootprintSqFt = String(Math.round(termiteFootprintNumber));
-      const perimeterLF = ep.perimeterLF || ep.perimeterLf || ep.perimeter;
+      const perimeterLF = ep.estimatedPerimeterLF || ep.perimeterLF || ep.perimeterLf || ep.perimeter;
       const perimeterNumber = parsePositiveNumber(perimeterLF);
       if (perimeterNumber) upd.trenchingPerimeterLF = String(Math.round(perimeterNumber));
-      const atticSqFt = ep.atticSqFt || ep.atticAreaSqFt || ep.rawWoodSqFt || ep.woodTreatmentSqFt;
+      const atticSqFt = ep.estimatedAtticSqFt || ep.atticSqFt || ep.atticAreaSqFt || ep.rawWoodSqFt || ep.woodTreatmentSqFt;
       const atticNumber = parsePositiveNumber(atticSqFt);
       if (atticNumber) upd.boracareSqft = String(Math.round(atticNumber));
-      const slabSqFt = ep.slabSqFt || ep.foundationSqFt || ep.buildingSlabSqFt || ep.newConstructionSlabSqFt;
+      const slabSqFt = ep.estimatedSlabSqFt || ep.slabSqFt || ep.foundationSqFt || ep.buildingSlabSqFt || ep.newConstructionSlabSqFt;
       const slabNumber = parsePositiveNumber(slabSqFt);
       if (slabNumber) upd.preslabSqft = String(Math.round(slabNumber));
 

@@ -1241,16 +1241,17 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     // record/search source; 'default' = nobody knew, we fell back to 1.
     storiesSource: rc?._storiesSource || (rc?.stories ? 'ai' : 'default'),
     footprint: footprintSf,
-    perimeterLF: estimatedPerimeterLF,
-    perimeterLFSource: estimatedPerimeterLF ? 'estimated_from_footprint' : null,
-    // Rough Bora-Care / pre-slab bases: the attic deck and the slab both
-    // approximate the ground-floor footprint (top floor ≈ footprint on
-    // equal-floor homes). Pre-fills only — the estimator boxes stay
-    // editable and manual entries override.
-    atticSqFt: footprintSf > 0 ? footprintSf : null,
-    atticSqFtSource: footprintSf > 0 ? 'estimated_from_footprint' : null,
-    slabSqFt: footprintSf > 0 ? footprintSf : null,
-    slabSqFtSource: footprintSf > 0 ? 'estimated_from_footprint' : null,
+    // Rough pre-fills for the estimator's termite measurement boxes: the
+    // attic deck and the slab both approximate the ground-floor footprint
+    // (top floor ≈ footprint on equal-floor homes). Published under
+    // estimated* names — like estimatedTurfSf / estimatedBedAreaSf — so
+    // translateV2CallToV1Input never forwards them as authoritative
+    // property measurements: headless pricing keeps the quote-required
+    // gates for trenching/pre-slab, and these reach pricing only through
+    // the operator-visible, editable boxes (manual entries override).
+    estimatedPerimeterLF,
+    estimatedAtticSqFt: footprintSf > 0 ? footprintSf : null,
+    estimatedSlabSqFt: footprintSf > 0 ? footprintSf : null,
 
     // ── CONSTRUCTION (merged property record + satellite AI) ──
     yearBuilt: rc?.yearBuilt || null,
