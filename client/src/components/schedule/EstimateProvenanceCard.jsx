@@ -64,6 +64,24 @@ function fmtDate(value) {
   });
 }
 
+// Payment timestamps (invoice paid_at) are full UTC instants — format them in
+// ET so an evening payment after midnight UTC doesn't display as the next
+// calendar day. Bare YYYY-MM-DD values take the date-only path instead (a
+// UTC-parsed midnight would slip a day the OTHER way).
+function fmtPaidDate(value) {
+  if (!value) return '';
+  const str = value instanceof Date ? value.toISOString() : String(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return fmtDate(str);
+  const d = new Date(str);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: 'America/New_York',
+  });
+}
+
 // Payment-posture rows: what the customer actually paid (or still owes) at
 // acceptance, from persisted invoice/term figures. Same row shape as
 // depositRow so all money facts render in one list.
@@ -93,18 +111,20 @@ function paymentRows(payment) {
       : '';
     const through = ap.termEnd ? ` through ${fmtDate(ap.termEnd)}` : '';
     if (ap.paid) {
-      const paidOn = fmtDate(ap.invoicePaidAt);
+      const paidOn = fmtPaidDate(ap.invoicePaidAt);
       rows.push({
         label: 'Annual prepay — paid',
         value: amount,
         sub: `Paid${paidOn ? ` ${paidOn}` : ''}${usage}${left}${through} — do not collect at the visit`,
         tone: 'paid',
       });
-    } else if (['cancelled', 'canceled', 'refunded'].includes(status)) {
+    } else if (ap.refunded || ['cancelled', 'canceled', 'refunded'].includes(status)) {
+      // ap.refunded covers the drift case: invoice still looks paid but the
+      // payment was fully refunded (term status may not have flipped yet).
       rows.push({
         label: 'Annual prepay',
         value: amount,
-        sub: `${status} — bill normally`,
+        sub: `${ap.refunded ? 'refunded' : status} — bill normally`,
         tone: 'muted',
       });
     } else {
@@ -135,7 +155,7 @@ function paymentRows(payment) {
     const inv = payment.acceptanceInvoice;
     if (inv) {
       const paidSub = inv.paid
-        ? `Paid${fmtDate(inv.paidAt) ? ` ${fmtDate(inv.paidAt)}` : ''}`
+        ? `Paid${fmtPaidDate(inv.paidAt) ? ` ${fmtPaidDate(inv.paidAt)}` : ''}`
         : 'Invoiced — not paid yet';
       const paidTone = inv.paid ? 'paid' : 'muted';
       if (inv.setupFeeAmount != null) {

@@ -110,6 +110,29 @@ async function resolveAnnualPrepayTerm(estimate, scheduledServiceId) {
   }
 }
 
+// Canonical "is this term's paid coverage still valid" — reuses the shared
+// coveredTermsAsOf predicate (annual-prepay-renewals): covered status guard,
+// prepay invoice not void/cancelled/refunded, AND no full refund on the
+// payments row. The Stripe refund webhook flips the PAYMENT row, not
+// invoices.status, so a bare invoice paid/paid_at check would render a
+// refunded prepay as "paid — do not collect". coverageDate null: the question
+// here is "was it paid and is that money still good", not "covered today".
+// Returns null (unknown) on a read failure so the caller can fall back to the
+// webhook-maintained term status instead of flipping a paid plan to pending.
+async function termCoverageStillValid(term) {
+  if (!term?.id) return false;
+  try {
+    const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+    const row = await AnnualPrepayRenewals.coveredTermsAsOf(db, null)
+      .where('t.id', term.id)
+      .first('t.id');
+    return !!row;
+  } catch (err) {
+    logger.warn('[estimate-payment-context] coverage predicate failed — falling back to term status', { error: err.message });
+    return null;
+  }
+}
+
 // "Visit X of Y · N remaining" usage for a prepay term, from the visits the
 // coverage machinery linked to it (scheduled_services.annual_prepay_term_id).
 // totalVisits prefers the SOLD count (coverage_visit_count) so a partially
@@ -215,14 +238,20 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
     }
     const status = String(term.status || '').toLowerCase();
     const usage = await summarizeTermVisitUsage(term, scheduledServiceId);
+    // Paid = the canonical coverage predicate: covers both the lagging-webhook
+    // case (payment_pending term whose invoice has settled reads paid) and the
+    // refund case (a paid-looking invoice whose payment was fully refunded
+    // reads NOT paid). Fall back to the term's own status only when the
+    // predicate can't be read.
+    const covered = await termCoverageStillValid(term);
+    const paid = covered != null ? covered : TERM_PAID_STATUSES.has(status);
     annualPrepay = {
       termId: term.id,
       status: term.status,
-      // Paid = the term reached a covered status OR its invoice is actually
-      // settled (the webhook flips payment_pending → active on payment, but
-      // read the invoice too so a lagging flip can't show "pending" money
-      // that has cleared).
-      paid: TERM_PAID_STATUSES.has(status) || invoiceIsPaid(invoice),
+      paid,
+      // Money came in but coverage was killed (void/refund) — the card must
+      // say "bill normally", not fall through to "payment not received yet".
+      refunded: !paid && invoiceIsPaid(invoice),
       planLabel: term.plan_label || null,
       prepayAmount: num(term.prepay_amount),
       termStart: term.term_start || null,
@@ -278,6 +307,7 @@ module.exports = {
     findAcceptanceInvoice,
     resolveAnnualPrepayTerm,
     summarizeTermVisitUsage,
+    termCoverageStillValid,
     SETUP_FEE_RE,
     FIRST_APPLICATION_RE,
   },

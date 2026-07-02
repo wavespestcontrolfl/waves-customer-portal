@@ -17,6 +17,22 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
+// Canonical coverage predicate (annual-prepay-renewals.coveredTermsAsOf):
+// tests control whether the term counts as still-valid paid coverage. null =
+// not covered (refunded/void); an object = covered; throwing exercises the
+// term-status fallback.
+let mockCoveredTermRow = null;
+let mockCoveredThrows = false;
+jest.mock('../services/annual-prepay-renewals', () => ({
+  coveredTermsAsOf: jest.fn(() => {
+    if (mockCoveredThrows) throw new Error('coverage predicate down');
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.first = jest.fn(async () => mockCoveredTermRow);
+    return chain;
+  }),
+}));
+
 const {
   buildEstimatePaymentContext,
   _private: { sumMatchingLines, invoiceIsPaid, SETUP_FEE_RE, FIRST_APPLICATION_RE },
@@ -50,6 +66,8 @@ function configureDb(tables) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockDbHandler = () => { throw new Error('db handler not configured'); };
+  mockCoveredTermRow = null;
+  mockCoveredThrows = false;
 });
 
 describe('sumMatchingLines — exact cents from persisted line items', () => {
@@ -114,6 +132,7 @@ describe('buildEstimatePaymentContext', () => {
       },
       invoices: { id: 'inv-9', status: 'paid', paid_at: '2026-06-12T15:00:00Z', total: '743.06' },
     });
+    mockCoveredTermRow = { id: 'term-1' };
 
     const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-1' });
     expect(ctx.billingTerm).toBe('prepay_annual');
@@ -179,10 +198,11 @@ describe('buildEstimatePaymentContext', () => {
     const ctx = await buildEstimatePaymentContext(estimate, { scheduledServiceId: 'ss-2' });
     expect(ctx.billingTerm).toBe('prepay_annual');
     expect(ctx.annualPrepay.paid).toBe(false);
+    expect(ctx.annualPrepay.refunded).toBe(false);
     expect(ctx.annualPrepay.prepayAmount).toBe(600);
   });
 
-  it('treats a lagging payment_pending term as paid when the invoice has settled', async () => {
+  it('treats a lagging payment_pending term as paid when the coverage predicate says so', async () => {
     configureDb({
       scheduled_services: { annual_prepay_term_id: null, payment_method_preference: null },
       annual_prepay_terms: {
@@ -193,6 +213,46 @@ describe('buildEstimatePaymentContext', () => {
       },
       invoices: { id: 'inv-3', status: 'paid', paid_at: '2026-06-20T12:00:00Z', total: '500.00' },
     });
+    mockCoveredTermRow = { id: 'term-3' };
+
+    const ctx = await buildEstimatePaymentContext(estimate, {});
+    expect(ctx.annualPrepay.paid).toBe(true);
+    expect(ctx.annualPrepay.refunded).toBe(false);
+  });
+
+  it('never reports a refunded prepay as paid, even when the invoice still looks paid', async () => {
+    // Stripe refund webhook flips the PAYMENT row, not invoices.status — the
+    // coverage predicate (mocked to "not covered") is what detects it. The
+    // term status may not have flipped either (drift).
+    configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: null },
+      annual_prepay_terms: {
+        id: 'term-4',
+        status: 'active',
+        prepay_amount: '743.06',
+        prepay_invoice_id: 'inv-4',
+      },
+      invoices: { id: 'inv-4', status: 'paid', paid_at: '2026-06-12T15:00:00Z', total: '743.06' },
+    });
+    mockCoveredTermRow = null;
+
+    const ctx = await buildEstimatePaymentContext(estimate, {});
+    expect(ctx.annualPrepay.paid).toBe(false);
+    expect(ctx.annualPrepay.refunded).toBe(true);
+  });
+
+  it('falls back to the term status when the coverage predicate cannot be read', async () => {
+    configureDb({
+      scheduled_services: { annual_prepay_term_id: null, payment_method_preference: null },
+      annual_prepay_terms: {
+        id: 'term-5',
+        status: 'active',
+        prepay_amount: '743.06',
+        prepay_invoice_id: null,
+      },
+      invoices: null,
+    });
+    mockCoveredThrows = true;
 
     const ctx = await buildEstimatePaymentContext(estimate, {});
     expect(ctx.annualPrepay.paid).toBe(true);
