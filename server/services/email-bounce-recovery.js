@@ -885,7 +885,7 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
     // The OR chain is GROUPED so the deleted_at filter applies to the whole
     // disjunction (ungrouped, SQL precedence would AND it onto the last OR
     // term only and a soft-deleted customer could still be alerted/linked).
-    const customer = await db('customers')
+    let customer = await db('customers')
       .where(function anyEmailField() {
         this.whereRaw(CUSTOMER_EMAIL_FIELDS.map((f) => `LOWER(${f}) = ?`).join(' OR '), CUSTOMER_EMAIL_FIELDS.map(() => email));
       })
@@ -901,7 +901,33 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
       .where(function openOnly() { this.whereNull('status').orWhereNotIn('status', CLOSED_LEAD_STATUSES); })
       .select('id', 'first_name', 'last_name', 'phone', 'extracted_data')
       .catch(() => []);
-    if (!customer && !leads.length) return { skipped: 'no_contact_match' };
+    // Direct untracked sends also target per-record recipient emails that may
+    // not be on the customer/lead row: service outlines go to
+    // estimates.customer_email and contract packets to
+    // customer_contracts.recipient_email. Resolve through their customer_id so
+    // the alert still names + links the right account.
+    let viaRecord = null;
+    if (!customer && !leads.length) {
+      const estimate = await db('estimates')
+        .whereRaw('LOWER(customer_email) = ?', [email])
+        .whereIn('status', ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed'])
+        .whereNull('archived_at')
+        .first('id', 'customer_id', 'customer_name')
+        .catch(() => null);
+      const contract = estimate ? null : await db('customer_contracts')
+        .whereRaw('LOWER(recipient_email) = ?', [email])
+        .first('id', 'customer_id', 'recipient_name')
+        .catch(() => null);
+      viaRecord = estimate || contract;
+      if (!viaRecord) return { skipped: 'no_contact_match' };
+      if (viaRecord.customer_id) {
+        customer = await db('customers')
+          .where({ id: viaRecord.customer_id })
+          .whereNull('deleted_at')
+          .first('id', 'first_name', 'last_name', 'phone')
+          .catch(() => null);
+      }
+    }
 
     for (const lead of leads) {
       try {
@@ -931,10 +957,13 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
 
     const who = customer
       ? (`${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'customer')
-      : (`${leads[0].first_name || ''} ${leads[0].last_name || ''}`.trim() || 'lead');
+      : leads.length
+        ? (`${leads[0].first_name || ''} ${leads[0].last_name || ''}`.trim() || 'lead')
+        : ((viaRecord.customer_name || viaRecord.recipient_name || '').trim() || 'customer');
     // Lead-only matches are precisely the callback case — fall back to the
     // lead's phone when there is no customer row.
     const callbackPhone = customer?.phone || leads[0]?.phone || null;
+    const linkCustomerId = customer?.id || viaRecord?.customer_id || null;
     const phoneHint = callbackPhone ? ` Confirm by phone: ${callbackPhone}.` : '';
     const reason = String(ev.reason || ev.response || '').trim() || 'mailbox rejected';
     await adminAlertDeduped({
@@ -943,14 +972,14 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
       category: 'alert',
       title: 'Email bounced — needs a correct address',
       body: `${email} for ${who} hard-bounced (${reason}) and is now suppressed — estimates and receipts will not deliver until it is corrected.${phoneHint}`,
-      link: customer ? `/admin/customers/${customer.id}` : '/admin/leads',
+      link: linkCustomerId ? `/admin/customers/${linkCustomerId}` : '/admin/leads',
       metadata: {
-        customer_id: customer?.id || null,
+        customer_id: linkCustomerId,
         lead_id: leads[0]?.id || null,
         source: 'untracked_bounce',
       },
     });
-    return { alerted: true, customerId: customer?.id || null, leadsStamped: leads.length };
+    return { alerted: true, customerId: linkCustomerId, leadsStamped: leads.length };
   } catch (err) {
     logger.error(`[bounce-recovery] alertBouncedContactAddress failed: ${err.message}`);
     return { error: err.message };

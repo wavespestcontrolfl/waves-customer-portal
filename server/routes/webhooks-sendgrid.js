@@ -354,10 +354,17 @@ async function handleEvent(ev) {
   // operational contact must reach a human. recordEmailSuppressionForEvent is
   // idempotent (update-else-insert), so webhook redeliveries are safe even
   // without the event ledger.
-  try {
-    await recordEmailSuppressionForEvent(ev, null, null, eventOccurredAt(ev));
-  } catch (err) {
-    logger.error(`[sendgrid-webhook] untracked suppression record failed: ${err.message}`);
+  // HARD BOUNCES ONLY: a dead mailbox is dead for every stream, so the
+  // null-group (global) suppression this records is correct. Group-scoped
+  // events (unsubscribes, spam reports) are skipped here — without the
+  // send's stream context a null group_key would make a newsletter opt-out
+  // block unrelated transactional email.
+  if (bounceRecovery.isHardBounceEvent(ev)) {
+    try {
+      await recordEmailSuppressionForEvent(ev, null, null, eventOccurredAt(ev));
+    } catch (err) {
+      logger.error(`[sendgrid-webhook] untracked suppression record failed: ${err.message}`);
+    }
   }
   alertUntrackedHardBounce();
   return;

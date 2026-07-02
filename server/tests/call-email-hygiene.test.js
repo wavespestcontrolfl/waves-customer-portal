@@ -112,7 +112,7 @@ describe('alertBouncedContactAddress', () => {
       for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'whereNull', 'orWhereNotIn']) {
         chain[m] = jest.fn(() => chain);
       }
-      chain.first = jest.fn(() => Promise.resolve(cfg.first ?? null));
+      chain.first = jest.fn(() => Promise.resolve(typeof cfg.first === 'function' ? cfg.first() : (cfg.first ?? null)));
       chain.select = jest.fn(() => Promise.resolve(cfg.select ?? []));
       chain.update = jest.fn((patch) => { updates.push({ table, patch }); return Promise.resolve(1); });
       chain.insert = jest.fn((row) => { updates.push({ table, insert: row }); return Promise.resolve([1]); });
@@ -196,6 +196,26 @@ describe('alertBouncedContactAddress', () => {
     await alertBouncedContactAddress('karrenkllens@kc.rr.com', {});
 
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('an estimate-recipient bounce resolves through customer_id for the alert', async () => {
+    // The bounced address lives only on estimates.customer_email (service
+    // outline send) — not on the customer row or any lead.
+    let customerCalls = 0;
+    mockTables({
+      customers: { first: () => (customerCalls++ === 0 ? null : { id: 'cust-9', first_name: 'Pat', last_name: 'Roe', phone: '+19415550000' }) },
+      leads: { select: [] },
+      estimates: { first: { id: 'est-9', customer_id: 'cust-9', customer_name: 'Pat Roe' } },
+      notifications: { first: null },
+    });
+
+    const out = await alertBouncedContactAddress('outline-recipient@example.com', {});
+
+    expect(out).toMatchObject({ alerted: true, customerId: 'cust-9' });
+    const [, , body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).toContain('Pat Roe');
+    expect(body).toContain('+19415550000');
+    expect(opts.link).toBe('/admin/customers/cust-9');
   });
 
   test('empty email is a safe no-op', async () => {
