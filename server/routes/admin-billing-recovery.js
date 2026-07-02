@@ -30,6 +30,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const InvoiceService = require('../services/invoice');
 const { customerOnAutopay, autopayActivePredicate } = require('../services/autopay-eligibility');
+const { listAtRiskMrrAccounts } = require('../services/mrr-breakdown');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
@@ -230,6 +231,28 @@ router.get('/aging', async (req, res) => {
   } catch (err) {
     logger.error(`[billing-recovery] aging query failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to load AR aging' });
+  }
+});
+
+/**
+ * GET /api/admin/billing-recovery/at-risk-mrr
+ * The recurring accounts behind the dashboard's "MRR at risk" action item,
+ * with per-account causes (service paused / autopay paused / overdue /
+ * prepay invoice unpaid). Same shared definition as the MRR tile
+ * (services/mrr-breakdown.js), so this list, the tile split, and the Action
+ * Inbox count always agree.
+ */
+router.get('/at-risk-mrr', async (req, res) => {
+  try {
+    const accounts = await listAtRiskMrrAccounts();
+    res.json({
+      accounts,
+      count: accounts.length,
+      atRisk: accounts.reduce((s, a) => s + a.monthlyRate, 0),
+    });
+  } catch (err) {
+    logger.error(`[billing-recovery] at-risk-mrr query failed: ${err.message}`);
+    res.status(500).json({ error: 'Failed to load at-risk MRR accounts' });
   }
 });
 

@@ -60,8 +60,10 @@ function primeDb(results) {
 }
 
 // Distinguish the two db('leads') generators by their unique chain calls.
+// (Both apply the internal-lead whereNotIn now, so key on the unattributed
+// generator's whereNull('lead_source_id') instead.)
 const leadsResult = ({ waiting, unattributed }) => (calls) => {
-  if (calls.some((c) => c.method === 'whereNotIn')) return unattributed;
+  if (calls.some((c) => c.method === 'whereNull' && c.args[0] === 'lead_source_id')) return unattributed;
   return waiting;
 };
 
@@ -78,7 +80,10 @@ beforeEach(() => {
 describe('Action Inbox generators', () => {
   test('leads_awaiting_contact: critical action, floored at the fresh-start baseline', async () => {
     const capture = primeDb({
-      leads: leadsResult({ waiting: { count: '3' }, unattributed: { count: 0 } }),
+      leads: leadsResult({
+        waiting: [{ id: 'lead-a' }, { id: 'lead-b' }, { id: 'lead-c' }],
+        unattributed: { count: 0 },
+      }),
     });
     const { alerts } = await computeDashboardAlertsUncached();
 
@@ -90,6 +95,7 @@ describe('Action Inbox generators', () => {
       href: '/admin/leads',
     });
     expect(item.label).toContain('waiting over 30m');
+    expect(item.fingerprint).toMatch(/^[0-9a-f]{32}$/); // membership digest rides along
 
     // The Speed-to-Lead fresh-start floor must be applied (env unset →
     // default 2026-07-01 baseline), so the pre-reset backlog can't nag.
@@ -99,6 +105,34 @@ describe('Action Inbox generators', () => {
     );
     expect(floor).toBeDefined();
     expect(floor.args[2]).toBeInstanceOf(Date);
+
+    // Internal/test leads must not page an operator as critical — the waiting
+    // query applies the same name exclusion as the dashboard lead panels.
+    const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
+    const excluded = capture.find(
+      (c) => c.table === 'leads' && c.method === 'whereNotIn'
+        && c.args[1] === INTERNAL_TEST_CUSTOMERS,
+    );
+    expect(excluded).toBeDefined();
+  });
+
+  test('leads_awaiting_contact: fingerprint digests membership — order-independent, changes when a different lead waits at the same count', async () => {
+    const alertFor = async (waiting) => {
+      primeDb({ leads: leadsResult({ waiting, unattributed: { count: 0 } }) });
+      const { alerts } = await computeDashboardAlertsUncached();
+      return alerts.find((a) => a.id === 'leads_awaiting_contact');
+    };
+
+    const ab = await alertFor([{ id: 'lead-a' }, { id: 'lead-b' }]);
+    const ba = await alertFor([{ id: 'lead-b' }, { id: 'lead-a' }]);
+    const ac = await alertFor([{ id: 'lead-a' }, { id: 'lead-c' }]);
+
+    // Same membership, any order → same digest (a re-query can't re-alert).
+    expect(ba.fingerprint).toBe(ab.fingerprint);
+    // Same COUNT but different membership → different digest, so a dismissal
+    // recorded against {a,b} re-surfaces when the queue becomes {a,c}.
+    expect(ac.count).toBe(ab.count);
+    expect(ac.fingerprint).not.toBe(ab.fingerprint);
   });
 
   test('estimates_expiring: warn action carrying the annualized at-stake amount, internal-test rows excluded', async () => {
@@ -177,7 +211,7 @@ describe('Action Inbox generators', () => {
   test('leads_unattributed_7d: counts this week\'s sourceless leads, non-engaged statuses excluded', async () => {
     const { NON_ENGAGED_LEAD_STATUSES } = require('../services/lead-statuses');
     const capture = primeDb({
-      leads: leadsResult({ waiting: { count: 0 }, unattributed: { count: '4' } }),
+      leads: leadsResult({ waiting: [], unattributed: { count: '4' } }),
     });
     const { alerts } = await computeDashboardAlertsUncached();
 
@@ -191,12 +225,28 @@ describe('Action Inbox generators', () => {
       (c) => c.table === 'leads' && c.method === 'whereNotIn' && c.args[0] === 'status',
     );
     expect(excluded.args[1]).toBe(NON_ENGAGED_LEAD_STATUSES);
+
+    // Mirror /leads-by-source: null-source email/referral leads map to their
+    // own direct buckets there, so they are NOT a data-quality gap here.
+    const directBuckets = capture.find(
+      (c) => c.table === 'leads' && c.method === 'whereRaw'
+        && String(c.args[0]).includes("NOT IN ('email', 'referral')"),
+    );
+    expect(directBuckets).toBeDefined();
+
+    // Internal/test leads with a null source must not nag either.
+    const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
+    const internal = capture.find(
+      (c) => c.table === 'leads' && c.method === 'whereNotIn'
+        && c.args[1] === INTERNAL_TEST_CUSTOMERS,
+    );
+    expect(internal).toBeDefined();
   });
 
   test('legacy watch-state generators are back-tagged kind:"alert"', async () => {
     primeDb({
       invoices: { count: '2', amount: '500' },
-      leads: leadsResult({ waiting: { count: '1' }, unattributed: { count: 0 } }),
+      leads: leadsResult({ waiting: [{ id: 'lead-a' }], unattributed: { count: 0 } }),
     });
     const { alerts } = await computeDashboardAlertsUncached();
     expect(alerts.find((a) => a.id === 'ar_overdue_60').kind).toBe('alert');

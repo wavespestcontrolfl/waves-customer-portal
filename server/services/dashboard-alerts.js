@@ -12,6 +12,7 @@
 // caller can detect them and skip the persistence-backed
 // mark-as-read flow.
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
@@ -40,11 +41,34 @@ const SEVERITY_TO_PRIORITY = {
   info: 'normal',
 };
 
+// Order-independent digest of a queue alert's member ids. Dismissals persist
+// it next to dismissed_at_count (admin-notifications.js) so membership churn
+// at a constant count — one lead contacted, a different one crosses the SLA —
+// re-surfaces the alert during the 24h dismissal window.
+function membershipFingerprint(ids) {
+  return crypto.createHash('md5').update(ids.map(String).sort().join(',')).digest('hex');
+}
+
+// Internal/test leads (QA captures left in status='new') must not page an
+// operator or nag as a data-quality gap. Mirrors excludeInternalLeads in
+// routes/admin-dashboard.js — leads denormalize contact names, so the
+// customers-side exclusion doesn't cover them. (Local copy, not an import:
+// requiring the route module here would be circular.)
+function excludeInternalLeads(qb) {
+  if (INTERNAL_TEST_CUSTOMERS.length === 0) return qb;
+  return qb.whereNotIn(
+    db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
+    INTERNAL_TEST_CUSTOMERS,
+  );
+}
+
 // Compute the current set of operational alerts. Each entry returns
 // only when its count is > 0 — clean day = empty array.
 //
 // Shape (banner-friendly):
-//   { id, kind: 'action'|'alert', severity: 'critical'|'warn', count, label, href, amount? }
+//   { id, kind: 'action'|'alert', severity: 'critical'|'warn', count, label, href, amount?, fingerprint? }
+// `fingerprint` (queue alerts only) digests the member ids so dismissals can
+// detect membership change at a constant count.
 //
 // The notification bell adapter (toNotifications below) reshapes these
 // into notification-table-shaped objects with `id: 'live:<id>'`,
@@ -270,22 +294,28 @@ async function computeDashboardAlertsUncached() {
   //    moment. The shared fresh-start floor keeps the pre-reset backlog of
   //    never-answered leads from nagging forever.
   try {
-    const waitingQuery = db('leads')
-      .where('status', 'new')
-      .whereNull('response_time_minutes')
-      .whereNotNull('first_contact_at')
-      .whereRaw(`first_contact_at <= NOW() - INTERVAL '${LEAD_RESPONSE_SLA_MINUTES} minutes'`);
+    const waitingQuery = excludeInternalLeads(
+      db('leads')
+        .where('status', 'new')
+        .whereNull('response_time_minutes')
+        .whereNotNull('first_contact_at')
+        .whereRaw(`first_contact_at <= NOW() - INTERVAL '${LEAD_RESPONSE_SLA_MINUTES} minutes'`),
+    );
     if (SPEED_TO_LEAD_FRESH_START) {
       waitingQuery.where('first_contact_at', '>=', SPEED_TO_LEAD_FRESH_START);
     }
-    const waiting = await waitingQuery.count('* as count').first();
-    const count = parseInt(waiting?.count || 0);
+    const waitingRows = (await waitingQuery.select('id')) || [];
+    const count = waitingRows.length;
     if (count > 0) {
       alerts.push({
         id: 'leads_awaiting_contact',
         kind: 'action',
         severity: 'critical',
         count,
+        // Queue membership, not just size: a dismissal stores this so a
+        // DIFFERENT lead crossing the SLA at the same count still re-surfaces
+        // the alert instead of hiding behind the count-only dismissal.
+        fingerprint: membershipFingerprint(waitingRows.map((r) => r.id)),
         label: `${count} lead${count === 1 ? '' : 's'} waiting over ${LEAD_RESPONSE_SLA_MINUTES}m for first contact`,
         href: '/admin/leads',
       });
@@ -390,10 +420,18 @@ async function computeDashboardAlertsUncached() {
   //     ET-date RHS would resolve the week boundary at UTC midnight in a UTC
   //     session (4-5h shifted week).
   try {
-    const unattributed = await db('leads')
-      .whereNull('lead_source_id')
-      .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
-      .whereRaw("(created_at AT TIME ZONE 'America/New_York') >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '6 days')")
+    const unattributed = await excludeInternalLeads(
+      db('leads')
+        .whereNull('lead_source_id')
+        // Mirror /leads-by-source: a null-source email/referral lead falls
+        // back to its own direct bucket there ('Email (direct)' / 'Referral
+        // (direct)'), so it is deliberate attribution, not a gap — only leads
+        // that would land in the 'Unattributed' row count here. COALESCE keeps
+        // null-channel rows counted (NULL NOT IN (...) is never true).
+        .whereRaw("COALESCE(first_contact_channel, '') NOT IN ('email', 'referral')")
+        .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
+        .whereRaw("(created_at AT TIME ZONE 'America/New_York') >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '6 days')"),
+    )
       .count('* as count')
       .first();
     const count = parseInt(unattributed?.count || 0);

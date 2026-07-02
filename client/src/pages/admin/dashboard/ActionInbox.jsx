@@ -17,14 +17,17 @@ function rank(a) {
 // shows, ordered by urgency, and a clean day says so instead of hiding.
 // alerts === null means the fetch never succeeded — render an explicit
 // unavailable state; claiming "all clear" on a failed load would hide any
-// critical alarms behind a green checkmark.
-export default function ActionInbox({ alerts }) {
+// critical alarms behind a green checkmark. `stale` means the LATEST fetch
+// failed and `alerts` is a kept-previous value: a non-empty list still shows
+// (labeled stale — old items beat no items), but an empty one must not read
+// as a confirmed all-clear.
+export default function ActionInbox({ alerts, stale = false }) {
   const loaded = Array.isArray(alerts);
   const items = loaded ? [...alerts].sort((a, b) => rank(a) - rank(b)) : [];
   const criticalCount = items.filter((a) => a.severity === "critical").length;
-  const allClear = loaded && items.length === 0;
+  const allClear = loaded && !stale && items.length === 0;
 
-  if (!loaded) {
+  if (!loaded || (stale && items.length === 0)) {
     return (
       <Card className="mb-4 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
         <CardHeader className="flex items-center gap-2.5">
@@ -33,7 +36,9 @@ export default function ActionInbox({ alerts }) {
         </CardHeader>
         <CardBody>
           <div className="text-13 text-ink-secondary py-2">
-            Alerts couldn&apos;t be loaded — refresh to retry.
+            {loaded
+              ? "Alerts couldn't be refreshed — refresh to retry."
+              : "Alerts couldn't be loaded — refresh to retry."}
           </div>
         </CardBody>
       </Card>
@@ -62,6 +67,7 @@ export default function ActionInbox({ alerts }) {
               {criticalCount > 0
                 ? `${criticalCount} critical`
                 : `${items.length} open`}
+              {stale ? " · refresh failed, showing last loaded" : ""}
             </span>
           )}
         </div>

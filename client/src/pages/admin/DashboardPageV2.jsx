@@ -88,6 +88,9 @@ export default function DashboardPageV2() {
   // null = alerts never loaded successfully. ActionInbox renders an explicit
   // unavailable state for null — only a real [] response may claim all-clear.
   const [alerts, setAlerts] = useState(null);
+  // true = the LATEST alerts fetch failed (value above is a kept-previous).
+  // ActionInbox suppresses the green all-clear while stale.
+  const [alertsStale, setAlertsStale] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -205,6 +208,10 @@ export default function DashboardPageV2() {
     setToday((prev) => td ?? prev);
     setBilling((prev) => bh?.summary ?? prev);
     setAlerts((prev) => (Array.isArray(al?.alerts) ? al.alerts : prev));
+    // Mark refresh failures so ActionInbox can tell "confirmed empty" from
+    // "kept the previous value" (the preserve-on-failure pattern above) —
+    // a green all-clear must never render off a failed load.
+    setAlertsStale(!Array.isArray(al?.alerts));
     setLoading(false);
 
     const wave2 = await Promise.all([
@@ -495,7 +502,7 @@ export default function DashboardPageV2() {
         </div>
       )}
 
-      <TodaySection alerts={alerts} today={today} {...kpiStripProps} />
+      <TodaySection alerts={alerts} alertsStale={alertsStale} today={today} {...kpiStripProps} />
 
       <GrowthSection
         data={data}

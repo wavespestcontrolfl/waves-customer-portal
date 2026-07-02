@@ -92,4 +92,29 @@ describe("ActionInbox", () => {
       screen.queryByText("Nothing needs you right now."),
     ).not.toBeInTheDocument();
   });
+
+  it("never claims all-clear when the latest refresh failed and the kept value is empty", () => {
+    render(<ActionInbox alerts={[]} stale />);
+    expect(
+      screen.getByText(/Alerts couldn't be refreshed/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/All clear/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Nothing needs you right now."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps showing last-loaded items on a failed refresh, labeled stale", () => {
+    render(
+      <ActionInbox
+        stale
+        alerts={[
+          { id: "a", kind: "action", severity: "warn", count: 1, label: "1 estimate expiring", href: "/admin/estimates" },
+        ]}
+      />,
+    );
+    expect(screen.getByRole("link")).toHaveTextContent("1 estimate expiring");
+    expect(screen.getByText(/refresh failed, showing last loaded/)).toBeInTheDocument();
+    expect(screen.queryByText(/All clear/)).not.toBeInTheDocument();
+  });
 });
