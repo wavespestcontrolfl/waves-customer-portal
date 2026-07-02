@@ -2,18 +2,22 @@
  * One-off cleanup for the Pipeline>Leads audit (2026-07-01), fix #8:
  * the backlog the three forward-acting lanes don't reach.
  *
- *   A. BOOKED-BUT-UN-WON — leads whose linked customer has a real (non-
- *      cancelled/non-rescheduled) scheduled service but whose lead row was
- *      never converted (the AI-call booking path didn't convert until
- *      PR #2262). Open/unresponsive leads convert only when they pass the
- *      SAME guards the live conversion path exports from lead-estimate-link
- *      (isOriginatingLead's member_since-aware ET-calendar-day check +
- *      customerHasWonLead, re-checked in-transaction), the lead is the
- *      customer's ONLY open candidate (ambiguous multi-lead customers go
- *      to a human, like the live path), and a qualifying visit postdates
- *      the lead — an established customer's add-on inquiry or routine
- *      visits can never win a lead. Human-closed rows (lost/disqualified)
- *      are reported instead of touched.
+ *   A. BOOKED-BUT-UN-WON — leads whose linked customer has a standing (non-
+ *      terminal) scheduled service but whose lead row was never converted
+ *      (the AI-call booking path didn't convert until PR #2262). OPEN leads
+ *      convert only when they pass the SAME guards the live conversion path
+ *      exports from lead-estimate-link (isOriginatingLead's
+ *      member_since-aware ET-calendar-day check + customerHasWonLead,
+ *      re-checked in-transaction), the lead is the customer's ONLY open
+ *      candidate (ambiguous multi-lead customers go to a human, like the
+ *      live path), and a qualifying visit postdates the lead — an
+ *      established customer's add-on inquiry or routine visits can never
+ *      win a lead. Closed rows (lost/disqualified/unresponsive — the shared
+ *      conversion code's closed set) are reported instead of touched.
+ *      A converted lead's estimates are re-owned to the customer via the
+ *      live path's linkLeadEstimatesToCustomer (best-effort, post-commit,
+ *      exactly like leadAttribution.markConverted) so they stay visible to
+ *      customer-keyed "Estimate source" flows.
  *      `converted_at` is BACKDATED to the earliest qualifying
  *      scheduled_services.created_at so ads offline-conversion windows
  *      (data-manager reads COALESCE(converted_at, …)) don't see 72 stale
@@ -57,14 +61,18 @@ const SCRIPT_TAG = 'cleanup-leads-pipeline-audit';
 
 // The LIVE booking path (convertCallLeadOnPhoneBooking) converts everything
 // but won/duplicate because at booking time the deal IS closing. A backfill
-// months later can't know whether a human marked a lead lost/disqualified
-// AFTER the booking (plan cancelled, mistaken identity) — so those are
-// reported for a human instead of auto-converted.
-const CONVERT_ELIGIBLE_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'unresponsive'];
-const CONVERT_HUMAN_STATUSES = ['lost', 'disqualified'];
-// Visit rows that do NOT prove a standing booking (a reschedule is replaced
-// by a live row that still matches) — same set the staleness sweep uses.
-const NON_EVIDENCE_VISIT_STATUSES = ['cancelled', 'rescheduled'];
+// months later can't know whether a human (or the staleness sweep) closed a
+// lead AFTER the booking (plan cancelled, mistaken identity, retired as
+// unresponsive) — so every closed status the shared conversion code treats
+// as closed (lead-estimate-link CLOSED_LEAD_STATUSES) is reported for a
+// human instead of auto-resurrected to won.
+const CONVERT_ELIGIBLE_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
+const CONVERT_HUMAN_STATUSES = ['lost', 'disqualified', 'unresponsive'];
+// Visit rows that do NOT prove a standing booking — the repo's terminal
+// convention (waveguard-existing-services TERMINAL_STATUSES minus
+// 'completed'): a cancelled/rescheduled row is replaced or dead, and a
+// skipped/no_show row is a terminal miss. None of them is conversion proof.
+const NON_EVIDENCE_VISIT_STATUSES = ['cancelled', 'rescheduled', 'skipped', 'no_show'];
 
 // Junk contact-email matchers — aligned with the email-lead-guards lane
 // (LEAD_HARD_SKIP_SENDERS + AUTOMATED_SENDER_LOCAL_PARTS/RELAY usage).
@@ -115,10 +123,15 @@ async function hasDeletedAtColumn() {
 
 // ── Part A: booked-but-un-won → won ────────────────────────────────────────
 async function partABookedUnwon({ softDelete }) {
-  // The SAME guards the live conversion path applies (lead-estimate-link):
-  // isOriginatingLead = member_since-aware ET-calendar-day comparison,
-  // fail-closed; customerHasWonLead = the prior-won gate.
-  const { isOriginatingLead, customerHasWonLead } = require('../services/lead-estimate-link');
+  // The SAME guards + side effects as the live conversion path
+  // (lead-estimate-link): isOriginatingLead = member_since-aware
+  // ET-calendar-day comparison, fail-closed; customerHasWonLead = the
+  // prior-won gate; linkLeadEstimatesToCustomer = estimate re-ownership.
+  const {
+    isOriginatingLead,
+    customerHasWonLead,
+    linkLeadEstimatesToCustomer,
+  } = require('../services/lead-estimate-link');
 
   let query = db('leads')
     .whereIn('leads.status', [...CONVERT_ELIGIBLE_STATUSES, ...CONVERT_HUMAN_STATUSES])
@@ -132,11 +145,12 @@ async function partABookedUnwon({ softDelete }) {
     // call-processing flow where the booking row can precede the lead row
     // inside one processing run.
     .whereRaw("ss.created_at >= COALESCE(leads.first_contact_at, leads.created_at) - interval '1 day'")
-    .groupBy('leads.id', 'leads.status', 'leads.customer_id', 'leads.first_contact_at', 'leads.created_at')
+    .groupBy('leads.id', 'leads.status', 'leads.customer_id', 'leads.estimate_id', 'leads.first_contact_at', 'leads.created_at')
     .select(
       'leads.id',
       'leads.status',
       'leads.customer_id',
+      'leads.estimate_id',
       'leads.first_contact_at',
       'leads.created_at',
       db.raw('MIN(ss.created_at) as first_booking_at'),
@@ -192,13 +206,14 @@ async function partABookedUnwon({ softDelete }) {
   if (!COMMIT || !actionable.length) return { candidates: actionable.length, applied: 0 };
 
   let applied = 0;
+  let estimatesLinked = 0;
   for (const row of actionable) {
     // Per-lead transaction, stamp gated on the still-unconverted state so a
     // concurrent live-path conversion can't be double-logged; the prior-won
     // gate is re-checked on the transaction for the same reason.
     // eslint-disable-next-line no-await-in-loop
-    await db.transaction(async (trx) => {
-      if (await customerHasWonLead(trx, row.customer_id)) return;
+    const stampedRow = await db.transaction(async (trx) => {
+      if (await customerHasWonLead(trx, row.customer_id)) return false;
       let stampQuery = trx('leads')
         .where({ id: row.id })
         .whereIn('status', CONVERT_ELIGIBLE_STATUSES)
@@ -210,7 +225,7 @@ async function partABookedUnwon({ softDelete }) {
         is_qualified: true,
         updated_at: new Date(),
       });
-      if (!stamped) return;
+      if (!stamped) return false;
       await trx('lead_activities').insert({
         lead_id: row.id,
         activity_type: 'converted',
@@ -222,10 +237,22 @@ async function partABookedUnwon({ softDelete }) {
           script: SCRIPT_TAG,
         }),
       });
-      applied += 1;
+      return true;
+    });
+    if (!stampedRow) continue;
+    applied += 1;
+    // Re-own the lead's estimates to the customer, exactly like the live
+    // path (leadAttribution.markConverted): an unowned estimate stays
+    // invisible to customer-keyed "Estimate source" flows and can't be
+    // converted. Post-commit + best-effort like the live path — the helper
+    // swallows SQL errors, which inside the txn would abort the commit.
+    // eslint-disable-next-line no-await-in-loop
+    estimatesLinked += await linkLeadEstimatesToCustomer({
+      lead: { id: row.id, estimate_id: row.estimate_id },
+      customerId: row.customer_id,
     });
   }
-  console.log(`  → converted ${applied} lead(s)`);
+  console.log(`  → converted ${applied} lead(s), re-owned ${estimatesLinked} estimate(s)`);
   return { candidates: rows.length, applied };
 }
 
@@ -292,7 +319,7 @@ function normalizedName(row) {
 async function partCDupes({ softDelete }) {
   let query = db('leads').select(
     'id', 'status', 'first_name', 'last_name', 'email', 'phone',
-    'estimate_id', 'customer_id', 'first_contact_at', 'created_at',
+    'estimate_id', 'customer_id', 'first_contact_at', 'created_at', 'converted_at',
   );
   if (softDelete) query = query.whereNull('deleted_at');
   const rows = await query;
@@ -321,23 +348,41 @@ async function partCDupes({ softDelete }) {
       return bTs - aTs;
     });
     const keeper = ranked[0];
+    // A won keeper is a CLOSED courtship, not a standing claim on the
+    // contact: an open row that postdates its conversion is a legitimate
+    // repeat/add-on inquiry, not a duplicate — marking it would hide new
+    // pipeline work behind a historical win. Only open losers from BEFORE
+    // the conversion (the same courtship, minted twice) are dupes. A won
+    // keeper missing converted_at falls back to its own first-contact time,
+    // which is earlier than the real conversion — failing toward review,
+    // never toward suppression.
+    const keeperConvertedTs = keeper.status === 'won'
+      ? new Date(keeper.converted_at || keeper.first_contact_at || keeper.created_at || 0).getTime()
+      : null;
     for (const loser of ranked.slice(1)) {
       if (!OPEN_STATUSES.includes(loser.status)) continue; // closed rows stay as-is
       if (loser.estimate_id || loser.customer_id) {
-        needsHuman.push({ loser, keeper });
-      } else {
-        toMark.push({ loser, keeper });
+        needsHuman.push({ loser, keeper, reason: 'holds estimate/customer link' });
+        continue;
       }
+      if (keeperConvertedTs != null) {
+        const loserTs = new Date(loser.first_contact_at || loser.created_at || 0).getTime();
+        if (loserTs > keeperConvertedTs) {
+          needsHuman.push({ loser, keeper, reason: 'postdates the won keeper\'s conversion — possible repeat inquiry' });
+          continue;
+        }
+      }
+      toMark.push({ loser, keeper });
     }
   }
 
   const actionable = cap(toMark);
-  console.log(`\n── Part C: exact same-contact same-name dupes → duplicate (${groupCount} group(s); ${actionable.length} actionable, ${needsHuman.length} linked for human review)`);
+  console.log(`\n── Part C: exact same-contact same-name dupes → duplicate (${groupCount} group(s); ${actionable.length} actionable, ${needsHuman.length} for human review)`);
   for (const { loser, keeper } of actionable) {
     console.log(`  lead ${loser.id} status=${loser.status} → duplicate (keeper ${keeper.id} status=${keeper.status})`);
   }
-  for (const { loser, keeper } of needsHuman) {
-    console.log(`  NEEDS HUMAN (holds estimate/customer link, not touched): lead ${loser.id} (keeper ${keeper.id})`);
+  for (const { loser, keeper, reason } of needsHuman) {
+    console.log(`  NEEDS HUMAN (${reason}, not touched): lead ${loser.id} (keeper ${keeper.id})`);
   }
   if (!COMMIT || !actionable.length) {
     return { candidates: actionable.length, applied: 0, skippedForHuman: needsHuman.length };
