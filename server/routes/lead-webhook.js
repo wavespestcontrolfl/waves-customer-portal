@@ -16,6 +16,9 @@ const { isEnabled } = require('../config/feature-gates');
 // Service-line inference is shared with the call attribution path so both
 // populate ad_service_attribution identically — see utils/service-line-infer.
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
+// Backfills the CALL-source funnel row when a voicemail text-back lead is
+// attached here (the call path skipped it: recovery leads are customer-less).
+const { backfillCallLeadAttribution } = require('../services/ads/call-attribution');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
@@ -877,13 +880,22 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // Removed intentionally; do NOT re-add without deduping upstream.
 
     // Ad service attribution — track the full funnel from lead onward.
-    // Skipped for a lead ATTACHED via the voicemail text-back prefill token:
-    // that funnel row belongs to the CALL source (the tracking number the
-    // prospect dialed), stamped by the call-attribution path on the same
-    // lead_id — a web-channel row here would win the unique slot first and
-    // permanently misattribute a paid/GBP voicemail to the website.
+    // A lead ATTACHED via the voicemail text-back prefill token is a
+    // call-pipeline lead: its funnel row belongs to the CALL source (the
+    // tracking number the prospect dialed) — a web-channel row here would win
+    // the unique lead_id slot and permanently misattribute a paid/GBP
+    // voicemail to the website. And because the call processor's attribution
+    // is customerId-gated while voicemail recovery leads are customer-less at
+    // call time, no call row exists yet either: BACKFILL it now that this
+    // handler has linked the customer (lead_id dedupe + first-touch inside).
     try {
-      if (!attachedViaPrefill) {
+      if (attachedViaPrefill) {
+        await backfillCallLeadAttribution({
+          leadId: leadRecord?.id || null,
+          customerId: customer.id,
+          serviceInterest: serviceInterest || null,
+        });
+      } else {
         await db('ad_service_attribution').insert({
           customer_id: customer.id,
           // Stamp the lead so the call-attribution path dedupes against this row

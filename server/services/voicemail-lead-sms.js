@@ -44,7 +44,10 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { readCachedLineType, cacheLineType, lookupLineType } = require('./messaging/validators/line-type');
 const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
-const { shortenOrPassthrough } = require('./short-url');
+// createShortCode (NOT shortenOrPassthrough): the prefill link carries a
+// bearer token, so a shorten failure must fail closed — never fall back to
+// putting the long tokenized URL in an SMS body. See the call site.
+const { createShortCode } = require('./short-url');
 
 const MESSAGE_TYPE = 'voicemail_quote_link';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
@@ -259,11 +262,26 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
   // server (no morgan/Railway log line, no Referer leak) and survive the
   // short-link 302 because the Location target carries them verbatim.
   const longUrl = `${PORTAL_BASE_URL}/estimate#vlead=${encodeURIComponent(leadId)}&vt=${encodeURIComponent(token)}`;
-  const quoteUrl = await shortenOrPassthrough(longUrl, {
-    kind: 'quote_prefill',
-    entityType: 'leads',
-    entityId: leadId,
-  });
+  // Fail CLOSED if the shortener can't mint a code — shortenOrPassthrough's
+  // long-URL fallback is unsafe for THIS link: the fallback body would carry
+  // the 14-day bearer token, and the send path persists rendered bodies in
+  // plaintext (sms_log, messaging-audit previews) besides handing them to
+  // Twilio. Only the opaque short code may leave this function. A shortener
+  // failure is transient (DB insert) and never consumed the one-shot, so
+  // release BOTH claims for a later retry.
+  let quoteUrl;
+  try {
+    ({ shortUrl: quoteUrl } = await createShortCode(longUrl, {
+      kind: 'quote_prefill',
+      entityType: 'leads',
+      entityId: leadId,
+    }));
+  } catch (shortErr) {
+    await clearLeadClaim(leadId);
+    await releasePhoneClaim(phone);
+    logger.error(`[voicemail-sms] Short-code creation failed — text-back skipped for lead ${leadId} (bearer URL never falls back into an SMS): ${shortErr.message}`);
+    return { sent: false, skipped: 'short_link_failed' };
+  }
 
   const firstName = capitalizeName(extracted.first_name);
   const serviceLabel = String(extracted.matched_service || extracted.requested_service || '').trim()

@@ -31,8 +31,12 @@ jest.mock('../services/messaging/validators/line-type', () => ({
 jest.mock('../utils/lead-prefill-token', () => ({
   mintLeadPrefillToken: jest.fn(() => '1760000000.test-signature'),
 }));
+// createShortCode, not shortenOrPassthrough — the service must fail CLOSED
+// when the shortener can't mint a code (the long URL carries the bearer
+// token and must never reach an SMS body / sms_log).
+const SHORT_URL = 'https://portal.wavespestcontrol.com/l/k3j9x';
 jest.mock('../services/short-url', () => ({
-  shortenOrPassthrough: jest.fn(async (url) => url),
+  createShortCode: jest.fn(async () => ({ code: 'k3j9x', shortUrl: 'https://portal.wavespestcontrol.com/l/k3j9x' })),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -42,6 +46,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const lineType = require('../services/messaging/validators/line-type');
 const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
+const { createShortCode } = require('../services/short-url');
 const { sendVoicemailQuoteLink, MESSAGE_TYPE } = require('../services/voicemail-lead-sms');
 
 const LEAD_ID = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
@@ -98,6 +103,7 @@ beforeEach(() => {
   lineType.lookupLineType.mockResolvedValue('mobile');
   lineType.cacheLineType.mockResolvedValue(undefined);
   mintLeadPrefillToken.mockReturnValue('1760000000.test-signature');
+  createShortCode.mockResolvedValue({ code: 'k3j9x', shortUrl: SHORT_URL });
   renderSmsTemplate.mockImplementation(async (key, vars) => `Hi ${vars.first_name} — ${vars.service_label}: ${vars.quote_url}`);
   sendCustomerMessage.mockResolvedValue({ sent: true });
 });
@@ -240,6 +246,20 @@ describe('voicemail lead text-back gates', () => {
     expect(phoneClaimReleased()).toBe(true);
     expect(leadClaimCleared()).toBe(true);
   });
+
+  test('shortener failure fails CLOSED — the bearer long URL never reaches an SMS body', async () => {
+    createShortCode.mockRejectedValue(new Error('db down'));
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'short_link_failed' });
+    // Nothing rendered, nothing sent — no surface (sms_log, audit previews,
+    // Twilio) ever sees a URL containing the prefill token.
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // Transient failure never consumed the one-shot — BOTH claims release so
+    // a later voicemail (usually reusing this lead row) can retry.
+    expect(phoneClaimReleased()).toBe(true);
+    expect(leadClaimCleared()).toBe(true);
+  });
 });
 
 describe('voicemail lead text-back send outcomes', () => {
@@ -250,11 +270,17 @@ describe('voicemail lead text-back send outcomes', () => {
     expect(renderSmsTemplate).toHaveBeenCalledWith(MESSAGE_TYPE, expect.objectContaining({
       first_name: 'Dana', // capitalized
       service_label: 'termite',
-      // Token rides the FRAGMENT — never a query string a server would log.
-      quote_url: expect.stringContaining(`/estimate#vlead=${encodeURIComponent(LEAD_ID)}`),
+      // The SMS body carries ONLY the opaque short code — the tokenized long
+      // URL exists solely as the short code's redirect target.
+      quote_url: SHORT_URL,
     }), expect.any(Object));
-    expect(renderSmsTemplate.mock.calls[0][1].quote_url).toContain('vt=');
-    expect(renderSmsTemplate.mock.calls[0][1].quote_url).not.toContain('?vlead');
+    expect(renderSmsTemplate.mock.calls[0][1].quote_url).not.toContain('vt=');
+    // Token rides the redirect target's FRAGMENT — never a query string a
+    // server would log.
+    const longUrl = createShortCode.mock.calls[0][0];
+    expect(longUrl).toContain(`/estimate#vlead=${encodeURIComponent(LEAD_ID)}`);
+    expect(longUrl).toContain('vt=');
+    expect(longUrl).not.toContain('?vlead');
 
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: PHONE,

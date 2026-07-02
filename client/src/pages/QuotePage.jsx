@@ -424,12 +424,26 @@ export default function QuotePage({ serviceSlug = '' }) {
         if (cancelled || !d) return;
         const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
         const phoneDigits = String(d.phone || '').replace(/\D/g, '').slice(-10);
+        // Compose street + city + ZIP: the call processor stores the extracted
+        // STREET line in `address` with city/ZIP as separate columns, and a
+        // bare street line accepted as-is can geocode the wrong property at
+        // /property-lookup. Containment guards because some lead rows carry a
+        // full formatted address already (never double-append). No street
+        // line → no prefill; city/ZIP alone aren't an address.
+        const street = String(d.address || '').trim();
+        const cityPart = String(d.city || '').trim();
+        const zipPart = String(d.zip || '').trim();
+        const locality = [
+          cityPart && !street.toLowerCase().includes(cityPart.toLowerCase()) ? cityPart : '',
+          zipPart && !street.includes(zipPart) ? zipPart : '',
+        ].filter(Boolean).join(' ');
+        const prefillAddress = street ? [street, locality].filter(Boolean).join(', ') : '';
         setIntake(prev => ({
           ...prev,
           ...(name && !prev.name ? { name } : {}),
           ...(d.email && !prev.email ? { email: d.email } : {}),
           ...(phoneDigits.length === 10 && !prev.phone ? { phone: phoneDigits } : {}),
-          ...(d.address && !prev.address ? { address: d.address } : {}),
+          ...(prefillAddress && !prev.address ? { address: prefillAddress } : {}),
         }));
       } catch { /* prefill is best-effort */ }
     })();

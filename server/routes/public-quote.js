@@ -11,7 +11,7 @@ const { subscribeOrResubscribe } = require('../services/newsletter-subscribers')
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
-const { attributionForSourceType } = require('../services/ads/call-attribution');
+const { attributionForSourceType, backfillCallLeadAttribution } = require('../services/ads/call-attribution');
 const { etDateString } = require('../utils/datetime-et');
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -897,12 +897,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const channelAttr = attributionForSourceType(sourceMeta.sourceType);
       // A lead ATTACHED via the voicemail text-back prefill token is a
       // call-pipeline lead: its funnel row belongs to the CALL source (the
-      // tracking number the prospect dialed), which the call-attribution path
-      // stamps keyed on this same lead_id. Writing a web-channel row here
-      // first would win the unique lead_id slot and permanently misattribute
-      // a paid/GBP voicemail to the website.
+      // tracking number the prospect dialed) — a web-channel row here would
+      // win the unique lead_id slot and permanently misattribute a paid/GBP
+      // voicemail to the website. But the call processor's own attribution is
+      // gated on customerId and voicemail recovery leads are customer-less at
+      // call time, so no call row exists yet either: BACKFILL it now that the
+      // wizard has linked the customer (lead_id dedupe + first-touch inside,
+      // so re-submits and pre-existing rows are safe).
       const attachedCallLead = ['voicemail', 'inbound_call'].includes(lead?.lead_type);
-      if (channelAttr && !attachedCallLead) {
+      if (attachedCallLead) {
+        await backfillCallLeadAttribution({ leadId: lead.id, customerId, serviceInterest });
+      } else if (channelAttr) {
         await db('ad_service_attribution').insert({
           customer_id: customerId,
           lead_id: lead.id,
