@@ -20,7 +20,7 @@ jest.mock('../config/twilio-numbers', () => ({
 
 const logger = require('../services/logger');
 const { _test } = require('../services/call-recording-processor');
-const { convertCallLeadOnPhoneBooking } = _test;
+const { convertCallLeadOnPhoneBooking, findReusableCallLead } = _test;
 
 // Inner (savepoint) db stub: routes table calls to configurable results and
 // records update/insert payloads. where(fn) invokes the closure against the
@@ -249,5 +249,73 @@ describe('convertCallLeadOnPhoneBooking', () => {
     expect(converted).toBe(true);
     expect(inner._writes.updates.filter((w) => w.table === 'customers')).toHaveLength(0);
     expect(inner._writes.inserts).toHaveLength(1);
+  });
+});
+
+// Query stub for the existing-lead-by-phone lookup: records each clause so
+// tests can assert which filters a path applies. where(fn) invokes the
+// closure against the same builder (mirroring knex query grouping).
+function makeLookupDb(result = null) {
+  const calls = { where: [], whereNull: [], whereNotIn: [], orWhere: [] };
+  const b = {
+    where: jest.fn(function (arg, val) {
+      if (typeof arg === 'function') { calls.where.push('group'); arg(b); }
+      else calls.where.push([arg, val]);
+      return b;
+    }),
+    whereNull: jest.fn((col) => { calls.whereNull.push(col); return b; }),
+    orWhere: jest.fn((col, val) => { calls.orWhere.push([col, val]); return b; }),
+    whereNotIn: jest.fn((col, vals) => { calls.whereNotIn.push([col, vals]); return b; }),
+    orderBy: jest.fn(() => b),
+    first: jest.fn(async () => result),
+  };
+  const database = jest.fn(() => b);
+  database._calls = calls;
+  return database;
+}
+
+describe('findReusableCallLead', () => {
+  const PHONE = '+19415550123';
+
+  test('customer-attached path only reuses an unclaimed lead or one already owned by this customer', async () => {
+    // A phone-matched lead can BELONG to another customer (shared/household
+    // numbers). Reusing it would write this caller's extraction + ai_triage
+    // onto the other customer's lead — the ownership predicate makes a
+    // foreign-owned lead invisible so the caller gets a fresh row instead.
+    const database = makeLookupDb(null);
+
+    const lead = await findReusableCallLead(database, { phone: PHONE, customerId: 'cust-1', workableUnnamedLead: false });
+
+    expect(lead).toBeNull();
+    expect(database).toHaveBeenCalledWith('leads');
+    expect(database._calls.where).toContainEqual(['phone', PHONE]);
+    expect(database._calls.where).toContain('group');
+    expect(database._calls.whereNull).toContain('customer_id');
+    expect(database._calls.orWhere).toContainEqual(['customer_id', 'cust-1']);
+    // The customer path keeps its pre-existing status behavior (a lost/
+    // unresponsive lead that calls back and books DID close) — no terminal
+    // filter here.
+    expect(database._calls.whereNotIn).toHaveLength(0);
+  });
+
+  test('customer-less recovery path reuses only an ACTIVE lead, with no ownership predicate', async () => {
+    const database = makeLookupDb({ id: 'lead-7' });
+
+    const lead = await findReusableCallLead(database, { phone: PHONE, customerId: null, workableUnnamedLead: true });
+
+    expect(lead).toEqual({ id: 'lead-7' });
+    expect(database._calls.whereNotIn).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate']]);
+    expect(database._calls.whereNull).toContain('converted_at');
+    // customerId is null on this path — no ownership group.
+    expect(database._calls.orWhere).toHaveLength(0);
+  });
+
+  test('no phone → no lookup at all', async () => {
+    const database = makeLookupDb({ id: 'never' });
+
+    const lead = await findReusableCallLead(database, { phone: null, customerId: 'cust-1', workableUnnamedLead: false });
+
+    expect(lead).toBeNull();
+    expect(database).not.toHaveBeenCalled();
   });
 });

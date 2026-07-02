@@ -408,6 +408,30 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 }
 
+// Resolve which existing lead (if any) this call should reuse, by caller phone.
+// - Customer-less recovery path (workableUnnamedLead): only an ACTIVE lead
+//   (status not terminal, not converted), so a recovered inquiry lands on an
+//   open row or a fresh one — never silently attached to a won/lost/
+//   disqualified/duplicate lead where it would not surface.
+// - Customer-attached path: only a lead that is UNCLAIMED (customer_id NULL)
+//   or already owned by this customer. A phone-matched lead can BELONG to
+//   another customer (shared/household numbers): reusing it would write this
+//   caller's extraction + ai_triage activity onto the other customer's lead,
+//   and the booking-conversion ownership guard would then (rightly) refuse to
+//   close it — stranding this caller's booked deal with no convertible lead.
+//   A foreign-owned lead is invisible here; the caller gets a fresh row.
+async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead }) {
+  if (!phone) return null;
+  let query = database('leads').where('phone', phone);
+  if (workableUnnamedLead) {
+    query = query.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
+  }
+  if (customerId) {
+    query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+  }
+  return query.orderBy('created_at', 'desc').first();
+}
+
 // Convert the call's lead to won when the pipeline books an appointment,
 // on the SAME transaction as the scheduled_services insert (mirrors the
 // admin-leads schedule-appointment route: conversion cannot commit without
@@ -2611,18 +2635,11 @@ const CallRecordingProcessor = {
     }
     if (shouldCreateLead) {
       try {
-        // Check if lead already exists for this phone. On the customer-less
-        // recovery path, reuse only an ACTIVE lead (status not terminal, not
-        // converted) so a recovered inquiry lands on an open row or a fresh one
-        // — never silently attached to a won/lost/disqualified/duplicate lead
-        // where it would not surface. The customer-attached path is unchanged —
-        // its shouldCreateCallLeadForCustomer gate already limits it to
-        // open-lead / newly-created customers.
-        let existingLeadQuery = phone ? db('leads').where('phone', phone) : null;
-        if (existingLeadQuery && workableUnnamedLead) {
-          existingLeadQuery = existingLeadQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
-        }
-        const existingLead = existingLeadQuery ? await existingLeadQuery.orderBy('created_at', 'desc').first() : null;
+        // Check if lead already exists for this phone (see findReusableCallLead
+        // for the per-path filters: active-only on the customer-less recovery
+        // path; unclaimed-or-ours on the customer-attached path, so a shared-
+        // phone lead owned by another customer is never reused/overwritten).
+        const existingLead = await findReusableCallLead(db, { phone, customerId, workableUnnamedLead });
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -2802,24 +2819,30 @@ const CallRecordingProcessor = {
           });
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
-          // Only ever SET the customer link, never clear it — and never STEAL
-          // it. The unnamed-lead path runs with customerId null and can reuse
-          // an existing lead found by phone — writing customer_id = null there
-          // would detach a lead already linked to a customer. And a
-          // phone-matched reused lead can already BELONG to another customer
-          // (shared/household numbers): overwriting that link here would
-          // pre-stamp the lead as ours and defeat the conversion helper's
-          // ownership guard, which runs later in the booking transaction.
-          // Attach only when the lead is unclaimed or already ours.
-          if (customerId && (!current?.customer_id || String(current.customer_id) === String(customerId))) {
-            leadUpdates.customer_id = customerId;
-          }
+          // Only ever SET the customer link, never clear it. The unnamed-lead
+          // path runs with customerId null and can reuse an existing lead
+          // found by phone — writing customer_id = null there would detach a
+          // lead already linked to a customer.
+          if (customerId) leadUpdates.customer_id = customerId;
           leadUpdates.updated_at = new Date();
-          await db('leads').where({ id: leadId }).update(leadUpdates);
+          // findReusableCallLead already excludes a lead owned by ANOTHER
+          // customer from the lookup, so `current` is never foreign here. The
+          // write repeats that ownership predicate as the race backstop: a
+          // concurrent claim between the lookup and this update leaves the
+          // just-claimed lead untouched (0 rows) instead of overwriting the
+          // other customer's lead with this caller's extraction.
+          let enrichmentWrite = db('leads').where({ id: leadId });
+          if (customerId) {
+            enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+          }
+          const enriched = await enrichmentWrite.update(leadUpdates);
 
-          // Log AI triage activity. When the bridge flagged anything, append a
-          // plain-language "confirm before dispatch" line so it's visible on the
-          // lead timeline Virginia works, not just in extracted_data.
+          // Log AI triage activity — gated on the enrichment write landing, so
+          // a lead lost to the ownership race above never gets this caller's
+          // triage on its timeline either. When the bridge flagged anything,
+          // append a plain-language "confirm before dispatch" line so it's
+          // visible on the lead timeline Virginia works, not just in
+          // extracted_data.
           const triageBase = `AI extracted from call: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`;
           const triageNotes = [];
           if (contact.missing.length) {
@@ -2829,7 +2852,7 @@ const CallRecordingProcessor = {
             triageNotes.push(`⚠ CONFIRM BEFORE DISPATCH: ${bridgeNeedsConfirmation.map(describeConfirmReason).join('; ')}`);
           }
           const triageDesc = triageNotes.length ? `${triageBase} — ${triageNotes.join(' — ')}` : triageBase;
-          await db('lead_activities').insert({
+          if (enriched) await db('lead_activities').insert({
             lead_id: leadId,
             activity_type: 'ai_triage',
             description: triageDesc,
@@ -3730,6 +3753,7 @@ CallRecordingProcessor._test = {
   extractCallDataV2,
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,
+  findReusableCallLead,
 };
 
 module.exports = CallRecordingProcessor;

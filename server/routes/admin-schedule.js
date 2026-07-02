@@ -2221,14 +2221,30 @@ router.post('/', requireAdmin, async (req, res, next) => {
             const { convertLeadFromEvent } = require('../services/lead-estimate-link');
             const conversion = await convertLeadFromEvent({
               source: isRecurring ? 'recurring_service_booked' : 'appointment_booked',
+              // The estimate this booking rode in on: passing it lets the
+              // authoritative estimate-link tier (leads.estimate_id) resolve
+              // the exact FK-linked lead before the customer/contact
+              // fallback — so an add-on lead linked to the source estimate
+              // of an established customer converts even though
+              // enforceOriginating would reject it by timing. Never after a
+              // lost attach race: the quote (and its linked lead) belongs to
+              // another customer.
+              estimateId: (linkedEstimate && !estimateAttachRaceLost) ? linkedEstimateId : null,
               customerId,
               enforceOriginating: true,
             });
-            // A conversion closes the courtship — the customer row owes the
-            // same promotion every other booking path applies (stage → won,
-            // member_since, reactivation); markConverted only touches the
-            // leads row.
-            if (conversion?.converted) {
+            // A closed deal owes the customer row the same promotion every
+            // other booking path applies (stage → won, member_since,
+            // reactivation); markConverted only touches the leads row.
+            // Promote when THIS trigger converted — or when the deal closed
+            // through the estimate path: markEstimateManuallyAccepted (or the
+            // earlier acceptance of an already-accepted quote) converts the
+            // linked lead itself, so convertLeadFromEvent finds no open lead
+            // and reports converted:false, yet a one-time acceptance never
+            // promotes the customer row (only the recurring converter does).
+            const estimateClosedDeal = !!(linkedEstimate && !estimateAttachRaceLost
+              && (estimateAutoAccepted || linkedEstimate.status === 'accepted'));
+            if (conversion?.converted || estimateClosedDeal) {
               const { promoteCustomerOnBooking } = require('../services/customer-stages');
               await promoteCustomerOnBooking(db, customerId);
             }
