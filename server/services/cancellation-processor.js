@@ -227,10 +227,23 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
     // Reminder record → cancelled, so a deferred "appointment confirmed" send
     // can't fire for a pulled visit. Per-visit cancellation SMS suppressed —
     // the route sends one dedicated cancellation-confirmation SMS instead.
+    // The helper catches its own failures and returns null (which is ALSO its
+    // no-reminder-row signal), so re-check the row: one left uncancelled means
+    // deferred confirmations can still fire for a cancelled visit — surface it
+    // instead of the alert claiming full auto-processing.
     try {
       const AppointmentReminders = require('./appointment-reminders');
       await AppointmentReminders.handleCancellation(svc.id, { sendNotification: false });
+      const staleReminder = await db('appointment_reminders')
+        .where({ scheduled_service_id: svc.id })
+        .whereRaw('cancelled IS DISTINCT FROM true')
+        .first('id');
+      if (staleReminder) {
+        errors.push(`reminder_cancel:${svc.id}`);
+        logger.error(`[cancellation-processor] reminder row for ${svc.id} still active after cancellation — needs manual review`);
+      }
     } catch (err) {
+      errors.push(`reminder_cancel:${svc.id}`);
       logger.error(`[cancellation-processor] reminder cancellation failed for ${svc.id}: ${err.message}`);
     }
 

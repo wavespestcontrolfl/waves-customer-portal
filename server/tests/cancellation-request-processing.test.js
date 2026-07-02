@@ -107,6 +107,8 @@ jest.mock('../models/db', () => {
         if (/track_state\s+IS\s+NULL\s+OR\s+track_state\s+NOT\s+IN/i.test(sql)) {
           const excluded = [...sql.matchAll(/'([a-z_]+)'/gi)].map((m) => m[1]);
           conds.push((r) => r.track_state == null || !excluded.includes(r.track_state));
+        } else if (/cancelled\s+IS\s+DISTINCT\s+FROM\s+true/i.test(sql)) {
+          conds.push((r) => r.cancelled !== true); // JS !== treats null correctly
         }
         return q;
       },
@@ -407,6 +409,29 @@ describe('processCancellationRequest', () => {
 
     expect(result.cancelledCount).toBe(1);
     expect(result.errors).toEqual(['invoice_review:inv1', 'invoice_review:inv4']);
+    expect(result.ok).toBe(false);
+  });
+
+  test('a reminder row left uncancelled after the helper runs is surfaced for manual review', async () => {
+    db.__tables.scheduled_services = [
+      { id: 's1', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+      { id: 's2', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+    ];
+    // handleCancellation swallows its own failures and returns null — the
+    // default mock here doesn't touch the rows, simulating a silent failure
+    // for s1. s2's row reads as if the helper succeeded.
+    db.__tables.appointment_reminders = [
+      { id: 'r1', scheduled_service_id: 's1', cancelled: false },
+      { id: 'r2', scheduled_service_id: 's2', cancelled: true },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true }];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req12' });
+
+    expect(result.cancelledCount).toBe(2);
+    expect(result.errors).toEqual(['reminder_cancel:s1']);
     expect(result.ok).toBe(false);
   });
 
