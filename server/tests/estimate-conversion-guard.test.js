@@ -380,13 +380,17 @@ describe('archiveConvertedOpenEstimates', () => {
           ),
       ),
     ).toBeTruthy();
+    // member_since is an ET DATE stamped at booking time — it must compare
+    // as a strictly-earlier ET calendar day, NOT a midnight timestamptz
+    // cast, or a same-day post-estimate conversion would read as
+    // pre-estimate and defeat the sweep + first-booking expiration hold.
     expect(
       calls.find(
         (c) =>
           c.m === 'whereRaw' &&
           typeof c.args?.[0] === 'string' &&
           c.args[0].includes(
-            'customers.member_since::timestamptz < estimates.created_at',
+            "customers.member_since < (estimates.created_at AT TIME ZONE 'America/New_York')::date",
           ),
       ),
     ).toBeTruthy();
@@ -483,7 +487,7 @@ describe('excludePendingFirstBookings (expiration hold)', () => {
           c.m === 'whereRaw' &&
           typeof c.args?.[0] === 'string' &&
           c.args[0].includes(
-            'customers.member_since::timestamptz < estimates.created_at',
+            "customers.member_since < (estimates.created_at AT TIME ZONE 'America/New_York')::date",
           ),
       ),
     ).toBeTruthy();

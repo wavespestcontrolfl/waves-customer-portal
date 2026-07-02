@@ -110,10 +110,19 @@ async function customerConvertedSince(est) {
  *    re-stamped on conversion, so a stale intake-stamped date can only
  *    over-disqualify (estimate kept, ages to expiration) — never archive.
  *
- * DATE-typed columns (scheduled_date, service_date, member_since) cast to
- * midnight, understating the real event time — which fails toward "predates
- * the estimate", toward keeping a possibly-live upsell, never toward
- * archiving it.
+ * Date semantics differ by evidence source, ON PURPOSE:
+ *  - scheduled_date / service_date cast to midnight (::timestamptz),
+ *    understating the real event time — a completed row is genuine
+ *    conversion evidence either way, so reading it as "predates" only KEEPS
+ *    a possibly-live upsell, never archives one.
+ *  - member_since compares as a strictly-earlier ET calendar day. It is an
+ *    ET DATE stamped when the customer converts, including at BOOKING time
+ *    — before any completion/invoice evidence exists — so a midnight cast
+ *    would read a same-day post-estimate conversion as pre-estimate,
+ *    lifting the first-booking expiration hold while the booking is still
+ *    pending (the estimate would expire mid-courtship and be counted lost
+ *    forever). Same-day therefore reads as NOT-before; the transactional
+ *    guards above still catch a genuine same-day pre-estimate conversion.
  */
 function whereNoConversionBeforeEstimate(query) {
   return query
@@ -149,7 +158,9 @@ function whereNoConversionBeforeEstimate(query) {
         .from("customers")
         .whereRaw("customers.id = estimates.customer_id")
         .whereIn("customers.pipeline_stage", CUSTOMER_STAGES)
-        .whereRaw("customers.member_since::timestamptz < estimates.created_at");
+        .whereRaw(
+          "customers.member_since < (estimates.created_at AT TIME ZONE 'America/New_York')::date",
+        );
     });
 }
 
