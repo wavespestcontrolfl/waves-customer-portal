@@ -8,6 +8,7 @@
 jest.mock('../models/db', () => {
   const qb = {};
   qb.where = jest.fn(() => qb);
+  qb.whereIn = jest.fn(() => qb);
   qb.first = jest.fn();
   qb.update = jest.fn(() => Promise.resolve(1));
   const db = jest.fn(() => qb);
@@ -21,12 +22,16 @@ jest.mock('../services/customer-properties', () => ({
   syncPrimaryAddress: jest.fn(() => Promise.resolve()),
   syncPrimaryCoordsFromCustomer: jest.fn(() => Promise.resolve()),
 }));
+jest.mock('../services/customer-address-fanout', () => ({
+  propagateCustomerAddressChange: jest.fn(() => Promise.resolve({ leads: 0, estimates: 0 })),
+}));
 jest.mock('../services/geocoder', () => ({
   ensureCustomerGeocoded: jest.fn(() => Promise.resolve({ latitude: 27.1, longitude: -82.4 })),
 }));
 
 const db = require('../models/db');
 const customerProperties = require('../services/customer-properties');
+const addressFanout = require('../services/customer-address-fanout');
 const geocoder = require('../services/geocoder');
 const { executeTool } = require('../services/intelligence-bar/tools');
 
@@ -53,9 +58,17 @@ test('an address change syncs the primary property atomically and re-geocodes', 
   });
 
   expect(result.success).toBe(true);
-  // property mirror synced inside the transaction
+  // property mirror + lead/estimate snapshot fan-out synced inside the transaction
   expect(db.transaction).toHaveBeenCalledTimes(1);
   expect(customerProperties.syncPrimaryAddress).toHaveBeenCalledTimes(1);
+  expect(addressFanout.propagateCustomerAddressChange).toHaveBeenCalledTimes(1);
+  expect(addressFanout.propagateCustomerAddressChange).toHaveBeenCalledWith(
+    expect.objectContaining({
+      before: expect.objectContaining({ address_line1: '123 Old Street' }),
+      after: expect.objectContaining({ address_line1: '9136 93rd Run E' }),
+    }),
+    expect.anything(),
+  );
   // coords cleared, then a re-geocode kicked off
   expect(db.__qb.update).toHaveBeenCalledWith(expect.objectContaining({ latitude: null, longitude: null }));
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith(CUSTOMER_ID);
@@ -105,5 +118,43 @@ test('a non-address change does not touch the property mirror or geocoder', asyn
 
   expect(result.success).toBe(true);
   expect(customerProperties.syncPrimaryAddress).not.toHaveBeenCalled();
+  expect(addressFanout.propagateCustomerAddressChange).not.toHaveBeenCalled();
+  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
+});
+
+test('a bulk ADDRESS edit takes the per-row path: mirror + fan-out + re-geocode per row', async () => {
+  const rowA = { ...baseRow, id: 'cust-a' };
+  const rowB = { ...baseRow, id: 'cust-b' };
+  db.__qb.first
+    .mockResolvedValueOnce(rowA) // before (cust-a)
+    .mockResolvedValueOnce(rowB); // before (cust-b)
+
+  const result = await executeTool('bulk_update_customers', {
+    customer_ids: ['cust-a', 'cust-b'],
+    updates: { address_line1: '9136 93rd Run E', city: 'Parrish', zip: '34219' },
+  });
+
+  expect(result.success).toBe(true);
+  expect(result.updated_count).toBe(2);
+  // one transaction per row, each with the mirror + snapshot fan-out
+  expect(db.transaction).toHaveBeenCalledTimes(2);
+  expect(customerProperties.syncPrimaryAddress).toHaveBeenCalledTimes(2);
+  expect(addressFanout.propagateCustomerAddressChange).toHaveBeenCalledTimes(2);
+  // stale coords cleared, re-geocode kicked off for each row
+  expect(db.__qb.update).toHaveBeenCalledWith(expect.objectContaining({ latitude: null, longitude: null }));
+  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith('cust-a');
+  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith('cust-b');
+});
+
+test('a bulk NON-address edit keeps the single-statement path', async () => {
+  const result = await executeTool('bulk_update_customers', {
+    customer_ids: ['cust-a', 'cust-b'],
+    updates: { waveguard_tier: 'gold' },
+  });
+
+  expect(result.success).toBe(true);
+  expect(db.transaction).not.toHaveBeenCalled();
+  expect(customerProperties.syncPrimaryAddress).not.toHaveBeenCalled();
+  expect(addressFanout.propagateCustomerAddressChange).not.toHaveBeenCalled();
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
 });

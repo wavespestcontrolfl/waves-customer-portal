@@ -2288,6 +2288,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           await trx('customers').where({ id: req.params.id }).update(updates);
           if (addressChanged) {
             await require('../services/customer-properties').syncPrimaryAddress(after, trx);
+            // Open leads/estimates snapshot the address at creation and never
+            // re-read customers.* — sync the copies that still match the old
+            // address (matching rules in the fan-out service header).
+            await require('../services/customer-address-fanout').propagateCustomerAddressChange({ before, after }, trx);
           }
         });
       } catch (e) {

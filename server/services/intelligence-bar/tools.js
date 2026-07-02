@@ -987,6 +987,12 @@ async function updateCustomer(customerId, updates) {
       await trx('customers').where('id', customerId).update(clean);
       if (addressSubmitted) {
         await require('../customer-properties').syncPrimaryAddress(merged, trx);
+        // Open leads/estimates snapshot the address at creation and never
+        // re-read customers.* — sync the copies that still match the old
+        // address (matching rules in the fan-out service header). Presence-
+        // triggered like the mirror above, so resubmitting the same address
+        // also self-heals copies left stale by a pre-fix edit.
+        await require('../customer-address-fanout').propagateCustomerAddressChange({ before, after: merged }, trx);
       }
     });
   } catch (e) {
@@ -1048,16 +1054,63 @@ async function bulkUpdateCustomers(customerIds, updates) {
         `CASE WHEN pipeline_stage IN ('active_customer','won','at_risk','churned','dormant') THEN COALESCE(member_since, ?) ELSE ? END`,
         [etDateString(), etDateString()]) }
     : {};
-  const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
 
   // notes maps to free-text crm_notes — redact from logs (see updateCustomer).
   const logUpdates = updates.notes !== undefined ? { ...updates, notes: '[redacted]' } : updates;
-  logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
+
+  const addressSubmitted = ['address_line1', 'address_line2', 'city', 'state', 'zip']
+    .some((f) => clean[f] !== undefined);
+  if (!addressSubmitted) {
+    const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
+    logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
+    return {
+      success: true,
+      updated_count: count,
+      fields_updated: Object.keys(updates),
+    };
+  }
+
+  // A bulk ADDRESS edit takes a per-row path so every row gets the same
+  // consistency treatment as a single edit (see updateCustomer): primary
+  // customer_properties mirror + lead/estimate snapshot fan-out ATOMICALLY,
+  // then coords cleared + re-geocoded. The old single-statement path skipped
+  // all of that, leaving property dedup keys, map pins, and snapshot copies
+  // pointing at the old address.
+  let count = 0;
+  const errors = [];
+  for (const customerId of customerIds) {
+    const before = await db('customers').where('id', customerId).first();
+    if (!before) {
+      errors.push({ customer_id: customerId, error: 'Customer not found' });
+      continue;
+    }
+    const merged = { ...before, ...clean };
+    try {
+      await db.transaction(async (trx) => {
+        await trx('customers').where('id', customerId).update({ ...clean, ...stageStamp });
+        await require('../customer-properties').syncPrimaryAddress(merged, trx);
+        await require('../customer-address-fanout').propagateCustomerAddressChange({ before, after: merged }, trx);
+      });
+    } catch (e) {
+      if (e && e.code === '23505') {
+        errors.push({ customer_id: customerId, error: 'That address already exists as another property on this customer.' });
+        continue;
+      }
+      throw e;
+    }
+    await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
+    void require('../geocoder').ensureCustomerGeocoded(customerId)
+      .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
+      .catch(() => {});
+    count += 1;
+  }
+  logger.info(`[intelligence-bar] Bulk updated ${count} customers (address path):`, logUpdates);
 
   return {
     success: true,
     updated_count: count,
     fields_updated: Object.keys(updates),
+    ...(errors.length ? { errors } : {}),
   };
 }
 
