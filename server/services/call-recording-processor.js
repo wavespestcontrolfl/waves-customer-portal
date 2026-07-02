@@ -3134,11 +3134,21 @@ const CallRecordingProcessor = {
                           followup_source_service_id: primaryRow.id,
                           create_invoice_on_complete: false,
                           estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
+                          // Customer-safe only: once dispatch confirms this row
+                          // the portal filter no longer hides it and
+                          // GET /api/schedule returns notes verbatim. The
+                          // dispatch instruction + Call SID live in
+                          // internal_notes (JobDrawer) — the reuse lookup
+                          // (findExistingCallAppointment) excludes child rows,
+                          // so the child needs no marker in notes.
                           notes: [
-                            'Follow-up treatment (visit 2) booked from phone call — confirm exact time with the customer before dispatch.',
+                            'Follow-up treatment (visit 2) booked from your phone call.',
                             priceInfo.price != null ? 'Included in the package price on the initial visit.' : null,
-                            `Call SID: ${callSid}.`,
                           ].filter(Boolean).join(' '),
+                          internal_notes: [
+                            'Booked from phone call — confirm exact time with the customer before dispatch.',
+                            `Call SID: ${callSid}.`,
+                          ].join(' '),
                           booking_source: 'phone_call',
                           source_call_log_id: call.id,
                           source_action: 'ai_call_pipeline_followup',
