@@ -8,8 +8,9 @@
  *   - status = 'new' and created_at <= now - N days
  *   - no lead_activities row inside the window (recent activity skips)
  *   - next_follow_up_at NULL or past (future callback skips)
- *   - NOT EXISTS scheduled_services for the linked customer (booked
- *     customer skips — pending won-conversion, not unresponsive)
+ *   - NOT EXISTS non-cancelled/non-rescheduled scheduled_services for the
+ *     linked customer (booked customer skips — pending won-conversion, not
+ *     unresponsive; a lone cancelled visit does NOT exempt)
  *   - deleted_at IS NULL, gated on the column existing (the leads
  *     soft-delete lane ships separately; either merge order must work)
  * Effects (activity rows, summary counts, env off switch) are covered with
@@ -107,10 +108,11 @@ describe('lead staleness sweep', () => {
         + 'and not exists (select 1 from "lead_activities" '
         + 'where lead_activities.lead_id = leads.id and "lead_activities"."created_at" >= ?) '
         + 'and not exists (select 1 from "scheduled_services" '
-        + 'where scheduled_services.customer_id = leads.customer_id) '
+        + 'where scheduled_services.customer_id = leads.customer_id '
+        + 'and "scheduled_services"."status" not in (?, ?)) '
         + 'returning "id"'
       );
-      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff]);
+      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, 'cancelled', 'rescheduled']);
 
       return knex.destroy();
     });

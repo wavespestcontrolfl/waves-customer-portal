@@ -50,12 +50,17 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
         .whereRaw('lead_activities.lead_id = leads.id')
         .where('lead_activities.created_at', '>=', cutoff);
     })
-    // A lead linked to a customer with booked service is pending
-    // won-conversion, not unresponsive. The correlated subquery can never
-    // match when customer_id is NULL, so unlinked leads pass through.
+    // A lead linked to a customer with booked (or already-delivered) service
+    // is pending won-conversion, not unresponsive. Cancelled/rescheduled
+    // rows don't count: a reschedule is replaced by a live row that still
+    // matches, and a customer whose only visit was cancelled has no standing
+    // service — without the status filter one dead visit from months ago
+    // would exempt the lead forever. The correlated subquery can never match
+    // when customer_id is NULL, so unlinked leads pass through.
     .whereNotExists(function () {
       this.select(1).from('scheduled_services')
-        .whereRaw('scheduled_services.customer_id = leads.customer_id');
+        .whereRaw('scheduled_services.customer_id = leads.customer_id')
+        .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled']);
     })
     .update({ status: 'unresponsive', updated_at: now })
     .returning('id');
