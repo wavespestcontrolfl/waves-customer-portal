@@ -26,11 +26,16 @@ describe("computePretreatChemistry", () => {
     expect(computePretreatChemistry().status).toBe("unknown_product");
   });
 
-  it("flags Trelona ATBB (bait) and Bora-Care (wood treatment) as not applicable", () => {
-    const bait = computePretreatChemistry({ productName: "Trelona ATBB", squareFootage: "2000" });
-    expect(bait.status).toBe("not_applicable");
-    expect(bait.kind).toBe("bait");
-    expect(bait.note).toMatch(/bait system/i);
+  it("flags Trelona bait and Bora-Care (wood treatment) as not applicable", () => {
+    // The catalog seeds "Trelona ATBS" (+ suffixed variants); ATBB is the
+    // free-text alias. All must resolve — an unrecognized bait name would
+    // skip the not-applicable force-clear and leave stale liquid chemistry.
+    for (const name of ["Trelona ATBS", "Trelona ATBS Bait Station", "Trelona ATBS RFID", "Trelona ATBB"]) {
+      const bait = computePretreatChemistry({ productName: name, squareFootage: "2000" });
+      expect(bait.status).toBe("not_applicable");
+      expect(bait.kind).toBe("bait");
+      expect(bait.note).toMatch(/bait system/i);
+    }
 
     const wood = computePretreatChemistry({ productName: "Bora-Care" });
     expect(wood.status).toBe("not_applicable");
@@ -56,6 +61,24 @@ describe("computePretreatChemistry", () => {
     expect(result.concentrationPct).toBe("0.060");
     expect(result.gallons).toBe(90); // 150/10 * 4 * 1.5
     expect(result.assumedDepth).toBe(false);
+  });
+
+  it("converts inch trench-depth notation to feet instead of reading it as feet", () => {
+    for (const notation of ["6 in", '6"', "6-inch", "6in."]) {
+      const result = computePretreatChemistry({
+        productName: "Termidor SC",
+        linearFeet: "100",
+        trenchDepthFt: notation,
+      });
+      expect(result.verticalGallons).toBe(20); // 100/10 * 4 * 0.5, NOT 6 ft
+      expect(result.assumedDepth).toBe(false);
+    }
+    const feet = computePretreatChemistry({
+      productName: "Termidor SC",
+      linearFeet: "100",
+      trenchDepthFt: "1.5 ft",
+    });
+    expect(feet.verticalGallons).toBe(60); // explicit ft stays feet
   });
 
   it("combines horizontal + vertical and assumes the 0.5 ft label-standard depth when blank", () => {

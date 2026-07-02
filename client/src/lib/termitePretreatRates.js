@@ -24,6 +24,16 @@ const VERTICAL_GAL_PER_LF_PER_FT_DEPTH = 4 / 10;
 // certificate never prints different chemistry than the priced work order.
 const DEFAULT_TRENCH_DEPTH_FT = 0.5;
 
+// The admin product catalog seeds the bait stations as "Trelona ATBS" (and
+// "Trelona ATBS Bait Station", "Trelona ATBS RFID" — the prefix match picks
+// those up); 'trelona atbb' is kept as a free-text alias so either spelling
+// resolves to the same not-applicable entry.
+const TRELONA_BAIT_RATE = {
+  label: 'Trelona ATBS',
+  kind: 'bait',
+  note: 'Trelona ATBS is a bait system — finished-solution concentration and gallons do not apply.',
+};
+
 export const PRETREAT_PRODUCT_RATES = {
   'termidor sc': {
     label: 'Termidor SC',
@@ -40,11 +50,8 @@ export const PRETREAT_PRODUCT_RATES = {
     kind: 'soil_liquid',
     concentrationPct: '0.050',
   },
-  'trelona atbb': {
-    label: 'Trelona ATBB',
-    kind: 'bait',
-    note: 'Trelona ATBB is a bait system — finished-solution concentration and gallons do not apply.',
-  },
+  'trelona atbs': TRELONA_BAIT_RATE,
+  'trelona atbb': TRELONA_BAIT_RATE,
   'bora-care': {
     label: 'Bora-Care',
     kind: 'wood_treatment',
@@ -73,6 +80,15 @@ function parseMeasure(value) {
   if (!match) return null;
   const n = Number(match[0]);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// The depth field is labeled feet, but the label-standard trench is 6 inches
+// and techs write it that way — "6 in", '6"', "6-inch" convert to feet; a
+// bare number or an explicit ft stays feet.
+function parseDepthFt(value) {
+  const n = parseMeasure(value);
+  if (n == null) return null;
+  return /\d[\s-]*(?:"|in\b|inch)/i.test(String(value)) ? n / 12 : n;
 }
 
 function roundGallons(value) {
@@ -109,7 +125,7 @@ export function computePretreatChemistry({ productName, squareFootage, linearFee
 
   const sqFt = parseMeasure(squareFootage);
   const lf = parseMeasure(linearFeet);
-  const depth = parseMeasure(trenchDepthFt);
+  const depth = parseDepthFt(trenchDepthFt);
   const assumedDepth = Boolean(lf && !depth);
   const effectiveDepth = depth || DEFAULT_TRENCH_DEPTH_FT;
 
