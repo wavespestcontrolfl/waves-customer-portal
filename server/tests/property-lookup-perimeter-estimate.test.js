@@ -69,3 +69,25 @@ describe('enriched profile perimeterLF', () => {
     expect(profile.perimeterLFSource).toBeNull();
   });
 });
+
+describe('enriched profile attic / slab estimates', () => {
+  test('attic and slab default to the ground-floor footprint', () => {
+    const profile = buildEnrichedProfile(
+      { squareFootage: 3000, stories: 2 },
+      {},
+      27.4, -82.4, null,
+    );
+    expect(profile.atticSqFt).toBe(1500);
+    expect(profile.atticSqFtSource).toBe('estimated_from_footprint');
+    expect(profile.slabSqFt).toBe(1500);
+    expect(profile.slabSqFtSource).toBe('estimated_from_footprint');
+  });
+
+  test('no square footage → null attic/slab, null sources', () => {
+    const profile = buildEnrichedProfile(null, {}, 27.4, -82.4, null);
+    expect(profile.atticSqFt).toBeNull();
+    expect(profile.atticSqFtSource).toBeNull();
+    expect(profile.slabSqFt).toBeNull();
+    expect(profile.slabSqFtSource).toBeNull();
+  });
+});

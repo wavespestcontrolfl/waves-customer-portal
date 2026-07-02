@@ -1243,6 +1243,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     footprint: footprintSf,
     perimeterLF: estimatedPerimeterLF,
     perimeterLFSource: estimatedPerimeterLF ? 'estimated_from_footprint' : null,
+    // Rough Bora-Care / pre-slab bases: the attic deck and the slab both
+    // approximate the ground-floor footprint (top floor ≈ footprint on
+    // equal-floor homes). Pre-fills only — the estimator boxes stay
+    // editable and manual entries override.
+    atticSqFt: footprintSf > 0 ? footprintSf : null,
+    atticSqFtSource: footprintSf > 0 ? 'estimated_from_footprint' : null,
+    slabSqFt: footprintSf > 0 ? footprintSf : null,
+    slabSqFtSource: footprintSf > 0 ? 'estimated_from_footprint' : null,
 
     // ── CONSTRUCTION (merged property record + satellite AI) ──
     yearBuilt: rc?.yearBuilt || null,
