@@ -97,8 +97,12 @@ async function customerConvertedSince(est) {
  *
  * Five evidence sources, broader than the sweep's eligibility signals on
  * purpose (both asymmetries fail toward KEEPING an estimate):
- *  - paid invoices (null paid_at reads as paid at creation time — the lower
- *    bound — so an ambiguous invoice counts as predating);
+ *  - paid invoices, judged by the EARLIER of minted and paid time: an
+ *    invoice OPENED before the estimate is prior evidence even when it's
+ *    only paid afterward (an existing customer settling an older bill
+ *    post-quote must not make their live upsell look freshly converted),
+ *    and null paid_at reads as paid at creation time — the lower bound —
+ *    so an ambiguous invoice counts as predating;
  *  - bookings CREATED before the estimate (live or since completed) — the
  *    customer had already converted when the quote went out, even if the
  *    completion/payment evidence only lands afterward;
@@ -108,24 +112,33 @@ async function customerConvertedSince(est) {
  *  - completed service_records — imported/legacy service history often lives
  *    ONLY here, with no scheduled_services or invoice rows at all;
  *  - the customer row itself: a real customer stage (CUSTOMER_STAGES) whose
- *    member_since predates the estimate — a long-standing/imported customer
- *    may carry NO transactional rows whatsoever. member_since is not
+ *    conversion date predates the estimate — a long-standing/imported
+ *    customer may carry NO transactional rows whatsoever. The date is the
+ *    canonical CONVERSION_DATE_SQL shape (customer-stages.js):
+ *    member_since, else created_at as an ET date — quick-add/import paths
+ *    may never stamp member_since, and for a real-stage customer created
+ *    before the estimate that IS prior evidence. member_since is not
  *    re-stamped on conversion, so a stale intake-stamped date can only
  *    over-disqualify (estimate kept, ages to expiration) — never archive.
  *
  * Date semantics differ by evidence source, ON PURPOSE:
- *  - scheduled_date / service_date cast to midnight (::timestamptz),
- *    understating the real event time — a completed row is genuine
- *    conversion evidence either way, so reading it as "predates" only KEEPS
- *    a possibly-live upsell, never archives one.
- *  - member_since compares as a strictly-earlier ET calendar day. It is an
- *    ET DATE stamped when the customer converts, including at BOOKING time
- *    — before any completion/invoice evidence exists — so a midnight cast
- *    would read a same-day post-estimate conversion as pre-estimate,
- *    lifting the first-booking expiration hold while the booking is still
- *    pending (the estimate would expire mid-courtship and be counted lost
- *    forever). Same-day therefore reads as NOT-before; the transactional
- *    guards above still catch a genuine same-day pre-estimate conversion.
+ *  - scheduled_date / service_date anchor to ET midnight (naive timestamp
+ *    AT TIME ZONE 'America/New_York'), understating the real event time —
+ *    a completed row is genuine conversion evidence either way, so reading
+ *    it as "predates" only KEEPS a possibly-live upsell, never archives
+ *    one. A bare ::timestamptz would be SESSION-timezone midnight — 8pm ET
+ *    the PREVIOUS day on the UTC server — making a next-ET-day visit read
+ *    as pre-estimate for any estimate created the evening before, so the
+ *    sweep would refuse to archive it and it would later expire as lost.
+ *  - the customer conversion date compares as a strictly-earlier ET
+ *    calendar day. member_since is stamped when the customer converts,
+ *    including at BOOKING time — before any completion/invoice evidence
+ *    exists — so treating same-day as "before" would read a same-day
+ *    post-estimate conversion as pre-estimate, lifting the first-booking
+ *    expiration hold while the booking is still pending (the estimate
+ *    would expire mid-courtship and be counted lost forever). Same-day
+ *    therefore reads as NOT-before; the transactional guards above still
+ *    catch a genuine same-day pre-estimate conversion.
  */
 function whereNoConversionBeforeEstimate(query) {
   return query
@@ -135,7 +148,7 @@ function whereNoConversionBeforeEstimate(query) {
         .whereRaw("invoices.customer_id = estimates.customer_id")
         .where("invoices.status", "paid")
         .whereRaw(
-          "COALESCE(invoices.paid_at, invoices.created_at) < estimates.created_at",
+          "LEAST(invoices.created_at, COALESCE(invoices.paid_at, invoices.created_at)) < estimates.created_at",
         );
     })
     .whereNotExists(function () {
@@ -161,7 +174,7 @@ function whereNoConversionBeforeEstimate(query) {
         .whereRaw("scheduled_services.customer_id = estimates.customer_id")
         .where("scheduled_services.status", "completed")
         .whereRaw(
-          "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz) < estimates.created_at",
+          "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamp AT TIME ZONE 'America/New_York') < estimates.created_at",
         );
     })
     .whereNotExists(function () {
@@ -170,7 +183,7 @@ function whereNoConversionBeforeEstimate(query) {
         .whereRaw("service_records.customer_id = estimates.customer_id")
         .where("service_records.status", "completed")
         .whereRaw(
-          "service_records.service_date::timestamptz < estimates.created_at",
+          "service_records.service_date::timestamp AT TIME ZONE 'America/New_York' < estimates.created_at",
         );
     })
     .whereNotExists(function () {
@@ -179,7 +192,7 @@ function whereNoConversionBeforeEstimate(query) {
         .whereRaw("customers.id = estimates.customer_id")
         .whereIn("customers.pipeline_stage", CUSTOMER_STAGES)
         .whereRaw(
-          "customers.member_since < (estimates.created_at AT TIME ZONE 'America/New_York')::date",
+          "COALESCE(customers.member_since, (customers.created_at AT TIME ZONE 'America/New_York')::date) < (estimates.created_at AT TIME ZONE 'America/New_York')::date",
         );
     });
 }

@@ -371,7 +371,7 @@ describe('archiveConvertedOpenEstimates', () => {
       (c) =>
         c.m === 'whereRaw' &&
         typeof c.args?.[0] === 'string' &&
-        c.args[0].includes('COALESCE(invoices.paid_at, invoices.created_at)'),
+        c.args[0].includes('LEAST(invoices.created_at, COALESCE(invoices.paid_at, invoices.created_at))'),
     );
     expect(coalesceBound).toBeTruthy();
 
@@ -385,7 +385,7 @@ describe('archiveConvertedOpenEstimates', () => {
         c.m === 'whereRaw' &&
         typeof c.args?.[0] === 'string' &&
         c.args[0].includes(
-          'COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz)',
+          "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamp AT TIME ZONE 'America/New_York')",
         ),
     );
     expect(legacyCompletedFallback).toBeTruthy();
@@ -401,7 +401,7 @@ describe('archiveConvertedOpenEstimates', () => {
           c.m === 'whereRaw' &&
           typeof c.args?.[0] === 'string' &&
           c.args[0].includes(
-            'service_records.service_date::timestamptz < estimates.created_at',
+            "service_records.service_date::timestamp AT TIME ZONE 'America/New_York' < estimates.created_at",
           ),
       ),
     ).toBeTruthy();
@@ -415,7 +415,7 @@ describe('archiveConvertedOpenEstimates', () => {
           c.m === 'whereRaw' &&
           typeof c.args?.[0] === 'string' &&
           c.args[0].includes(
-            "customers.member_since < (estimates.created_at AT TIME ZONE 'America/New_York')::date",
+            "COALESCE(customers.member_since, (customers.created_at AT TIME ZONE 'America/New_York')::date) < (estimates.created_at AT TIME ZONE 'America/New_York')::date",
           ),
       ),
     ).toBeTruthy();
@@ -483,7 +483,7 @@ describe('excludePendingFirstBookings (expiration hold)', () => {
         (c) =>
           c.m === 'whereRaw' &&
           typeof c.args?.[0] === 'string' &&
-          c.args[0].includes('COALESCE(invoices.paid_at, invoices.created_at)'),
+          c.args[0].includes('LEAST(invoices.created_at, COALESCE(invoices.paid_at, invoices.created_at))'),
       ),
     ).toBeTruthy();
     expect(
@@ -492,7 +492,7 @@ describe('excludePendingFirstBookings (expiration hold)', () => {
           c.m === 'whereRaw' &&
           typeof c.args?.[0] === 'string' &&
           c.args[0].includes(
-            'COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamptz)',
+            "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamp AT TIME ZONE 'America/New_York')",
           ),
       ),
     ).toBeTruthy();
@@ -502,7 +502,7 @@ describe('excludePendingFirstBookings (expiration hold)', () => {
           c.m === 'whereRaw' &&
           typeof c.args?.[0] === 'string' &&
           c.args[0].includes(
-            'service_records.service_date::timestamptz < estimates.created_at',
+            "service_records.service_date::timestamp AT TIME ZONE 'America/New_York' < estimates.created_at",
           ),
       ),
     ).toBeTruthy();
@@ -512,7 +512,7 @@ describe('excludePendingFirstBookings (expiration hold)', () => {
           c.m === 'whereRaw' &&
           typeof c.args?.[0] === 'string' &&
           c.args[0].includes(
-            "customers.member_since < (estimates.created_at AT TIME ZONE 'America/New_York')::date",
+            "COALESCE(customers.member_since, (customers.created_at AT TIME ZONE 'America/New_York')::date) < (estimates.created_at AT TIME ZONE 'America/New_York')::date",
           ),
       ),
     ).toBeTruthy();
