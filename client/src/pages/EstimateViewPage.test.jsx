@@ -458,6 +458,30 @@ describe('ReviewPhase — site-confirmation hold copy', () => {
     expect(screen.queryByText('Invoice due now')).not.toBeInTheDocument();
   });
 
+  it('non-invoice held estimate with an existing appointment: no "creates your invoice" promise either', () => {
+    // The server holds first invoices for narrow low-confidence recurring
+    // accepts regardless of bill_by_invoice — the review copy must not be
+    // invoice-mode-gated.
+    render(
+      <ReviewPhase
+        slotId={null}
+        existingAppointment={{ id: 'ss1', scheduledDate: '2026-07-10', windowDisplay: '8–10 AM' }}
+        paymentPreference="pay_at_visit"
+        secondsRemaining={600}
+        onConfirm={noop}
+        onCancel={noop}
+        invoiceMode={false}
+        siteConfirmationHold
+        serviceMode="recurring"
+        depositNote={null}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Confirm approval' })).toBeInTheDocument();
+    expect(screen.getByText('No payment now — price confirmed on site')).toBeInTheDocument();
+    expect(screen.queryByText(/Next step creates your invoice/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm invoice' })).not.toBeInTheDocument();
+  });
+
   it('a one-time accept keeps its own copy even when the estimate carries the hold flag', () => {
     render(
       <ReviewPhase

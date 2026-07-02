@@ -1800,11 +1800,12 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 export function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
-  // A held (site-confirmation) recurring accept mints NO invoice — the account
-  // manager confirms the exact price on site, then sends the first invoice — so
-  // the generic invoice-mode "due now / creates your invoice" copy would promise
-  // a payment step that never happens. Mirrors PaymentPreferenceButtons' gate.
-  const heldForSiteConfirmation = invoiceMode && siteConfirmationHold && serviceMode !== 'one_time';
+  // A held (site-confirmation) recurring accept mints NO invoice whatever the
+  // billing mode — the account manager confirms the exact price on site, then
+  // the first invoice follows — so the generic "due now / creates your invoice"
+  // copy would promise a payment step that never happens. Mirrors
+  // PaymentPreferenceButtons' heldRecurring gate (NOT invoice-gated).
+  const heldForSiteConfirmation = siteConfirmationHold && serviceMode !== 'one_time';
   const paymentLabel = heldForSiteConfirmation
     ? 'No payment now — price confirmed on site'
     : invoiceMode
