@@ -2812,15 +2812,19 @@ const CallRecordingProcessor = {
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
     const customerServiceContext = customerId ? await loadCustomerServiceContext(customerId) : null;
     const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext });
-    const isOutboundCall = String(call.direction || '').toLowerCase().startsWith('outbound');
-    const canCreateAppointmentFromCall = !isOutboundCall && serviceResolution.ok;
+    // Use the module-level isOutboundCall(call) helper — a local `const
+    // isOutboundCall` here shadows it for the WHOLE function scope, putting the
+    // phantom-guard references above (Step 0) in the temporal dead zone:
+    // "Cannot access 'isOutboundCall' before initialization" on every call that
+    // reaches them with a pre-linked customer_id.
+    const canCreateAppointmentFromCall = !isOutboundCall(call) && serviceResolution.ok;
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
         dateTime: extracted.preferred_date_time,
         scheduleCreated: false,
         smsSent: false,
-        skippedReason: isOutboundCall ? 'outbound_call' : serviceResolution.reason,
+        skippedReason: isOutboundCall(call) ? 'outbound_call' : serviceResolution.reason,
       };
       logger.info(
         `[call-proc] Skipping appointment auto-create for ${callSid}: ` +
