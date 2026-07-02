@@ -313,13 +313,17 @@ async function handleEvent(ev) {
   };
 
   if (newsletterDelivery) {
-    await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));
-    alertUntrackedHardBounce();
+    // Fire the alert only when the event was NEWLY processed — a SendGrid
+    // redelivery must not re-run the side effect (mirrors the emailMessage
+    // branch below); the notification dedupe + idempotent lead stamp remain
+    // the backstop for the fully-untracked branch, which has no event ledger.
+    const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));
+    if (processedNew) alertUntrackedHardBounce();
     return;
   }
   if (automationSend) {
-    await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
-    alertUntrackedHardBounce();
+    const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
+    if (processedNew) alertUntrackedHardBounce();
     return;
   }
   if (emailMessage) {

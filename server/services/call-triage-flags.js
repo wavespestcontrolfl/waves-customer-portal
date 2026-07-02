@@ -445,16 +445,36 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
     needsConfirmation.push('rental_or_tenant_occupied');
   }
 
-  // Email bridge. A transcription-spelled email is the top source of hard
-  // bounces (letters mishear: "A-L-L-E-N-S" → "K-L-L-E-N-S"; the mailbox can't
-  // be verified live), and the first automated email fires within seconds of
-  // intake — so every call-captured email gets a read-back reason, and a
-  // high-confidence domain typo is corrected up front. Local parts are NEVER
-  // touched (email-typo-correction contract): a wrong local part is only
-  // discoverable by asking the caller, which is what the reason drives.
-  // extracted.email_raw carries what intake normalization rejected (the
-  // normalizer nulls non-regex emails before this bridge runs) so invalid
-  // captures still get their reason — and a missing-dot typo its fix.
+  // Email review — shared with the enforce-mode/V2-off fallback in the call
+  // processor, so email hygiene is never shadow-bridge-only.
+  const emailReview = deriveEmailReview(extracted);
+  needsConfirmation.push(...emailReview.needsConfirmation);
+
+  return { normalizedAddress, normalizedEmail: emailReview.normalizedEmail, needsConfirmation };
+}
+
+// Syntactic sanity only — deliverability is unknowable until a send. Anything
+// failing this is transcription garbage, not an address worth storing plans on.
+const BASIC_EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/**
+ * Email review — pure, extraction-mode-independent (the call processor runs
+ * it via the shadow bridge OR directly in enforce/V2-off modes; first-touch
+ * sends read extracted.email in every mode).
+ *
+ * A transcription-spelled email is the top source of hard bounces (letters
+ * mishear: "A-L-L-E-N-S" → "K-L-L-E-N-S"; the mailbox can't be verified
+ * live), and the first automated email fires within seconds of intake — so
+ * every call-captured email gets a read-back reason, and a high-confidence
+ * domain typo is corrected up front. Local parts are NEVER touched
+ * (email-typo-correction contract): a wrong local part is only discoverable
+ * by asking the caller, which is what the reason drives.
+ * extracted.email_raw carries what intake normalization rejected (the
+ * normalizer nulls non-regex emails before this runs) so invalid captures
+ * still get their reason — and a missing-dot typo its fix.
+ */
+function deriveEmailReview(extracted = {}) {
+  const needsConfirmation = [];
   let normalizedEmail = null;
   const rawEmail = String(extracted.email || extracted.email_raw || '').trim().toLowerCase();
   if (rawEmail) {
@@ -471,13 +491,8 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
       needsConfirmation.push('email_unverified');
     }
   }
-
-  return { normalizedAddress, normalizedEmail, needsConfirmation };
+  return { normalizedEmail, needsConfirmation };
 }
-
-// Syntactic sanity only — deliverability is unknowable until a send. Anything
-// failing this is transcription garbage, not an address worth storing plans on.
-const BASIC_EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 /**
  * True when a call indicates a rental / tenant-occupied property — a non-owner-
@@ -500,6 +515,7 @@ module.exports = {
   mergeTriageFlags,
   suppressAddressFlagsForAV,
   deriveCallReviewBridge,
+  deriveEmailReview,
   detectRentalSignal,
   streetCompareKey,
   canAutoRoute,

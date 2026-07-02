@@ -31,7 +31,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
-const { deriveCallReviewBridge } = require('../services/call-triage-flags');
+const { deriveCallReviewBridge, deriveEmailReview } = require('../services/call-triage-flags');
 const { alertBouncedContactAddress } = require('../services/email-bounce-recovery');
 
 describe('deriveCallReviewBridge — email', () => {
@@ -86,6 +86,17 @@ describe('deriveCallReviewBridge — email', () => {
       extracted: { address_line1: '4867 Tober Morey Way', email: 'karrenkllens@kc.rr.com' },
     });
     expect(out.needsConfirmation).toEqual(expect.arrayContaining(['address_unverified', 'email_unverified']));
+  });
+});
+
+describe('deriveEmailReview (mode-independent — enforce/V2-off fallback uses it directly)', () => {
+  test('same semantics as the bridge path', () => {
+    expect(deriveEmailReview({ email: 'jane@gmial.com' }))
+      .toEqual({ normalizedEmail: 'jane@gmail.com', needsConfirmation: ['email_unverified'] });
+    expect(deriveEmailReview({ email: null, email_raw: 'karen allen at kc dot rr' }))
+      .toEqual({ normalizedEmail: null, needsConfirmation: ['email_invalid'] });
+    expect(deriveEmailReview({}))
+      .toEqual({ normalizedEmail: null, needsConfirmation: [] });
   });
 });
 

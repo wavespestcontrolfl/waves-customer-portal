@@ -40,7 +40,7 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { validateAddress, buildAddressLines } = require('./address-validation');
@@ -2163,6 +2163,22 @@ const CallRecordingProcessor = {
         }
       } catch (bridgeErr) {
         logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
+      }
+    } else {
+      // Enforce-mode (DRIVES_ROUTING) / V2-off fallback: the shadow bridge
+      // above owns email hygiene when it runs, but first-touch sends read
+      // extracted.email in EVERY mode — the domain-typo correction and the
+      // read-back reasons must not be shadow-only. Advisory only, never
+      // blocks the pipeline.
+      try {
+        const { normalizedEmail: correctedEmail, needsConfirmation: emailReasons } = deriveEmailReview(extracted);
+        if (correctedEmail) {
+          extracted.email = correctedEmail;
+          logger.info(`[call-proc] Adopted high-confidence email domain correction for ${maskSid(callSid)}`);
+        }
+        if (emailReasons.length) bridgeNeedsConfirmation.push(...emailReasons);
+      } catch (emailErr) {
+        logger.warn(`[call-proc] email review skipped for ${maskSid(callSid)}: ${emailErr.message}`);
       }
     }
 
