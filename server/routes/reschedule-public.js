@@ -70,6 +70,18 @@ function hhmm(t) {
   return t ? String(t).slice(0, 5) : null;
 }
 
+// '14:00' → '2:00 PM' — for responses that echo a window the availability
+// engine didn't label (e.g. the idempotent-replay short-circuit).
+function label12(t) {
+  const parts = hhmm(t);
+  if (!parts) return null;
+  const [h, m] = parts.split(':').map(Number);
+  if (Number.isNaN(h)) return parts;
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  const hour12 = h % 12 || 12;
+  return `${hour12}:${String(m || 0).padStart(2, '0')} ${suffix}`;
+}
+
 // Customer-facing eligibility for the appointment behind the token.
 // Returns { ok: true } or { ok: false, reason } with a customer-safe reason:
 //   completed | cancelled | in_progress | past | not_available
@@ -114,6 +126,7 @@ async function loadByToken(token) {
       's.estimated_duration_minutes',
       's.is_recurring',
       's.recurring_parent_id',
+      's.self_booking_id',
       'c.first_name as cust_first_name',
       'c.last_name as cust_last_name',
       'c.address_line1',
@@ -236,6 +249,22 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
 
+    // Idempotent replay: a retried POST (network retry, double-tap) whose
+    // target matches the visit's current date + start already succeeded —
+    // committing again would duplicate the reschedule_log row, re-send the
+    // reschedule notice, and count toward the escalation threshold.
+    if (apptDateStr(svc.scheduled_date) === date && hhmm(svc.window_start) === startTime) {
+      return res.json({
+        success: true,
+        replayed: true,
+        originalDate: svc.scheduled_date,
+        newDate: date,
+        window: { start: startTime, end: hhmm(svc.window_end) },
+        startLabel: label12(startTime),
+        endLabel: label12(svc.window_end),
+      });
+    }
+
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
@@ -286,6 +315,27 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
       }
       throw err;
+    }
+
+    // Self-booked visits carry a linked self_booked_appointments row that the
+    // public availability builder counts for max_self_books_per_day
+    // (booking.js fullDays) — move it with the visit or the old day stays
+    // artificially full while the new day goes uncounted. Best-effort right
+    // after the rebooker commit; a failure only skews the day-cap counting.
+    if (svc.self_booking_id) {
+      try {
+        await db('self_booked_appointments')
+          .where({ id: svc.self_booking_id })
+          .update({
+            date,
+            start_time: slot.start_time,
+            end_time: slot.end_time,
+            technician_id: slot.technician_id || null,
+            updated_at: db.fn.now(),
+          });
+      } catch (err) {
+        logger.error(`[reschedule-public] self-booking row sync failed for ${svc.id}: ${err.message}`);
+      }
     }
 
     // Post-commit, best-effort: reminder re-arm + the standard
@@ -340,6 +390,7 @@ router._test = {
   eligibility,
   bookingRange,
   apptDateStr,
+  label12,
 };
 
 module.exports = router;

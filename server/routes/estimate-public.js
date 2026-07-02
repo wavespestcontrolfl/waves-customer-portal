@@ -7708,6 +7708,14 @@ router.put('/:token/accept', async (req, res, next) => {
             const start = hhmm(confirmedAppointmentRow?.window_start);
             const end = hhmm(confirmedAppointmentRow?.window_end);
             const timeWindow = start && end ? formatSmsTimeRange(`${start}-${end}`) : 'your selected window';
+            // appointment_confirmation renders {reschedule_line}, and
+            // getTemplate suppresses the whole SMS on an unresolved
+            // placeholder — every render site must pass the clause ('' when
+            // no link could be minted).
+            const { buildRescheduleLink } = require('../services/reschedule-link');
+            const reschedule = confirmedAppointmentRow?.id
+              ? await buildRescheduleLink(confirmedAppointmentRow.id, { customerId: customerId || null })
+              : { url: null, line: '' };
             const customerBody = await renderTemplate(
               'appointment_confirmation',
               {
@@ -7715,6 +7723,7 @@ router.put('/:token/accept', async (req, res, next) => {
                 service_type: confirmedServiceLabel,
                 date: serviceDate,
                 time: timeWindow,
+                reschedule_line: reschedule.line,
               },
               undefined,
               { workflow: 'estimate_accept_onetime_confirmed', entity_type: 'scheduled_service', entity_id: confirmedAppointmentRow?.id || estimate.id },

@@ -13,7 +13,7 @@ const { smsLineFor } = require('../services/reschedule-link');
 const smsMigration = require('../models/migrations/20260702000011_reschedule_link_sms_templates');
 const emailMigration = require('../models/migrations/20260702000012_reschedule_link_email_templates');
 
-const { eligibility, bookingRange, apptDateStr } = reschedulePublicRouter._test;
+const { eligibility, bookingRange, apptDateStr, label12 } = reschedulePublicRouter._test;
 
 // Fixed "now": 2026-07-02 12:00 ET (16:00 UTC, EDT).
 const NOW = new Date('2026-07-02T16:00:00.000Z');
@@ -69,6 +69,14 @@ describe('reschedule-public eligibility', () => {
     expect(apptDateStr('2026-07-10T00:00:00.000Z')).toBe('2026-07-10');
     expect(apptDateStr(new Date('2026-07-10T00:00:00.000Z'))).toBe('2026-07-10');
     expect(apptDateStr(null)).toBe(null);
+  });
+
+  test('label12 formats HH:MM(:SS) into 12-hour labels for the replay response', () => {
+    expect(label12('09:00')).toBe('9:00 AM');
+    expect(label12('14:00:00')).toBe('2:00 PM');
+    expect(label12('00:30')).toBe('12:30 AM');
+    expect(label12('12:00')).toBe('12:00 PM');
+    expect(label12(null)).toBe(null);
   });
 });
 

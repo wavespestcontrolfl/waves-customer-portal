@@ -366,6 +366,20 @@ finding and warns on P1. Reviewers must return JSON matching
   `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
   to the report / receipt / rate surfaces. Treat the track token and any change
   to its payload, in any state, as security-critical).
+  `/api/public/reschedule/:token` (GET + POST; customer self-serve single-visit
+  reschedule linked from appointment confirmation/72h/24h texts + reminder
+  emails. `scheduled_services.reschedule_token` (64-hex, `TOKEN_RE` format gate)
+  is the ONLY gate, plus 60 req/min router limit and 10 req/min on the POST.
+  GET returns the appointment summary (customer first name, service type,
+  current date/window, recurring flag) + live open slots from the /book
+  availability engine. POST is a WRITE: it moves the single visit — never the
+  recurring series, never live/terminal visits (409) — and only to a slot the
+  availability engine still offers for that day (route feasibility, lunch
+  reserve, self-book day caps re-checked server-side); the commit goes through
+  `SmartRebooker.reschedule` (advisory lock + tech-route overlap conflict
+  check + `reschedule_log` audit as `customer_self_serve` + escalation
+  flagging). Generic 404 for bad/unknown tokens. Treat the reschedule token
+  and any change to this route's payload or commit path as security-critical).
   `/api/reviews/featured` (read-only public featured Google reviews for the
   marketing site — no auth, no token, location filter + limit; reads
   `google_reviews` only).
