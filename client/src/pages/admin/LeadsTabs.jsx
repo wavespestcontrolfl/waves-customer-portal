@@ -74,6 +74,15 @@ const CLOSED_STATUSES = [
   "disqualified",
   "duplicate",
 ];
+// Mirrors the server's expansion of the virtual `open` filter (admin-leads
+// OPEN_LEAD_STATUSES) — needed to know whether a given lead would survive
+// the table's current status filter.
+const OPEN_FILTER_STATUSES = ["new", "contacted", "estimate_sent", "estimate_viewed"];
+const leadMatchesStatusFilter = (lead, status) =>
+  !status ||
+  (status === "open"
+    ? OPEN_FILTER_STATUSES.includes(lead.status)
+    : lead.status === status);
 const BOARD_STAGES = [
   "new",
   "contacted",
@@ -866,6 +875,10 @@ export function LeadsSection() {
     if (!leadId) return;
     setTab("pipeline");
     setPipelineView("table");
+    // The lead's status is unknown before the list loads, and the table's
+    // `open` default would hide a converted/closed lead's row (and with it
+    // the expanded detail this deep link exists to show) — load unfiltered.
+    setFilters((f) => (f.status ? { ...f, status: "", page: 1 } : f));
     setActiveLead(leadId);
     loadLeadActivities(leadId);
   }, [setActiveLead, loadLeadActivities]);
@@ -2624,7 +2637,14 @@ export function LeadsSection() {
                         }}
                         onDragEnd={() => setDraggingLeadId(null)}
                         onClick={() => {
+                          // The expanded detail row only renders in the table,
+                          // and the table's status filter (default `open`)
+                          // would hide a closed lead's row entirely — widen
+                          // the filter when this card wouldn't pass it.
                           setPipelineView("table");
+                          if (!leadMatchesStatusFilter(lead, filters.status)) {
+                            setFilters((f) => ({ ...f, status: "", page: 1 }));
+                          }
                           expandLead(lead);
                         }}
                         style={{

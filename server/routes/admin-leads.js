@@ -187,7 +187,9 @@ router.get('/analytics/overview', async (req, res, next) => {
     const total = leads.length;
     const won = leads.filter(l => l.status === 'won').length;
     const lost = leads.filter(l => l.status === 'lost').length;
-    const active = leads.filter(l => !['won', 'lost', 'disqualified', 'duplicate'].includes(l.status)).length;
+    // unresponsive included: the daily staleness sweep assigns it at scale,
+    // and an auto-closed lead must leave the active count immediately.
+    const active = leads.filter(l => !['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'].includes(l.status)).length;
     const conversionRate = total > 0 ? Math.round(won / total * 1000) / 10 : 0;
 
     // Response time headline is the MEDIAN, not the mean: a handful of multi-day
