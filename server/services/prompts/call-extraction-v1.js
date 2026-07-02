@@ -137,8 +137,28 @@ const _contractHash = crypto.createHash('sha256')
 
 const PROMPT_HASH = `${PROMPT_VERSION}-${_contractHash}`;
 
+// The rendered catalog block changes the exact prompt, so the persisted
+// version must change with it — otherwise shadow rows produced under
+// different catalogs share one ai_extraction_prompt_version and the
+// promotion-readiness gate mixes incompatible cohorts under one hash.
+// Order-sensitive by design: a reordered catalog renders a different
+// prompt and must version as a different cohort. No catalog → bare
+// PROMPT_HASH, so pre-catalog rows keep their existing version.
+function extractionPromptVersion(bookableServiceNames) {
+  const names = Array.isArray(bookableServiceNames)
+    ? bookableServiceNames.filter(Boolean)
+    : [];
+  if (!names.length) return PROMPT_HASH;
+  const catalogHash = crypto.createHash('sha256')
+    .update(names.join('\n'))
+    .digest('hex')
+    .slice(0, 8);
+  return `${PROMPT_HASH}-cat.${catalogHash}`;
+}
+
 module.exports = {
   buildExtractionPrompt,
+  extractionPromptVersion,
   PROMPT_VERSION,
   PROMPT_HASH,
 };

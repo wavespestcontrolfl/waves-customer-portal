@@ -51,10 +51,14 @@ const ROACH_RE = /\b(?:german\s+)?(?:cock)?roach(?:es)?\b/i;
 // "not roaches, just ants" and "last time it was roaches" describe what the
 // visit is NOT for, and must not force the cockroach service (and its catalog
 // price) onto a booking for something else. Strip negated mentions (negation
-// word + up to two fillers, e.g. "haven't seen any roaches") and
-// historical-context mentions within the same clause, then test what's left —
-// one surviving affirmative mention is enough.
-const NEGATED_ROACH_RE = /\b(?:no|not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|never|without)\s+(?:\w+\s+){0,2}?(?:german\s+)?(?:cock)?roach(?:es)?\b/gi;
+// word + up to four fillers, e.g. "don't currently have any german roaches",
+// "don't think we have roaches") and historical-context mentions within the
+// same clause, then test what's left — one surviving affirmative mention is
+// enough. Fillers must be plain words (punctuation breaks the run, so the
+// negation never reaches across a clause boundary) and adversative
+// conjunctions are excluded so "don't have ants but roaches are everywhere"
+// keeps its affirmative mention.
+const NEGATED_ROACH_RE = /\b(?:no|not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|never|without)\s+(?:(?!(?:but|however|though|except)\b)[\w'’]+\s+){0,4}?(?:german\s+)?(?:cock)?roach(?:es)?\b/gi;
 // Historical context can sit on either side of the mention: "last time it was
 // roaches" AND "we had roaches last time" — strip both orders.
 const HISTORICAL_ROACH_RE = /\b(?:last\s+(?:time|visit|year)|previous(?:ly)?|in\s+the\s+past|used\s+to)\b[^.!?\n]{0,40}?\b(?:german\s+)?(?:cock)?roach(?:es)?\b/gi;

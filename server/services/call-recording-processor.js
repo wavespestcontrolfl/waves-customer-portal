@@ -31,7 +31,7 @@ const { normalizeCallExtraction, applyContactNormalization } = require('../utils
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
-const { buildExtractionPrompt, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const { buildExtractionPrompt, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
@@ -1496,7 +1496,7 @@ function buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptO
 // Parse → validate(model-output) → inject server meta → normalize → validate(persisted).
 // Provider-agnostic tail shared by the Gemini and OpenAI extraction paths. Fails closed
 // to a status string; never trusts model output directly.
-function finalizeV2Extraction(rawText, { callId = null, extractionModel } = {}) {
+function finalizeV2Extraction(rawText, { callId = null, extractionModel, promptVersion = null } = {}) {
   // Pass 1: parse JSON
   let parsed;
   try {
@@ -1521,7 +1521,7 @@ function finalizeV2Extraction(rawText, { callId = null, extractionModel } = {}) 
     schema_version: SCHEMA_VERSION,
     extracted_at: new Date().toISOString(),
     extraction_model: extractionModel,
-    extraction_prompt_version: PROMPT_HASH,
+    extraction_prompt_version: promptVersion || PROMPT_HASH,
   };
 
   // Normalize
@@ -1581,7 +1581,13 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     return { status: 'parse_failed', extraction: null, errors: [{ message: err.message }] };
   }
 
-  return finalizeV2Extraction(rawText, { callId: opts.callId || null, extractionModel: GEMINI_EXTRACTION_MODEL });
+  return finalizeV2Extraction(rawText, {
+    callId: opts.callId || null,
+    extractionModel: GEMINI_EXTRACTION_MODEL,
+    // The catalog block is part of the rendered prompt, so the stamped
+    // version must carry its hash or cohorts mix under one version.
+    promptVersion: extractionPromptVersion(opts.bookableServiceNames),
+  });
 }
 
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
@@ -1896,6 +1902,9 @@ const CallRecordingProcessor = {
     // (service_id / price / duration / follow-up interval). Fails open to [].
     const bookableCallServices = await loadBookableCallServices(db);
     const bookableServiceNames = bookableCallServices.map((s) => s.name).filter(Boolean);
+    // Catalog-aware provenance: the catalog block is part of the rendered
+    // V2 prompt, so every stamp for this call must carry its hash.
+    const v2PromptVersion = extractionPromptVersion(bookableServiceNames);
 
     let extracted;
     try {
@@ -1941,7 +1950,7 @@ const CallRecordingProcessor = {
           ai_address_validation: v2AddressValidation ? JSON.stringify(v2AddressValidation) : null,
           v2_extraction_status: v2Result.status,
           ai_extraction_model: GEMINI_EXTRACTION_MODEL,
-          ai_extraction_prompt_version: PROMPT_HASH,
+          ai_extraction_prompt_version: v2PromptVersion,
           updated_at: new Date(),
         };
         await db('call_log').where({ id: call.id }).update(v2Update);
@@ -1956,7 +1965,7 @@ const CallRecordingProcessor = {
           v2_extraction_status: 'parse_failed',
           ai_extraction_validation_errors: JSON.stringify([{ message: err.message }]),
           ai_extraction_model: GEMINI_EXTRACTION_MODEL,
-          ai_extraction_prompt_version: PROMPT_HASH,
+          ai_extraction_prompt_version: v2PromptVersion,
           updated_at: new Date(),
         });
       }

@@ -652,4 +652,65 @@ describe('future-scheduled-date stale-attempt guard', () => {
     expect(result.ok).toBe(true);
     expect(result.state).toBe('cancelled');
   });
+
+  test('an already-cancelled parent still cascades — a retry heals a cascade that died mid-flight', async () => {
+    const cancelledAt = new Date('2026-07-01T15:00:00Z');
+    const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, track_state: 'cancelled', cancelled_at: cancelledAt };
+    const childrenSelect = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ id: 'child-1' }]),
+    };
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
+    db
+      .mockReturnValueOnce(query(svc)) // loadService — parent already cancelled, no update runs
+      .mockReturnValueOnce(childrenSelect); // follow-up children lookup
+
+    const result = await trackTransitions.cancel('job-1', { reason: 'retry' });
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('cancelled');
+    expect(transitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'child-1',
+      toStatus: 'cancelled',
+    }));
+  });
+
+  test('a 0-row cancel race cascades when the parent ended cancelled', async () => {
+    const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, track_state: 'scheduled' };
+    const fresh = { ...svc, track_state: 'cancelled', cancelled_at: new Date('2026-07-01T15:00:00Z') };
+    const childrenSelect = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ id: 'child-1' }]),
+    };
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(0)) // primary cancel update loses the race
+      .mockReturnValueOnce(query(fresh)) // loadService (fresh state)
+      .mockReturnValueOnce(childrenSelect); // follow-up children lookup
+
+    const result = await trackTransitions.cancel('job-1', { reason: 'customer moved' });
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('cancelled');
+    expect(transitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'child-1',
+      toStatus: 'cancelled',
+    }));
+  });
+
+  test('a 0-row cancel race does NOT cascade when the parent ended complete — visit 2 survives visit 1 completing', async () => {
+    const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, track_state: 'scheduled' };
+    const fresh = { ...svc, track_state: 'complete' };
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query(0)) // primary cancel update loses the race
+      .mockReturnValueOnce(query(fresh)); // loadService (fresh state = complete)
+
+    const result = await trackTransitions.cancel('job-1', { reason: 'customer moved' });
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('complete');
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
 });

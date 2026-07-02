@@ -169,6 +169,33 @@ describe('resolveCallBookingCatalogService', () => {
     expect(row).toBeNull();
   });
 
+  test('longer negation ("don\'t currently have any german roaches") does NOT map to the cockroach program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control' },
+      transcription: "We don't currently have any german roaches, just ants on the patio",
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
+  test('hedged negation ("don\'t think we have roaches") does NOT map to the cockroach program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control' },
+      transcription: "I don't think we have roaches, it is probably spiders in the lanai",
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
+  test('adversative conjunction survives the negation strip ("don\'t have ants but roaches")', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control' },
+      transcription: "We don't have ants but roaches are everywhere in the kitchen",
+      services: CATALOG,
+    });
+    expect(row?.service_key).toBe('cockroach_control');
+  });
+
   test('"never had roaches" does NOT map to the cockroach program', () => {
     const row = resolveCallBookingCatalogService({
       extracted: { requested_service: 'mosquito treatment' },
