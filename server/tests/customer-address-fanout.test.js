@@ -10,6 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const {
   addressMatchKey,
+  snapshotMatchesContact,
   snapshotMatchesLine1,
   propagateCustomerAddressChange,
 } = require('../services/customer-address-fanout');
@@ -80,6 +81,23 @@ describe('addressMatchKey / snapshotMatchesLine1', () => {
   test('suffix spelling differences compare equal (Street vs St)', () => {
     expect(snapshotMatchesLine1('123 Main Street', '123 Main St')).toBe(true);
     expect(snapshotMatchesLine1('123 Main Street, Bradenton, FL 34205', '123 Main St')).toBe(true);
+  });
+
+  test('a full snapshot for the same street name in a DIFFERENT place never matches', () => {
+    // zip is the discriminator when both sides have one
+    expect(snapshotMatchesContact('100 Main St, Sarasota, FL 34240', {
+      address_line1: '100 Main St', city: 'Bradenton', zip: '34205',
+    })).toBe(false);
+    // no zips to compare → city decides
+    expect(snapshotMatchesContact('100 Main St, Sarasota, FL', {
+      address_line1: '100 Main St', city: 'Bradenton',
+    })).toBe(false);
+  });
+
+  test('postal-city aliases match when the zip agrees (Bradenton/Lakewood Ranch share 34211)', () => {
+    expect(snapshotMatchesContact('4867 Tobermorey Way, Lakewood Ranch, FL 34211', {
+      address_line1: '4867 Tobermorey Way', city: 'Bradenton', zip: '34211',
+    })).toBe(true);
   });
 
   test('empty snapshot or empty line never matches', () => {
@@ -220,6 +238,30 @@ describe('propagateCustomerAddressChange', () => {
     });
 
     await propagateCustomerAddressChange({ before: AFTER, after: AFTER }, conn);
+
+    const patch = conn.__updates.find((u) => u.table === 'estimates').patch;
+    expect(patch.estimate_data).toBeUndefined();
+  });
+
+  test('a suffix-spelling-only difference from the target never drops proposalDelivery', async () => {
+    const conn = makeConn({
+      leads: [],
+      estimates: [{
+        id: 'est-suffix',
+        // Proposal authored with the unabbreviated suffix; the rebuilt target
+        // uses the customer's abbreviated line — same place either way.
+        address: '123 Main Street, Bradenton, FL 34211',
+        estimate_data: {
+          proposal: { propertyAddress: '123 Main Street, Bradenton, FL 34211' },
+          proposalDelivery: { pdfEmailed: true },
+        },
+      }],
+    });
+
+    await propagateCustomerAddressChange({
+      before: { ...AFTER, address_line1: '123 Main St' },
+      after: { ...AFTER, address_line1: '123 Main St' },
+    }, conn);
 
     const patch = conn.__updates.find((u) => u.table === 'estimates').patch;
     expect(patch.estimate_data).toBeUndefined();

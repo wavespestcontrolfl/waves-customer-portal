@@ -48,25 +48,54 @@ function addressMatchKey(value) {
 // deliberately absent: every Florida address has an ", FL 34211" segment.
 const UNIT_SEGMENT_RE = /^\s*(?:apt|apartment|unit|ste|suite|bldg|building|lot|trlr|rm|#)\s*#?\s*[\w-]+\s*$/i;
 
-// True when a stored snapshot refers to the given street line. The comparison
-// is EXACT key equality on the snapshot's first comma-segment: whole-string
-// equality covers street-line snapshots (leads.address); the first segment of
-// a full single-line snapshot ("123 Main St, Bradenton, FL 34205" on
-// estimates) is its street line. A prefix check would be wrong here — it
-// would let "123 Main St" swallow "123 Main St Apt 2" — and a snapshot whose
-// LATER segment is a unit designator ("123 Main St, Apt 2, Bradenton") is a
-// distinct unit too, so it never matches a unitless customer line.
-function snapshotMatchesLine1(snapshot, line1) {
-  // Both sides pass through normalizeStreetLine before keying so suffix
-  // spelling differences compare equal — customer writes store abbreviated
-  // suffixes ("123 Main St") while older lead/estimate snapshots may carry
-  // the unabbreviated form ("123 Main Street").
-  const lineKey = addressMatchKey(normalizeStreetLine(line1));
+// A tail segment carrying no city information (state, zip, country) — used
+// to find the city segment of a full single-line snapshot.
+const NON_CITY_TAIL_RE = /^\s*(?:fl|florida)?\s*(?:\d{5}(?:-\d{4})?)?\s*(?:usa|united states)?\s*$/i;
+
+// True when a stored snapshot refers to the given contact's address. The
+// street line compares by EXACT key equality on the snapshot's first
+// comma-segment (a prefix check would let "123 Main St" swallow "123 Main St
+// Apt 2"), a later unit-designator segment ("..., Apt 2, ...") never matches
+// a unitless line, and both sides pass through normalizeStreetLine so suffix
+// spelling ("Street"/"St") compares equal.
+//
+// A FULL-string snapshot must also corroborate the PLACE, not just the street
+// line — the same customer can have two properties on identically-named
+// streets in different cities (addressKey identity elsewhere includes
+// city/zip for the same reason). ZIP is the strong discriminator when both
+// sides have one; postal-city names alias (Bradenton / Lakewood Ranch share
+// 34211), so the city comparison only applies when no zip comparison is
+// possible. Missing data on either side corroborates nothing and matches —
+// skipping a genuine copy is safer than clobbering a different property, but
+// only when the data actually says they differ.
+function snapshotMatchesContact(snapshot, contact) {
+  if (!contact) return false;
+  const lineKey = addressMatchKey(normalizeStreetLine(contact.address_line1));
   if (!lineKey) return false;
   const segments = String(snapshot ?? '').split(',');
   if (segments.slice(1).some((seg) => UNIT_SEGMENT_RE.test(seg))) return false;
   const segKey = addressMatchKey(normalizeStreetLine(segments[0]));
-  return !!segKey && segKey === lineKey;
+  if (!segKey || segKey !== lineKey) return false;
+  if (segments.length === 1) return true; // bare street line — nothing more to check
+
+  const tail = segments.slice(1).join(' ');
+  const snapZip = (tail.match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || null;
+  const contactZip = String(contact.zip || '').trim().slice(0, 5);
+  if (snapZip && /^\d{5}$/.test(contactZip)) return snapZip === contactZip;
+
+  const contactCityKey = addressMatchKey(contact.city);
+  if (!contactCityKey) return true;
+  const snapCitySeg = segments.slice(1).find((seg) => seg.trim() && !NON_CITY_TAIL_RE.test(seg));
+  if (!snapCitySeg) return true;
+  const snapCityKey = addressMatchKey(
+    snapCitySeg.replace(/\b(?:fl|florida)\b/gi, '').replace(/\b\d{5}(?:-\d{4})?\b/g, ''),
+  );
+  return !snapCityKey || snapCityKey === contactCityKey;
+}
+
+// Back-compat shape for callers/tests that only have a street line.
+function snapshotMatchesLine1(snapshot, line1) {
+  return snapshotMatchesContact(snapshot, { address_line1: line1 });
 }
 
 async function propagateCustomerAddressChange({ before, after }, conn = db) {
@@ -78,8 +107,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   if (!addressMatchKey(after && after.address_line1)) return counts;
 
   const matchesCustomerAddress = (snapshot) =>
-    snapshotMatchesLine1(snapshot, before && before.address_line1)
-    || snapshotMatchesLine1(snapshot, after.address_line1);
+    snapshotMatchesContact(snapshot, before) || snapshotMatchesContact(snapshot, after);
 
   const now = new Date();
   const fullAddress = formatAddress({
@@ -149,7 +177,15 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
       // no-op rewrite here would still drop proposalDelivery, clearing the
       // "PDF emailed" marker on an already-sent proposal for nothing.
       const proposalCurrent = data?.proposal?.propertyAddress;
-      const proposalAlreadyTarget = addressMatchKey(proposalCurrent) === addressMatchKey(fullAddress.slice(0, 200));
+      // Same normalization as the matcher (suffix spelling, trailing USA) —
+      // a raw-key compare would call '123 Main Street, …' stale against the
+      // freshly formatted '123 Main St, …' and drop proposalDelivery on an
+      // already-correct proposal.
+      const proposalTargetKey = (value) => {
+        const segs = String(value ?? '').replace(/,?\s*(?:USA|United States)\s*$/i, '').split(',');
+        return [normalizeStreetLine(segs[0]), ...segs.slice(1)].map((x) => addressMatchKey(x)).join('|');
+      };
+      const proposalAlreadyTarget = proposalTargetKey(proposalCurrent) === proposalTargetKey(fullAddress.slice(0, 200));
       if (proposalCurrent && !proposalAlreadyTarget && matchesCustomerAddress(proposalCurrent)) {
         patch.estimate_data = conn.raw(
           "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,propertyAddress}', to_jsonb(?::text)) - 'proposalDelivery'",
@@ -171,4 +207,4 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   return counts;
 }
 
-module.exports = { addressMatchKey, snapshotMatchesLine1, propagateCustomerAddressChange };
+module.exports = { addressMatchKey, snapshotMatchesContact, snapshotMatchesLine1, propagateCustomerAddressChange };
