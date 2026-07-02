@@ -7285,6 +7285,12 @@ function priceRodentGuarantee(options = {}) {
     eligible,
     eligibilityMissing: missing,
     effectivePoints,
+    // Fixed per-tier price. WAVEGUARD.excludedFromPercentDiscount blocks the
+    // automatic paths, but the manual/coupon pass filters on line-level flags
+    // only (see isManualOneTimeDiscountEligible) — same treatment as the
+    // trap-only retainer.
+    discountEligible: false,
+    excludedFromCoupons: true,
     detail: eligible
       ? `$${price}/yr — 12-month re-entry warranty, renewable annually (${tier} tier)`
       : `INELIGIBLE — missing: ${missing.join(', ')}`,

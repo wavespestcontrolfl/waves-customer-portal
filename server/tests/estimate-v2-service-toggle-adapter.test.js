@@ -650,6 +650,33 @@ describe('estimate v2 service toggle adapter', () => {
       .not.toContain('recurring_customer_one_time_perk');
   });
 
+  test('manual percentage discount does not cut the fixed-tier rodent guarantee', () => {
+    // WAVEGUARD.excludedFromPercentDiscount only guards the automatic discount
+    // paths; the manual/coupon pass filters on line-level flags instead
+    // (isManualOneTimeDiscountEligible), so the guarantee line must carry
+    // discountEligible:false / excludedFromCoupons like the trap-only retainer.
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: true,
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+    input.manualDiscount = { type: 'PERCENT', value: 10 };
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item.price).toBe(199);
+    expect(item.discountEligible).toBe(false);
+    expect(item.excludedFromCoupons).toBe(true);
+    expect(estimate.summary.oneTimeTotal).toBe(199);
+    expect(estimate.summary.manualDiscount.oneTimeAmount).toBe(0);
+    expect(estimate.summary.manualDiscount.eligibleServices).not.toContain('rodent_guarantee');
+  });
+
   test('drops the RODENT_GUARANTEE line when any eligibility flag is missing (fail closed)', () => {
     const input = translateV2CallToV1Input(
       baseProfile(),
