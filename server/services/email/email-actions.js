@@ -105,7 +105,7 @@ async function handleNewsletter(email) {
  * to Waves' own auto-acknowledgment ("Re: Thanks for reaching out to Waves,
  * Santos"), and junk leads were minted with automated SENDER addresses stored
  * as the lead's contact email (voicemail@twimlets.com,
- * do-not-reply@thumbtack.com, messenger@messaging.squareup.com).
+ * do-not-reply@thumbtack.com, a retired payment processor's messenger bot).
  *
  * Design principle: guards must not silently eat a real inquiry. Anything
  * blocked by the confidence floor, vendor skip, or reply-thread guards
@@ -116,11 +116,12 @@ async function handleNewsletter(email) {
 
 // Pure machine noise — never a lead, no matter what the classifier says.
 // Entries starting with '@' match the sender domain; others match the full
-// address. Extend as new junk-lead sources appear.
+// address. Keep this list to LIVE infrastructure senders only (Twilio is a
+// core dependency). One-off junk senders — retired-processor bots and the
+// like — belong in the admin-managed blocked_email_senders denylist instead,
+// which email-sync honors (auto-trash) before an email is ever classified.
 const LEAD_HARD_SKIP_SENDERS = [
   '@twimlets.com', // Twilio voicemail relay robots
-  'messenger@messaging.squareup.com', // legacy payment-processor bot
-  '@messaging.squareup.com',
 ];
 
 // Automated/no-reply senders and relay domains (e.g. Thumbtack lead
@@ -244,7 +245,9 @@ async function flagLeadNeedsReview(email, classification, reason) {
     });
   } catch (e) { /* non-critical */ }
 
-  logger.info(`[email-actions] Lead auto-create blocked (${reason}): ${email.from_address} — "${email.subject}" flagged for review`);
+  // Ids only in logs — sender addresses and subjects are PII (subjects can
+  // carry names/phones/addresses); the needs-review notification has detail.
+  logger.info(`[email-actions] Lead auto-create blocked (${reason}): email ${email.id} flagged for review`);
   return { action: 'lead_needs_review', reason };
 }
 
@@ -257,7 +260,7 @@ async function handleLeadInquiry(email, classification) {
       auto_action: 'lead_skipped_automated_sender',
       updated_at: new Date(),
     });
-    logger.info(`[email-actions] Lead skipped — hard-skip automated sender ${email.from_address} ("${email.subject}")`);
+    logger.info(`[email-actions] Lead skipped — hard-skip automated sender (email ${email.id})`);
     return { action: 'skipped_automated_sender' };
   }
 
@@ -316,7 +319,7 @@ async function handleLeadInquiry(email, classification) {
       auto_action: 'lead_skipped_existing_customer',
       updated_at: new Date(),
     });
-    logger.info(`[email-actions] Lead skipped — ${email.from_address} matches existing customer ${existingCustomer.id} ("${email.subject}")`);
+    logger.info(`[email-actions] Lead skipped — email ${email.id} matches existing customer ${existingCustomer.id}`);
     return { action: 'skipped_existing_customer', customerId: existingCustomer.id };
   }
 

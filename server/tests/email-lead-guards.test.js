@@ -4,7 +4,7 @@
  * auto-acknowledgment ("Re: Thanks for reaching out to Waves, Santos") and
  * junk leads were minted with automated SENDER addresses stored as the
  * lead's contact email (voicemail@twimlets.com, do-not-reply@thumbtack.com,
- * messenger@messaging.squareup.com).
+ * a retired payment processor's messenger bot).
  *
  * Guards under test: existing-customer skip (silent), confidence floor
  * (needs-review), hard-skip sender list (silent), automated-sender contact
@@ -411,8 +411,9 @@ describe('lead-guard helpers', () => {
   test('isHardSkippedLeadSender matches the machine-noise list', () => {
     expect(isHardSkippedLeadSender('voicemail@twimlets.com')).toBe(true);
     expect(isHardSkippedLeadSender('anything@twimlets.com')).toBe(true);
-    expect(isHardSkippedLeadSender('messenger@messaging.squareup.com')).toBe(true);
-    expect(isHardSkippedLeadSender('other@messaging.squareup.com')).toBe(true);
+    // The list is live-infrastructure only; one-off junk senders (retired
+    // processor bots etc.) go in the blocked_email_senders denylist, which
+    // email-sync enforces before classification.
     expect(isHardSkippedLeadSender('jane.prospect@example.com')).toBe(false);
     expect(isHardSkippedLeadSender(null)).toBe(false);
   });
