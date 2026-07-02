@@ -4661,11 +4661,34 @@ router.put('/:id/status', async (req, res, next) => {
                 const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr);
                 applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons);
                 const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
+                // Post-insert re-check closes the remaining race: a
+                // cancellation can stop the series between the pre-insert
+                // read above and this insert. The row hasn't been mirrored,
+                // broadcast, or given a reminder yet, so compensating is a
+                // plain delete — guarded on status='pending' so if the
+                // cancellation sweep already flipped it, the cancelled row
+                // (and its history) is left intact. Either way the add-on
+                // mirror + reminder registration below are skipped, so a
+                // stale reminder can't be minted after the sweep's
+                // reminder-cancel step already ran.
+                let autoExtLive = true;
+                if (cols.recurring_ongoing && autoExtRow?.id) {
+                  const parentNow = await db('scheduled_services')
+                    .where({ id: parentId })
+                    .first('recurring_ongoing');
+                  if (!parentNow || !parentNow.recurring_ongoing) {
+                    autoExtLive = false;
+                    const removed = await db('scheduled_services')
+                      .where({ id: autoExtRow.id, status: 'pending' })
+                      .del();
+                    logger.info(`[recurring] Auto-extend ${removed ? 'rolled back' : 'left to the cancellation sweep'} for parent=${parentId} — series stopped during completion processing`);
+                  }
+                }
                 // Mirror parent's add-on lines onto the auto-extended visit
                 // so a multi-service ongoing series keeps its full scope
                 // (and billing) past the seeded 4-visit window.
                 try {
-                  if (parentAddons.length > 0 && autoExtRow?.id) {
+                  if (autoExtLive && parentAddons.length > 0 && autoExtRow?.id) {
                     const addonCols = await db('scheduled_service_addons').columnInfo();
                     for (const addon of dueAddons) {
                       const addonData = {
@@ -4691,15 +4714,17 @@ router.put('/:id/status', async (req, res, next) => {
                 // visit never enters appointment_reminders, so the customer
                 // gets no 72h/24h texts for it (the cron reads only that
                 // table). No confirmation SMS, matching spawned children.
-                await registerSpawnedVisitReminder({
-                  scheduledServiceId: autoExtRow?.id,
-                  customerId: parent.customer_id,
-                  scheduledDate: nextStr,
-                  windowStart: parent.window_start,
-                  serviceType: parent.service_type,
-                  source: 'recurring_auto_extend',
-                });
-                logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
+                if (autoExtLive) {
+                  await registerSpawnedVisitReminder({
+                    scheduledServiceId: autoExtRow?.id,
+                    customerId: parent.customer_id,
+                    scheduledDate: nextStr,
+                    windowStart: parent.window_start,
+                    serviceType: parent.service_type,
+                    source: 'recurring_auto_extend',
+                  });
+                  logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
+                }
               }
             }
           } else if (!isOngoing && pendingCount === 0) {

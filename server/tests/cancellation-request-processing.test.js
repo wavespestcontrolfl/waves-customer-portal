@@ -317,10 +317,14 @@ describe('processCancellationRequest', () => {
       // current status is no longer 'cancelled', so the repair leaves it alone
       // (past-dated, so the fresh sweep skips it as well).
       { id: 'sRevived', customer_id: 'c1', status: 'pending', scheduled_date: PAST, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+      // ANOTHER customer's cancelled visit whose history note happens to carry
+      // the same string — the hard customer scope must keep it out.
+      { id: 'sOtherCust', customer_id: 'other', status: 'cancelled', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
     ];
     db.__tables.job_status_history = [
       { job_id: 's1', from_status: 'pending', to_status: 'cancelled', notes: reason },
       { job_id: 'sRevived', from_status: 'pending', to_status: 'cancelled', notes: reason },
+      { job_id: 'sOtherCust', from_status: 'pending', to_status: 'cancelled', notes: reason },
     ];
     db.__tables.invoices = [
       { id: 'inv1', scheduled_service_id: 's1', status: 'sent' },
@@ -346,6 +350,9 @@ describe('processCancellationRequest', () => {
     const revived = db.__tables.scheduled_services.find((r) => r.id === 'sRevived');
     expect(revived.status).toBe('pending');
     expect(AppointmentReminders.handleCancellation).not.toHaveBeenCalledWith('sRevived', expect.anything());
+    // The other customer's visit was never touched despite the matching note.
+    expect(AppointmentReminders.handleCancellation).not.toHaveBeenCalledWith('sOtherCust', expect.anything());
+    expect(InvoiceService.voidOpenInvoicesForCancelledService).not.toHaveBeenCalledWith('sOtherCust');
   });
 
   test('a visit whose tracker goes live between the sweep and the flip is reverted and flagged', async () => {

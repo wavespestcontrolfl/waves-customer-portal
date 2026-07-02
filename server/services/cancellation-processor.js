@@ -172,21 +172,29 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   // flip stamps the request-scoped reason into job_status_history.notes, which
   // identifies exactly the visits this request cancelled; re-confirm each is
   // STILL cancelled so a visit an admin has since revived is left alone.
+  // Repairs are only meaningful with a caller-scoped reason: the shared
+  // CHURN_REASON fallback would match every reason-less cancellation's note
+  // across requests, resurrecting unrelated work.
   let repairs = [];
-  try {
-    const history = await db('job_status_history')
-      .where({ to_status: 'cancelled', notes: cancelReason })
-      .select('job_id');
-    const priorIds = [...new Set(history.map((h) => h.job_id))];
-    if (priorIds.length) {
-      repairs = await db('scheduled_services')
-        .whereIn('id', priorIds)
-        .where({ status: 'cancelled' })
-        .select('id', 'status');
+  if (reason) {
+    try {
+      const history = await db('job_status_history')
+        .where({ to_status: 'cancelled', notes: cancelReason })
+        .select('job_id');
+      const priorIds = [...new Set(history.map((h) => h.job_id))];
+      if (priorIds.length) {
+        repairs = await db('scheduled_services')
+          .whereIn('id', priorIds)
+          // Hard customer scope: job_status_history carries no customer_id,
+          // and a duplicated note string must never let this request re-run
+          // side effects against ANOTHER customer's cancelled visit.
+          .where({ status: 'cancelled', customer_id: customerId })
+          .select('id', 'status');
+      }
+    } catch (err) {
+      errors.push('load_prior_cancelled');
+      logger.error(`[cancellation-processor] failed to load prior-cancelled visits for ${customerId}: ${err.message}`);
     }
-  } catch (err) {
-    errors.push('load_prior_cancelled');
-    logger.error(`[cancellation-processor] failed to load prior-cancelled visits for ${customerId}: ${err.message}`);
   }
 
   // 3. Cancel the customer's upcoming cancellable visits.
