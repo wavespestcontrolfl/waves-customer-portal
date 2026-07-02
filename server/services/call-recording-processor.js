@@ -43,7 +43,7 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
-const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan } = require('./call-booking-catalog');
+const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete } = require('./call-booking-catalog');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -462,8 +462,14 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   if (!customerId) return null;
 
   const marker = `Call SID: ${call.twilio_call_sid}`;
+  // Both lookups answer "was the PRIMARY appointment for this call already
+  // created?" — a linked follow-up child (visit 2) carries the same Call SID
+  // marker and booking_source, so child rows must be excluded or a reprocess
+  // whose primary was cancelled/rescheduled would adopt the pending follow-up
+  // as the confirmed booking and never recreate the actual visit.
   const marked = await trx('scheduled_services')
     .where({ customer_id: customerId })
+    .whereNull('parent_service_id')
     .whereNotIn('status', ['cancelled', 'rescheduled'])
     .where('notes', 'like', `%${marker}%`)
     .orderBy('created_at', 'asc')
@@ -475,6 +481,7 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   const callCreatedAt = call.created_at ? new Date(call.created_at) : null;
   const query = trx('scheduled_services')
     .where({ customer_id: customerId, booking_source: 'phone_call' })
+    .whereNull('parent_service_id')
     .where('scheduled_date', scheduledDate)
     .whereRaw('window_start::time = ?::time', [windowStart])
     .whereRaw('LOWER(TRIM(service_type)) = LOWER(TRIM(?))', [serviceType])
@@ -3093,6 +3100,10 @@ const CallRecordingProcessor = {
                   service_type: serviceType,
                   service_id: callBookingCatalogRow?.id || null,
                   estimated_price: priceInfo.price,
+                  create_invoice_on_complete: callBookingInvoiceOnComplete({
+                    price: priceInfo.price,
+                    catalogRow: callBookingCatalogRow,
+                  }),
                   estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
                   status: 'confirmed',
                   customer_confirmed: true,
@@ -3775,6 +3786,7 @@ CallRecordingProcessor._test = {
   findCustomerForCallContact,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
+  findExistingCallAppointment,
   classifyCallerAccount,
   summarizeKnownCaller,
   isNonLeadCallContent,

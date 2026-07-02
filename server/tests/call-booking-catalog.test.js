@@ -2,6 +2,7 @@ const {
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,
+  callBookingInvoiceOnComplete,
   sanitizeQuotedCallPrice,
 } = require('../services/call-booking-catalog');
 const { validateModelOutput } = require('../schemas/validate-extraction');
@@ -124,6 +125,51 @@ describe('resolveCallBookingCatalogService', () => {
     expect(row?.service_key).toBe('cockroach_control');
   });
 
+  test('negated roach mention ("not roaches, just ants") does NOT map to the cockroach program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control' },
+      transcription: 'No, it is not roaches, just ants everywhere in the kitchen',
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
+  test('negated contraction ("don\'t have roaches") does NOT map to the cockroach program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control' },
+      transcription: "We don't have roaches, the problem is fleas in the carpet",
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
+  test('"never had roaches" does NOT map to the cockroach program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'mosquito treatment' },
+      transcription: 'We never had roaches before, this call is about mosquitoes in the backyard',
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
+  test('historical roach mention ("last time it was roaches") does NOT map to the cockroach program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'lawn treatment' },
+      transcription: 'Last time it was roaches but this visit is for the lawn treatment',
+      services: CATALOG,
+    });
+    expect(row).toBeNull();
+  });
+
+  test('an affirmative roach mention alongside a negated one still maps to the program', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control' },
+      transcription: 'They are not palmetto bugs, we have german roaches in the kitchen',
+      services: CATALOG,
+    });
+    expect(row?.service_key).toBe('cockroach_control');
+  });
+
   test('keyword rule is skipped when the service_key is not in the catalog', () => {
     const row = resolveCallBookingCatalogService({
       extracted: {},
@@ -184,6 +230,27 @@ describe('resolveCallBookingPrice', () => {
     expect(sanitizeQuotedCallPrice('2 treatments at 175')).toBeNull();
     expect(resolveCallBookingPrice({ quotedPrice: '50 to 60', catalogRow: roach }))
       .toEqual({ price: 350, source: 'catalog' });
+  });
+});
+
+describe('callBookingInvoiceOnComplete', () => {
+  const roach = CATALOG.find((s) => s.service_key === 'cockroach_control');
+  const quarterly = CATALOG.find((s) => s.service_key === 'pest_general_quarterly');
+
+  test('priced one_time catalog booking flags invoice-on-complete', () => {
+    expect(callBookingInvoiceOnComplete({ price: 350, catalogRow: roach })).toBe(true);
+  });
+
+  test('recurring catalog row never flags, even with a transcript-quoted price', () => {
+    expect(callBookingInvoiceOnComplete({ price: 65, catalogRow: quarterly })).toBe(false);
+  });
+
+  test('coarse legacy label (no catalog row) never flags — billing type unknown', () => {
+    expect(callBookingInvoiceOnComplete({ price: 150, catalogRow: null })).toBe(false);
+  });
+
+  test('unpriced one_time booking does not flag', () => {
+    expect(callBookingInvoiceOnComplete({ price: null, catalogRow: roach })).toBe(false);
   });
 });
 

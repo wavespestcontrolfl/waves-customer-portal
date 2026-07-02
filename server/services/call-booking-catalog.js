@@ -46,6 +46,23 @@ const DEFAULT_FOLLOW_UP_INTERVAL_DAYS = 14;
 // $350 two-treatment program.
 const PALMETTO_BUG_RE = /\bpalmetto\s+(?:bugs?|(?:cock)?roach(?:es)?)\b/gi;
 const ROACH_RE = /\b(?:german\s+)?(?:cock)?roach(?:es)?\b/i;
+// A roach mention only counts as booking intent when it's affirmative:
+// "not roaches, just ants" and "last time it was roaches" describe what the
+// visit is NOT for, and must not force the cockroach service (and its catalog
+// price) onto a booking for something else. Strip negated mentions (negation
+// word + up to two fillers, e.g. "haven't seen any roaches") and
+// historical-context mentions within the same clause, then test what's left —
+// one surviving affirmative mention is enough.
+const NEGATED_ROACH_RE = /\b(?:no|not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|never|without)\s+(?:\w+\s+){0,2}?(?:german\s+)?(?:cock)?roach(?:es)?\b/gi;
+const HISTORICAL_ROACH_RE = /\b(?:last\s+(?:time|visit|year)|previous(?:ly)?|in\s+the\s+past|used\s+to)\b[^.!?\n]{0,40}?\b(?:german\s+)?(?:cock)?roach(?:es)?\b/gi;
+
+function hasAffirmativeRoachMention(text) {
+  const cleaned = String(text || '')
+    .replace(PALMETTO_BUG_RE, ' ')
+    .replace(NEGATED_ROACH_RE, ' ')
+    .replace(HISTORICAL_ROACH_RE, ' ');
+  return ROACH_RE.test(cleaned);
+}
 
 // Deterministic transcript-keyword rules, tried only after the model's own
 // exact catalog pick. Each maps to a service_key that must exist in the
@@ -54,7 +71,7 @@ const ROACH_RE = /\b(?:german\s+)?(?:cock)?roach(?:es)?\b/i;
 const KEYWORD_SERVICE_RULES = [
   {
     serviceKey: 'cockroach_control',
-    matches: (text) => ROACH_RE.test(String(text || '').replace(PALMETTO_BUG_RE, ' ')),
+    matches: hasAffirmativeRoachMention,
   },
 ];
 
@@ -150,6 +167,19 @@ function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
   return { price: null, source: null };
 }
 
+/**
+ * Whether the booking should flag create_invoice_on_complete. A priced
+ * one-time booking must bill at completion: without the flag the completion
+ * auto-invoice skips priced, self-pay, non-WaveGuard visits
+ * (GATE_AUTOINVOICE_PRICED_VISITS defaults off) and the job closes
+ * uninvoiced. Only for a one_time catalog row — a recurring service's visits
+ * bill through the recurring machinery, and a coarse legacy label's billing
+ * type is unknown, so flagging either risks double-billing.
+ */
+function callBookingInvoiceOnComplete({ price, catalogRow } = {}) {
+  return price != null && catalogRow?.billing_type === 'one_time';
+}
+
 // Real-calendar check: "2026-13-40" matches a date-shaped regex but must not
 // reach a scheduled_services insert — a rejected child INSERT inside the
 // booking transaction would roll back the confirmed primary appointment.
@@ -210,6 +240,7 @@ module.exports = {
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,
+  callBookingInvoiceOnComplete,
   sanitizeQuotedCallPrice,
   DEFAULT_FOLLOW_UP_INTERVAL_DAYS,
 };
