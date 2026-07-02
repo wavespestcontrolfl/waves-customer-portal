@@ -27,7 +27,7 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
-const { CUSTOMER_STAGES } = require('./customer-stages');
+const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
@@ -460,36 +460,25 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
           callSid,
         }),
       });
-      // Promote the customer row alongside the lead (mirrors the admin
-      // schedule-appointment route): a phone-booked account left at
-      // new_lead falls outside the canonical live-customer stages and is
-      // under-counted by every dashboard. Stage promotion only when still
-      // in a lead/churned stage; reactivation also for a deactivated or
-      // churn-stamped row already in a customer stage.
-      const customer = await inner('customers')
-        .where({ id: customerId })
-        .first('id', 'pipeline_stage', 'member_since', 'active', 'churned_at');
-      if (customer) {
-        const inCustomerStage = CUSTOMER_STAGES.includes(customer.pipeline_stage);
-        const customerUpdates = {};
-        if (!inCustomerStage) {
-          customerUpdates.pipeline_stage = 'won';
-          customerUpdates.pipeline_stage_changed_at = new Date();
-          // Conversion date: keep a former customer's real start (churned/
-          // dormant re-booking), but overwrite a lead's intake date with today.
-          customerUpdates.member_since = ['churned', 'dormant'].includes(customer.pipeline_stage)
-            ? (customer.member_since || etDateString())
-            : etDateString();
-        }
-        if (!inCustomerStage || customer.active === false || customer.churned_at) {
-          customerUpdates.active = true;
-          customerUpdates.churned_at = null;
-          customerUpdates.churn_reason = null;
-        }
-        if (Object.keys(customerUpdates).length) {
-          customerUpdates.updated_at = new Date();
-          await inner('customers').where({ id: customerId }).update(customerUpdates);
-        }
+      // Promote the customer row alongside the lead (the shared
+      // booking-promotion helper, same as the admin paths): a phone-booked
+      // account left at new_lead falls outside the canonical live-customer
+      // stages and is under-counted by every dashboard.
+      await promoteCustomerOnBooking(inner, customerId);
+      // Re-own the lead's estimates to the customer, like the canonical
+      // booking path (admin-leads → linkLeadEstimatesToCustomer): a won
+      // lead's quote left at customer_id NULL stays invisible to
+      // customer-keyed estimate flows and EstimateConverter refuses it.
+      // Deliberately INSIDE the savepoint: the helper swallows SQL errors,
+      // which leave the transaction it ran on aborted — contained here that
+      // dooms only this savepoint (conversion retries on reprocessing via
+      // the reuse paths), never the booking commit.
+      const convertedLead = await inner('leads')
+        .where({ id: leadId })
+        .first('id', 'estimate_id');
+      if (convertedLead) {
+        const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
+        await linkLeadEstimatesToCustomer({ database: inner, lead: convertedLead, customerId });
       }
       logger.info(`[call-proc] Lead ${leadId} converted to won (appointment_booked) for ${callSid}`);
       return true;
@@ -2813,12 +2802,18 @@ const CallRecordingProcessor = {
           });
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
-          // Only ever SET the customer link, never clear it. The unnamed-lead
-          // path runs with customerId null and can reuse an existing lead found
-          // by phone — writing customer_id = null there would detach a lead
-          // already linked to a customer. Attach when we have one; otherwise
-          // leave whatever link the lead already had.
-          if (customerId) leadUpdates.customer_id = customerId;
+          // Only ever SET the customer link, never clear it — and never STEAL
+          // it. The unnamed-lead path runs with customerId null and can reuse
+          // an existing lead found by phone — writing customer_id = null there
+          // would detach a lead already linked to a customer. And a
+          // phone-matched reused lead can already BELONG to another customer
+          // (shared/household numbers): overwriting that link here would
+          // pre-stamp the lead as ours and defeat the conversion helper's
+          // ownership guard, which runs later in the booking transaction.
+          // Attach only when the lead is unclaimed or already ours.
+          if (customerId && (!current?.customer_id || String(current.customer_id) === String(customerId))) {
+            leadUpdates.customer_id = customerId;
+          }
           leadUpdates.updated_at = new Date();
           await db('leads').where({ id: leadId }).update(leadUpdates);
 

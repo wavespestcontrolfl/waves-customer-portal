@@ -155,13 +155,29 @@ describe('convertCallLeadOnPhoneBooking', () => {
     // leadId can come from the phone-only existing-lead lookup, and a caller
     // phone can be shared across leads — booking one customer must never
     // steal another customer's lead. The predicate is repeated in the UPDATE
-    // so a concurrent claim between read and write can't slip through.
+    // so a concurrent claim between read and write can't slip through. The
+    // third leads chain is the post-conversion estimate-link fetch.
     const leadChains = inner._chains.filter((b) => b._table === 'leads');
-    expect(leadChains).toHaveLength(2); // read + update
-    for (const b of leadChains) {
+    expect(leadChains).toHaveLength(3);
+    for (const b of leadChains.slice(0, 2)) {
       expect(b.whereNull).toHaveBeenCalledWith('customer_id');
       expect(b.orWhere).toHaveBeenCalledWith('customer_id', 'cust-1');
     }
+  });
+
+  test("re-owns the lead's FK-linked estimate to the customer inside the savepoint", async () => {
+    const inner = makeInner({ convertible: { id: 'lead-1', estimate_id: 'est-9' } });
+    const trx = makeTrx(inner);
+
+    const converted = await convertCallLeadOnPhoneBooking(trx, ARGS);
+
+    // A won lead's quote left at customer_id NULL is invisible to
+    // customer-keyed estimate flows — the phone path owes the same
+    // linkLeadEstimatesToCustomer backfill as the admin booking path.
+    expect(converted).toBe(true);
+    const estUpdate = inner._writes.updates.find((w) => w.table === 'estimates');
+    expect(estUpdate).toBeTruthy();
+    expect(estUpdate.payload).toMatchObject({ customer_id: 'cust-1' });
   });
 
   test('update raced to zero rows → returns false, no activity row, no promotion', async () => {

@@ -2206,15 +2206,35 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // a lead first contacted on/before the customer signed up converts.
         // Single unambiguous open lead only, idempotent. Best-effort; never
         // blocks the booking.
-        try {
-          const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-          await convertLeadFromEvent({
-            source: isRecurring ? 'recurring_service_booked' : 'appointment_booked',
-            customerId,
-            enforceOriginating: true,
-          });
-        } catch (e) {
-          logger.warn(`[lead-trigger] booking conversion failed for customer=${customerId}: ${e.message}`);
+        //
+        // Gated on the quote's fate: when the booking came from a sent/viewed
+        // estimate whose auto-accept was REFUSED (manager approval,
+        // invoice-mode, converter guards — the warning path above), the deal
+        // did not close, so recording the lead as won here would contradict
+        // the quote we deliberately left unaccepted. No linked estimate or an
+        // already-/newly-accepted one converts as before.
+        const estimateRefusedAcceptance = !!(linkedEstimate
+          && linkedEstimate.status !== 'accepted'
+          && !estimateAutoAccepted);
+        if (!estimateRefusedAcceptance) {
+          try {
+            const { convertLeadFromEvent } = require('../services/lead-estimate-link');
+            const conversion = await convertLeadFromEvent({
+              source: isRecurring ? 'recurring_service_booked' : 'appointment_booked',
+              customerId,
+              enforceOriginating: true,
+            });
+            // A conversion closes the courtship — the customer row owes the
+            // same promotion every other booking path applies (stage → won,
+            // member_since, reactivation); markConverted only touches the
+            // leads row.
+            if (conversion?.converted) {
+              const { promoteCustomerOnBooking } = require('../services/customer-stages');
+              await promoteCustomerOnBooking(db, customerId);
+            }
+          } catch (e) {
+            logger.warn(`[lead-trigger] booking conversion failed for customer=${customerId}: ${e.message}`);
+          }
         }
 
         // Optional: push an in-app notification to the assigned tech's PWA queue
