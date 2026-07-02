@@ -35,6 +35,13 @@ describe("kpiTargetTone", () => {
     expect(kpiTargetTone(76, def)).toBe("bad");
   });
 
+  it("callback rate at exactly 6.0% is NOT good — the old guard was red at >= 6", () => {
+    // Regression for the 6→5.9 translation: with a target of 6 and
+    // <=-semantics, a server-rounded 6.0 would have flipped to green.
+    expect(kpiTargetTone(6, DEFAULT_KPI_TARGETS.callback_rate)).not.toBe("good");
+    expect(kpiTargetTone(5.9, DEFAULT_KPI_TARGETS.callback_rate)).toBe("good");
+  });
+
   it("lowerIsBetter flips the comparison", () => {
     const lower = { target: 30, lowerIsBetter: true, amberBandPct: 10 };
     expect(kpiTargetTone(28, lower)).toBe("good");

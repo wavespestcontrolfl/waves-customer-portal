@@ -171,6 +171,14 @@ export default function SettingsPage() {
     : "general";
   const [tab, setTab] = useState(initialTab);
 
+  // Mobile section links change ?tab= on the already-mounted page (the mobile
+  // index and the tab panel share this route/component) — sync the param into
+  // state so those taps actually switch tabs instead of leaving the prior one.
+  useEffect(() => {
+    const qp = searchParams.get("tab");
+    if (qp && VALID_TABS.includes(qp)) setTab(qp);
+  }, [searchParams]);
+
   useEffect(() => {
     Promise.all([
       fetch(`${API_BASE}/health`).then((r) => r.json()),
@@ -886,7 +894,9 @@ function KpiTargetsSettingsTab({ canAdmin }) {
   const [rows, setRows] = useState(null); // { [metric]: stored row }
   const [dirty, setDirty] = useState({}); // { [metric]: { target?, amberBandPct?, lowerIsBetter? } }
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  // { text, error } — an explicit flag, not a substring heuristic, so server
+  // validation rejections can never render green as if the save succeeded.
+  const [message, setMessage] = useState(null);
 
   useEffect(() => {
     adminFetch("/admin/kpi-targets")
@@ -902,7 +912,7 @@ function KpiTargetsSettingsTab({ canAdmin }) {
         for (const row of data.targets) byMetric[row.metric] = row;
         setRows(byMetric);
       })
-      .catch((err) => setMessage(err.message || "Could not load KPI targets."));
+      .catch((err) => setMessage({ text: err.message || "Could not load KPI targets.", error: true }));
   }, []);
 
   // Stored row, overlaid by unsaved edits, falling back to the tile default.
@@ -925,7 +935,7 @@ function KpiTargetsSettingsTab({ canAdmin }) {
       const blank = e.target == null || (typeof e.target === "string" && e.target.trim() === "");
       const target = Number(e.target);
       if (blank || !Number.isFinite(target)) {
-        setMessage(`Enter a numeric target for "${KPI_METRIC_LABELS[metric] || metric}" (or discard the edit).`);
+        setMessage({ text: `Enter a numeric target for "${KPI_METRIC_LABELS[metric] || metric}" (or discard the edit).`, error: true });
         return;
       }
       targets.push({
@@ -936,11 +946,11 @@ function KpiTargetsSettingsTab({ canAdmin }) {
       });
     }
     if (!targets.length) {
-      setMessage("Nothing to save yet — edit a target first.");
+      setMessage({ text: "Nothing to save yet — edit a target first.", error: true });
       return;
     }
     setSaving(true);
-    setMessage("");
+    setMessage(null);
     try {
       const result = await adminFetch("/admin/kpi-targets", {
         method: "PUT",
@@ -953,9 +963,9 @@ function KpiTargetsSettingsTab({ canAdmin }) {
         return next;
       });
       setDirty({});
-      setMessage(`Saved ${targets.length} target${targets.length === 1 ? "" : "s"}. Dashboard tiles pick this up on their next refresh.`);
+      setMessage({ text: `Saved ${targets.length} target${targets.length === 1 ? "" : "s"}. Dashboard tiles pick this up on their next refresh.`, error: false });
     } catch (err) {
-      setMessage(err.message || "Could not save KPI targets.");
+      setMessage({ text: err.message || "Could not save KPI targets.", error: true });
     } finally {
       setSaving(false);
     }
@@ -967,8 +977,8 @@ function KpiTargetsSettingsTab({ canAdmin }) {
   if (!rows) {
     return (
       <Card>
-        <div style={{ color: message ? D.red : D.muted, fontSize: 13 }}>
-          {message || "Loading KPI targets..."}
+        <div style={{ color: message?.error ? D.red : D.muted, fontSize: 13 }}>
+          {message?.text || "Loading KPI targets..."}
         </div>
       </Card>
     );
@@ -1008,8 +1018,8 @@ function KpiTargetsSettingsTab({ canAdmin }) {
           )}
         </div>
         {message && (
-          <div style={{ marginTop: 12, fontSize: 12, color: /Could not|Enter a numeric/.test(message) ? D.red : D.green }}>
-            {message}
+          <div style={{ marginTop: 12, fontSize: 12, color: message.error ? D.red : D.green }}>
+            {message.text}
           </div>
         )}
       </Card>

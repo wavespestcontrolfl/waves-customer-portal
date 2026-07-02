@@ -19,7 +19,10 @@
 const SEED_TARGETS = [
   // [metric, target, lower_is_better, amber_band_pct]
   ['completion_rate', 85, false, 10],
-  ['callback_rate', 6, true, 10],
+  // The old tile guard was red AT >= 6 (good requires < 6); the value is
+  // rounded to one decimal, so 5.9 is the highest good value — seeding 6
+  // with <=-semantics would flip exactly-6.0% to green.
+  ['callback_rate', 5.9, true, 10],
   ['lead_conversion', 20, false, 10],
   ['response_speed_min', 60, true, 10],
   ['gross_margin', 40, false, 10],

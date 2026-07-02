@@ -71,10 +71,26 @@ describe("KpiTile target-store integration", () => {
         chart={{ kind: "gauge", value: 40, max: 100 }}
       />,
     );
-    // 40 < target 70 would be red — but n=2 is noise, not a verdict.
+    // 40 < target 70 would be red — but n=2 is noise, not a verdict. The
+    // ring must stay neutral too: the target is withheld from it, so a few
+    // favorable samples can't paint a green "meets target" either.
     expect(container.innerHTML).not.toContain("#C8312F");
+    expect(container.innerHTML).not.toContain("#10B981");
     expect(container.firstChild.className).toContain("opacity-70");
     expect(screen.getByText(/n=2 — low sample/)).toBeInTheDocument();
+  });
+
+  it("a MET target shows green on the number for tiles with no ring/bar to carry it", () => {
+    render(
+      <KpiTile
+        label="Revenue / Job"
+        metricKey="revenue_per_job"
+        metricValue={130}
+        targets={{ revenue_per_job: { target: 100, lowerIsBetter: false, amberBandPct: 10 } }}
+        value="$130.00"
+      />,
+    );
+    expect(screen.getByText("$130.00").className).toContain("text-emerald-600");
   });
 
   it("keeps the caller-passed alert for tiles without a resolvable target", () => {

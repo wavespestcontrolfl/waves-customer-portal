@@ -66,8 +66,13 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
     </>
   ) : sub;
   // The store's target/direction override the JSX chart's (the JSX values are
-  // only the pre-store fallbacks, kept in DEFAULT_KPI_TARGETS).
-  const chartTarget = targetDef?.target != null ? Number(targetDef.target) : chart?.target;
+  // only the pre-store fallbacks, kept in DEFAULT_KPI_TARGETS). While the
+  // sample is too small for a verdict, the target is withheld from the chart
+  // too — otherwise KpiRing/KpiBullet would recompute a green "meets target"
+  // from 1-4 favorable samples right next to the "low sample" note.
+  const chartTarget = lowConfidence
+    ? null
+    : targetDef?.target != null ? Number(targetDef.target) : chart?.target;
   const chartLower = targetDef ? !!targetDef.lowerIsBetter : chart?.lowerIsBetter;
 
   // Gauge tiles let the ring BE the value (number in the center), with the
@@ -101,11 +106,18 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
     <div className={cn("bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3", lowConfidence && "opacity-70")}>
       <div className="u-label text-ink-secondary">{label}</div>
       {/* Diverging/no-chart tiles have no ring or bar to carry the tone, so
-          the number itself shows the amber near-miss (red stays alert-only). */}
+          the number itself shows the full red/amber/green verdict (red stays
+          alert-only; untargeted tiles keep the neutral zinc). */}
       <div
         className={cn(
           "u-nums text-22 font-medium tracking-tight mt-2 leading-none",
-          alertResolved ? "text-alert-fg" : warn ? "text-amber-600" : "text-zinc-900",
+          alertResolved
+            ? "text-alert-fg"
+            : warn
+              ? "text-amber-600"
+              : tone === "good"
+                ? "text-emerald-600"
+                : "text-zinc-900",
         )}
       >
         {value}

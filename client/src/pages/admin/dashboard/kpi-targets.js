@@ -8,7 +8,10 @@
 // same keys the kpi-history sparkline series use.
 export const DEFAULT_KPI_TARGETS = {
   completion_rate: { target: 85, lowerIsBetter: false, amberBandPct: 10 },
-  callback_rate: { target: 6, lowerIsBetter: true, amberBandPct: 10 },
+  // The old guard was red AT >= 6, i.e. good requires < 6. The tile value is
+  // server-rounded to one decimal, so 5.9 is the highest value that was good
+  // — a target of 6 with <=-semantics would flip exactly-6.0 to green.
+  callback_rate: { target: 5.9, lowerIsBetter: true, amberBandPct: 10 },
   lead_conversion: { target: 20, lowerIsBetter: false, amberBandPct: 10 },
   response_speed_min: { target: 60, lowerIsBetter: true, amberBandPct: 10 },
   gross_margin: { target: 40, lowerIsBetter: false, amberBandPct: 10 },
