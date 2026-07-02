@@ -29,10 +29,16 @@ function getThresholdDays() {
 // Set-based UPDATE for stale `new` leads. `qb` is the knex instance or an
 // open transaction; the caller awaits the returned builder. Exported so
 // tests can compile it to SQL and pin the WHERE semantics.
-function buildStaleLeadUpdate(qb, { now, cutoff }) {
+// `excludeSoftDeleted` is passed by the caller only when leads.deleted_at
+// exists (the soft-delete lane ships separately) — a removed lead must not
+// be flipped or have activity written on it.
+function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
   return qb('leads')
     .where('leads.status', 'new')
     .where('leads.created_at', '<=', cutoff)
+    .modify((builder) => {
+      if (excludeSoftDeleted) builder.whereNull('leads.deleted_at');
+    })
     // A scheduled future callback means the lead is being worked.
     .where(function () {
       this.whereNull('leads.next_follow_up_at')
@@ -65,10 +71,15 @@ async function runLeadStalenessSweep() {
   const now = new Date();
   const cutoff = new Date(now.getTime() - thresholdDays * 24 * 60 * 60 * 1000);
 
+  // Column-gated so the sweep is correct on either side of the leads
+  // soft-delete migration (separate lane): once deleted_at exists, removed
+  // leads are excluded; before it lands, the condition would 500 the query.
+  const excludeSoftDeleted = await db.schema.hasColumn('leads', 'deleted_at').catch(() => false);
+
   // One UPDATE + one batched activity INSERT inside a transaction, so a
   // failed insert rolls the flips back and the next run retries cleanly.
   const marked = await db.transaction(async (trx) => {
-    const flipped = await buildStaleLeadUpdate(trx, { now, cutoff });
+    const flipped = await buildStaleLeadUpdate(trx, { now, cutoff, excludeSoftDeleted });
 
     if (flipped.length) {
       await trx('lead_activities').insert(flipped.map(({ id }) => ({

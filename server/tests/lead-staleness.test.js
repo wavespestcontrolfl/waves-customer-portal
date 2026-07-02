@@ -10,6 +10,8 @@
  *   - next_follow_up_at NULL or past (future callback skips)
  *   - NOT EXISTS scheduled_services for the linked customer (booked
  *     customer skips — pending won-conversion, not unresponsive)
+ *   - deleted_at IS NULL, gated on the column existing (the leads
+ *     soft-delete lane ships separately; either merge order must work)
  * Effects (activity rows, summary counts, env off switch) are covered with
  * the chain-mock style used by the other sweep tests.
  */
@@ -34,6 +36,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function makeUpdateChain(result) {
   const chain = {};
   chain.where = jest.fn(() => chain);
+  chain.whereNull = jest.fn(() => chain);
+  chain.modify = jest.fn((cb) => { cb(chain); return chain; });
   chain.whereNotExists = jest.fn(() => chain);
   chain.update = jest.fn(() => chain);
   chain.returning = jest.fn(() => chain);
@@ -41,7 +45,7 @@ function makeUpdateChain(result) {
   return chain;
 }
 
-function installDb({ flipped = [] } = {}) {
+function installDb({ flipped = [], hasDeletedAt = false } = {}) {
   const leadsChain = makeUpdateChain(flipped);
   const activityInsert = jest.fn(async () => {});
   const trx = jest.fn((table) => {
@@ -50,6 +54,7 @@ function installDb({ flipped = [] } = {}) {
     throw new Error(`unexpected table ${table}`);
   });
   mockDb.transaction = jest.fn(async (cb) => cb(trx));
+  mockDb.schema = { hasColumn: jest.fn(async () => hasDeletedAt) };
   return { leadsChain, activityInsert, trx };
 }
 
@@ -106,6 +111,16 @@ describe('lead staleness sweep', () => {
         + 'returning "id"'
       );
       expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff]);
+
+      return knex.destroy();
+    });
+
+    test('excludeSoftDeleted adds deleted_at IS NULL', () => {
+      const knex = require('knex')({ client: 'pg' });
+      const cutoff = new Date(NOW.getTime() - 21 * DAY_MS);
+      const { sql } = buildStaleLeadUpdate(knex, { now: NOW, cutoff, excludeSoftDeleted: true }).toSQL();
+
+      expect(sql).toContain('"leads"."deleted_at" is null');
 
       return knex.destroy();
     });
@@ -166,6 +181,23 @@ describe('lead staleness sweep', () => {
           description: 'Auto-marked unresponsive after 30 days with no contact',
         }),
       ]);
+    });
+
+    test('deleted_at column absent (pre-soft-delete-migration): no whereNull', async () => {
+      const { leadsChain } = installDb({ flipped: [] });
+
+      await runLeadStalenessSweep();
+
+      expect(mockDb.schema.hasColumn).toHaveBeenCalledWith('leads', 'deleted_at');
+      expect(leadsChain.whereNull).not.toHaveBeenCalledWith('leads.deleted_at');
+    });
+
+    test('deleted_at column present: soft-deleted leads are excluded', async () => {
+      const { leadsChain } = installDb({ flipped: [], hasDeletedAt: true });
+
+      await runLeadStalenessSweep();
+
+      expect(leadsChain.whereNull).toHaveBeenCalledWith('leads.deleted_at');
     });
 
     test('no eligible leads: no activity insert, marked 0', async () => {
