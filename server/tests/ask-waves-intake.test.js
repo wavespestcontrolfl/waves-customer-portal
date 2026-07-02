@@ -52,6 +52,11 @@ describe('scrubPriceTalk — the no-price invariant', () => {
     'Unos cuarenta y cinco dólares.',
     'Alrededor de 300 pesos.',
     'Sale como 60 al mes.',
+    // word-number + cadence, no currency word (Codex round 3 P1)
+    'Usually forty five per month for a home your size.',
+    'Somewhere around ninety-nine per year.',
+    'Como cuarenta al mes.',
+    'Serían treinta y cinco por visita.',
   ])('replaces a reply containing a price: %s', (reply) => {
     const out = scrubPriceTalk({ ...base, reply });
     expect(out.reply).not.toMatch(PRICE_TALK_RE);
@@ -187,6 +192,31 @@ describe('processIntakeMessage provider ladder', () => {
     expect(out).toEqual(SUPPORT_FALLBACK_RESULT);
     expect(out.intent).toBe('existing_customer');
     expect(out.ready_for_quote).toBe(false);
+  });
+
+  test('emergency in a PRIOR turn still gets the emergency fallback on a follow-up', async () => {
+    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
+    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+    const out = await processIntakeMessage({
+      message: 'what should I do now?',
+      history: [
+        { role: 'user', content: "my child was stung and can't breathe" },
+        { role: 'assistant', content: 'Please call 911 right away.' },
+      ],
+    });
+    expect(out).toEqual(EMERGENCY_FALLBACK_RESULT);
+  });
+
+  test('assistant turns in history do not poison the fallback guard', async () => {
+    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
+    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+    const out = await processIntakeMessage({
+      message: 'ants in my kitchen',
+      history: [
+        { role: 'assistant', content: 'If anyone has an allergic reaction, call 911.' },
+      ],
+    });
+    expect(out).toEqual(FALLBACK_RESULT);
   });
 
   test('live returns unusable JSON (no reply) → falls through the ladder', async () => {

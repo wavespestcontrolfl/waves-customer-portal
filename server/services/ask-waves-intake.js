@@ -60,12 +60,17 @@ const HISTORY_TURN_MAX_LEN = 600;
 // negative leaks a model-invented price — err toward matching.
 const NUM_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|few|couple)';
 const NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti\\w+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|mil|pocos)';
+// An "amount" is digits OR spelled-out number words — the SAME alternation
+// feeds both the currency branches and the per-cadence branches, so "forty
+// five per month" / "cuarenta al mes" scrub exactly like "45 per month".
+const EN_AMOUNT = `(?:\\d+(?:\\.\\d+)?|a|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NUM_WORD})*)`;
+const ES_AMOUNT = `(?:\\d+(?:\\.\\d+)?|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES})*)`;
 const PRICE_TALK_RE = new RegExp(
   '\\$\\s*\\d' // $45, $ 100
-  + `|\\b(?:\\d+|a|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NUM_WORD})*)\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks
-  + `|\\b(?:\\d+|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES})*)\\s+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, cuarenta y cinco dólares
-  + '|\\b\\d+(?:\\.\\d+)?\\s*(?:\\/|per\\s+)(?:mo\\b|month|visit|treatment|application|year|yr\\b)' // 45/mo, 45 per visit
-  + '|\\b\\d+(?:\\.\\d+)?\\s*(?:al|por)\\s+(?:mes|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b', // 45 al mes, 45 por visita
+  + `|\\b${EN_AMOUNT}\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks
+  + `|\\b${ES_AMOUNT}\\s+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, cuarenta y cinco dólares
+  + `|\\b${EN_AMOUNT}\\s*(?:\\/|per\\s+)(?:mo\\b|month|visit|treatment|application|year|yr\\b)` // 45/mo, forty five per month
+  + `|\\b${ES_AMOUNT}\\s+(?:al|por)\\s+(?:mes|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b`, // 45 al mes, cuarenta al mes
   'i',
 );
 const PRICE_REDIRECT_REPLY = `Exact pricing comes straight from your property details — square footage, lot size, the works — so I never have to guess. Tap "Get my price" and I'll pull your real number in about 20 seconds, or call us at ${COMPANY.phone}.`;
@@ -264,8 +269,17 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
 
   if (!result) {
     logger.warn('[ask-waves] both providers missed; serving deterministic fallback');
-    result = looksLikeEmergency(message) ? { ...EMERGENCY_FALLBACK_RESULT }
-      : SUPPORT_RE.test(String(message || '')) ? { ...SUPPORT_FALLBACK_RESULT }
+    // Guard over the whole visitor side of the transcript, not just the last
+    // turn — history "my child was stung and can't breathe" followed by "what
+    // should I do now?" must still get the emergency answer. History is
+    // untrusted client input, but using it here can only make the fallback
+    // MORE cautious, never less.
+    const guardText = [
+      ...sanitizeHistory(history).filter((t) => t.role === 'user').map((t) => t.content),
+      cleanText(message, MESSAGE_MAX_LEN),
+    ].join('\n');
+    result = looksLikeEmergency(guardText) ? { ...EMERGENCY_FALLBACK_RESULT }
+      : SUPPORT_RE.test(guardText) ? { ...SUPPORT_FALLBACK_RESULT }
         : { ...FALLBACK_RESULT };
   }
 
