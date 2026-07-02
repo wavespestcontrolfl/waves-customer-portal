@@ -1391,7 +1391,7 @@ function manualDiscountMonthlyAmount(manualDiscount) {
   return Number.isFinite(amount) && amount > 0 ? Math.round((amount / 12) * 100) / 100 : 0;
 }
 
-function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier }) {
+export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier }) {
   if (!combined) return null;
   const quoteRequired = selectedFrequency?.quoteRequired === true;
   const quoteReason = quoteRequired ? quoteRequiredReasonText(selectedFrequency || combined) : '';
@@ -1401,6 +1401,27 @@ function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier
     ? combined.manualDiscount
     : null;
   const manualDiscountMonthly = manualDiscountMonthlyAmount(manualDiscount);
+  // Narrow low-confidence commercial estimate: range the combined recurring total
+  // on its aggregate low-confidence share (mirrors PriceCard). The uncertain LOW
+  // dollars are FIXED while the exact part moves with the selected cadence, so
+  // derive the fraction from the server's raw lowConfidenceMonthly against the
+  // SELECTED monthly (band = LOW × pct at every selection); the stamped
+  // default-subtotal fraction is only a fallback for older payloads.
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const lowConfidencePct = quoteRequired ? 0 : Number(selectedFrequency?.lowConfidenceRangePct ?? combined.lowConfidenceRangePct) || 0;
+  const rawFraction = Number(selectedFrequency?.lowConfidenceFraction ?? combined.lowConfidenceFraction);
+  const stampedFraction = Number.isFinite(rawFraction) && rawFraction > 0 ? Math.min(rawFraction, 1) : 1;
+  const rawLowMonthly = Number(selectedFrequency?.lowConfidenceMonthly ?? combined.lowConfidenceMonthly);
+  const lowConfidenceFraction = Number.isFinite(rawLowMonthly) && rawLowMonthly > 0 && Number(monthly) > 0
+    ? Math.min(rawLowMonthly / Number(monthly), 1)
+    : stampedFraction;
+  const showLowConfidenceRange = lowConfidencePct > 0 && monthly != null && monthly > 0;
+  const monthlyBand = showLowConfidenceRange ? monthly * lowConfidenceFraction * lowConfidencePct : 0;
+  const rangeLow = showLowConfidenceRange ? round2(monthly - monthlyBand) : null;
+  const rangeHigh = showLowConfidenceRange ? round2(monthly + monthlyBand) : null;
+  const annualBand = showLowConfidenceRange && annual ? Number(annual) * lowConfidenceFraction * lowConfidencePct : 0;
+  const annualRangeLow = showLowConfidenceRange && annual ? round2(Number(annual) - annualBand) : null;
+  const annualRangeHigh = showLowConfidenceRange && annual ? round2(Number(annual) + annualBand) : null;
   return (
     <section style={{
       background: COLORS.white,
@@ -1435,17 +1456,28 @@ function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier
         <div style={{ textAlign: 'right' }}>
           <div style={{
             fontFamily: FONTS.serif,
-            fontSize: quoteRequired ? 34 : 46,
+            fontSize: quoteRequired ? 34 : showLowConfidenceRange ? 34 : 46,
             lineHeight: 1,
             color: ESTIMATE_TEXT,
             fontWeight: 500,
           }}>
-            {quoteRequired ? 'Quote required' : fmtMoney(monthly)}
+            {quoteRequired
+              ? 'Quote required'
+              : showLowConfidenceRange
+              ? `${fmtMoney(rangeLow)}–${fmtMoney(rangeHigh)}`
+              : fmtMoney(monthly)}
             {!quoteRequired ? <span style={{ fontFamily: FONT_BODY, fontSize: 20, color: ESTIMATE_MUTED }}> /mo</span> : null}
           </div>
           {!quoteRequired && annual ? (
             <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8 }}>
-              {fmtMoney(annual)} / year
+              {showLowConfidenceRange
+                ? `${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`
+                : `${fmtMoney(annual)} / year`}
+            </div>
+          ) : null}
+          {showLowConfidenceRange ? (
+            <div style={{ fontSize: 13, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5, maxWidth: 320 }}>
+              Estimated range — we confirm your exact price with a quick site visit.
             </div>
           ) : null}
           {quoteRequired && quoteReason ? (
@@ -1765,30 +1797,44 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
   );
 }
 
-function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, serviceMode, depositNote }) {
+export function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
-  const paymentLabel = invoiceMode
-    ? 'Invoice due now'
-    : recurringPayPerApplication
-      ? 'Pay per application'
-      : paymentPreference === 'prepay_annual'
-        ? 'Pay the 12-month plan in full'
-        : 'Pay at the visit';
-  const confirmLabel = usingExistingAppointment
-    ? recurringPayPerApplication
-      ? 'Confirm invoice'
-      : paymentPreference === 'prepay_annual'
-        ? 'Confirm annual prepay'
-        : 'Confirm appointment'
-    : 'Confirm booking';
-  const confirmSub = usingExistingAppointment
-    ? recurringPayPerApplication
-      ? 'Your existing appointment stays scheduled. Next step creates your invoice and makes secure payment available.'
-      : paymentPreference === 'prepay_annual'
-        ? 'Your existing appointment stays scheduled. Annual prepay invoice is available for optional payment after confirmation.'
-        : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
-    : '';
+  // A held (site-confirmation) recurring accept mints NO invoice whatever the
+  // billing mode — the account manager confirms the exact price on site, then
+  // the first invoice follows — so the generic "due now / creates your invoice"
+  // copy would promise a payment step that never happens. Mirrors
+  // PaymentPreferenceButtons' heldRecurring gate (NOT invoice-gated).
+  const heldForSiteConfirmation = siteConfirmationHold && serviceMode !== 'one_time';
+  const paymentLabel = heldForSiteConfirmation
+    ? 'No payment now — price confirmed on site'
+    : invoiceMode
+      ? 'Invoice due now'
+      : recurringPayPerApplication
+        ? 'Pay per application'
+        : paymentPreference === 'prepay_annual'
+          ? 'Pay the 12-month plan in full'
+          : 'Pay at the visit';
+  const confirmLabel = heldForSiteConfirmation
+    ? (usingExistingAppointment ? 'Confirm approval' : 'Approve estimate')
+    : usingExistingAppointment
+      ? recurringPayPerApplication
+        ? 'Confirm invoice'
+        : paymentPreference === 'prepay_annual'
+          ? 'Confirm annual prepay'
+          : 'Confirm appointment'
+      : 'Confirm booking';
+  const confirmSub = heldForSiteConfirmation
+    ? (usingExistingAppointment
+      ? 'Your existing appointment stays scheduled. No payment needed now — we confirm your exact price on a quick site visit, then send your first invoice.'
+      : 'No payment needed now. Your account manager confirms the exact price on a quick site visit, then sends your first invoice.')
+    : usingExistingAppointment
+      ? recurringPayPerApplication
+        ? 'Your existing appointment stays scheduled. Next step creates your invoice and makes secure payment available.'
+        : paymentPreference === 'prepay_annual'
+          ? 'Your existing appointment stays scheduled. Annual prepay invoice is available for optional payment after confirmation.'
+          : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
+      : '';
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 24,
@@ -1796,18 +1842,22 @@ function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRe
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-        {usingExistingAppointment ? 'Confirm invoice option' : 'Confirm your booking'}
+        {heldForSiteConfirmation
+          ? 'Confirm your approval'
+          : usingExistingAppointment ? 'Confirm invoice option' : 'Confirm your booking'}
       </div>
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
-        {usingExistingAppointment ? 'Selected invoice option: ' : 'Pay option: '}
+        {heldForSiteConfirmation ? 'Payment: ' : usingExistingAppointment ? 'Selected invoice option: ' : 'Pay option: '}
         <strong>{paymentLabel}</strong>{usingExistingAppointment ? '.' : null}
       </div>
       <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
         {usingExistingAppointment
           ? `Appointment: ${formatAppointmentLabel(existingAppointment)}`
-          : `Slot: ${slotId}`}
+          : manualScheduling
+            ? 'Scheduling: a Waves team member will reach out to set up your visit.'
+            : `Slot: ${slotId}`}
       </div>
-      {!usingExistingAppointment ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
+      {!usingExistingAppointment && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
       <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
         <button
           type="button"
@@ -1919,6 +1969,26 @@ function SuccessCard({ acceptResult }) {
     );
   }
 
+  if (nextStep === 'site_confirmation') {
+    // Narrow low-confidence commercial: approved online, but the exact price is
+    // confirmed on site before the first invoice — so no payment step here.
+    return (
+      <div style={{
+        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
+        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+        marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          You're approved — no payment needed yet.
+        </div>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
+          Your Waves account manager will confirm the exact price on a quick site visit, then send your first
+          invoice. Nothing is charged until that's done.
+        </div>
+      </div>
+    );
+  }
+
   if (nextStep === 'book_one_time') {
     return (
       <div style={{
@@ -1994,6 +2064,29 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
 
 function AcceptanceModeCard({ acceptance }) {
   if (!acceptance || acceptance.mode === 'standard_slot_pick' || acceptance.mode === 'existing_appointment') return null;
+  // Held (site-confirmation) commercial estimate: the customer approves online
+  // WITHOUT picking a slot — the accept CTA renders right below this card — so
+  // this is informational (no call-to-book), explaining who schedules the visit.
+  if (acceptance.mode === 'commercial_site_confirmation') {
+    return (
+      <div style={{
+        background: COLORS.white,
+        borderRadius: 16,
+        padding: 24,
+        border: `1px solid ${ESTIMATE_BORDER}`,
+        marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+          Approve online — we handle the scheduling.
+        </div>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+          No appointment to pick here: after you approve, a Waves team member reaches out to
+          schedule your commercial service, and your account manager confirms the exact price
+          on a quick site visit before your first invoice.
+        </div>
+      </div>
+    );
+  }
   const title = acceptance.mode === 'quote_required'
     ? 'This treatment needs a custom quote.'
     : 'Waves will help schedule this estimate.';
@@ -2171,6 +2264,11 @@ export default function EstimateViewPage() {
   const services = useMemo(() => pricingServices(data?.pricing), [data]);
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
   const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
+  // Held (site-confirmation) commercial estimate with no linked appointment:
+  // no self-servable slots exist (the slots endpoints return the empty
+  // commercial-manual list), so the accept CTA renders WITHOUT a slot pick —
+  // the team schedules after approval.
+  const manualScheduleAccept = acceptance.mode === 'commercial_site_confirmation';
   const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
   // Per-service cadence (bundles): the precomputed combo matching every section's
   // independent selection, plus the non-pest selection map sent on accept.
@@ -2358,6 +2456,19 @@ export default function EstimateViewPage() {
       setError(null);
       return;
     }
+    if (manualScheduleAccept && serviceMode !== 'one_time') {
+      // Held commercial accept: no slot to reserve — the team schedules after
+      // approval. The sentinel keeps the review phase rendered (it's gated on
+      // a truthy reservation) and tells ReviewPhase to show the manual-
+      // scheduling line instead of a slot + countdown. Recurring only: the
+      // one-time toggle is hidden for this mode (a one-time card-hold/deposit
+      // accept requires a booked appointment that can't exist here).
+      setPaymentPreference(pref);
+      setReservation({ manualScheduling: true });
+      setCtaPhase('review');
+      setError(null);
+      return;
+    }
     if (!selectedSlotId) return;
     const attemptId = reserveAttemptRef.current + 1;
     reserveAttemptRef.current = attemptId;
@@ -2409,7 +2520,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [existingAppointment, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
+  }, [existingAppointment, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -2548,7 +2659,13 @@ export default function EstimateViewPage() {
       }
     }
     const depositPolicy = data?.depositPolicy;
-    if (depositPolicy?.required && paymentPreference !== 'prepay_annual' && !depositPaymentIntentIdRef.current) {
+    // requiredForOneTime: a site-confirmation-held estimate zeroes `required`
+    // (its recurring accept collects nothing) but a one-time switch still owes
+    // that mode's deposit — keep consulting /deposit-intent, which re-resolves
+    // per mode and 409-exempts when nothing is owed.
+    const depositRequired = depositPolicy?.required
+      || (serviceMode === 'one_time' && depositPolicy?.requiredForOneTime);
+    if (depositRequired && paymentPreference !== 'prepay_annual' && !depositPaymentIntentIdRef.current) {
       setCtaPhase('submitting');
       setError(null);
       try {
@@ -2876,6 +2993,7 @@ export default function EstimateViewPage() {
                 setupFee={pricing.setupFee || null}
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
                 invoiceMode={!!estimate.billByInvoice}
+                siteConfirmationHold={!!estimate.siteConfirmationHold}
                 selectedFrequency={combinedFrequency}
                 cardHold={data?.cardHoldPolicy || null}
               />
@@ -2889,10 +3007,12 @@ export default function EstimateViewPage() {
             onConfirm={handleConfirm}
             onCancel={handleReviewCancel}
             invoiceMode={!!estimate.billByInvoice}
+            siteConfirmationHold={!!estimate.siteConfirmationHold}
+            manualScheduling={!!reservation?.manualScheduling}
             serviceMode={serviceMode}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
               ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
-              : (data?.depositPolicy?.required && paymentPreference !== 'prepay_annual'
+              : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime)) && paymentPreference !== 'prepay_annual'
                 ? `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`
                 : null)}
           />
@@ -2917,8 +3037,12 @@ export default function EstimateViewPage() {
           {/* One-time mode toggle — only rendered when admin opted this
               estimate into the one-time option AND there's a non-zero
               one-time price to offer. Default mode is 'recurring' so
-              estimates without the flag behave identically to before. */}
-          {!estimate.isOneTimeOnly && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
+              estimates without the flag behave identically to before.
+              Hidden for the no-slot (site-confirmation) commercial mode: its
+              ranged price is a recurring concept, and a one-time accept there
+              dead-ends — no slots exist, and the one-time card-hold/deposit
+              gates require a booked appointment the customer can't pick. */}
+          {!estimate.isOneTimeOnly && !manualScheduleAccept && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
@@ -2962,7 +3086,7 @@ export default function EstimateViewPage() {
             <ExistingAppointmentCard appointment={existingAppointment} />
           ) : null}
 
-          {(existingAppointment || (canShowSlotPicker && selectedSlotId)) ? (
+          {(existingAppointment || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
             <PaymentPreferenceButtons
               onSelect={handlePaymentChoice}
               disabled={ctaPhase === 'submitting'}
@@ -2970,6 +3094,7 @@ export default function EstimateViewPage() {
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
+              siteConfirmationHold={!!estimate.siteConfirmationHold}
               selectedFrequency={combinedFrequency}
               cardHold={data?.cardHoldPolicy || null}
             />
