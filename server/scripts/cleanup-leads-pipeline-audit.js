@@ -36,6 +36,9 @@
  *   node server/scripts/cleanup-leads-pipeline-audit.js             # dry-run
  *   node server/scripts/cleanup-leads-pipeline-audit.js --commit    # apply
  *   node server/scripts/cleanup-leads-pipeline-audit.js --limit=50  # cap per part
+ *   --junk-domains=a.com,b.com   # extra junk relay domains for Part B
+ *                                # (retired-tool domains are passed here at
+ *                                # run time, never committed to the repo)
  */
 require('dotenv').config();
 const db = require('../models/db');
@@ -59,7 +62,14 @@ const NON_EVIDENCE_VISIT_STATUSES = ['cancelled', 'rescheduled'];
 
 // Junk contact-email matchers — aligned with the email-lead-guards lane
 // (LEAD_HARD_SKIP_SENDERS + AUTOMATED_SENDER_LOCAL_PARTS/RELAY usage).
-const JUNK_EMAIL_DOMAINS = ['twimlets.com', 'messaging.squareup.com'];
+// Retired-tool domains (e.g. the phased-out payment processor's messaging
+// domain) are deliberately NOT committed here — pass them at run time:
+//   --junk-domains=example-relay.com,other.com
+const junkDomainsArg = process.argv.find((a) => a.startsWith('--junk-domains='));
+const EXTRA_JUNK_DOMAINS = junkDomainsArg
+  ? junkDomainsArg.split('=')[1].split(',').map((d) => d.trim().toLowerCase()).filter(Boolean)
+  : [];
+const JUNK_EMAIL_DOMAINS = ['twimlets.com', ...EXTRA_JUNK_DOMAINS];
 const JUNK_EMAIL_EXACT = ['do-not-reply@thumbtack.com'];
 const JUNK_LOCAL_PARTS = ['do-not-reply', 'no-reply', 'noreply', 'donotreply', 'notifications'];
 
@@ -105,6 +115,12 @@ async function partABookedUnwon({ softDelete }) {
     .whereNull('leads.converted_at')
     .join('scheduled_services as ss', 'ss.customer_id', 'leads.customer_id')
     .whereNotIn('ss.status', NON_EVIDENCE_VISIT_STATUSES)
+    // Evidence must postdate the lead: an existing customer's OLD services
+    // must not "win" a NEW inquiry lead (and backdating converted_at to a
+    // pre-lead booking would corrupt attribution). 1-day grace covers the
+    // call-processing flow where the booking row can precede the lead row
+    // inside one processing run.
+    .whereRaw("ss.created_at >= COALESCE(leads.first_contact_at, leads.created_at) - interval '1 day'")
     .groupBy('leads.id', 'leads.status', 'leads.customer_id')
     .select(
       'leads.id',
@@ -193,6 +209,9 @@ async function partBJunkEmails({ softDelete }) {
 
   let applied = 0;
   for (const row of actionable) {
+    // deleted_by is deliberately not written: it stays NULL (its default) —
+    // the system actor is recorded on the activity row instead, and probing
+    // only deleted_at keeps the guard aligned with what the script writes.
     // eslint-disable-next-line no-await-in-loop
     await db.transaction(async (trx) => {
       const stamped = await trx('leads')
@@ -200,7 +219,7 @@ async function partBJunkEmails({ softDelete }) {
         .whereNull('deleted_at')
         .whereNot('status', 'won')
         .whereNull('customer_id')
-        .update({ deleted_at: new Date(), deleted_by: null, updated_at: new Date() });
+        .update({ deleted_at: new Date(), updated_at: new Date() });
       if (!stamped) return;
       await trx('lead_activities').insert({
         lead_id: row.id,
