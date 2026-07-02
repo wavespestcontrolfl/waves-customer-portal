@@ -32,6 +32,7 @@ const {
   fetchUpcomingWeekRainForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
+  TEMPLATE_ON_TRACK,
   _private,
 } = require('../services/irrigation-weekly-email');
 
@@ -101,14 +102,17 @@ describe('buildWeeklyEmailDecision', () => {
     });
   });
 
-  test('balanced week sends nothing', () => {
+  test('balanced week sends the on-track email with a right-in-line summary', () => {
     const decision = buildWeeklyEmailDecision({
       ...base,
       irrigationInchesPerWeek: 1.25,
       rainfallInches7d: 0,
     });
-    expect(decision.shouldSend).toBe(false);
+    expect(decision.shouldSend).toBe(true);
+    expect(decision.templateKey).toBe(TEMPLATE_ON_TRACK);
     expect(decision.reason).toBe('balanced');
+    expect(decision.payload.summary_line).toContain('right in line');
+    expect(decision.payload.summary_line).toContain('1.25"');
   });
 
   test('surplus WITHOUT a full rainfall window sends nothing — never quote 0" rain we do not know about', () => {
@@ -131,18 +135,23 @@ describe('buildWeeklyEmailDecision', () => {
     expect(decision.reason).toBe('unknown');
   });
 
-  test('deficit is VETOED when the forecast alone covers the weekly target', () => {
+  test('deficit is REROUTED to on-track when the forecast alone covers the weekly target', () => {
     const decision = buildWeeklyEmailDecision({
       ...base,
       irrigationInchesPerWeek: 0.25,
       rainfallInches7d: 0,
       forecastRainInches: 1.5, // ≥ the 1.25" target — don't say "add water"
     });
-    expect(decision.shouldSend).toBe(false);
+    expect(decision.shouldSend).toBe(true);
+    expect(decision.templateKey).toBe(TEMPLATE_ON_TRACK);
     expect(decision.reason).toBe('deficit_rain_forecast');
+    // The summary carries the forecast explanation; no separate forecast line.
+    expect(decision.payload.summary_line).toContain('1.5"');
+    expect(decision.payload.summary_line).toContain('has it covered');
+    expect(decision.payload.forecast_line).toBe('');
   });
 
-  test('deficit is VETOED when schedule + forecast together cover the week ahead', () => {
+  test('deficit is REROUTED to on-track when schedule + forecast together cover the week ahead', () => {
     // 0.5" scheduled irrigation keeps running; 0.8" forecast rain (alone below
     // the 1.25" target) brings the projected week to 1.3" — no longer a
     // deficit, so "add water" must not send.
@@ -152,17 +161,20 @@ describe('buildWeeklyEmailDecision', () => {
       rainfallInches7d: 0,
       forecastRainInches: 0.8,
     });
-    expect(decision.shouldSend).toBe(false);
+    expect(decision.shouldSend).toBe(true);
+    expect(decision.templateKey).toBe(TEMPLATE_ON_TRACK);
     expect(decision.reason).toBe('deficit_rain_forecast');
   });
 
-  test('deficit still sends when schedule + forecast stay short of the target, and when the forecast is unknown', () => {
-    expect(buildWeeklyEmailDecision({
+  test('deficit still says add-water when schedule + forecast stay short, and when the forecast is unknown', () => {
+    const short = buildWeeklyEmailDecision({
       ...base, irrigationInchesPerWeek: 0.25, rainfallInches7d: 0, forecastRainInches: 0.5,
-    }).shouldSend).toBe(true); // projected 0.75" vs 1.25" target — still a deficit
-    expect(buildWeeklyEmailDecision({
+    });
+    expect(short.templateKey).toBe(TEMPLATE_ADD_WATER); // projected 0.75" vs 1.25" — still a deficit
+    const noForecast = buildWeeklyEmailDecision({
       ...base, irrigationInchesPerWeek: 0.25, rainfallInches7d: 0, forecastRainInches: null,
-    }).shouldSend).toBe(true); // fail soft to last week's facts
+    });
+    expect(noForecast.templateKey).toBe(TEMPLATE_ADD_WATER); // fail soft to last week's facts
   });
 
   test('surplus is NOT forecast-vetoed — a saturated lawn should ease back regardless', () => {
@@ -314,6 +326,9 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     inserts.length = 0;
+    // clearAllMocks keeps implementations — re-pin the default send success so
+    // a mockRejectedValue from one test cannot leak into the next.
+    EmailTemplateLibrary.sendTemplate.mockImplementation(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-07-06T11:00:00Z' } }));
     // Forecast fetch fails soft → null forecast → email still sends without the line.
     global.fetch = jest.fn(async () => ({ ok: false }));
     db.mockImplementation((table) => makeBuilder(
@@ -354,16 +369,15 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(inserts.some((row) => row.interaction_type === 'email_outbound')).toBe(true);
   });
 
-  test('balanced week → nothing sends, skip is counted, and no forecast call is spent', async () => {
+  test('balanced week → the on-track email sends', async () => {
     isEnabled.mockReturnValue(true);
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.25, et0Inches: 1.6, dailyRain: [] });
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
-    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
-    expect(summary.sent).toBe(0);
-    expect(summary.skipped.balanced).toBe(1);
-    // The forecast only decorates copy — a skipped customer must not cost an
-    // Open-Meteo forecast request.
-    expect(global.fetch).not.toHaveBeenCalled();
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    const call = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+    expect(call.templateKey).toBe(TEMPLATE_ON_TRACK);
+    expect(call.payload.summary_line).toContain('right in line');
+    expect(summary.sent).toBe(1);
   });
 
   test('legacy lawn_type customer without a turf profile is scored against their real grass', async () => {
@@ -398,22 +412,28 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(audit.body).toContain('[redacted-email]');
   });
 
-  test('deficit week with a target-covering forecast → suppressed, counted, no send', async () => {
+  test('deficit week with a target-covering forecast → on-track email, not add-water', async () => {
     isEnabled.mockReturnValue(true);
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0, et0Inches: 1.6, dailyRain: [] });
-    // 7 full days summing 1.4" ≥ the 1.25" St. Augustine target.
+    // 7 full days summing 1.4"; with the 1" schedule the projected week is
+    // covered (the customer's irrigation is 1"/week vs the 1.25" target).
     global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ daily: { precipitation_sum: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2] } }) }));
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
-    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
-    expect(summary.skipped.deficit_rain_forecast).toBe(1);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    const call = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+    expect(call.templateKey).toBe(TEMPLATE_ON_TRACK);
+    expect(call.categories).toContain('deficit_rain_forecast');
+    expect(summary.sent).toBe(1);
   });
 
-  test('incomplete rainfall window → nothing sends, rain_unknown counted', async () => {
+  test('incomplete rainfall window → nothing sends, rain_unknown counted, no forecast call is spent', async () => {
     isEnabled.mockReturnValue(true);
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: null, et0Inches: null, dailyRain: null });
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     expect(summary.skipped.rain_unknown).toBe(1);
+    // A no-send customer must not cost an Open-Meteo forecast request.
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   test('template-library dedupe (re-run same week) counts as deduped, not sent', async () => {

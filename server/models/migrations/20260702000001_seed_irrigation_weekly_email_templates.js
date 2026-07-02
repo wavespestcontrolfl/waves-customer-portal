@@ -1,23 +1,31 @@
 /**
  * Seed the weekly irrigation recommendation emails (irrigation-weekly-email.js).
  *
- * Two templates — one per direction of the water balance — sent Monday morning
- * to lawn-care customers who entered a weekly irrigation-inches value in the
- * customer portal, when last week's rain + their schedule landed meaningfully
- * over or under the seasonal target for their grass:
+ * Three templates — sent Monday morning to lawn-care customers who entered a
+ * weekly irrigation-inches value in the customer portal, one per outcome of
+ * last week's water balance vs. the seasonal target for their grass:
  *   irrigation.weekly_cut_back    (surplus — ease back)
  *   irrigation.weekly_add_water   (deficit — add a little time)
+ *   irrigation.weekly_on_track    (balanced, or a light week the upcoming
+ *                                  rain forecast covers — no change needed;
+ *                                  owner directive 2026-07-02: on-target
+ *                                  customers hear "you're good" every week)
  *
  * Sent on the service_operational stream so customer email unsubscribes are
- * honored (a watering tip is not a required notice). Balanced weeks send
- * nothing — these templates only ever carry an actionable recommendation.
+ * honored (a watering tip is not a required notice). Weeks without a full
+ * trusted rainfall window send nothing — never claim numbers we don't have.
  */
 
 const SERVICE_FROM = 'contact@wavespestcontrol.com';
 
 const SHARED_VARIABLES = ['first_name', 'customer_portal_url', 'company_phone', 'company_email'];
 
-const REQUIRED = [
+// The two action templates (cut back / add water) quote the differential; the
+// on-track template instead carries a computed summary_line (its lead sentence
+// differs between a truly balanced week and a light week that incoming
+// forecast rain covers). Required variables must be referenced by the
+// template's blocks, so the lists are per-template.
+const REQUIRED_ACTION = [
   'first_name',
   'grass_label',
   'rain_last_week',
@@ -25,6 +33,15 @@ const REQUIRED = [
   'total_inches',
   'target_inches',
   'difference_inches',
+];
+const REQUIRED_ON_TRACK = [
+  'first_name',
+  'grass_label',
+  'rain_last_week',
+  'irrigation_inches',
+  'total_inches',
+  'target_inches',
+  'summary_line',
 ];
 const OPTIONAL = ['forecast_line', 'week_ending'];
 
@@ -44,6 +61,29 @@ const FOOTER_NOTE_BLOCK = {
 };
 
 const TEMPLATES = [
+  {
+    key: 'irrigation.weekly_on_track',
+    name: 'Irrigation Weekly — On Track',
+    category: 'lawn',
+    sensitivity: 'account',
+    description: 'Weekly watering check-in when no change is needed: the week was balanced, or a light week is covered by the upcoming rain forecast. The lead sentence arrives as summary_line because those two cases read differently.',
+    required: REQUIRED_ON_TRACK,
+    subject: 'Your lawn\'s watering is right on track, {{first_name}}',
+    preview: 'No changes needed this week — your current schedule has it covered.',
+    ctaLabel: 'UPDATE MY IRRIGATION INFO',
+    ctaUrlVariable: 'customer_portal_url',
+    blocks: [
+      { type: 'heading', content: 'You\'re good to go this week, {{first_name}}' },
+      { type: 'paragraph', content: '{{summary_line}}' },
+      WATER_DETAILS_BLOCK,
+      { type: 'callout', content: 'No changes needed — keep your current schedule running as-is. We check this every week and we\'ll tell you the moment something should change.' },
+      { type: 'paragraph', content: '{{forecast_line}}' },
+      { type: 'paragraph', content: 'If your sprinkler schedule has changed, take 30 seconds to update it in your portal so these check-ins stay accurate.' },
+      { type: 'cta', label: 'UPDATE MY IRRIGATION INFO', url_variable: 'customer_portal_url' },
+      FOOTER_NOTE_BLOCK,
+      { type: 'signature', content: '— The Waves Team' },
+    ],
+  },
   {
     key: 'irrigation.weekly_cut_back',
     name: 'Irrigation Weekly — Cut Back (Surplus)',
@@ -100,6 +140,7 @@ const PREVIEW_PAYLOAD = {
   total_inches: '3',
   target_inches: '1.25',
   difference_inches: '1.75',
+  summary_line: 'Between last week\'s rain (2.1") and your irrigation schedule (1"), your lawn got about 3" of water — right in line with what your St. Augustine needs this time of year.',
   forecast_line: 'Looking ahead: about 1.4" of rain is in the forecast for your area over the next 7 days — more than your lawn needs on its own, so easing back now will really pay off.',
   week_ending: '2026-06-28',
   customer_portal_url: 'https://portal.wavespestcontrol.com/?tab=property',
@@ -108,8 +149,8 @@ const PREVIEW_PAYLOAD = {
 };
 
 function templateRow(t) {
-  const allowed = [...new Set([...SHARED_VARIABLES, ...REQUIRED, ...OPTIONAL])];
-  const required = [...new Set(REQUIRED)];
+  const required = [...new Set(t.required || REQUIRED_ACTION)];
+  const allowed = [...new Set([...SHARED_VARIABLES, ...required, ...OPTIONAL])];
   const optional = allowed.filter((key) => !required.includes(key));
   return {
     template_key: t.key,
@@ -218,4 +259,4 @@ exports.down = async function down(knex) {
 };
 
 exports.TEMPLATES = TEMPLATES;
-exports.__private = { TEMPLATES, templateRow, PREVIEW_PAYLOAD, SHARED_VARIABLES, REQUIRED, OPTIONAL };
+exports.__private = { TEMPLATES, templateRow, PREVIEW_PAYLOAD, SHARED_VARIABLES, REQUIRED_ACTION, REQUIRED_ON_TRACK, OPTIONAL };

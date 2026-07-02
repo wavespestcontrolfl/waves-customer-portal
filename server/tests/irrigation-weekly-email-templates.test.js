@@ -22,6 +22,7 @@ const {
   buildWeeklyEmailDecision,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
+  TEMPLATE_ON_TRACK,
 } = require('../services/irrigation-weekly-email');
 
 const PLACEHOLDER_RE = /\{\{\s*[a-zA-Z][a-zA-Z0-9_]*\s*\}\}/;
@@ -44,8 +45,9 @@ function seedRows(key) {
 }
 
 describe('irrigation weekly email template seeds', () => {
-  test('defines both directions on the suppressible service_operational stream', () => {
+  test('defines all three outcomes on the suppressible service_operational stream', () => {
     expect(seed.__private.TEMPLATES.map((t) => t.key)).toEqual([
+      'irrigation.weekly_on_track',
       'irrigation.weekly_cut_back',
       'irrigation.weekly_add_water',
     ]);
@@ -78,16 +80,18 @@ describe('irrigation weekly email template seeds', () => {
   });
 
   test.each([
-    ['surplus', TEMPLATE_CUT_BACK, { irrigationInchesPerWeek: 1, rainfallInches7d: 2.1 }],
-    ['deficit', TEMPLATE_ADD_WATER, { irrigationInchesPerWeek: 0.25, rainfallInches7d: 0.1 }],
+    // forecast 0.5" stays below the 1.25" target so the deficit is not rerouted.
+    ['surplus', TEMPLATE_CUT_BACK, { irrigationInchesPerWeek: 1, rainfallInches7d: 2.1, forecastRainInches: 0.5 }],
+    ['deficit', TEMPLATE_ADD_WATER, { irrigationInchesPerWeek: 0.25, rainfallInches7d: 0.1, forecastRainInches: 0.5 }],
+    ['balanced', TEMPLATE_ON_TRACK, { irrigationInchesPerWeek: 1.25, rainfallInches7d: 0, forecastRainInches: 0.5 }],
+    // Light week + forecast that covers the projection → on-track variant.
+    ['deficit_rain_forecast', TEMPLATE_ON_TRACK, { irrigationInchesPerWeek: 0.5, rainfallInches7d: 0, forecastRainInches: 0.8 }],
   ])('%s payload from the sender renders %s with no unresolved placeholders', (status, key, water) => {
     const decision = buildWeeklyEmailDecision({
       firstName: 'Dana',
       grassType: 'st_augustine',
       weekEnding: '2026-07-05',
       et0Inches: 1.6,
-      // Below the 1.25" target so the deficit scenario is not forecast-vetoed.
-      forecastRainInches: 0.5,
       ...water,
     });
     expect(decision.shouldSend).toBe(true);

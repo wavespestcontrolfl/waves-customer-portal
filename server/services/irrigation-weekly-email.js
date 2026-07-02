@@ -7,13 +7,16 @@
  * irrigation-inches value in the customer portal (My Property → Irrigation).
  * Reuses the service report's water balance: last week's rainfall + reference
  * ET₀ at the customer's own lat/lng (fetchServiceWeekWeather) fed through
- * buildIrrigationAdvice. Only a clear surplus ("cut back") or deficit ("add
- * water") sends — balanced weeks and weeks with unknown rainfall send nothing,
- * so the email stays a signal, not a newsletter.
+ * buildIrrigationAdvice. Every eligible customer hears from us weekly —
+ * surplus → "cut back", deficit → "add water", balanced (or a light week the
+ * upcoming rain forecast covers) → "you're on track" (owner directive
+ * 2026-07-02). Only a week without a full trusted rainfall window sends
+ * nothing — never quote rain numbers we don't have.
  *
  * Templates (seeded by 20260702000001_seed_irrigation_weekly_email_templates.js):
  *   irrigation.weekly_cut_back
  *   irrigation.weekly_add_water
+ *   irrigation.weekly_on_track
  *
  * Sent on the service_operational stream so customer email unsubscribes are
  * honored (a watering tip is not a required notice). Cron wiring lives in
@@ -37,6 +40,7 @@ const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const SUPPRESSION_GROUP = 'service_operational';
 const TEMPLATE_CUT_BACK = 'irrigation.weekly_cut_back';
 const TEMPLATE_ADD_WATER = 'irrigation.weekly_add_water';
+const TEMPLATE_ON_TRACK = 'irrigation.weekly_on_track';
 
 // Sequential per-customer weather fetches; Open-Meteo caching in
 // application-conditions dedupes nearby customers (coords keyed at 2 decimals).
@@ -186,43 +190,64 @@ function buildWeeklyEmailDecision({
     irrigationEnabled: true,
   });
 
-  // Only a clear, actionable imbalance sends. 'rain_unknown' means we could
-  // not trust a full week of rainfall — never guess at a recommendation. A
-  // surplus CAN be reported without rainfall (irrigation alone over target),
-  // but this email quotes the week's rain number, so it too requires a full
-  // rain window — never tell a customer it rained 0" when we just don't know.
-  if ((advice.status !== 'surplus' && advice.status !== 'deficit') || !advice.rainKnown) {
+  // Every eligible customer hears from us weekly — cut back, add water, or
+  // "you're good to go" (owner directive 2026-07-02). The ONLY silent case is
+  // an untrusted rainfall window ('rain_unknown', including a surplus computed
+  // without rain): this email quotes the week's rain number, so never tell a
+  // customer it rained 0" when we just don't know.
+  const actionable = advice.status === 'surplus' || advice.status === 'deficit' || advice.status === 'balanced';
+  if (!actionable || !advice.rainKnown) {
     return { shouldSend: false, reason: advice.rainKnown ? advice.status : 'rain_unknown', advice };
   }
 
   // The instruction is for the week AHEAD. The programmed schedule keeps
   // running, so the projected week is irrigation + forecast rain: when that is
   // no longer a deficit (inside the same quarter-inch band the advice uses),
-  // "add more water" would likely be wrong by mid-week — suppress instead of
-  // instructing against a week that is already covered (forecast unavailable
-  // → fail soft to last week's facts). A surplus is NOT forecast-suppressed:
-  // after an over-watered week the soil is already saturated, so easing back
-  // stays correct whatever this week brings.
+  // "add more water" would likely be wrong by mid-week — route to the
+  // on-track email instead of instructing against a week that is already
+  // covered (forecast unavailable → fail soft to last week's facts). A
+  // surplus is NOT forecast-rerouted: after an over-watered week the soil is
+  // already saturated, so easing back stays correct whatever this week brings.
   const forecast = numberOrNull(forecastRainInches);
+  let reason = advice.status;
   if (advice.status === 'deficit' && forecast != null) {
     const projectedDifferential = (numberOrNull(irrigationInchesPerWeek) + forecast) - advice.recommendedInchesPerWeek;
-    if (projectedDifferential > -0.25) {
-      return { shouldSend: false, reason: 'deficit_rain_forecast', advice };
-    }
+    if (projectedDifferential > -0.25) reason = 'deficit_rain_forecast';
+  }
+  const templateKey = reason === 'surplus' ? TEMPLATE_CUT_BACK
+    : reason === 'deficit' ? TEMPLATE_ADD_WATER
+      : TEMPLATE_ON_TRACK; // 'balanced' and 'deficit_rain_forecast'
+
+  const differential = Math.abs(numberOrNull(advice.differentialInchesPerWeek) ?? 0);
+  const grassLabel = customerGrassLabel(grassType);
+  const rain = formatInches(rainfallInches7d);
+  const irrigationFmt = formatInches(irrigationInchesPerWeek);
+  const total = formatInches(advice.appliedInchesPerWeek);
+  const target = formatInches(advice.recommendedInchesPerWeek);
+
+  // Lead sentence for the on-track template — a truly balanced week and a
+  // light week that incoming rain covers read differently, so the copy is
+  // computed here rather than baked into the template.
+  let summaryLine = null;
+  if (reason === 'balanced') {
+    summaryLine = `Between last week's rain (${rain}") and your irrigation schedule (${irrigationFmt}" per week), your lawn got about ${total}" of water — right in line with the ${target}" your ${grassLabel} needs this time of year.`;
+  } else if (reason === 'deficit_rain_forecast') {
+    summaryLine = `Last week ran a touch light (${total}" against the ${target}" your ${grassLabel} needs), but with about ${formatInches(forecast)}" of rain in this week's forecast, your current schedule has it covered.`;
   }
 
-  const surplus = advice.status === 'surplus';
-  const differential = Math.abs(numberOrNull(advice.differentialInchesPerWeek) ?? 0);
   const payload = {
     first_name: String(firstName || '').trim() || 'there',
-    grass_label: customerGrassLabel(grassType),
+    grass_label: grassLabel,
     week_ending: weekEnding,
-    rain_last_week: formatInches(rainfallInches7d),
-    irrigation_inches: formatInches(irrigationInchesPerWeek),
-    total_inches: formatInches(advice.appliedInchesPerWeek),
-    target_inches: formatInches(advice.recommendedInchesPerWeek),
+    rain_last_week: rain,
+    irrigation_inches: irrigationFmt,
+    total_inches: total,
+    target_inches: target,
     difference_inches: formatInches(differential),
-    forecast_line: forecastLine({
+    ...(summaryLine ? { summary_line: summaryLine } : {}),
+    // The rain-covers-it case explains the forecast in its summary_line — a
+    // second forecast sentence would repeat it.
+    forecast_line: reason === 'deficit_rain_forecast' ? '' : forecastLine({
       forecastRainInches,
       status: advice.status,
       targetInches: advice.recommendedInchesPerWeek,
@@ -232,13 +257,7 @@ function buildWeeklyEmailDecision({
     company_email: CONTACT_EMAIL,
   };
 
-  return {
-    shouldSend: true,
-    templateKey: surplus ? TEMPLATE_CUT_BACK : TEMPLATE_ADD_WATER,
-    reason: advice.status,
-    advice,
-    payload,
-  };
+  return { shouldSend: true, templateKey, reason, advice, payload };
 }
 
 /**
@@ -386,7 +405,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
     sent: 0,
     deduped: 0,
     blocked: 0,
-    skipped: { balanced: 0, rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0, deficit_rain_forecast: 0 },
+    skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0 },
     failed: 0,
   };
 
@@ -429,7 +448,8 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         longitude: customer.longitude,
       });
       decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches });
-      // The forecast can veto a deficit ("add water" against incoming rain).
+      // Defensive recheck — today the forecast only reroutes a deficit to the
+      // on-track template (still a send), but a no-send here must be counted.
       if (!decision.shouldSend) {
         if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
         else summary.skipped.unknown += 1;
@@ -508,7 +528,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
   logger.info(
     `[irrigation-weekly-email] week ending ${weekEnding}: ${summary.candidates} candidate(s), `
     + `${summary.sent} sent, ${summary.deduped} deduped, ${summary.blocked} suppressed, `
-    + `${summary.skipped.balanced} balanced, ${summary.skipped.rain_unknown} rain-unknown, ${summary.failed} failed`,
+    + `${summary.skipped.rain_unknown} rain-unknown, ${summary.failed} failed`,
   );
   return summary;
 }
@@ -520,5 +540,6 @@ module.exports = {
   fetchUpcomingWeekRainForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
+  TEMPLATE_ON_TRACK,
   _private: { forecastLine, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason },
 };
