@@ -2164,6 +2164,51 @@ function AcceptanceModeCard({ acceptance }) {
   );
 }
 
+// Rendered in place of the slot picker / accept CTA when the estimate is
+// review-before-booking (cta.reviewBeforeBooking — e.g. a priced termite
+// trenching quote): NOT a terminal state. The price cards and Ask-Waves stay
+// live; only self-booking is gated — a Waves specialist confirms the plan and
+// schedules the visit. Mirrors the server-rendered page's review card.
+function ReviewBeforeBookingCard({ reason }) {
+  const isTrenching = reason === 'termite_trenching_review';
+  return (
+    <div style={{
+      background: COLORS.white,
+      borderRadius: 16,
+      padding: 24,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+        {isTrenching
+          ? 'Waves will confirm & schedule your trenching'
+          : 'Waves will confirm & schedule this service'}
+      </div>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+        {isTrenching
+          ? 'Your price is set from the measured treatment path. Because trenching drills concrete, lays a chemical soil barrier, and carries a retreat warranty, a Waves specialist confirms the plan with you — access, exact footage, product, and warranty — then schedules your visit, so it can’t be self-booked online.'
+          : 'A Waves specialist reviews this quote with you and schedules your visit — it can’t be self-booked online.'}
+      </div>
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={{
+        display: 'inline-block',
+        marginTop: 14,
+        padding: '12px 18px',
+        background: ESTIMATE_BUTTON_BG,
+        color: COLORS.white,
+        borderRadius: 10,
+        textDecoration: 'none',
+        fontSize: 14,
+        fontWeight: 700,
+      }}>
+        Call Waves to confirm — {WAVES_PHONE_DISPLAY}
+      </a>
+      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.5 }}>
+        Prefer we reach out? We’ll follow up to confirm and schedule your visit. You pay on service day; no card or deposit now.
+      </div>
+    </div>
+  );
+}
+
 export function ServiceSection({
   section,
   servicesLength = 1,
@@ -2810,6 +2855,10 @@ export default function EstimateViewPage() {
 
   const { estimate, pricing, cta } = data;
   const canAccept = cta?.canAccept === true;
+  // Review-before-booking (e.g. priced termite trenching) is NOT terminal: the
+  // price + Ask-Waves stay visible and only self-booking is gated. A genuine
+  // terminal state (accepted/declined/expired/quote_required) always wins.
+  const reviewBeforeBooking = cta?.reviewBeforeBooking === true && !cta?.terminalState;
   const showAskBar = !['accepted', 'declined', 'expired'].includes(cta?.terminalState);
   const serviceCategory = estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
   const copy = estimateCopyFor(serviceCategory);
@@ -2949,7 +2998,7 @@ export default function EstimateViewPage() {
     );
   };
 
-  if (!canAccept) {
+  if (!canAccept && !reviewBeforeBooking) {
     // An accepted estimate keeps a read-only recap of the booked services +
     // pricing below the banner (legacy parity) so the customer/bookkeeper can
     // reopen the link and see what they agreed to. Gate on a STORED accepted
@@ -3019,6 +3068,29 @@ export default function EstimateViewPage() {
       />
     </>
   );
+
+  // Review-before-booking (priced termite trenching): the price cards + Waves AI
+  // panel + Ask bar all stay visible — this is NOT quoteRequired — but the slot
+  // picker / payment CTAs are replaced by the review card, mirroring the
+  // server-rendered page. Without this branch, !canAccept fell through to
+  // TerminalStateCard's null-state default and told the customer their quote
+  // had expired.
+  if (reviewBeforeBooking) {
+    return (
+      <Page>
+        <Header
+          customerFirstName={estimate.customerFirstName}
+          address={estimate.address}
+          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
+          headline={copy.headline}
+        />
+        {renderQuoteDetailCards(true)}
+        {aiPanelBlock}
+        <ReviewBeforeBookingCard reason={cta?.reviewReason} />
+        <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
+      </Page>
+    );
+  }
 
   return (
     <Page>
