@@ -16,17 +16,35 @@ jest.mock('../sockets', () => ({
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const { clearTechCurrentJob } = require('../services/tech-status');
+const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
+
+// reschedule() rejects past target dates against the REAL clock, so fixture
+// dates must be dynamic — hardcoded ones time-bomb the suite when the
+// calendar catches up (this file died on 2026-07-01 for exactly that).
+const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), n));
+const BASE = dayOffset(10); // anchor's original date
+const TARGET = dayOffset(12); // reschedule target (+2 days)
+const SIB1 = dayOffset(17); // weekly sibling 1 (BASE + 7)
+const SIB1_SHIFTED = dayOffset(19); // sibling 1 recomputed from the new anchor (TARGET + 7)
+const SIB2 = dayOffset(24); // weekly sibling 2 (BASE + 14)
+const SIB2_SHIFTED = dayOffset(26); // sibling 2 recomputed (TARGET + 14)
 
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
     where: jest.fn(function where(arg) {
-      if (typeof arg === 'function') arg.call(builder);
+      // Grouped-where callbacks receive the builder both as `this` AND as
+      // the first arg (knex passes the sub-builder as the parameter).
+      if (typeof arg === 'function') arg.call(builder, builder);
       return builder;
     }),
     orWhere: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereNot: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
+    orWhereRaw: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn(),
@@ -47,7 +65,7 @@ function liveService(status) {
     id: 'svc-1',
     customer_id: 'cust-1',
     technician_id: 'tech-1',
-    scheduled_date: '2026-06-10',
+    scheduled_date: BASE,
     window_start: '09:00:00',
     window_end: '11:00:00',
     status,
@@ -60,6 +78,8 @@ function wireRescheduleMocks(service) {
   const updateQuery = chain({ update: jest.fn().mockResolvedValue(1) });
   const historyInsert = chain();
   const logInsert = chain();
+  // Post-commit best-effort shift of a call-created follow-up child.
+  const followupShift = chain({ update: jest.fn().mockResolvedValue(0) });
   const logCount = chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
 
   const trx = jest.fn((table) => {
@@ -70,15 +90,16 @@ function wireRescheduleMocks(service) {
   });
   trx.raw = rawFactory('trx.raw');
   db.transaction = jest.fn(async (callback) => callback(trx));
+  db.fn = { now: jest.fn(() => 'NOW()') };
 
-  const dbQueries = [serviceLookup, logCount];
+  const dbQueries = [serviceLookup, followupShift, logCount];
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') return dbQueries.shift();
     if (table === 'reschedule_log') return dbQueries.shift();
     throw new Error(`Unexpected db table ${table}`);
   });
 
-  return { updateQuery, historyInsert };
+  return { updateQuery, historyInsert, followupShift };
 }
 
 describe('live-status reschedule override (allowLive)', () => {
@@ -95,7 +116,7 @@ describe('live-status reschedule override (allowLive)', () => {
       db.mockImplementation(() => serviceLookup);
 
       await expect(SmartRebooker.reschedule(
-        'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+        'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
       )).rejects.toMatchObject({
         message: `Cannot reschedule a ${status} job`,
         statusCode: 409,
@@ -110,12 +131,12 @@ describe('live-status reschedule override (allowLive)', () => {
       const { updateQuery, historyInsert } = wireRescheduleMocks(liveService(status));
 
       await expect(SmartRebooker.reschedule(
-        'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+        'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
         { allowLive: true },
       )).resolves.toEqual({
         success: true,
-        originalDate: '2026-06-10',
-        newDate: '2026-06-12',
+        originalDate: BASE,
+        newDate: TARGET,
       });
 
       // Atomic guard widened to include the live statuses.
@@ -126,7 +147,7 @@ describe('live-status reschedule override (allowLive)', () => {
 
       const payload = updateQuery.update.mock.calls[0][0];
       expect(payload).toMatchObject({
-        scheduled_date: '2026-06-12',
+        scheduled_date: TARGET,
         status: 'confirmed',
         track_state: 'scheduled',
         en_route_at: null,
@@ -165,7 +186,7 @@ describe('live-status reschedule override (allowLive)', () => {
     const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
 
     await SmartRebooker.reschedule(
-      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'customer_request', 'admin',
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin',
       { allowLive: true },
     );
 
@@ -176,6 +197,39 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(mockIoEmit).not.toHaveBeenCalled();
   });
 
+  test('a successful reschedule delta-shifts the pending call-created follow-up child', async () => {
+    const { followupShift } = wireRescheduleMocks(liveService('confirmed'));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin',
+      { allowLive: true },
+    )).resolves.toMatchObject({ success: true });
+
+    // Narrow filter: only the call pipeline's pending, never-confirmed child.
+    expect(followupShift.where).toHaveBeenCalledWith({
+      parent_service_id: 'svc-1',
+      source_action: 'ai_call_pipeline_followup',
+      status: 'pending',
+      customer_confirmed: false,
+    });
+    // Delta math runs in SQL off the normalized original/new date strings.
+    const payload = followupShift.update.mock.calls[0][0];
+    expect(payload.scheduled_date).toMatchObject({
+      label: 'db.raw',
+      bindings: [TARGET, BASE],
+    });
+  });
+
+  test('a failed follow-up shift is swallowed — the reschedule still succeeds', async () => {
+    const { followupShift } = wireRescheduleMocks(liveService('confirmed'));
+    followupShift.update.mockRejectedValue(new Error('boom'));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin',
+      { allowLive: true },
+    )).resolves.toMatchObject({ success: true });
+  });
+
   test.each(['completed', 'cancelled', 'skipped'])(
     'allowLive never permits rescheduling a %s job',
     async (status) => {
@@ -183,7 +237,7 @@ describe('live-status reschedule override (allowLive)', () => {
       db.mockImplementation(() => serviceLookup);
 
       await expect(SmartRebooker.reschedule(
-        'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+        'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
         { allowLive: true },
       )).rejects.toMatchObject({
         message: `Cannot reschedule a ${status} job`,
@@ -197,7 +251,7 @@ describe('live-status reschedule override (allowLive)', () => {
     db.mockImplementation(() => serviceLookup);
 
     await expect(SmartRebooker.rescheduleSeries(
-      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
     )).rejects.toMatchObject({
       statusCode: 409,
       message: expect.stringContaining('reschedule this appointment only'),
@@ -245,12 +299,12 @@ describe('live-status reschedule override (allowLive)', () => {
 
   test('rescheduleSeries with allowLive moves the live anchor with a lifecycle rewind and shifts confirmed siblings', async () => {
     const { updates, historyInsert } = wireSeriesMocks('on_site', [
-      { id: 'svc-1', status: 'on_site', scheduled_date: '2026-06-10', window_start: '09:00:00', window_end: '11:00:00' },
-      { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-17', window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-1', status: 'on_site', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
     ]);
 
     const result = await SmartRebooker.rescheduleSeries(
-      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
       { allowLive: true },
     );
 
@@ -260,7 +314,7 @@ describe('live-status reschedule override (allowLive)', () => {
     // Anchor: new date + full tracker rewind back to a fresh confirmed appt.
     const anchorPayload = updates[0].update.mock.calls[0][0];
     expect(anchorPayload).toMatchObject({
-      scheduled_date: '2026-06-12',
+      scheduled_date: TARGET,
       status: 'confirmed',
       track_state: 'scheduled',
       en_route_at: null,
@@ -273,7 +327,7 @@ describe('live-status reschedule override (allowLive)', () => {
     // Sibling: cadence-shifted (weekly from the new anchor), NO rewind fields.
     const siblingPayload = updates[1].update.mock.calls[0][0];
     expect(siblingPayload).toMatchObject({
-      scheduled_date: '2026-06-19',
+      scheduled_date: SIB1_SHIFTED,
       status: 'confirmed',
     });
     expect(siblingPayload).not.toHaveProperty('track_state');
@@ -301,35 +355,35 @@ describe('live-status reschedule override (allowLive)', () => {
 
   test('rescheduleSeries with allowLive still skips a live NON-anchor sibling', async () => {
     const { updates } = wireSeriesMocks('on_site', [
-      { id: 'svc-1', status: 'on_site', scheduled_date: '2026-06-10', window_start: '09:00:00', window_end: '11:00:00' },
-      { id: 'svc-2', status: 'en_route', scheduled_date: '2026-06-17', window_start: '09:00:00', window_end: '11:00:00' },
-      { id: 'svc-3', status: 'confirmed', scheduled_date: '2026-06-24', window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-1', status: 'on_site', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'en_route', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-3', status: 'confirmed', scheduled_date: SIB2, window_start: '09:00:00', window_end: '11:00:00' },
     ]);
 
     const result = await SmartRebooker.rescheduleSeries(
-      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
       { allowLive: true },
     );
 
     // Anchor + svc-3 moved; the live svc-2 left alone (still counted for
     // cadence: svc-3 lands at the +2-week mark, not +1).
     expect(result.occurrencesRescheduled).toBe(2);
-    expect(updates[0].update.mock.calls[0][0].scheduled_date).toBe('2026-06-12');
-    expect(updates[1].update.mock.calls[0][0].scheduled_date).toBe('2026-06-26');
+    expect(updates[0].update.mock.calls[0][0].scheduled_date).toBe(TARGET);
+    expect(updates[1].update.mock.calls[0][0].scheduled_date).toBe(SIB2_SHIFTED);
     expect(updates[2].update).not.toHaveBeenCalled();
   });
 
   test('rescheduleSeries live anchor is status-guarded — a concurrent completion aborts the whole trx', async () => {
     const { updates, historyInsert } = wireSeriesMocks('on_site', [
-      { id: 'svc-1', status: 'on_site', scheduled_date: '2026-06-10', window_start: '09:00:00', window_end: '11:00:00' },
-      { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-17', window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-1', status: 'on_site', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
     ]);
     // Tech completes the job between the sibling SELECT and the UPDATE —
     // the status-guarded write matches 0 rows.
     updates[0].update.mockResolvedValue(0);
 
     await expect(SmartRebooker.rescheduleSeries(
-      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
       { allowLive: true },
     )).rejects.toMatchObject({
       statusCode: 409,
@@ -349,11 +403,11 @@ describe('live-status reschedule override (allowLive)', () => {
     // sibling SELECT — the non-terminal filter excludes it. The series
     // must not shift off startIdx 0, and no cleanup may fire.
     const { updates, historyInsert, logInsert } = wireSeriesMocks('on_site', [
-      { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-17', window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
     ]);
 
     await expect(SmartRebooker.rescheduleSeries(
-      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
       { allowLive: true },
     )).rejects.toMatchObject({
       statusCode: 409,
@@ -372,12 +426,12 @@ describe('live-status reschedule override (allowLive)', () => {
     // in the sibling set — but a no-show drop must not be revived to
     // confirmed with a tracker rewind.
     const { updates, historyInsert, logInsert } = wireSeriesMocks('on_site', [
-      { id: 'svc-1', status: 'skipped', scheduled_date: '2026-06-10', window_start: '09:00:00', window_end: '11:00:00' },
-      { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-17', window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-1', status: 'skipped', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
     ]);
 
     await expect(SmartRebooker.rescheduleSeries(
-      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
       { allowLive: true },
     )).rejects.toMatchObject({
       statusCode: 409,
@@ -397,7 +451,7 @@ describe('live-status reschedule override (allowLive)', () => {
     db.mockImplementation(() => serviceLookup);
 
     await expect(SmartRebooker.rescheduleSeries(
-      'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
       { allowLive: true },
     )).rejects.toMatchObject({
       statusCode: 409,

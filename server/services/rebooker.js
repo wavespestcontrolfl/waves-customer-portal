@@ -356,6 +356,38 @@ class SmartRebooker {
       emitCustomerJobRefresh({ ...service, ...updates, id: serviceId }, 'confirmed');
     }
 
+    // A call-created follow-up (visit 2) is anchored an interval after its
+    // parent: when the primary moves, shift the still-pending, never-
+    // confirmed child by the same delta so the package keeps its spacing.
+    // Narrow filter (source_action) leaves every other parent-linked flow
+    // untouched; best-effort outside the trx — a failed shift leaves the
+    // child where it was, and dispatch confirms follow-up dates with the
+    // customer before dispatch anyway.
+    try {
+      // scheduled_date is a pg `date` column → JS Date at LOCAL midnight;
+      // local getters recover the calendar date regardless of process TZ
+      // (binding the raw Date risks an off-by-one through the tz cast).
+      const originalDateStr = originalDate instanceof Date
+        ? `${originalDate.getFullYear()}-${String(originalDate.getMonth() + 1).padStart(2, '0')}-${String(originalDate.getDate()).padStart(2, '0')}`
+        : String(originalDate).split('T')[0];
+      const shifted = await db('scheduled_services')
+        .where({
+          parent_service_id: serviceId,
+          source_action: 'ai_call_pipeline_followup',
+          status: 'pending',
+          customer_confirmed: false,
+        })
+        .update({
+          scheduled_date: db.raw('scheduled_date + (?::date - ?::date)', [newDateStr, originalDateStr]),
+          updated_at: db.fn.now(),
+        });
+      if (shifted > 0) {
+        logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with parent ${serviceId} (${originalDateStr} -> ${newDateStr})`);
+      }
+    } catch (err) {
+      logger.error(`[rebooker] call follow-up shift failed for ${serviceId}: ${err.message}`);
+    }
+
     // Check escalation
     const count = await db('reschedule_log')
       .where({ scheduled_service_id: serviceId })
