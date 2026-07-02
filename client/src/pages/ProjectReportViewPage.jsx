@@ -831,7 +831,9 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
     ? ''
     : /depth/i.test(trenchDepthRaw)
       ? trenchDepthRaw
-      : `${valueWithUnit(trenchDepthRaw, 'ft', /\b(ft|foot|feet)\b/i)} depth`;
+      // Inch notation ("6 in", 6", "6in.") counts as already-united — the
+      // create form accepts it, so appending ft would print "6 in ft depth".
+      : `${valueWithUnit(trenchDepthRaw, 'ft', /("|\b(ft|foot|feet|inch|inches)\b|\din\b|\bin\b)/i)} depth`;
   const coverageLine = [
     valueWithUnit(f.square_footage, 'sq ft', /\b(sq\.?\s*ft|square\s*feet|sf)\b/i),
     valueWithUnit(f.linear_feet, 'linear ft', /\b(linear\s*ft|lineal\s*ft|lf)\b/i),
