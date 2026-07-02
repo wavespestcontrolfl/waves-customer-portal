@@ -27,7 +27,7 @@ const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
 const { fetchServiceWeekWeather } = require('./service-report/application-conditions');
-const { grassTypeLabel } = require('./lawn-grass-context');
+const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
@@ -45,6 +45,17 @@ const MAX_SENDS_PER_RUN = 500;
 
 function isEmailLike(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim().toLowerCase());
+}
+
+// Raw provider errors can echo the recipient address (e.g. SendGrid's
+// "...does not match a verified Sender Identity: <email>") — email addresses
+// in Railway logs are a P1. Keep the status/shape for diagnosis, redact any
+// address-looking token from anything we log or persist.
+function sanitizeFailureReason(err) {
+  const status = err?.status ? ` status=${err.status}` : '';
+  const message = String(err?.message || err || 'unknown error')
+    .replace(/[^\s@:<>()"']+@[^\s@:<>()"']+\.[^\s@:<>()"']+/g, '[redacted-email]');
+  return `${message}${status}`;
 }
 
 function numberOrNull(value) {
@@ -107,7 +118,9 @@ async function fetchUpcomingWeekRainForecast({ latitude, longitude } = {}) {
     if (!response.ok) return null;
     const payload = await response.json();
     const days = payload?.daily?.precipitation_sum;
-    if (!Array.isArray(days) || !days.length) return null;
+    // A full 7-day window or nothing — a short array (Open-Meteo can 200 with
+    // a partial series) would understate the week and read as "little rain".
+    if (!Array.isArray(days) || days.length !== 7) return null;
     // Every day must be numeric — a partial window would understate the week.
     let total = 0;
     for (const value of days) {
@@ -216,6 +229,9 @@ function buildWeeklyEmailDecision({
  * coordinates to work with + lawn-care membership (mirrors
  * lawn-health.js hasCustomerLawnCare: active turf profile, or waveguard_tier /
  * lawn_type on the customer, or any lawn-flavored scheduled service).
+ * Customers who turned email off portal-wide (notification_prefs.email_enabled
+ * = false) are excluded — this is an optional nudge, not a required notice
+ * (same rule as booking-abandon-recovery's customerEmailDisabled).
  */
 async function findEligibleCustomers() {
   return db('customers as c')
@@ -223,6 +239,8 @@ async function findEligibleCustomers() {
     .leftJoin('customer_turf_profiles as tp', function joinActiveProfile() {
       this.on('tp.customer_id', '=', 'c.id').andOnVal('tp.active', '=', true);
     })
+    .leftJoin('notification_prefs as np', 'np.customer_id', 'c.id')
+    .whereRaw('np.email_enabled IS DISTINCT FROM false')
     .where('c.active', true)
     .whereNull('c.deleted_at')
     .whereNotNull('c.email')
@@ -256,8 +274,17 @@ async function findEligibleCustomers() {
       'c.longitude',
       'pp.irrigation_inches_per_week',
       'tp.grass_type',
+      'c.lawn_type',
     )
     .orderBy('c.id');
+}
+
+// Grass for the water target: the turf profile's canonical key wins; legacy
+// customers without an active profile fall back to free-text customers.lawn_type
+// normalized to a canonical key ("Zoysia Empire" → zoysia) so a Bahia/Zoysia
+// lawn is not scored against the St. Augustine default.
+function resolveGrassType(candidate = {}) {
+  return candidate.grass_type || normalizeGrassType(candidate.lawn_type) || null;
 }
 
 async function logEmailAttempt({ customerId, templateKey, status, providerMessageId = null, sentAt = null, failureReason = null, weekEnding }) {
@@ -332,26 +359,29 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date() } = {}) {
         longitude: customer.longitude,
         serviceDate: weekEnding,
       });
-      const forecastRainInches = await fetchUpcomingWeekRainForecast({
-        latitude: customer.latitude,
-        longitude: customer.longitude,
-      });
 
-      const decision = buildWeeklyEmailDecision({
+      const decisionInputs = {
         firstName: customer.first_name,
-        grassType: customer.grass_type,
+        grassType: resolveGrassType(customer),
         weekEnding,
         irrigationInchesPerWeek: customer.irrigation_inches_per_week,
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
-        forecastRainInches,
-      });
-
+      };
+      // Decide from last week's balance FIRST — the forecast only fills an
+      // optional copy line and never changes shouldSend, so skipped customers
+      // (balanced / rain-unknown) must not cost an Open-Meteo forecast call.
+      let decision = buildWeeklyEmailDecision(decisionInputs);
       if (!decision.shouldSend) {
         if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
         else summary.skipped.unknown += 1;
         continue;
       }
+      const forecastRainInches = await fetchUpcomingWeekRainForecast({
+        latitude: customer.latitude,
+        longitude: customer.longitude,
+      });
+      decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches });
 
       // Same bounded per-recipient token as appointment-email so the key fits
       // email_messages.idempotency_key even for long addresses.
@@ -391,18 +421,19 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date() } = {}) {
           customerId: customer.id,
           templateKey: decision.templateKey,
           status: 'failed',
-          failureReason: result.reason || result.message?.error_message || 'email_not_sent',
+          failureReason: sanitizeFailureReason({ message: result.reason || result.message?.error_message || 'email_not_sent' }),
           weekEnding,
         });
       }
     } catch (err) {
       summary.failed += 1;
-      logger.error(`[irrigation-weekly-email] send failed for customer ${customer.id}: ${err.message}`);
+      const reason = sanitizeFailureReason(err);
+      logger.error(`[irrigation-weekly-email] send failed for customer ${customer.id}: ${reason}`);
       await logEmailAttempt({
         customerId: customer.id,
         templateKey: 'irrigation.weekly',
         status: 'failed',
-        failureReason: err.message,
+        failureReason: reason,
         weekEnding,
       });
     }
@@ -423,5 +454,5 @@ module.exports = {
   fetchUpcomingWeekRainForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
-  _private: { forecastLine, lastCompletedWeekEnding, formatInches, monthFromYmd },
+  _private: { forecastLine, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, sanitizeFailureReason },
 };

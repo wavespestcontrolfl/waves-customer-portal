@@ -29,6 +29,7 @@ const { fetchServiceWeekWeather } = require('../services/service-report/applicat
 const {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
+  fetchUpcomingWeekRainForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
   _private,
@@ -142,6 +143,42 @@ describe('buildWeeklyEmailDecision', () => {
   });
 });
 
+describe('resolveGrassType', () => {
+  const { resolveGrassType } = _private;
+
+  test('turf-profile grass wins over legacy lawn_type', () => {
+    expect(resolveGrassType({ grass_type: 'bahia', lawn_type: 'Zoysia Empire' })).toBe('bahia');
+  });
+
+  test('legacy free-text customers.lawn_type normalizes to a canonical key', () => {
+    expect(resolveGrassType({ grass_type: null, lawn_type: 'Zoysia Empire' })).toBe('zoysia');
+    expect(resolveGrassType({ grass_type: null, lawn_type: 'Floratam' })).toBe('st_augustine');
+    expect(resolveGrassType({ grass_type: null, lawn_type: 'Argentine Bahia' })).toBe('bahia');
+  });
+
+  test('unrecognizable lawn_type falls through to null (advice uses its own default)', () => {
+    expect(resolveGrassType({ grass_type: null, lawn_type: 'nice green one' })).toBe(null);
+    expect(resolveGrassType({})).toBe(null);
+  });
+});
+
+describe('sanitizeFailureReason', () => {
+  const { sanitizeFailureReason } = _private;
+
+  test('redacts email addresses echoed by provider errors and keeps the status', () => {
+    const err = new Error('SendGrid 403: does not match a verified Sender Identity: dana@example.com');
+    err.status = 403;
+    const reason = sanitizeFailureReason(err);
+    expect(reason).not.toContain('dana@example.com');
+    expect(reason).toContain('[redacted-email]');
+    expect(reason).toContain('status=403');
+  });
+
+  test('passes plain errors through', () => {
+    expect(sanitizeFailureReason(new Error('timeout'))).toBe('timeout');
+  });
+});
+
 describe('forecastLine', () => {
   const { forecastLine } = _private;
 
@@ -168,6 +205,31 @@ describe('forecastLine', () => {
   test('moderate forecast is informational only', () => {
     const line = forecastLine({ forecastRainInches: 0.5, status: 'deficit', targetInches: 1.25 });
     expect(line).toBe('Looking ahead: about 0.5" of rain is in the forecast for your area over the next 7 days.');
+  });
+});
+
+describe('fetchUpcomingWeekRainForecast', () => {
+  // The module caches by coordinates — every case uses distinct coords.
+  const okJson = (precipitation_sum) => ({ ok: true, json: async () => ({ daily: { precipitation_sum } }) });
+
+  test('a full 7-day window sums to inches', async () => {
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05]));
+    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.01, longitude: -81.01 })).resolves.toBe(1.2);
+  });
+
+  test('a SHORT window (Open-Meteo 200 with a partial series) is unknown, not "little rain"', async () => {
+    global.fetch = jest.fn(async () => okJson([0.1, 0.2, 0.3]));
+    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.02, longitude: -81.02 })).resolves.toBe(null);
+  });
+
+  test('a null day inside the window is unknown', async () => {
+    global.fetch = jest.fn(async () => okJson([0.1, 0, null, 0.5, 0, 0.3, 0.05]));
+    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.03, longitude: -81.03 })).resolves.toBe(null);
+  });
+
+  test('a non-2xx response fails soft to null', async () => {
+    global.fetch = jest.fn(async () => ({ ok: false }));
+    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.04, longitude: -81.04 })).resolves.toBe(null);
   });
 });
 
@@ -235,13 +297,48 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(inserts.some((row) => row.interaction_type === 'email_outbound')).toBe(true);
   });
 
-  test('balanced week → nothing sends, skip is counted', async () => {
+  test('balanced week → nothing sends, skip is counted, and no forecast call is spent', async () => {
     isEnabled.mockReturnValue(true);
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.25, et0Inches: 1.6, dailyRain: [] });
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     expect(summary.sent).toBe(0);
     expect(summary.skipped.balanced).toBe(1);
+    // The forecast only decorates copy — a skipped customer must not cost an
+    // Open-Meteo forecast request.
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('legacy lawn_type customer without a turf profile is scored against their real grass', async () => {
+    isEnabled.mockReturnValue(true);
+    db.mockImplementation((table) => makeBuilder(
+      String(table).startsWith('customers')
+        ? { rows: [{ ...CANDIDATE, grass_type: null, lawn_type: 'Argentine Bahia' }] }
+        : {},
+    ));
+    // Bahia target at ET₀ 1.6 is 0.75" (Kc 0.45, roundQuarter) — 1" irrigation
+    // + 0.5" rain = 1.5" applied → surplus for bahia (St. Augustine's 1.25"
+    // target would have read balanced-ish; the fallback changes the outcome).
+    fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.5, et0Inches: 1.6, dailyRain: [] });
+    await runWeeklyIrrigationEmailSweep({ now: NOW });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    const call = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+    expect(call.templateKey).toBe(TEMPLATE_CUT_BACK);
+    expect(call.payload.grass_label).toBe('Bahia');
+    expect(call.payload.target_inches).toBe('0.75');
+  });
+
+  test('a provider error carrying an email address is logged redacted', async () => {
+    isEnabled.mockReturnValue(true);
+    const err = new Error('SendGrid 403: sender identity mismatch for dana@example.com');
+    err.status = 403;
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(err);
+    const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
+    expect(summary.failed).toBe(1);
+    const audit = inserts.find((row) => row.interaction_type === 'email_outbound');
+    expect(audit).toBeDefined();
+    expect(JSON.stringify(audit)).not.toContain('dana@example.com');
+    expect(audit.body).toContain('[redacted-email]');
   });
 
   test('incomplete rainfall window → nothing sends, rain_unknown counted', async () => {
