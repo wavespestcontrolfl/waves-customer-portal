@@ -2632,6 +2632,120 @@ describe('public estimate one-time breakdown', () => {
     expect(estimateTrenchingReviewRequired({})).toBe(false);
   });
 
+  test('a positive charge hidden in oneTime.total (normalized one_time_adjustment) blocks the trenching gate', () => {
+    // oneTime.total is $500 above the listed rows — normalizeOneTimeBreakdown emits
+    // that difference as a synthetic positive `one_time_adjustment` row. It is a
+    // real charge for something other than trenching, so it must block the
+    // trenching-only classification exactly like a listed positive row would (the
+    // raw acceptanceServiceLists rows alone can't see it).
+    const trenchingWithUnlistedCharge = { result: { recurring: { services: [] }, oneTime: {
+      total: 2710,
+      items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }], specItems: [] } } };
+    // A NET total that reconciles against a listed discount row nets a zero
+    // difference — no synthetic charge, gate stays on.
+    const trenchingDiscountedNetTotal = { result: { recurring: { services: [] }, oneTime: {
+      total: 2100,
+      items: [
+        { service: 'trenching', name: 'Termite Trenching', price: 2210 },
+        { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -110 },
+      ], specItems: [] } } };
+
+    expect(estimateTrenchingReviewRequired(trenchingWithUnlistedCharge)).toBe(false);
+    expect(estimateTrenchingReviewRequired(trenchingDiscountedNetTotal)).toBe(true);
+  });
+
+  test('engine-backed trenching quote (engineResult.lineItems only) classifies as review-before-booking', () => {
+    // Quote-wizard / engine-invocation estimates persist the priced trenching line
+    // under estData.engineResult with no v1-mapped result.oneTime.items — the
+    // shared predicate must classify these identically (acceptanceServiceLists
+    // falls back to the normalized breakdown, which reads engineResult.lineItems).
+    const engineBackedTrenching = { engineResult: { lineItems: [
+      { service: 'termite_trenching', label: 'Termite Trenching', price: 2210 },
+    ] } };
+    expect(estimateTrenchingReviewRequired(engineBackedTrenching)).toBe(true);
+  });
+
+  test('server-rendered engine-backed trenching quote gets the review card, not a dead booking card', () => {
+    // The SSR gate must use the SHARED predicate: an engine-backed trenching
+    // estimate has no result.oneTime.items, and a raw-rows-only check would render
+    // the normal booking card whose slot endpoints return nothing — a dead
+    // self-book flow instead of the review/call CTA.
+    const html = renderPage('termite-trenching-engine-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2210,
+      tier: 'Bronze',
+    }, {
+      engineResult: {
+        lineItems: [
+          { service: 'termite_trenching', label: 'Termite Trenching', price: 2210 },
+        ],
+      },
+    });
+
+    expect(html).toContain('id="trenching-review-card"');
+    expect(html).not.toContain('id="booking-card"');
+    expect(html).not.toContain('class="cta pick-time-cta"');
+  });
+
+  test('commercial-flagged trenching-only quote shows the review card, not the commercial approve CTA', () => {
+    // /accept 409s a trenching-only quote with NO commercial exception, so the
+    // commercial manual-accept card's approval buttons could only end in a 409.
+    // The trenching review gate deliberately outranks the commercial card.
+    const html = renderPage('termite-trenching-commercial-token', {
+      status: 'sent',
+      customerName: 'Terry Business',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2210,
+      tier: 'Bronze',
+    }, {
+      commercialEstimatedPricing: true,
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('id="trenching-review-card"');
+    expect(html).not.toContain('id="commercial-accept-card"');
+    expect(html).not.toContain('Approve estimate');
+  });
+
+  test('trenching pricing contract (React path) offers the drilling Ask-Waves chip', async () => {
+    // React estimates render chips from pricing.askChips (attachPublicPricingContract
+    // ← SERVICE_COPY.termite_trenching.askChips) — the drilling chip must live there
+    // too, not just in the server-rendered prompt bar.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-trenching-askchips-test',
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 2210,
+            items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }],
+          },
+          recurring: { services: [] },
+        },
+      },
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 2210,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.askChips).toContain('How long does the barrier last?');
+    expect(payload.askChips).toContain('Do you drill the concrete or driveway?');
+    expect(payload.askChips.length).toBeLessThanOrEqual(6);
+  });
+
   test('server-rendered pre-slab estimate uses pre-slab ask prompt and never duplicates its copy', () => {
     const html = renderPage('preslab-onetime-token', {
       status: 'sent',

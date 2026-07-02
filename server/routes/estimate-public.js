@@ -958,6 +958,10 @@ const SERVICE_COPY = {
     aiBody: 'We measured the trenching path and linear footage used for this quote.',
     askChips: [
       'How long does the barrier last?',
+      // Second trenching chip (top slab/driveway question) — kept in the shared
+      // SERVICE_COPY list so the React contract (pricing.askChips via
+      // attachPublicPricingContract) offers it too, not just the SSR prompt bar.
+      'Do you drill the concrete or driveway?',
       'What product is used?',
       "What's covered?",
       'Do you renew it?',
@@ -2132,7 +2136,17 @@ function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
 // created for a quote that /accept would reject (AGENTS.md money-gate mirroring).
 function estimateTrenchingReviewRequired(estData) {
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
-  return hasOnlyTermiteTrenchingServiceMix(recurringSvcList, oneTimeList);
+  if (!hasOnlyTermiteTrenchingServiceMix(recurringSvcList, oneTimeList)) return false;
+  // acceptanceServiceLists returns the RAW one-time rows whenever any exist, so a
+  // positive charge that exists only as the normalized difference between
+  // oneTime.total and the listed rows (the synthetic `one_time_adjustment` row
+  // normalizeOneTimeBreakdown emits) would be invisible above. That difference is
+  // a real charge for something other than trenching, so it must block the
+  // trenching-only classification exactly like a listed positive row does —
+  // re-check against the normalized rows too (empty normalization keeps the raw
+  // verdict; discount rows still net out and stay ignorable).
+  const normalizedRows = normalizeOneTimeBreakdown(estData).items;
+  return normalizedRows.every((item) => isTermiteTrenchingOneTimeItem(item) || isNonBillableOneTimeRow(item));
 }
 
 // True for one-time rows that carry no billable service of their own, so they
@@ -3155,7 +3169,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const hasOnlyMosquitoServices = hasOnlyMosquitoServiceMix(recurring, oneTimeItems);
   const hasOnlyTreeShrubServices = hasOnlyTreeShrubServiceMix(recurring, oneTimeItems);
   const hasOnlyTermiteBaitServices = hasOnlyTermiteBaitServiceMix(recurring, oneTimeItems);
-  const hasOnlyTermiteTrenchingServices = hasOnlyTermiteTrenchingServiceMix(recurring, oneTimeItems);
+  // Trenching detection uses the SHARED review-gate predicate (not the raw
+  // result.oneTime.items) so the server-rendered copy + review card classify
+  // exactly like /accept and the slot/money endpoints — engine-backed estimates
+  // that persist trenching only under engineResult.lineItems would otherwise
+  // render the normal booking card whose slot endpoints return nothing (a dead
+  // self-book flow instead of the review/call CTA).
+  const hasOnlyTermiteTrenchingServices = estimateTrenchingReviewRequired(estData);
   const hasOnlyBoraCareServices = hasOnlyBoraCareServiceMix(recurring, boraCareOneTimeRows);
   const pageCopy = hasOnlyLawnCareServices
     ? {
@@ -3418,7 +3438,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // estimate is therefore review-before-booking: the PRICE stays visible (this is
   // NOT quoteRequired, so the number and the Ask-Waves AI both stay live), but the
   // online slot picker / self-book is suppressed and Waves schedules after review.
-  const trenchingReviewBeforeBooking = !locked && !commercialManualAccept && hasOnlyTermiteTrenchingServices;
+  // This deliberately OUTRANKS the commercial manual-accept card: /accept 409s a
+  // trenching-only quote with no commercial exception, so rendering the commercial
+  // approval buttons here would present a CTA that can only end in a 409.
+  const trenchingReviewBeforeBooking = !locked && hasOnlyTermiteTrenchingServices;
 
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeDiscounts) * 100) / 100);
   // Per-day figure is a true daily rate: annual cost / 365 (monthly * 12 / 365).
@@ -12238,12 +12261,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // (NOT quoteRequired) but self-accept/self-book is suppressed on the React
         // path too, mirroring the SSR view + the reserve/deposit/card-hold gates so
         // no slot or Stripe intent is ever created for a quote /accept would reject.
+        // A terminal estimate (accepted/declined/expired) never advertises the
+        // review state — the terminal card always wins on the client.
         canAccept: terminalState === null && !quoteRequirement.quoteRequired && !trenchingReviewBeforeBooking,
         terminalState: ctaTerminalState,
         quoteRequired: quoteRequirement.quoteRequired,
         quoteRequiredReason: quoteRequirement.reason || null,
-        reviewBeforeBooking: trenchingReviewBeforeBooking,
-        reviewReason: trenchingReviewBeforeBooking ? 'termite_trenching_review' : null,
+        reviewBeforeBooking: terminalState === null && trenchingReviewBeforeBooking,
+        reviewReason: terminalState === null && trenchingReviewBeforeBooking ? 'termite_trenching_review' : null,
         // Proposal-aware fields so the React view renders the formal-proposal
         // state (PDF + account-manager follow-up), not the generic
         // "inspection required" quote-required copy — and is channel-aware
