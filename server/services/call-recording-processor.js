@@ -27,6 +27,7 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
+const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
@@ -411,6 +412,112 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   }
 
   // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
+}
+
+// Resolve which existing lead (if any) this call should reuse, by caller phone.
+// Soft-deleted leads never absorb a new call — a fresh lead is made.
+// - Customer-less recovery path (workableUnnamedLead): only an ACTIVE lead
+//   (status not terminal, not converted), so a recovered inquiry lands on an
+//   open row or a fresh one — never silently attached to a won/lost/
+//   disqualified/duplicate lead where it would not surface.
+// - Customer-attached path: only a lead that is UNCLAIMED (customer_id NULL)
+//   or already owned by this customer. A phone-matched lead can BELONG to
+//   another customer (shared/household numbers): reusing it would write this
+//   caller's extraction + ai_triage activity onto the other customer's lead,
+//   and the booking-conversion ownership guard would then (rightly) refuse to
+//   close it — stranding this caller's booked deal with no convertible lead.
+//   A foreign-owned lead is invisible here; the caller gets a fresh row.
+async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead }) {
+  if (!phone) return null;
+  let query = database('leads').where('phone', phone).whereNull('deleted_at');
+  if (workableUnnamedLead) {
+    query = query.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
+  }
+  if (customerId) {
+    query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+  }
+  return query.orderBy('created_at', 'desc').first();
+}
+
+// Convert the call's lead to won when the pipeline books an appointment,
+// on the SAME transaction as the scheduled_services insert (mirrors the
+// admin-leads schedule-appointment route: conversion cannot commit without
+// the appointment row). Skips only `won` (idempotent reprocessing) and
+// `duplicate` (the deal belongs to another lead row) — a lost/unresponsive
+// lead that books DID close, so won is the correct terminal state for it.
+// Runs in a NESTED transaction (savepoint): a plain try/catch inside the
+// booking txn would leave it aborted after a SQL error and doom the COMMIT,
+// rolling back the booking. The savepoint contains a conversion failure to
+// the conversion alone; the booking still commits.
+async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid }) {
+  if (!leadId) return false;
+  try {
+    return await trx.transaction(async (inner) => {
+      // Ownership guard: leadId can come from the phone-only existing-lead
+      // lookup, and a caller phone can be shared across leads. Only a lead
+      // that is unclaimed (customer_id NULL) or already belongs to the
+      // booked customer may be closed here — never reassign another
+      // customer's lead. Repeated in the UPDATE predicate so a concurrent
+      // claim between the read and the write can't slip through.
+      const ownedOrUnclaimed = (q) =>
+        q.whereNull('customer_id').orWhere('customer_id', customerId);
+      const convertible = await inner('leads')
+        .where({ id: leadId })
+        .whereNotIn('status', ['won', 'duplicate'])
+        .where(ownedOrUnclaimed)
+        .first('id');
+      if (!convertible) return false;
+      const updated = await inner('leads')
+        .where({ id: leadId })
+        .whereNotIn('status', ['won', 'duplicate'])
+        .where(ownedOrUnclaimed)
+        .update({
+          status: 'won',
+          customer_id: customerId,
+          converted_at: new Date(),
+          is_qualified: true,
+          updated_at: new Date(),
+        });
+      if (!updated) return false;
+      await inner('lead_activities').insert({
+        lead_id: leadId,
+        activity_type: 'converted',
+        description: `Converted to customer (${customerId}) — appointment booked by phone`,
+        performed_by: 'system',
+        metadata: JSON.stringify({
+          customerId,
+          triggerSource: 'appointment_booked',
+          scheduledServiceId,
+          callSid,
+        }),
+      });
+      // Promote the customer row alongside the lead (the shared
+      // booking-promotion helper, same as the admin paths): a phone-booked
+      // account left at new_lead falls outside the canonical live-customer
+      // stages and is under-counted by every dashboard.
+      await promoteCustomerOnBooking(inner, customerId);
+      // Re-own the lead's estimates to the customer, like the canonical
+      // booking path (admin-leads → linkLeadEstimatesToCustomer): a won
+      // lead's quote left at customer_id NULL stays invisible to
+      // customer-keyed estimate flows and EstimateConverter refuses it.
+      // Deliberately INSIDE the savepoint: the helper swallows SQL errors,
+      // which leave the transaction it ran on aborted — contained here that
+      // dooms only this savepoint (conversion retries on reprocessing via
+      // the reuse paths), never the booking commit.
+      const convertedLead = await inner('leads')
+        .where({ id: leadId })
+        .first('id', 'estimate_id');
+      if (convertedLead) {
+        const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
+        await linkLeadEstimatesToCustomer({ database: inner, lead: convertedLead, customerId });
+      }
+      logger.info(`[call-proc] Lead ${leadId} converted to won (appointment_booked) for ${callSid}`);
+      return true;
+    });
+  } catch (err) {
+    logger.error(`[call-proc] Lead conversion on phone booking failed for ${callSid}: ${err.message}`);
+    return false;
+  }
 }
 
 async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }) {
@@ -2676,19 +2783,12 @@ const CallRecordingProcessor = {
     }
     if (shouldCreateLead) {
       try {
-        // Check if lead already exists for this phone. On the customer-less
-        // recovery path, reuse only an ACTIVE lead (status not terminal, not
-        // converted) so a recovered inquiry lands on an open row or a fresh one
-        // — never silently attached to a won/lost/disqualified/duplicate lead
-        // where it would not surface. The customer-attached path is unchanged —
-        // its shouldCreateCallLeadForCustomer gate already limits it to
-        // open-lead / newly-created customers.
-        // Soft-deleted leads never absorb a new call — a fresh lead is made.
-        let existingLeadQuery = phone ? db('leads').where('phone', phone).whereNull('deleted_at') : null;
-        if (existingLeadQuery && workableUnnamedLead) {
-          existingLeadQuery = existingLeadQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
-        }
-        const existingLead = existingLeadQuery ? await existingLeadQuery.orderBy('created_at', 'desc').first() : null;
+        // Check if lead already exists for this phone (see findReusableCallLead
+        // for the per-path filters: soft-deleted excluded always; active-only
+        // on the customer-less recovery path; unclaimed-or-ours on the
+        // customer-attached path, so a shared-phone lead owned by another
+        // customer is never reused/overwritten).
+        const existingLead = await findReusableCallLead(db, { phone, customerId, workableUnnamedLead });
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -2899,10 +2999,9 @@ const CallRecordingProcessor = {
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
           // Only ever SET the customer link, never clear it. The unnamed-lead
-          // path runs with customerId null and can reuse an existing lead found
-          // by phone — writing customer_id = null there would detach a lead
-          // already linked to a customer. Attach when we have one; otherwise
-          // leave whatever link the lead already had.
+          // path runs with customerId null and can reuse an existing lead
+          // found by phone — writing customer_id = null there would detach a
+          // lead already linked to a customer.
           if (customerId) leadUpdates.customer_id = customerId;
           // Reopen a reused lead the office parked as 'unresponsive' — the
           // prospect just called back, and 'unresponsive' buckets under
@@ -2913,11 +3012,24 @@ const CallRecordingProcessor = {
           // and never reopened here).
           if (existingLead && current?.status === 'unresponsive') leadUpdates.status = 'new';
           leadUpdates.updated_at = new Date();
-          await db('leads').where({ id: leadId }).update(leadUpdates);
+          // findReusableCallLead already excludes a lead owned by ANOTHER
+          // customer from the lookup, so `current` is never foreign here. The
+          // write repeats that ownership predicate as the race backstop: a
+          // concurrent claim between the lookup and this update leaves the
+          // just-claimed lead untouched (0 rows) instead of overwriting the
+          // other customer's lead with this caller's extraction.
+          let enrichmentWrite = db('leads').where({ id: leadId });
+          if (customerId) {
+            enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+          }
+          const enriched = await enrichmentWrite.update(leadUpdates);
 
-          // Log AI triage activity. When the bridge flagged anything, append a
-          // plain-language "confirm before dispatch" line so it's visible on the
-          // lead timeline Virginia works, not just in extracted_data.
+          // Log AI triage activity — gated on the enrichment write landing, so
+          // a lead lost to the ownership race above never gets this caller's
+          // triage on its timeline either. When the bridge flagged anything,
+          // append a plain-language "confirm before dispatch" line so it's
+          // visible on the lead timeline Virginia works, not just in
+          // extracted_data.
           const triageBase = `AI extracted from ${extracted.is_voicemail ? 'voicemail' : 'call'}: ${extracted.matched_service || 'general inquiry'}, quality: ${extracted.lead_quality || 'unknown'}`;
           const triageNotes = [];
           if (contact.missing.length) {
@@ -2927,7 +3039,7 @@ const CallRecordingProcessor = {
             triageNotes.push(`⚠ CONFIRM BEFORE DISPATCH: ${bridgeNeedsConfirmation.map(describeConfirmReason).join('; ')}`);
           }
           const triageDesc = triageNotes.length ? `${triageBase} — ${triageNotes.join(' — ')}` : triageBase;
-          await db('lead_activities').insert({
+          if (enriched) await db('lead_activities').insert({
             lead_id: leadId,
             activity_type: 'ai_triage',
             description: triageDesc,
@@ -3367,6 +3479,17 @@ const CallRecordingProcessor = {
                       .returning('*');
                     primaryRow = updatedExisting || existing;
                   }
+                  // A reused appointment still closed the deal: reprocessing a
+                  // call (or recovering from an earlier savepoint-contained
+                  // conversion failure) must not strand the lead as open. The
+                  // helper's won/duplicate + ownership guards make this a no-op
+                  // when the lead already converted.
+                  await convertCallLeadOnPhoneBooking(trx, {
+                    leadId,
+                    customerId,
+                    scheduledServiceId: primaryRow.id,
+                    callSid,
+                  });
                   // After the backfill so the child inherits the assigned tech.
                   followUpCreated = await ensureCallFollowUpVisit(primaryRow);
                   return primaryRow;
@@ -3425,6 +3548,18 @@ const CallRecordingProcessor = {
                   .ignore()
                   .returning('*');
                 if (created) {
+                  // A phone-booked appointment is the deal closing — convert the
+                  // call's lead to won in the SAME transaction (mirrors the
+                  // admin-leads schedule-appointment route), so the conversion
+                  // can't commit without the appointment row. Every other booking
+                  // path already converts; this one silently didn't, stranding
+                  // phone-booked callers as `new` in the pipeline.
+                  await convertCallLeadOnPhoneBooking(trx, {
+                    leadId,
+                    customerId,
+                    scheduledServiceId: created.id,
+                    callSid,
+                  });
                   followUpCreated = await ensureCallFollowUpVisit(created);
                   return created;
                 }
@@ -3436,6 +3571,14 @@ const CallRecordingProcessor = {
                 if (existingByKey) {
                   reusedExistingSchedule = true;
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
+                  // Same as the reuse path above: the appointment exists, so
+                  // the lead must still convert (idempotent, ownership-guarded).
+                  await convertCallLeadOnPhoneBooking(trx, {
+                    leadId,
+                    customerId,
+                    scheduledServiceId: existingByKey.id,
+                    callSid,
+                  });
                   // This is exactly the retry whose first attempt may have
                   // lost the savepointed follow-up insert — ensure visit 2.
                   followUpCreated = await ensureCallFollowUpVisit(existingByKey);
@@ -4018,6 +4161,8 @@ CallRecordingProcessor._test = {
   transcribeRecording,
   extractCallDataV2,
   normalizeOpenAISegments,
+  convertCallLeadOnPhoneBooking,
+  findReusableCallLead,
 };
 
 module.exports = CallRecordingProcessor;

@@ -424,6 +424,57 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     expect(result).toMatchObject({ converted: true, leadIds: ['Lold'] });
   });
 
+  test('appointment_booked (one-time admin booking) converts the originating lead like the recurring trigger', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-01-01' },
+      contactLeads: [{ id: 'Lold', status: 'new', customer_id: null, first_contact_at: '2025-12-15T10:00:00Z' }],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'appointment_booked',
+      customerId: 'c1',
+      enforceOriginating: true,
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toMatchObject({ converted: true, leadIds: ['Lold'] });
+    expect(markConverted.mock.calls[0][1]).toEqual({ customerId: 'c1', triggerSource: 'appointment_booked' });
+  });
+
+  test('appointment_booked with a source estimate resolves via the estimate-link tier BEFORE the originating-timing fallback', async () => {
+    // An established customer books from an accepted add-on quote: the
+    // FK-linked lead was first contacted AFTER member_since, so the
+    // enforceOriginating contact fallback would reject it — but the estimate
+    // link is authoritative (the booking rode in on exactly this quote), so
+    // tier 1 converts it, with the estimate's value hints.
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      estimate: { id: 'e9', customer_id: 'c1', monthly_total: null, onetime_total: 450, waveguard_tier: null },
+      leadsByEstimate: [{ id: 'Laddon', status: 'estimate_sent', customer_id: 'c1', first_contact_at: '2026-06-20T10:00:00Z' }],
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-01-01' },
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'appointment_booked',
+      estimateId: 'e9',
+      customerId: 'c1',
+      enforceOriginating: true,
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toMatchObject({ converted: true, leadIds: ['Laddon'] });
+    expect(markConverted.mock.calls[0][1]).toEqual({
+      customerId: 'c1',
+      triggerSource: 'appointment_booked',
+      monthlyValue: null,
+      initialServiceValue: 450,
+      waveguardTier: null,
+    });
+  });
+
   test('enforceOriginating does NOT convert a contact lead created AFTER the customer signed up (later add-on)', async () => {
     const markConverted = jest.fn().mockResolvedValue();
     const database = makeConvertDb({

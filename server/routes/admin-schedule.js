@@ -2195,20 +2195,62 @@ router.post('/', requireAdmin, async (req, res, next) => {
           }
         }
 
-        // Booking a recurring service (e.g. a quarterly WaveGuard membership) is
-        // the deal closing — convert the originating lead to won now rather than
-        // waiting for the first visit to complete. enforceOriginating keeps the
-        // fuzzy contact fallback from winning a LATER unlinked add-on lead that
-        // happens to share the customer's phone/email (e.g. an established
-        // customer booking an add-on): only a lead first contacted on/before the
-        // customer signed up converts. Single unambiguous open lead only,
-        // idempotent. Best-effort; never blocks the booking.
-        if (isRecurring) {
+        // Booking a service is the deal closing — convert the originating lead
+        // to won now rather than waiting for the first visit to complete.
+        // Recurring bookings keep their dedicated trigger source; one-time
+        // bookings use appointment_booked (previously they didn't convert
+        // until completion/invoice, stranding phone-sold one-time jobs as
+        // open leads whenever the completion trigger's matching tiers missed).
+        // enforceOriginating keeps the fuzzy contact fallback from winning a
+        // LATER unlinked add-on lead that happens to share the customer's
+        // phone/email (e.g. an established customer booking an add-on): only
+        // a lead first contacted on/before the customer signed up converts.
+        // Single unambiguous open lead only, idempotent. Best-effort; never
+        // blocks the booking.
+        //
+        // Gated on the quote's fate: when the booking came from a sent/viewed
+        // estimate whose auto-accept was REFUSED (manager approval,
+        // invoice-mode, converter guards — the warning path above), the deal
+        // did not close, so recording the lead as won here would contradict
+        // the quote we deliberately left unaccepted. No linked estimate or an
+        // already-/newly-accepted one converts as before.
+        const estimateRefusedAcceptance = !!(linkedEstimate
+          && linkedEstimate.status !== 'accepted'
+          && !estimateAutoAccepted);
+        if (!estimateRefusedAcceptance) {
           try {
             const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-            await convertLeadFromEvent({ source: 'recurring_service_booked', customerId, enforceOriginating: true });
+            const conversion = await convertLeadFromEvent({
+              source: isRecurring ? 'recurring_service_booked' : 'appointment_booked',
+              // The estimate this booking rode in on: passing it lets the
+              // authoritative estimate-link tier (leads.estimate_id) resolve
+              // the exact FK-linked lead before the customer/contact
+              // fallback — so an add-on lead linked to the source estimate
+              // of an established customer converts even though
+              // enforceOriginating would reject it by timing. Never after a
+              // lost attach race: the quote (and its linked lead) belongs to
+              // another customer.
+              estimateId: (linkedEstimate && !estimateAttachRaceLost) ? linkedEstimateId : null,
+              customerId,
+              enforceOriginating: true,
+            });
+            // A closed deal owes the customer row the same promotion every
+            // other booking path applies (stage → won, member_since,
+            // reactivation); markConverted only touches the leads row.
+            // Promote when THIS trigger converted — or when the deal closed
+            // through the estimate path: markEstimateManuallyAccepted (or the
+            // earlier acceptance of an already-accepted quote) converts the
+            // linked lead itself, so convertLeadFromEvent finds no open lead
+            // and reports converted:false, yet a one-time acceptance never
+            // promotes the customer row (only the recurring converter does).
+            const estimateClosedDeal = !!(linkedEstimate && !estimateAttachRaceLost
+              && (estimateAutoAccepted || linkedEstimate.status === 'accepted'));
+            if (conversion?.converted || estimateClosedDeal) {
+              const { promoteCustomerOnBooking } = require('../services/customer-stages');
+              await promoteCustomerOnBooking(db, customerId);
+            }
           } catch (e) {
-            logger.warn(`[lead-trigger] recurring-booking conversion failed for customer=${customerId}: ${e.message}`);
+            logger.warn(`[lead-trigger] booking conversion failed for customer=${customerId}: ${e.message}`);
           }
         }
 
