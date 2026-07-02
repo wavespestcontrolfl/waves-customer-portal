@@ -55,7 +55,7 @@ async function liveAlertNotifications(adminUserId) {
   let dismissals = [];
   try {
     dismissals = await db.raw(
-      `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_fingerprint, dismissed_at
+      `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_members, dismissed_at
        FROM dashboard_alert_dismissed
        WHERE admin_user_id = ?
          AND dismissed_at > NOW() - (INTERVAL '1 hour' * ?)
@@ -71,7 +71,9 @@ async function liveAlertNotifications(adminUserId) {
   const dismissedByAlert = new Map(
     dismissals.map((d) => [d.alert_id, {
       count: parseInt(d.dismissed_at_count || 0, 10),
-      fingerprint: d.dismissed_fingerprint || null,
+      members: d.dismissed_members
+        ? new Set(String(d.dismissed_members).split(',').filter(Boolean))
+        : null,
     }]),
   );
 
@@ -79,11 +81,16 @@ async function liveAlertNotifications(adminUserId) {
     const dismissed = dismissedByAlert.get(a.id);
     if (dismissed == null) return true; // never dismissed
     if (a.count > dismissed.count) return true; // escalation re-shows
-    // Membership change re-shows a queue alert: a DIFFERENT lead crossing the
-    // SLA at the same count is new work, not the item that was dismissed.
-    // Requires a fingerprint on BOTH sides — alerts without one, and
-    // pre-migration dismissal rows, keep the count-only behavior.
-    return Boolean(a.fingerprint && dismissed.fingerprint && a.fingerprint !== dismissed.fingerprint);
+    // Membership-aware re-show for queue alerts: a member the dismissal did
+    // NOT cover (a different lead crossing the SLA, a new expiring estimate)
+    // is new work even at an unchanged or lower count — but a queue that
+    // merely shrank to a subset of what was dismissed stays hidden. Needs
+    // members on BOTH sides; aggregate alerts and pre-migration dismissal
+    // rows keep the count-only behavior.
+    if (Array.isArray(a.members) && a.members.length && dismissed.members) {
+      return a.members.some((id) => !dismissed.members.has(String(id)));
+    }
+    return false;
   });
 
   return { live: toNotifications(visible), liveKeys };
@@ -224,9 +231,11 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
         admin_user_id: adminUserId,
         alert_id: a.id,
         dismissed_at_count: a.count,
-        // Queue alerts carry a membership digest — record it so the bell can
-        // re-show on membership change, not just on count growth.
-        dismissed_fingerprint: a.fingerprint || null,
+        // Queue alerts carry their member ids — record them so the bell can
+        // re-show when a NEW member enters, not just on count growth.
+        dismissed_members: Array.isArray(a.members) && a.members.length
+          ? a.members.join(',')
+          : null,
       })),
     );
   } catch (err) {
