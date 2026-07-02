@@ -25,6 +25,7 @@ const {
   assessDepositFollowUpEligibility,
   DEPOSIT_FOLLOWUP_WINDOW,
 } = require("./estimate-deposits");
+const { customerConvertedSince } = require("./estimate-conversion-guard");
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -98,6 +99,14 @@ async function safetyGate(est, now = new Date()) {
   if (isQuietHours(now)) return { skip: true, reason: "quiet-hours" };
   if (wasRecentlyOpened(est, 2, now.getTime()))
     return { skip: true, reason: "recently-opened" };
+  // Conversion guard: the customer already paid an invoice, booked an
+  // appointment after this estimate, or is an active customer — the estimate
+  // status just never flipped (booking/invoicing/completion don't write it).
+  // Never nag a converted customer to "accept" a quote for work we already
+  // did. Fail-closed inside the check; cheap sync gates run first.
+  const conv = await customerConvertedSince(est);
+  if (conv.converted)
+    return { skip: true, reason: `customer-converted:${conv.reason}` };
   if (await hasRepliedRecently(est))
     return { skip: true, reason: "customer-replied-recently" };
   return { skip: false };
@@ -273,6 +282,7 @@ async function checkDepositAbandoned(now = new Date()) {
   const candidates = await db("estimates")
     .join(latestPendingByEstimate, "pd.estimate_id", "estimates.id")
     .whereIn("estimates.status", ["sent", "viewed"])
+    .whereNull("estimates.archived_at")
     .whereNotNull("estimates.customer_phone")
     .where("pd.latest_pending_at", "<", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.minAgeHours * 3600000))
     .where("pd.latest_pending_at", ">", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.maxAgeHours * 3600000))
@@ -394,6 +404,7 @@ const EstimateFollowUp = {
     try {
       const unviewed = await db("estimates")
         .where({ status: "sent" })
+        .whereNull("archived_at")
         .whereNull("viewed_at")
         .where("sent_at", "<", new Date(Date.now() - 24 * 3600000))
         .where("sent_at", ">", new Date(Date.now() - 48 * 3600000))
@@ -483,6 +494,7 @@ const EstimateFollowUp = {
     try {
       const viewedNotAccepted = await db("estimates")
         .where({ status: "viewed" })
+        .whereNull("archived_at")
         .whereNotNull("viewed_at")
         .where("viewed_at", "<", new Date(Date.now() - 48 * 3600000))
         .where("viewed_at", ">", new Date(Date.now() - 72 * 3600000))
@@ -571,6 +583,7 @@ const EstimateFollowUp = {
     try {
       const finalNudge = await db("estimates")
         .where({ status: "viewed" })
+        .whereNull("archived_at")
         .whereNotNull("viewed_at")
         .where("viewed_at", "<", new Date(Date.now() - 5 * 86400000))
         .where("viewed_at", ">", new Date(Date.now() - 6 * 86400000))
@@ -655,6 +668,7 @@ const EstimateFollowUp = {
     try {
       const expiring = await db("estimates")
         .whereIn("status", ["sent", "viewed"])
+        .whereNull("archived_at")
         .whereNotNull("expires_at")
         .where((q) =>
           q.whereNotNull("customer_phone").orWhereNotNull("customer_email"),
@@ -770,4 +784,5 @@ module.exports._private = {
   estimateEmailPayload,
   renderTemplate,
   checkDepositAbandoned,
+  safetyGate,
 };

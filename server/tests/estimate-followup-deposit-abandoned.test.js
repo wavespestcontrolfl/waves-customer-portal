@@ -60,8 +60,8 @@ const updates = [];
 function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
-    'join', 'whereIn', 'whereNotNull', 'where', 'select', 'groupBy', 'max',
-    'as', 'orderBy', 'orWhereNull', 'andWhere',
+    'join', 'whereIn', 'whereNotNull', 'whereNull', 'whereNot', 'where',
+    'select', 'groupBy', 'max', 'as', 'orderBy', 'orWhereNull', 'andWhere',
   ]) {
     b[m] = jest.fn(() => b);
   }
