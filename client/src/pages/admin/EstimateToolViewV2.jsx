@@ -713,6 +713,14 @@ function firstPositiveNumber(...values) {
   return undefined;
 }
 
+// The satellite analyzer emits SPARSE for low vegetation density; the form
+// dropdowns and pricing engine only know LIGHT/MODERATE/HEAVY.
+function normalizeDensityValue(value) {
+  const v = String(value || "").toUpperCase();
+  if (v === "SPARSE") return "LIGHT";
+  return ["LIGHT", "MODERATE", "HEAVY"].includes(v) ? v : undefined;
+}
+
 function lookupTermiteFootprintSqFt(data = {}) {
   const explicitFootprint = firstPositiveNumber(
     data.footprint,
@@ -2382,7 +2390,18 @@ export default function EstimateToolViewV2({
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
         ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
+        ...(key === "trenchingPerimeterLF" ? { _trenchingPerimeterAuto: false } : {}),
+        ...(key === "boracareSqft" ? { _boracareSqftAuto: false } : {}),
+        ...(key === "preslabSqft" ? { _preslabSqftAuto: false } : {}),
       };
+      // Entering a Bora-Care surface run while the attic box still holds an
+      // untouched lookup estimate signals a surface-only job — drop the auto
+      // attic value so priceBoraCare takes its surface-only path instead of
+      // silently quoting attic + surface. A manually entered attic survives.
+      if (key === "boracareSurfaceLinearFt" && f._boracareSqftAuto && String(val || "").trim() !== "") {
+        next.boracareSqft = "";
+        next._boracareSqftAuto = false;
+      }
       if (key === "palmCount" && String(f.palmTreatmentCount || "").trim() === "") {
         next.palmTreatmentCount = val;
       }
@@ -2816,15 +2835,12 @@ export default function EstimateToolViewV2({
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
       const termiteFootprintNumber = lookupTermiteFootprintSqFt(ep);
       if (termiteFootprintNumber) upd.termiteFootprintSqFt = String(Math.round(termiteFootprintNumber));
-      const perimeterLF = ep.perimeterLF || ep.perimeterLf || ep.perimeter;
+      const perimeterLF = ep.estimatedPerimeterLF || ep.perimeterLF || ep.perimeterLf || ep.perimeter;
       const perimeterNumber = parsePositiveNumber(perimeterLF);
-      if (perimeterNumber) upd.trenchingPerimeterLF = String(Math.round(perimeterNumber));
-      const atticSqFt = ep.atticSqFt || ep.atticAreaSqFt || ep.rawWoodSqFt || ep.woodTreatmentSqFt;
+      const atticSqFt = ep.estimatedAtticSqFt || ep.atticSqFt || ep.atticAreaSqFt || ep.rawWoodSqFt || ep.woodTreatmentSqFt;
       const atticNumber = parsePositiveNumber(atticSqFt);
-      if (atticNumber) upd.boracareSqft = String(Math.round(atticNumber));
-      const slabSqFt = ep.slabSqFt || ep.foundationSqFt || ep.buildingSlabSqFt || ep.newConstructionSlabSqFt;
+      const slabSqFt = ep.estimatedSlabSqFt || ep.slabSqFt || ep.foundationSqFt || ep.buildingSlabSqFt || ep.newConstructionSlabSqFt;
       const slabNumber = parsePositiveNumber(slabSqFt);
-      if (slabNumber) upd.preslabSqft = String(Math.round(slabNumber));
 
       setForm((f) => {
         const next = {
@@ -2834,6 +2850,30 @@ export default function EstimateToolViewV2({
           _poolCageSizeEdited: false,
           _storiesEdited: false,
         };
+        // Termite measurement pre-fills honor the section contract: a
+        // manually entered value is never overwritten by a lookup estimate,
+        // and a lookup miss clears a value only if a previous lookup put it
+        // there (never a manual one) so it can't leak onto the next address.
+        const applyTermiteEstimate = (key, flagKey, estimate) => {
+          if (estimate) {
+            if (String(f[key] || "").trim() === "" || f[flagKey]) {
+              next[key] = String(Math.round(estimate));
+              next[flagKey] = true;
+            }
+          } else if (f[flagKey]) {
+            next[key] = "";
+            next[flagKey] = false;
+          }
+        };
+        applyTermiteEstimate("trenchingPerimeterLF", "_trenchingPerimeterAuto", perimeterNumber);
+        // Attic pre-fill also stands down when a surface run is already
+        // entered — that's a surface-only Bora-Care job (see set()).
+        applyTermiteEstimate(
+          "boracareSqft",
+          "_boracareSqftAuto",
+          String(f.boracareSurfaceLinearFt || "").trim() === "" ? atticNumber : undefined,
+        );
+        applyTermiteEstimate("preslabSqft", "_preslabSqftAuto", slabNumber);
         if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
           next.palmTreatmentCount = upd.palmCount;
         }
@@ -2988,8 +3028,10 @@ export default function EstimateToolViewV2({
         upd.bedArea = String(Math.round(data.bed_area_sqft));
       if (data.palm_count) upd.palmCount = String(data.palm_count);
       if (data.tree_count) upd.treeCount = String(data.tree_count);
-      if (data.shrub_density) upd.shrubDensity = data.shrub_density;
-      if (data.tree_density) upd.treeDensity = data.tree_density;
+      const satShrubDensity = normalizeDensityValue(data.shrub_density);
+      if (satShrubDensity) upd.shrubDensity = satShrubDensity;
+      const satTreeDensity = normalizeDensityValue(data.tree_density);
+      if (satTreeDensity) upd.treeDensity = satTreeDensity;
       if (data.landscape_complexity)
         upd.landscapeComplexity = data.landscape_complexity;
       if (data.has_pool) upd.hasPool = "YES";
@@ -3818,6 +3860,9 @@ export default function EstimateToolViewV2({
       customerEmail: "",
       leadServiceInterest: "",
       _termiteFootprintAuto: false,
+      _trenchingPerimeterAuto: false,
+      _boracareSqftAuto: false,
+      _preslabSqftAuto: false,
       // Guarantee eligibility is per-job; the next property must re-confirm.
       ...Object.fromEntries(RODENT_GUARANTEE_ELIGIBILITY_KEYS.map((k) => [k, false])),
     }));
