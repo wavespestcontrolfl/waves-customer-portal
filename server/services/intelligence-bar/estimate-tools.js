@@ -463,7 +463,7 @@ async function createPendingEstimate(input) {
   const crypto = require('crypto');
   const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + 7);
+  expiresAt.setDate(expiresAt.getDate() + 10); // match the admin default (follow-up cadence assumes 10)
 
   const monthly = Number(engineResult.monthlyTotal) || 0;
   const annual = Number(engineResult.annualTotal) || monthly * 12;

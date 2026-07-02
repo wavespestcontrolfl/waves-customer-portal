@@ -323,7 +323,7 @@ const MSG_TYPE_TO_TEMPLATE = {
   estimate_sent: 'estimate_sent',
   estimate_accepted_onetime: 'estimate_accepted_onetime',
   estimate_auto_renewed: 'estimate_auto_renewed',
-  estimate_followup: 'estimate_followup_unviewed',
+  estimate_followup: 'estimate_followup_questions',
   reactivation: 'seasonal_reactivation',
 };
 

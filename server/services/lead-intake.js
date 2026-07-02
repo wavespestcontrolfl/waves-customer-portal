@@ -80,7 +80,7 @@ async function createOrUpdateDraftEstimate(customer, interest) {
   const nameSlug = customerName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const token = `${nameSlug || 'lead'}-${shortId}`;
   const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + 7);
+  expiresAt.setDate(expiresAt.getDate() + 10); // match the admin default (follow-up cadence assumes 10)
 
   const result = await withAutomatedEstimatePhoneLock(customer.phone, async (trx) => {
     const duplicateBlock = await blockIfAutomatedEstimateDuplicate(customer.phone, { database: trx });

@@ -484,6 +484,18 @@ function recurringFlagUpdates(columns) {
 
 function onboardingUpdates(columns) {
   const updates = { updated_at: new Date() };
+  // Stamp every follow-up stage so placeholder estimates never enter the
+  // cadence (columns are per-stage claim timestamps; legacy boolean names
+  // kept for pre-migration schemas).
+  const stamped = new Date();
+  for (const col of [
+    'followup_questions_sent_at',
+    'followup_credit_sent_at',
+    'followup_expiring_sent_at',
+    'followup_deposit_abandoned_sent_at',
+  ]) {
+    if (hasColumn(columns, col)) updates[col] = stamped;
+  }
   if (hasColumn(columns, 'followup_24h_sent')) updates.followup_24h_sent = true;
   if (hasColumn(columns, 'followup_72h_sent')) updates.followup_72h_sent = true;
   if (hasColumn(columns, 'followup_expiring_sent')) updates.followup_expiring_sent = true;

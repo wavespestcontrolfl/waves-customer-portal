@@ -43,26 +43,26 @@ beforeEach(() => {
 describe('estimate follow-up emails via template library', () => {
   test('SMS renderer forwards workflow/entity context to template issues', async () => {
     await _private.renderTemplate(
-      'estimate_followup_unviewed',
+      'estimate_followup_questions',
       { first_name: 'Taylor', estimate_url: 'https://portal/x' },
       { workflow: 'estimate_follow_up', entity_type: 'estimate', entity_id: 'est-1' },
     );
 
     expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
-      'estimate_followup_unviewed',
+      'estimate_followup_questions',
       { first_name: 'Taylor', estimate_url: 'https://portal/x' },
       { workflow: 'estimate_follow_up', entity_type: 'estimate', entity_id: 'est-1' },
     );
   });
 
-  test('unviewed stage uses estimate.unviewed_followup with stage-scoped idempotency', async () => {
+  test('questions stage uses estimate.unviewed_followup with stage-scoped idempotency', async () => {
     EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true });
 
     const attempted = await _private.sendDualChannel(baseEst, {
       sms: 'SMS body',
       email: {
         templateKey: 'estimate.unviewed_followup',
-        stage: 'unviewed',
+        stage: 'questions',
         payload: { first_name: 'Taylor', estimate_url: 'https://portal/x' },
       },
     });
@@ -72,13 +72,13 @@ describe('estimate follow-up emails via template library', () => {
     const args = EmailTemplates.sendTemplate.mock.calls[0][0];
     expect(args.templateKey).toBe('estimate.unviewed_followup');
     expect(args.to).toBe('lead@example.com');
-    expect(args.idempotencyKey).toBe('estimate_followup_unviewed:est-1');
-    expect(args.triggerEventId).toBe('estimate_followup_unviewed:est-1');
+    expect(args.idempotencyKey).toBe('estimate_followup_questions:est-1');
+    expect(args.triggerEventId).toBe('estimate_followup_questions:est-1');
     expect(args.payload).toEqual({ first_name: 'Taylor', estimate_url: 'https://portal/x' });
     expect(args.recipientType).toBe('customer');
     expect(args.recipientId).toBe('cust-1');
     expect(args.categories).toContain('estimate_followup');
-    expect(args.categories).toContain('estimate_followup_unviewed');
+    expect(args.categories).toContain('estimate_followup_questions');
   });
 
   test('expiring stage passes expires_at variable through payload', async () => {
@@ -108,7 +108,7 @@ describe('estimate follow-up emails via template library', () => {
         sms: 'SMS body',
         email: {
           templateKey: 'estimate.unviewed_followup',
-          stage: 'unviewed',
+          stage: 'questions',
           payload: { first_name: 'Taylor', estimate_url: 'https://portal/x' },
         },
       },
@@ -130,7 +130,7 @@ describe('estimate follow-up emails via template library', () => {
       sms: null, // no SMS body so only email counts
       email: {
         templateKey: 'estimate.unviewed_followup',
-        stage: 'unviewed',
+        stage: 'questions',
         payload: { first_name: 'Taylor', estimate_url: 'https://portal/x' },
       },
     });
@@ -151,7 +151,7 @@ describe('estimate follow-up emails via template library', () => {
       sms: 'SMS body',
       email: {
         templateKey: 'estimate.unviewed_followup',
-        stage: 'unviewed',
+        stage: 'questions',
         payload: { first_name: 'Taylor', estimate_url: 'https://portal/x' },
       },
     });
@@ -167,7 +167,7 @@ describe('estimate follow-up emails via template library', () => {
       sms: 'SMS body',
       email: {
         templateKey: 'estimate.unviewed_followup',
-        stage: 'unviewed',
+        stage: 'questions',
         payload: { first_name: 'Taylor', estimate_url: 'https://portal/x' },
       },
     });
@@ -184,7 +184,7 @@ describe('estimate follow-up emails via template library', () => {
         sms: 'SMS body',
         email: {
           templateKey: 'estimate.unviewed_followup',
-          stage: 'unviewed',
+          stage: 'questions',
           payload: { first_name: 'Taylor', estimate_url: 'https://portal/x' },
         },
       },

@@ -61,7 +61,8 @@ function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
     'join', 'whereIn', 'whereNotNull', 'where', 'select', 'groupBy', 'max',
-    'as', 'orderBy', 'orWhereNull', 'andWhere',
+    'as', 'orderBy', 'orWhereNull', 'andWhere', 'whereNull', 'orWhere',
+    'whereNotExists',
   ]) {
     b[m] = jest.fn(() => b);
   }
@@ -167,10 +168,10 @@ describe('checkDepositAbandoned', () => {
         estimateId: 'est-1',
       }),
     );
-    // Claim flips the stage flag; success bumps the follow-up counters and
-    // the claim stays set.
+    // Claim stamps the stage timestamp; success bumps the follow-up counters
+    // and the stamp stays set (it doubles as the attribution record).
     expect(updates).toEqual([
-      { table: 'estimates', payload: { followup_deposit_abandoned_sent: true } },
+      { table: 'estimates', payload: { followup_deposit_abandoned_sent_at: NOW } },
       {
         table: 'estimates',
         payload: expect.objectContaining({ last_follow_up_at: 'NOW()' }),
@@ -309,8 +310,8 @@ describe('checkDepositAbandoned', () => {
 
     expect(sent).toBe(0);
     expect(updates).toEqual([
-      { table: 'estimates', payload: { followup_deposit_abandoned_sent: true } },
-      { table: 'estimates', payload: { followup_deposit_abandoned_sent: false } },
+      { table: 'estimates', payload: { followup_deposit_abandoned_sent_at: NOW } },
+      { table: 'estimates', payload: { followup_deposit_abandoned_sent_at: null } },
     ]);
   });
 
@@ -323,6 +324,18 @@ describe('checkDepositAbandoned', () => {
 
     expect(sent).toBe(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('active-customer guard: a converted customer never gets the deposit nudge', async () => {
+    enqueue('estimate_deposits', {});
+    enqueue('estimates', { rows: [baseEstimate()] });
+    enqueue('customers', { first: { id: 'cust-1' } }); // live per whereLiveCustomer predicate
+
+    const sent = await _private.checkDepositAbandoned(NOW);
+
+    expect(sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
   });
 
   test('quiet hours skip: never texts outside 9a-5p ET', async () => {

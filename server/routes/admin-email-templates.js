@@ -42,7 +42,6 @@ const PROTECTED_EMAIL_TEMPLATE_KEYS = new Set([
   'estimate.delivery',
   'estimate.expiring_notice',
   'estimate.extension_notice',
-  'estimate.followup_final',
   'estimate.unviewed_followup',
   'estimate.viewed_followup',
   'invoice.receipt',

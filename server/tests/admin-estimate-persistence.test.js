@@ -706,7 +706,7 @@ describe('admin estimate persistence', () => {
         updated_at: now(),
       },
     });
-    expect(updates[0].patch.expires_at.toISOString()).toBe('2026-05-22T12:00:00.000Z');
+    expect(updates[0].patch.expires_at.toISOString()).toBe('2026-05-25T12:00:00.000Z');
     expect(estimateViewUrl(result.estimate.token)).toBe('https://portal.wavespestcontrol.com/estimate/existing-token');
     expect(getEstimatePricingCache('estimate-draft')).toBeNull();
   });

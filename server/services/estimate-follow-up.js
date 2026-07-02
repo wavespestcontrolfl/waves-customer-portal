@@ -1,16 +1,21 @@
 /**
  * Estimate Follow-Up Service
  *
- * Auto-sends follow-up SMS + email to customers who:
- *   - Received an estimate but haven't viewed it (24h)
- *   - Viewed an estimate but haven't accepted (48h, 5d)
- *   - Estimate is about to expire (1-3 days before)
- *   - Started the deposit payment step but never completed it (2-72h after
- *     the last pending PaymentIntent; gated by
- *     GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS — shadow-logs counts until on)
+ * Three touches while a quote is live, plus one payment-drop stage:
+ *   1. Questions opener — 48-72h after send, viewed / not-yet-viewed copy
+ *      variants. A reply routes the thread to Virginia (the reply-pause
+ *      below already stops the cron from talking over a live conversation).
+ *   2. Day-5 check-in — the slot the offer engine's First-Year Protection
+ *      Credit will occupy (hence the followup_credit_sent_at column);
+ *      neutral copy until the offer machinery lands. SMS-only.
+ *   3. Last-day notice — the day before expires_at.
+ *   +  Deposit started but never completed (2-72h after the last pending
+ *      PaymentIntent; gated by GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS —
+ *      shadow-logs counts until on).
  *
- * Runs via cron every 2 hours. SMS is primary, email is a second channel —
- * each stage's flag flips once either channel attempts so we don't re-nudge.
+ * Runs via cron every 2 hours. SMS is primary, email is a second channel
+ * where an honest template exists. Each stage atomically claims a timestamp
+ * column (not a boolean) so acceptances can be attributed to touches later.
  */
 
 const db = require("../models/db");
@@ -21,13 +26,35 @@ const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
+const { CUSTOMER_STAGES } = require("./customer-stages");
 const {
   assessDepositFollowUpEligibility,
   DEPOSIT_FOLLOWUP_WINDOW,
 } = require("./estimate-deposits");
 
+// ── Cadence windows ──────────────────────────────────────────────────────
+// With the 10-day default expiry the ladder lands roughly day 2-3 / day 5-6
+// / day 9 — one touch every ~3 days. Max-age bounds keep a stalled cron or
+// deploy gap from nudging estimates whose moment has passed.
+
+const QUESTIONS_WINDOW = { minAgeHours: 48, maxAgeHours: 120 };
+const CHECKIN_WINDOW = { minAgeDays: 5, maxAgeDays: 8 };
+// The check-in yields when expiry is close — the last-day notice carries the
+// deadline; two texts on the same short-fuse estimate would stack.
+const CHECKIN_EXPIRY_YIELD_HOURS = 48;
+// Gap required since the questions touch so a quiet-hours-delayed touch 1
+// doesn't run into touch 2 the next morning.
+const CHECKIN_QUESTIONS_GAP_HOURS = 48;
+// "Last day" catch window: wide enough that quiet hours + the 2h cron can't
+// starve it, tight enough the copy stays honest.
+const EXPIRING_HORIZON_HOURS = 30;
+// Minimum spacing from ANY prior follow-up (manual sends included). The
+// expiring touch runs a tighter gap because it is deadline-critical.
+const TOUCH_SPACING_HOURS = 24;
+const EXPIRING_SPACING_HOURS = 12;
+
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
-// Centralized so the behavior stays consistent across all four stages.
+// Centralized so the behavior stays consistent across all stages.
 
 const TERMINAL_STATUSES = new Set(["declined", "accepted", "expired", "void"]);
 
@@ -90,6 +117,46 @@ async function hasRepliedRecently(est, days = 14) {
   }
 }
 
+// The pipeline-audit nag bug: every stage gated on ESTIMATE status only, so
+// a lead who became a paying customer through another path (second estimate,
+// phone booking) kept getting "any questions about your quote?" texts.
+// Guarded at both layers: stage queries exclude estimates whose customer is
+// live, and safetyGate re-checks per candidate (covers rows loaded before a
+// conversion landed). Uses the canonical live-customer predicate from
+// customer-stages.js — customers.active alone does NOT distinguish
+// customers from CRM lead rows; pipeline_stage does.
+function whereCustomerNotLive(query) {
+  query.whereNotExists(function () {
+    this.select(db.raw("1"))
+      .from("customers")
+      .whereRaw("customers.id = estimates.customer_id")
+      .where("customers.active", true)
+      .whereNull("customers.deleted_at")
+      .whereIn("customers.pipeline_stage", CUSTOMER_STAGES);
+  });
+  return query;
+}
+
+async function isLiveCustomer(est) {
+  if (!est.customer_id) return false;
+  try {
+    const row = await db("customers")
+      .where({ id: est.customer_id })
+      .where("active", true)
+      .whereNull("deleted_at")
+      .whereIn("pipeline_stage", CUSTOMER_STAGES)
+      .first("id");
+    return !!row;
+  } catch (e) {
+    // Fail CLOSED: a skipped touch retries next tick (the claim is never
+    // burned on a skip); texting a paying customer can't be taken back.
+    logger.warn(
+      `[est-followup] live-customer check failed (failing closed): ${e.message}`,
+    );
+    return true;
+  }
+}
+
 // Unified gate. Returns { skip: true, reason } if the send should be
 // blocked, else { skip: false }. Keeps the per-stage loops readable.
 async function safetyGate(est, now = new Date()) {
@@ -98,6 +165,8 @@ async function safetyGate(est, now = new Date()) {
   if (isQuietHours(now)) return { skip: true, reason: "quiet-hours" };
   if (wasRecentlyOpened(est, 2, now.getTime()))
     return { skip: true, reason: "recently-opened" };
+  if (await isLiveCustomer(est))
+    return { skip: true, reason: "active-customer" };
   if (await hasRepliedRecently(est))
     return { skip: true, reason: "customer-replied-recently" };
   return { skip: false };
@@ -116,25 +185,26 @@ async function renderTemplate(templateKey, vars, context = {}) {
   return null;
 }
 
-// Atomic stage claim. Flips the stage flag from false/NULL → true and returns
-// true only if THIS caller won the race. Two concurrent crons (server restart,
+// Atomic stage claim. Stamps the stage timestamp from NULL and returns true
+// only if THIS caller won the race. Two concurrent crons (server restart,
 // overlapping runs) both load the same candidate row; the one whose UPDATE
 // affects 1 row sends, the other gets 0 rows and skips. Prevents duplicate
-// SMS/email to the customer.
-async function claimStage(estId, flag) {
+// SMS/email to the customer. The stamp doubles as the attribution record —
+// "accepted within 48h of the day-5 touch" needs the actual send time.
+async function claimStage(estId, column, now = new Date()) {
   const affected = await db("estimates")
     .where({ id: estId })
-    .where((q) => q.where(flag, false).orWhereNull(flag))
-    .update({ [flag]: true });
+    .whereNull(column)
+    .update({ [column]: now });
   return affected === 1;
 }
 
 // Reverses a claim when the send fails on every channel, so the next cron
 // tick retries instead of permanently burning the stage.
-async function releaseStage(estId, flag) {
+async function releaseStage(estId, column) {
   await db("estimates")
     .where({ id: estId })
-    .update({ [flag]: false });
+    .update({ [column]: null });
 }
 
 function moneySummary(est = {}) {
@@ -148,6 +218,18 @@ function moneySummary(est = {}) {
   }
   if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(0)} one-time`;
   return "";
+}
+
+function formatExpiryDate(expiresAt) {
+  if (!expiresAt) return null;
+  const d = new Date(expiresAt);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "America/New_York",
+  });
 }
 
 function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
@@ -165,6 +247,14 @@ function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
   };
 }
 
+function templateContext(est) {
+  return {
+    workflow: "estimate_follow_up",
+    entity_type: "estimate",
+    entity_id: est.id,
+  };
+}
+
 // Shared sender — fires SMS if phone exists, email if email exists. Returns
 // true if at least one channel attempted (callers use this to decide whether
 // to keep the stage claim or release it).
@@ -175,7 +265,7 @@ function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
 // renders content the admin can edit in /admin/email without a deploy. The
 // `idempotencyKey` is stable per (stage, estimate) — duplicate cron ticks
 // hit the email_messages unique index instead of resending. The atomic
-// claimStage() flag is still primary; idempotency is belt-and-suspenders.
+// claimStage() timestamp is still primary; idempotency is belt-and-suspenders.
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
   if (est.customer_phone && sms) {
@@ -247,7 +337,273 @@ async function sendDualChannel(est, { sms, email }) {
   return attempted;
 }
 
-// 5. Deposit started but never completed (2-72h after the last pending
+async function bumpFollowUpCounters(estId) {
+  await db("estimates")
+    .where({ id: estId })
+    .update({
+      follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
+      last_follow_up_at: db.fn.now(),
+    });
+}
+
+// Shared per-candidate runner: safety gate → render → atomic claim → send →
+// counters, releasing the claim if nothing attempted so the next tick
+// retries. Render happens BEFORE the claim so a missing template on an
+// SMS-only stage (smsRequired) skips without burning the stage. Returns 1
+// when at least one channel attempted, else 0.
+async function runTouch(est, cfg, now = new Date()) {
+  let claimed = false;
+  try {
+    const gate = await safetyGate(est, now);
+    if (gate.skip) {
+      logger.info(`[est-followup] ${cfg.label} skip ${est.id}: ${gate.reason}`);
+      return 0;
+    }
+    const firstName = (est.customer_name || "").split(" ")[0] || "there";
+    const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+    const url = await shortenOrPassthrough(longUrl, {
+      kind: "estimate",
+      entityType: "estimates",
+      entityId: est.id,
+      customerId: est.customer_id,
+    });
+    const { sms, email } = await cfg.render(est, { firstName, url }, now);
+    if (!sms && cfg.smsRequired) {
+      logger.warn(
+        `[est-followup] ${cfg.label} SMS unavailable — skipping est ${est.id} without claiming`,
+      );
+      return 0;
+    }
+    if (!(await claimStage(est.id, cfg.column, now))) {
+      logger.info(`[est-followup] ${cfg.label} skip ${est.id}: lost-claim`);
+      return 0;
+    }
+    claimed = true;
+    const ok = await sendDualChannel(est, { sms, email });
+    if (ok) {
+      await bumpFollowUpCounters(est.id);
+      claimed = false; // success path keeps the timestamp set
+      return 1;
+    }
+    // !ok → finally releases so the next tick retries
+    return 0;
+  } catch (e) {
+    logger.error(`[est-followup] ${cfg.label} send failed: ${e.message}`);
+    return 0;
+  } finally {
+    if (claimed) {
+      try {
+        await releaseStage(est.id, cfg.column);
+      } catch (e) {
+        logger.error(`[est-followup] ${cfg.label} release failed: ${e.message}`);
+      }
+    }
+  }
+}
+
+function withContactableChannel(q) {
+  return q.where(function () {
+    this.whereNotNull("customer_phone").orWhereNotNull("customer_email");
+  });
+}
+
+function withTouchSpacing(q, nowMs, hours) {
+  return q.where(function () {
+    this.whereNull("last_follow_up_at").orWhere(
+      "last_follow_up_at",
+      "<",
+      new Date(nowMs - hours * 3600000),
+    );
+  });
+}
+
+// 1. Questions opener, 48-72h after send. Anchored on sent_at (not
+// viewed_at) so a lead who never opens the link still gets touch 1 — the
+// copy just switches to the not-yet-viewed variant.
+const QUESTIONS_TOUCH = {
+  label: "Questions",
+  column: "followup_questions_sent_at",
+  smsRequired: false,
+  async render(est, { firstName, url }) {
+    const viewed = !!est.viewed_at;
+    const templateKey = viewed
+      ? "estimate_followup_questions"
+      : "estimate_followup_questions_unviewed";
+    let sms = null;
+    const expiresLabel = formatExpiryDate(est.expires_at);
+    if (!viewed && !expiresLabel) {
+      // The unviewed copy promises "price locked until {expires_at}" —
+      // without a date that sentence is broken, so skip SMS (email still
+      // goes). Every live creation path stamps expires_at; this is legacy
+      // rows only.
+      logger.warn(
+        `[est-followup] Questions SMS skipped for est ${est.id}: no expires_at for unviewed copy`,
+      );
+    } else {
+      const vars = viewed
+        ? { first_name: firstName, estimate_url: url }
+        : {
+            first_name: firstName,
+            address: (est.address || "").trim() || "your home",
+            expires_at: expiresLabel,
+            estimate_url: url,
+          };
+      sms = await renderTemplate(templateKey, vars, templateContext(est));
+      if (!sms) {
+        logger.warn(
+          `[est-followup] ${templateKey} template missing/disabled — continuing without SMS for est ${est.id}`,
+        );
+      }
+    }
+    return {
+      sms,
+      email: {
+        templateKey: viewed
+          ? "estimate.viewed_followup"
+          : "estimate.unviewed_followup",
+        stage: "questions",
+        payload: estimateEmailPayload(est, firstName, url),
+      },
+    };
+  },
+};
+
+async function checkQuestionsTouch(now = new Date()) {
+  const nowMs = now.getTime();
+  const q = db("estimates")
+    .whereIn("status", ["sent", "viewed"])
+    .whereNotNull("sent_at")
+    .where("sent_at", "<", new Date(nowMs - QUESTIONS_WINDOW.minAgeHours * 3600000))
+    .where("sent_at", ">", new Date(nowMs - QUESTIONS_WINDOW.maxAgeHours * 3600000))
+    .whereNull("followup_questions_sent_at");
+  withContactableChannel(q);
+  withTouchSpacing(q, nowMs, TOUCH_SPACING_HOURS);
+  whereCustomerNotLive(q);
+  const candidates = await q;
+
+  let sent = 0;
+  for (const est of candidates) {
+    sent += await runTouch(est, QUESTIONS_TOUCH, now);
+  }
+  return sent;
+}
+
+// 2. Day-5 check-in — the offer slot. SMS-only: the retired "final nudge"
+// email said "one last check-in", which is dishonest mid-ladder, and the
+// offer email belongs to PR 2. Yields to the last-day notice when expiry is
+// close, and keeps distance from a quiet-hours-delayed questions touch.
+const CHECKIN_TOUCH = {
+  label: "Check-in",
+  column: "followup_credit_sent_at",
+  smsRequired: true,
+  async render(est, { firstName, url }) {
+    const sms = await renderTemplate(
+      "estimate_followup_credit",
+      {
+        first_name: firstName,
+        expires_at: formatExpiryDate(est.expires_at),
+        estimate_url: url,
+      },
+      templateContext(est),
+    );
+    return { sms, email: null };
+  },
+};
+
+async function checkCheckInTouch(now = new Date()) {
+  const nowMs = now.getTime();
+  const q = db("estimates")
+    .whereIn("status", ["sent", "viewed"])
+    .whereNotNull("sent_at")
+    .where("sent_at", "<", new Date(nowMs - CHECKIN_WINDOW.minAgeDays * 86400000))
+    .where("sent_at", ">", new Date(nowMs - CHECKIN_WINDOW.maxAgeDays * 86400000))
+    .whereNotNull("customer_phone")
+    .whereNull("followup_credit_sent_at")
+    .whereNotNull("expires_at")
+    .where(
+      "expires_at",
+      ">",
+      new Date(nowMs + CHECKIN_EXPIRY_YIELD_HOURS * 3600000),
+    )
+    .where(function () {
+      this.whereNull("followup_questions_sent_at").orWhere(
+        "followup_questions_sent_at",
+        "<",
+        new Date(nowMs - CHECKIN_QUESTIONS_GAP_HOURS * 3600000),
+      );
+    });
+  withTouchSpacing(q, nowMs, TOUCH_SPACING_HOURS);
+  whereCustomerNotLive(q);
+  const candidates = await q;
+
+  let sent = 0;
+  for (const est of candidates) {
+    sent += await runTouch(est, CHECKIN_TOUCH, now);
+  }
+  return sent;
+}
+
+// 3. Last-day notice, the day before expiry. Runs FIRST in checkAll so the
+// deadline touch wins the day when a short manual expiry stacks stages —
+// later stages then space themselves off last_follow_up_at.
+const EXPIRING_TOUCH = {
+  label: "Expiring",
+  column: "followup_expiring_sent_at",
+  smsRequired: false,
+  async render(est, { firstName, url }) {
+    const expiresLabel = formatExpiryDate(est.expires_at);
+    const sms = await renderTemplate(
+      "estimate_followup_expiring",
+      {
+        first_name: firstName,
+        expires_at: expiresLabel,
+        estimate_url: url,
+      },
+      templateContext(est),
+    );
+    if (!sms) {
+      logger.warn(
+        `[est-followup] estimate_followup_expiring template missing/disabled — continuing without SMS for est ${est.id}`,
+      );
+    }
+    return {
+      sms,
+      email: {
+        templateKey: "estimate.expiring_notice",
+        stage: "expiring",
+        payload: estimateEmailPayload(est, firstName, url, {
+          expires_at: expiresLabel,
+        }),
+      },
+    };
+  },
+};
+
+async function checkExpiringTouch(now = new Date()) {
+  const nowMs = now.getTime();
+  const q = db("estimates")
+    .whereIn("status", ["sent", "viewed"])
+    .whereNotNull("expires_at")
+    .where("expires_at", ">", now)
+    .where(
+      "expires_at",
+      "<",
+      new Date(nowMs + EXPIRING_HORIZON_HOURS * 3600000),
+    )
+    .whereNull("followup_expiring_sent_at");
+  withContactableChannel(q);
+  withTouchSpacing(q, nowMs, EXPIRING_SPACING_HOURS);
+  whereCustomerNotLive(q);
+  const candidates = await q;
+
+  let sent = 0;
+  for (const est of candidates) {
+    sent += await runTouch(est, EXPIRING_TOUCH, now);
+  }
+  return sent;
+}
+
+// 4. Deposit started but never completed (2-72h after the last pending
 // PaymentIntent). Highest-intent drop-off: the customer clicked accept and
 // reached the Stripe card form. Gated separately because it's a new
 // customer-facing auto-send — until GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS is
@@ -270,18 +626,16 @@ async function checkDepositAbandoned(now = new Date()) {
     .groupBy("estimate_id")
     .max("updated_at as latest_pending_at")
     .as("pd");
-  const candidates = await db("estimates")
+  const q = db("estimates")
     .join(latestPendingByEstimate, "pd.estimate_id", "estimates.id")
     .whereIn("estimates.status", ["sent", "viewed"])
     .whereNotNull("estimates.customer_phone")
     .where("pd.latest_pending_at", "<", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.minAgeHours * 3600000))
     .where("pd.latest_pending_at", ">", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.maxAgeHours * 3600000))
-    .where((q) =>
-      q
-        .where("followup_deposit_abandoned_sent", false)
-        .orWhereNull("followup_deposit_abandoned_sent"),
-    )
+    .whereNull("estimates.followup_deposit_abandoned_sent_at")
     .select("estimates.*");
+  whereCustomerNotLive(q);
+  const candidates = await q;
 
   if (!candidates.length) return 0;
   if (!isEnabled("estimateDepositAbandonmentSms")) {
@@ -338,18 +692,14 @@ async function checkDepositAbandoned(now = new Date()) {
           ? String(depositAmount)
           : depositAmount.toFixed(2),
         estimate_url: url,
-      }, {
-        workflow: "estimate_follow_up",
-        entity_type: "estimate",
-        entity_id: est.id,
-      });
+      }, templateContext(est));
       if (!smsBody) {
         logger.warn(
           `[est-followup] estimate_followup_deposit template missing/disabled — skipping est ${est.id} without claiming`,
         );
         continue;
       }
-      if (!(await claimStage(est.id, "followup_deposit_abandoned_sent"))) {
+      if (!(await claimStage(est.id, "followup_deposit_abandoned_sent_at", now))) {
         logger.info(
           `[est-followup] Deposit-abandoned skip ${est.id}: lost-claim`,
         );
@@ -358,12 +708,7 @@ async function checkDepositAbandoned(now = new Date()) {
       claimed = true;
       const ok = await sendDualChannel(est, { sms: smsBody });
       if (ok) {
-        await db("estimates")
-          .where({ id: est.id })
-          .update({
-            follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
-            last_follow_up_at: db.fn.now(),
-          });
+        await bumpFollowUpCounters(est.id);
         sent++;
         claimed = false;
       }
@@ -374,7 +719,7 @@ async function checkDepositAbandoned(now = new Date()) {
     } finally {
       if (claimed) {
         try {
-          await releaseStage(est.id, "followup_deposit_abandoned_sent");
+          await releaseStage(est.id, "followup_deposit_abandoned_sent_at");
         } catch (e) {
           logger.error(
             `[est-followup] Deposit-abandoned release failed: ${e.message}`,
@@ -389,371 +734,29 @@ async function checkDepositAbandoned(now = new Date()) {
 const EstimateFollowUp = {
   async checkAll() {
     let sent = 0;
+    const now = new Date();
 
-    // 1. Sent but NOT viewed after 24 hours
+    // Deadline touch first — see EXPIRING_TOUCH.
     try {
-      const unviewed = await db("estimates")
-        .where({ status: "sent" })
-        .whereNull("viewed_at")
-        .where("sent_at", "<", new Date(Date.now() - 24 * 3600000))
-        .where("sent_at", ">", new Date(Date.now() - 48 * 3600000))
-        .where((q) =>
-          q.whereNotNull("customer_phone").orWhereNotNull("customer_email"),
-        )
-        .where((q) =>
-          q
-            .where("followup_unviewed_sent", false)
-            .orWhereNull("followup_unviewed_sent"),
-        );
-
-      for (const est of unviewed) {
-        let claimed = false;
-        try {
-          const gate = await safetyGate(est);
-          if (gate.skip) {
-            logger.info(
-              `[est-followup] Unviewed skip ${est.id}: ${gate.reason}`,
-            );
-            continue;
-          }
-          if (!(await claimStage(est.id, "followup_unviewed_sent"))) {
-            logger.info(`[est-followup] Unviewed skip ${est.id}: lost-claim`);
-            continue;
-          }
-          claimed = true;
-          const firstName = (est.customer_name || "").split(" ")[0] || "there";
-          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          const url = await shortenOrPassthrough(longUrl, {
-            kind: "estimate",
-            entityType: "estimates",
-            entityId: est.id,
-            customerId: est.customer_id,
-          });
-          const smsBody = await renderTemplate("estimate_followup_unviewed", {
-            first_name: firstName,
-            estimate_url: url,
-          }, {
-            workflow: "estimate_follow_up",
-            entity_type: "estimate",
-            entity_id: est.id,
-          });
-          if (!smsBody) {
-            logger.warn(
-              `[est-followup] estimate_followup_unviewed template missing/disabled — continuing without SMS for est ${est.id}`,
-            );
-          }
-          const ok = await sendDualChannel(est, {
-            sms: smsBody,
-            email: {
-              templateKey: "estimate.unviewed_followup",
-              stage: "unviewed",
-              payload: estimateEmailPayload(est, firstName, url),
-            },
-          });
-          if (ok) {
-            await db("estimates")
-              .where({ id: est.id })
-              .update({
-                follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
-                last_follow_up_at: db.fn.now(),
-              });
-            sent++;
-            claimed = false; // success path keeps the flag set
-          }
-          // !ok → claim stays true; finally releases so next tick retries
-        } catch (e) {
-          logger.error(`[est-followup] Unviewed send failed: ${e.message}`);
-        } finally {
-          if (claimed) {
-            try {
-              await releaseStage(est.id, "followup_unviewed_sent");
-            } catch (e) {
-              logger.error(
-                `[est-followup] Unviewed release failed: ${e.message}`,
-              );
-            }
-          }
-        }
-      }
+      sent += await checkExpiringTouch(now);
     } catch {
       /* columns may not exist */
     }
 
-    // 2. Viewed but NOT accepted after 48 hours
     try {
-      const viewedNotAccepted = await db("estimates")
-        .where({ status: "viewed" })
-        .whereNotNull("viewed_at")
-        .where("viewed_at", "<", new Date(Date.now() - 48 * 3600000))
-        .where("viewed_at", ">", new Date(Date.now() - 72 * 3600000))
-        .where((q) =>
-          q.whereNotNull("customer_phone").orWhereNotNull("customer_email"),
-        )
-        .where((q) =>
-          q
-            .where("followup_viewed_sent", false)
-            .orWhereNull("followup_viewed_sent"),
-        );
-
-      for (const est of viewedNotAccepted) {
-        let claimed = false;
-        try {
-          const gate = await safetyGate(est);
-          if (gate.skip) {
-            logger.info(`[est-followup] Viewed skip ${est.id}: ${gate.reason}`);
-            continue;
-          }
-          if (!(await claimStage(est.id, "followup_viewed_sent"))) {
-            logger.info(`[est-followup] Viewed skip ${est.id}: lost-claim`);
-            continue;
-          }
-          claimed = true;
-          const firstName = (est.customer_name || "").split(" ")[0] || "there";
-          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          const url = await shortenOrPassthrough(longUrl, {
-            kind: "estimate",
-            entityType: "estimates",
-            entityId: est.id,
-            customerId: est.customer_id,
-          });
-          const smsBody = await renderTemplate("estimate_followup_viewed", {
-            first_name: firstName,
-            estimate_url: url,
-          }, {
-            workflow: "estimate_follow_up",
-            entity_type: "estimate",
-            entity_id: est.id,
-          });
-          if (!smsBody) {
-            logger.warn(
-              `[est-followup] estimate_followup_viewed template missing/disabled — continuing without SMS for est ${est.id}`,
-            );
-          }
-          const ok = await sendDualChannel(est, {
-            sms: smsBody,
-            email: {
-              templateKey: "estimate.viewed_followup",
-              stage: "viewed",
-              payload: estimateEmailPayload(est, firstName, url),
-            },
-          });
-          if (ok) {
-            await db("estimates")
-              .where({ id: est.id })
-              .update({
-                follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
-                last_follow_up_at: db.fn.now(),
-              });
-            sent++;
-            claimed = false;
-          }
-        } catch (e) {
-          logger.error(
-            `[est-followup] Viewed-not-accepted send failed: ${e.message}`,
-          );
-        } finally {
-          if (claimed) {
-            try {
-              await releaseStage(est.id, "followup_viewed_sent");
-            } catch (e) {
-              logger.error(
-                `[est-followup] Viewed release failed: ${e.message}`,
-              );
-            }
-          }
-        }
-      }
+      sent += await checkQuestionsTouch(now);
     } catch {
       /* columns may not exist */
     }
 
-    // 3. Viewed but NOT accepted after 5 days (final nudge)
     try {
-      const finalNudge = await db("estimates")
-        .where({ status: "viewed" })
-        .whereNotNull("viewed_at")
-        .where("viewed_at", "<", new Date(Date.now() - 5 * 86400000))
-        .where("viewed_at", ">", new Date(Date.now() - 6 * 86400000))
-        .where((q) =>
-          q.whereNotNull("customer_phone").orWhereNotNull("customer_email"),
-        )
-        .where((q) =>
-          q
-            .where("followup_final_sent", false)
-            .orWhereNull("followup_final_sent"),
-        );
-
-      for (const est of finalNudge) {
-        let claimed = false;
-        try {
-          const gate = await safetyGate(est);
-          if (gate.skip) {
-            logger.info(`[est-followup] Final skip ${est.id}: ${gate.reason}`);
-            continue;
-          }
-          if (!(await claimStage(est.id, "followup_final_sent"))) {
-            logger.info(`[est-followup] Final skip ${est.id}: lost-claim`);
-            continue;
-          }
-          claimed = true;
-          const firstName = (est.customer_name || "").split(" ")[0] || "there";
-          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          const url = await shortenOrPassthrough(longUrl, {
-            kind: "estimate",
-            entityType: "estimates",
-            entityId: est.id,
-            customerId: est.customer_id,
-          });
-          const smsBody = await renderTemplate("estimate_followup_final", {
-            first_name: firstName,
-            estimate_url: url,
-          }, {
-            workflow: "estimate_follow_up",
-            entity_type: "estimate",
-            entity_id: est.id,
-          });
-          if (!smsBody) {
-            logger.warn(
-              `[est-followup] estimate_followup_final template missing/disabled — continuing without SMS for est ${est.id}`,
-            );
-          }
-          const ok = await sendDualChannel(est, {
-            sms: smsBody,
-            email: {
-              templateKey: "estimate.followup_final",
-              stage: "final",
-              payload: estimateEmailPayload(est, firstName, url),
-            },
-          });
-          if (ok) {
-            await db("estimates")
-              .where({ id: est.id })
-              .update({
-                follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
-                last_follow_up_at: db.fn.now(),
-              });
-            sent++;
-            claimed = false;
-          }
-        } catch (e) {
-          logger.error(`[est-followup] Final nudge send failed: ${e.message}`);
-        } finally {
-          if (claimed) {
-            try {
-              await releaseStage(est.id, "followup_final_sent");
-            } catch (e) {
-              logger.error(`[est-followup] Final release failed: ${e.message}`);
-            }
-          }
-        }
-      }
+      sent += await checkCheckInTouch(now);
     } catch {
       /* columns may not exist */
     }
 
-    // 4. Expiring in 1-3 days
     try {
-      const expiring = await db("estimates")
-        .whereIn("status", ["sent", "viewed"])
-        .whereNotNull("expires_at")
-        .where((q) =>
-          q.whereNotNull("customer_phone").orWhereNotNull("customer_email"),
-        )
-        .whereBetween("expires_at", [
-          new Date(Date.now() + 1 * 86400000),
-          new Date(Date.now() + 3 * 86400000),
-        ])
-        .where((q) =>
-          q
-            .where("followup_expiring_sent", false)
-            .orWhereNull("followup_expiring_sent"),
-        );
-
-      for (const est of expiring) {
-        let claimed = false;
-        try {
-          const gate = await safetyGate(est);
-          if (gate.skip) {
-            logger.info(
-              `[est-followup] Expiring skip ${est.id}: ${gate.reason}`,
-            );
-            continue;
-          }
-          if (!(await claimStage(est.id, "followup_expiring_sent"))) {
-            logger.info(`[est-followup] Expiring skip ${est.id}: lost-claim`);
-            continue;
-          }
-          claimed = true;
-          const firstName = (est.customer_name || "").split(" ")[0] || "there";
-          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          const url = await shortenOrPassthrough(longUrl, {
-            kind: "estimate",
-            entityType: "estimates",
-            entityId: est.id,
-            customerId: est.customer_id,
-          });
-          const expDate = new Date(est.expires_at).toLocaleDateString("en-US", {
-            month: "long",
-            day: "numeric",
-            year: "numeric",
-            timeZone: "America/New_York",
-          });
-          const smsBody = await renderTemplate("estimate_followup_expiring", {
-            first_name: firstName,
-            estimate_url: url,
-            expires_at: expDate,
-          }, {
-            workflow: "estimate_follow_up",
-            entity_type: "estimate",
-            entity_id: est.id,
-          });
-          if (!smsBody) {
-            logger.warn(
-              `[est-followup] estimate_followup_expiring template missing/disabled — continuing without SMS for est ${est.id}`,
-            );
-          }
-          const ok = await sendDualChannel(est, {
-            sms: smsBody,
-            email: {
-              templateKey: "estimate.expiring_notice",
-              stage: "expiring",
-              payload: {
-                ...estimateEmailPayload(est, firstName, url),
-                expires_at: expDate,
-              },
-            },
-          });
-          if (ok) {
-            await db("estimates")
-              .where({ id: est.id })
-              .update({
-                follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
-                last_follow_up_at: db.fn.now(),
-              });
-            sent++;
-            claimed = false;
-          }
-        } catch (e) {
-          logger.error(`[est-followup] Expiry reminder failed: ${e.message}`);
-        } finally {
-          if (claimed) {
-            try {
-              await releaseStage(est.id, "followup_expiring_sent");
-            } catch (e) {
-              logger.error(
-                `[est-followup] Expiring release failed: ${e.message}`,
-              );
-            }
-          }
-        }
-      }
-    } catch {
-      /* columns may not exist */
-    }
-
-    // 5. Deposit started but never completed
-    try {
-      sent += await checkDepositAbandoned();
+      sent += await checkDepositAbandoned(now);
     } catch {
       /* columns may not exist */
     }
@@ -770,4 +773,10 @@ module.exports._private = {
   estimateEmailPayload,
   renderTemplate,
   checkDepositAbandoned,
+  checkQuestionsTouch,
+  checkCheckInTouch,
+  checkExpiringTouch,
+  safetyGate,
+  isLiveCustomer,
+  formatExpiryDate,
 };

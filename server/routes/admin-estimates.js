@@ -1505,15 +1505,37 @@ router.post('/:id/follow-up', async (req, res, next) => {
     });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
 
-    const msg = req.body.message || await renderTemplate('estimate_followup_unviewed', {
+    // Mirror the cron's touch-1 copy: questions opener, state-variant by
+    // whether the lead has opened the quote.
+    const viewed = !!estimate.viewed_at;
+    const followupTemplateKey = viewed
+      ? 'estimate_followup_questions'
+      : 'estimate_followup_questions_unviewed';
+    const expiresLabel = estimate.expires_at
+      ? new Date(estimate.expires_at).toLocaleDateString('en-US', {
+          month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
+        })
+      : null;
+    if (!req.body.message && !viewed && !expiresLabel) {
+      // The not-yet-viewed copy promises "price locked until {expires_at}".
+      return res.status(422).json({
+        error: 'Estimate has no expiration date — extend it first or send a custom message.',
+      });
+    }
+    const msg = req.body.message || await renderTemplate(followupTemplateKey, viewed ? {
       first_name: firstName,
+      estimate_url: viewUrl,
+    } : {
+      first_name: firstName,
+      address: (estimate.address || '').trim() || 'your home',
+      expires_at: expiresLabel,
       estimate_url: viewUrl,
     }, {
       workflow: 'admin_estimate_followup',
       entity_type: 'estimate',
       entity_id: estimate.id,
     });
-    if (!msg) return res.status(422).json({ error: 'SMS template estimate_followup_unviewed is missing or inactive' });
+    if (!msg) return res.status(422).json({ error: `SMS template ${followupTemplateKey} is missing or inactive` });
 
     const smsResult = await sendCustomerMessage({
       to: estimate.customer_phone,
@@ -1708,12 +1730,12 @@ router.post('/:id/extend', async (req, res, next) => {
     const anchor = currentExpiry > now ? currentExpiry : now;
     const newExpiry = new Date(anchor.getTime() + days * 86400000);
 
-    // Re-arm the expiring nudge for the new deadline. Other stage flags
-    // (unviewed / viewed / final) stay as-is — those are tied to send /
-    // view timestamps that haven't moved.
+    // Re-arm the last-day notice for the new deadline. Other stage stamps
+    // (questions / day-5 check-in) stay as-is — those are tied to the send
+    // timestamp, which hasn't moved.
     const updates = {
       expires_at: newExpiry,
-      followup_expiring_sent: false,
+      followup_expiring_sent_at: null,
       updated_at: db.fn.now(),
     };
     // Expired estimates flipping back to active need their status reset

@@ -33,8 +33,10 @@ function estimateViewUrl(token) {
 }
 
 function estimateExpiresAt(now = () => new Date()) {
+  // 10 days (was 7): spaces the three follow-up touches roughly one every
+  // three days (day 2-3 / 5-6 / 9) instead of stacking in the back half.
   const expiresAt = new Date(now().getTime());
-  expiresAt.setDate(expiresAt.getDate() + 7);
+  expiresAt.setDate(expiresAt.getDate() + 10);
   return expiresAt;
 }
 
