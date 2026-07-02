@@ -37,6 +37,7 @@ function makeConn(rowsByTable) {
     };
     return qb;
   };
+  conn.raw = (sql, bindings) => ({ __raw: sql, bindings });
   conn.__updates = updates;
   return conn;
 }
@@ -67,6 +68,13 @@ describe('addressMatchKey / snapshotMatchesLine1', () => {
   test('a distinct unit under the same street line does not match (no prefix swallowing)', () => {
     expect(snapshotMatchesLine1('123 Main St Apt 2', '123 Main St')).toBe(false);
     expect(snapshotMatchesLine1('123 Main St Apt 2, Bradenton, FL 34205', '123 Main St')).toBe(false);
+  });
+
+  test('a unit carried as its own comma segment does not match either', () => {
+    expect(snapshotMatchesLine1('123 Main St, Apt 2, Bradenton, FL 34205', '123 Main St')).toBe(false);
+    expect(snapshotMatchesLine1('123 Main St, # 4, Bradenton, FL', '123 Main St')).toBe(false);
+    // a city segment is NOT a unit segment
+    expect(snapshotMatchesLine1('123 Main St, Bradenton, FL 34205', '123 Main St')).toBe(true);
   });
 
   test('empty snapshot or empty line never matches', () => {
@@ -119,9 +127,11 @@ describe('propagateCustomerAddressChange', () => {
 
     expect(counts.estimates).toBe(1);
     const patch = conn.__updates.find((u) => u.table === 'estimates').patch;
-    const data = JSON.parse(patch.estimate_data);
-    expect(data.proposal.propertyAddress).toBe('4857 Tobermory Way, Bradenton, FL 34211');
-    expect(data.other).toBe('kept');
+    // Targeted jsonb_set (never a full estimate_data overwrite) that also
+    // drops the now-stale proposalDelivery "PDF emailed" marker.
+    expect(patch.estimate_data.__raw).toContain("jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,propertyAddress}'");
+    expect(patch.estimate_data.__raw).toContain("- 'proposalDelivery'");
+    expect(patch.estimate_data.bindings).toEqual(['4857 Tobermory Way, Bradenton, FL 34211']);
   });
 
   test('a proposal holding a deliberately different address is left alone', async () => {
@@ -178,6 +188,25 @@ describe('propagateCustomerAddressChange', () => {
 
     expect(counts).toEqual({ leads: 0, estimates: 0 });
     expect(conn.__updates).toHaveLength(0);
+  });
+
+  test('a street-only customer row patches lead address but never blanks city/zip, and skips estimates', async () => {
+    const conn = makeConn({
+      leads: [{ id: 'lead-match', address: '4867 Tober Morey Way' }],
+      estimates: [{ id: 'est-match', address: '4867 Tobermorey Way, Lakewood Ranch, FL 34211' }],
+    });
+
+    const counts = await propagateCustomerAddressChange(
+      { before: BEFORE, after: { ...AFTER, city: '', zip: null } },
+      conn,
+    );
+
+    expect(counts).toEqual({ leads: 1, estimates: 0 });
+    const leadPatch = conn.__updates.find((u) => u.table === 'leads').patch;
+    expect(leadPatch.address).toBe('4857 Tobermory Way');
+    expect(leadPatch).not.toHaveProperty('city');
+    expect(leadPatch).not.toHaveProperty('zip');
+    expect(conn.__updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
   });
 
   test('missing customer id is a safe no-op', async () => {

@@ -42,17 +42,26 @@ function addressMatchKey(value) {
   return String(value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// A comma segment that is a secondary-unit designator ("Apt 2", "# 4",
+// "Suite 200") — a snapshot carrying one refers to a distinct unit even when
+// its street segment matches the customer's unitless line. "FL" (floor) is
+// deliberately absent: every Florida address has an ", FL 34211" segment.
+const UNIT_SEGMENT_RE = /^\s*(?:apt|apartment|unit|ste|suite|bldg|building|lot|trlr|rm|#)\s*#?\s*[\w-]+\s*$/i;
+
 // True when a stored snapshot refers to the given street line. The comparison
 // is EXACT key equality on the snapshot's first comma-segment: whole-string
 // equality covers street-line snapshots (leads.address); the first segment of
 // a full single-line snapshot ("123 Main St, Bradenton, FL 34205" on
 // estimates) is its street line. A prefix check would be wrong here — it
-// would let "123 Main St" swallow "123 Main St Apt 2", clobbering an open
-// lead/estimate for a distinct unit under the same customer.
+// would let "123 Main St" swallow "123 Main St Apt 2" — and a snapshot whose
+// LATER segment is a unit designator ("123 Main St, Apt 2, Bradenton") is a
+// distinct unit too, so it never matches a unitless customer line.
 function snapshotMatchesLine1(snapshot, line1) {
   const lineKey = addressMatchKey(line1);
   if (!lineKey) return false;
-  const segKey = addressMatchKey(String(snapshot ?? '').split(',')[0]);
+  const segments = String(snapshot ?? '').split(',');
+  if (segments.slice(1).some((seg) => UNIT_SEGMENT_RE.test(seg))) return false;
+  const segKey = addressMatchKey(segments[0]);
   return !!segKey && segKey === lineKey;
 }
 
@@ -82,41 +91,54 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
     .select('id', 'address');
   const leadIds = leadRows.filter((r) => matchesCustomerAddress(r.address)).map((r) => r.id);
   if (leadIds.length) {
+    // city/zip are patched only when the customer row actually HAS them — a
+    // street-only customer edit must not erase more complete location data
+    // captured on the lead.
+    const leadPatch = { address: after.address_line1, updated_at: now };
+    if (addressMatchKey(after.city)) leadPatch.city = after.city;
+    if (addressMatchKey(after.zip)) leadPatch.zip = after.zip;
     counts.leads = await conn('leads')
       .whereIn('id', leadIds)
       .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
-      .update({
-        address: after.address_line1,
-        city: after.city || null,
-        zip: after.zip || null,
-        updated_at: now,
-      });
+      .update(leadPatch);
   }
 
-  const estimateRows = await conn('estimates')
-    .where({ customer_id: customerId })
-    .whereIn('status', OPEN_ESTIMATE_STATUSES)
-    .whereNull('archived_at')
-    .select('id', 'address', 'estimate_data');
-  for (const row of estimateRows) {
-    if (!matchesCustomerAddress(row.address)) continue;
-    const patch = { address: fullAddress, updated_at: now };
-    // An authored proposal snapshots its own copy (estimate_data.proposal.
-    // propertyAddress) which normalizeProposal PREFERS over estimates.address
-    // and the proposal PDF prints — patch it under the same guard or a resend
-    // still attaches a PDF with the old address.
-    const data = typeof row.estimate_data === 'string'
-      ? (() => { try { return JSON.parse(row.estimate_data); } catch { return null; } })()
-      : row.estimate_data;
-    if (data?.proposal?.propertyAddress && matchesCustomerAddress(data.proposal.propertyAddress)) {
-      data.proposal.propertyAddress = fullAddress.slice(0, 200);
-      patch.estimate_data = JSON.stringify(data);
-    }
-    counts.estimates += await conn('estimates')
-      .where({ id: row.id })
+  // Estimates snapshot ONE full display string, so rebuilding it needs the
+  // customer's city+zip — with either missing, a rewrite would produce a
+  // less complete address than the snapshot already has. Skip instead.
+  if (addressMatchKey(after.city) && addressMatchKey(after.zip)) {
+    const estimateRows = await conn('estimates')
+      .where({ customer_id: customerId })
       .whereIn('status', OPEN_ESTIMATE_STATUSES)
       .whereNull('archived_at')
-      .update(patch);
+      .select('id', 'address', 'estimate_data');
+    for (const row of estimateRows) {
+      if (!matchesCustomerAddress(row.address)) continue;
+      const patch = { address: fullAddress, updated_at: now };
+      // An authored proposal snapshots its own copy (estimate_data.proposal.
+      // propertyAddress) which normalizeProposal PREFERS over estimates.address
+      // and the proposal PDF prints — patch it under the same guard or a resend
+      // still attaches a PDF with the old address. The write is a targeted
+      // jsonb_set (mirroring the send path's merge discipline) so a concurrent
+      // proposal save / send-snapshot merge is never clobbered by a full
+      // estimate_data overwrite — and it drops proposalDelivery, because the
+      // address change makes the prior "PDF emailed" claim stale (same rule as
+      // clearStaleProposalDelivery on proposal re-authoring).
+      const data = typeof row.estimate_data === 'string'
+        ? (() => { try { return JSON.parse(row.estimate_data); } catch { return null; } })()
+        : row.estimate_data;
+      if (data?.proposal?.propertyAddress && matchesCustomerAddress(data.proposal.propertyAddress)) {
+        patch.estimate_data = conn.raw(
+          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,propertyAddress}', to_jsonb(?::text)) - 'proposalDelivery'",
+          [fullAddress.slice(0, 200)],
+        );
+      }
+      counts.estimates += await conn('estimates')
+        .where({ id: row.id })
+        .whereIn('status', OPEN_ESTIMATE_STATUSES)
+        .whereNull('archived_at')
+        .update(patch);
+    }
   }
 
   if (counts.leads || counts.estimates) {
