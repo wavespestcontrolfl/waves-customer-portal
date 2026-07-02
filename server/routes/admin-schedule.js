@@ -21,6 +21,7 @@ const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
 const {
   isNewRecurringSignupCandidate,
   sendNewRecurringWelcome,
@@ -2419,6 +2420,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           case 'reschedule': {
             if (!payload?.scheduledDate) throw Object.assign(new Error('scheduledDate required'), { isValidation: true });
             let reminderSyncTime = null;
+            let callFollowUpShiftFrom = null;
             await db.transaction(async (trx) => {
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
@@ -2426,6 +2428,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (payload?.windowStart) updates.window_start = payload.windowStart;
               if (payload?.windowEnd) updates.window_end = payload.windowEnd;
               await trx('scheduled_services').where({ id }).update(updates);
+              callFollowUpShiftFrom = svc.scheduled_date;
               const prevDate = svc.scheduled_date instanceof Date
                 ? svc.scheduled_date.toISOString().split('T')[0]
                 : normalizeDateOnly(svc.scheduled_date);
@@ -2457,6 +2460,23 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 }
               } catch {}
             }
+            // Keep a call-created follow-up (visit 2) spaced from its parent —
+            // shared with the rebooker path; best-effort outside the trx (a
+            // failed shift leaves the child where it was; the helper no-ops
+            // when the date didn't actually change).
+            try {
+              const shifted = await shiftCallFollowUpsForParentMove({
+                conn: db,
+                parentServiceId: id,
+                fromDate: callFollowUpShiftFrom,
+                toDate: payload.scheduledDate,
+              });
+              if (shifted > 0) {
+                logger.info(`[admin-schedule] bulk reschedule shifted ${shifted} call-created follow-up visit(s) with parent ${id}`);
+              }
+            } catch (e) {
+              logger.error(`[admin-schedule] bulk reschedule call follow-up shift failed for ${id}: ${e.message}`);
+            }
             break;
           }
           case 'cancel': {
@@ -2477,6 +2497,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               const AppointmentReminders = require('../services/appointment-reminders');
               await AppointmentReminders.handleCancellation(id);
             } catch {}
+            // Cancelling a call-booked primary pulls its pending follow-up
+            // (visit 2) off the schedule too — shared with the track-
+            // transitions cancel path; best-effort after the parent commit.
+            try {
+              const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: id });
+              if (cancelled > 0) {
+                logger.info(`[admin-schedule] bulk cancel cascaded to ${cancelled} call-created follow-up visit(s) of ${id}`);
+              }
+            } catch (e) {
+              logger.error(`[admin-schedule] bulk-cancel call follow-up cascade failed for ${id}: ${e.message}`);
+            }
             // Void any still-open invoice pre-minted for this visit so
             // dunning doesn't chase a cancelled job. Paid/processing stay put.
             await voidOpenInvoicesForCancelledService(id);
@@ -2918,6 +2949,9 @@ router.put('/:id/update-details', async (req, res, next) => {
     // them AFTER commit (mirrors the POST create path) so the 72h/24h cron
     // never reads a row whose visit could still roll back.
     const spawnedRecurringChildren = [];
+    // Prior scheduled_date, captured inside the trx when the edit moves the
+    // visit — drives the call-created follow-up shift after commit.
+    let callFollowUpShiftFrom = null;
 
     await db.transaction(async (trx) => {
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
@@ -2946,6 +2980,9 @@ router.put('/:id/update-details', async (req, res, next) => {
           ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
           : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        if (updates.scheduled_date !== undefined && reminderBefore) {
+          callFollowUpShiftFrom = reminderBefore.scheduled_date;
+        }
         // Third-party Bill-To: a payer/PO change on a recurring PARENT must reach
         // the already-spawned pending child visits, INDEPENDENT of any date/
         // cadence rewrite (that path is separately gated by
@@ -3407,6 +3444,26 @@ router.put('/:id/update-details', async (req, res, next) => {
         }
       }
     });
+
+    // Keep a call-created follow-up (visit 2) spaced from its parent when the
+    // edit modal moves the primary — shared with the rebooker path; best-effort
+    // outside the trx (a failed shift leaves the child where it was; the
+    // helper no-ops when the date didn't actually change).
+    if (callFollowUpShiftFrom != null && updates.scheduled_date !== undefined) {
+      try {
+        const shifted = await shiftCallFollowUpsForParentMove({
+          conn: db,
+          parentServiceId: req.params.id,
+          fromDate: callFollowUpShiftFrom,
+          toDate: updates.scheduled_date,
+        });
+        if (shifted > 0) {
+          logger.info(`[schedule/update-details] shifted ${shifted} call-created follow-up visit(s) with parent ${req.params.id}`);
+        }
+      } catch (e) {
+        logger.error(`[schedule/update-details] call follow-up shift failed for ${req.params.id}: ${e.message}`);
+      }
+    }
 
     // Register reminder rows for the children spawned above — without this
     // the spawned visits never enter appointment_reminders, so they get no
@@ -4359,6 +4416,15 @@ router.put('/:id/status', async (req, res, next) => {
         const AppointmentReminders = require('../services/appointment-reminders');
         await AppointmentReminders.handleCancellation(req.params.id);
       } catch (e) { logger.error(`Appointment cancellation handler failed: ${e.message}`); }
+      // Cancelling a call-booked primary pulls its pending follow-up
+      // (visit 2) off the schedule too — shared with the track-transitions
+      // cancel path; best-effort after the parent commit.
+      try {
+        const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: svc.id });
+        if (cancelled > 0) {
+          logger.info(`[admin-schedule] status cancel cascaded to ${cancelled} call-created follow-up visit(s) of ${svc.id}`);
+        }
+      } catch (e) { logger.error(`[admin-schedule] status-cancel call follow-up cascade failed for ${svc.id}: ${e.message}`); }
       // Void any still-open invoice pre-minted for this visit ("Charge now")
       // so dunning doesn't chase a cancelled job. Paid/processing stay put.
       await voidOpenInvoicesForCancelledService(svc.id);

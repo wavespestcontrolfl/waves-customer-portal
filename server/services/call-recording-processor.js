@@ -31,7 +31,7 @@ const { normalizeCallExtraction, applyContactNormalization } = require('../utils
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
-const { buildExtractionPrompt, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const { buildExtractionPrompt, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
@@ -43,6 +43,7 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
+const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -461,8 +462,14 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   if (!customerId) return null;
 
   const marker = `Call SID: ${call.twilio_call_sid}`;
+  // Both lookups answer "was the PRIMARY appointment for this call already
+  // created?" — a linked follow-up child (visit 2) carries the same Call SID
+  // marker and booking_source, so child rows must be excluded or a reprocess
+  // whose primary was cancelled/rescheduled would adopt the pending follow-up
+  // as the confirmed booking and never recreate the actual visit.
   const marked = await trx('scheduled_services')
     .where({ customer_id: customerId })
+    .whereNull('parent_service_id')
     .whereNotIn('status', ['cancelled', 'rescheduled'])
     .where('notes', 'like', `%${marker}%`)
     .orderBy('created_at', 'asc')
@@ -474,6 +481,7 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   const callCreatedAt = call.created_at ? new Date(call.created_at) : null;
   const query = trx('scheduled_services')
     .where({ customer_id: customerId, booking_source: 'phone_call' })
+    .whereNull('parent_service_id')
     .where('scheduled_date', scheduledDate)
     .whereRaw('window_start::time = ?::time', [windowStart])
     .whereRaw('LOWER(TRIM(service_type)) = LOWER(TRIM(?))', [serviceType])
@@ -857,7 +865,10 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   if (!service && hasConfirmedGenericAppointment(extracted, fullContextText)) {
     return { ok: true, reason: null, service: GENERIC_CALL_APPOINTMENT_SERVICE };
   }
-  if (!service) return { ok: false, reason: 'unsupported_service', service: null };
+  // noMatch distinguishes "no coarse label fit" (rescuable by an exact
+  // bookable-catalog match) from the context vetoes above (unsupported topic /
+  // admin-only call), which a catalog match must never override.
+  if (!service) return { ok: false, reason: 'unsupported_service', service: null, noMatch: true };
   return { ok: true, reason: null, service };
 }
 
@@ -884,11 +895,23 @@ async function resolveDefaultCallBookingTechnician(conn = db) {
       this.where({ active: true }).orWhereNull('active');
     })
     .first('id', 'name');
-  if (!tech?.id) {
-    logger.warn(`[call-proc] Default call-booking technician not found: ${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}`);
-    return null;
+  if (tech?.id) return { id: tech.id, name: tech.name || DEFAULT_CALL_BOOKING_TECHNICIAN_NAME };
+
+  // Name mismatch (e.g. the row is "Adam", not "Adam B.") used to silently
+  // book with no technician. When exactly one active technician exists there
+  // is no ambiguity — assign them and say so.
+  const activeTechs = await conn('technicians')
+    .where(function () {
+      this.where({ active: true }).orWhereNull('active');
+    })
+    .select('id', 'name');
+  if (activeTechs.length === 1) {
+    logger.info(`[call-proc] Default call-booking technician name "${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}" not found; using sole active technician ${activeTechs[0].name}`);
+    return { id: activeTechs[0].id, name: activeTechs[0].name || null };
   }
-  return { id: tech.id, name: tech.name || DEFAULT_CALL_BOOKING_TECHNICIAN_NAME };
+
+  logger.warn(`[call-proc] Default call-booking technician not found: ${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}`);
+  return null;
 }
 
 async function resolveDefaultCallBookingTechnicianId(conn = db) {
@@ -1305,6 +1328,16 @@ async function extractCallData(transcription, callerPhone, opts = {}) {
   // (a lead) apart from an existing customer coordinating a visit, reporting a
   // problem, or asking about billing (not leads).
   const knownCaller = opts.knownCaller || null;
+  // matched_service picks from the live bookable catalog first (specific
+  // services like "Cockroach Control Service"), backstopped by the legacy
+  // coarse labels so intent gating (canonicalWavesService) keeps working.
+  const LEGACY_MATCHED_SERVICES = [
+    'General Pest Control', 'Lawn Care', 'Mosquito Control', 'Termite Inspection', 'WDO Inspection',
+    'Pre-Slab Termidor', 'Liquid Termite Perimeter', 'Termite Wood Treatment', 'Termite Foam Drill',
+    'Rodent Control', 'Bed Bug Treatment', 'Tree & Shrub Care',
+  ];
+  const bookableNames = Array.isArray(opts.bookableServiceNames) ? opts.bookableServiceNames.filter(Boolean) : [];
+  const matchedServiceList = [...new Set([...bookableNames, ...LEGACY_MATCHED_SERVICES])].join(', ');
   const knownCallerBlock = knownCaller
     ? `\nKNOWN CALLER: This phone number matches an EXISTING Waves ${
         knownCaller.accountType === 'established_customer' ? 'customer' : 'contact'
@@ -1342,7 +1375,10 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "pain_points": "brief summary of customer concerns or pest issues",
   "call_summary": "2-3 sentence summary of the call",
   "lead_quality": "hot/warm/cold/spam",
-  "matched_service": "best match from: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, or null",
+  "matched_service": "best match from: ${matchedServiceList}, or null — prefer the MOST SPECIFIC service that fits (e.g. a German/kitchen cockroach infestation cleanout is Cockroach Control Service, not General Pest Control)",
+  "quoted_price": number or null,
+  "follow_up_visit_mentioned": true/false,
+  "follow_up_date_time": "same ISO format as preferred_date_time, or null",
   "referred_by": "if the caller EXPLICITLY says a friend / neighbor / existing customer referred or recommended them, the referrer's name — or 'unnamed' if they say they were referred but don't name who. Else null."
 }
 
@@ -1379,6 +1415,11 @@ IMPORTANT — appointment_confirmed rules:
   - Do set appointment_confirmed to true when a builder or construction company explicitly books a Waves pre-slab/preconstruction termite, soil-treatment, or concrete-pour field-service appointment with a specific date and time.
 - Do not set appointment_confirmed to true for follow-up/admin calls about an invoice, payment, receipt, compliance report, sticker, certificate, W-9, report, or paperwork unless the caller and agent also explicitly book a new Waves field-service visit.
 - If the caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, new-construction termite treatment, or treatment before a slab/concrete pour, matched_service must be "Pre-Slab Termidor" — not "Termite Inspection".
+
+IMPORTANT — quoted_price and follow-up visit:
+- quoted_price: the TOTAL price in US dollars the agent quoted AND the caller accepted for the service being booked (agent: "that runs around 350 total", caller agrees -> 350). Use the total package price when quoted as a total across multiple treatments. null when no price was quoted, the caller didn't accept, or the amount is uncertain or a range. Never estimate or invent a price.
+- follow_up_visit_mentioned: true ONLY when the agent and caller specifically discussed a SECOND/follow-up treatment visit as part of this booking (e.g. "our standard protocol is two treatments", "we'll come back in two weeks"). A generic "call us if it comes back" is NOT a follow-up visit.
+- follow_up_date_time: set ONLY when a specific follow-up date (and time) was explicitly agreed on the call. Most calls: null — the office schedules the follow-up at the standard interval.
 
 IMPORTANT — customer name rules:
 - Capture both first_name and last_name whenever the caller clearly states both.
@@ -1443,8 +1484,8 @@ Return ONLY valid JSON.`;
 // embed the schema as prompt guidance. Correctness is guaranteed by the two-pass
 // ajv validation in finalizeV2Extraction — the model output is never trusted directly.
 // Shared by the live Gemini path and the OpenAI shadow so both send the identical prompt.
-function buildV2ExtractionPrompt(transcription, callerPhone, callDateET) {
-  return buildExtractionPrompt(transcription, callerPhone, callDateET)
+function buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptOpts = {}) {
+  return buildExtractionPrompt(transcription, callerPhone, callDateET, promptOpts)
     + '\n\n═══ OUTPUT CONTRACT ═══\n'
     + 'Return ONLY a single JSON object that conforms EXACTLY to this JSON Schema: '
     + 'every required field present, every enum value exact, no extra fields, '
@@ -1455,7 +1496,7 @@ function buildV2ExtractionPrompt(transcription, callerPhone, callDateET) {
 // Parse → validate(model-output) → inject server meta → normalize → validate(persisted).
 // Provider-agnostic tail shared by the Gemini and OpenAI extraction paths. Fails closed
 // to a status string; never trusts model output directly.
-function finalizeV2Extraction(rawText, { callId = null, extractionModel } = {}) {
+function finalizeV2Extraction(rawText, { callId = null, extractionModel, promptVersion = null } = {}) {
   // Pass 1: parse JSON
   let parsed;
   try {
@@ -1480,7 +1521,7 @@ function finalizeV2Extraction(rawText, { callId = null, extractionModel } = {}) 
     schema_version: SCHEMA_VERSION,
     extracted_at: new Date().toISOString(),
     extraction_model: extractionModel,
-    extraction_prompt_version: PROMPT_HASH,
+    extraction_prompt_version: promptVersion || PROMPT_HASH,
   };
 
   // Normalize
@@ -1506,7 +1547,9 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   if (!process.env.GEMINI_API_KEY) return { status: 'not_run', extraction: null, errors: null };
 
   const callDateET = etDateString(opts.callStartedAt || new Date());
-  const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET);
+  const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
+    bookableServiceNames: opts.bookableServiceNames,
+  });
 
   let rawText;
   try {
@@ -1538,7 +1581,13 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     return { status: 'parse_failed', extraction: null, errors: [{ message: err.message }] };
   }
 
-  return finalizeV2Extraction(rawText, { callId: opts.callId || null, extractionModel: GEMINI_EXTRACTION_MODEL });
+  return finalizeV2Extraction(rawText, {
+    callId: opts.callId || null,
+    extractionModel: GEMINI_EXTRACTION_MODEL,
+    // The catalog block is part of the rendered prompt, so the stamped
+    // version must carry its hash or cohorts mix under one version.
+    promptVersion: extractionPromptVersion(opts.bookableServiceNames),
+  });
 }
 
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
@@ -1848,9 +1897,18 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
     }
 
+    // Bookable service catalog: fed to both extraction prompts (so the model
+    // can name a specific bookable service) and to the booking block below
+    // (service_id / price / duration / follow-up interval). Fails open to [].
+    const bookableCallServices = await loadBookableCallServices(db);
+    const bookableServiceNames = bookableCallServices.map((s) => s.name).filter(Boolean);
+    // Catalog-aware provenance: the catalog block is part of the rendered
+    // V2 prompt, so every stamp for this call must carry its hash.
+    const v2PromptVersion = extractionPromptVersion(bookableServiceNames);
+
     let extracted;
     try {
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       await db('call_log').where({ id: call.id }).update({
@@ -1870,6 +1928,7 @@ const CallRecordingProcessor = {
         v2Result = await extractCallDataV2(transcription, contactPhone, {
           callStartedAt: call.created_at,
           callId: call.id,
+          bookableServiceNames,
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -1891,7 +1950,7 @@ const CallRecordingProcessor = {
           ai_address_validation: v2AddressValidation ? JSON.stringify(v2AddressValidation) : null,
           v2_extraction_status: v2Result.status,
           ai_extraction_model: GEMINI_EXTRACTION_MODEL,
-          ai_extraction_prompt_version: PROMPT_HASH,
+          ai_extraction_prompt_version: v2PromptVersion,
           updated_at: new Date(),
         };
         await db('call_log').where({ id: call.id }).update(v2Update);
@@ -1906,7 +1965,7 @@ const CallRecordingProcessor = {
           v2_extraction_status: 'parse_failed',
           ai_extraction_validation_errors: JSON.stringify([{ message: err.message }]),
           ai_extraction_model: GEMINI_EXTRACTION_MODEL,
-          ai_extraction_prompt_version: PROMPT_HASH,
+          ai_extraction_prompt_version: v2PromptVersion,
           updated_at: new Date(),
         });
       }
@@ -2800,6 +2859,18 @@ const CallRecordingProcessor = {
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
       if (v2Flat.matched_service) extracted.matched_service = v2Flat.matched_service;
       if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
+      // Catalog-anchored booking fields: the gate validated this extraction, so
+      // the booking must use ITS specific service / quoted price / follow-up
+      // signal — INCLUDING null/false clears. A truthy-only merge would let a
+      // stale unvalidated V1 value (hallucinated price, phantom follow-up)
+      // drive catalog selection, estimated_price, or follow-up creation on a
+      // V2-approved booking.
+      extracted.specific_service_name = v2Flat.specific_service_name || null;
+      extracted.quoted_price = typeof v2Flat.quoted_price === 'number' ? v2Flat.quoted_price : null;
+      extracted.follow_up_visit_mentioned = v2Flat.follow_up_visit_mentioned === true;
+      extracted.follow_up_date_time = (v2Flat.follow_up_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.follow_up_date_time))
+        ? v2Flat.follow_up_date_time.slice(0, 16)
+        : null;
       // (AV-normalized address was already written into `extracted` at the gate
       // approval branch above, before the customer/lead upsert — see there.)
       logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
@@ -2812,12 +2883,23 @@ const CallRecordingProcessor = {
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
     const customerServiceContext = customerId ? await loadCustomerServiceContext(customerId) : null;
     const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext });
+    // Catalog anchor: the specific bookable service this call maps to, when
+    // one resolves. Drives service_type/service_id/price/duration/follow-up on
+    // the booking. Also rescues catalog services whose names don't hit the
+    // coarse canonicalWavesService buckets (every bookable service must be
+    // bookable by phone). null -> legacy coarse-label behavior.
+    const callBookingCatalogRow = resolveCallBookingCatalogService({
+      extracted,
+      transcription,
+      services: bookableCallServices,
+    });
     // Use the module-level isOutboundCall(call) helper — a local `const
     // isOutboundCall` here shadows it for the WHOLE function scope, putting the
     // phantom-guard references above (Step 0) in the temporal dead zone:
     // "Cannot access 'isOutboundCall' before initialization" on every call that
     // reaches them with a pre-linked customer_id.
-    const canCreateAppointmentFromCall = !isOutboundCall(call) && serviceResolution.ok;
+    const canCreateAppointmentFromCall = !isOutboundCall(call)
+      && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
@@ -2861,7 +2943,13 @@ const CallRecordingProcessor = {
             );
           } else {
             const firstName = customerValidation.details.firstName || '';
-            const serviceType = serviceResolution.service;
+            const serviceType = callBookingCatalogRow?.name || serviceResolution.service;
+            // Price: transcript-quoted (what the agent and caller agreed)
+            // first, catalog list price fallback (one_time services only).
+            const priceInfo = resolveCallBookingPrice({
+              quotedPrice: extracted.quoted_price,
+              catalogRow: callBookingCatalogRow,
+            });
             const smsPhone = customerValidation.details.phone;
 
           // Use SMS template if available, fall back to inline
@@ -2916,6 +3004,7 @@ const CallRecordingProcessor = {
           let scheduledDateForLog = null;
           let windowStartForLog = null;
           let scheduleWasReused = false;
+          let followUpCreated = null;
           try {
             const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
@@ -2975,12 +3064,143 @@ const CallRecordingProcessor = {
                 const displayH = hh % 12 || 12;
                 windowDisplay = `${displayH}:${String(mm).padStart(2, '0')} ${ampm}`;
               }
+              // Follow-up visit plan — only when the call specifically
+              // discussed a second/follow-up treatment (transcript-driven);
+              // date from the transcript when agreed, else parent date + the
+              // service's catalog interval (default 14 days).
+              const callFollowUpPlan = resolveCallFollowUpPlan({
+                extracted,
+                catalogRow: callBookingCatalogRow,
+                parentDate: scheduledDate,
+                parentWindowStart: windowStart || '09:00',
+              });
               let reusedExistingSchedule = false;
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
                 const defaultTechnicianName = defaultTechnician?.name || null;
+                // Linked follow-up visit (visit 2). PENDING, not customer-
+                // confirmed: the exact time gets confirmed by a human at
+                // dispatch. No confirmation SMS and no reminder registration
+                // for this row — customer comms go out for the initial
+                // visit only (owner directive).
+                // Called on the fresh-insert path AND both reuse paths (marker/
+                // slot match, idempotency-key conflict) so a retry whose first
+                // attempt lost the savepointed follow-up insert — or a
+                // reprocess after the primary already exists — still creates
+                // the promised second treatment.
+                const ensureCallFollowUpVisit = async (primaryRow) => {
+                  if (!callFollowUpPlan || !primaryRow?.id) return null;
+                  // A terminal primary gets no visit 2 — reprocessing an old
+                  // call whose booking since completed or was cancelled must
+                  // not book a stray child off it.
+                  if (['cancelled', 'completed', 'skipped'].includes(primaryRow.status)) return null;
+                  // Any existing follow-up off this primary — whatever its
+                  // status or origin (AI child OR a completion-CTA follow-up)
+                  // — means dispatch already owns the outcome (a cancelled
+                  // child was cancelled on purpose; don't resurrect it). The
+                  // idempotency key alone can't catch a reprocess whose
+                  // extracted date differs.
+                  const existingChild = await trx('scheduled_services')
+                    .where((qb) => qb
+                      .where({ parent_service_id: primaryRow.id, source_action: 'ai_call_pipeline_followup' })
+                      .orWhere({ followup_source_service_id: primaryRow.id }))
+                    .first('id');
+                  if (existingChild) return null;
+                  // A reused primary may have been RESCHEDULED since the call
+                  // was first processed — callFollowUpPlan above was spaced
+                  // from the extraction's date, so a retry that lost the child
+                  // insert would book visit 2 at old-date + interval. Re-space
+                  // the plan from the row's actual date (an explicit transcript
+                  // date re-validates against it; a plan that no longer
+                  // resolves fails closed to no child — dispatch books by hand).
+                  let fuPlan = callFollowUpPlan;
+                  const primaryActualDate = callBookingDateOnly(primaryRow.scheduled_date);
+                  if (primaryActualDate && primaryActualDate !== scheduledDate) {
+                    fuPlan = resolveCallFollowUpPlan({
+                      extracted,
+                      catalogRow: callBookingCatalogRow,
+                      parentDate: primaryActualDate,
+                      parentWindowStart: String(primaryRow.window_start || '').slice(0, 5) || windowStart || '09:00',
+                    });
+                    if (!fuPlan) return null;
+                  }
+                  // Runs in a SAVEPOINT (nested trx): a rejected follow-up
+                  // insert must never roll back the confirmed primary
+                  // appointment sharing this transaction.
+                  const fuStart = fuPlan.windowStart;
+                  const [fuH, fuM] = fuStart.split(':').map(Number);
+                  const fuEndH = fuH >= 23 ? 23 : fuH + 1;
+                  try {
+                    return await trx.transaction(async (sp) => {
+                      const [fuRow] = await sp('scheduled_services')
+                        .insert({
+                          customer_id: customerId,
+                          technician_id: primaryRow.technician_id || defaultTechnicianId,
+                          scheduled_date: fuPlan.scheduledDate,
+                          window_start: fuStart,
+                          window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
+                          window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
+                          service_type: serviceType,
+                          service_id: callBookingCatalogRow?.id || null,
+                          parent_service_id: primaryRow.id,
+                          status: 'pending',
+                          customer_confirmed: false,
+                          // Billing shape rides the price: a priced package
+                          // total covers both treatments → $0 "included" child
+                          // (same no-charge shape as the completion-CTA flow:
+                          // followup_included bypasses the one-time billing
+                          // pre-gate and completion billing can't fall back to
+                          // a monthly rate). An UNPRICED booking's second visit
+                          // was never prepaid → billable-neutral like its
+                          // unpriced primary, office prices at completion.
+                          // followup_source_service_id is stamped either way:
+                          // its partial unique index blocks a duplicate
+                          // follow-up off this visit and carries no free
+                          // semantics of its own.
+                          ...callFollowUpBillingShape(priceInfo.price),
+                          followup_source_service_id: primaryRow.id,
+                          estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
+                          // Customer-safe only: once dispatch confirms this row
+                          // the portal filter no longer hides it and
+                          // GET /api/schedule returns notes verbatim. The
+                          // dispatch instruction + Call SID live in
+                          // internal_notes (JobDrawer) — the reuse lookup
+                          // (findExistingCallAppointment) excludes child rows,
+                          // so the child needs no marker in notes.
+                          notes: [
+                            'Follow-up treatment (visit 2) booked from your phone call.',
+                            priceInfo.price != null ? 'Included in the package price on the initial visit.' : null,
+                          ].filter(Boolean).join(' '),
+                          internal_notes: [
+                            'Booked from phone call — confirm exact time with the customer before dispatch.',
+                            `Call SID: ${callSid}.`,
+                          ].join(' '),
+                          booking_source: 'phone_call',
+                          source_call_log_id: call.id,
+                          source_action: 'ai_call_pipeline_followup',
+                          idempotency_key: computeAppointmentIdempotencyKey({
+                            callLogId: call.id,
+                            schedulingStatus: 'follow_up',
+                            confirmedStartAt: `${fuPlan.scheduledDate}T${fuStart}`,
+                            primaryServiceCategory: serviceType,
+                            addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
+                          }),
+                        })
+                        .onConflict('idempotency_key')
+                        .ignore()
+                        .returning('*');
+                      return fuRow || null;
+                    });
+                  } catch (fuErr) {
+                    // Savepoint rolled back: visit 2 is lost but the confirmed
+                    // primary appointment commits. Dispatch confirms follow-ups
+                    // by hand, so surface it in the log for manual recovery.
+                    logger.warn(`[call-proc] Follow-up visit insert failed for ${callSid}; primary booking kept: ${fuErr.message}`);
+                    return null;
+                  }
+                };
                 const existing = await findExistingCallAppointment({
                   customerId,
                   call,
@@ -2991,14 +3211,17 @@ const CallRecordingProcessor = {
                 });
                 if (existing) {
                   reusedExistingSchedule = true;
+                  let primaryRow = existing;
                   if (!existing.technician_id && defaultTechnicianId) {
                     const [updatedExisting] = await trx('scheduled_services')
                       .where({ id: existing.id })
                       .update({ technician_id: defaultTechnicianId, updated_at: new Date() })
                       .returning('*');
-                    return updatedExisting || existing;
+                    primaryRow = updatedExisting || existing;
                   }
-                  return existing;
+                  // After the backfill so the child inherits the assigned tech.
+                  followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                  return primaryRow;
                 }
                 const insertData = {
                   customer_id: customerId,
@@ -3008,6 +3231,13 @@ const CallRecordingProcessor = {
                   window_end: windowEnd || '10:00',
                   window_display: windowDisplay,
                   service_type: serviceType,
+                  service_id: callBookingCatalogRow?.id || null,
+                  estimated_price: priceInfo.price,
+                  create_invoice_on_complete: callBookingInvoiceOnComplete({
+                    price: priceInfo.price,
+                    catalogRow: callBookingCatalogRow,
+                  }),
+                  estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
                   status: 'confirmed',
                   customer_confirmed: true,
                   confirmed_at: new Date(),
@@ -3015,8 +3245,21 @@ const CallRecordingProcessor = {
                     'Booked via phone call.',
                     `Call SID: ${callSid}.`,
                     defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
+                    priceInfo.price != null
+                      ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
+                      : null,
                     extracted.call_summary || null,
                   ].filter(Boolean).join(' ').trim(),
+                  // Dispatcher-only price provenance: scheduled_services.notes
+                  // is customer-visible (GET /api/schedule returns it verbatim),
+                  // so the catalog-vs-quote review cue lives in internal_notes
+                  // (surfaced in the dispatch JobDrawer), never in notes.
+                  internal_notes: (priceInfo.source === 'transcript'
+                    && callBookingCatalogRow
+                    && Number(callBookingCatalogRow.base_price) > 0
+                    && Math.abs(Number(callBookingCatalogRow.base_price) - priceInfo.price) >= 0.01)
+                    ? `Catalog list price: $${Number(callBookingCatalogRow.base_price).toFixed(2)} — quote differs, review.`
+                    : null,
                   booking_source: 'phone_call',
                   source_call_log_id: call.id,
                   source_action: 'ai_call_pipeline',
@@ -3033,7 +3276,10 @@ const CallRecordingProcessor = {
                   .onConflict('idempotency_key')
                   .ignore()
                   .returning('*');
-                if (created) return created;
+                if (created) {
+                  followUpCreated = await ensureCallFollowUpVisit(created);
+                  return created;
+                }
                 // Idempotency conflict: another writer already created a row with this key.
                 // Fetch it and mark as reused so downstream skips duplicate side effects.
                 const existingByKey = await trx('scheduled_services')
@@ -3042,6 +3288,9 @@ const CallRecordingProcessor = {
                 if (existingByKey) {
                   reusedExistingSchedule = true;
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
+                  // This is exactly the retry whose first attempt may have
+                  // lost the savepointed follow-up insert — ensure visit 2.
+                  followUpCreated = await ensureCallFollowUpVisit(existingByKey);
                   return existingByKey;
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
@@ -3062,6 +3311,11 @@ const CallRecordingProcessor = {
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
                 });
+              }
+              if (followUpCreated) {
+                // Intentionally NO registerScheduleSideEffects here: the
+                // follow-up is pending and must not message the customer.
+                logger.info(`[call-proc] Follow-up visit created: ${followUpCreated.id} on ${followUpCreated.scheduled_date} (parent ${svc.id}); pending, no customer comms until confirmed`);
               }
 
             } else {
@@ -3156,6 +3410,13 @@ const CallRecordingProcessor = {
               logger.info(`[call-proc] Skipping duplicate appointment SMS to customer ${customerId} (sent within last 10 min)`);
               appointmentResult = { smsSent: false, smsSkippedReason: 'duplicate', scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time };
             }
+          }
+          if (followUpCreated) {
+            appointmentResult = {
+              ...(appointmentResult || {}),
+              followUpScheduledServiceId: followUpCreated.id,
+              followUpDate: followUpCreated.scheduled_date,
+            };
           }
         }
         }
@@ -3599,6 +3860,7 @@ CallRecordingProcessor._test = {
   findCustomerForCallContact,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
+  findExistingCallAppointment,
   classifyCallerAccount,
   summarizeKnownCaller,
   isNonLeadCallContent,
