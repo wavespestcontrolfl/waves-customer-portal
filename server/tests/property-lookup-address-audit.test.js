@@ -157,6 +157,37 @@ describe('auditAddressHouseNumber', () => {
     expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
   });
 
+  test('a typed post-suffix direction is pinned — 17th St E is not 17th St W', async () => {
+    mockSitusResponse(['123 17TH ST W', '125 17TH ST W']);
+
+    const audit = await auditAddressHouseNumber('123 17th St E, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: false, hasExactMatch: false });
+  });
+
+  test("'Apt #4' strips cleanly — no phantom 'MAIN ST APT' street", async () => {
+    mockSitusResponse(['123 MAIN ST', '125 MAIN ST']);
+
+    const audit = await auditAddressHouseNumber('123 Main St Apt #4, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetLabel: 'MAIN ST', streetExists: true, hasExactMatch: true });
+  });
+
+  test('the ORIGINALLY TYPED house number is audited even when Google corrected it', async () => {
+    mockSitusResponse(TOBERMORY_SITUS);
+
+    // Google snapped the nonexistent 4867 to 4857 in the canonical address;
+    // the audit must still flag the customer's typed 4867.
+    const audit = await auditAddressHouseNumber(
+      '4857 Tobermory Way, Bradenton, FL 34211, USA',
+      null,
+      { typedAddress: '4867 Tobermory Way, Bradenton, FL 34211' },
+    );
+
+    expect(audit).toMatchObject({ houseNumber: 4867, streetExists: true, hasExactMatch: false });
+    expect(audit.nearestNumbers).toContain(4857);
+  });
+
   test('a typed suffix must match the roll suffix — PINE WAY is not PINE RD', async () => {
     mockSitusResponse(['100 PINE RD', '104 PINE RD']);
 

@@ -264,7 +264,10 @@ async function performPropertyLookup(address, options = {}) {
   // record-bearing lookup it rides the cached property_record like _floodZone;
   // record-less lookups are never cached, so they re-audit live each time.
   if (!hasCountyEvidence(result.propertyRecord)) {
-    const audit = await auditAddressHouseNumber(canonicalLookupAddress(address, geo), geo)
+    // Canonical address for the street (typo-fixed names make the roll
+    // findable); typedAddress so the audit checks the CUSTOMER'S house number
+    // even when Google snapped a nonexistent number to the nearest premise.
+    const audit = await auditAddressHouseNumber(canonicalLookupAddress(address, geo), geo, { typedAddress: address })
       .catch(() => null);
     if (audit) {
       result.addressAudit = audit;

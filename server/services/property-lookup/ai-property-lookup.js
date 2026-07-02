@@ -1691,6 +1691,10 @@ function stripUnitDesignators(street) {
     if (next === s) break;
     s = next;
   }
+  // A trailing VALUE-LESS designator ("MAIN ST APT" — left behind when the
+  // bare-# pre-strip ate the value out of "Apt #4") is not a street token
+  // either.
+  s = s.replace(/\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM)$/i, '').trim();
   return s;
 }
 
@@ -1743,7 +1747,17 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     const street = normalizeCountyStreetLine(cleanedAddress); // "4867 TOBERMORY WAY"
     const m = /^(\d+)\s+(.{3,})$/.exec(street || '');
     if (!m) return null;
-    const houseNumber = parseInt(m[1], 10);
+    let houseNumber = parseInt(m[1], 10);
+    // The audit usually receives the geocoder's CANONICAL address (typo-fixed
+    // street names make the roll findable) — but Google can also snap a
+    // nonexistent house number to the nearest real premise, which would make
+    // the audit validate the wrong number. The house number is therefore
+    // always taken from the ORIGINALLY TYPED address when one is supplied.
+    if (options.typedAddress) {
+      const typedStreet = normalizeCountyStreetLine(String(options.typedAddress).replace(/#\s*[A-Za-z0-9-]+/g, ' '));
+      const typedM = /^(\d+)\s+/.exec(typedStreet || '');
+      if (typedM) houseNumber = parseInt(typedM[1], 10);
+    }
     // "123 MAIN ST APT 4" must audit MAIN ST, not a street named MAIN ST APT 4.
     const streetLabel = stripUnitDesignators(m[2].trim());
     if (streetLabel.length < 3) return null;
@@ -1761,8 +1775,14 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // absent, never a different one: "100 PINE WAY" must not match
     // "100 PINE RD" (different street) or "100 PINE RIDGE WAY" (longer name).
     const relaxedSuffixAlt = typedSuffix ? escapeAuditRegex(typedSuffix) : AUDIT_SUFFIX_ALT;
+    // Same pinning for a typed post-suffix direction: "123 17TH ST E" must
+    // not collect numbers from "123 17TH ST W" — a directional pair is two
+    // different streets. A roll row that omits the direction still matches
+    // (formatting variance), a DIFFERENT direction never does.
+    const typedDirection = extractPostSuffixDirection(streetLabel);
+    const relaxedDirectionAlt = typedDirection ? escapeAuditRegex(typedDirection) : '[NSEW]';
     const relaxedPattern = new RegExp(
-      `\\b(\\d+)\\s+${escapeAuditRegex(likeText)}(?:\\s+${relaxedSuffixAlt}(?:\\s+[NSEW])?)?(?=\\s*(?:[;,]|$))`,
+      `\\b(\\d+)\\s+${escapeAuditRegex(likeText)}(?:\\s+${relaxedSuffixAlt}(?:\\s+${relaxedDirectionAlt})?)?(?=\\s*(?:[;,]|$))`,
       'gi',
     );
 
