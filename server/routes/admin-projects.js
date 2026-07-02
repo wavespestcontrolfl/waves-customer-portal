@@ -503,6 +503,11 @@ function evaluateProjectSendReadiness({ project, customer }) {
     const isBaitSystem = rawMethod === 'Bait system';
     const isWoodTreatment = rawMethod === 'Wood treatment (borate)';
     const needsGallons = !isBaitSystem && !isWoodTreatment;
+    // A finished-solution concentration only exists for liquid soil barriers.
+    // Bait stations and direct wood treatments have no dilution to record —
+    // the create form deliberately leaves concentration_pct blank for them,
+    // so requiring it here would dead-end those certificates at send.
+    const needsConcentration = needsGallons;
     const hasArea = hasMeaningfulValue(findings.square_footage) || hasMeaningfulValue(findings.linear_feet);
     const coverageOk = needsGallons
       ? hasArea && hasMeaningfulValue(findings.gallons_applied)
@@ -515,7 +520,12 @@ function evaluateProjectSendReadiness({ project, customer }) {
       { key: 'cert_treatment_date', label: 'Date of treatment', ok: hasMeaningfulValue(findings.treatment_date) || hasMeaningfulValue(project?.project_date) },
       { key: 'cert_treatment_method', label: 'Method of treatment', ok: hasMeaningfulValue(method) },
       { key: 'cert_product', label: 'Product used', ok: hasMeaningfulValue(productName) },
-      { key: 'cert_active_ingredient', label: 'Active ingredient + concentration', ok: hasMeaningfulValue(findings.active_ingredient) && hasMeaningfulValue(findings.concentration_pct) },
+      {
+        key: 'cert_active_ingredient',
+        label: needsConcentration ? 'Active ingredient + concentration' : 'Active ingredient',
+        ok: hasMeaningfulValue(findings.active_ingredient)
+          && (!needsConcentration || hasMeaningfulValue(findings.concentration_pct)),
+      },
       { key: 'cert_coverage', label: coverageLabel, ok: coverageOk },
       { key: 'cert_applicator_name', label: "Applicator's printed name", ok: hasMeaningfulValue(findings.applicator_name) },
       { key: 'cert_applicator_fdacs_id', label: 'Applicator FDACS ID #', ok: hasMeaningfulValue(findings.applicator_fdacs_id) },

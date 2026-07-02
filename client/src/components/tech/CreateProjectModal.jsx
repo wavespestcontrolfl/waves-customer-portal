@@ -634,7 +634,11 @@ export default function CreateProjectModal({
       }
       return changed ? next : prev;
     });
-  }, [chemAuto]);
+    // The two output fields are deliberately in the deps: clearing an
+    // auto-filled value re-runs the effect, which owns the now-blank field
+    // and refills it (the effect converges — a re-run after its own write
+    // changes nothing).
+  }, [chemAuto, findings.concentration_pct, findings.gallons_applied]);
 
   function handleFindingChange(key, value) {
     setFindings(prev => ({ ...prev, [key]: value }));
@@ -1161,7 +1165,9 @@ export default function CreateProjectModal({
                 // the list loads (free text remains the offline fallback).
                 const isApplicatorPicker = field.key === 'applicator_name' && applicators.length > 0;
                 const renderField = isApplicatorPicker
-                  ? { ...field, type: 'select', options: applicators.map((a) => a.name) }
+                  // Deduped: handleApplicatorChange resolves a name via first
+                  // match, so one option per name keeps pick and ID in step.
+                  ? { ...field, type: 'select', options: [...new Set(applicators.map((a) => a.name))] }
                   : field;
                 return (
                 <div key={field.key}>
