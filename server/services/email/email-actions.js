@@ -411,7 +411,7 @@ async function handleLeadInquiry(email, classification) {
     });
   } catch (e) { /* non-critical */ }
 
-  logger.info(`[email-actions] Lead created: ${firstName} ${lastName} — ${extracted.service_interest || 'general'}`);
+  logger.info(`[email-actions] Lead created: ${lead.id} — ${extracted.service_interest || 'general'}`);
   return { action: 'lead_created', leadId: lead.id };
 }
 
