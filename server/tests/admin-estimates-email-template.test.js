@@ -440,3 +440,77 @@ describe('admin estimate email delivery', () => {
     expect(estimateMatchesSentOnlyScope({ status: 'send_failed', sent_at: null })).toBe(true);
   });
 });
+
+describe('manual follow-up claims the questions touch (pre-push Codex P1)', () => {
+  const smsTemplatesRouter = require('../routes/admin-sms-templates');
+  const { shortenOrPassthrough } = require('../services/short-url');
+
+  function makeQuery(estimate) {
+    return {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(estimate),
+      update: jest.fn().mockResolvedValue(1),
+    };
+  }
+
+  const baseEstimate = {
+    id: 'est-followup-1',
+    token: 'tok-followup',
+    customer_name: 'Taylor Smith',
+    customer_phone: '+15555550123',
+    customer_id: null,
+    status: 'viewed',
+    monthly_total: 89,
+    viewed_at: '2026-07-01T15:00:00.000Z',
+    estimate_data: {},
+  };
+
+  let getTemplateSpy;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
+    db.fn = { now: jest.fn(() => ({ __raw: 'now()' })) };
+    shortenOrPassthrough.mockResolvedValue('https://wvs.pt/x');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    getTemplateSpy = jest
+      .spyOn(smsTemplatesRouter, 'getTemplate')
+      .mockResolvedValue('SMS body');
+  });
+
+  afterEach(() => {
+    getTemplateSpy.mockRestore();
+  });
+
+  test('template send stamps followup_questions_sent_at so the cron does not repeat touch 1', async () => {
+    const query = makeQuery({ ...baseEstimate });
+    db.mockReturnValue(query);
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+
+    await routeHandler('/:id/follow-up')({
+      params: { id: baseEstimate.id },
+      body: {},
+    }, res, jest.fn());
+
+    expect(res.json).toHaveBeenCalledWith({ success: true });
+    const patch = query.update.mock.calls.at(-1)[0];
+    expect(patch).toHaveProperty('followup_questions_sent_at');
+    expect(patch.followup_questions_sent_at.__raw).toMatch(/COALESCE\(followup_questions_sent_at/);
+  });
+
+  test('custom message leaves the questions touch unclaimed', async () => {
+    const query = makeQuery({ ...baseEstimate });
+    db.mockReturnValue(query);
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+
+    await routeHandler('/:id/follow-up')({
+      params: { id: baseEstimate.id },
+      body: { message: 'Custom note from Virginia' },
+    }, res, jest.fn());
+
+    expect(res.json).toHaveBeenCalledWith({ success: true });
+    const patch = query.update.mock.calls.at(-1)[0];
+    expect(patch).not.toHaveProperty('followup_questions_sent_at');
+    expect(patch).toHaveProperty('last_follow_up_at');
+  });
+});

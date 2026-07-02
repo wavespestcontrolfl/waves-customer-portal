@@ -1560,6 +1560,13 @@ router.post('/:id/follow-up', async (req, res, next) => {
     await db('estimates').where({ id: estimate.id }).update({
       follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
       last_follow_up_at: db.fn.now(),
+      // A template send IS touch 1 — claim it so the cron doesn't repeat the
+      // questions opener a day later. Custom messages leave the touch open
+      // (24h spacing off last_follow_up_at still applies). COALESCE keeps an
+      // earlier stamp's attribution time.
+      ...(req.body.message ? {} : {
+        followup_questions_sent_at: db.raw('COALESCE(followup_questions_sent_at, CURRENT_TIMESTAMP)'),
+      }),
     });
 
     res.json({ success: true });
