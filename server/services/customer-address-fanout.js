@@ -28,8 +28,13 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { formatAddress } = require('../utils/address-normalizer');
 
-const OPEN_ESTIMATE_STATUSES = ['draft', 'sent', 'viewed'];
-const TERMINAL_LEAD_STATUSES = ['won', 'lost'];
+// Deliverable estimate states — mirrors SENDABLE_ESTIMATE_STATUSES in
+// routes/admin-estimates.js (scheduled/sending/send_failed rows still produce
+// customer-facing email/PDF content on their next attempt, so their snapshot
+// must not go stale either). Terminal lead states mirror CLOSED_STATUSES in
+// intelligence-bar/leads-tools.js.
+const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
 
 // Lowercased alphanumerics only — spacing/punctuation/casing differences
 // (including speech-to-text spacing like "Tober Morey") compare equal.
@@ -37,15 +42,18 @@ function addressMatchKey(value) {
   return String(value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-// True when a stored snapshot refers to the given street line. Equality covers
-// street-line snapshots (leads.address); the prefix check covers full
-// single-line snapshots ("123 Main St, Bradenton, FL 34205" on estimates)
-// whose key starts with the street-line key.
+// True when a stored snapshot refers to the given street line. The comparison
+// is EXACT key equality on the snapshot's first comma-segment: whole-string
+// equality covers street-line snapshots (leads.address); the first segment of
+// a full single-line snapshot ("123 Main St, Bradenton, FL 34205" on
+// estimates) is its street line. A prefix check would be wrong here — it
+// would let "123 Main St" swallow "123 Main St Apt 2", clobbering an open
+// lead/estimate for a distinct unit under the same customer.
 function snapshotMatchesLine1(snapshot, line1) {
-  const snapKey = addressMatchKey(snapshot);
   const lineKey = addressMatchKey(line1);
-  if (!snapKey || !lineKey) return false;
-  return snapKey === lineKey || snapKey.startsWith(lineKey);
+  if (!lineKey) return false;
+  const segKey = addressMatchKey(String(snapshot ?? '').split(',')[0]);
+  return !!segKey && segKey === lineKey;
 }
 
 async function propagateCustomerAddressChange({ before, after }, conn = db) {
@@ -65,31 +73,50 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
     line1: after.address_line1, city: after.city, state: after.state, zip: after.zip,
   }).slice(0, 300);
 
+  // The updates re-assert the open/terminal predicates from the selects: a
+  // concurrent accept/archive/close landing between select and update must
+  // not have its now-historical snapshot rewritten.
   const leadRows = await conn('leads')
     .where({ customer_id: customerId })
     .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
     .select('id', 'address');
   const leadIds = leadRows.filter((r) => matchesCustomerAddress(r.address)).map((r) => r.id);
   if (leadIds.length) {
-    counts.leads = await conn('leads').whereIn('id', leadIds).update({
-      address: after.address_line1,
-      city: after.city || null,
-      zip: after.zip || null,
-      updated_at: now,
-    });
+    counts.leads = await conn('leads')
+      .whereIn('id', leadIds)
+      .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
+      .update({
+        address: after.address_line1,
+        city: after.city || null,
+        zip: after.zip || null,
+        updated_at: now,
+      });
   }
 
   const estimateRows = await conn('estimates')
     .where({ customer_id: customerId })
     .whereIn('status', OPEN_ESTIMATE_STATUSES)
     .whereNull('archived_at')
-    .select('id', 'address');
-  const estimateIds = estimateRows.filter((r) => matchesCustomerAddress(r.address)).map((r) => r.id);
-  if (estimateIds.length) {
-    counts.estimates = await conn('estimates').whereIn('id', estimateIds).update({
-      address: fullAddress,
-      updated_at: now,
-    });
+    .select('id', 'address', 'estimate_data');
+  for (const row of estimateRows) {
+    if (!matchesCustomerAddress(row.address)) continue;
+    const patch = { address: fullAddress, updated_at: now };
+    // An authored proposal snapshots its own copy (estimate_data.proposal.
+    // propertyAddress) which normalizeProposal PREFERS over estimates.address
+    // and the proposal PDF prints — patch it under the same guard or a resend
+    // still attaches a PDF with the old address.
+    const data = typeof row.estimate_data === 'string'
+      ? (() => { try { return JSON.parse(row.estimate_data); } catch { return null; } })()
+      : row.estimate_data;
+    if (data?.proposal?.propertyAddress && matchesCustomerAddress(data.proposal.propertyAddress)) {
+      data.proposal.propertyAddress = fullAddress.slice(0, 200);
+      patch.estimate_data = JSON.stringify(data);
+    }
+    counts.estimates += await conn('estimates')
+      .where({ id: row.id })
+      .whereIn('status', OPEN_ESTIMATE_STATUSES)
+      .whereNull('archived_at')
+      .update(patch);
   }
 
   if (counts.leads || counts.estimates) {

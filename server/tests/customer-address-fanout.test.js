@@ -15,13 +15,18 @@ const {
 } = require('../services/customer-address-fanout');
 
 // Minimal knex-shaped stub: select() resolves the preset rows for the table,
-// update() records { table, ids, patch } and resolves the id count.
+// update() records { table, ids, patch } and resolves the id count. Captures
+// targets from both whereIn('id', [...]) (leads) and where({ id }) (per-row
+// estimate updates).
 function makeConn(rowsByTable) {
   const updates = [];
   const conn = (table) => {
     let updateIds = null;
     const qb = {
-      where: () => qb,
+      where: (arg) => {
+        if (arg && typeof arg === 'object' && typeof arg !== 'function' && arg.id) updateIds = [arg.id];
+        return qb;
+      },
       whereIn: (col, vals) => { if (col === 'id') updateIds = vals; return qb; },
       whereNull: () => qb,
       select: () => Promise.resolve(rowsByTable[table] || []),
@@ -51,12 +56,17 @@ describe('addressMatchKey / snapshotMatchesLine1', () => {
     expect(addressMatchKey('123 Main St.')).toBe(addressMatchKey('123 main st'));
   });
 
-  test('full single-line snapshots match their street line by prefix', () => {
+  test('full single-line snapshots match their street line via the first comma segment', () => {
     expect(snapshotMatchesLine1('4857 Tobermory Way, Bradenton, FL 34211, USA', '4857 Tobermory Way')).toBe(true);
   });
 
   test('a different house number on the same street does not match', () => {
     expect(snapshotMatchesLine1('5109 Tobermory Way', '4857 Tobermory Way')).toBe(false);
+  });
+
+  test('a distinct unit under the same street line does not match (no prefix swallowing)', () => {
+    expect(snapshotMatchesLine1('123 Main St Apt 2', '123 Main St')).toBe(false);
+    expect(snapshotMatchesLine1('123 Main St Apt 2, Bradenton, FL 34205', '123 Main St')).toBe(false);
   });
 
   test('empty snapshot or empty line never matches', () => {
@@ -90,6 +100,45 @@ describe('propagateCustomerAddressChange', () => {
     const estUpdate = conn.__updates.find((u) => u.table === 'estimates');
     expect(estUpdate.ids).toEqual(['est-match']);
     expect(estUpdate.patch).toMatchObject({ address: '4857 Tobermory Way, Bradenton, FL 34211' });
+  });
+
+  test('an authored proposal snapshot (estimate_data.proposal.propertyAddress) is patched under the same guard', async () => {
+    const conn = makeConn({
+      leads: [],
+      estimates: [{
+        id: 'est-prop',
+        address: '4867 Tobermorey Way, Lakewood Ranch, FL 34211',
+        estimate_data: {
+          proposal: { propertyAddress: '4867 Tobermorey Way, Lakewood Ranch, FL 34211' },
+          other: 'kept',
+        },
+      }],
+    });
+
+    const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+
+    expect(counts.estimates).toBe(1);
+    const patch = conn.__updates.find((u) => u.table === 'estimates').patch;
+    const data = JSON.parse(patch.estimate_data);
+    expect(data.proposal.propertyAddress).toBe('4857 Tobermory Way, Bradenton, FL 34211');
+    expect(data.other).toBe('kept');
+  });
+
+  test('a proposal holding a deliberately different address is left alone', async () => {
+    const conn = makeConn({
+      leads: [],
+      estimates: [{
+        id: 'est-prop',
+        address: '4867 Tobermorey Way, Lakewood Ranch, FL 34211',
+        estimate_data: { proposal: { propertyAddress: '999 Warehouse Blvd, Venice, FL 34285' } },
+      }],
+    });
+
+    await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+
+    const patch = conn.__updates.find((u) => u.table === 'estimates').patch;
+    expect(patch.estimate_data).toBeUndefined();
+    expect(patch.address).toBe('4857 Tobermory Way, Bradenton, FL 34211');
   });
 
   test('snapshots already holding the NEW street line self-heal city/zip', async () => {
