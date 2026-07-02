@@ -407,6 +407,53 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 }
 
+// Convert the call's lead to won when the pipeline books an appointment,
+// on the SAME transaction as the scheduled_services insert (mirrors the
+// admin-leads schedule-appointment route: conversion cannot commit without
+// the appointment row). Skips only `won` (idempotent reprocessing) and
+// `duplicate` (the deal belongs to another lead row) — a lost/unresponsive
+// lead that books DID close, so won is the correct terminal state for it.
+// Runs in a NESTED transaction (savepoint): a plain try/catch inside the
+// booking txn would leave it aborted after a SQL error and doom the COMMIT,
+// rolling back the booking. The savepoint contains a conversion failure to
+// the conversion alone; the booking still commits.
+async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid }) {
+  if (!leadId) return false;
+  try {
+    return await trx.transaction(async (inner) => {
+      const convertible = await inner('leads')
+        .where({ id: leadId })
+        .whereNotIn('status', ['won', 'duplicate'])
+        .first('id');
+      if (!convertible) return false;
+      await inner('leads').where({ id: leadId }).update({
+        status: 'won',
+        customer_id: customerId,
+        converted_at: new Date(),
+        is_qualified: true,
+        updated_at: new Date(),
+      });
+      await inner('lead_activities').insert({
+        lead_id: leadId,
+        activity_type: 'converted',
+        description: `Converted to customer (${customerId}) — appointment booked by phone`,
+        performed_by: 'system',
+        metadata: JSON.stringify({
+          customerId,
+          triggerSource: 'appointment_booked',
+          scheduledServiceId,
+          callSid,
+        }),
+      });
+      logger.info(`[call-proc] Lead ${leadId} converted to won (appointment_booked) for ${callSid}`);
+      return true;
+    });
+  } catch (err) {
+    logger.error(`[call-proc] Lead conversion on phone booking failed for ${callSid}: ${err.message}`);
+    return false;
+  }
+}
+
 async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }) {
   const emailLc = String(email || '').trim().toLowerCase();
   if (!customerId || !emailLc) return null;
@@ -3033,7 +3080,21 @@ const CallRecordingProcessor = {
                   .onConflict('idempotency_key')
                   .ignore()
                   .returning('*');
-                if (created) return created;
+                if (created) {
+                  // A phone-booked appointment is the deal closing — convert the
+                  // call's lead to won in the SAME transaction (mirrors the
+                  // admin-leads schedule-appointment route), so the conversion
+                  // can't commit without the appointment row. Every other booking
+                  // path already converts; this one silently didn't, stranding
+                  // phone-booked callers as `new` in the pipeline.
+                  await convertCallLeadOnPhoneBooking(trx, {
+                    leadId,
+                    customerId,
+                    scheduledServiceId: created.id,
+                    callSid,
+                  });
+                  return created;
+                }
                 // Idempotency conflict: another writer already created a row with this key.
                 // Fetch it and mark as reused so downstream skips duplicate side effects.
                 const existingByKey = await trx('scheduled_services')
@@ -3607,6 +3668,7 @@ CallRecordingProcessor._test = {
   transcribeRecording,
   extractCallDataV2,
   normalizeOpenAISegments,
+  convertCallLeadOnPhoneBooking,
 };
 
 module.exports = CallRecordingProcessor;
