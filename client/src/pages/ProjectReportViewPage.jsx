@@ -227,6 +227,7 @@ const FIELD_LABELS = {
   concentration_pct: 'Concentration (%)',
   square_footage: 'Square footage treated',
   linear_feet: 'Linear feet treated',
+  trench_depth_ft: 'Trench / rod depth (ft)',
   gallons_applied: 'Gallons applied',
   applicator_name: "Applicator's printed name",
   applicator_fdacs_id: 'Applicator FDACS ID #',
@@ -825,9 +826,16 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
     f.active_ingredient,
     f.concentration_pct ? `${String(f.concentration_pct).replace(/%$/, '')}%` : '',
   ].filter(Boolean).join(' — ');
+  const trenchDepthRaw = String(f.trench_depth_ft || '').trim();
+  const trenchDepthLine = !trenchDepthRaw
+    ? ''
+    : /depth/i.test(trenchDepthRaw)
+      ? trenchDepthRaw
+      : `${valueWithUnit(trenchDepthRaw, 'ft', /\b(ft|foot|feet)\b/i)} depth`;
   const coverageLine = [
     valueWithUnit(f.square_footage, 'sq ft', /\b(sq\.?\s*ft|square\s*feet|sf)\b/i),
     valueWithUnit(f.linear_feet, 'linear ft', /\b(linear\s*ft|lineal\s*ft|lf)\b/i),
+    trenchDepthLine,
     gallonsApplied(f.gallons_applied),
   ].filter(Boolean).join(' · ');
   const treatmentDateValue = [

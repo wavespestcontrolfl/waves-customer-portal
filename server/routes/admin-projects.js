@@ -991,6 +991,32 @@ router.get('/service-search', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/admin/projects/applicators — licensed-applicator picker for the
+// pre-treatment certificate. Tech-reachable (the timetracking tech route
+// sanitizes license fields away, so the create form needs its own source).
+// License numbers print on the public certificate, so exposing them to a
+// logged-in tech is not a data leak.
+// ---------------------------------------------------------------------------
+router.get('/applicators', async (req, res, next) => {
+  try {
+    const techs = await db('technicians')
+      .where({ active: true })
+      .orderBy('name')
+      .select('id', 'name', 'fl_applicator_license');
+    res.json({
+      applicators: techs.map((t) => ({
+        id: t.id,
+        name: t.name,
+        fdacsId: String(t.fl_applicator_license || '').trim() || null,
+      })),
+      // Admins create certificates on behalf of the treating tech, so only a
+      // tech's own session defaults the applicator to themselves.
+      defaultTechnicianId: isAdmin(req) ? null : req.technicianId || null,
+    });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/projects — list (admin dashboard)
 // ---------------------------------------------------------------------------
 router.get('/', async (req, res, next) => {

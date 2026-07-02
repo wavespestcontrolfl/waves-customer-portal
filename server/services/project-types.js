@@ -912,6 +912,7 @@ const PROJECT_TYPES = {
       { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', placeholder: 'e.g. 0.060' },
       { key: 'square_footage', label: 'Square footage treated', type: 'text' },
       { key: 'linear_feet', label: 'Linear feet treated', type: 'text', placeholder: 'For trenching / perimeter applications' },
+      { key: 'trench_depth_ft', label: 'Trench / rod depth (ft)', type: 'text', placeholder: 'Vertical barrier depth, e.g. 1.0 (label rate is per ft of depth)' },
       { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text' },
       { key: 'applicator_name', label: "Applicator's printed name", type: 'text' },
       { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text' },

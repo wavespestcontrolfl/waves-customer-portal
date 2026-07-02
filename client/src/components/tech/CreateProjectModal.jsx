@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/wdoProfileToFindings';
+import { computePretreatChemistry } from '../../lib/termitePretreatRates';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
 import DictationButton from './DictationButton';
 
@@ -262,6 +263,14 @@ export default function CreateProjectModal({
   // auto-filled, so a customer switch re-syncs it and un-picking clears it,
   // while a hand-typed/autocompleted address the tech chose is never clobbered.
   const projectAddressAutoFillRef = useRef({ key: null, value: '' });
+  // Licensed-applicator picker for the pre-treatment certificate (any type
+  // whose fields include applicator_name + applicator_fdacs_id).
+  const [applicators, setApplicators] = useState([]);
+  const [defaultApplicatorTechId, setDefaultApplicatorTechId] = useState(null);
+  // The chemistry values this form last auto-calculated. A field is only
+  // rewritten while blank or still holding what we wrote, so a hand-typed
+  // concentration/gallons override always survives recalculation.
+  const chemAutoFillRef = useRef({ concentration_pct: null, gallons_applied: null });
   const [projectDate, setProjectDate] = useState(
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
@@ -435,6 +444,26 @@ export default function CreateProjectModal({
 
   const typeCfg = typesRegistry && projectType ? typesRegistry[projectType] : null;
   const addressFieldKey = getProjectAddressFieldKey(typeCfg?.findingsFields);
+  const typeFieldKeys = useMemo(
+    () => new Set((typeCfg?.findingsFields || []).map((f) => f.key)),
+    [typeCfg],
+  );
+  const hasApplicatorFields = typeFieldKeys.has('applicator_name') && typeFieldKeys.has('applicator_fdacs_id');
+  const hasChemistryFields = typeFieldKeys.has('product_name')
+    && typeFieldKeys.has('concentration_pct')
+    && typeFieldKeys.has('gallons_applied');
+  // Pure function of the treatment inputs — recomputed on every keystroke so
+  // the sync effect below and the inline hints always agree.
+  const chemAuto = useMemo(() => (
+    hasChemistryFields
+      ? computePretreatChemistry({
+        productName: findings.product_name,
+        squareFootage: findings.square_footage,
+        linearFeet: findings.linear_feet,
+        trenchDepthFt: findings.trench_depth_ft,
+      })
+      : null
+  ), [hasChemistryFields, findings.product_name, findings.square_footage, findings.linear_feet, findings.trench_depth_ft]);
   // appointmentManaged types complete through the standard appointment flow
   // now — they're not creatable as projects (server 422s them too). An
   // explicit allowedProjectTypes prop (the special-project dispatch path)
@@ -537,8 +566,90 @@ export default function CreateProjectModal({
     });
   }, [projectType, selectedCustomer, addressFieldKey]);
 
+  // Load the licensed-applicator list once a type with applicator fields is
+  // picked. The tech timetracking endpoints sanitize license numbers away,
+  // so the certificate form has its own projects-scoped source.
+  useEffect(() => {
+    if (!hasApplicatorFields || applicators.length) return;
+    adminFetch('/admin/projects/applicators')
+      .then((r) => r.json())
+      .then((d) => {
+        setApplicators(Array.isArray(d.applicators) ? d.applicators : []);
+        setDefaultApplicatorTechId(d.defaultTechnicianId || null);
+      })
+      .catch(() => { /* applicator fields still accept free text */ });
+  }, [hasApplicatorFields, applicators.length]);
+
+  // Default the applicator to the logged-in tech (the server sends
+  // defaultTechnicianId only for a tech's own session, not admins). Fills
+  // only while BOTH fields are untouched, so a restored draft or a picked
+  // applicator is never overridden.
+  useEffect(() => {
+    if (!hasApplicatorFields || !applicators.length || !defaultApplicatorTechId) return;
+    const me = applicators.find((a) => a.id === defaultApplicatorTechId);
+    if (!me) return;
+    setFindings(prev => {
+      if (hasMeaningfulValue(prev.applicator_name) || hasMeaningfulValue(prev.applicator_fdacs_id)) return prev;
+      return {
+        ...prev,
+        applicator_name: me.name,
+        ...(me.fdacsId ? { applicator_fdacs_id: me.fdacsId } : {}),
+      };
+    });
+  }, [hasApplicatorFields, applicators, defaultApplicatorTechId]);
+
+  // Keep concentration_pct / gallons_applied in sync with the label-rate
+  // calculation. Ownership rule: a field is written only while blank, still
+  // holding our last auto-value, or already equal to the new computation (a
+  // restored draft re-adopts). When the product stops resolving to a soil
+  // liquid — bait/wood product, or a name we don't recognize — values WE
+  // wrote are cleared so a stale Termidor dilution can never print on a
+  // Trelona certificate; hand-typed values are left alone.
+  useEffect(() => {
+    if (!chemAuto) return;
+    setFindings(prev => {
+      const auto = chemAutoFillRef.current;
+      const next = { ...prev };
+      let changed = false;
+      const ownsField = (key, newValue) => {
+        const current = String(prev[key] || '').trim();
+        return current === ''
+          || current === String(auto[key] ?? '')
+          || (newValue != null && current === String(newValue));
+      };
+      const writeField = (key, value) => {
+        if (!ownsField(key, value)) return;
+        auto[key] = value || null;
+        if (String(prev[key] || '') !== value) {
+          next[key] = value;
+          changed = true;
+        }
+      };
+      if (chemAuto.status === 'ok') {
+        writeField('concentration_pct', chemAuto.concentrationPct);
+        writeField('gallons_applied', chemAuto.gallonsText || '');
+      } else {
+        writeField('concentration_pct', '');
+        writeField('gallons_applied', '');
+      }
+      return changed ? next : prev;
+    });
+  }, [chemAuto]);
+
   function handleFindingChange(key, value) {
     setFindings(prev => ({ ...prev, [key]: value }));
+  }
+
+  function handleApplicatorChange(name) {
+    const match = applicators.find((a) => a.name === name);
+    setFindings(prev => ({
+      ...prev,
+      applicator_name: name,
+      // The FDACS ID prints beside the name on the certificate — re-bind it
+      // on every pick (blank when none is on file) so a previous applicator's
+      // number can never carry over to the new name.
+      ...(match ? { applicator_fdacs_id: match.fdacsId || '' } : {}),
+    }));
   }
 
   function handleProductSelect(fieldKey, product) {
@@ -1044,7 +1155,15 @@ export default function CreateProjectModal({
                 />
               )}
 
-              {typeCfg.findingsFields.map(field => (
+              {typeCfg.findingsFields.map(field => {
+                // The applicator must be one of our licensed techs — swap the
+                // free-text field for a dropdown of active technicians once
+                // the list loads (free text remains the offline fallback).
+                const isApplicatorPicker = field.key === 'applicator_name' && applicators.length > 0;
+                const renderField = isApplicatorPicker
+                  ? { ...field, type: 'select', options: applicators.map((a) => a.name) }
+                  : field;
+                return (
                 <div key={field.key}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
                     <label style={{ ...labelStyle, marginBottom: 0 }}>{field.label}</label>
@@ -1086,18 +1205,34 @@ export default function CreateProjectModal({
                     )}
                   </div>
                   <ProjectFindingFieldInput
-                    field={field}
+                    field={renderField}
                     id={`create-project-${projectType}-${field.key}`}
                     name={`findings.${field.key}`}
                     value={findings[field.key] || ''}
-                    onChange={(value) => handleFindingChange(field.key, value)}
+                    onChange={(value) => (
+                      isApplicatorPicker ? handleApplicatorChange(value) : handleFindingChange(field.key, value)
+                    )}
                     inputStyle={inputStyle}
                     products={productCatalog}
                     onProductSelect={(product) => handleProductSelect(field.key, product)}
                     palette={P}
                   />
+                  {field.key === 'product_name' && chemAuto?.status === 'not_applicable' && chemAuto.note && (
+                    <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>{chemAuto.note}</div>
+                  )}
+                  {field.key === 'concentration_pct' && chemAuto?.status === 'ok' && (
+                    <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>
+                      Auto-filled with the label&apos;s standard pre-construction dilution — overtype to record a different labeled rate.
+                    </div>
+                  )}
+                  {field.key === 'gallons_applied' && chemAuto?.status === 'ok' && chemAuto.note && (
+                    <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>
+                      Auto-calculated: {chemAuto.note}.
+                    </div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
 
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
