@@ -302,6 +302,7 @@ async function handleLeadInquiry(email, classification) {
         }
       })
       .whereNotIn('status', ['won', 'lost'])
+      .whereNull('deleted_at')
       .first();
   }
   // Skip the from_address fallback for automated senders — every
@@ -309,7 +310,9 @@ async function handleLeadInquiry(email, classification) {
   // it would glue unrelated prospects onto a single lead.
   if (!existingLead && email.from_address && !automatedSender) {
     existingLead = await db('leads').where('email', email.from_address)
-      .whereNotIn('status', ['won', 'lost']).first();
+      .whereNotIn('status', ['won', 'lost'])
+      .whereNull('deleted_at')
+      .first();
   }
 
   if (existingLead) {

@@ -105,7 +105,8 @@ async function attachLeadToEstimate({
 }) {
   if (!leadId) return null;
 
-  const lead = await database('leads').where({ id: leadId }).first();
+  // Soft-deleted leads can't attach estimates — treat as not found (404).
+  const lead = await database('leads').where({ id: leadId }).whereNull('deleted_at').first();
 
   const estimateForValidation = estimate || await database('estimates').where({ id: estimateId }).first();
   assertLeadCanAttachEstimate({
@@ -175,8 +176,13 @@ function leadOriginatedOnOrBefore(lead, cutoff) {
 // can't grab a NEWER same-contact inquiry that post-dates it (mirrors the
 // `enforceOriginating` guard convertLeadFromEvent uses for its backfill).
 async function resolveEstimateEventLeads(database, estimateId, { originatingNotAfter = null } = {}) {
+  // The linkage check deliberately INCLUDES soft-deleted rows: any linkage row
+  // — even a deleted one — means this estimate's originating lead is accounted
+  // for, so we must not fall through to the fuzzy rescue tiers (same rationale
+  // as the closed-lead rule in markLinkedLeadEstimateAccepted). Deleted rows
+  // are then filtered out so they are never advanced.
   const linked = await database('leads').where({ estimate_id: estimateId });
-  if (linked.length) return { leads: linked, rescued: false };
+  if (linked.length) return { leads: linked.filter((lead) => !lead.deleted_at), rescued: false };
 
   const estimate = await database('estimates').where({ id: estimateId }).first();
   if (!estimate) return { leads: [], rescued: false };
@@ -188,6 +194,7 @@ async function resolveEstimateEventLeads(database, estimateId, { originatingNotA
     const lead = await database('leads').where({ id: dataLeadId }).first();
     if (
       lead
+      && !lead.deleted_at
       && !lead.estimate_id
       && !CLOSED_LEAD_STATUSES.has(lead.status)
       && leadMatchesEstimateContact(lead, estimate)
@@ -382,7 +389,9 @@ async function markLinkedLeadEstimateAccepted({
   const linked = await database('leads').where({ estimate_id: estimateId });
   if (linked.length) {
     for (const lead of linked) {
-      if (!CLOSED_LEAD_STATUSES.has(lead.status)) await convert(lead);
+      // Soft-deleted leads convert like closed ones don't — but their linkage
+      // row still counts as "the lead is accounted for" (no fuzzy fallback).
+      if (!CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at) await convert(lead);
     }
     return;
   }
@@ -399,7 +408,7 @@ async function markLinkedLeadEstimateAccepted({
   const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id || null;
   if (dataLeadId) {
     const lead = await database('leads').where({ id: dataLeadId }).first();
-    if (lead && !CLOSED_LEAD_STATUSES.has(lead.status)) await convert(lead);
+    if (lead && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at) await convert(lead);
     return;
   }
 
@@ -458,6 +467,7 @@ async function findUnconvertedLeadsByContact(database, phone, email) {
   return database('leads')
     .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
     .whereNull('customer_id')
+    .whereNull('deleted_at')
     .andWhere((builder) => {
       if (np) builder.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?", [np]);
       if (ne) builder.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [ne]);
@@ -477,6 +487,7 @@ async function findCustomerLinkedLeadsByContact(database, phone, email) {
   return database('leads')
     .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
     .whereNotNull('customer_id')
+    .whereNull('deleted_at')
     .andWhere((builder) => {
       if (np) builder.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?", [np]);
       if (ne) builder.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [ne]);
@@ -540,6 +551,7 @@ async function findOpenLeadsForCustomer(database, customerId) {
   if (!customerId) return [];
   return database('leads')
     .where({ customer_id: customerId })
+    .whereNull('deleted_at')
     .whereNotIn('status', [...CLOSED_LEAD_STATUSES]);
 }
 
@@ -552,6 +564,7 @@ async function customerHasWonLead(database, customerId) {
   if (!customerId) return false;
   const won = await database('leads')
     .where({ customer_id: customerId, status: 'won' })
+    .whereNull('deleted_at')
     .first('id');
   return !!won;
 }
@@ -695,7 +708,10 @@ async function convertLeadFromEvent({
       }
     }
 
-    const open = (candidates || []).filter((lead) => lead && !CLOSED_LEAD_STATUSES.has(lead.status));
+    // deleted_at covers the tier-1 estimate-link candidates (queried without a
+    // guard so an all-deleted linkage still counts as "accounted for" and
+    // blocks the fuzzy tiers); tiers 2/3 come pre-filtered by their finders.
+    const open = (candidates || []).filter((lead) => lead && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at);
     if (!open.length) return { converted: false, reason: 'no_open_lead' };
     // FK-linked leads are authoritatively tied to THIS estimate, so convert them
     // all; tier 2 already enforced a single first-close lead. Only the fuzzy
@@ -808,7 +824,7 @@ async function attributeSelfBooking({
     // Belt-and-suspenders: even a just-created customer could already match a
     // lead created earlier without a customer link. An existing lead owns its own
     // channel attribution — never overwrite or duplicate it.
-    const linkedLead = await database('leads').where({ customer_id: customerId }).first('id');
+    const linkedLead = await database('leads').where({ customer_id: customerId }).whereNull('deleted_at').first('id');
     if (linkedLead) return { attributed: false, reason: 'existing_customer_lead' };
     const contactMatches = await findUnconvertedLeadsByContact(database, customer.phone, customer.email);
     if (contactMatches.length) return { attributed: false, reason: 'existing_contact_lead' };

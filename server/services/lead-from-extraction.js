@@ -156,7 +156,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   }
 
   let existingLead = phone
-    ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first()
+    ? await db('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
     : null;
 
   // Don't reuse a lead that belongs to a different person on a shared line: if
