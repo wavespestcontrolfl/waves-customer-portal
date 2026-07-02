@@ -303,10 +303,29 @@ async function sweepPendingAdAttribution(db, { limit = 300 } = {}) {
 
   const candidates = await db('ad_service_attribution as asa')
     .whereNotNull('asa.customer_id')
-    .whereNotExists(function notCompleted() {
-      this.select(1).from('ad_service_attribution as done')
-        .whereRaw('done.customer_id = asa.customer_id')
-        .where('done.funnel_stage', 'completed');
+    .where(function pendingOrStalePrimary() {
+      // Never-completed customers → first-time advance.
+      this.whereNotExists(function notCompleted() {
+        this.select(1).from('ad_service_attribution as done')
+          .whereRaw('done.customer_id = asa.customer_id')
+          .where('done.funnel_stage', 'completed');
+      })
+        // OR an advanceable row PREDATES the credited completed row — a late/
+        // backfilled earlier first-touch must re-take primary (sync re-picks and
+        // demotes the stale one), else the revenue stays on the wrong channel
+        // forever (PR #2257 P2). Strictly earlier lead_date: the created_at
+        // tiebreak sync applies on equal dates isn't worth re-syncing every
+        // multi-row customer daily.
+        .orWhereExists(function backfilledEarlierFirstTouch() {
+          this.select(1).from('ad_service_attribution as pend')
+            .whereRaw('pend.customer_id = asa.customer_id')
+            .whereNotIn('pend.funnel_stage', ['completed', 'lost'])
+            .whereNotNull('pend.lead_date')
+            .whereRaw(
+              'pend.lead_date < (SELECT MIN(done2.lead_date) FROM ad_service_attribution done2 '
+              + "WHERE done2.customer_id = asa.customer_id AND done2.funnel_stage = 'completed')",
+            );
+        });
     })
     .whereExists(function hasCompletedVisit() {
       this.select(1).from('scheduled_services as ss')

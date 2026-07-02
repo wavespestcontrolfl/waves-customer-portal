@@ -279,6 +279,7 @@ function makeSweepDb(state) {
     if (String(table) === 'ad_service_attribution as asa') {
       const b = {
         whereNotNull: () => b,
+        where: () => b,
         whereNotExists: () => b,
         whereExists: () => b,
         distinct: () => b,
@@ -342,5 +343,39 @@ describe('sweepPendingAdAttribution', () => {
     const state = { captured: {}, candidates: [], asaCols: { completed_revenue: 1 } };
     await sweepPendingAdAttribution(makeSweepDb(state), { limit: 50 });
     expect(state.captured.limit).toBe(50);
+  });
+});
+
+// PR #2257 P2: a late/backfilled EARLIER first-touch row must re-take primary
+// from a previously-synced completed row — the sweep must hand sync those
+// customers (predicate guarded by wiring test below; behavior via sync).
+describe('sweepPendingAdAttribution re-pick (stale completed primary)', () => {
+  test('candidate with a completed row + earlier backfilled row → primary re-picked, stale cleared', async () => {
+    const state = {
+      captured: {},
+      candidates: ['c1'],
+      asaCols: { completed_revenue: 1, gross_profit: 1 },
+      asaRows: [
+        { id: 'stale', customer_id: 'c1', funnel_stage: 'completed', lead_date: '2026-06-20', completed_revenue: 300 },
+        { id: 'backfilled', customer_id: 'c1', funnel_stage: 'lead', lead_date: '2026-05-01' },
+      ],
+      agg: { revenue: 300, gross_profit: 150, visits: 2 },
+      customer: { id: 'c1', monthly_rate: 0 },
+      financials: { target_gross_margin_pct: 55 },
+      clearedCount: 1,
+    };
+    const res = await sweepPendingAdAttribution(makeSweepDb(state));
+    expect(res.advanced).toBe(1);
+    expect(state.captured.update.where).toEqual({ id: 'backfilled' }); // earlier first-touch wins
+    expect(state.captured.clear.ids).toEqual(['stale']);               // old primary demoted
+  });
+
+  test('candidate-query predicate includes the stale-primary re-pick branch', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/ad-attribution-sync.js'), 'utf8');
+    expect(src).toMatch(/orWhereExists\(function backfilledEarlierFirstTouch/);
+    expect(src).toMatch(/pend\.lead_date < \(SELECT MIN\(done2\.lead_date\)/);
+    expect(src).toMatch(/whereNotIn\('pend\.funnel_stage', \['completed', 'lost'\]\)/);
   });
 });
