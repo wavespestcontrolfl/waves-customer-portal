@@ -1131,10 +1131,23 @@ const SPECIALTY = {
     defaultProductKey: 'taurus_sc',
     defaultIncludedProductKey: 'taurus_sc',
     defaultApplicationRate: 'standard',
-    defaultTrenchDepthFt: 1.0,
+    // 6 in / 0.5 ft is the label-standard residential trench depth and the
+    // pricing baseline (see baselineTrenchDepthFt). Deeper trenches add a
+    // per-half-foot install premium; 0.5 ft leaves the LF model unchanged.
+    defaultTrenchDepthFt: 0.5,
     finishedGallonsPer10LFPerFtDepth: 4,
     defaultConcreteVolumePadPct: 0.20,
     productPremiumMultiplier: 1.45,
+    // Trench depth + application rate install premiums (Phase 2, 2026-07-01).
+    // baseInstallPrice = max(floor, dirtLF×dirtPerLF + concreteLF×concretePerLF)
+    //   × trenchDepthMultiplier × highRatePriceMultiplier.
+    // Depth multiplier is linear from the baseline: 1 + max(0,(depth−baseline)/0.5)
+    //   × trenchDepthPremiumPerHalfFt. At 0.15/half-foot the tiers land on
+    //   0.5 ft ×1.00 · 1.0 ft ×1.15 · 1.5 ft ×1.30 (owner-approved "Moderate").
+    baselineTrenchDepthFt: 0.5,
+    trenchDepthPremiumPerHalfFt: 0.15,
+    // High/problem-soil (0.125%) application rate install premium (+12%).
+    highRatePriceMultiplier: 1.12,
     products: {
       termidor_sc: {
         label: 'Termidor SC - Fipronil',
@@ -1772,6 +1785,7 @@ const WAVEGUARD = {
   // Services excluded from percentage discounts (flat credits only where explicitly allowed)
   excludedFromPercentDiscount: {
     rodent_bait: true,          // Fully excluded: no tier count, %, setup credit, coupon, or benefit
+    rodent_guarantee: true,     // Gated annual re-entry warranty ($199/$249/$299 by tier): fixed per-tier price, excluded from the recurring-customer one-time perk (enforces RODENT.excludeFromPctDiscount)
     palm_injection: true,       // $10/palm/yr Gold+ flat credit
     bed_bug: true,              // Bed bug services are not eligible for recurring-customer discounts
     bed_bug_chemical: true,     // Legacy key; excluded with no flat credit

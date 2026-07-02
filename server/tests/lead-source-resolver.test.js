@@ -90,3 +90,91 @@ describe('resolveLeadSource', () => {
     expect(res.leadSourceId).toBe('ls-gbp-parrish');
   });
 });
+
+// ---------------------------------------------------------------------------
+// sourceType — the lead_sources.source_type key the ad-funnel channel map
+// (ads/call-attribution attributionForSourceType) is keyed on. public-quote
+// stamps its ad_service_attribution row from this, so a wrong/missing value
+// means a wizard lead is mis-channeled or silently dropped from the funnel.
+// ---------------------------------------------------------------------------
+describe('resolveLeadSource sourceType', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isGbpUtmCampaign.mockReturnValue(false);
+    findGbpLocationByUtmContent.mockReturnValue(null);
+  });
+
+  test('passes through the resolved row source_type (main_site)', async () => {
+    mockLeadSources({ byName: { [MAIN_SITE_NAME]: { id: 'ls-main', name: MAIN_SITE_NAME, source_type: 'main_site' } } });
+    const res = await resolveLeadSource({ landing_url: 'https://wavespestcontrol.com/quote' });
+    expect(res.sourceType).toBe('main_site');
+  });
+
+  test('passes through spoke_site for a spoke referrer', async () => {
+    mockLeadSources({
+      byName: {
+        'Spoke Pest — parrishpestcontrol.com': { id: 'ls-spoke', name: 'Spoke Pest — parrishpestcontrol.com', source_type: 'spoke_site' },
+      },
+    });
+    const res = await resolveLeadSource({ referrer: 'https://www.parrishpestcontrol.com/services' });
+    expect(res.sourceType).toBe('spoke_site');
+  });
+
+  test('paid Google click keeps google_ads even when no lead_sources row exists', async () => {
+    mockLeadSources({ google: null });
+    const res = await resolveLeadSource({ gclid: 'g-1' });
+    expect(res.leadSourceId).toBeNull();
+    expect(res.sourceType).toBe('google_ads');
+  });
+
+  test('paid Meta click keeps facebook even when no lead_sources row exists', async () => {
+    mockLeadSources({ facebook: null });
+    const res = await resolveLeadSource({ fbclid: 'fb-1' });
+    expect(res.sourceType).toBe('facebook');
+  });
+
+  test('no row and no paid signal → null (fail-closed: no funnel row)', async () => {
+    mockLeadSources({ byName: {} });
+    const res = await resolveLeadSource({ referrer: 'https://duckduckgo.com/' });
+    expect(res.sourceType).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isPaidClick — paid evidence for THIS visit (click id or explicit cpc).
+// Pre-push P1: metaPaid classifies any utm_source=facebook into the Facebook
+// channel, whose funnel-map entry is paid — organic social must not inherit it.
+// ---------------------------------------------------------------------------
+describe('resolveLeadSource isPaidClick', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isGbpUtmCampaign.mockReturnValue(false);
+    findGbpLocationByUtmContent.mockReturnValue(null);
+    mockLeadSources({
+      google: { id: 'ls-google', source_type: 'google_ads' },
+      facebook: { id: 'ls-fb', name: 'Facebook Ads', source_type: 'facebook' },
+    });
+  });
+
+  test('true for Google click ids and google/cpc', async () => {
+    expect((await resolveLeadSource({ gclid: 'g1' })).isPaidClick).toBe(true);
+    expect((await resolveLeadSource({ wbraid: 'w1' })).isPaidClick).toBe(true);
+    expect((await resolveLeadSource({ utm: { source: 'google', medium: 'cpc' } })).isPaidClick).toBe(true);
+  });
+
+  test('true for Meta click ids and facebook/cpc', async () => {
+    expect((await resolveLeadSource({ fbclid: 'f1' })).isPaidClick).toBe(true);
+    expect((await resolveLeadSource({ fbc: 'fb.1.123.f1' })).isPaidClick).toBe(true);
+    expect((await resolveLeadSource({ utm: { source: 'facebook', medium: 'cpc' } })).isPaidClick).toBe(true);
+  });
+
+  test('FALSE for organic facebook utm — channel facebook, but not paid', async () => {
+    const res = await resolveLeadSource({ utm: { source: 'facebook', medium: 'social' } });
+    expect(res.sourceType).toBe('facebook'); // still the Facebook channel
+    expect(res.isPaidClick).toBe(false);     // but no paid evidence
+  });
+
+  test('FALSE for plain organic traffic', async () => {
+    expect((await resolveLeadSource({ referrer: 'https://duckduckgo.com/' })).isPaidClick).toBe(false);
+  });
+});

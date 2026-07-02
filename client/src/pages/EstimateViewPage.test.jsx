@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { EstimateAskBar, OneTimeBreakdownCard, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimePriceCopy } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimePriceCopy } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -240,6 +240,37 @@ describe('oneTimePriceCopy', () => {
     });
     expect(copy).toMatch(/30-day callback period if pests return/);
   });
+
+  it('returns no-visit renewal copy for a guarantee-only estimate (no "One visit" contradiction)', () => {
+    // The invoice_only acceptance card says "No appointment needed" — the
+    // price copy above it must not promise a service visit.
+    const copy = oneTimePriceCopy({ total: 199, items: [{ service: 'rodent_guarantee', label: 'Rodent Guarantee', amount: 199 }] });
+    expect(copy).toMatch(/no service visit to schedule/i);
+    expect(copy).not.toMatch(/One visit, pay on service day/);
+    expect(copy).not.toMatch(/30-day callback period if pests return/);
+  });
+
+  it('keeps guarantee renewal copy when the only other row is a discount', () => {
+    const copy = oneTimePriceCopy({
+      total: 179,
+      items: [
+        { service: 'rodent_guarantee', label: 'Rodent Guarantee', amount: 199 },
+        { service: 'manual_discount', label: 'Manual discount', amount: -20 },
+      ],
+    });
+    expect(copy).toMatch(/no service visit to schedule/i);
+  });
+
+  it('falls back to the default visit copy when the guarantee is bundled with real work', () => {
+    const copy = oneTimePriceCopy({
+      total: 349,
+      items: [
+        { service: 'rodent_guarantee', label: 'Rodent Guarantee', amount: 199 },
+        { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 150 },
+      ],
+    });
+    expect(copy).toMatch(/30-day callback period if pests return/);
+  });
 });
 
 describe('estimateAddServiceOffer', () => {
@@ -369,5 +400,153 @@ describe('getServiceLabel', () => {
         services: [{ key: 'mosquito', label: 'Mosquito Control', isRecurring: true }],
       },
     )).toBe('Seasonal Mosquito Control or One-Time Mosquito Control');
+  });
+});
+
+describe('CombinedRecurringPriceCard — low-confidence range tracks the SELECTED cadence', () => {
+  // The uncertain LOW dollars are fixed ($400 × 20% = ±$80) while the exact part
+  // moves with the selection — the band must NOT grow with the displayed total.
+  const combined = {
+    monthlySubtotal: 500,
+    annualSubtotal: 6000,
+    lowConfidenceRangePct: 0.2,
+    lowConfidenceFraction: 0.8, // stale default-subtotal fraction (400/500)
+    lowConfidenceMonthly: 400,
+  };
+
+  it('bands only the LOW dollars when another cadence changes the displayed total', () => {
+    // Selected combined cadence $600/mo: ±$80 → $520–$680 (NOT the stale
+    // fraction's 600×0.8×0.2 = ±$96 → $504–$696).
+    render(
+      <CombinedRecurringPriceCard
+        combined={combined}
+        selectedFrequency={{ key: 'alt', monthly: 600, annual: 7200 }}
+      />,
+    );
+    expect(screen.getByText(/\$520–\$680/)).toBeInTheDocument();
+    expect(screen.queryByText(/\$504–\$696/)).not.toBeInTheDocument();
+  });
+
+  it('default selection still bands the LOW share of the subtotal', () => {
+    render(<CombinedRecurringPriceCard combined={combined} selectedFrequency={null} />);
+    // $500/mo, ±$80 → $420–$580
+    expect(screen.getByText(/\$420–\$580/)).toBeInTheDocument();
+  });
+
+  it('falls back to the stamped fraction when raw LOW dollars are absent (older payloads)', () => {
+    const { lowConfidenceMonthly, ...withoutRaw } = combined;
+    render(<CombinedRecurringPriceCard combined={withoutRaw} selectedFrequency={{ key: 'alt', monthly: 600 }} />);
+    // stamped 0.8 against $600 → ±$96 → $504–$696
+    expect(screen.getByText(/\$504–\$696/)).toBeInTheDocument();
+  });
+});
+
+describe('ReviewPhase — site-confirmation hold copy', () => {
+  const noop = () => {};
+
+  it('held no-slot accept: no invoice-due promise, manual scheduling line, approve CTA', () => {
+    render(
+      <ReviewPhase
+        slotId={null}
+        existingAppointment={null}
+        paymentPreference="pay_at_visit"
+        secondsRemaining={600}
+        onConfirm={noop}
+        onCancel={noop}
+        invoiceMode
+        siteConfirmationHold
+        manualScheduling
+        serviceMode="recurring"
+        depositNote={null}
+      />,
+    );
+    expect(screen.getByText('No payment now — price confirmed on site')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve estimate' })).toBeInTheDocument();
+    expect(screen.getByText(/a Waves team member will reach out to set up your visit/i)).toBeInTheDocument();
+    expect(screen.getByText(/confirms the exact price on a quick site visit, then sends your first invoice/i)).toBeInTheDocument();
+    expect(screen.queryByText('Invoice due now')).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Slot:/)).not.toBeInTheDocument();
+  });
+
+  it('held accept on an existing appointment: approval copy, no "creates your invoice" promise', () => {
+    render(
+      <ReviewPhase
+        slotId={null}
+        existingAppointment={{ id: 'ss1', scheduledDate: '2026-07-10', windowDisplay: '8–10 AM' }}
+        paymentPreference="pay_at_visit"
+        secondsRemaining={600}
+        onConfirm={noop}
+        onCancel={noop}
+        invoiceMode
+        siteConfirmationHold
+        serviceMode="recurring"
+        depositNote={null}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Confirm approval' })).toBeInTheDocument();
+    expect(screen.getByText(/No payment needed now — we confirm your exact price on a quick site visit/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Next step creates your invoice/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Invoice due now')).not.toBeInTheDocument();
+  });
+
+  it('non-invoice held estimate with an existing appointment: no "creates your invoice" promise either', () => {
+    // The server holds first invoices for narrow low-confidence recurring
+    // accepts regardless of bill_by_invoice — the review copy must not be
+    // invoice-mode-gated.
+    render(
+      <ReviewPhase
+        slotId={null}
+        existingAppointment={{ id: 'ss1', scheduledDate: '2026-07-10', windowDisplay: '8–10 AM' }}
+        paymentPreference="pay_at_visit"
+        secondsRemaining={600}
+        onConfirm={noop}
+        onCancel={noop}
+        invoiceMode={false}
+        siteConfirmationHold
+        serviceMode="recurring"
+        depositNote={null}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Confirm approval' })).toBeInTheDocument();
+    expect(screen.getByText('No payment now — price confirmed on site')).toBeInTheDocument();
+    expect(screen.queryByText(/Next step creates your invoice/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm invoice' })).not.toBeInTheDocument();
+  });
+
+  it('a one-time accept keeps its own copy even when the estimate carries the hold flag', () => {
+    render(
+      <ReviewPhase
+        slotId="slot-1"
+        existingAppointment={null}
+        paymentPreference="pay_at_visit"
+        secondsRemaining={600}
+        onConfirm={noop}
+        onCancel={noop}
+        invoiceMode
+        siteConfirmationHold
+        serviceMode="one_time"
+        depositNote={null}
+      />,
+    );
+    expect(screen.getByText('Invoice due now')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeInTheDocument();
+  });
+
+  it('non-held invoice-mode copy is unchanged', () => {
+    render(
+      <ReviewPhase
+        slotId="slot-1"
+        existingAppointment={null}
+        paymentPreference="pay_at_visit"
+        secondsRemaining={600}
+        onConfirm={noop}
+        onCancel={noop}
+        invoiceMode
+        serviceMode="recurring"
+        depositNote={null}
+      />,
+    );
+    expect(screen.getByText('Invoice due now')).toBeInTheDocument();
+    expect(screen.getByText(/Slot: slot-1/)).toBeInTheDocument();
   });
 });

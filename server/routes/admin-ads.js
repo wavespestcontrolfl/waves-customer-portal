@@ -210,11 +210,23 @@ router.get('/call-bridge', async (req, res, next) => {
 });
 
 // POST /api/admin/ads/call-bridge/apply
+// Serialized with the 6:20 cron (bridge claim + unclaimed→organic fallback)
+// under the SAME lease: a manual apply repoints leads.lead_source_id before it
+// writes the paid funnel row, and the fallback sweeping concurrently off a
+// stale selection could insert an organic row the paid write can't flip.
+// try-lock semantics: if the cron holds the lease, the manual apply returns
+// 409 rather than waiting — re-run it a minute later.
 router.post('/call-bridge/apply', async (req, res, next) => {
   try {
+    const { runExclusive } = require('../utils/cron-lock');
     const periodDays = parseInt(String(req.body.period || '30d').replace('d', ''), 10) || 30;
     const limit = parseInt(req.body.limit, 10) || 200;
-    const result = await getGoogleCallBridge().applyBridge({ days: periodDays, limit });
+    const result = await runExclusive('google-call-bridge-organic', () => (
+      getGoogleCallBridge().applyBridge({ days: periodDays, limit })
+    ));
+    if (result?.skipped && result?.reason) {
+      return res.status(409).json({ error: 'Call bridge is currently running (daily cron or another apply) — try again in a minute.' });
+    }
     res.json(result);
   } catch (err) { next(err); }
 });

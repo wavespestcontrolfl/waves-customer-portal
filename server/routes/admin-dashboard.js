@@ -17,6 +17,7 @@ const { autopayActivePredicate } = require('../services/autopay-eligibility');
 const { generateChartSpec, extractImageIntent } = require('../services/ai-chart-builder');
 const { runReadOnlyAnalyticsQuery, validateAnalyticsSql, SqlGuardError } = require('../services/analytics-sql-sandbox');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
+const { resolveAttributionFreshStart, applyAttributionFreshStart } = require('../utils/attribution-fresh-start');
 const rateLimit = require('express-rate-limit');
 
 // Server-side gate for the AI chart builder. The client hides the panel behind
@@ -1486,11 +1487,18 @@ function parseCustomRange(query) {
   return { from: from > today ? today : from };
 }
 
+// Resolved once at boot; ATTRIBUTION_FRESH_START=YYYY-MM-DD overrides, empty
+// disables, invalid fails open. See utils/attribution-fresh-start.js.
+const ATTRIBUTION_FRESH_START = resolveAttributionFreshStart();
+
 function resolveAttributionWindow(period, range) {
-  if (range && range.from) {
-    return { from: range.from, to: etDateString(), label: `Since ${range.from}` };
-  }
-  return { from: periodStartDate(period), to: etDateString(), label: periodLabel(period) };
+  const win = range && range.from
+    ? { from: range.from, to: etDateString(), label: `Since ${range.from}` }
+    : { from: periodStartDate(period), to: etDateString(), label: periodLabel(period) };
+  // Attribution data before the fresh start is known-dirty (city-page buckets
+  // blended with GBP dials, pre-realignment costs) — clip every window at the
+  // baseline. The floored label flows to the card sub + the leads drill.
+  return applyAttributionFreshStart(win, ATTRIBUTION_FRESH_START);
 }
 
 // GET /api/admin/dashboard/calls-by-source?period=mtd

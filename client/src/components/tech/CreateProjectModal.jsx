@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/wdoProfileToFindings';
+import { computePretreatChemistry } from '../../lib/termitePretreatRates';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
 import DictationButton from './DictationButton';
 
@@ -92,6 +93,29 @@ function formatCustomerAddress(customer) {
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// Which finding field holds the service/treatment address for a project type.
+// WDO inspections use `property_address` (handled by its own richer effect); the
+// pre-treatment certificate uses a `treatment_address` autocomplete. Any future
+// `type: 'address'` field is picked up automatically so the generic customer-
+// address prefill stays type-agnostic.
+function getProjectAddressFieldKey(fields) {
+  if (!Array.isArray(fields)) return null;
+  const match = fields.find((f) => f?.type === 'address' || f?.key === 'property_address');
+  return match ? match.key : null;
+}
+
+// Loose address equality. The same address arrives punctuated differently by
+// source: a customer search row carries the server `formatAddress` string
+// ("123 Main St, Bradenton, FL 34205") while the estimates-summary refetch
+// (used after a draft restore) is assembled client-side into "123 Main St
+// Bradenton, FL 34205". Comparing on a case/punctuation/whitespace-normalized
+// form lets the effect still recognize a customer-derived address it wrote.
+function addressesMatch(a, b) {
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const na = norm(a);
+  return na !== '' && na === norm(b);
 }
 
 function formatCustomerName(customer) {
@@ -234,6 +258,19 @@ export default function CreateProjectModal({
   // cleared so the previous customer's address/contacts never carry over
   // onto the new customer's FDACS-13645 form.
   const wdoAutoFillRef = useRef(null);
+  // For non-WDO types with a single address field (e.g. the pre-treatment
+  // certificate's `treatment_address`): the last customer-derived address we
+  // auto-filled, so a customer switch re-syncs it and un-picking clears it,
+  // while a hand-typed/autocompleted address the tech chose is never clobbered.
+  const projectAddressAutoFillRef = useRef({ key: null, value: '' });
+  // Licensed-applicator picker for the pre-treatment certificate (any type
+  // whose fields include applicator_name + applicator_fdacs_id).
+  const [applicators, setApplicators] = useState([]);
+  const [defaultApplicatorTechId, setDefaultApplicatorTechId] = useState(null);
+  // The chemistry values this form last auto-calculated. A field is only
+  // rewritten while blank or still holding what we wrote, so a hand-typed
+  // concentration/gallons override always survives recalculation.
+  const chemAutoFillRef = useRef({ concentration_pct: null, gallons_applied: null });
   const [projectDate, setProjectDate] = useState(
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
@@ -406,6 +443,48 @@ export default function CreateProjectModal({
   }, [serviceSearch]);
 
   const typeCfg = typesRegistry && projectType ? typesRegistry[projectType] : null;
+  const addressFieldKey = getProjectAddressFieldKey(typeCfg?.findingsFields);
+  const typeFieldKeys = useMemo(
+    () => new Set((typeCfg?.findingsFields || []).map((f) => f.key)),
+    [typeCfg],
+  );
+  const hasApplicatorFields = typeFieldKeys.has('applicator_name') && typeFieldKeys.has('applicator_fdacs_id');
+  // Picker options carry the technician id as the value so two techs who
+  // share a display name stay distinct picks (the label gets the license #
+  // appended only in that duplicate case, so the human can tell them apart).
+  const applicatorOptions = useMemo(() => {
+    const nameCounts = new Map();
+    applicators.forEach((a) => nameCounts.set(a.name, (nameCounts.get(a.name) || 0) + 1));
+    return applicators.map((a) => ({
+      value: a.id,
+      label: nameCounts.get(a.name) > 1 ? `${a.name} (${a.fdacsId || 'no license # on file'})` : a.name,
+    }));
+  }, [applicators]);
+  // The stored findings are the printed name + FDACS ID pair, so the select's
+  // current value is recovered by matching that pair back to a technician
+  // (an unmatched pair — restored free-text draft or hand-edited ID — falls
+  // back to showing the raw name).
+  const selectedApplicator = useMemo(() => (
+    applicators.find((a) => (
+      a.name === String(findings.applicator_name || '').trim()
+      && String(a.fdacsId || '') === String(findings.applicator_fdacs_id || '').trim()
+    )) || null
+  ), [applicators, findings.applicator_name, findings.applicator_fdacs_id]);
+  const hasChemistryFields = typeFieldKeys.has('product_name')
+    && typeFieldKeys.has('concentration_pct')
+    && typeFieldKeys.has('gallons_applied');
+  // Pure function of the treatment inputs — recomputed on every keystroke so
+  // the sync effect below and the inline hints always agree.
+  const chemAuto = useMemo(() => (
+    hasChemistryFields
+      ? computePretreatChemistry({
+        productName: findings.product_name,
+        squareFootage: findings.square_footage,
+        linearFeet: findings.linear_feet,
+        trenchDepthFt: findings.trench_depth_ft,
+      })
+      : null
+  ), [hasChemistryFields, findings.product_name, findings.square_footage, findings.linear_feet, findings.trench_depth_ft]);
   // appointmentManaged types complete through the standard appointment flow
   // now — they're not creatable as projects (server 422s them too). An
   // explicit allowedProjectTypes prop (the special-project dispatch path)
@@ -472,8 +551,138 @@ export default function CreateProjectModal({
     });
   }, [projectType, selectedCustomer]);
 
+  // Prefill the address field from the selected customer for every OTHER project
+  // type that has one (the pre-treatment certificate's `treatment_address`, and
+  // any future `type: 'address'` field). WDO keeps its dedicated multi-field
+  // effect above. Blank-fills, re-syncs when the customer changes, and clears on
+  // un-pick — but only ever touches the value it auto-filled, so an address the
+  // tech typed or picked from the autocomplete is preserved.
+  useEffect(() => {
+    if (projectType === 'wdo_inspection' || !addressFieldKey) return;
+    const address = formatCustomerAddress(selectedCustomer);
+    setFindings(prev => {
+      const current = prev[addressFieldKey] || '';
+      const auto = projectAddressAutoFillRef.current;
+      // A field already holding the selected customer's address counts as
+      // auto-filled even if the ref was reset (e.g. a restored draft, whose
+      // findings repopulate but leave the ref empty) — so re-adopt it and keep
+      // it in sync on a later customer switch. A hand-entered pre-construction
+      // lot address that DIFFERS from the customer's is left tech-owned.
+      const isAutoFilled = (auto.key === addressFieldKey && addressesMatch(current, auto.value))
+        || addressesMatch(current, address);
+      if (hasMeaningfulValue(current) && !isAutoFilled) return prev;
+      if (!address) {
+        // Customer un-picked: drop only what we auto-filled.
+        if (!isAutoFilled) return prev;
+        projectAddressAutoFillRef.current = { key: null, value: '' };
+        return { ...prev, [addressFieldKey]: '' };
+      }
+      // Re-establish the marker whenever the field matches the customer (covers
+      // the restored-draft case, where the saved value may be punctuated
+      // differently) so a subsequent switch re-syncs or clears it. Leave a
+      // loosely-matching value in place — no need to rewrite just punctuation.
+      projectAddressAutoFillRef.current = { key: addressFieldKey, value: address };
+      if (addressesMatch(current, address)) return prev;
+      return { ...prev, [addressFieldKey]: address };
+    });
+  }, [projectType, selectedCustomer, addressFieldKey]);
+
+  // Load the licensed-applicator list once a type with applicator fields is
+  // picked. The tech timetracking endpoints sanitize license numbers away,
+  // so the certificate form has its own projects-scoped source.
+  useEffect(() => {
+    if (!hasApplicatorFields || applicators.length) return;
+    adminFetch('/admin/projects/applicators')
+      .then((r) => r.json())
+      .then((d) => {
+        setApplicators(Array.isArray(d.applicators) ? d.applicators : []);
+        setDefaultApplicatorTechId(d.defaultTechnicianId || null);
+      })
+      .catch(() => { /* applicator fields still accept free text */ });
+  }, [hasApplicatorFields, applicators.length]);
+
+  // Default the applicator to the logged-in tech (the server sends
+  // defaultTechnicianId only for a tech's own session, not admins). Fills
+  // only while BOTH fields are untouched, so a restored draft or a picked
+  // applicator is never overridden.
+  useEffect(() => {
+    if (!hasApplicatorFields || !applicators.length || !defaultApplicatorTechId) return;
+    const me = applicators.find((a) => a.id === defaultApplicatorTechId);
+    if (!me) return;
+    setFindings(prev => {
+      if (hasMeaningfulValue(prev.applicator_name) || hasMeaningfulValue(prev.applicator_fdacs_id)) return prev;
+      return {
+        ...prev,
+        applicator_name: me.name,
+        ...(me.fdacsId ? { applicator_fdacs_id: me.fdacsId } : {}),
+      };
+    });
+  }, [hasApplicatorFields, applicators, defaultApplicatorTechId]);
+
+  // Keep concentration_pct / gallons_applied in sync with the label-rate
+  // calculation. Ownership rule: a field is written only while blank, still
+  // holding our last auto-value, or already equal to the new computation (a
+  // restored draft re-adopts) — a hand-typed labeled rate survives. Two
+  // exceptions on product change: a KNOWN bait/wood product force-clears
+  // both fields even over a hand-typed value (no finished-solution chemistry
+  // exists, so anything here would print wrong on the certificate), while an
+  // unrecognized product name only reclaims values the form itself wrote (a
+  // free-text product's hand-entered chemistry is the tech's to keep).
+  useEffect(() => {
+    if (!chemAuto) return;
+    setFindings(prev => {
+      const auto = chemAutoFillRef.current;
+      const next = { ...prev };
+      let changed = false;
+      const ownsField = (key, newValue) => {
+        const current = String(prev[key] || '').trim();
+        return current === ''
+          || current === String(auto[key] ?? '')
+          || (newValue != null && current === String(newValue));
+      };
+      const writeField = (key, value, { force = false } = {}) => {
+        if (!force && !ownsField(key, value)) return;
+        auto[key] = value || null;
+        if (String(prev[key] || '') !== value) {
+          next[key] = value;
+          changed = true;
+        }
+      };
+      if (chemAuto.status === 'ok') {
+        writeField('concentration_pct', chemAuto.concentrationPct);
+        writeField('gallons_applied', chemAuto.gallonsText || '');
+      } else if (chemAuto.status === 'not_applicable') {
+        writeField('concentration_pct', '', { force: true });
+        writeField('gallons_applied', '', { force: true });
+      } else {
+        writeField('concentration_pct', '');
+        writeField('gallons_applied', '');
+      }
+      return changed ? next : prev;
+    });
+    // The two output fields are deliberately in the deps: clearing an
+    // auto-filled value re-runs the effect, which owns the now-blank field
+    // and refills it (the effect converges — a re-run after its own write
+    // changes nothing).
+  }, [chemAuto, findings.concentration_pct, findings.gallons_applied]);
+
   function handleFindingChange(key, value) {
     setFindings(prev => ({ ...prev, [key]: value }));
+  }
+
+  function handleApplicatorChange(value) {
+    // Option values are technician ids. No match means the injected
+    // current-value option (a restored draft's free-text name) — keep it as
+    // the name and leave the ID alone.
+    const match = applicators.find((a) => String(a.id) === String(value));
+    setFindings(prev => ({
+      ...prev,
+      applicator_name: match ? match.name : value,
+      // The FDACS ID prints beside the name on the certificate — re-bind it
+      // on every pick (blank when none is on file) so a previous applicator's
+      // number can never carry over to the new name.
+      ...(match ? { applicator_fdacs_id: match.fdacsId || '' } : {}),
+    }));
   }
 
   function handleProductSelect(fieldKey, product) {
@@ -500,6 +709,16 @@ export default function CreateProjectModal({
       wdoAutoFillRef.current = recordAppliedAutoFill(prev, next, selectedCustomer, { overwrite: true });
       return next;
     });
+  }
+
+  // Explicit "Fill from customer" for a non-WDO address field — overwrites and
+  // marks the value as auto-filled so a later customer switch still re-syncs it.
+  function fillAddressFromCustomer() {
+    if (!addressFieldKey) return;
+    const address = formatCustomerAddress(selectedCustomer);
+    if (!address) return;
+    projectAddressAutoFillRef.current = { key: addressFieldKey, value: address };
+    setFindings(prev => ({ ...prev, [addressFieldKey]: address }));
   }
 
   // Called when the tech un-picks the customer ("Change"): drop the WDO fields
@@ -969,7 +1188,15 @@ export default function CreateProjectModal({
                 />
               )}
 
-              {typeCfg.findingsFields.map(field => (
+              {typeCfg.findingsFields.map(field => {
+                // The applicator must be one of our licensed techs — swap the
+                // free-text field for a dropdown of active technicians once
+                // the list loads (free text remains the offline fallback).
+                const isApplicatorPicker = field.key === 'applicator_name' && applicators.length > 0;
+                const renderField = isApplicatorPicker
+                  ? { ...field, type: 'select', options: applicatorOptions }
+                  : field;
+                return (
                 <div key={field.key}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
                     <label style={{ ...labelStyle, marginBottom: 0 }}>{field.label}</label>
@@ -991,20 +1218,64 @@ export default function CreateProjectModal({
                         Fill from customer
                       </button>
                     )}
+                    {projectType !== 'wdo_inspection' && field.key === addressFieldKey && formatCustomerAddress(selectedCustomer) && (
+                      <button
+                        type="button"
+                        onClick={fillAddressFromCustomer}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: P.accent,
+                          fontSize: 11,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                          padding: 0,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Fill from customer
+                      </button>
+                    )}
                   </div>
                   <ProjectFindingFieldInput
-                    field={field}
+                    field={renderField}
                     id={`create-project-${projectType}-${field.key}`}
                     name={`findings.${field.key}`}
-                    value={findings[field.key] || ''}
-                    onChange={(value) => handleFindingChange(field.key, value)}
+                    value={isApplicatorPicker
+                      // The picker's value is the matched technician id; an
+                      // unmatched name+ID pair shows as the raw name via the
+                      // select's injected current-value option.
+                      ? (selectedApplicator ? selectedApplicator.id : (findings.applicator_name || ''))
+                      : (findings[field.key] || '')}
+                    onChange={(value) => (
+                      isApplicatorPicker ? handleApplicatorChange(value) : handleFindingChange(field.key, value)
+                    )}
                     inputStyle={inputStyle}
                     products={productCatalog}
                     onProductSelect={(product) => handleProductSelect(field.key, product)}
                     palette={P}
                   />
+                  {field.key === 'product_name' && chemAuto?.status === 'not_applicable' && chemAuto.note && (
+                    <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>{chemAuto.note}</div>
+                  )}
+                  {field.key === 'concentration_pct' && chemAuto?.status === 'ok' && (
+                    <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>
+                      Auto-filled with the label&apos;s standard pre-construction dilution — overtype to record a different labeled rate.
+                    </div>
+                  )}
+                  {field.key === 'gallons_applied' && chemAuto?.status === 'ok' && chemAuto.note && (
+                    <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>
+                      Auto-calculated: {chemAuto.note}.
+                    </div>
+                  )}
+                  {(field.key === 'concentration_pct' || field.key === 'gallons_applied') && chemAuto?.status === 'not_applicable' && (
+                    <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>
+                      Not applicable for this product — kept blank on the certificate.
+                    </div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
 
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>

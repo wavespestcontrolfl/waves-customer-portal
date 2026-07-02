@@ -392,6 +392,11 @@ function commercialLowConfidenceRange(estimateData) {
   const services = commercialRecurringLinesForConfidence(data || {});
   let lowMonthly = 0;
   let highMonthly = 0;
+  // Track the exact totals separately so a MIXED estimate can band ONLY the
+  // low-confidence share of the price (not the whole total). lowConfidenceMonthly
+  // is the sum of LOW-line monthlies; exactMonthly is the sum of every line.
+  let lowConfidenceMonthly = 0;
+  let exactMonthly = 0;
   let hasLowConfidence = false;
   for (const svc of services) {
     if (!svc || typeof svc !== 'object') continue;
@@ -399,8 +404,10 @@ function commercialLowConfidenceRange(estimateData) {
     if (svc.quoteRequired === true) continue; // manual lines handled by the quote gate
     const monthly = commercialLineMonthly(svc);
     if (monthly <= 0) continue;
+    exactMonthly += monthly;
     if (String(svc.pricingConfidence || '').toUpperCase() === 'LOW') {
       hasLowConfidence = true;
+      lowConfidenceMonthly += monthly;
       lowMonthly += monthly * (1 - COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT);
       highMonthly += monthly * (1 + COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT);
     } else {
@@ -418,12 +425,37 @@ function commercialLowConfidenceRange(estimateData) {
     rangeLowMonthly,
     rangeHighMonthly,
     monthlySwing,
+    lowConfidenceMonthly: round(lowConfidenceMonthly),
+    exactMonthly: round(exactMonthly),
     forceSiteQuote: monthlySwing > COMMERCIAL_LOW_CONFIDENCE_MAX_MONTHLY_SWING,
   };
 }
 
 function commercialLowConfidenceRequiresSiteQuote(estimateData) {
   return commercialLowConfidenceRange(estimateData).forceSiteQuote === true;
+}
+
+// The per-service priced commercial recurring lines with their monthly + whether
+// each is LOW confidence. Lets the pricing-contract layer compute a per-section
+// low-confidence share (a single split card carries only its own service's
+// confidence; a bundle card blends them), so mixed multi-service estimates never
+// over- or under-state the ±20% band.
+function commercialLowConfidenceServiceLines(estimateData) {
+  const data = parseEstimateData(estimateData);
+  const services = commercialRecurringLinesForConfidence(data || {});
+  const out = [];
+  for (const svc of services) {
+    if (!svc || typeof svc.service !== 'string' || !svc.service.startsWith('commercial_')) continue;
+    if (svc.quoteRequired === true) continue;
+    const monthly = commercialLineMonthly(svc);
+    if (monthly <= 0) continue;
+    out.push({
+      service: svc.service,
+      monthly,
+      isLow: String(svc.pricingConfidence || '').toUpperCase() === 'LOW',
+    });
+  }
+  return out;
 }
 
 function cloneEstimateData(data) {
@@ -918,10 +950,12 @@ function nonPestRecurringServicesForOneTimeOption(estimateData) {
 }
 
 module.exports = {
+  COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT,
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
   commercialRiskTypeReviewNeeded,
   commercialLowConfidenceRange,
+  commercialLowConfidenceServiceLines,
   commercialLowConfidenceRequiresSiteQuote,
   hasDerivableOneTimePestChoicePricing,
   hasPestRecurringServiceForOneTimeOption,

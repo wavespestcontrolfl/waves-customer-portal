@@ -2500,7 +2500,11 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     services.trenching = {
       productKey: o.trenchingProductKey || o.trenchingTermiticideProductKey || o.productKey || 'taurus_sc',
       applicationRate: o.trenchingApplicationRate || o.applicationRate || 'standard',
-      trenchDepthFt: o.trenchingDepthFt || o.trenchDepthFt || 1.0,
+      // 0.5 ft (6 in) is the canonical baseline trench depth (SPECIALTY.trenching
+      // .defaultTrenchDepthFt) — must match the admin-form default so a V2/server
+      // estimate without an explicit depth prices at the ×1.0 baseline, not the
+      // retired 1.0 ft (+15%) tier with doubled chemical volume.
+      trenchDepthFt: o.trenchingDepthFt || o.trenchDepthFt || 0.5,
       concreteVolumePadPct: o.trenchingConcreteVolumePadPct || o.concreteVolumePadPct,
       warrantyTier: o.trenchingWarrantyTier || o.warrantyTier || 'one_year_retreat',
       labelConfirmed: o.trenchingLabelConfirmed === true || o.labelConfirmed === true ||
@@ -2693,6 +2697,26 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         urgency, afterHours,
       };
     }
+  }
+  // Annual rodent guarantee — gated. The engine drops the line unless all four
+  // eligibility flags are true, so the rep confirms each affirmatively; missing
+  // any → INELIGIBLE and no line item (fail closed). Pass the normalized
+  // homeSqFt/stories/roofType so tiering (standard/complex/estate) keys off the
+  // same authoritative inputs as the rest of the estimate — the engine's
+  // property.footprint fallback is only set when the profile carries a footprint
+  // field, so relying on it can undertier a large home (e.g. 5,000 sf → complex).
+  if (sel.has('RODENT_GUARANTEE')) {
+    services.rodentGuarantee = {
+      homeSqFt,
+      stories,
+      roofType: p.roofType,
+      eligibility: {
+        trappingCompleted: !!o.rgTrappingCompleted,
+        exclusionCompleted: !!o.rgExclusionCompleted,
+        sanitationCompletedOrPhotoBaseline: !!o.rgSanitationBaseline,
+        noActivityAfterFinalTrapCheck: !!o.rgNoActivityAfterFinalCheck,
+      },
+    };
   }
   if (sel.has('TOPDRESS')) {
     const topDressArea = Math.max(0, Number(o.topDressArea) || 0);

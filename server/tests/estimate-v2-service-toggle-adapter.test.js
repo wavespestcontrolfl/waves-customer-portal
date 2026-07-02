@@ -542,4 +542,157 @@ describe('estimate v2 service toggle adapter', () => {
     expect(pest.productionDiagnostics.reviewReasons).toContain('large_pool_cage');
     expect(pest.productionDiagnostics.reviewReasons).not.toContain('pool_cage_size_inferred');
   });
+
+  test('maps RODENT_GUARANTEE with all eligibility flags into a priced renewable warranty line', () => {
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: true,
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+
+    expect(input.services.rodentGuarantee).toMatchObject({
+      eligibility: {
+        trappingCompleted: true,
+        exclusionCompleted: true,
+        sanitationCompletedOrPhotoBaseline: true,
+        noActivityAfterFinalTrapCheck: true,
+      },
+    });
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+
+    expect(item).toBeDefined();
+    expect(item.eligible).toBe(true);
+    expect(item.price).toBeGreaterThan(0);
+    expect(item.detail).toContain('renewable annually');
+  });
+
+  test('tiers the guarantee off the profile home size even without a footprint field', () => {
+    // A large two-story tile home must price as estate ($299), not complex —
+    // the adapter forwards normalized homeSqFt/stories/roofType so tiering does
+    // not depend on the engine's optional property.footprint fallback.
+    const { footprint, ...profileNoFootprint } = baseProfile();
+    const input = translateV2CallToV1Input(
+      { ...profileNoFootprint, homeSqFt: 5000, stories: 2, roofType: 'tile' },
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: true,
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+
+    expect(input.services.rodentGuarantee).toMatchObject({
+      homeSqFt: 5000,
+      stories: 2,
+      roofType: 'tile',
+    });
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item.tier).toBe('estate');
+    expect(item.price).toBe(299);
+  });
+
+  test('promotes a small tile-roof home to complex even when roof type is uppercase', () => {
+    // Property lookup / verified overrides return roof type as 'TILE'; the tier
+    // rule must still recognize it (small single-story tile home -> complex $249,
+    // not standard $199).
+    const { footprint, ...profileNoFootprint } = baseProfile();
+    const input = translateV2CallToV1Input(
+      { ...profileNoFootprint, homeSqFt: 2000, stories: 1, roofType: 'TILE' },
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: true,
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item.tier).toBe('complex');
+    expect(item.price).toBe(249);
+  });
+
+  test('does not apply the recurring-customer one-time perk to the rodent guarantee', () => {
+    // The guarantee is excluded from % discounts (RODENT.excludeFromPctDiscount).
+    // A recurring customer must still pay the full per-tier price, not 15% off.
+    // recurringCustomer must ride the adapter OPTIONS (the real call path): the
+    // adapter always emits input.recurringCustomer, which the engine prefers
+    // over isRecurringCustomer — a post-translate isRecurringCustomer mutation
+    // is ignored and would let this regression pass vacuously.
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['RODENT_GUARANTEE'],
+      {
+        recurringCustomer: true,
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: true,
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+    expect(input.recurringCustomer).toBe(true);
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item.priceAfterDiscount).toBe(item.price);
+    expect((item.discount?.appliedDiscounts || []).map((d) => d.type))
+      .not.toContain('recurring_customer_one_time_perk');
+  });
+
+  test('manual percentage discount does not cut the fixed-tier rodent guarantee', () => {
+    // WAVEGUARD.excludedFromPercentDiscount only guards the automatic discount
+    // paths; the manual/coupon pass filters on line-level flags instead
+    // (isManualOneTimeDiscountEligible), so the guarantee line must carry
+    // discountEligible:false / excludedFromCoupons like the trap-only retainer.
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: true,
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+    input.manualDiscount = { type: 'PERCENT', value: 10 };
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item.price).toBe(199);
+    expect(item.discountEligible).toBe(false);
+    expect(item.excludedFromCoupons).toBe(true);
+    expect(estimate.summary.oneTimeTotal).toBe(199);
+    expect(estimate.summary.manualDiscount.oneTimeAmount).toBe(0);
+    expect(estimate.summary.manualDiscount.eligibleServices).not.toContain('rodent_guarantee');
+  });
+
+  test('drops the RODENT_GUARANTEE line when any eligibility flag is missing (fail closed)', () => {
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['RODENT_GUARANTEE'],
+      {
+        rgTrappingCompleted: true,
+        rgExclusionCompleted: false, // not confirmed
+        rgSanitationBaseline: true,
+        rgNoActivityAfterFinalCheck: true,
+      }
+    );
+
+    expect(input.services.rodentGuarantee.eligibility.exclusionCompleted).toBe(false);
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item).toBeUndefined();
+  });
 });
