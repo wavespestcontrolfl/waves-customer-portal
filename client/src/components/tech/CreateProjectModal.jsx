@@ -622,10 +622,12 @@ export default function CreateProjectModal({
   // Keep concentration_pct / gallons_applied in sync with the label-rate
   // calculation. Ownership rule: a field is written only while blank, still
   // holding our last auto-value, or already equal to the new computation (a
-  // restored draft re-adopts). When the product stops resolving to a soil
-  // liquid — bait/wood product, or a name we don't recognize — values WE
-  // wrote are cleared so a stale Termidor dilution can never print on a
-  // Trelona certificate; hand-typed values are left alone.
+  // restored draft re-adopts) — a hand-typed labeled rate survives. Two
+  // exceptions on product change: a KNOWN bait/wood product force-clears
+  // both fields even over a hand-typed value (no finished-solution chemistry
+  // exists, so anything here would print wrong on the certificate), while an
+  // unrecognized product name only reclaims values the form itself wrote (a
+  // free-text product's hand-entered chemistry is the tech's to keep).
   useEffect(() => {
     if (!chemAuto) return;
     setFindings(prev => {
@@ -638,8 +640,8 @@ export default function CreateProjectModal({
           || current === String(auto[key] ?? '')
           || (newValue != null && current === String(newValue));
       };
-      const writeField = (key, value) => {
-        if (!ownsField(key, value)) return;
+      const writeField = (key, value, { force = false } = {}) => {
+        if (!force && !ownsField(key, value)) return;
         auto[key] = value || null;
         if (String(prev[key] || '') !== value) {
           next[key] = value;
@@ -649,6 +651,9 @@ export default function CreateProjectModal({
       if (chemAuto.status === 'ok') {
         writeField('concentration_pct', chemAuto.concentrationPct);
         writeField('gallons_applied', chemAuto.gallonsText || '');
+      } else if (chemAuto.status === 'not_applicable') {
+        writeField('concentration_pct', '', { force: true });
+        writeField('gallons_applied', '', { force: true });
       } else {
         writeField('concentration_pct', '');
         writeField('gallons_applied', '');
@@ -1261,6 +1266,11 @@ export default function CreateProjectModal({
                   {field.key === 'gallons_applied' && chemAuto?.status === 'ok' && chemAuto.note && (
                     <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>
                       Auto-calculated: {chemAuto.note}.
+                    </div>
+                  )}
+                  {(field.key === 'concentration_pct' || field.key === 'gallons_applied') && chemAuto?.status === 'not_applicable' && (
+                    <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>
+                      Not applicable for this product — kept blank on the certificate.
                     </div>
                   )}
                 </div>
