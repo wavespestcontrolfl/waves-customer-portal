@@ -6329,6 +6329,7 @@ async function handleEstimateView(req, res, next) {
       membership,
       oneTime: depositStructuralOneTime,
       oneTimeUninvoiced: depositStructuralOneTime && !effectiveInvoiceMode,
+      noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
     });
     // Card-hold policy "as if one-time" — surfaced so the page can require a
     // card when the customer books a single visit (enforced client-side only
@@ -6639,6 +6640,10 @@ router.put('/:token/accept', async (req, res, next) => {
       membership: acceptMembership,
       oneTime: treatAsOneTime,
       oneTimeUninvoiced: treatAsOneTime && !billByInvoice,
+      // Guarantee-only renewal: no appointment exists to book, so the plan-
+      // customer booking commitment gate must not 400 the no-slot accept —
+      // the renewal's audience IS a plan customer.
+      noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
       scheduledServiceId: acceptLinkedSsId,
       // Scope already resolved above to the accepted appointment — don't let the
       // resolver re-derive an unrelated linked appointment when this is null.
@@ -12165,6 +12170,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       membership,
       oneTime: depositStructuralOneTime,
       oneTimeUninvoiced: depositStructuralOneTime && !effectiveInvoiceMode,
+      noVisit: guaranteeOnlyAccept,
     });
     // One-time card-on-file hold policy ("as if one-time") for the React
     // capture UI — the page only enforces it once serviceMode is one_time.

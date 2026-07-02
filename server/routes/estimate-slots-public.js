@@ -41,6 +41,7 @@ const {
   findLinkedUpcomingAppointment,
   handleEstimateAsk,
   isEstimateAcceptActive,
+  isRodentGuaranteeOnlyEstimate,
   isStructuralOneTimeOnlyEstimate,
   reconcileFrozenMembershipSnapshot,
   resolveAcceptOneTimeTotal,
@@ -439,8 +440,11 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       membership,
       oneTime,
       // Effective invoice mode (admin flag OR derived guarantee-only renewal)
-      // — mirrors accept, so a guarantee-only deposit never demands a booking.
+      // — mirrors accept, so a guarantee-only deposit never demands a booking
+      // (noVisit also lifts the plan-customer booking commitment gate: a
+      // renewal has no appointment to book).
       oneTimeUninvoiced: oneTime && !resolveEstimateInvoiceMode(estimate, estData),
+      noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
     });
     if (!policy.required) {
       return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: policy.exemptReason || null });

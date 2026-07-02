@@ -145,3 +145,39 @@ describe('buildEstimateAcceptanceContract invoice_only mode', () => {
     expect(contract.mode).toBe('standard_slot_pick');
   });
 });
+
+describe('resolveDepositPolicy noVisit — plan-customer booking gate lifted for renewals', () => {
+  // A guarantee renewal's primary audience IS an existing plan customer. Their
+  // normal deposit exemption swaps in a booking commitment gate
+  // (slotRequired) — but a no-visit accept has no appointment to book, so the
+  // gate would 400 APPOINTMENT_REQUIRED on a UI with no slot picker. The
+  // invoice minted at accept is the commitment instead.
+  const { resolveDepositPolicy } = require('../services/estimate-deposits');
+  const PLAN_CUSTOMER = { isExistingCustomer: true };
+
+  let prevFlag;
+  beforeAll(() => {
+    prevFlag = process.env.ESTIMATE_DEPOSIT_REQUIRED;
+    process.env.ESTIMATE_DEPOSIT_REQUIRED = 'true';
+  });
+  afterAll(() => {
+    if (prevFlag === undefined) delete process.env.ESTIMATE_DEPOSIT_REQUIRED;
+    else process.env.ESTIMATE_DEPOSIT_REQUIRED = prevFlag;
+  });
+
+  test('plan customer + noVisit → no deposit, NO booking requirement', () => {
+    expect(resolveDepositPolicy({ estimate: {}, membership: PLAN_CUSTOMER, oneTime: true, noVisit: true }))
+      .toEqual({ enforced: true, required: false, slotRequired: false, exemptReason: 'existing_plan_customer' });
+  });
+
+  test('plan customer without noVisit keeps the booking commitment gate (unchanged)', () => {
+    expect(resolveDepositPolicy({ estimate: {}, membership: PLAN_CUSTOMER, oneTime: true }))
+      .toEqual({ enforced: true, required: false, slotRequired: true, exemptReason: 'existing_plan_customer' });
+  });
+
+  test('non-plan customer: noVisit does not change the deposit itself', () => {
+    const policy = resolveDepositPolicy({ estimate: {}, membership: null, oneTime: true, noVisit: true });
+    expect(policy.required).toBe(true);
+    expect(policy.slotRequired).toBe(false);
+  });
+});
