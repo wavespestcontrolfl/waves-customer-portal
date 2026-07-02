@@ -54,6 +54,21 @@ function maskPhone(value) {
   return digits ? `***${digits.slice(-4)}` : 'unknown';
 }
 
+// Same normalization sendCustomerMessage applies to its recipient
+// (normalizeRecipient) — the caller can hand us Twilio's E.164 caller ID or
+// an AI-extracted 10-digit/formatted callback, and the one-shot claim key,
+// the sms_log history check, and the pipeline-written sms_log rows must all
+// agree on ONE shape or the same prospect can be claimed twice.
+function normalizePhoneE164(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return null;
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  if (trimmed.startsWith('+')) return trimmed;
+  return trimmed;
+}
+
 function capitalizeName(name) {
   const trimmed = String(name || '').trim();
   if (!trimmed) return '';
@@ -114,11 +129,28 @@ async function stampPhoneClaim(phone, outcome) {
   }
 }
 
-async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone } = {}) {
+// Reset the per-lead one-shot marker alongside a phone-claim release. The
+// call pipeline reuses the same open lead row for a repeat caller, so leaving
+// a 'blocked'/'failed' stamp here would make the retry lose the per-lead
+// claim ('already_claimed') right after re-taking the phone claim — wedging
+// the phone as consumed with no text ever sent. Release always clears BOTH.
+async function clearLeadClaim(leadId) {
+  try {
+    await db('leads').where({ id: leadId }).update({
+      extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'quote_link_sms_status'"),
+      updated_at: new Date(),
+    });
+  } catch (e) {
+    logger.warn(`[voicemail-sms] lead claim clear failed for lead ${leadId}: ${e.message}`);
+  }
+}
+
+async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone: rawPhone } = {}) {
   if (!isEnabled('voicemailLeadSms')) {
     logger.info(`[voicemail-sms] Gate off — text-back skipped for lead ${leadId || 'unknown'}`);
     return { sent: false, skipped: 'gate_off' };
   }
+  const phone = normalizePhoneE164(rawPhone);
   if (!leadId || !phone) return { sent: false, skipped: 'missing_input' };
 
   // Belt-and-suspenders history check: pre-claim-table sends (or hand-sent
@@ -160,8 +192,10 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
   try {
     return await sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone });
   } catch (err) {
-    // An unexpected throw never consumed the one-shot — release so a later
-    // voicemail can retry — and rethrows into the caller's non-blocking catch.
+    // An unexpected throw never consumed the one-shot — release BOTH claims
+    // so a later voicemail can retry — then rethrow into the caller's
+    // non-blocking catch. (Clearing an un-taken lead claim is a no-op.)
+    await clearLeadClaim(leadId);
     await releasePhoneClaim(phone);
     throw err;
   }
@@ -214,8 +248,10 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
   // Prefill link. No secret configured → no token → no link worth sending.
   const token = mintLeadPrefillToken(leadId);
   if (!token) {
-    await stampStatus(leadId, 'failed');
-    await releasePhoneClaim(phone); // config failure — never consumed the one-shot
+    // Config failure — never consumed the one-shot: release BOTH claims so a
+    // later voicemail (usually reusing this same lead row) can retry.
+    await clearLeadClaim(leadId);
+    await releasePhoneClaim(phone);
     logger.warn('[voicemail-sms] No prefill token secret configured — skipping (fail closed)');
     return { sent: false, skipped: 'no_token_secret' };
   }
@@ -243,9 +279,9 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
   });
   if (!body) {
     // Template missing or admin-disabled — respect the kill switch. Release
-    // the phone claim: re-enabling the template should let a LATER voicemail
-    // from this prospect get its text.
-    await stampStatus(leadId, 'blocked');
+    // BOTH claims: re-enabling the template should let a LATER voicemail from
+    // this prospect (usually reusing this same lead row) get its text.
+    await clearLeadClaim(leadId);
     await releasePhoneClaim(phone);
     logger.info(`[voicemail-sms] Template ${MESSAGE_TYPE} missing/disabled — text-back skipped for lead ${leadId}`);
     return { sent: false, skipped: 'template_disabled' };
@@ -313,8 +349,9 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
       return { sent: false, scheduled: true, nextAllowedAt: result.nextAllowedAt };
     } catch (queueErr) {
       logger.error(`[voicemail-sms] Re-queue failed for lead ${leadId}: ${queueErr.message}`);
-      await stampStatus(leadId, 'failed');
-      await releasePhoneClaim(phone); // transient failure — one-shot not consumed
+      // Transient failure — one-shot not consumed; release BOTH claims.
+      await clearLeadClaim(leadId);
+      await releasePhoneClaim(phone);
       return { sent: false, skipped: 'requeue_failed' };
     }
   }

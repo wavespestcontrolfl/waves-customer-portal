@@ -279,6 +279,10 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             city: normalizedAddress.city || zipToCity(normalizedAddress.zip) || null,
             zip: normalizedAddress.zip || null,
             ...(serviceInterest ? { service_interest: serviceInterest } : {}),
+            // A lead the office parked as 'unresponsive' just responded — the
+            // admin UI buckets that status as closed, so reopen it or the
+            // re-engaged prospect stays hidden. Other statuses are untouched.
+            status: db.raw("CASE WHEN status = 'unresponsive' THEN 'new' ELSE status END"),
             extracted_data: db.raw(
               "COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb",
               [JSON.stringify(startedStage)]

@@ -122,6 +122,13 @@ function phoneClaimReleased() {
   return state.deletes.some((d) => d.table === 'voicemail_sms_claims');
 }
 
+// A release path must also reset the per-lead one-shot marker (jsonb key
+// removal) or the reused lead row wedges the retry as already_claimed.
+function leadClaimCleared() {
+  return state.updates.some((u) => u.table === 'leads'
+    && String(u.payload.extracted_data?.__raw || '').includes("- 'quote_link_sms_status'"));
+}
+
 function phoneClaimOutcomes() {
   return state.updates
     .filter((u) => u.table === 'voicemail_sms_claims')
@@ -216,20 +223,22 @@ describe('voicemail lead text-back gates', () => {
     mintLeadPrefillToken.mockReturnValue(null);
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'no_token_secret' });
-    expect(stampsFor()).toContain('failed');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    // Config failure never consumed the one-shot — a later voicemail can retry.
+    // Config failure never consumed the one-shot — BOTH claims release so a
+    // later voicemail (usually reusing this lead row) can retry.
     expect(phoneClaimReleased()).toBe(true);
+    expect(leadClaimCleared()).toBe(true);
   });
 
   test('template missing or admin-disabled — kill switch respected', async () => {
     renderSmsTemplate.mockResolvedValue(undefined);
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'template_disabled' });
-    expect(stampsFor()).toContain('blocked');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    // Re-enabling the template should let a LATER voicemail get its text.
+    // Re-enabling the template should let a LATER voicemail get its text —
+    // both the phone claim and the per-lead marker must reset together.
     expect(phoneClaimReleased()).toBe(true);
+    expect(leadClaimCleared()).toBe(true);
   });
 });
 
@@ -261,6 +270,14 @@ describe('voicemail lead text-back send outcomes', () => {
     // PII discipline: the activity masks the phone.
     expect(activity.payload.description).not.toContain(PHONE);
     expect(activity.payload.description).toContain('***0101');
+  });
+
+  test('a 10-digit extracted callback normalizes to E.164 before claiming and sending', async () => {
+    const result = await sendVoicemailQuoteLink(args({ phone: '(941) 555-0101' }));
+    expect(result).toEqual({ sent: true });
+    const claim = state.inserts.find((i) => i.table === 'voicemail_sms_claims');
+    expect(claim.payload.phone).toBe(PHONE); // +19415550101 — same key as Twilio caller-ID form
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: PHONE }));
   });
 
   test('missing name/service falls back to "there" + "pest control"', async () => {
@@ -304,9 +321,9 @@ describe('voicemail lead text-back send outcomes', () => {
     state.insertError.sms_log = new Error('insert failed');
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'requeue_failed' });
-    expect(stampsFor()).toContain('failed');
-    // Transient failure — the one-shot was not consumed.
+    // Transient failure — the one-shot was not consumed; both claims reset.
     expect(phoneClaimReleased()).toBe(true);
+    expect(leadClaimCleared()).toBe(true);
   });
 
   test('terminal block (STOP suppression etc.) keeps the claim — a blocked prospect is never retried', async () => {

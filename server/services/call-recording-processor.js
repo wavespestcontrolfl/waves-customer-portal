@@ -1940,14 +1940,37 @@ const CallRecordingProcessor = {
     // transcription can never mint a partial-data customer. Existing-customer
     // voicemails keep today's behavior: terminal 'voicemail' status, no lead —
     // a normal missed call the office sees in the comms inbox.
+    // The content veto for voicemails keys on the content TYPE only. A stale
+    // model output can keep the legacy `call_type='voicemail', is_lead=false`
+    // shape even when it extracted a concrete requested service, and that
+    // boolean must not out-vote deterministic service intent on exactly the
+    // channel this path exists to recover (isNonLeadCallContent would veto on
+    // it). Real non-lead content — billing, complaint, existing-customer
+    // scheduling/service, wrong number — still vetoes.
+    const voicemailContentVeto = NON_LEAD_CALL_TYPES.has(
+      String(extracted?.call_type || '').trim().toLowerCase()
+    );
     let voicemailLeadPath = false;
-    if (voicemailChannel && !extracted.is_spam && !isOutboundCall(call) && !isNonLeadCallContent(extracted)) {
+    if (voicemailChannel && !extracted.is_spam && !isOutboundCall(call) && !voicemailContentVeto) {
       const vmPhone = resolveCallContactPhone(call, extracted.phone);
       if (vmPhone && hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) {
         const vmCustomer = call.customer_id
           ? { id: call.customer_id }
           : await findCustomerForCallContact(vmPhone, extracted).catch(() => null);
         voicemailLeadPath = !vmCustomer;
+      }
+    }
+    if (voicemailLeadPath && extracted.is_lead === false) {
+      // Reconcile the stale legacy shape so every downstream consumer (the
+      // Step 4b nonLeadCall gate, the ai_triage stamp, route decisions) sees
+      // what the deterministic signals decided: channel voicemail + callback
+      // number + concrete service intent IS a lead. Without this, the same
+      // stale boolean that the gate above ignores would re-veto lead creation
+      // via isNonLeadCallContent at shouldCreateLead.
+      extracted.is_lead = true;
+      const staleType = String(extracted.call_type || '').trim().toLowerCase();
+      if (!staleType || staleType === 'voicemail' || staleType === 'other') {
+        extracted.call_type = 'new_inquiry';
       }
     }
 

@@ -757,7 +757,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .where({ id: leadId })
         .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
         .update(updateFields)
-        .returning(['id', 'lead_source_id']);
+        .returning(['id', 'lead_source_id', 'lead_type']);
       lead = rows[0];
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
         await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
@@ -895,7 +895,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // never advance — correct, since it never converted).
     try {
       const channelAttr = attributionForSourceType(sourceMeta.sourceType);
-      if (channelAttr) {
+      // A lead ATTACHED via the voicemail text-back prefill token is a
+      // call-pipeline lead: its funnel row belongs to the CALL source (the
+      // tracking number the prospect dialed), which the call-attribution path
+      // stamps keyed on this same lead_id. Writing a web-channel row here
+      // first would win the unique lead_id slot and permanently misattribute
+      // a paid/GBP voicemail to the website.
+      const attachedCallLead = ['voicemail', 'inbound_call'].includes(lead?.lead_type);
+      if (channelAttr && !attachedCallLead) {
         await db('ad_service_attribution').insert({
           customer_id: customerId,
           lead_id: lead.id,

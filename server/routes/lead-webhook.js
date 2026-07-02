@@ -704,6 +704,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
               city: resolvedCity,
               service_interest: serviceInterest || null,
               customer_id: customer.id,
+              // Reopen a lead the office parked as 'unresponsive' — they just
+              // responded, and that status buckets as closed in the admin UI.
+              status: db.raw("CASE WHEN status = 'unresponsive' THEN 'new' ELSE status END"),
               extracted_data: db.raw(
                 "COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb",
                 [JSON.stringify(webhookStage)]
@@ -873,35 +876,42 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // call that used to live here caused every lead to ring the bell twice.
     // Removed intentionally; do NOT re-add without deduping upstream.
 
-    // Ad service attribution — track the full funnel from lead onward
+    // Ad service attribution — track the full funnel from lead onward.
+    // Skipped for a lead ATTACHED via the voicemail text-back prefill token:
+    // that funnel row belongs to the CALL source (the tracking number the
+    // prospect dialed), stamped by the call-attribution path on the same
+    // lead_id — a web-channel row here would win the unique slot first and
+    // permanently misattribute a paid/GBP voicemail to the website.
     try {
-      await db('ad_service_attribution').insert({
-        customer_id: customer.id,
-        // Stamp the lead so the call-attribution path dedupes against this row
-        // (a customer who fills the web form and later calls the paid number is
-        // one lead, not two) — see services/ads/call-attribution.js.
-        lead_id: leadRecord?.id || null,
-        service_line: inferServiceLine(serviceInterest),
-        specific_service: inferSpecificService(serviceInterest),
-        service_bucket: inferServiceBucket(serviceInterest),
-        lead_date: etDateString(),
-        lead_source: leadSource.source,
-        lead_source_detail: leadSource.detail,
-        gclid: gclid || null,
-        wbraid: wbraid || null,
-        gbraid: gbraid || null,
-        fbclid: fbclid || null,
-        fbc: fbc || null,
-        fbp: fbp || null,
-        utm_campaign: utmCampaign,
-        utm_term: utmTerm,
-        funnel_stage: 'lead',
-        // determineLeadSource marks every paid classification (google cpc,
-        // gclid/wbraid/gbraid, fbclid/_fbc, facebook cpc) channel='paid'.
-        // Without this stamp even gclid rows sit at is_paid NULL and the paid
-        // funnel views undercount.
-        is_paid: leadSource.channel === 'paid',
-      }).onConflict('lead_id').ignore();
+      if (!attachedViaPrefill) {
+        await db('ad_service_attribution').insert({
+          customer_id: customer.id,
+          // Stamp the lead so the call-attribution path dedupes against this row
+          // (a customer who fills the web form and later calls the paid number is
+          // one lead, not two) — see services/ads/call-attribution.js.
+          lead_id: leadRecord?.id || null,
+          service_line: inferServiceLine(serviceInterest),
+          specific_service: inferSpecificService(serviceInterest),
+          service_bucket: inferServiceBucket(serviceInterest),
+          lead_date: etDateString(),
+          lead_source: leadSource.source,
+          lead_source_detail: leadSource.detail,
+          gclid: gclid || null,
+          wbraid: wbraid || null,
+          gbraid: gbraid || null,
+          fbclid: fbclid || null,
+          fbc: fbc || null,
+          fbp: fbp || null,
+          utm_campaign: utmCampaign,
+          utm_term: utmTerm,
+          funnel_stage: 'lead',
+          // determineLeadSource marks every paid classification (google cpc,
+          // gclid/wbraid/gbraid, fbclid/_fbc, facebook cpc) channel='paid'.
+          // Without this stamp even gclid rows sit at is_paid NULL and the paid
+          // funnel views undercount.
+          is_paid: leadSource.channel === 'paid',
+        }).onConflict('lead_id').ignore();
+      }
     } catch (attrErr) {
       logger.error(`Ad attribution insert failed: ${attrErr.message}`);
     }
