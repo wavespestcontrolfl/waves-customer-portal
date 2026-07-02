@@ -260,7 +260,9 @@ router.get('/', dashboardCache, async (req, res, next) => {
       db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
         .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [som]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [today])
         .count('* as count').first(),
-      db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
+      // archived_at: the conversion-guard sweep archives converted customers'
+      // estimates WITHOUT changing status, so status alone over-counts.
+      db('estimates').whereIn('status', ['sent', 'viewed']).whereNull('archived_at').where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
       db('scheduled_services').where('scheduled_date', '>=', monW).where('scheduled_date', '<=', sunW).select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed")
@@ -506,7 +508,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     try {
       const leadAgg = await excludeInternalLeads(
         applyETTimestampWindow(
-          db('leads').whereNotIn('status', NON_ENGAGED_LEAD_STATUSES),
+          db('leads').whereNull('deleted_at').whereNotIn('status', NON_ENGAGED_LEAD_STATUSES),
           'first_contact_at',
           start,
           todayStr,
@@ -1567,7 +1569,8 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
     const rows = await excludeInternalLeads(
       applyETTimestampWindow(
         db('leads as l')
-          .leftJoin('lead_sources as s', 'l.lead_source_id', 's.id'),
+          .leftJoin('lead_sources as s', 'l.lead_source_id', 's.id')
+          .whereNull('l.deleted_at'),
         'l.first_contact_at',
         win.from,
         win.to,
@@ -1682,7 +1685,7 @@ router.get('/channel-mix', dashboardCache, async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     const rows = await excludeInternalLeads(
-      applyETTimestampWindow(db('leads'), 'first_contact_at', win.from, win.to)
+      applyETTimestampWindow(db('leads').whereNull('deleted_at'), 'first_contact_at', win.from, win.to)
     ).select(
         db.raw("COALESCE(first_contact_channel, 'unknown') as channel"),
         db.raw('COUNT(*) as leads'),

@@ -47,9 +47,11 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
     return { type: 'existing_customer', customerId: existingCustomer.id, leadSourceId: leadSource?.id };
   }
 
-  // Check if we already have a lead with this phone
+  // Check if we already have a lead with this phone. Soft-deleted leads are
+  // excluded — a new touch from that number should make a FRESH lead, not
+  // silently update a row an operator removed from the pipeline.
   const existingLead = normalizedFrom
-    ? await db('leads').where('phone', normalizedFrom).orderBy('created_at', 'desc').first()
+    ? await db('leads').where('phone', normalizedFrom).whereNull('deleted_at').orderBy('created_at', 'desc').first()
     : null;
 
   if (existingLead) {
@@ -126,7 +128,13 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   if (initialServiceValue !== undefined) updates.initial_service_value = initialServiceValue || null;
   if (waveguardTier !== undefined) updates.waveguard_tier = waveguardTier || null;
 
-  await db('leads').where('id', leadId).update(updates);
+  // Soft-deleted leads are out of every live mutation path: 0 rows updated
+  // means the lead is missing or deleted, and nothing below should run.
+  const updatedRows = await db('leads').where('id', leadId).whereNull('deleted_at').update(updates);
+  if (!updatedRows) {
+    logger.info(`[LeadAttribution] markConverted skipped — lead ${leadId} missing or deleted`);
+    return;
+  }
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now
@@ -158,13 +166,17 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 // 3. markLost
 // ---------------------------------------------------------------------------
 async function markLost(leadId, { reason, competitor, notes }) {
-  await db('leads').where('id', leadId).update({
+  const updatedRows = await db('leads').where('id', leadId).whereNull('deleted_at').update({
     status: 'lost',
     lost_reason: reason || null,
     lost_to_competitor: competitor || null,
     lost_notes: notes || null,
     updated_at: new Date(),
   });
+  if (!updatedRows) {
+    logger.info(`[LeadAttribution] markLost skipped — lead ${leadId} missing or deleted`);
+    return;
+  }
 
   await db('lead_activities').insert({
     lead_id: leadId,
@@ -181,8 +193,8 @@ async function markLost(leadId, { reason, competitor, notes }) {
 // 4. logFirstResponse
 // ---------------------------------------------------------------------------
 async function logFirstResponse(leadId) {
-  const lead = await db('leads').where('id', leadId).first();
-  if (!lead || lead.response_time_minutes != null) return; // already logged
+  const lead = await db('leads').where('id', leadId).whereNull('deleted_at').first();
+  if (!lead || lead.response_time_minutes != null) return; // deleted or already logged
 
   const firstContact = new Date(lead.first_contact_at);
   const now = new Date();
@@ -258,6 +270,7 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
   // ROI over the same population as its lead counts.
   const leads = await db('leads')
     .where('lead_source_id', leadSourceId)
+    .whereNull('deleted_at')
     .where('first_contact_at', '>=', start)
     .where('first_contact_at', '<=', end)
     .modify((qb) => applyNameExclusion(qb, excludeCustomerNames));
@@ -457,6 +470,7 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
   if (allSources.length) {
     const wonLeads = await db('leads')
       .whereIn('lead_source_id', allSources.map((s) => s.id))
+      .whereNull('deleted_at')
       .where('status', 'won')
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)

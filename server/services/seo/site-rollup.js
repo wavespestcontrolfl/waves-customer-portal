@@ -163,6 +163,7 @@ class SiteRollup {
 
     const leadRows = await db('leads as l')
       .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
+      .whereNull('l.deleted_at')
       .where('l.first_contact_at', '>=', since)
       .groupBy('ls.id', 'ls.name', 'ls.domain')
       .select('ls.id as source_id', 'ls.name as source_name', 'ls.domain as source_domain')

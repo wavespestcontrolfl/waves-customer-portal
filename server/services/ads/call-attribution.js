@@ -213,6 +213,59 @@ async function recordCallPpcAttribution({
   }
 }
 
+/**
+ * Backfill the CALL-source funnel row for a call-pipeline lead at the moment
+ * it gains a customer — the voicemail text-back attach paths (/calculate and
+ * the lead-webhook). The call processor's own attribution is gated on
+ * leadId && customerId, so a customer-less voicemail recovery lead has no
+ * ad_service_attribution row at call time; the attach paths suppress their
+ * web-channel row so the CALL source keeps the unique lead_id slot — without
+ * this backfill an attached paid/GBP voicemail lead would end up with NO
+ * funnel row at all. Resolves the channel from the lead's preserved
+ * lead_source_id (the tracking number dialed), honors the shared
+ * bridge-target suppression, and delegates to recordCallPpcAttribution
+ * (lead_id dedupe + first-touch, so a pre-existing web row is never
+ * overwritten and re-runs are idempotent).
+ */
+async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest = null } = {}) {
+  if (!leadId || !customerId) return { recorded: false, reason: 'missing_ids' };
+  try {
+    const lead = await db('leads')
+      .where({ id: leadId })
+      .first('lead_source_id', 'service_interest', 'created_at');
+    if (!lead?.lead_source_id) return { recorded: false, reason: 'no_lead_source' };
+    const sourceRow = await db('lead_sources').where({ id: lead.lead_source_id }).first();
+    if (!sourceRow) return { recorded: false, reason: 'source_not_found' };
+    const attr = attributionForSourceType(sourceRow.source_type);
+    if (!attr) return { recorded: false, reason: 'no_channel' };
+    // Same exception as the call pipeline: the Google Ads call-bridge target
+    // number is SHARED (organic hub + paid call-extension), resolved by the
+    // bridge after the fact — never pre-attribute it or the row would lock
+    // before the bridge can mark the call paid. The unclaimed-bridge sweep
+    // below picks these up as organic after the claim window. Lazy require:
+    // google-call-bridge lazily requires this module (require cycle).
+    const { isBridgeTargetNumber } = require('./google-call-bridge');
+    if (isBridgeTargetNumber(sourceRow.twilio_phone_number)) {
+      return { recorded: false, reason: 'bridge_target' };
+    }
+    return await recordCallPpcAttribution({
+      customerId,
+      leadId,
+      leadSource: attr.leadSource,
+      isPaid: attr.isPaid,
+      leadSourceDetail: sourceRow.name || 'inbound call',
+      serviceInterest: serviceInterest || lead.service_interest || null,
+      // Date by the actual call — the call pipeline mints the lead row at
+      // call time, so created_at is the call date (not the day the prospect
+      // finally clicked the text-back link).
+      leadDate: lead.created_at || null,
+    });
+  } catch (err) {
+    logger.warn(`[call-attribution] attached-lead backfill failed for lead ${leadId}: ${err.message}`);
+    return { recorded: false, reason: 'error' };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Unclaimed bridge-target leads → organic, after a claim window.
 //
@@ -316,6 +369,7 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
 module.exports = {
   recordCallPpcAttribution,
   attributionForSourceType,
+  backfillCallLeadAttribution,
   attributeUnclaimedBridgeLeads,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION },
 };

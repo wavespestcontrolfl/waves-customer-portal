@@ -1,4 +1,4 @@
-const { buildExtractionPrompt, PROMPT_VERSION, PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
+const { buildExtractionPrompt, extractionPromptVersion, PROMPT_VERSION, PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
 const { SCHEMA_VERSION } = require('../schemas/validate-extraction');
 
 describe('v2 extraction prompt', () => {
@@ -66,6 +66,22 @@ describe('v2 extraction prompt', () => {
   test('prompt version and hash are stable', () => {
     expect(PROMPT_VERSION).toBe('v1');
     expect(PROMPT_HASH).toMatch(/^v1-[a-f0-9]{12}$/);
+  });
+
+  test('extractionPromptVersion appends an order-sensitive catalog hash', () => {
+    // No catalog → bare PROMPT_HASH, so pre-catalog rows keep their version.
+    expect(extractionPromptVersion()).toBe(PROMPT_HASH);
+    expect(extractionPromptVersion([])).toBe(PROMPT_HASH);
+    expect(extractionPromptVersion([null, undefined, ''])).toBe(PROMPT_HASH);
+
+    const a = extractionPromptVersion(['Cockroach Control Service', 'Rodent Control']);
+    expect(a).toMatch(new RegExp(`^${PROMPT_HASH}-cat\\.[a-f0-9]{8}$`));
+    // Deterministic for the same rendered catalog…
+    expect(extractionPromptVersion(['Cockroach Control Service', 'Rodent Control'])).toBe(a);
+    // …but a reorder renders a different prompt and must version separately,
+    expect(extractionPromptVersion(['Rodent Control', 'Cockroach Control Service'])).not.toBe(a);
+    // …as must an edited catalog.
+    expect(extractionPromptVersion(['Cockroach Control Service'])).not.toBe(a);
   });
 });
 

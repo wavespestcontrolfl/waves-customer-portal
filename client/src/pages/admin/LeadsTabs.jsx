@@ -74,6 +74,15 @@ const CLOSED_STATUSES = [
   "disqualified",
   "duplicate",
 ];
+// Mirrors the server's expansion of the virtual `open` filter (admin-leads
+// OPEN_LEAD_STATUSES) — needed to know whether a given lead would survive
+// the table's current status filter.
+const OPEN_FILTER_STATUSES = ["new", "contacted", "estimate_sent", "estimate_viewed"];
+const leadMatchesStatusFilter = (lead, status) =>
+  !status ||
+  (status === "open"
+    ? OPEN_FILTER_STATUSES.includes(lead.status)
+    : lead.status === status);
 const BOARD_STAGES = [
   "new",
   "contacted",
@@ -602,6 +611,10 @@ function readSourceDrillParams() {
     start_date: sp.get("from") || "",
     end_date: sp.get("to") || "",
     period_label: sp.get("period_label") || "",
+    // An explicitly passed status wins over the table's "open" default; a
+    // drill without one shows ALL statuses so the rows match the panel count
+    // the operator clicked (dashboard panels count won/lost leads too).
+    status: sp.get("status") || "",
   };
 }
 
@@ -631,6 +644,8 @@ export function LeadsSection() {
   const [lostReasons, setLostReasons] = useState([]);
   const [expandedLead, setExpandedLead] = useState(null);
   const expandedLeadRef = useRef(null);
+  // Monotonic id of the newest loadLeads request — stale responses bail.
+  const leadsRequestRef = useRef(0);
   const [leadActivities, setLeadActivities] = useState([]);
   const [leadActivitiesLoading, setLeadActivitiesLoading] = useState(false);
   const [leadActivitiesError, setLeadActivitiesError] = useState(null);
@@ -641,8 +656,16 @@ export function LeadsSection() {
     // single source name, scoped to the period window the panel was showing.
     // Initialized from the URL so the first load is already scoped.
     const drill = readSourceDrillParams();
+    // A ?lead= deep link must start UNFILTERED: the target's status is
+    // unknown before the list loads, and loadLeads has no stale-response
+    // guard — an initial open-filtered fetch could resolve after the
+    // widened one and hide a closed lead's expanded row.
+    const leadDeepLink = new URLSearchParams(window.location.search).get("lead");
     return {
-      status: "",
+      // The pipeline table defaults to OPEN statuses (new / contacted /
+      // estimate sent / estimate viewed) — the server expands `status=open`.
+      // A dashboard drill overrides the default (see readSourceDrillParams).
+      status: leadDeepLink ? "" : drill ? drill.status : "open",
       search: "",
       sort: "first_contact_at",
       page: 1,
@@ -668,10 +691,20 @@ export function LeadsSection() {
   }, []);
 
   const loadLeads = useCallback(async ({ silent = false } = {}) => {
+    // The requested scope depends on the view + filters, so a slow response
+    // from a superseded request (quick Table↔Board toggle, filter change)
+    // must never overwrite the current view's rows — only the newest
+    // request commits.
+    const requestId = ++leadsRequestRef.current;
     try {
       if (!silent) setLoadError(null);
       const params = new URLSearchParams();
-      if (filters.status) params.set("status", filters.status);
+      // The board view needs EVERY status (its Won / Lost columns would be
+      // emptied by the table's default "open" filter), so it always fetches
+      // unfiltered; the table's status selection is preserved for switching
+      // back. Filtering stays server-side — the list is paginated.
+      const status = pipelineView === "board" ? "" : filters.status;
+      if (status) params.set("status", status);
       if (filters.search) params.set("search", filters.search);
       if (filters.source_name) params.set("source_name", filters.source_name);
       if (filters.start_date) params.set("start_date", filters.start_date);
@@ -680,13 +713,15 @@ export function LeadsSection() {
       params.set("page", filters.page);
       params.set("limit", "50");
       const data = await adminFetch(`/admin/leads?${params}`);
+      if (requestId !== leadsRequestRef.current) return; // superseded
       setLeads(data.leads || []);
       setLeadsTotal(data.total || 0);
     } catch (e) {
+      if (requestId !== leadsRequestRef.current) return; // superseded
       console.error("loadLeads", e);
       if (!silent) setLoadError(e);
     }
-  }, [filters]);
+  }, [filters, pipelineView]);
 
   const loadSources = useCallback(async ({ silent = false } = {}) => {
     try {
@@ -854,6 +889,9 @@ export function LeadsSection() {
     if (!leadId) return;
     setTab("pipeline");
     setPipelineView("table");
+    // The status filter already initialized to "" for lead deep-links (see
+    // the filters useState) so even the FIRST fetch is unfiltered and a
+    // closed lead's row can render its expanded detail.
     setActiveLead(leadId);
     loadLeadActivities(leadId);
   }, [setActiveLead, loadLeadActivities]);
@@ -875,7 +913,9 @@ export function LeadsSection() {
     if (!sp.get("source_name")) return;
     setTab("pipeline");
     setPipelineView("table");
-    ["source_name", "from", "to", "period_label"].forEach((k) => sp.delete(k));
+    ["source_name", "from", "to", "period_label", "status"].forEach((k) =>
+      sp.delete(k),
+    );
     setSearchParams(sp, { replace: true });
   }, [setSearchParams]);
 
@@ -908,7 +948,7 @@ export function LeadsSection() {
       "this lead";
     if (
       !window.confirm(
-        `Delete ${label} from the lead pipeline?\n\nThis removes the lead and its activity timeline. Existing estimates stay in Estimates.`,
+        `Delete ${label} from the lead pipeline?\n\nThis removes the lead from the pipeline (an admin can recover it). The activity timeline is kept, and existing estimates stay in Estimates.`,
       )
     ) {
       return;
@@ -1171,9 +1211,12 @@ export function LeadsSection() {
                 key={view}
                 type="button"
                 onClick={() => {
+                  // Keep filters.status intact — loadLeads ignores it while
+                  // the board is active (the board fetches all statuses), so
+                  // the table's selection survives a round-trip to the board.
                   setPipelineView(view);
                   if (view === "board")
-                    setFilters((f) => ({ ...f, status: "", page: 1 }));
+                    setFilters((f) => ({ ...f, page: 1 }));
                 }}
                 style={{
                   background: pipelineView === view ? C.heading : "transparent",
@@ -1208,6 +1251,7 @@ export function LeadsSection() {
               }}
             >
               {" "}
+              <option value="open">Open</option>
               <option value="">All Statuses</option>
               {STATUSES.map((s) => (
                 <option key={s} value={s}>
@@ -2606,7 +2650,14 @@ export function LeadsSection() {
                         }}
                         onDragEnd={() => setDraggingLeadId(null)}
                         onClick={() => {
+                          // The expanded detail row only renders in the table,
+                          // and the table's status filter (default `open`)
+                          // would hide a closed lead's row entirely — widen
+                          // the filter when this card wouldn't pass it.
                           setPipelineView("table");
+                          if (!leadMatchesStatusFilter(lead, filters.status)) {
+                            setFilters((f) => ({ ...f, status: "", page: 1 }));
+                          }
                           expandLead(lead);
                         }}
                         style={{

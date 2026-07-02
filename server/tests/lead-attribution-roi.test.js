@@ -11,6 +11,7 @@ jest.mock('../models/db', () => {
     const rows = mockDbConfig[table];
     const builder = {
       where(...args) { mockWhereCalls.push([table, ...args]); return builder; },
+      whereNull(...args) { mockWhereCalls.push([table, 'whereNull', ...args]); return builder; },
       whereIn(...args) { mockWhereCalls.push([table, 'whereIn', args[0]]); return builder; },
       whereNotIn(...args) { mockWhereCalls.push([table, 'whereNotIn', ...args]); return builder; },
       modify(fn) { fn(builder); return builder; },

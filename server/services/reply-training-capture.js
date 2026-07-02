@@ -197,7 +197,7 @@ async function buildContextSnapshot({ conversation, inbound, outbound, customerI
       ? db('estimates').where({ customer_id: customerId }).orderBy('created_at', 'desc').limit(RECENT_ESTIMATE_LIMIT).catch(() => [])
       : [],
     customerId
-      ? db('leads').where({ customer_id: customerId }).orderBy('created_at', 'desc').limit(RECENT_LEAD_LIMIT).catch(() => [])
+      ? db('leads').where({ customer_id: customerId }).whereNull('deleted_at').orderBy('created_at', 'desc').limit(RECENT_LEAD_LIMIT).catch(() => [])
       : [],
   ]);
 

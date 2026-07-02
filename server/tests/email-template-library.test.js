@@ -969,6 +969,44 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test('suppressProviderErrorLog redacts the provider body before persisting and auditing', async () => {
+    const queuedMessage = { id: 'msg-1', status: 'queued', subject_snapshot: 'Your estimate expires June 12' };
+    const queueInsert = chain({ returning: [queuedMessage] });
+    const failUpdate = chain({ returning: [] });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [
+        queueInsert,
+        failUpdate,
+        chain({ first: { ...queuedMessage, status: 'failed' } }),
+      ],
+    });
+    // SendGrid 4xx bodies can echo the recipient address.
+    const providerError = new Error('SendGrid 403: does not match a verified Sender Identity: sam@example.com');
+    providerError.status = 403;
+    sendgrid.sendOne.mockRejectedValue(providerError);
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: {
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        expires_at: 'June 12',
+      },
+      suppressionGroupKey: 'service_operational',
+      suppressProviderErrorLog: true,
+    })).rejects.toThrow();
+
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ suppressErrorLog: true }));
+    const persisted = failUpdate.update.mock.calls[0][0];
+    expect(persisted.error_message).toContain('[redacted-email]');
+    expect(persisted.error_message).not.toContain('sam@example.com');
+  });
+
   test('sendTemplate retries a failed idempotent message instead of deduping it', async () => {
     const failedMessage = {
       id: 'msg-1',

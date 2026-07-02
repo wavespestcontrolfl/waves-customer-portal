@@ -435,15 +435,27 @@ async function resolveEstimateContext({ customer, phone, body }) {
       .where({ kind: 'estimate' })
       .first();
     if (short?.entity_id) {
-      const estimate = await db('estimates').where({ id: short.entity_id }).first();
+      // An old short link can point at a closed courtship (accepted /
+      // declined / expired, or archived-by-sweep with its status still
+      // sent/viewed). Only an OPEN un-archived estimate may anchor the
+      // conversion agent — otherwise fall through to the customer/phone
+      // lookups below.
+      const estimate = await db('estimates')
+        .where({ id: short.entity_id })
+        .whereIn('status', OPEN_ESTIMATE_STATUSES)
+        .whereNull('archived_at')
+        .first();
       if (estimate) return { estimate, shortCode };
     }
   }
 
   if (customer?.id) {
+    // whereNull(archived_at): archived rows keep sent/viewed status but the
+    // courtship already closed — never resolve one as "the open estimate".
     const estimate = await db('estimates')
       .where({ customer_id: customer.id })
       .whereIn('status', OPEN_ESTIMATE_STATUSES)
+      .whereNull('archived_at')
       .orderByRaw('COALESCE(last_viewed_at, viewed_at, sent_at, updated_at, created_at) DESC')
       .first();
     if (estimate) return { estimate, shortCode: null };
@@ -453,6 +465,7 @@ async function resolveEstimateContext({ customer, phone, body }) {
   if (last10) {
     const estimate = await db('estimates')
       .whereIn('status', OPEN_ESTIMATE_STATUSES)
+      .whereNull('archived_at')
       .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
       .orderByRaw('COALESCE(last_viewed_at, viewed_at, sent_at, updated_at, created_at) DESC')
       .first();
@@ -464,13 +477,14 @@ async function resolveEstimateContext({ customer, phone, body }) {
 
 async function resolveLeadContext({ customer, phone, estimate }) {
   if (estimate?.id) {
-    const lead = await db('leads').where({ estimate_id: estimate.id }).orderBy('created_at', 'desc').first();
+    const lead = await db('leads').where({ estimate_id: estimate.id }).whereNull('deleted_at').orderBy('created_at', 'desc').first();
     if (lead) return lead;
   }
 
   if (customer?.id) {
     const lead = await db('leads')
       .where({ customer_id: customer.id })
+      .whereNull('deleted_at')
       .whereIn('status', OPEN_LEAD_STATUSES)
       .orderBy('created_at', 'desc')
       .first();
@@ -480,6 +494,7 @@ async function resolveLeadContext({ customer, phone, estimate }) {
   const last10 = normalizePhoneLast10(phone);
   if (last10) {
     return db('leads')
+      .whereNull('deleted_at')
       .whereIn('status', OPEN_LEAD_STATUSES)
       .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
       .orderBy('created_at', 'desc')
