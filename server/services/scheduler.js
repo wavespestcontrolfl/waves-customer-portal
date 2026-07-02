@@ -2668,11 +2668,35 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 6AM ET — Estimate expiration (Estimates v2 spec §5)
-  // Flips sent/viewed estimates past ESTIMATE_EXPIRATION_DAYS (default 7) to
-  // expired; also flips anything past explicit expires_at.
+  // DAILY 6AM ET — Converted-estimate archive sweep, THEN estimate expiration
+  // (Estimates v2 spec §5). One job, hard-ordered: the sweep must stamp
+  // archived_at on converted customers' open estimates BEFORE expiration
+  // scans, or an overnight age-out flips them to expired first and the sweep
+  // (sent/viewed-only) can never reclaim them. If the sweep fails, expiration
+  // is skipped this run — a one-day expiration delay is harmless (7-day
+  // threshold), misclassifying a converted customer's estimate is permanent.
+  // See estimate-conversion-guard.js for why the sweep never auto-flips
+  // status to accepted.
   // =========================================================================
   cron.schedule('0 6 * * *', async () => {
+    logger.info('Running: converted-customer estimate archive sweep');
+    try {
+      const { archiveConvertedOpenEstimates } = require('./estimate-conversion-guard');
+      await archiveConvertedOpenEstimates();
+    } catch (err) {
+      logger.error(`Converted-estimate archive sweep failed — skipping estimate expiration status flips this run: ${err.message}`);
+      // Skipping expiration must NOT skip the terminal-deposit refund sweep
+      // that runs inside it — that sweep is the only daily self-healing path
+      // for stranded deposit refunds, and an archive-sweep bug must never
+      // block customer money. Run it directly instead.
+      try {
+        const { sweepTerminalEstimateDeposits } = require('./estimate-deposits');
+        await sweepTerminalEstimateDeposits();
+      } catch (e) {
+        logger.error(`Terminal-estimate deposit sweep failed: ${e.message}`);
+      }
+      return;
+    }
     logger.info('Running: Estimate expiration sweep');
     try {
       const { runEstimateExpiration } = require('./estimate-expiration');

@@ -100,9 +100,11 @@ async function buildWindowForecast(todayStr, days, mrr) {
     .first();
   const oneTimeScheduled = Math.round(parseFloat(scheduledResult.total || 0) * 100) / 100;
 
-  // Pipeline: estimates sent/viewed * 25% conversion rate
+  // Pipeline: estimates sent/viewed * 25% conversion rate. Archived rows
+  // keep their sent/viewed status but are closed courtships, not pipeline.
   const pipelineResult = await db('estimates')
     .whereIn('status', ['sent', 'viewed'])
+    .whereNull('archived_at')
     .where('created_at', '>=', new Date(Date.now() - 90 * 86400000).toISOString())
     .sum('monthly_total as total')
     .first();

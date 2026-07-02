@@ -33,6 +33,9 @@ async function findDuplicateEstimateByPhone(phone, options = {}) {
       [values.last10]
     )
     .whereIn('status', statuses)
+    // An archived row keeps its status but the courtship already closed —
+    // it must not block a genuinely new automated estimate.
+    .whereNull('archived_at')
     .orderBy('created_at', 'desc');
 
   if (options.excludeEstimateId) {
