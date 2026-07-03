@@ -110,7 +110,14 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const serviceCadenceLabel = isSeparateServiceCadence(frequency) ? frequency.label : null;
   const cadencePrice = quoteRequired || monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
   const anchorPrice = Number(frequency.perVisit || 0);
-  const savings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
+  // cadencePrice round-trips through the rounded monthly figure (e.g. a $94
+  // quarterly visit → $31.33/mo → $93.99/quarter), so a 0%-discount tier
+  // (WaveGuard Bronze) can land a phantom cent or two under the per-visit
+  // anchor. Anything below this threshold is rounding noise, not a member
+  // discount — show no anchor strike-through and no save line for it.
+  const SAVINGS_ROUNDING_NOISE = 0.05;
+  const rawSavings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
+  const savings = rawSavings >= SAVINGS_ROUNDING_NOISE ? rawSavings : 0;
   // True daily rate: annual cost / 365 (monthly * 12 / 365).
   const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;
   // A narrow low-confidence commercial line prices as a ±pct RANGE tied to the

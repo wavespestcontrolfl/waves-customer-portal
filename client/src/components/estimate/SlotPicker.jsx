@@ -52,15 +52,15 @@ function SlotCard({ slot, isSelected, onSelect }) {
         background: isSelected ? W.blueDeeper : W.white,
         color: isSelected ? W.white : W.blueDeeper,
         border: `2px solid ${isSelected ? W.blueDeeper : W.border}`,
-        borderRadius: 12, padding: '16px 18px',
+        borderRadius: 12, padding: '14px 16px',
         cursor: 'pointer', marginBottom: 10,
         display: 'flex', flexDirection: 'column', gap: 4,
         transition: 'border-color 160ms ease, background 160ms ease, color 160ms ease',
       }}
     >
-      <div style={{ fontSize: 16, fontWeight: 700, color: isSelected ? 'rgba(255,255,255,.82)' : W.textCaption }}>{day}</div>
-      <div style={{ fontSize: 30, fontWeight: 800, color: isSelected ? W.white : W.blueDeeper, lineHeight: 1.15 }}>{startTime}</div>
-      <div style={{ fontSize: 15, color: isSelected ? 'rgba(255,255,255,.86)' : W.textCaption }}>
+      <div style={{ fontSize: 14, fontWeight: 600, color: isSelected ? 'rgba(255,255,255,.82)' : W.textCaption }}>{day}</div>
+      <div style={{ fontSize: 20, fontWeight: 700, color: isSelected ? W.white : W.blueDeeper, lineHeight: 1.2 }}>{startTime}</div>
+      <div style={{ fontSize: 13, color: isSelected ? 'rgba(255,255,255,.86)' : W.textCaption }}>
         Arrival window: {window}
       </div>
       {slot.routeOptimal ? (
@@ -211,8 +211,12 @@ export default function SlotPicker({
     );
   };
 
+  // Waves AI search + 90-day date picker. Lives INSIDE the booking card,
+  // directly under the "Find a date & time" heading + explainer and above
+  // the slot list — same order as the server-rendered estimate's
+  // #date-finder block.
   const finder = (
-    <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16, display: 'grid', gap: 14 }}>
+    <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
       <WavesAIScheduleSearch
         theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.border, surface: W.white, inputBg: W.offWhite }}
         onSearch={runAiSearch}
@@ -269,28 +273,11 @@ export default function SlotPicker({
   const expander = data?.expander || [];
   const allSlots = [...primary, ...expander];
 
-  if (allSlots.length === 0) {
-    return (
-      <>
-        <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
-          <div style={{ fontSize: 14, color: W.textBody }}>
-            No open slots in the next 14 days — try searching a specific date below, or <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>call us</a> and we&apos;ll fit you in.
-          </div>
-        </div>
-        {finder}
-      </>
-    );
-  }
-
-  const initial = allSlots.slice(0, INITIAL_VISIBLE);
-  const more = allSlots.slice(INITIAL_VISIBLE, INITIAL_VISIBLE + 3);
-
-  return (
+  const heading = (
     <>
-    <div style={{ background: W.white, borderRadius: 14, padding: 32, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
       <div style={{
-        fontSize: 30,
-        fontWeight: 800,
+        fontSize: 22,
+        fontWeight: 600,
         color: W.blueDeeper,
         letterSpacing: 0,
         lineHeight: 1.2,
@@ -298,9 +285,31 @@ export default function SlotPicker({
       }}>
         Find a date & time that works for you
       </div>
-      <div style={{ fontSize: 16, color: W.textCaption, lineHeight: 1.55, marginBottom: 22 }}>
+      <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.55, marginBottom: 16 }}>
         These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.
       </div>
+    </>
+  );
+
+  if (allSlots.length === 0) {
+    return (
+      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+        {heading}
+        {finder}
+        <div style={{ fontSize: 14, color: W.textBody }}>
+          No open slots in the next 14 days — try searching a specific date above, or <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>call us</a> and we&apos;ll fit you in.
+        </div>
+      </div>
+    );
+  }
+
+  const initial = allSlots.slice(0, INITIAL_VISIBLE);
+  const more = allSlots.slice(INITIAL_VISIBLE, INITIAL_VISIBLE + 3);
+
+  return (
+    <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+      {heading}
+      {finder}
       {initial.map((slot) => (
         <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
       ))}
@@ -328,7 +337,5 @@ export default function SlotPicker({
         </>
       ) : null}
     </div>
-    {finder}
-    </>
   );
 }

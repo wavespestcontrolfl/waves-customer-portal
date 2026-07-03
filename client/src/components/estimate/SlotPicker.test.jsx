@@ -44,6 +44,32 @@ afterEach(() => {
 });
 
 describe('SlotPicker', () => {
+  it('renders the date finder inside the booking card, above the slot list', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2026-06-01')], expander: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <SlotPicker
+        token="estimate-token"
+        selectedSlotId={null}
+        onSelect={vi.fn()}
+        refreshSignal={0}
+        serviceMode="recurring"
+        selectedFrequency="quarterly"
+      />,
+    );
+
+    const firstSlot = await screen.findByText('Monday, June 1');
+    const heading = screen.getByText('Find a date & time that works for you');
+    const finderLabel = screen.getByText(/pick one that works for you/i);
+
+    // Order: heading → finder → slot windows (matches the SSR booking card).
+    expect(heading.compareDocumentPosition(finderLabel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(finderLabel.compareDocumentPosition(firstSlot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('ignores stale picked-date availability responses', async () => {
     const firstDateFetch = deferred();
     const secondDateFetch = deferred();
