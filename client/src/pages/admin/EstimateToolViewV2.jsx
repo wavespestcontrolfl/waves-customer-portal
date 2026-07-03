@@ -3977,10 +3977,17 @@ export default function EstimateToolViewV2({
       alert("Preview link unavailable. Save the estimate and try again.");
       return;
     }
+    // A just-saved estimate is a DRAFT: the bare URL renders the legacy SSR
+    // page, not what the customer gets. The param routes staff to the real
+    // React customer page (staff-JWT-gated /data, banner, inert booking).
+    // Harmless on an already-sent estimate — published rows ignore it.
+    const previewUrl = saved.viewUrl.includes("?")
+      ? `${saved.viewUrl}&adminPreview=1`
+      : `${saved.viewUrl}?adminPreview=1`;
     if (pendingPreviewWindow) {
-      pendingPreviewWindow.location.replace(saved.viewUrl);
+      pendingPreviewWindow.location.replace(previewUrl);
     } else {
-      window.open(saved.viewUrl, "_blank", "noopener,noreferrer");
+      window.open(previewUrl, "_blank", "noopener,noreferrer");
     }
   }
 
