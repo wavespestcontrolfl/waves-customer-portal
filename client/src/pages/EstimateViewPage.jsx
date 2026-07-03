@@ -72,6 +72,12 @@ const SECTION_KICKER_STYLE = {
 };
 
 const BOOKING_SECTION_ID = 'estimate-booking-section';
+const PRICE_SECTION_ID = 'estimate-price-section';
+
+function scrollToPriceSection() {
+  const el = typeof document !== 'undefined' ? document.getElementById(PRICE_SECTION_ID) : null;
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 
 function scrollToBookingSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(BOOKING_SECTION_ID) : null;
@@ -492,7 +498,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         </div>
         <h2 style={{
           fontFamily: FONTS.serif,
-          fontSize: 28,
+          fontSize: 24,
           fontWeight: 500,
           lineHeight: 1.18,
           color: ESTIMATE_TEXT,
@@ -734,7 +740,7 @@ function MembershipCard({ membership }) {
     <section style={{ ...estimateCard(), display: 'grid', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
-          <h2 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
+          <h2 style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
             {hello}
           </h2>
           <p style={{ margin: '6px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.55 }}>
@@ -863,7 +869,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
         </div>
         <h2 style={{
           fontFamily: FONTS.serif,
-          fontSize: 28,
+          fontSize: 24,
           fontWeight: 500,
           lineHeight: 1.18,
           color: ESTIMATE_TEXT,
@@ -2511,6 +2517,9 @@ export default function EstimateViewPage() {
       });
       if (!r.ok) throw new Error(`preferences failed: ${r.status}`);
       await loadEstimate({ preserveSelection: true });
+      // The toggles sit below the schedule card — jump back up so the
+      // customer sees the price adjust (owner directive).
+      scrollToPriceSection();
     } catch (err) {
       setError(err.message);
       setSelectedAddOns((prev) => {
@@ -3250,7 +3259,9 @@ export default function EstimateViewPage() {
             />
           ) : null}
 
-          {renderQuoteDetailCards()}
+          <div id={PRICE_SECTION_ID}>
+            {renderQuoteDetailCards()}
+          </div>
 
           {/* Waves AI panel + Ask bar render AFTER the price/plan (matches the
               server-rendered estimate's order: price → Waves AI → booking) so

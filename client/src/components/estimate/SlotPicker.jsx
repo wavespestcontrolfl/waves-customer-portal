@@ -308,8 +308,9 @@ export default function SlotPicker({
         Schedule your visit
       </div>
       <div style={{
-        fontSize: 22,
-        fontWeight: 600,
+        fontFamily: "'Source Serif 4', Georgia, serif",
+        fontSize: 24,
+        fontWeight: 500,
         color: W.blueDeeper,
         letterSpacing: 0,
         lineHeight: 1.2,

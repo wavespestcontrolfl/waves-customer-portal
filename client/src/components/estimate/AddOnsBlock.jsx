@@ -29,7 +29,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
       </div>
       <div style={{
         fontFamily: "'Source Serif 4', Georgia, serif",
-        fontSize: 28,
+        fontSize: 24,
         fontWeight: 500,
         color: W.blueDeeper,
         lineHeight: 1.2,
@@ -37,7 +37,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
       }}>
         Skip parts you don't need
       </div>
-      <div style={{ fontSize: 16, color: '#6B7280', lineHeight: 1.5, marginBottom: 18 }}>
+      <div style={{ fontSize: 14, color: '#6B7280', lineHeight: 1.5, marginBottom: 18 }}>
         {disabled
           ? "The add-ons included in the visit you booked."
           : "These are on by default. Toggle off whatever you don't want and the price adjusts instantly."}

@@ -321,6 +321,9 @@ window.fetch = async (input, init) => {
   if (url.includes('/find-slots')) {
     return respond({ summary: 'Here’s what’s open around then:', nearby: true, primary: SLOTS.primary.slice(0, 3), expander: [] });
   }
+  if (url.includes('/preferences')) {
+    return respond({ saved: true });
+  }
   if (url.includes('/reviews/featured')) {
     return respond(REVIEWS);
   }
