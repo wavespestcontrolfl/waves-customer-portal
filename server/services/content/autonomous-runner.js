@@ -2227,9 +2227,15 @@ class AutonomousRunner {
     // 'claimed') AND the run before publishing. Moving it off 'pending_review'
     // means a concurrent requeue/dismiss is rejected (the review decisions
     // require pending_review), so it can't overwrite the in-flight publish.
+    // claimed_at MUST be stamped fresh here: the row still carries the
+    // runner's original claim timestamp (days old by review time), so
+    // without the refresh this claim is stale the moment it's taken —
+    // recoverStaleClaims would bounce the row to 'pending' mid-publish and
+    // a new run could re-draft an opportunity whose PR/post already exists.
+    const approvalClaimedAt = new Date();
     const oppClaimed = await db('opportunity_queue')
       .where({ id: opportunityId, status: 'pending_review', skip_reason: 'named_competitor_review' })
-      .update({ status: 'claimed', skip_reason: 'named_competitor_publishing', updated_at: new Date() });
+      .update({ status: 'claimed', skip_reason: 'named_competitor_publishing', claimed_at: approvalClaimedAt, updated_at: new Date() });
     if (!oppClaimed) {
       const e = new Error('This opportunity is no longer parked for named-competitor review'); e.statusCode = 409; throw e;
     }
@@ -2320,6 +2326,53 @@ class AutonomousRunner {
       astro_pr_url: patch.astro_pr_url || null,
       publish_status: patch.publish_status || null,
     };
+  }
+
+  /**
+   * Janitor for the one transient state approveAndPublishNamedCompetitor
+   * holds: a crash between the claim and the final persist strands the run
+   * at outcome='publishing_named_competitor' (no code path ever reads it)
+   * and the opportunity at claimed/'named_competitor_publishing'.
+   *
+   * The janitor CANNOT know whether the crash happened before or after the
+   * irreversible external side effect (_publishAndDistribute may have
+   * opened a PR or gone live), so it never retries and never releases the
+   * row back to a claimable state. Both records park at pending_review /
+   * 'named_competitor_publish_interrupted' — a reason the approval path
+   * does NOT accept (it requires 'named_competitor_review'), so the item
+   * surfaces in the review queue for a human to reconcile against GitHub
+   * but can't be blindly re-published or re-drafted. Pairs with
+   * recoverStaleClaims skipping 'named_competitor_publishing' claims.
+   *
+   * staleMinutes must comfortably exceed a slow publish (Astro PR open +
+   * IndexNow + social ≈ a couple of minutes); 60 is generous.
+   */
+  async recoverStuckNamedCompetitorPublishes({ staleMinutes = 60 } = {}) {
+    const cutoff = new Date(Date.now() - staleMinutes * 60000);
+    const REASON = 'named_competitor_publish_interrupted';
+    const note = `[${new Date().toISOString()}] janitor: named-competitor publish interrupted (stuck >${staleMinutes}m) — check GitHub for an open Astro PR or live post before requeueing; the publish may have completed externally before the crash`;
+    const runs = await db('autonomous_runs')
+      .where('outcome', 'publishing_named_competitor')
+      .where('updated_at', '<', cutoff)
+      .update({
+        outcome: 'completed_pending_review',
+        skip_reason: REASON,
+        reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),
+        updated_at: new Date(),
+      });
+    const opps = await db('opportunity_queue')
+      .where({ status: 'claimed', skip_reason: 'named_competitor_publishing' })
+      .where('claimed_at', '<', cutoff)
+      .update({
+        status: 'pending_review',
+        skip_reason: REASON,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+    if (runs > 0 || opps > 0) {
+      logger.error(`[autonomous-runner] parked ${runs} run(s) / ${opps} opportunit${opps === 1 ? 'y' : 'ies'} stuck in named-competitor publishing for human reconciliation (${REASON})`);
+    }
+    return { runs, opps };
   }
 
   // Load + JSONB-parse the brief the reviewed run was generated against

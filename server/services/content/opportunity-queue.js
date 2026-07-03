@@ -10,11 +10,14 @@
  *                    \→ skipped
  *                    \→ pending_review
  *   pending → expired (via expireStale)
+ *   pending → skipped/attempts_exhausted (via sweepExhaustedAttempts)
  *
  * Claim takes a stale-claim timeout — if a runner crashes mid-work,
  * its claimed row falls back to pending after the timeout so another
  * runner can pick it up. Same pattern as scheduled_sms_claim_limit in
- * the existing scheduler.js.
+ * the existing scheduler.js. Every claim also increments attempt_count
+ * (a lifetime budget — see maxClaimAttempts), so a row that keeps
+ * bouncing back to pending eventually stops burning runner dispatches.
  */
 
 const db = require('../../models/db');
@@ -23,6 +26,18 @@ const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
 
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_FETCH_LIMIT = 20;
+
+// Lifetime claim budget per opportunity. A row that keeps failing returns
+// to pending (release / stale-claim recovery) and, as the top-scored row,
+// gets re-claimed by the daily batch forever — one wasted LLM dispatch per
+// day with no exit. Every claim increments attempt_count; claimNext skips
+// rows at/over budget and sweepExhaustedAttempts() converts them to a
+// visible skipped/attempts_exhausted instead of leaving invisible zombies.
+// An operator requeue resets the counter (fresh explicit signal).
+function maxClaimAttempts() {
+  const n = Number(process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS);
+  return Number.isFinite(n) && n > 0 ? n : 5;
+}
 
 /**
  * The blog floor applies ONLY when the caller runs at the global default —
@@ -103,6 +118,7 @@ class OpportunityQueue {
       `UPDATE opportunity_queue
          SET status = 'claimed',
              claimed_at = ?,
+             attempt_count = attempt_count + 1,
              updated_at = now()
        WHERE id = (
          SELECT id FROM opportunity_queue
@@ -112,6 +128,9 @@ class OpportunityQueue {
            -- until their window opens. NULL = available immediately (every
            -- miner row).
            AND (available_at IS NULL OR available_at <= now())
+           -- Lifetime claim budget — see maxClaimAttempts(). Exhausted rows
+           -- are swept to skipped/attempts_exhausted by the janitor.
+           AND attempt_count < ?::int
            -- ::numeric casts are load-bearing: inside a CASE, Postgres types
            -- bare parameters as text (no comparison context), and
            -- integer >= text has no operator — this exact line failed in
@@ -124,7 +143,7 @@ class OpportunityQueue {
          LIMIT 1
        )
        RETURNING *`,
-      [new Date(), blogMinScoreFor(minScore), minScore]
+      [new Date(), maxClaimAttempts(), blogMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
         .concat(exclude.length ? [exclude] : [])
     );
@@ -249,6 +268,15 @@ class OpportunityQueue {
     const recovered = await db('opportunity_queue')
       .where('status', 'claimed')
       .where('claimed_at', '<', cutoff)
+      // A named-competitor APPROVAL claim is not crash-recoverable by
+      // rerun: the publish may already have opened a PR / gone live, so
+      // bouncing the row to 'pending' invites a duplicate draft of content
+      // that already exists. The runner's own janitor
+      // (recoverStuckNamedCompetitorPublishes) parks these for human
+      // reconciliation instead. IS DISTINCT FROM, not <>: runner claims
+      // carry a NULL skip_reason and NULL <> 'x' is NULL, which would
+      // silently exclude every normal claim from recovery.
+      .whereRaw(`skip_reason IS DISTINCT FROM 'named_competitor_publishing'`)
       .update({
         status: 'pending',
         claimed_at: null,
@@ -260,13 +288,39 @@ class OpportunityQueue {
 
   /**
    * Mark pending opportunities past their expires_at as 'expired'.
-   * Janitor cron task.
+   * Janitor cron task (wired into the daily mine tick, which runs it
+   * BEFORE mining so a still-live signal immediately re-pends with a
+   * fresh expires_at — 'expired' only sticks for disappeared signals).
    */
   async expireStale() {
     const result = await db('opportunity_queue')
       .where('status', 'pending')
       .where('expires_at', '<', new Date())
       .update({ status: 'expired', updated_at: new Date() });
+    if (result > 0) logger.info(`[opportunity-queue] expired ${result} stale pending opportunit${result === 1 ? 'y' : 'ies'}`);
+    return result;
+  }
+
+  /**
+   * Convert pending rows that have used up their lifetime claim budget to
+   * a VISIBLE skipped/attempts_exhausted. claimNext already refuses them,
+   * but without this sweep they'd sit pending forever as invisible
+   * zombies — never claimable, never surfaced. skipped is sticky in the
+   * miner upsert, so the next mine can't resurrect them; an operator
+   * requeue (which resets attempt_count) is the deliberate way back in.
+   * Janitor cron task, paired with expireStale().
+   */
+  async sweepExhaustedAttempts() {
+    const result = await db('opportunity_queue')
+      .where('status', 'pending')
+      .where('attempt_count', '>=', maxClaimAttempts())
+      .update({
+        status: 'skipped',
+        skip_reason: 'attempts_exhausted',
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+    if (result > 0) logger.warn(`[opportunity-queue] swept ${result} opportunit${result === 1 ? 'y' : 'ies'} to skipped/attempts_exhausted (claimed ${maxClaimAttempts()}+ times without completing)`);
     return result;
   }
 
@@ -302,4 +356,4 @@ function parseRow(row) {
 
 module.exports = new OpportunityQueue();
 module.exports.OpportunityQueue = OpportunityQueue;
-module.exports._internals = { parseRow, STALE_CLAIM_MS };
+module.exports._internals = { parseRow, STALE_CLAIM_MS, maxClaimAttempts };

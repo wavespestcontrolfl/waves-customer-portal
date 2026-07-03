@@ -1168,8 +1168,19 @@ class GscOpportunityMiner {
       };
 
       // ON CONFLICT (dedupe_key) DO UPDATE — keeps latest score + mined_at,
-      // resets status back to pending unless the row is already claimed,
-      // done, or waiting on autonomous review.
+      // resets status back to pending unless the row is claimed, done,
+      // waiting on autonomous review, or SKIPPED. Skipped is sticky here:
+      // it records a decision — an operator dismissal (manual_dismiss:*),
+      // a human-closed PR (astro_pr_closed_unmerged), an exhausted attempt
+      // budget — and skip()'s own contract is "won't be retried". The
+      // daily mine re-emitting the same dedupe_key must not overturn it
+      // (it did: every dismissal came back the next morning and burned a
+      // fresh runner dispatch). Deliberate contrast: 'expired' DOES revive
+      // — expiry just means the row aged out unclaimed, so a fresh mine of
+      // the same signal is a fresh opportunity with a fresh expires_at.
+      // Operator paths that legitimately resurrect a skipped row (review
+      // requeue, intercept re-seed) write status='pending' directly and
+      // are unaffected by this CASE.
       const result = await db.raw(
         `INSERT INTO opportunity_queue
            (bucket, action_type, query, page_url, service, city,
@@ -1183,7 +1194,7 @@ class GscOpportunityMiner {
                mined_at = EXCLUDED.mined_at,
                expires_at = EXCLUDED.expires_at,
                action_type = EXCLUDED.action_type,
-               status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review')
+               status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
                              THEN opportunity_queue.status
                              ELSE 'pending'
                         END,

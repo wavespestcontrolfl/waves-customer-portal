@@ -477,13 +477,21 @@ const ContentScheduler = {
 
     // Un-strand blogs whose 'publishing' claim never resolved (process died
     // mid-publish). Without this the row is stuck forever AND — because
-    // pages-poll's auto-merge branch fires on pr_open + publishing — a
-    // stranded claim would keep that scheduler-only auto-merge path armed
+    // pages-poll's auto-merge branch fires on pr_open + publishing —
+    // a stranded claim would keep that scheduler-only auto-merge path armed
     // indefinitely. See the matching comment in pages-poll.pollPost().
     try {
       await this.resetStalePublishingBlogs();
     } catch (err) {
       logger.warn(`[content-scheduler] stale-publishing sweep failed: ${err.message}`);
+    }
+    // Same sweep for social rows — a crash mid-publishToAll strands them at
+    // 'publishing' with no other reader (the pending query selects only
+    // pending/dry_run).
+    try {
+      await this.resetStalePublishingSocials();
+    } catch (err) {
+      logger.warn(`[content-scheduler] stale social-publishing sweep failed: ${err.message}`);
     }
 
     // ── Process blog posts ──────────────────────────────────────
@@ -559,13 +567,34 @@ const ContentScheduler = {
         errors++;
         const terminalFailure = err.message === 'Scheduled blog has no content; cannot open Astro publish PR';
         // Only release a claim WE hold — if the claim update itself failed
-        // (or another instance holds it), writing pending_review here would
-        // stomp the active attempt's 'publishing' state.
+        // (or another instance holds it), writing here would stomp the
+        // active attempt's 'publishing' state (hence the publish_status
+        // guard on every branch).
         if (claimed) {
-          await db('blog_posts').where('id', blog.id).update({
-            publish_status: terminalFailure ? 'failed' : 'pending_review',
-            updated_at: new Date(),
-          }).catch(() => {});
+          if (terminalFailure) {
+            await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing')
+              .update({ publish_status: 'failed', updated_at: new Date() }).catch(() => {});
+          } else {
+            // Same fork as resetStalePublishingBlogs: where the row goes
+            // depends on whether Astro state exists NOW (publishAstro may
+            // have set it before throwing — re-check, don't trust the
+            // tick-start snapshot).
+            //   - no astro_status (e.g. a transient GitHub blip before the
+            //     PR opened): release to 'pending' so the next tick retries
+            //     — parking at pending_review would strand it permanently,
+            //     because the pending query only re-selects pending_review
+            //     rows when astro_status='live'.
+            //   - astro_status set (PR opened / build failed / live):
+            //     'pending_review', the state pages-poll and the live-flip
+            //     path drive forward.
+            const retried = await db('blog_posts').where('id', blog.id)
+              .where('publish_status', 'publishing').whereNull('astro_status')
+              .update({ publish_status: 'pending', updated_at: new Date() }).catch(() => 0);
+            if (!retried) {
+              await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing')
+                .update({ publish_status: 'pending_review', updated_at: new Date() }).catch(() => {});
+            }
+          }
         }
         logger.error(`[content-scheduler] Failed to publish blog ${blog.id}: ${err.message}`);
       }
@@ -586,8 +615,23 @@ const ContentScheduler = {
       .where('scheduled_for', '<=', now);
 
     for (const social of pendingSocials) {
+      let claimed = false;
       try {
-        await db('social_media_posts').where('id', social.id).update({ publish_status: 'publishing' });
+        // Atomic compare-and-set claim, same rule as the blog loop above:
+        // guard on the publish_status we selected so an overlapping
+        // instance (deploy overlap / slow prior tick) can't double-drive
+        // the same row into publishToAll — scheduled-source posts have no
+        // pre-post dedupe, so a double-drive here is a duplicate post on
+        // every enabled platform. Whoever flips to 'publishing' first
+        // wins; the loser sees 0 rows updated and skips.
+        claimed = (await db('social_media_posts')
+          .where('id', social.id)
+          .where('publish_status', social.publish_status)
+          .update({ publish_status: 'publishing' })) > 0;
+        if (!claimed) {
+          logger.info(`[content-scheduler] social ${social.id} already claimed by a concurrent tick — skipping`);
+          continue;
+        }
 
         const SocialMediaService = require('./social-media');
         const customContent = typeof social.custom_content === 'string'
@@ -617,7 +661,16 @@ const ContentScheduler = {
         }
       } catch (err) {
         errors++;
-        await db('social_media_posts').where('id', social.id).update({ publish_status: 'failed' });
+        // Only mark failed a claim WE hold (and that is still 'publishing'):
+        // if the claim update itself failed — or another instance holds the
+        // row — writing 'failed' here would stomp the active attempt.
+        if (claimed) {
+          await db('social_media_posts')
+            .where('id', social.id)
+            .where('publish_status', 'publishing')
+            .update({ publish_status: 'failed' })
+            .catch(() => {});
+        }
         logger.error(`[content-scheduler] Failed to publish social "${social.title}": ${err.message}`);
       }
     }
@@ -665,6 +718,36 @@ const ContentScheduler = {
       logger.warn(`[content-scheduler] reset ${reset} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m back to pending_review (crashed mid-publish with Astro state)`);
     }
     return retried + reset;
+  },
+
+  /**
+   * Reset SOCIAL rows stranded at publish_status='publishing'.
+   *
+   * Same strand shape as the blogs: the claim is transient (publishToAll
+   * resolves within the tick), so a crash mid-publish leaves a row nothing
+   * re-selects (the pending query takes only pending/dry_run). Unlike the
+   * blog sweep this NEVER retries: publishToAll may have posted to some
+   * platforms before the crash, and a retry would duplicate those posts —
+   * the exact failure the CAS claim exists to prevent. Stranded rows go to
+   * 'failed' (the same state the error path uses) for a human to reschedule.
+   *
+   * social_media_posts has no updated_at column, so staleness keys on
+   * scheduled_for: a claim is only ever taken when scheduled_for <= now,
+   * so any row still 'publishing' well past its scheduled time is stranded.
+   * The 30-minute margin keeps a slow in-flight publish of an overdue
+   * backlog row safe (the cron also runs under an exclusive advisory lock,
+   * so no publish is in flight while this sweep runs).
+   */
+  async resetStalePublishingSocials({ staleMinutes = 30 } = {}) {
+    const cutoff = new Date(Date.now() - staleMinutes * 60000);
+    const reset = await db('social_media_posts')
+      .where('publish_status', 'publishing')
+      .where('scheduled_for', '<', cutoff)
+      .update({ publish_status: 'failed', status: 'failed' });
+    if (reset > 0) {
+      logger.warn(`[content-scheduler] marked ${reset} social post(s) stranded in publish_status='publishing' as failed (crashed mid-publish; NOT retried — platforms may have partially posted, reschedule manually)`);
+    }
+    return reset;
   },
 
   /**

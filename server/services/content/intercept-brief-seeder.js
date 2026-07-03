@@ -218,10 +218,13 @@ function rowForBrief(brief, manifest, { now = new Date() } = {}) {
 
 /**
  * Upsert every manifest brief into opportunity_queue. Idempotent: re-runs
- * update payload/score/window in place via ON CONFLICT (dedupe_key); the
- * status CASE mirrors gsc-opportunity-miner.persistAll — claimed / done /
- * pending_review rows are never reset, while skipped/expired rows revive to
- * pending (an operator re-seed is an explicit "run these" signal).
+ * update payload/score/window in place via ON CONFLICT (dedupe_key);
+ * claimed / done / pending_review rows are never reset, while skipped/
+ * expired rows revive to pending. NOTE this deliberately DIVERGES from
+ * gsc-opportunity-miner.persistAll, where 'skipped' is sticky: the miner
+ * runs unattended every morning and must not overturn a dismissal, but
+ * seedAll only runs when an operator invokes the seed script — an explicit
+ * "run these" signal that legitimately resurrects a dismissed brief.
  */
 async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new Date() } = {}) {
   const manifest = loadManifest(file);
