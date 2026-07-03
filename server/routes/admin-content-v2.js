@@ -633,6 +633,12 @@ router.post('/blog/:id/share-social', async (req, res, next) => {
     const post = await db('blog_posts').where({ id: req.params.id }).first();
     if (!post) return res.status(404).json({ error: 'Post not found' });
 
+    // Live-status gate (shared with the content-agent's distribute tool):
+    // a non-live post shares a dead 404 link to every enabled platform.
+    const { blogPostShareability } = require('../services/content/blog-share-gate');
+    const shareable = blogPostShareability(post);
+    if (!shareable.ok) return res.status(409).json({ error: shareable.reason });
+
     const link = post.astro_live_url || post.url || `https://www.wavespestcontrol.com/${post.slug}`;
     const title = post.title;
     const description = post.meta_description || (post.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300);

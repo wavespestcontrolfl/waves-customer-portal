@@ -1382,6 +1382,42 @@ describe('Astro publisher hero image republish', () => {
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
   });
 
+  test('blocks a post whose comparison table fails the named-competitor gate before opening a PR (manual lane previously skipped it)', async () => {
+    const post = {
+      id: 'post-1',
+      title: 'Comparing Pest Control Options in Bradenton',
+      slug: 'comparing-pest-control-options-bradenton',
+      meta_description: 'A practical comparison of pest control options for Bradenton homeowners, covering service models, guarantees, and what to weigh before choosing.',
+      keyword: 'pest control comparison Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Comparison of pest control options',
+      // A comparison table with a business-shaped option that is NOT on the
+      // curated competitor-facts allowlist — the gate fails closed on it.
+      // The manual/calendar lane previously ran NO comparison scan at all,
+      // so this could go fully live unattended via the scheduler auto-merge.
+      content: '## How the options compare\n\n<ComparisonTable\n  caption="Pest control options in Bradenton"\n  columns={["What to weigh","Acme Pest Solutions","DIY"]}\n  rows={[["Response time","Same day","Your schedule"]]}\n/>\n\nEvery option has trade-offs worth weighing.',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/comparison\/named-competitor gate failed/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
+  });
+
   test('hub-only post with literal "Waves Pest Control" branding publishes (not treated as multi-domain)', async () => {
     const post = {
       id: 'post-1',
