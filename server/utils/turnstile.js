@@ -141,12 +141,13 @@ function selectSecretForHost(widgets, host) {
  * verdict, so a real submission is never lost to our own misconfiguration or a
  * Cloudflare hiccup:
  *   - no TURNSTILE_SECRET_KEY set                    → not_configured
- *   - host maps to no configured widget              → no_widget_match
  *   - siteverify errors / times out / 5xx            → verify_error / http_5xx
  *   - the owning secret is misconfigured             → config_error
  * Fails CLOSED (ok:false, enforced:true) only on a definitive negative:
  *   - secret set but token missing/blank             → missing_token
  *   - token longer than Cloudflare's 2048 cap        → malformed_token
+ *   - host maps to no configured widget (forged/     → no_widget_match
+ *     absent Origin, or an unmapped domain)
  *   - the owning widget's secret rejected the token  → rejected
  *
  * The caller decides whether an enforced failure actually blocks the request
@@ -181,12 +182,16 @@ async function verifyTurnstileToken(token, remoteip, hostname) {
 
   const secret = selectSecretForHost(widgets, hostname);
   if (!secret) {
-    // Couldn't map the submitting host to a widget → we don't know the token's
-    // owning secret, and probing others would spend this single-use token. Fail
-    // OPEN — never lose a real lead to our own mapping gap (honeypot + the
-    // rate limiter still apply).
-    logger.warn(`[turnstile] no widget matched host "${hostname || ''}" — failing open`);
-    return { ok: true, enforced: false, reason: 'no_widget_match' };
+    // Host maps to no configured widget. A legit fleet/portal submission ALWAYS
+    // resolves to a widget domain (Origin is browser-set on the POST), so this
+    // means a forged/absent Origin or an unmapped domain — we can't verify the
+    // token against the right secret, and probing others would spend this
+    // single-use token. Fail CLOSED so a direct POST with a junk token + forged
+    // Origin can't slip past the gate (codex P1). While the gate is off this only
+    // logs (shadow), so a genuinely-missing fleet domain surfaces here and can be
+    // added to the map BEFORE enforcement is flipped on.
+    logger.info(`[turnstile] no widget matched host "${hostname || ''}"`);
+    return { ok: false, enforced: true, reason: 'no_widget_match' };
   }
   return verifyOneSecret(secret, trimmedToken, remoteip);
 }

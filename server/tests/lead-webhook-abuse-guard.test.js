@@ -204,11 +204,19 @@ describe('verifyTurnstileToken', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1); // never probes the other secret
   });
 
-  test('host maps to NO widget → fails OPEN, no siteverify call (never probe a single-use token)', async () => {
+  test('host maps to NO widget (forged/unknown Origin) → fails CLOSED, no siteverify call (codex P1)', async () => {
     process.env.TURNSTILE_SECRET_KEY = TWO_WIDGETS;
     fetchSpy = jest.spyOn(global, 'fetch');
     const r = await verifyTurnstileToken('tok', '1.2.3.4', 'evil-unknown-domain.com');
-    expect(r).toMatchObject({ ok: true, enforced: false, reason: 'no_widget_match' });
+    expect(r).toMatchObject({ ok: false, enforced: true, reason: 'no_widget_match' });
+    expect(fetchSpy).not.toHaveBeenCalled(); // never probe a single-use token
+  });
+
+  test('missing host + multi-widget map → fails CLOSED (can\'t pick a widget)', async () => {
+    process.env.TURNSTILE_SECRET_KEY = TWO_WIDGETS;
+    fetchSpy = jest.spyOn(global, 'fetch');
+    const r = await verifyTurnstileToken('tok', '1.2.3.4', '');
+    expect(r).toMatchObject({ ok: false, enforced: true, reason: 'no_widget_match' });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
