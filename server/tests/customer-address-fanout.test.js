@@ -409,6 +409,48 @@ describe('propagateCustomerAddressChange', () => {
     expect(patched[1].name).toBe('North Warehouse');
   });
 
+  test('punctuated unit designators (Apt. 2 / Ste. 200) are distinct units too', () => {
+    const contact = { address_line1: '123 Main St', city: 'Bradenton', zip: '34205' };
+    expect(snapshotMatchesContact('123 Main St, Apt. 2, Bradenton, FL 34205', contact)).toBe(false);
+    expect(snapshotMatchesContact('123 Main St, Ste. 200, Bradenton, FL 34205', contact)).toBe(false);
+  });
+
+  test('the lead update re-asserts the selected city/zip (concurrent place-edit guard)', async () => {
+    const conn = makeConn({
+      leads: [{ id: 'lead-match', address: '4867 Tober Morey Way', city: 'Lakewood Ranch', zip: '34211' }],
+      estimates: [],
+    });
+
+    await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+
+    const leadUpdate = conn.__updates.find((u) => u.table === 'leads');
+    const guards = leadUpdate.whereRaw.map((w) => `${w.sql}:${w.bindings[0]}`);
+    expect(guards).toContain('city IS NOT DISTINCT FROM ?:Lakewood Ranch');
+    expect(guards).toContain('zip IS NOT DISTINCT FROM ?:34211');
+  });
+
+  test('a buildings patch re-asserts the selected buildings array at update time', async () => {
+    const conn = makeConn({
+      leads: [],
+      estimates: [{
+        id: 'est-bldg',
+        address: '4867 Tobermorey Way, Lakewood Ranch, FL 34211',
+        estimate_data: {
+          proposal: {
+            propertyAddress: '4867 Tobermorey Way, Lakewood Ranch, FL 34211',
+            buildings: [{ name: '4867 Tobermorey Way, Lakewood Ranch, FL 34211' }],
+          },
+        },
+      }],
+    });
+
+    await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+
+    const estUpdate = conn.__updates.find((u) => u.table === 'estimates');
+    const bGuard = estUpdate.whereRaw.find((w) => w.sql.includes("#> '{proposal,buildings}'"));
+    expect(JSON.parse(bGuard.bindings[0])).toEqual([{ name: '4867 Tobermorey Way, Lakewood Ranch, FL 34211' }]);
+  });
+
   test('missing customer id is a safe no-op', async () => {
     const conn = makeConn({ leads: [], estimates: [] });
     const counts = await propagateCustomerAddressChange({ before: null, after: null }, conn);

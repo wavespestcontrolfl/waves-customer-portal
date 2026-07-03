@@ -52,7 +52,7 @@ function addressMatchKey(value) {
 // "Suite 200") — a snapshot carrying one refers to a distinct unit even when
 // its street segment matches the customer's unitless line. "FL" (floor) is
 // deliberately absent: every Florida address has an ", FL 34211" segment.
-const UNIT_SEGMENT_RE = /^\s*(?:apt|apartment|unit|ste|suite|bldg|building|lot|trlr|rm|#)\s*#?\s*[\w-]+\s*$/i;
+const UNIT_SEGMENT_RE = /^\s*(?:apt|apartment|unit|ste|suite|bldg|building|lot|trlr|rm|#)\.?\s*#?\s*[\w-]+\s*$/i;
 
 // A tail segment carrying no city information (state, zip, country) — used
 // to find the city segment of a full single-line snapshot.
@@ -197,8 +197,13 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
     // writes leads.customer_id), a close, or an admin lead-address edit
     // landing between select and update must not be overwritten.
     for (const r of rowsToPatch) {
+      // city/zip re-assert via IS NOT DISTINCT FROM (nullable columns): for a
+      // bare-street row those columns are the place evidence that qualified
+      // the match, so a concurrent city/zip edit must void the patch too.
       counts.leads += await conn('leads')
         .where({ id: r.id, customer_id: customerId, address: r.address })
+        .whereRaw('city IS NOT DISTINCT FROM ?', [r.city ?? null])
+        .whereRaw('zip IS NOT DISTINCT FROM ?', [r.zip ?? null])
         .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
         .update(leadPatch);
     }
@@ -284,12 +289,18 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
         // rewritten (or its delivery marker dropped) from that stale read.
         // Revalidate the proposal address at update time; if it moved, apply
         // the address-column sync alone and leave the new proposal be.
-        const n = await conn('estimates')
+        let guarded = conn('estimates')
           .where({ id: row.id, customer_id: customerId, address: row.address })
           .whereRaw("estimate_data #>> '{proposal,propertyAddress}' IS NOT DISTINCT FROM ?", [proposalCurrent ?? null])
           .whereIn('status', OPEN_ESTIMATE_STATUSES)
-          .whereNull('archived_at')
-          .update(patch);
+          .whereNull('archived_at');
+        if (patchBuildings) {
+          // The buildings array is part of the stale read too — a concurrent
+          // proposal save that edits buildings/line-items WITHOUT moving the
+          // property address must not have its fresh array overwritten.
+          guarded = guarded.whereRaw("estimate_data #> '{proposal,buildings}' IS NOT DISTINCT FROM ?::jsonb", [JSON.stringify(buildings)]);
+        }
+        const n = await guarded.update(patch);
         counts.estimates += n;
         if (n) continue;
         delete patch.estimate_data;
