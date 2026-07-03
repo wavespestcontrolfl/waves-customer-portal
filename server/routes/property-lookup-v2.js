@@ -16,13 +16,14 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const {
   attachFloodZoneToCachedLookup,
   attachPoolPermitsToCachedLookup,
+  attachAddressAuditToCachedLookup,
   applyVerifiedOverrides,
   getCachedLookup,
   getVerifiedOverrides,
@@ -158,6 +159,34 @@ async function performPropertyLookup(address, options = {}) {
           await attachPoolPermitsToCachedLookup(address, permits);
         }
       }
+      // House-number-audit backfill, same pattern: record-bearing rows cached
+      // before the audit shipped have no _addressAudit key, so the panel's
+      // typo hint would stay dark until the 180-day TTL. Audit once on hit
+      // (county gates resolve from the raw address zip/city — no geocode on
+      // this path), attach, persist. A null audit (GIS failure) is NOT
+      // persisted — it simply retries next hit. Like the fresh path, county
+      // evidence does not skip the audit when the record's own house number
+      // disagrees with the typed one — a cached SNAPPED record must not keep
+      // serving the unflagged neighbor parcel until expiry.
+      const cachedSnapped = cached.property_record
+        ? typedNumberDisagreesWithRecord(address, cached.property_record)
+        : null;
+      if (
+        cached.property_record
+        && cached.property_record._addressAudit === undefined
+        && (!hasCountyEvidence(cached.property_record) || cachedSnapped)
+      ) {
+        const audit = await auditAddressHouseNumber(address, null).catch(() => null);
+        const marker = audit
+          || (cachedSnapped
+            ? { county: null, houseNumber: cachedSnapped.typed, streetLabel: null, streetExists: null, hasExactMatch: false, parcelCount: 0, nearestNumbers: [] }
+            : null);
+        if (marker) {
+          if (cachedSnapped) marker.snappedRecord = cachedSnapped;
+          cached.property_record._addressAudit = marker;
+          await attachAddressAuditToCachedLookup(address, marker);
+        }
+      }
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }
@@ -234,6 +263,43 @@ async function performPropertyLookup(address, options = {}) {
         parcelId: parcelMeta.paoParcelId,
       }).catch(() => null);
       if (permits) result.propertyRecord._poolPermits = permits;
+    }
+  }
+
+  // ── STEP 1b: house-number audit ──
+  // Only when no provider produced county evidence: checks the typed house
+  // number against the county roll's situs addresses for the same street, so
+  // the data-quality panel can say "house number not on the county roll —
+  // nearest existing: N" (typo / misheard call transcription) instead of the
+  // unexplained all-zeros panel. Fail-open: a null audit is "no signal". On a
+  // record-bearing lookup it rides the cached property_record like _floodZone;
+  // record-less lookups are never cached, so they re-audit live each time.
+  // County evidence normally means the roll vouched for the address — but if
+  // Google snapped a mistyped house number to a nearby premise, the parcel/
+  // county record describes the SNAPPED address, not the typed one. When the
+  // record's own house number disagrees with the typed one, run the audit
+  // anyway so the panel flags the customer's number instead of silently
+  // pricing the neighbor's parcel.
+  const snappedRecord = typedNumberDisagreesWithRecord(address, result.propertyRecord);
+  if (!hasCountyEvidence(result.propertyRecord) || snappedRecord) {
+    // Canonical address for the street (typo-fixed names make the roll
+    // findable); typedAddress so the audit checks the CUSTOMER'S house number
+    // even when Google snapped a nonexistent number to the nearest premise.
+    const audit = await auditAddressHouseNumber(canonicalLookupAddress(address, geo), geo, { typedAddress: address })
+      .catch(() => null);
+    // A typed-vs-record number disagreement is a finding in ITSELF — even
+    // when the typed number also exists on the roll (audit exact match), the
+    // record below still describes the SNAPPED premise, so the mismatch must
+    // reach the panel rather than be swallowed by the audit's verdict. A
+    // failed audit still carries the marker.
+    const marker = audit
+      || (snappedRecord
+        ? { county: null, houseNumber: snappedRecord.typed, streetLabel: null, streetExists: null, hasExactMatch: false, parcelCount: 0, nearestNumbers: [] }
+        : null);
+    if (marker) {
+      if (snappedRecord) marker.snappedRecord = snappedRecord;
+      result.addressAudit = marker;
+      if (result.propertyRecord) result.propertyRecord._addressAudit = marker;
     }
   }
 
@@ -523,7 +589,7 @@ async function performPropertyLookup(address, options = {}) {
   if (verifiedOverrides?.stories && result.propertyRecord) {
     result.propertyRecord._storiesSource = 'verified';
   }
-  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm);
+  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit);
 
   // Clean up internal fields before sending to client
   if (result.satellite) {
@@ -1179,7 +1245,11 @@ function applySatelliteAttachmentType(rc, ai) {
   return candidate;
 }
 
-function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
+function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null) {
+  // Record-bearing lookups carry the audit on the cached record (_addressAudit,
+  // like _floodZone); record-less lookups pass it alongside since there is no
+  // record to ride.
+  const addressAudit = addressAuditParam || rc?._addressAudit || null;
   const footprintTurf = computeFootprintTurf(rc);
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
   const waterDistance = ai?.waterDistance || 'NONE';
@@ -1430,7 +1500,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     propertySources: rc?._aiSources || [],
     propertyProviders: rc?._aiProviders || [],
     analysisNotes: ai?.analysisNotes || '',
-    fieldVerifyFlags: buildFieldVerifyFlags(rc, ai),
+    addressAudit,
+    fieldVerifyFlags: buildFieldVerifyFlags(rc, ai, addressAudit),
 
     // ── DATA SOURCE TRACKING ──
     dataSources: {
@@ -1475,6 +1546,19 @@ function buildProviderStatus() {
     },
     maps: !!(process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY),
   };
+}
+
+// Leading house number of the typed address vs the county/parcel record's
+// own situs line — a disagreement means the geocoder snapped the typed
+// number to a different premise and the "county evidence" describes the
+// wrong building.
+function typedNumberDisagreesWithRecord(address, rc) {
+  const typed = (String(address || '').match(/^\s*(\d+)\s/) || [])[1] || null;
+  const recordLine = rc?.addressLine1 || rc?._parcel?.situsAddress || '';
+  const record = (String(recordLine).match(/^\s*(\d+)\s/) || [])[1] || null;
+  return typed && record && typed !== record
+    ? { typed: parseInt(typed, 10), record: parseInt(record, 10) }
+    : null;
 }
 
 const FALLBACK_CRITICAL_FIELDS = ['squareFootage', 'lotSize', 'stories', 'propertyType'];
@@ -2068,8 +2152,45 @@ function calcPestPressureMult(pressure) {
 // ─────────────────────────────────────────────
 // FIELD VERIFY FLAGS
 // ─────────────────────────────────────────────
-function buildFieldVerifyFlags(rc, ai) {
+function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
   const flags = [];
+
+  // Geocoder snapped the typed house number to a different premise — this
+  // outranks (and replaces) the ordinary audit flags: even a roll-confirmed
+  // typed number doesn't change the fact that the record below describes the
+  // SNAPPED building, not the one the customer gave.
+  if (addressAudit && addressAudit.snappedRecord) {
+    const { typed, record } = addressAudit.snappedRecord;
+    const rollNote = addressAudit.hasExactMatch
+      ? `Both numbers exist on the ${addressAudit.county} county roll — confirm which property is the customer's before pricing`
+      : addressAudit.streetExists
+        ? `The county roll has no ${typed}${addressAudit.nearestNumbers.length ? ` (nearest existing: ${addressAudit.nearestNumbers.join(', ')})` : ''} — verify the address before pricing`
+        : 'Verify the address before pricing';
+    flags.push({
+      field: 'address',
+      reason: `Typed house number ${typed}, but the property record below describes ${record} — the geocoder snapped to a nearby premise. ${rollNote}`,
+      priority: 'HIGH',
+    });
+  } else
+  // Address itself is suspect — first, because it explains every other
+  // missing-data line on the panel. Only set when the county roll ANSWERED
+  // (a GIS outage yields no audit at all, see auditAddressHouseNumber).
+  if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch) {
+    const nearest = addressAudit.nearestNumbers.length
+      ? ` — nearest existing: ${addressAudit.nearestNumbers.join(', ')}`
+      : '';
+    flags.push({
+      field: 'address',
+      reason: `House number ${addressAudit.houseNumber} is not on the ${addressAudit.county} county roll, but ${addressAudit.streetLabel} exists (${addressAudit.parcelCount} parcels)${nearest}. Likely a typo or misheard digits — verify the address before pricing`,
+      priority: 'HIGH',
+    });
+  } else if (addressAudit && !addressAudit.streetExists) {
+    flags.push({
+      field: 'address',
+      reason: `${addressAudit.streetLabel} not found on the ${addressAudit.county} county roll — possible misspelling or brand-new plat; verify the address before pricing`,
+      priority: 'HIGH',
+    });
+  }
 
   // Foundation unknown on older homes, or in a FEMA flood zone where slab is
   // an unsafe default. else-if keeps this to a SINGLE foundationType flag
@@ -3188,6 +3309,7 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyParcelTurfBound,
+  typedNumberDisagreesWithRecord,
   applySatelliteAttachmentType,
   applyVisionPropertyTypeEvidence,
   buildFallbackPropertyDataQuality,
