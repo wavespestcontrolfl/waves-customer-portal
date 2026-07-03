@@ -18,6 +18,8 @@ const RecommendationEngine = require('../services/lawn-recommendation-engine');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
 const { seasonAwareAdjustment } = require('../services/service-report/lawn-seasonality');
 const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
+const { loadCustomerGrassContext } = require('../services/lawn-grass-context');
+const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
 
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
@@ -721,6 +723,51 @@ router.post('/assess', async (req, res, next) => {
         .first('ai_summary');
       if (prior?.ai_summary) visionContext.priorSummary = String(prior.ai_summary);
     } catch (err) { logger.warn(`[lawn-assessment] prior-summary context lookup failed: ${err.message}`); }
+
+    // The products this visit's protocol calls for, plus their label
+    // safety/irrigation notes. Knowing a herbicide is in the plan helps the model
+    // read temporary chemical injury as treatment rather than disease; a fungicide
+    // frames brown patches as being treated. Best-effort — protocol/catalog misses
+    // just omit these lines.
+    try {
+      const grassCtx = await loadCustomerGrassContext(customerId, db);
+      const track = grassCtx.trackKey || 'st_augustine';
+      const protoCtx = await getProtocolWindowContext(db, { serviceDate: visitNow, grassTrack: track });
+      const structured = protoCtx ? summarizeProtocolContext(protoCtx) : null;
+      const plannedProducts = (structured?.products || []).filter((p) => p.productName);
+      if (plannedProducts.length) {
+        visionContext.productsApplied = plannedProducts.map((p) => (
+          p.role ? `${p.productName} (${String(p.role).replace(/_/g, ' ')})` : p.productName
+        ));
+        const ids = [...new Set(plannedProducts.map((p) => p.productId).filter(Boolean))];
+        if (ids.length) {
+          const catalogRows = await db('products_catalog')
+            .whereIn('id', ids)
+            .select(
+              'name',
+              'customer_precaution_summary',
+              'customer_safety_summary',
+              'reentry_summary',
+              'reentry_text',
+              'irrigation_notes',
+              'rei_hours',
+            )
+            .catch(() => []);
+          const constraints = [];
+          for (const c of catalogRows) {
+            const bits = [];
+            const safety = c.customer_precaution_summary || c.customer_safety_summary;
+            if (safety) bits.push(String(safety).trim());
+            const reentry = c.reentry_summary || c.reentry_text;
+            if (reentry) bits.push(`re-entry: ${String(reentry).trim()}`);
+            if (c.irrigation_notes) bits.push(`watering: ${String(c.irrigation_notes).trim()}`);
+            else if (Number.isFinite(Number(c.rei_hours))) bits.push(`REI ${Number(c.rei_hours)}h`);
+            if (bits.length) constraints.push(`${c.name}: ${bits.join('; ')}`);
+          }
+          if (constraints.length) visionContext.labelConstraints = constraints.slice(0, 6);
+        }
+      }
+    } catch (err) { logger.warn(`[lawn-assessment] protocol-products context lookup failed: ${err.message}`); }
 
     // Multi-photo AI runs in parallel with the same small cap. Each
     // analyzePhoto call is itself two vision-API calls (Claude +
