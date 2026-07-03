@@ -41,7 +41,9 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
+const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
@@ -59,6 +61,8 @@ const OPENAI_COMPLETENESS_FALLBACK_CHARS = Number(process.env.OPENAI_COMPLETENES
 const OPENAI_TRANSCRIPTION_PROMPT = `Transcribe this phone call recording for Waves Pest Control (pest control and lawn care, Southwest Florida).
 
 Preserve fillers like "um" and "uh", numbers, addresses, phone numbers, and proper nouns exactly as spoken.
+Street names in addresses are real words or proper names — prefer a plausible street name over a nonsense phonetic rendering.
+When a caller spells something letter-by-letter or with phonetic markers like "B as in boy", write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
 const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
 // v2 extraction uses Gemini 2.5 Pro — most capable model for the deeply-nested
@@ -73,6 +77,7 @@ const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2
 // silently-unverified address or an incomplete account holder.
 const CONFIRM_REASON_TEXT = {
   address_unverified: 'service address could not be verified — read it back to the caller',
+  address_recovered: 'street name was garbled in transcription — matched to a single validated address; read it back to the caller',
   out_of_service_area: 'address resolves outside the service area — verify the county',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
@@ -1231,21 +1236,28 @@ ${text}`,
 }
 
 // ── Primary transcription via OpenAI (multipart upload) ──
-async function transcribeWithOpenAI(audioBuffer) {
+// opts.model/opts.prompt override the defaults for secondary passes (the
+// contact-dictation pass runs gpt-4o-transcribe with a dictation-focused
+// prompt). NOTE: gpt-4o-transcribe-diarize does NOT support the prompt
+// parameter (or logprobs/timestamp_granularities) — prompting only ever
+// applies on non-diarize models, which is why the branch below exists.
+async function transcribeWithOpenAI(audioBuffer, opts = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
 
+  const model = opts.model || OPENAI_TRANSCRIPTION_MODEL;
+  const prompt = opts.prompt || OPENAI_TRANSCRIPTION_PROMPT;
   try {
     const form = new FormData();
     form.append('file', new Blob([audioBuffer], { type: 'audio/mpeg' }), 'call-recording.mp3');
-    form.append('model', OPENAI_TRANSCRIPTION_MODEL);
+    form.append('model', model);
     form.append('language', 'en');
-    const diarized = OPENAI_TRANSCRIPTION_MODEL.includes('diarize');
+    const diarized = model.includes('diarize');
     form.append('response_format', diarized ? 'diarized_json' : 'json');
     if (diarized) {
       form.append('chunking_strategy', 'auto');
     } else {
-      form.append('prompt', OPENAI_TRANSCRIPTION_PROMPT);
+      form.append('prompt', prompt);
     }
     form.append('temperature', '0');
 
@@ -1269,7 +1281,7 @@ async function transcribeWithOpenAI(audioBuffer) {
       text,
       segments: normalizeOpenAISegments(data),
       provider: 'openai',
-      model: OPENAI_TRANSCRIPTION_MODEL,
+      model,
       responseFormat: diarized ? 'diarized_json' : 'json',
     };
   } catch (err) {
@@ -1304,6 +1316,8 @@ Rules:
 - Label every turn "Agent:" or "Caller:" on its own line.
 - "Agent" means Waves staff. "Caller" means the external customer/contact, including on outbound calls placed by Waves.
 - Transcribe verbatim — preserve fillers ("um", "uh"), numbers, addresses, phone numbers, and proper nouns exactly as spoken.
+- Street names in addresses are real words or proper names — prefer a plausible street name over a nonsense phonetic rendering.
+- When a caller spells something letter-by-letter or with phonetic markers ("B as in boy"), write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 - If audio is silent, unintelligible, or only voicemail tones, output exactly: [VOICEMAIL] or [NO SPEECH].
 - Do NOT summarize, translate, or add commentary. Output the transcript only, nothing before or after.` },
             ],
@@ -1328,10 +1342,47 @@ Rules:
   }
 }
 
+// Wrapper: primary transcription + (when the call dictated contact info) a
+// SECOND full-call pass on a promptable model. The diarized primary cannot be
+// prompted, so token-level dictation fidelity ("W, C as in Charlie, W, six
+// three") comes from this pass; the contact-dictation decoder consumes both
+// transcripts as evidence. Best-effort — a contact-pass failure never affects
+// the primary result.
 async function transcribeRecording(mp3Url, opts = {}) {
+  const bufferRef = {};
+  const result = await transcribeRecordingPrimary(mp3Url, opts, bufferRef);
+  try {
+    if (
+      result?.transcription
+      && bufferRef.buffer
+      && process.env.CONTACT_DICTATION_ENABLED !== 'false'
+      && detectContactDictationSignals(result.transcription).any
+    ) {
+      const contactModel = process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe';
+      const second = await transcribeWithOpenAI(bufferRef.buffer, {
+        model: contactModel,
+        prompt: CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
+      });
+      if (second?.text) {
+        result.contactPassTranscript = second.text;
+        if (result.metadata) {
+          result.metadata.contact_pass_model = second.model;
+          result.metadata.contact_pass_chars = second.text.length;
+        }
+        logger.info(`[call-proc] contact-dictation pass complete: ${second.text.length} chars (${contactModel})`);
+      }
+    }
+  } catch (err) {
+    logger.warn(`[call-proc] contact-dictation pass skipped: ${err.message}`);
+  }
+  return result;
+}
+
+async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
   try {
     logger.info(`[call-proc] Downloading recording for transcription: ${mp3Url}`);
     const audioBuffer = await downloadRecording(mp3Url);
+    bufferRef.buffer = audioBuffer;
     logger.info(`[call-proc] Downloaded ${Math.round(audioBuffer.length / 1024)}KB audio`);
 
     const openai = await transcribeWithOpenAI(audioBuffer);
@@ -1545,6 +1596,8 @@ IMPORTANT — customer name rules:
 IMPORTANT — spelled-out names and emails are authoritative over how they sounded:
 - When the caller spells a name or email letter-by-letter, or with phonetic markers ("B as in boy", "V as in Victor", "N as in Nancy"), the SPELLED letters are the source of truth — use them, not the word as it was transcribed phonetically. Callers spell precisely because the spoken form is easy to mishear (e.g. the caller says "Smyth" but then spells S-M-I-T-H, so the correct value is "Smith", and the email is jane.smith@example.com — NOT smyth). This is an illustrative example only — never copy this name or email into the output.
 - When an email is described relative to the name (e.g. "first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
+- Transcription often CONCATENATES a phonetic spelling into nonsense tokens: "blikenboy, vlikenvictor" is "B like in boy, V like in Victor" — decode each such token to its letter (B, V). A run of these tokens ending in digits is a spelled email local part ("blikenboy vlikenvictor 42 at gmail.com" → bv42@gmail.com). Decode the letters even when the words are jammed together.
+- The decoded spelled letters ALSO beat the caller's own read-back of the finished email as transcribed — the read-back is one more chance for the transcriber to mishear. A transcribed local part that looks like a URL fragment ("www.", "http") is a mis-hearing, never a real mailbox: reconstruct it from the spelled letters, and if you cannot reconstruct it confidently, return null.
 
 IMPORTANT — customer contact rules:
 - Do not invent email addresses. Only return email when the caller clearly says or spells the complete address.
@@ -1898,10 +1951,14 @@ const CallRecordingProcessor = {
     // Step 1: Transcribe — OpenAI is the source of record. Gemini and Twilio are fallbacks only.
     let transcription = null;
     let transcriptionProvenance = null;
+    // Dictation-focused second-pass transcript (promptable model) — evidence
+    // for the contact-field decoder below, never the displayed transcript.
+    let contactPassTranscript = null;
 
     if (call.recording_url) {
       const result = await transcribeRecording(call.recording_url, { call, contactPhone });
       transcription = result.transcription;
+      contactPassTranscript = result.contactPassTranscript || null;
       if (transcription) {
         transcriptionProvenance = {
           provider: result.provider || null,
@@ -1922,11 +1979,14 @@ const CallRecordingProcessor = {
           transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
           updated_at: new Date(),
         };
-        if (result.structuredSegments) {
+        if (result.structuredSegments || contactPassTranscript) {
           transcriptUpdate.transcript_structured = JSON.stringify({
             provider: result.provider,
             model: result.model || OPENAI_TRANSCRIPTION_MODEL,
-            segments: result.structuredSegments,
+            segments: result.structuredSegments || null,
+            // Audit trail for the contact-field decoder's second evidence
+            // stream (dictation-focused re-transcription of the same audio).
+            ...(contactPassTranscript ? { contact_pass_transcript: contactPassTranscript } : {}),
           });
         }
         await db('call_log').where({ id: call.id }).update(transcriptUpdate);
@@ -2209,6 +2269,84 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+
+    // ── Contact-field dictation decoder (runs in EVERY mode, BEFORE the
+    // routing gate so enforce mode benefits too) ──────────────────────────
+    // The transcript is EVIDENCE, not the source of truth for dictated
+    // emails/addresses: a purpose-built decoder pass reads the diarized
+    // transcript plus the dictation-focused second-pass transcript and emits
+    // normalized CANDIDATES with confidence + a ready-to-read confirmation
+    // question. Exactly one strong, validated email candidate is adopted
+    // (behind the same cross-customer ownership gate as the domain-typo
+    // correction); anything ambiguous rides the review card — and if the
+    // primary extraction already stored an email from that same ambiguous
+    // dictation, it is DEMOTED to email_raw so no write/send path can use a
+    // value the decoder could not confirm. Street alternatives feed the
+    // address-recovery lookup below. Fail-open.
+    let contactDictation = null;
+    let dictationEmailPayload = null;
+    try {
+      if (transcription && (contactPassTranscript || detectContactDictationSignals(transcription).any)) {
+        contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
+      }
+      if (contactDictation) {
+        const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
+        dictationEmailPayload = emailDecision.payload;
+        if (emailDecision.adopt) {
+          // Same ownership gate as the domain-typo adoption in the bridge: a
+          // decoded email already on file for ANOTHER contact is never
+          // auto-adopted onto this caller (fails closed). email_raw keeps the
+          // rejected as-transcribed value as evidence.
+          const ownCustomerId = call.customer_id
+            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+            || null;
+          const ownedElsewhere = await require('./email-bounce-recovery')
+            .correctedAddressOwnedByOther(emailDecision.adopt, ownCustomerId)
+            .catch(() => true);
+          if (!ownedElsewhere) {
+            extracted.email = emailDecision.adopt;
+            logger.info(`[call-proc-dictation] Adopted decoded dictated email for ${maskSid(callSid)}`);
+          } else {
+            logger.info(`[call-proc-dictation] Skipped decoded email — on file for another contact (${maskSid(callSid)})`);
+          }
+        } else if (emailDecision.hold && extracted.email) {
+          // Quarantine: the stored email came from dictation the decoder
+          // could not confirm (ambiguous / risk-flagged) — demote it before
+          // the customer/lead upserts and first-touch sends read it.
+          if (!extracted.email_raw) extracted.email_raw = extracted.email;
+          extracted.email = null;
+          logger.info(`[call-proc-dictation] Demoted unconfirmed dictated email to email_raw for ${maskSid(callSid)}`);
+        }
+      }
+    } catch (dictationErr) {
+      logger.warn(`[call-proc-dictation] decoder skipped for ${maskSid(callSid)}: ${dictationErr.message}`);
+    }
+
+    // ── Garbled-street recovery (every mode; consumed by BOTH gates) ─────
+    // Runs before the routing gate: in enforce mode a recovered street must
+    // reach canAutoRoute as the validated verdict it is, or the very garble
+    // this feature fixes would still block routing and persist raw.
+    const rawStreetBeforeAdopt = extracted.address_line1 || null;
+    let addressRecovery = null;
+    if (v2AddressValidation && RECOVERABLE_STATUSES.has(v2AddressValidation.status)) {
+      addressRecovery = await recoverStreetAddress({
+        extracted,
+        avStatus: v2AddressValidation.status,
+        // Street re-hearings the contact-dictation decoder already produced
+        // from BOTH transcripts — tried before recovery spends its own
+        // phonetic model call.
+        extraStreetCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+      }).catch(() => null);
+    }
+    // The winning recovery candidate passed Address Validation itself, so the
+    // ENFORCE gate consumes that verdict (validated_accept/corrected) instead
+    // of the original unresolvable one. The persisted ai_address_validation
+    // shadow row keeps the ORIGINAL verdict; the shadow bridge also receives
+    // the original + the recovery result and applies its own adoption rule.
+    const effectiveAddressValidation = (addressRecovery?.recovered && addressRecovery.avResult)
+      ? addressRecovery.avResult
+      : v2AddressValidation;
+
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2Extraction = v2Result?.extraction || null;
@@ -2227,7 +2365,7 @@ const CallRecordingProcessor = {
           await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
           logger.warn(`[call-proc-v2] Fail-closed for ${callSid}: v2_extraction_status=${failReason}`);
         } else {
-          const addressValidation = v2AddressValidation;
+          const addressValidation = effectiveAddressValidation;
           const routingResult = canAutoRoute(v2Extraction, { contactPhone, addressValidation });
           const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation });
           // Strip model address flags too when AV accepted/corrected — otherwise
@@ -2258,6 +2396,31 @@ const CallRecordingProcessor = {
               .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory' }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
+          }
+
+          // A recovered street auto-routes on the recovered verdict above, but
+          // the read-back reminder must still reach the Needs Review inbox —
+          // the office confirms the corrected street with the caller before
+          // the visit, exactly like the shadow bridge surfaces it.
+          if (addressRecovery?.recovered) {
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'address_recovered',
+                extraction: v2Extraction,
+                severity: 'advisory',
+                extraPayload: {
+                  address_as_heard: rawStreetBeforeAdopt,
+                  address_recovered: addressRecovery.recovered.address_line1,
+                  address_candidates: addressRecovery.candidates || [],
+                  recovery_method: addressRecovery.method || null,
+                  ...(contactDictation?.addresses?.[0]?.confirmation_question
+                    ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
+                },
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore();
+            bridgeNeedsConfirmation.push('address_recovered');
           }
 
           if (!routingResult.allowed) {
@@ -2358,12 +2521,27 @@ const CallRecordingProcessor = {
             );
           } catch (_e) { /* fall back to model flags only */ }
         }
+        // addressRecovery + rawStreetBeforeAdopt were computed above the
+        // routing gate (shared with enforce mode); the bridge receives the
+        // ORIGINAL AV verdict plus the recovery result and applies its own
+        // exactly-one-confirmed-premise adoption rule.
         const { normalizedAddress, normalizedEmail, needsConfirmation } = deriveCallReviewBridge({
           addressValidation: v2AddressValidation,
           extracted,
           v2TriageFlags: bridgeTriageFlags,
           callerRelationship: v2Ext?.caller?.relationship_to_property,
+          addressRecovery,
         });
+        // Decoder-only email evidence: when the primary extraction captured
+        // NO email (empty email + email_raw) the bridge's email review stays
+        // silent, which would drop the decoder's candidates/question on the
+        // floor — exactly the malformed dictation this pass quarantines.
+        // Force a read-back reason so the triage item (with payload) exists.
+        if (dictationEmailPayload
+            && !needsConfirmation.includes('email_unverified')
+            && !needsConfirmation.includes('email_invalid')) {
+          needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
           // reads extracted.* below, so both records get the corrected address.
@@ -2373,6 +2551,9 @@ const CallRecordingProcessor = {
           if (normalizedAddress.zip) extracted.zip = normalizedAddress.zip;
           if (v2AddressValidation?.status === 'corrected') {
             logger.info(`[call-proc-bridge] Adopted Google-corrected address for ${maskSid(callSid)}`);
+          }
+          if (needsConfirmation.includes('address_recovered')) {
+            logger.info(`[call-proc-bridge] Recovered garbled street via ${addressRecovery?.method} for ${maskSid(callSid)}`);
           }
         }
         if (normalizedEmail) {
@@ -2412,12 +2593,26 @@ const CallRecordingProcessor = {
           // Shadow mode does not block the write -> severity 'advisory'.
           for (const flag of needsConfirmation.slice(0, 10)) {
             try {
+              // Address/email flags carry the correction evidence so the
+              // Needs Review card can show "heard X → matched Y" plus the
+              // candidate list and the exact question to ask, instead of a
+              // bare "could not be verified".
+              const isAddressFlag = flag === 'address_unverified' || flag === 'address_recovered';
+              const isEmailFlag = flag === 'email_unverified' || flag === 'email_invalid';
               await db('triage_items')
                 .insert(buildTriageItem({
                   callLogId: call.id,
                   flag,
                   extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                   severity: 'advisory',
+                  extraPayload: (isAddressFlag && addressRecovery?.attempted) ? {
+                    address_as_heard: rawStreetBeforeAdopt,
+                    address_recovered: flag === 'address_recovered' ? extracted.address_line1 : null,
+                    address_candidates: addressRecovery.candidates || [],
+                    recovery_method: addressRecovery.method || null,
+                    ...(contactDictation?.addresses?.[0]?.confirmation_question
+                      ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
+                  } : (isEmailFlag ? dictationEmailPayload : null),
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                 .ignore();
@@ -2437,6 +2632,13 @@ const CallRecordingProcessor = {
       // blocks the pipeline.
       try {
         const { normalizedEmail: correctedEmail, needsConfirmation: emailReasons } = deriveEmailReview(extracted);
+        // Same decoder-only fallback as the shadow branch: dictation evidence
+        // with no extracted email must still open a read-back triage item.
+        if (dictationEmailPayload
+            && !emailReasons.includes('email_unverified')
+            && !emailReasons.includes('email_invalid')) {
+          emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
         if (correctedEmail) {
           // Same ownership gate as the shadow-bridge site above (fails closed),
           // with the same phone/name fallback for a not-yet-linked known caller.
@@ -2466,6 +2668,9 @@ const CallRecordingProcessor = {
                   flag,
                   extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                   severity: 'advisory',
+                  // Same decoder evidence as the shadow branch — candidates +
+                  // the exact question to ask on the read-back.
+                  extraPayload: dictationEmailPayload,
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                 .ignore();
@@ -3067,6 +3272,22 @@ const CallRecordingProcessor = {
             email: leadUpdates.email ?? current?.email,
           };
           const contact = leadContactCompleteness(mergedContact);
+          // needs_confirmation is NOT a rolling snapshot like the fields
+          // around it: the reasons are read-back reminders that stand until
+          // the office confirms them, and a follow-up call that never
+          // restates the address/email must not erase the earlier call's
+          // warnings (a quick "slab or footer?" callback was wiping
+          // address_unverified/email_unverified off the lead). Union prior +
+          // this call; a recovered address supersedes its stale unverified.
+          const priorNeedsConfirmation = (() => {
+            try {
+              const data = typeof current?.extracted_data === 'string'
+                ? JSON.parse(current.extracted_data)
+                : (current?.extracted_data || {});
+              return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
+            } catch { return []; }
+          })();
+          const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);
           leadUpdates.extracted_data = JSON.stringify({
             pain_points: extracted.pain_points,
             preferred_date_time: extracted.preferred_date_time,
@@ -3074,7 +3295,7 @@ const CallRecordingProcessor = {
             call_type: extracted.call_type || null,
             ...(extracted.is_voicemail ? { voicemail: true } : {}),
             ...(contact.missing.length ? { missing_for_qualification: contact.missing } : {}),
-            ...(bridgeNeedsConfirmation.length ? { needs_confirmation: bridgeNeedsConfirmation } : {}),
+            ...(mergedNeedsConfirmation.length ? { needs_confirmation: mergedNeedsConfirmation } : {}),
           });
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;

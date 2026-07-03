@@ -47,6 +47,8 @@ CALLER NAME:
 SPELLED-OUT INPUT IS AUTHORITATIVE (names + emails):
 - When the caller spells a name or email letter-by-letter, or with phonetic markers ("B as in boy", "V as in Victor", "N as in Nancy"), the SPELLED letters are the source of truth — use them, not the word as it was transcribed phonetically. Callers spell precisely because the spoken form is easy to mishear (e.g. caller says "Smyth" but spells S-M-I-T-H -> use "Smith", and the email is jane.smith@example.com, NOT smyth). These are illustrative only — never copy this example name or email into the output.
 - When an email is described relative to the name ("first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
+- Transcription often CONCATENATES a phonetic spelling into nonsense tokens: "blikenboy, vlikenvictor" is "B like in boy, V like in Victor" — decode each such token to its letter (B, V). A run of these tokens ending in digits is a spelled email local part ("blikenboy vlikenvictor 42 at gmail.com" -> bv42@gmail.com). Decode the letters even when the words are jammed together.
+- The decoded spelled letters ALSO beat the caller's own read-back of the finished email as transcribed — the read-back is one more chance for the transcriber to mishear. When you had to decode garbled tokens, lower caller_identity confidence to 0.6 or below.
 
 PHONE:
 - phone_e164: Set to the callback number the caller states, in E.164 format (+1XXXXXXXXXX).
@@ -57,10 +59,12 @@ PHONE:
 EMAIL:
 - Only extract when the caller clearly says or spells the complete email address.
 - Uncertain, partial, or malformed emails must be null.
+- A transcribed local part that looks like a URL fragment ("www.", "http") is a mis-hearing, never a real mailbox: reconstruct it from the spelled letters, and if you cannot reconstruct it confidently, set null.
 
 ADDRESS:
 - raw_text: Verbatim address as spoken by caller.
 - Parse into street_line_1, city, state, postal_code when clearly stated.
+- If the transcribed street name is not a plausible street name (real words or a proper name — "C Phone Trail" is not), it is likely a phonetic mis-transcription: still parse it as heard (the server re-validates and recovers), but lower service_address confidence to 0.6 or below.
 - state must be "FL" or null. Do not set for non-Florida addresses.
 - county: Set if clearly identifiable from city/address. Manatee, Sarasota, Charlotte, or DeSoto only.
 - normalization_status: Always set to "not_attempted" (server handles normalization).
