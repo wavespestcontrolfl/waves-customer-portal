@@ -701,8 +701,17 @@ router.post('/assess', async (req, res, next) => {
     // Anchor the visit to the scheduled service's date (a business event in
     // Eastern time) when we have one, else "now" in ET — never the raw server
     // clock (Railway is UTC), which would flip the month/season near a boundary.
-    const visitServiceDateStr = scheduledService?.scheduled_date
-      ? String(scheduledService.scheduled_date).slice(0, 10)
+    // Normalize whether pg hands back the DATE column as a 'YYYY-MM-DD' string or a
+    // Date object — String(Date) is "Fri Jul 03 2026 …", which would fail the regex
+    // and silently fall back to today's clock (defeating the whole schedule anchor).
+    const rawScheduledDate = scheduledService?.scheduled_date;
+    const scheduledDateStr = rawScheduledDate == null
+      ? null
+      : (rawScheduledDate instanceof Date
+        ? rawScheduledDate.toISOString().slice(0, 10)
+        : String(rawScheduledDate).slice(0, 10));
+    const visitServiceDateStr = scheduledDateStr && /^\d{4}-\d{2}-\d{2}$/.test(scheduledDateStr)
+      ? scheduledDateStr
       : etDateString(new Date());
     const visitDate = /^\d{4}-\d{2}-\d{2}$/.test(visitServiceDateStr)
       ? new Date(`${visitServiceDateStr}T12:00:00-05:00`)
@@ -775,9 +784,14 @@ router.post('/assess', async (req, res, next) => {
         ? await getProtocolWindowContext(db, { serviceDate: visitDate, grassTrack: track, windowKey: assignedWindowKey })
         : null;
       const structured = protoCtx ? summarizeProtocolContext(protoCtx) : null;
-      // Only the products actually IN this visit's plan — conditional/optional
-      // rescue rows are not applied, so they must not be reported as planned.
-      const plannedProducts = (structured?.products || []).filter((p) => p.productName && p.defaultInPlan);
+      // Only claim products we're CERTAIN were applied: default-in-plan AND
+      // unconditional. A product carrying gates (ordinance / heat / disease-soil,
+      // etc.) may be blocked at closeout, so without evaluating those gates here we
+      // must not tell the vision model it was applied. Conservative by design — a
+      // gated product just omits its line rather than risk a false "was treated" cue.
+      const hasGates = (g) => (Array.isArray(g) ? g.length > 0 : !!g && typeof g === 'object' && Object.keys(g).length > 0);
+      const plannedProducts = (structured?.products || [])
+        .filter((p) => p.productName && p.defaultInPlan && !hasGates(p.gates));
       if (plannedProducts.length) {
         visionContext.productsApplied = plannedProducts.map((p) => (
           p.role ? `${p.productName} (${String(p.role).replace(/_/g, ' ')})` : p.productName
@@ -862,13 +876,20 @@ router.post('/assess', async (req, res, next) => {
     const now = new Date();
     const month = visitMonth;
     const season = lawnAssessment.getSeason(month);
+    // fetchRecentMinTempF returns the trailing window ending TODAY, so it only makes
+    // sense for a visit being analyzed same-day. For a backfilled/non-today visit,
+    // today's warm/cold nights would wrongly override the visit month's dormancy
+    // fallback — so skip the weather read and let the month bucket drive the season.
+    const visitIsToday = visitServiceDateStr === etDateString(now);
     let recentMinTempF = null;
-    try {
-      const cust = await db('customers').where({ id: customerId }).select('latitude', 'longitude').first();
-      if (cust && Number.isFinite(Number(cust.latitude)) && Number.isFinite(Number(cust.longitude))) {
-        recentMinTempF = await fetchRecentMinTempF({ latitude: Number(cust.latitude), longitude: Number(cust.longitude) });
-      }
-    } catch (err) { logger.warn(`[lawn-assessment] recent-temp lookup failed: ${err.message}`); }
+    if (visitIsToday) {
+      try {
+        const cust = await db('customers').where({ id: customerId }).select('latitude', 'longitude').first();
+        if (cust && Number.isFinite(Number(cust.latitude)) && Number.isFinite(Number(cust.longitude))) {
+          recentMinTempF = await fetchRecentMinTempF({ latitude: Number(cust.latitude), longitude: Number(cust.longitude) });
+        }
+      } catch (err) { logger.warn(`[lawn-assessment] recent-temp lookup failed: ${err.message}`); }
+    }
     const adjustedScores = Number.isFinite(recentMinTempF)
       ? seasonAwareAdjustment(displayScores, { month, recentMinTempF })
       : lawnAssessment.applySeasonalAdjustment(displayScores, month);
