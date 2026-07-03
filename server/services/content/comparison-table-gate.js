@@ -297,49 +297,80 @@ function evaluateProse(draft, body) {
 
   const known = new Set();
   const unknown = new Set();
-  const candidates = new Set();
+  const genericNames = new Set();
   for (const m of competitorFacts.findBusinessMentions(nameScanText)) {
     (m.inAllowlist ? known : unknown).add(m.name);
   }
   for (const m of nameScanText.matchAll(providerNameRe('g'))) {
     const nm = m[1].trim();
-    if (!OWN_BRAND_RE.test(nm)) candidates.add(nm);
+    if (!OWN_BRAND_RE.test(nm)) genericNames.add(nm);
   }
   for (const m of nameScanText.matchAll(legalEntityRe('g'))) {
     const nm = m[1].trim();
-    if (!OWN_BRAND_RE.test(nm)) candidates.add(nm);
+    if (!OWN_BRAND_RE.test(nm)) genericNames.add(nm);
   }
-  for (const n of known) candidates.add(n);
-  for (const n of unknown) candidates.add(n);
+  const curatedNames = [...known, ...unknown];
+  for (const nm of curatedNames) genericNames.delete(nm);
 
-  if (candidates.size) {
-    const names = [...candidates];
-    const nearCandidate = (idx, len) => {
+  // Curated competitor names: bare PROXIMITY is enough (a real brand plus
+  // negativity nearby is legal surface even without tidy grammar — mirrors
+  // the comparison path's prose scan). Generic business-SHAPED phrases need
+  // the negativity DIRECTED at the name — name-as-subject before a negative
+  // predicate, or the negative term immediately modifying the name. Bare
+  // proximity false-positives on titles like "Sarasota Pest Control Guide:
+  // Worst Roach Problems", where the negative describes the pest problem.
+  if (curatedNames.length) {
+    const nearCurated = (idx, len) => {
       const window = nameScanText
         .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
         .toLowerCase()
         .replace(/\s+/g, ' ');
-      return names.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
+      return curatedNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
     };
-    // Disparaging term OR negative adjective near a business name → P0.
     const p0Re = new RegExp(`${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b`, 'gi');
     let am;
     while ((am = p0Re.exec(scanText)) !== null) {
-      if (nearCandidate(am.index, am[0].length)) {
+      if (nearCurated(am.index, am[0].length)) {
         findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
-          `Draft disparages a named business ("${am[0].trim()}" near a business name). State neutral attributes only — in prose, the title, and the meta.`));
+          `Draft disparages a named competitor ("${am[0].trim()}" near a competitor name). State neutral attributes only — in prose, the title, and the meta.`));
         break;
       }
     }
-    // Negative service-reliability claim near a business name → P1 review.
     const negRe = new RegExp(PROVIDER_NEGATIVE_RE.source, 'gi');
     let nm;
     while ((nm = negRe.exec(scanText)) !== null) {
-      if (nearCandidate(nm.index, nm[0].length)) {
+      if (nearCurated(nm.index, nm[0].length)) {
         findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
-          `Draft makes a negative service-reliability claim near a named business ("${nm[0].trim()}"). Routed to human review — state neutral, verifiable attributes only.`));
+          `Draft makes a negative service-reliability claim near a named competitor ("${nm[0].trim()}"). Routed to human review — state neutral, verifiable attributes only.`));
         break;
       }
+    }
+  }
+
+  for (const name of genericNames) {
+    const escaped = escapeForNameRe(name);
+    // Name-as-subject: "<Name> [word word] is/never/keeps … <negative>" —
+    // within the same sentence, a linking/behavioral verb between the name
+    // and the negative term ties the negativity to the business.
+    const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seems?|looks?|sounds?|remains?|stays?|has(?:\\s+been)?|have(?:\\s+been)?|will|would|can(?:not)?|can\'?t|won\'?t|never|always|keeps?|kept|tends?|tend';
+    const directedP0 = new RegExp(
+      `${escaped}(?:'s)?\\b(?:\\s+\\w+){0,2}\\s+(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+    );
+    // Negative adjective immediately modifying the name ("the dishonest
+    // Acme Pest Solutions").
+    const negBeforeName = new RegExp(`(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
+    if (directedP0.test(nameScanText) || negBeforeName.test(nameScanText)) {
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `Draft directs disparaging language at "${name}". State neutral attributes only — in prose, the title, and the meta.`));
+      break;
+    }
+    // Service-reliability negative predicated on the name within the same
+    // sentence ("<Name> never answers the phone") → P1 review.
+    const directedReliability = new RegExp(`${escaped}(?:'s)?\\b[^.!?\\n]{0,60}(?:${PROVIDER_NEGATIVE_RE.source})`, 'i');
+    if (directedReliability.test(nameScanText)) {
+      findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
+        `Draft makes a negative service-reliability claim about "${name}". Routed to human review — state neutral, verifiable attributes only.`));
+      break;
     }
   }
 
@@ -354,6 +385,14 @@ function evaluateProse(draft, body) {
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
   return { pass, findings, requiresHumanReview: false };
+}
+
+// Escape a detected business name for use inside a regex, tolerating the
+// collapsed whitespace stripQuotesForNames leaves behind.
+function escapeForNameRe(name) {
+  return String(name || '')
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\s+/g, '\\s+');
 }
 
 /**

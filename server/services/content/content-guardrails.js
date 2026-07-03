@@ -160,7 +160,36 @@ function normalizeHost(host) {
   return String(host || '').trim().toLowerCase().replace(/\.$/, '').replace(/^www\./, '');
 }
 
-function allowedLinkHosts() {
+// Curated citation hosts for OPERATOR-directed sourcing. Intercept-brief
+// `source_notes` direct the writer to LOCATE sources of exactly these kinds
+// ("UF/IFAS for agronomic claims", regulators, consumer-protection outlets,
+// "Orkin published terms/plan pages") — their hosts can't be known per-URL at
+// gate time, so this curated set (plus the curated competitors' own sites,
+// below) is what "located source" may resolve to. Operator-provenance only:
+// mined drafts never get these.
+const OPERATOR_CITATION_HOSTS = [
+  'ufl.edu', 'epa.gov', 'cdc.gov', 'fdacs.gov', 'myfloridalicense.com',
+  'consumeraffairs.com', 'bbb.org', 'archive.org', 'web.archive.org',
+];
+
+// Hosts of the curated competitor-facts `source` URLs — the exact pages an
+// operator directive like "Orkin published terms/plan pages" resolves to.
+function curatedCompetitorSourceHosts() {
+  const hosts = new Set();
+  try {
+    const { COMPETITORS } = require('./competitor-facts');
+    for (const c of Array.isArray(COMPETITORS) ? COMPETITORS : []) {
+      for (const attr of Object.values(c?.attributes || {})) {
+        const src = attr?.source;
+        if (!src) continue;
+        try { hosts.add(normalizeHost(new URL(src).hostname)); } catch { /* not a URL */ }
+      }
+    }
+  } catch { /* competitor-facts unavailable — fall through to the base allowlist */ }
+  return hosts;
+}
+
+function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const hosts = new Set();
   for (const d of HUB_DOMAINS) hosts.add(normalizeHost(d));
   for (const d of SPOKE_SITE_KEYS) hosts.add(normalizeHost(d));
@@ -168,7 +197,28 @@ function allowedLinkHosts() {
     const h = normalizeHost(d);
     if (h) hosts.add(h);
   }
+  // Operator-mandated must-link citations: the brief's own required_sources
+  // URLs are binding writer instructions ("every source below must be linked
+  // in the body"), so their hosts are allowed for that draft.
+  for (const u of Array.isArray(requiredSourceUrls) ? requiredSourceUrls : []) {
+    try { hosts.add(normalizeHost(new URL(String(u)).hostname)); } catch { /* skip non-URLs */ }
+  }
+  if (operatorCitations) {
+    for (const h of OPERATOR_CITATION_HOSTS) hosts.add(normalizeHost(h));
+    for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
+  }
   return hosts;
+}
+
+// Exact host or subdomain of an allowed host ("entnemdept.ufl.edu" is allowed
+// by "ufl.edu"; "evil-ufl.edu" is not — the dot prefix prevents suffix abuse).
+function hostAllowed(host, allowed) {
+  if (!host) return false;
+  if (allowed.has(host)) return true;
+  for (const a of allowed) {
+    if (a && host.endsWith(`.${a}`)) return true;
+  }
+  return false;
 }
 
 // Absolute URLs anywhere in the text — markdown links/images, raw HTML
@@ -176,26 +226,29 @@ function allowedLinkHosts() {
 const ABSOLUTE_URL_RE = /\bhttps?:\/\/[^\s<>()"'\]]+/gi;
 // href/src carrying an executable or data scheme — never valid in a draft.
 const UNSAFE_SCHEME_HREF_RE = /\b(?:href|src)\s*=\s*["']?\s*(?:javascript|data|vbscript|file)\s*:/i;
+// The same unsafe schemes as a Markdown/MDX link destination — `[x](javascript:…)`
+// has no href= text and no https?:// shape, so the two scanners above miss it.
+const UNSAFE_SCHEME_MD_DEST_RE = /\]\(\s*(?:javascript|data|vbscript|file)\s*:/i;
 // Protocol-relative URL (//host/path) — scheme-less external reference that
 // bypasses an https?:// scan. Requires a dotted host with a TLD so prose
 // slashes ("and//or", path fragments) don't trip it.
 const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=])\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?=[/\s"')\]]|$)/i;
 const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
 
-function externalLinkFinding(text) {
+function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = String(text || '');
   if (!body) return null;
-  if (UNSAFE_SCHEME_HREF_RE.test(body)) {
-    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains an href/src with an executable scheme (javascript:/data:) — remove it.');
+  if (UNSAFE_SCHEME_HREF_RE.test(body) || UNSAFE_SCHEME_MD_DEST_RE.test(body)) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a link with an executable scheme (javascript:/data:) — remove it.');
   }
-  const allowed = allowedLinkHosts();
+  const allowed = allowedLinkHosts({ operatorCitations, requiredSourceUrls });
   const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
   let m;
   while ((m = urlRe.exec(body)) !== null) {
     let host = null;
     try { host = new URL(m[0]).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
-    if (!norm || !allowed.has(norm)) {
+    if (!hostAllowed(norm, allowed)) {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || m[0].slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
     }
   }
@@ -310,8 +363,13 @@ function keywordStuffingFinding(body, primaryKeyword) {
  * operatorFaqException: narrow opt-in skip of the FAQ-blocked-service P0 for
  *   operator-authored intercept briefs whose manifest mandates an FAQ (see
  *   the inline note at the call below). Default false — full enforcement.
+ * requiredSourceUrls: operator-brief must-link citation URLs — their hosts are
+ *   allowed for this draft (the brief BINDS the writer to link them in-body).
+ * operatorCitations: operator brief carries source_notes directives (writer
+ *   locates the sources itself) — additionally allow the curated citation +
+ *   competitor-source hosts. Both default off: mined drafts stay internal-only.
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -333,7 +391,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     priceFinding(publishableText),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
-    externalLinkFinding(publishableText),
+    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
     // Brand-token covers body AND meta too, but the hub-anchor exemption applies
     // ONLY to body markdown — editable meta is scanned strictly (a literal hub
     // brand in a spoke's title/description is a real leak, not an anchor).
@@ -365,5 +423,5 @@ module.exports = {
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS },
 };

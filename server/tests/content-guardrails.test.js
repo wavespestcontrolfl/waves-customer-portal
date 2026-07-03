@@ -335,3 +335,47 @@ describe('outbound-link gate (DISALLOWED_EXTERNAL_LINK)', () => {
     }
   });
 });
+
+describe('outbound-link gate: operator-intercept citation exceptions (Codex round 1)', () => {
+  test('required_sources hosts are allowed for that draft (binding must-link citations)', () => {
+    const r = guardrails.evaluate(
+      { body: 'See [the study](https://news.example.org/study-2026) for details.' },
+      { requiredSourceUrls: ['https://news.example.org/study-2026'] },
+    );
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+  test('operatorCitations allows curated citation hosts, subdomains included, and curated competitor source hosts', () => {
+    for (const body of [
+      'Per [UF/IFAS](https://entnemdept.ufl.edu/creatures/) research.',
+      'Per [Orkin\'s published terms](https://www.orkin.com/terms) as of June 2026.',
+      'Per [FDACS](https://www.fdacs.gov/Consumer-Resources) guidance.',
+    ]) {
+      const r = guardrails.evaluate({ body }, { operatorCitations: true });
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    }
+  });
+  test('operatorCitations still blocks non-curated hosts and suffix-spoofed domains', () => {
+    expect(guardrails.evaluate({ body: 'Buy [links](https://spam.example/x).' }, { operatorCitations: true })
+      .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+    expect(guardrails.evaluate({ body: 'See https://evil-ufl.edu/x now.' }, { operatorCitations: true })
+      .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+  });
+  test('mined drafts (no operator flags) stay internal-only — UF/IFAS still blocks', () => {
+    const r = guardrails.evaluate({ body: 'Per [UF/IFAS](https://entnemdept.ufl.edu/creatures/).' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+});
+
+describe('outbound-link gate: unsafe schemes in Markdown destinations (Codex round 1)', () => {
+  test('markdown links with javascript:/data: destinations are P0 (no href= text to match)', () => {
+    for (const body of ['Click [here](javascript:alert(1)) now.', 'See [this](data:text/html;base64,xyz) file.']) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+  test('relative markdown destinations are unaffected', () => {
+    const r = guardrails.evaluate({ body: 'See [pricing](/pest-control-calculator/) today.' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});

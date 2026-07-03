@@ -603,3 +603,28 @@ describe('table-less drafts: named-target legal scan (regression — these previ
     expect(gate.evaluate({ body: '' }).pass).toBe(true);
   });
 });
+
+describe('table-less drafts: negativity must be DIRECTED at generic business names (Codex round 1)', () => {
+  test('problem-framing negativity near a business-shaped phrase does NOT block', () => {
+    // "Worst" describes the roach problem, not a provider — bare proximity
+    // previously P0\'d this exact title shape.
+    const r = gate.evaluate({
+      body: 'How to handle roaches in your kitchen this summer.',
+      frontmatter: { title: 'Sarasota Pest Control Guide: Worst Roach Problems' },
+    });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('name-as-subject disparagement still blocks', () => {
+    const r = gate.evaluate({ body: 'Acme Pest Solutions is dishonest and will overcharge you.' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+  test('negative adjective immediately modifying the name still blocks', () => {
+    const r = gate.evaluate({ body: 'Avoid the dishonest Acme Pest Solutions crew at all costs.' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+  test('curated competitor names keep the stricter proximity scan', () => {
+    const r = gate.evaluate({ body: 'Many say the worst experience around here has been Terminix in recent years.' }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+});

@@ -586,11 +586,28 @@ class AutonomousRunner {
       const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
       const baseService = opp.service || brief.service || null;
       const guardService = faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService;
+      // Operator-intercept sourcing exception for the outbound-link guard:
+      // the seeded brief BINDS the writer to link its required_sources
+      // in-body (intercept-brief-seeder: "every source below must be linked
+      // in the body"), and source_notes direct it to LOCATE further sources
+      // (UF/IFAS, regulators, curated competitors' own pages). Bucket AND
+      // brief must agree — mined opportunities can never set these, so
+      // mined drafts stay internal-links-only.
+      const linkOperatorBrief = opp.bucket === OPERATOR_INTERCEPT_BUCKET
+        ? (brief?.voice_constraints?.operator_brief || null)
+        : null;
+      const requiredSourceUrls = Array.isArray(linkOperatorBrief?.required_sources)
+        ? linkOperatorBrief.required_sources
+        : [];
+      const operatorCitations = Array.isArray(linkOperatorBrief?.source_notes)
+        && linkOperatorBrief.source_notes.length > 0;
       const guardResult = contentGuardrails.evaluate(draft, {
         service: guardService,
         primaryKeyword: brief.target_keyword || null,
         domains: guardDomains,
         operatorFaqException,
+        requiredSourceUrls,
+        operatorCitations,
       });
       run.content_guardrails_result = guardResult;
       if (!guardResult.pass) {
