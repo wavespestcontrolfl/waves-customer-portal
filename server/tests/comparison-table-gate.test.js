@@ -707,6 +707,15 @@ describe('table-less drafts: operator-authorized competitor naming (Codex round 
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
   });
+  test('non-titlecase provider names still get the negativity scan (Codex round 8)', () => {
+    const r = gate.evaluate({ body: 'acme pest solutions is dishonest and overpriced.' });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    // lowercase category prose stays excluded, exactly like its Title Case form
+    const clean = gate.evaluate({ body: 'a local pest control company can quote you same-day in most cases.' });
+    expect(clean.pass).toBe(true);
+    expect(clean.findings).toHaveLength(0);
+  });
   test('a detection-only alias in the brief authorizes the FULLER surface form (word-boundary containment, Codex round 7)', () => {
     // "Aptive" (brief) and "Aptive Environmental" (draft) canonicalize to
     // DIFFERENT unknown names — exact-string matching sent the operator's

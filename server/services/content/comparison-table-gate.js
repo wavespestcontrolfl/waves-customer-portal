@@ -360,13 +360,33 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   for (const m of competitorFacts.findBusinessMentions(nameScanText)) {
     (m.inAllowlist ? known : unknown).add(m.name);
   }
-  for (const m of nameScanText.matchAll(providerNameRe('g'))) {
-    const nm = m[1].trim();
-    if (!OWN_BRAND_RE.test(nm)) genericNames.add(nm);
+  // Case-INSENSITIVE provider/legal-entity passes: a disparaged target
+  // written lowercase or all-caps ("acme pest solutions is dishonest")
+  // otherwise never enters genericNames and the negativity scan passes.
+  // The GENERIC_LEAD_EXCLUSIONS inside the patterns match case-insensitively
+  // too, so ordinary lowercase category prose ("local pest control company")
+  // stays excluded exactly as its Title Case form is. With /i, lowercase
+  // words become valid NAME tokens, so a capture can swallow its own
+  // preceding negativity ("Avoid the dishonest Acme Pest Solutions") — the
+  // capture is therefore SPLIT at its last interior negativity token: the
+  // name becomes what follows it, and the negativity sits back OUTSIDE the
+  // name where the neg-before-name directed check sees it.
+  const NEG_INSIDE_RE_SRC = `(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+`;
+  const splitAtNegativity = (name) => {
+    const inner = new RegExp(NEG_INSIDE_RE_SRC, 'gi');
+    const nm = String(name).trim();
+    let cut = -1;
+    let mm;
+    while ((mm = inner.exec(nm)) !== null) cut = mm.index + mm[0].length;
+    return cut >= 0 ? nm.slice(cut).trim() : nm;
+  };
+  for (const m of nameScanText.matchAll(providerNameRe('gi'))) {
+    const nm = splitAtNegativity(m[1]);
+    if (nm && !OWN_BRAND_RE.test(nm)) genericNames.add(nm);
   }
-  for (const m of nameScanText.matchAll(legalEntityRe('g'))) {
-    const nm = m[1].trim();
-    if (!OWN_BRAND_RE.test(nm)) genericNames.add(nm);
+  for (const m of nameScanText.matchAll(legalEntityRe('gi'))) {
+    const nm = splitAtNegativity(m[1]);
+    if (nm && !OWN_BRAND_RE.test(nm)) genericNames.add(nm);
   }
   const curatedNames = [...known, ...unknown];
   for (const nm of curatedNames) genericNames.delete(nm);

@@ -534,6 +534,19 @@ describe('outbound-link gate: angle-bracket protocol-relative, entity-encoded sc
   });
 });
 
+describe('quoted prices + encoded mailto header names (Codex round 8)', () => {
+  test('quoted amounts are hard prices too', () => {
+    expect(guardrails.findHardcodedPrice('The plan is "$9" per month flat.')).toBeTruthy();
+    expect(guardrails.findHardcodedPrice('He quoted "$1,200" for the bond.')).toBeTruthy();
+    // calculator framing still exempts
+    expect(guardrails.findHardcodedPrice('Use the calculator to estimate — plans from $45 depend on size.')).toBeNull();
+  });
+  test('percent-encoded mailto header NAMES are decoded before the to/cc/bcc check', () => {
+    const r = guardrails.evaluate({ body: 'Email [x](mailto:info@wavespestcontrol.com?b%63c=attacker@gmail.com).' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+});
+
 describe('outbound-link gate: encoded mailto separators, IP/localhost hosts, semicolonless entities (Codex round 7)', () => {
   test('percent-encoded separators in the mailto address are decoded before allowlisting', () => {
     const spoof = guardrails.evaluate({ body: 'Email [x](mailto:attacker@gmail.com%2Cinfo@wavespestcontrol.com).' }, {});

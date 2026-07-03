@@ -224,6 +224,13 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
       body: 'We treat homes across Boca Grande and Sun City Center every quarter, with same-day service in Englewood.',
     }).ok).toBe(true);
   });
+  test('redaction: compact E.164 customer phones are caught (Codex round 8 — 11-digit runs had no interior boundary to match)', () => {
+    const r = checkRedactionPassed({ body: 'Call our Sarasota line at (941) 297-2606 or the customer at +19415551234.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('non_business_phone_number_in_body:9415551234');
+    // Waves' own E.164 form passes
+    expect(checkRedactionPassed({ body: 'Tap +19412972606 to call our Sarasota office today for help.' }).ok).toBe(true);
+  });
 });
 
 // ── refresh checks ──────────────────────────────────────────────────

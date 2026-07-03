@@ -54,7 +54,7 @@ const PATTERNS = [
   {
     type: 'address',
     token: '[address]',
-    re: /\b\d{1,6}\s+(?!(?:minutes?|hours?|seconds?|days?|weeks?|months?|years?|miles?|blocks?|steps?|feet|foot|stars?|points?|percent|dollars?|bucks?)\b)([A-Za-z][a-zA-Z]+\s+){1,4}(St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Cir|Circle|Pl|Place|Pkwy|Parkway|Hwy|Highway|Ter|Terrace|Trl|Trail)\.?\b/gi,
+    re: /\b\d{1,6}\s+(?!(?:minutes?|hours?|seconds?|days?|weeks?|months?|years?|miles?|blocks?|steps?|feet|foot|stars?|points?|percent|dollars?|bucks?)\b)((?:\d{1,4}(?:st|nd|rd|th)|[A-Za-z][a-zA-Z]+)\s+){1,4}(St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Cir|Circle|Pl|Place|Pkwy|Parkway|Hwy|Highway|Ter|Terrace|Trl|Trail)\.?\b/gi,
   },
 
   // Long URLs — anything > 40 chars likely has tracking / query PII.
@@ -115,26 +115,36 @@ const NAME_ALLOWLIST = new Set([
   'Virginia', 'Jose', 'Jacob', 'Alvarado', 'Heaton', // staff
 ]);
 
-// Every service-area name from the canonical CITY_TO_LOCATION map is place
-// furniture, never a customer name — "Waves Pest Control serves Punta
+// Multi-word service-area names from the canonical CITY_TO_LOCATION map are
+// place furniture, never a customer name — "Waves Pest Control serves Punta
 // Gorda" must not produce a name finding (the hand-list above predates the
-// southern/Hillsborough reach: Punta Gorda, Boca Grande, Sun City Center,
-// Englewood, …). Config-unavailable just leaves the hand-list (fail-closed
-// direction: more redaction, never less).
+// southern/Hillsborough reach). Matched as adjacent word PAIRS (covering
+// 3-word areas like Sun City Center via their bigrams), NOT as individual
+// words: allowlisting each word would make the detector skip any customer
+// who shares a name with a single-word city — "Hi, this is Laurel Smith"
+// must still redact even though Laurel is a service area. Config-unavailable
+// leaves the pair set empty (fail-closed direction: more redaction, never
+// less).
+const CITY_PAIR_ALLOWLIST = new Set();
 try {
   const { CITY_TO_LOCATION } = require('../../config/locations');
   for (const city of Object.keys(CITY_TO_LOCATION || {})) {
-    for (const word of city.split(/\s+/)) {
-      if (word.length >= 2) NAME_ALLOWLIST.add(word[0].toUpperCase() + word.slice(1));
+    const words = city.trim().toLowerCase().split(/\s+/);
+    for (let i = 0; i + 1 < words.length; i++) {
+      CITY_PAIR_ALLOWLIST.add(`${words[i]} ${words[i + 1]}`);
     }
   }
-} catch { /* locations unavailable — keep the hand-list */ }
+} catch { /* locations unavailable — pair set stays empty */ }
 
 const NAME_ALLOWLIST_LOWER = new Set([...NAME_ALLOWLIST].map((w) => w.toLowerCase()));
 
 function looksLikeFalsePositiveName(first, last) {
   if (!first || !last) return true;
   if (NAME_ALLOWLIST.has(first) || NAME_ALLOWLIST.has(last)) return true;
+  // A capitalized pair that IS a service-area name ("Punta Gorda", or a
+  // bigram of a longer one like "Sun City" / "City Center") is place
+  // furniture, not a person.
+  if (CITY_PAIR_ALLOWLIST.has(`${first} ${last}`.toLowerCase())) return true;
   // All-caps single words are usually abbreviations, not names.
   if (first === first.toUpperCase() || last === last.toUpperCase()) return true;
   // Length sanity.

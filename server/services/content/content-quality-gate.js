@@ -547,11 +547,13 @@ function stripWavesOfficeAddresses(text) {
 
 function checkRedactionPassed(draft) {
   const body = String(draft.body || '');
-  // Broad phone regex covers both `941-555-1234` and `(941) 555-1234`
-  // (and a few common variants). Previous regex missed parenthesized
-  // formats, which let parenthesized customer numbers bypass the
-  // redaction hard check entirely.
-  const phoneRe = /\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
+  // Broad phone regex covers `941-555-1234`, `(941) 555-1234`, and compact
+  // 11-digit / E.164 forms (`+19415551234`, `19415551234`) — the earlier
+  // 10-digit-only pattern could not match an 11-digit run (no interior
+  // word boundary), so a customer number pasted in E.164 form sailed
+  // through. The digit lookbehind keeps mid-run starts out, so long
+  // numeric IDs still don't false-match.
+  const phoneRe = /(?<!\d)\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
   const phoneMatches = body.match(phoneRe) || [];
   for (const raw of phoneMatches) {
     const digits = raw.replace(/\D/g, '');

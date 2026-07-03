@@ -260,6 +260,21 @@ describe('lowercase transcripts (regression — the heuristics were capitalizati
     expect(b.text).toContain('[name]');
     expect(b.text).not.toContain('smith');
   });
+  test('numbered streets are addresses too (Codex round 8 — "123 5th Ave" was invisible)', () => {
+    for (const t of ['John lives at 123 5th Ave in Venice.', 'She is at 4867 1st Street near downtown.']) {
+      const r = redact(t);
+      expect(r.findings.some((f) => f.type === 'address')).toBe(true);
+      expect(r.text).toContain('[address]');
+    }
+  });
+  test('multi-word service areas are place PAIRS, not per-word allowlist (Codex round 8)', () => {
+    // The pair form is furniture...
+    expect(redact('Waves Pest Control serves Punta Gorda and Sun City Center.').findings).toEqual([]);
+    // ...but a person sharing a single-word city name still redacts.
+    const laurel = redact('Hi, this is Laurel Smith calling about ants.');
+    expect(laurel.findings.some((f) => f.type === 'name')).toBe(true);
+    expect(laurel.text).not.toContain('Laurel Smith');
+  });
   test('lowercase name signal ignores non-name continuations and allowlisted tokens', () => {
     expect(redact('my name is not on the account but my husband handles it').text).not.toContain('[name]');
     // staff/owner names stay (allowlist, case-insensitive)

@@ -45,7 +45,10 @@ function finding(severity, code, message) {
 // Comma-grouped thousands MUST be covered — a bare \d{2,5} stops at the comma,
 // so "$1,200 per year" (exactly the fabricated-price shape for termite bonds /
 // annual plans) produced no finding at all.
-const PRICE_RE_SRC = '(^|[\\s(])\\$\\s?(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\b|\\b(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\s+(?:dollars|bucks)\\b';
+// Prefix admits quotes (straight and curly) — generated copy routinely
+// QUOTES the amount ("$1,200"), and a start/whitespace/paren-only prefix
+// let exactly the fabricated-price shapes this covers slip both gates.
+const PRICE_RE_SRC = '(^|[\\s("\'“‘])\\$\\s?(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\b|\\b(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\s+(?:dollars|bucks)\\b';
 
 /**
  * findHardcodedPrice(text) → the offending price string, or null. Applies the
@@ -362,7 +365,14 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     for (const kv of String(queryPart || '').split('&')) {
       if (!kv) continue;
       const eq = kv.indexOf('=');
-      const key = (eq === -1 ? kv : kv.slice(0, eq)).trim().toLowerCase();
+      // Decode the header NAME like the value below — mail clients decode
+      // "?b%63c=" to bcc, so a raw-key compare would skip the recipient
+      // check entirely. Undecodable fails closed.
+      let key = (eq === -1 ? kv : kv.slice(0, eq)).trim();
+      try { key = decodeURIComponent(key); } catch {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable query header ("${key.slice(0, 40)}") — remove it.`);
+      }
+      key = key.trim().toLowerCase();
       if (key !== 'to' && key !== 'cc' && key !== 'bcc') continue; // subject/body etc. carry no recipients
       let value = eq === -1 ? '' : kv.slice(eq + 1);
       try { value = decodeURIComponent(value); } catch {
