@@ -44,6 +44,11 @@ describe('internals', () => {
     expect(VIDEO_CHAIN[0]).toMatch(/fast/);
   });
 
+  test('default poll budget covers Veo documented 6-minute peak latency', () => {
+    // Abandoning a started operation still pays for it (docs: up to 6min peak).
+    expect(VideoGenerator._internals.DEFAULT_TIMEOUT_MS).toBeGreaterThanOrEqual(6 * 60 * 1000);
+  });
+
   test('extractVideo accepts both response spellings and inline bytes', () => {
     expect(extractVideo(OP_DONE)).toEqual({ uri: 'https://files.test/video-abc' });
     expect(extractVideo({

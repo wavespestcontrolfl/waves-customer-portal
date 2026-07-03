@@ -19,11 +19,14 @@ const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 // Fast first (cost + latency); QUALITY only reached if the fast ID is gone.
 const VIDEO_CHAIN = [GEMINI_VIDEO_FAST, GEMINI_VIDEO_QUALITY];
 
-// Veo generations run 30s–3min; Reels containers add their own wait on the
-// publish side, so keep this bounded well under the cron/request budget.
+// Google documents Veo request latency up to 6 MINUTES at peak
+// (ai.google.dev/gemini-api/docs/veo#limitations) — abandoning a started
+// operation still pays for it, so the budget must cover the documented peak.
+// Generation runs on the 6:30 AM cron; a manual admin "Run Draft" may outlive
+// its proxy timeout, but the run completes server-side and lands in the queue.
 const DEFAULT_TIMEOUT_MS = Number(process.env.SOCIAL_VIDEO_TIMEOUT_MS) > 0
   ? Number(process.env.SOCIAL_VIDEO_TIMEOUT_MS)
-  : 4 * 60 * 1000;
+  : 6.5 * 60 * 1000;
 const POLL_INTERVAL_MS = 10 * 1000;
 
 function sleep(ms) {

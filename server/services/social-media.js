@@ -1367,19 +1367,21 @@ const SocialMediaService = {
 
         if (p.key === 'facebook') {
           // The image is OPTIONAL for Facebook (text+link /feed posts fine). If
-          // the media path fails — Meta rejected or couldn't fetch the video/
-          // image — fall back to a text/link /feed post instead of dropping a
-          // post that would otherwise publish. Mirrors the GBP media-fallback.
+          // the photo path fails — Meta rejected or couldn't fetch the image —
+          // fall back to a text/link /feed post instead of dropping a post that
+          // would otherwise publish. Mirrors the GBP media-fallback below.
+          // A VIDEO gets NO text fallback (same rule as the IG Reel branch): the
+          // admin approved a video, and a silent text post would also count as a
+          // platform success and let the approval finalize as "published" with
+          // no video anywhere. A video failure surfaces as a failure so the
+          // draft stays retryable.
           let r;
           try {
             r = hasVideo
               ? await withRetry(() => postToFacebookVideo(content, link, videoUrl), { label: 'facebook' })
               : await withRetry(() => postToFacebook(content, link, generatedImageUrl), { label: 'facebook' });
           } catch (fbErr) {
-            if (hasVideo && /Facebook video API/i.test(String(fbErr.message))) {
-              logger.warn(`[social] Facebook video post failed (${fbErr.message}); retrying text-only`);
-              r = await withRetry(() => postToFacebook(content, link, null), { label: 'facebook' });
-            } else if (!hasVideo && generatedImageUrl && /Facebook photo API/i.test(String(fbErr.message))) {
+            if (!hasVideo && generatedImageUrl && /Facebook photo API/i.test(String(fbErr.message))) {
               logger.warn(`[social] Facebook photo post failed (${fbErr.message}); retrying text-only`);
               r = await withRetry(() => postToFacebook(content, link, null), { label: 'facebook' });
             } else {

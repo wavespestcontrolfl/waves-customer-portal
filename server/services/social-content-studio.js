@@ -733,8 +733,11 @@ function hasVideoCapableChannel(channels) {
   const list = Array.isArray(channels) ? channels : [];
   const fbReady = SOCIAL_FLAGS.facebookEnabled
     && !!process.env.FACEBOOK_ACCESS_TOKEN && !!process.env.FACEBOOK_PAGE_ID;
-  const igReady = SOCIAL_FLAGS.instagramEnabled
-    && !!process.env.FACEBOOK_ACCESS_TOKEN && !!process.env.INSTAGRAM_ACCOUNT_ID;
+  // publishToAll's igReady is derived from fbReady (FACEBOOK_PAGE_ID included)
+  // — IG Graph publishing rides the page credentials — so mirror that exactly:
+  // an IG-only config missing the page id must not buy a clip publish will skip.
+  const igReady = fbReady
+    && SOCIAL_FLAGS.instagramEnabled && !!process.env.INSTAGRAM_ACCOUNT_ID;
   return (list.includes('facebook') && fbReady) || (list.includes('instagram') && igReady);
 }
 
@@ -1544,7 +1547,16 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       postId: run.social_media_post_id || null,
     });
 
-    const published = publishResult.success && !SOCIAL_FLAGS.dryRun;
+    // A VIDEO approval only counts as published if the video itself posted
+    // somewhere (an IG Reel or FB video success). Without this, a GBP image
+    // success alone would finalize the run as "published" while no platform
+    // carries the Reel the admin actually approved — unretryable and the audit
+    // row would imply the video shipped.
+    const videoPosted = !isVideoVariant
+      || (publishResult.platforms || []).some(
+        (p) => p?.success && (p.mediaType === 'reel' || p.mediaType === 'video')
+      );
+    const published = publishResult.success && videoPosted && !SOCIAL_FLAGS.dryRun;
 
     // Consume the review from the candidate queue only after a REAL publish —
     // same invariants as the autonomous publish path (never on dry-run/failure,
@@ -1571,7 +1583,9 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       templateKey: preview.visual?.templateKey,
       creative: chosen.conceptKey ? { conceptKey: chosen.conceptKey, sceneModel: chosen.sceneModel || null } : preview.visual?.creative,
       variants,
-      videoUrl: chosenVideoUrl,
+      // Only stamp the Reel onto the run's visual when it actually shipped —
+      // the audit row renders visual.videoUrl as "the published Reel".
+      videoUrl: published ? chosenVideoUrl : null,
     });
     const updated = await updateAutonomousRun(run.id, {
       status: published ? 'published' : 'draft_created',
@@ -1580,7 +1594,9 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       socialMediaPostId: run.social_media_post_id,
       skipReason: published ? null
         : SOCIAL_FLAGS.dryRun ? 'approve ran in dry-run mode — not published'
-        : 'approve publish failed: all platforms skipped or failed',
+        : publishResult.success && !videoPosted
+          ? 'approve publish incomplete: no platform posted the video — check platform results before retrying (non-video channels may already have posted)'
+          : 'approve publish failed: all platforms skipped or failed',
     });
 
     return { ok: true, published, dryRun: SOCIAL_FLAGS.dryRun, publishResult, run: updated };
