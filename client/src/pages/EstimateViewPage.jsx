@@ -2949,11 +2949,9 @@ export default function EstimateViewPage() {
             </div>
           ) : null}
 
-          {/* Multi-service plans render side by side (owner directive) —
+          {/* Multi-service plans stack vertically (owner directive) —
               each service keeps its own boxed price section. */}
-          <div style={services.length > 1
-            ? { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, alignItems: 'start' }
-            : undefined}>
+          <div>
           {services.map((section) => {
             const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
               ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
