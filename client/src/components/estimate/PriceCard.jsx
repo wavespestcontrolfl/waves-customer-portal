@@ -213,11 +213,13 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </div>
       ) : null}
 
-      {!quoteRequired && annual ? (
+      {/* Standard exact prices show no annual figure (owner directive
+          2026-07-03) — only the site-confirmation commercial range keeps
+          its annual band, since the ranged /mo figure alone understates
+          the commitment being confirmed on site. */}
+      {!quoteRequired && annual && showLowConfidenceRange ? (
         <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8 }}>
-          {showLowConfidenceRange
-            ? `${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`
-            : `${fmtMoney(annual)} / year`}
+          {`${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`}
         </div>
       ) : null}
 

@@ -58,8 +58,10 @@ export default function FrequencySlider({ frequencies, selected, onChange, disab
       tabIndex={disabled ? -1 : 0}
       onKeyDown={handleKeyDown}
       style={{
-        background: W.white, borderRadius: 16, padding: '22px 20px 14px',
-        border: `1px solid ${W.border}`, marginBottom: 16,
+        // No card chrome of its own — the slider renders inside the
+        // ServiceSection's shared shadow-box card, above the price.
+        padding: '0 0 6px',
+        marginBottom: 8,
         outline: 'none',
         opacity: disabled ? 0.68 : 1,
       }}

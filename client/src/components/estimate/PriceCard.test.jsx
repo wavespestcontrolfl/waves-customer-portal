@@ -125,6 +125,8 @@ describe('PriceCard — WaveGuard savings display', () => {
     expect(screen.queryByText('$94/quarter')).toBeNull();
     expect(screen.getByText('$93.99')).toBeInTheDocument();
     expect(screen.getByText('WaveGuard Bronze')).toBeInTheDocument();
+    // No annual figure on a standard exact price (owner directive).
+    expect(screen.queryByText(/\/ year/)).toBeNull();
   });
 
   it('still shows a real tier discount as savings', () => {

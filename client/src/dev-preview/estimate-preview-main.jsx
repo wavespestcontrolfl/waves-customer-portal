@@ -82,11 +82,13 @@ function pestScenario() {
         isPest: true,
         waveGuardTierEligible: true,
         defaultFrequencyKey: 'quarterly',
-        // $94/visit quarterly on a 0% Bronze tier — the exact rounding-artifact
-        // repro ($31.33/mo → $93.99/quarter vs $94 anchor).
+        // Real pest ladder (FREQUENCY_LADDER): quarterly / bi-monthly / monthly.
+        // Quarterly = the $94/visit Bronze rounding-artifact repro
+        // ($31.33/mo → $93.99/quarter vs $94 anchor).
         frequencies: [
           pestFrequency('quarterly', 'Quarterly', 31.33, 94, 375.96),
           pestFrequency('bi_monthly', 'Bi-monthly', 47, 94, 564),
+          pestFrequency('monthly', 'Monthly', 55, 55, 660),
         ],
         setupFee: null,
         quoteRequired: false,

@@ -791,66 +791,6 @@ function MembershipCard({ membership }) {
   );
 }
 
-// Customer portal showcase for recurring estimates. The recipient may not be
-// a portal user yet, so this is a direct-explore invitation: it links to the
-// portal and shows what they can do there. Warm customer-facing tone per the
-// design brief; rendered for recurring plans only. Features listed here mirror
-// real portal tabs (Visits, Billing, Request, on-location contacts, Refer,
-// Documents) — keep them in sync with PortalPage so we never advertise a
-// surface that does not exist.
-const PORTAL_SHOWCASE_URL = 'https://portal.wavespestcontrol.com';
-
-const PORTAL_SHOWCASE_FEATURES = [
-  ['Upcoming visits', 'See every scheduled service and reschedule in a tap.'],
-  ['Billing & autopay', 'View invoices, pay online, and turn on autopay.'],
-  ['Request service', 'Ask for a re-service or add a service anytime.'],
-  ['Loop in your family', 'Add a spouse, partner, or tenant to get appointment texts too.'],
-  ['Refer & earn', 'Give $25, get $25 for every friend you send our way.'],
-  ['Documents', 'Service reports, invoices, and agreements in one place.'],
-];
-
-function PortalShowcaseCard() {
-  return (
-    <section style={{ ...estimateCard(), display: 'grid', gap: 16 }}>
-      <div>
-        <h2 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
-          Your customer portal
-        </h2>
-        <p style={{ margin: '6px 0 0', color: ESTIMATE_BODY, fontSize: 14, lineHeight: 1.55 }}>
-          Manage your service from any device. Take a look around &mdash; here&rsquo;s what you can do inside.
-        </p>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
-        {PORTAL_SHOWCASE_FEATURES.map(([title, body]) => (
-          <div key={title} style={{
-            display: 'flex', gap: 10, alignItems: 'flex-start',
-            background: '#F8FAFC', border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 10, padding: '12px 14px',
-          }}>
-            <span aria-hidden="true" style={{ color: COLORS.green, fontWeight: 800, fontSize: 15, lineHeight: 1.4 }}>&#10003;</span>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ color: ESTIMATE_TEXT, fontWeight: 700, fontSize: 15 }}>{title}</div>
-              <div style={{ color: ESTIMATE_MUTED, fontSize: 14, lineHeight: 1.45, marginTop: 2 }}>{body}</div>
-            </div>
-          </div>
-        ))}
-      </div>
-      <div>
-        <a
-          href={PORTAL_SHOWCASE_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            display: 'inline-block', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
-            fontWeight: 700, fontSize: 15, padding: '12px 22px', borderRadius: 10, textDecoration: 'none',
-          }}
-        >
-          Explore your portal
-        </a>
-      </div>
-    </section>
-  );
-}
-
 const ESTIMATE_ASK_PROMPTS = [
   'What is included?',
   'How does billing work?',
@@ -1312,10 +1252,7 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
 
 function OneTimePriceCard({ oneTimePrice, breakdown }) {
   return (
-    <div style={{
-      padding: '14px 0 24px',
-      marginBottom: 8,
-    }}>
+    <div style={estimateCard()}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ fontFamily: FONTS.serif, fontSize: 56, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1 }}>
         {fmtMoney(oneTimePrice)}
@@ -2252,33 +2189,38 @@ export function ServiceSection({
 
   return (
     <section>
-      {servicesLength > 1 ? (
-        <h3 style={{
-          fontSize: 18,
-          color: ESTIMATE_TEXT,
-          margin: '20px 0 12px',
-          fontWeight: 800,
-        }}>
-          {section.label || 'Service'}
-        </h3>
-      ) : null}
+      {/* Frequency choice + price live in ONE shadow-box card, same
+          treatment as every other section (owner: "all boxes should
+          render like" the Waves AI card). */}
+      <div style={estimateCard()}>
+        {servicesLength > 1 ? (
+          <h3 style={{
+            fontSize: 18,
+            color: ESTIMATE_TEXT,
+            margin: '0 0 14px',
+            fontWeight: 800,
+          }}>
+            {section.label || 'Service'}
+          </h3>
+        ) : null}
 
-      {showSlider ? (
-        <FrequencySlider
-          frequencies={frequencies}
-          selected={selectedFrequencyKey}
-          onChange={(next) => onFrequencyChange(section.key, next)}
-          disabled={disabled}
-        />
-      ) : null}
+        {showSlider ? (
+          <FrequencySlider
+            frequencies={frequencies}
+            selected={selectedFrequencyKey}
+            onChange={(next) => onFrequencyChange(section.key, next)}
+            disabled={disabled}
+          />
+        ) : null}
 
-      {current ? (
-        <PriceCard
-          frequency={current}
-          waveGuardTier={section?.waveGuardTierEligible !== false ? waveGuardTier : null}
-          wording={copy.priceWording}
-        />
-      ) : null}
+        {current ? (
+          <PriceCard
+            frequency={current}
+            waveGuardTier={section?.waveGuardTierEligible !== false ? waveGuardTier : null}
+            wording={copy.priceWording}
+          />
+        ) : null}
+      </div>
 
       {afterPrice}
 
@@ -3053,7 +2995,6 @@ export default function EstimateViewPage() {
             />
           ) : null}
 
-          {readOnly ? null : <PortalShowcaseCard />}
         </>
       );
     }
