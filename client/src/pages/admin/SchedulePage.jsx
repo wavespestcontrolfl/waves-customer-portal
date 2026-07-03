@@ -11079,7 +11079,7 @@ export function CompletionPanel({
                         idSuffix={sp.productId}
                         targets={sp.targets}
                         suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
-                        noun={isLawn ? "weed or pest" : "pest"}
+                        noun={isLawn ? "" : "pest"}
                         onChange={(next) =>
                           updateProduct(sp.productId, "targets", next)
                         }
@@ -13033,7 +13033,7 @@ export function CompletionPanel({
                     idSuffix={sp.productId}
                     targets={sp.targets}
                     suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
-                    noun={isLawn ? "weed or pest" : "pest"}
+                    noun={isLawn ? "" : "pest"}
                     onChange={(next) =>
                       updateProduct(sp.productId, "targets", next)
                     }
@@ -13589,7 +13589,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme, suggestions 
         type="text"
         list={datalistId}
         value={draft}
-        placeholder={list.length ? "Add target…" : `Add ${noun} target…`}
+        placeholder={list.length || !noun ? "Add target…" : `Add ${noun} target…`}
         onChange={(e) => {
           const value = e.target.value;
           if (value.includes(",")) {
