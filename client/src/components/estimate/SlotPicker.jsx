@@ -71,7 +71,7 @@ function SlotCard({ slot, isSelected, onSelect }) {
           background: isSelected ? 'rgba(255,255,255,.16)' : W.greenLight, padding: '4px 8px', borderRadius: 999,
           alignSelf: 'flex-start',
         }}>
-          Nearby day — {slot.techFirstName || 'tech'} is servicing a property close to you
+          Nearby day — a tech is servicing a property close to you
         </div>
       ) : null}
     </button>

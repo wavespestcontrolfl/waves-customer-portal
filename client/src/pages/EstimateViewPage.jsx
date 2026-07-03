@@ -1262,10 +1262,10 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   return (
     <div style={estimateCard()}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-        <span style={{ fontFamily: FONTS.serif, fontSize: 56, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1 }}>
+        <span style={{ fontFamily: FONTS.serif, fontSize: 42, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1 }}>
         {fmtMoney(oneTimePrice)}
         </span>
-        <span style={{ fontSize: 24, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
+        <span style={{ fontSize: 18, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
       <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 14, lineHeight: 1.55 }}>
         {oneTimePriceCopy(breakdown)}

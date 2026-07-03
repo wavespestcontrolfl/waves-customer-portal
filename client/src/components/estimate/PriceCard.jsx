@@ -182,7 +182,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         {showSavings && savings > 0 && !showLowConfidenceRange ? (
           <span style={{
             fontFamily: "'Source Serif 4', Georgia, serif",
-            fontSize: 26,
+            fontSize: 20,
             color: '#9CA3AF',
             textDecoration: 'line-through',
             lineHeight: 1,
@@ -192,7 +192,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         ) : null}
         <span style={{
           fontFamily: "'Source Serif 4', Georgia, serif",
-          fontSize: quoteRequired ? 42 : showLowConfidenceRange ? 40 : 58,
+          fontSize: quoteRequired ? 36 : showLowConfidenceRange ? 34 : 42,
           fontWeight: 500,
           color: W.blueDeeper,
           lineHeight: 1,
@@ -204,7 +204,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           : fmtMoney(cadencePrice)}
         </span>
         {!quoteRequired ? (
-          <span style={{ fontSize: 24, fontWeight: 500, color: '#6B7280' }}>{periodLabel}</span>
+          <span style={{ fontSize: 18, fontWeight: 500, color: '#6B7280' }}>{periodLabel}</span>
         ) : null}
         {waveGuardTier ? (
           <span style={{
