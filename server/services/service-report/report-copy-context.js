@@ -379,7 +379,7 @@ async function buildReportCopyContext({
     const lines = productSafety.map((p) => {
       const bits = [
         p.activeIngredient ? `active: ${p.activeIngredient}` : null,
-        p.reiHours != null ? `REI ${p.reiHours} hr` : null,
+        p.reiHours != null ? (p.reiHours > 0 ? `REI ${p.reiHours} hr` : 'REI until dry') : null,
         p.rainfastMinutes != null ? `rainfast ${p.rainfastMinutes >= 60 ? `${(p.rainfastMinutes / 60).toFixed(p.rainfastMinutes % 60 ? 1 : 0)} hr` : `${p.rainfastMinutes} min`}` : null,
         p.reentryText ? `label: ${p.reentryText}` : null,
       ].filter(Boolean).join('; ');

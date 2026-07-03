@@ -49,6 +49,19 @@ describe('get_product_info safety block', () => {
     });
   });
 
+  test('rei_hours 0 is omitted (until-dry), never surfaced as a bare 0', async () => {
+    // 0 is the residential "until sprays have dried" value; exposing the number
+    // would read as immediate re-entry. The meaning is carried by `reentry`.
+    mockRow = {
+      name: 'LESCO Three-Way Selective Herbicide',
+      rei_hours: 0,
+      reentry_text: 'Keep people and pets off treated areas until dry.',
+    };
+    const result = await productInfo();
+    expect(result.safety.rei_hours).toBeUndefined();
+    expect(result.safety.reentry).toMatch(/until dry/i);
+  });
+
   test('irrigation_required false reports "not required", never a prohibition', async () => {
     // K-Flow / Green Flo liquid fertilizers are seeded false but should still be
     // watered in — false means "not required", not "do not water".

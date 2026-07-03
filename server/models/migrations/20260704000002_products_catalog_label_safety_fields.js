@@ -105,25 +105,12 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down(knex) {
-  // Clear only the exact values this migration seeds, so a rollback doesn't
-  // touch anything owner-edited afterward.
-  for (const f of SAFETY_BY_EPA) {
-    const rows = await knex('products_catalog')
-      .where({ epa_reg_number: f.epa })
-      .select('id', 'signal_word', 'rei_hours', 'rainfast_minutes', 'reentry_text', 'reentry_summary', 'irrigation_notes');
-    for (const row of rows) {
-      const patch = {};
-      if (f.signal_word && row.signal_word === f.signal_word) patch.signal_word = null;
-      if (f.rei_hours != null && row.rei_hours === f.rei_hours) patch.rei_hours = null;
-      if (f.rainfast_minutes != null && row.rainfast_minutes === f.rainfast_minutes) patch.rainfast_minutes = null;
-      if (f.irrigation_notes && row.irrigation_notes === f.irrigation_notes) patch.irrigation_notes = null;
-      if (f.reentry && row.reentry_text === f.reentry) patch.reentry_text = null;
-      if (f.reentry && row.reentry_summary === f.reentry) patch.reentry_summary = null;
-      if (Object.keys(patch).length) {
-        patch.updated_at = knex.fn.now();
-        await knex('products_catalog').where({ id: row.id }).update(patch);
-      }
-    }
-  }
+exports.down = async function down() {
+  // Intentional no-op. `up` is fill-only (it writes a field only when it was
+  // empty or the generic placeholder), so it can't be reversed without a
+  // per-row snapshot of the prior state. A value-matching rollback would erase
+  // pre-existing values this migration never wrote — e.g. SpeedZone Southern's
+  // rainfast_minutes (180) already set by 20260430000010, which `up` leaves
+  // alone. Leave the seeded safety data in place on rollback rather than risk
+  // clobbering owner/earlier-migration values.
 };
