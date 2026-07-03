@@ -320,16 +320,38 @@ async function searchProductCatalog(db, terms, productNames = []) {
             .orWhere('moa_group', 'ilike', like);
         }
       })
-      .select('name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified_by')
+      .select('name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified_by',
+        'signal_word', 'ppe_text', 'rei_hours', 'rainfast_minutes', 'reentry_summary', 'reentry_text', 'irrigation_notes')
       .limit(8);
 
     return rows.map((row) => {
+      // Label-verified safety facts (signal word, re-entry, rainfast,
+      // irrigation timing) let Ask Waves answer "is it pet safe?" from the
+      // product's own reviewed label instead of generic knowledge. Fail
+      // closed: only label-verified rows may drive customer safety claims.
+      // rei_hours = 0 is the owner-confirmed residential value ("until
+      // sprays have dried"), NOT a zero-hour claim; null = unknown.
+      const labelVerified = !!row.label_verified_by;
+      const reentryText = labelVerified
+        ? trimSnippet(row.reentry_summary || row.reentry_text || '')
+          || (row.rei_hours == null ? '' : (Number(row.rei_hours) === 0
+            ? 'Re-enter once sprays have dried'
+            : `Re-entry after about ${Number(row.rei_hours)} hour${Number(row.rei_hours) === 1 ? '' : 's'}`))
+        : '';
+      const safetyParts = labelVerified ? [
+        row.signal_word ? `Label signal word: ${row.signal_word}` : '',
+        reentryText ? `Re-entry: ${reentryText}` : '',
+        Number(row.rainfast_minutes) > 0 ? `Rainfast in about ${Number(row.rainfast_minutes)} minutes` : '',
+        row.irrigation_notes ? `Rain/irrigation timing: ${trimSnippet(row.irrigation_notes)}` : '',
+        row.ppe_text ? `Applicator PPE (worn by the technician): ${trimSnippet(row.ppe_text)}` : '',
+      ] : [];
       const parts = [
         row.category,
         row.active_ingredient ? `Active ingredient: ${row.active_ingredient}` : '',
         row.moa_group ? `MOA: ${row.moa_group}` : '',
         row.epa_reg_number ? `EPA Reg. No. ${row.epa_reg_number}` : '',
         row.label_verified_by ? 'Label verified in admin catalog' : '',
+        ...safetyParts,
       ].filter(Boolean);
       return {
         source: 'admin_product_catalog',
@@ -338,7 +360,10 @@ async function searchProductCatalog(db, terms, productNames = []) {
         category: row.category || null,
         activeIngredient: row.active_ingredient || null,
         epaRegNumber: row.epa_reg_number || null,
-        labelVerified: !!row.label_verified_by,
+        labelVerified,
+        signalWord: labelVerified ? (row.signal_word || null) : null,
+        reentry: reentryText || null,
+        rainfastMinutes: labelVerified && Number(row.rainfast_minutes) > 0 ? Number(row.rainfast_minutes) : null,
         snippet: trimSnippet(parts.join(' - ')),
       };
     }).filter((row) => row.snippet || row.title);

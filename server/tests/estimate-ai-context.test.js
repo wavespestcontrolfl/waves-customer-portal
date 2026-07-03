@@ -126,6 +126,53 @@ describe('estimate AI support context', () => {
     expect(result.externalSources.some((source) => source.title.includes('Florida-Friendly'))).toBe(true);
   });
 
+  test('label-verified safety fields flow into the product snippet; unverified rows stay safety-silent', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        products_catalog: [
+          {
+            name: 'SpeedZone EW',
+            category: 'herbicide',
+            active_ingredient: 'Carfentrazone + 2,4-D + MCPP + Dicamba',
+            active: true,
+            label_verified_by: 'waves-admin',
+            signal_word: 'Caution',
+            rei_hours: 0,
+            rainfast_minutes: 180,
+            reentry_summary: 'Keep people and pets off treated areas until dry.',
+            irrigation_notes: 'Rainfast in 3 hours; avoid irrigation for 24 hours.',
+            ppe_text: 'Long-sleeved shirt, long pants, chemical-resistant gloves.',
+          },
+          {
+            name: 'Mystery Concentrate',
+            category: 'insecticide',
+            active_ingredient: 'Bifenthrin',
+            active: true,
+            label_verified_by: null,
+            signal_word: 'Warning',
+            reentry_summary: 'Unverified re-entry claim.',
+          },
+        ],
+      }),
+      question: 'Is the herbicide safe for pets?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    });
+
+    const verified = result.productCatalog.find((row) => String(row.activeIngredient || '').includes('Carfentrazone'));
+    expect(verified.snippet).toContain('Label signal word: Caution');
+    expect(verified.snippet).toContain('Keep people and pets off treated areas until dry.');
+    expect(verified.snippet).toContain('Rainfast in about 180 minutes');
+    expect(verified.snippet).toContain('Applicator PPE');
+    expect(verified.signalWord).toBe('Caution');
+    expect(verified.rainfastMinutes).toBe(180);
+
+    // Fail closed: an unverified row must not surface safety claims.
+    const unverified = result.productCatalog.find((row) => row.activeIngredient === 'Bifenthrin');
+    expect(unverified.snippet).not.toContain('Warning');
+    expect(unverified.snippet).not.toContain('Unverified re-entry claim');
+    expect(unverified.signalWord).toBeNull();
+  });
+
   test('public support sources only expose external citation metadata', () => {
     const result = loadPublicEstimateSupportSources({
       question: 'What is included with lawn care?',
