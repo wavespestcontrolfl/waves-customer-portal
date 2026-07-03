@@ -187,9 +187,11 @@ function mapWater(waterContext, waterSnapshot = null) {
       confidence: waterSnapshot.confidence || 'medium',
       explanation: snapshotWaterExplanation(waterSnapshot, grassLabel),
       source: 'area_snapshot',
-      // A stored per-week irrigation figure means the customer has a schedule on
-      // file — the "add your watering schedule" CTA should not show.
-      scheduleOnFile: num(waterSnapshot.irrigation_inches_per_week) != null,
+      // A POSITIVE stored per-week irrigation figure means the customer has a real
+      // schedule on file — the "add your watering schedule" CTA should not show. A
+      // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
+      // `irrigation <= 0 = missing`), so the CTA must stay up.
+      scheduleOnFile: (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
     };
   }
   if (!waterContext) return null;
@@ -204,10 +206,12 @@ function mapWater(waterContext, waterSnapshot = null) {
     confidence: advice.profileMissing ? 'low' : (advice.rainKnown ? 'high' : 'medium'),
     explanation: waterExplanation(advice, target, grassLabel),
     source: 'irrigation_advice',
-    // The customer has an irrigation schedule on file when the advice engine
-    // reports the profile is present (or we have a real per-week figure). Used to
-    // suppress the "add your watering schedule" CTA once they've added one.
-    scheduleOnFile: advice.profileMissing === false || num(waterContext.irrigationInchesPerWeek) != null,
+    // The customer has a usable irrigation schedule on file only when the advice
+    // engine says the profile is present. profileMissing already accounts for a
+    // 0/absent/disabled schedule (irrigation <= 0), so trust it directly — a raw
+    // `irrigationInchesPerWeek != null` would wrongly count 0 and hide the CTA
+    // while the card still shows the "no schedule on file" copy.
+    scheduleOnFile: advice.profileMissing === false,
   };
 }
 
