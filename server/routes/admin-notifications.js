@@ -63,9 +63,29 @@ async function liveAlertNotifications(adminUserId) {
       [adminUserId, DISMISS_WINDOW_HOURS],
     ).then((r) => r.rows || []);
   } catch (err) {
-    // Table may not exist yet on a freshly-deployed instance before
-    // migration runs. Don't break the bell.
-    logger.warn(`[admin-notifications] dismissals query failed: ${err.message}`);
+    if (/dismissed_members/i.test(String(err.message))) {
+      // Pre-migration tolerance, matching the insert retry in
+      // dismissLiveAlerts: before 20260702000001 adds dismissed_members,
+      // retry the legacy projection so count-based dismissals still hide
+      // alerts — a write-side fallback alone would record rows this read
+      // then fails to load, and the bell badge would bounce back anyway.
+      try {
+        dismissals = await db.raw(
+          `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_at
+           FROM dashboard_alert_dismissed
+           WHERE admin_user_id = ?
+             AND dismissed_at > NOW() - (INTERVAL '1 hour' * ?)
+           ORDER BY alert_id, dismissed_at DESC`,
+          [adminUserId, DISMISS_WINDOW_HOURS],
+        ).then((r) => r.rows || []);
+      } catch (retryErr) {
+        logger.warn(`[admin-notifications] dismissals query failed (legacy retry): ${retryErr.message}`);
+      }
+    } else {
+      // Table may not exist yet on a freshly-deployed instance before
+      // migration runs. Don't break the bell.
+      logger.warn(`[admin-notifications] dismissals query failed: ${err.message}`);
+    }
   }
 
   const dismissedByAlert = new Map(
