@@ -1195,8 +1195,11 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
             onClick={onRequest}
             disabled={isSubmitting || isReceived}
             style={{
-              marginTop: 12,
-              width: '100%',
+              // Centered under the title + body, sized to its label.
+              margin: '12px auto 0',
+              width: 'fit-content',
+              minWidth: 220,
+              padding: '0 24px',
               minHeight: 44,
               border: 'none',
               borderRadius: 10,
@@ -1204,7 +1207,7 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
               color: COLORS.white,
               fontSize: 15,
               fontWeight: 800,
-              display: 'inline-flex',
+              display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               gap: 8,

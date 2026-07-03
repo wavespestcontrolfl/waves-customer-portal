@@ -61,6 +61,14 @@ const PEST_INTELLIGENCE = {
   signals: [],
 };
 
+// Pest service-preference toggles (SERVICE_PREFS interior_spray /
+// exterior_sweep) — the "Skip parts you don't need" block. Real payloads
+// carry these per frequency with renderFlags.showPestRecurringAddOns.
+const PEST_ADD_ONS = [
+  { key: 'interior_spray', label: 'Interior spraying', preChecked: true, detail: 'Save $10/visit if removed. No interior treatment — tech sprays and inspects the perimeter only.' },
+  { key: 'exterior_sweep', label: 'Exterior eave sweep', preChecked: true, detail: 'Save $10/visit if removed. No eave/cobweb sweep on the exterior — tech still performs the perimeter treatment.' },
+];
+
 const pestFrequency = (key, label, monthly, perVisit, annual) => ({
   key,
   label,
@@ -68,7 +76,7 @@ const pestFrequency = (key, label, monthly, perVisit, annual) => ({
   annual,
   perVisit,
   included: [{ key: 'pest_control', label: 'Pest Control', detail: null }],
-  addOns: [],
+  addOns: PEST_ADD_ONS,
 });
 
 function pestScenario() {
@@ -94,7 +102,7 @@ function pestScenario() {
         quoteRequired: false,
         copy: { priceWording: {} },
       }],
-      renderFlags: { showRecurringSummary: false, showWaveGuardSetupFee: false, showPestRecurringAddOns: false },
+      renderFlags: { showRecurringSummary: false, showWaveGuardSetupFee: false, showPestRecurringAddOns: true },
       waveGuardTier: 'Bronze',
       askChips: ['How do you handle ants?', 'Can you treat inside?', 'When am I charged?', 'What happens after approval?'],
       anchorOneTimePrice: 0,
