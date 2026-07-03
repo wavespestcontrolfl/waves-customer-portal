@@ -125,8 +125,25 @@ const DOC_LINKS = [
   },
   {
     pattern: 'Acelepryn Xtra',
+    labelUrl: 'https://www3.epa.gov/pesticides/chem_search/ppls/000100-01680-20230626.pdf',
     sdsUrl: 'https://www.domyown.com/msds/Acelepryn_Xtra_SDS_2023.pdf',
-    note: 'Official Syngenta SDS via mirror; verified 2026-07-03. NOTE: the SDS states product registration 100-1680 (Syngenta) while this row carries 432-1652 — owner to reconcile the EPA reg number.',
+    note: 'EPA-hosted label + official Syngenta SDS (via mirror) owner-provided 2026-07-03; EPA reg corrected to 100-1680 per owner ruling.',
+  },
+  {
+    pattern: 'Headway G',
+    labelUrl: 'https://www3.epa.gov/pesticides/chem_search/ppls/000100-01378-20190816.pdf',
+    sdsUrl: 'https://assets.syngenta-us.com/pdf/msds/hEADWAY%20g.pdf',
+    note: 'EPA-hosted label + official Syngenta SDS owner-provided 2026-07-03 (GreenCast confirms EPA 100-1378).',
+  },
+  {
+    // Inventory is the current EW formulation — the vendor_pricing row's SKU
+    // is SPEEDZONE-SOUTHERN-EW — so per the owner's ruling this row gets the
+    // SpeedZone Southern EW documents (EPA 2217-1031), not the old non-EW
+    // 2217-835 records.
+    pattern: '%SpeedZone Southern%',
+    labelUrl: 'https://www3.epa.gov/pesticides/chem_search/ppls/002217-01031-20190730.pdf',
+    sdsUrl: 'https://savannahga.gov/DocumentCenter/View/34436/SDS',
+    note: 'SpeedZone Southern EW label (EPA 2217-1031) + SDS owner-provided 2026-07-03; inventory SKU SPEEDZONE-SOUTHERN-EW confirms the EW formulation.',
   },
   {
     pattern: 'Arena 50 WDG',
@@ -155,6 +172,37 @@ const THREE_WAY = {
   sdsUrl: 'https://assets.greenbook.net/M6921.pdf',
 };
 
+// Owner rulings 2026-07-03: two catalog EPA registration numbers are wrong.
+// - Acelepryn Xtra is EPA 100-1680 (Syngenta/GreenCast, Greenbook, and the
+//   EPA-hosted A15452 label all agree); the seeded 432-1652 is not this
+//   product.
+// - SpeedZone Southern: no support exists for the seeded 2217-987. Inventory
+//   is the current EW formulation (vendor SKU SPEEDZONE-SOUTHERN-EW), which
+//   is EPA 2217-1031 per its EPA-hosted label; the old non-EW product was
+//   2217-835 and is not what we stock.
+// Guarded to the exact wrong value so an admin correction is never clobbered.
+const EPA_CORRECTIONS = [
+  {
+    pattern: 'Acelepryn Xtra',
+    from: '432-1652',
+    to: '100-1680',
+    note: 'EPA Reg. No. corrected 432-1652 → 100-1680 per owner ruling 2026-07-03 (GreenCast/Greenbook/EPA label agree).',
+  },
+  {
+    pattern: '%SpeedZone Southern%',
+    from: '2217-987',
+    to: '2217-1031',
+    note: 'EPA Reg. No. corrected 2217-987 (unsupported) → 2217-1031 (SpeedZone Southern EW) per owner ruling 2026-07-03; inventory SKU SPEEDZONE-SOUTHERN-EW confirms EW.',
+  },
+  {
+    // The EW-named duplicate row carries no reg at all.
+    pattern: '%SpeedZone Southern%',
+    from: 'N/A',
+    to: '2217-1031',
+    note: 'EPA Reg. No. set to 2217-1031 (SpeedZone Southern EW) per owner ruling 2026-07-03.',
+  },
+];
+
 function appendNote(existing, note) {
   if (!note) return existing || null;
   if (existing && existing.includes(note)) return existing;
@@ -162,7 +210,7 @@ function appendNote(existing, note) {
 }
 
 // Exposed for tests / read-only preview tooling.
-exports._data = { DOC_LINKS, THREE_WAY };
+exports._data = { DOC_LINKS, THREE_WAY, EPA_CORRECTIONS };
 
 exports.up = async function up(knex) {
   const hasTable = await knex.schema.hasTable('products_catalog');
@@ -186,6 +234,20 @@ exports.up = async function up(knex) {
       update.label_source_note = appendNote(row.label_source_note, entry.note);
       update.updated_at = knex.fn.now();
       await knex('products_catalog').where({ id: row.id }).update(update);
+    }
+  }
+
+  for (const fix of EPA_CORRECTIONS) {
+    const rows = await knex('products_catalog')
+      .where('name', 'ilike', fix.pattern)
+      .where({ epa_reg_number: fix.from })
+      .select('id', 'label_source_note');
+    for (const row of rows) {
+      await knex('products_catalog').where({ id: row.id }).update({
+        epa_reg_number: fix.to,
+        label_source_note: appendNote(row.label_source_note, fix.note),
+        updated_at: knex.fn.now(),
+      });
     }
   }
 
@@ -234,6 +296,13 @@ exports.down = async function down(knex) {
         .where({ sds_url: entry.sdsUrl })
         .update({ sds_url: null, updated_at: knex.fn.now() });
     }
+  }
+
+  for (const fix of EPA_CORRECTIONS) {
+    await knex('products_catalog')
+      .where('name', 'ilike', fix.pattern)
+      .where({ epa_reg_number: fix.to })
+      .update({ epa_reg_number: fix.from, updated_at: knex.fn.now() });
   }
 
   await knex('products_catalog')
