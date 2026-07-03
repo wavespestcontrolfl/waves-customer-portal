@@ -1118,6 +1118,16 @@ router.post('/confirm', async (req, res, next) => {
           const aiScores = calibrationBaseline
             ? (typeof calibrationBaseline === 'string' ? JSON.parse(calibrationBaseline) : calibrationBaseline)
             : {};
+          // Legacy pre-stress_damage baselines have no stress in the AI JSON, so the
+          // calibration would write ai_stress_damage=null and skip the delta. Seed it
+          // the same way the UI/confirm fallback does — min(fungus, thatch, 95) — so a
+          // tech's Stress correction on a legacy row records a real delta, not zero.
+          if (aiScores && aiScores.stress_damage == null) {
+            const f = Number(aiScores.fungus_control);
+            const t = Number(aiScores.thatch_level);
+            const parts = [f, t, 95].filter(Number.isFinite);
+            if (parts.length > 1) aiScores.stress_damage = Math.min(...parts);
+          }
           await LawnIntel.recordTechCalibration(assessmentId, aiScores, adjustedScores);
         }
 

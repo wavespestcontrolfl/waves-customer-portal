@@ -44,6 +44,12 @@ const SCORE_FINDINGS = [
     severeThreshold: 45,
     customerLabel: 'possible disease pressure',
     cautious: true,
+    // Disease + thatch are the signals the tech's consolidated Stress score folds
+    // in. The completion screen now lets the tech correct Stress directly (without
+    // touching fungus/thatch), so these findings must defer to that confirmed
+    // Stress — otherwise a stale AI fungus/thatch can raise a customer finding the
+    // tech already overruled.
+    foldedIntoStress: true,
   },
   {
     key: 'thatch_watch',
@@ -53,6 +59,7 @@ const SCORE_FINDINGS = [
     severeThreshold: 42,
     customerLabel: 'thatch buildup indicators',
     cautious: true,
+    foldedIntoStress: true,
   },
 ];
 
@@ -168,6 +175,12 @@ function deriveFindings(inputs = {}) {
     fungus_control: scoreValue(assessment.fungus_control),
     thatch_level: scoreValue(assessment.thatch_level),
   };
+  // The tech's confirmed consolidated Stress score (explicit column, else the
+  // worst of fungus/thatch for legacy rows). Findings folded into Stress defer to
+  // this so a Stress correction the tech made isn't contradicted.
+  const stressDamage = assessment.stress_damage != null
+    ? scoreValue(assessment.stress_damage)
+    : Math.min(scores.fungus_control ?? 100, scores.thatch_level ?? 100);
   const evidencePhoto = chooseEvidencePhoto(inputs.photos || []);
   const locationLabel = locationLabelFromPhoto(evidencePhoto);
 
@@ -175,6 +188,10 @@ function deriveFindings(inputs = {}) {
   for (const rule of SCORE_FINDINGS) {
     const score = scores[rule.scoreKey];
     if (score == null || score >= rule.threshold) continue;
+    // Folded findings (disease/thatch) fire only when the confirmed Stress also
+    // reads below the threshold — so a tech who raised Stress above it (overruling
+    // a stale AI fungus/thatch) doesn't get a contradicting customer finding.
+    if (rule.foldedIntoStress && stressDamage != null && stressDamage >= rule.threshold) continue;
     const severity = score < rule.severeThreshold ? Math.max(3, severityFromScore(score)) : severityFromScore(score);
     const finding = {
       key: rule.key,
