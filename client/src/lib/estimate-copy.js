@@ -1,7 +1,6 @@
 export const SERVICE_COPY = {
   pest_control: {
     headline: "Hey {first}, choose your pest control option.",
-    oneTimeHeadline: "Hey {first}, here's your one-time pest treatment quote.",
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed your property before pricing this estimate',
     aiBody: 'We reviewed your home, lot, and pest-risk factors before pricing this plan.',
@@ -30,7 +29,6 @@ export const SERVICE_COPY = {
   },
   tree_shrub: {
     headline: "Hey {first}, choose your tree & shrub option.",
-    oneTimeHeadline: "Hey {first}, here's your tree & shrub treatment quote.",
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed your beds and trees before pricing this estimate',
     aiBody: 'We reviewed your beds, trees, and treatment needs before pricing this plan.',
@@ -46,7 +44,6 @@ export const SERVICE_COPY = {
   },
   mosquito: {
     headline: "Hey {first}, choose your mosquito control option.",
-    oneTimeHeadline: "Hey {first}, here's your one-time mosquito treatment quote.",
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed your lot and mosquito pressure before pricing this estimate',
     aiBody: 'We reviewed your lot, resting zones, and mosquito pressure before pricing this plan.',
@@ -62,7 +59,6 @@ export const SERVICE_COPY = {
   },
   termite_bait: {
     headline: "Hey {first}, choose your termite protection option.",
-    oneTimeHeadline: "Hey {first}, here's your termite treatment quote.",
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed your termite perimeter before pricing this estimate',
     aiBody: 'We reviewed your home, lot, and termite perimeter before pricing this plan.',
@@ -78,7 +74,6 @@ export const SERVICE_COPY = {
   },
   foam_recurring: {
     headline: "Hey {first}, choose your recurring foam treatment option.",
-    oneTimeHeadline: "Hey {first}, here's your foam treatment quote.",
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed your foam treatment scope before pricing this plan',
     aiBody: 'We reviewed the drill points and treatment areas before pricing this recurring foam plan.',
@@ -125,7 +120,6 @@ export const SERVICE_COPY = {
   },
   lawn_care: {
     headline: "Hey {first}, choose your lawn care option.",
-    oneTimeHeadline: "Hey {first}, here's your one-time lawn treatment quote.",
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed your lawn before pricing this estimate',
     aiBody: 'We reviewed your lawn size, turf type, and treatment needs before pricing this plan.',
@@ -156,7 +150,6 @@ export const SERVICE_COPY = {
   },
   bundle: {
     headline: "Hey {first}, here's your custom Waves plan.",
-    oneTimeHeadline: "Hey {first}, here's your custom Waves quote.",
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed your property before pricing this estimate',
     aiBody: 'We reviewed the services, property details, and pricing rules used for this plan.',
@@ -174,15 +167,4 @@ export const SERVICE_COPY = {
 
 export function estimateCopyFor(category) {
   return SERVICE_COPY[category] || SERVICE_COPY.pest_control;
-}
-
-// Headline for the hero. A one-time-only estimate must never invite the
-// customer to "choose your ... option" — there is exactly one quoted
-// service and no frequency choice — so those categories carry a
-// oneTimeHeadline ("here's your ... quote") used when the estimate is
-// structurally one-time. Categories whose base headline is already
-// quote-phrased (rodent, trenching, Bora-Care, pre-slab) fall through.
-export function estimateHeadlineFor(copy, { isOneTimeOnly = false } = {}) {
-  if (!copy) return null;
-  return (isOneTimeOnly && copy.oneTimeHeadline) || copy.headline;
 }

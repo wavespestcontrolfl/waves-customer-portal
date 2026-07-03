@@ -37,7 +37,7 @@ import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { estimateCopyFor, estimateHeadlineFor } from '../lib/estimate-copy';
+import { estimateCopyFor } from '../lib/estimate-copy';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
 
@@ -52,6 +52,12 @@ const ESTIMATE_TEXT = '#1B2C5B';
 const ESTIMATE_BODY = '#3F4A65';
 const ESTIMATE_CHROME = '#F7F5EE';
 const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
+
+// Universal hero headline (owner directive 2026-07-03). The eyebrow line
+// ("Your estimate · <quoted services>") carries the service specifics, so
+// the headline itself never has to guess at per-service phrasing — and can
+// never invite a "choose your option" on an estimate with nothing to choose.
+const UNIVERSAL_HEADLINE = 'Hello {first}, your estimate is ready!';
 
 function fmtMoney(n) {
   if (n == null) return '—';
@@ -385,10 +391,9 @@ const HEADER_EYEBROW_STYLE = {
   fontWeight: 700,
 };
 
-function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, canChooseOneTime, headline }) {
+function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, headline }) {
   const firstName = customerFirstName || 'there';
-  const fallbackHeadline = `Hey {first}, ${canChooseOneTime ? 'choose your pest control option.' : "here's your custom quote."}`;
-  const headlineText = String(headline || fallbackHeadline).replace('{first}', firstName);
+  const headlineText = String(headline || UNIVERSAL_HEADLINE).replace('{first}', firstName);
   const phoneDisplay = formatCustomerPhone(customerPhone);
   const contactLines = [
     customerName,
@@ -1031,8 +1036,21 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
 
 export function getServiceLabel(frequency, estimate, pricing) {
   if (estimate?.isOneTimeOnly) {
-    const primary = pricing?.oneTimeBreakdown?.items?.find((item) => item?.kind !== 'discount');
-    return primary?.label || 'One-time service';
+    // Every billable line belongs in the eyebrow, not just the first —
+    // mirrors the SSR page's quotedOneTimeNames.join(' + ').
+    const names = (pricing?.oneTimeBreakdown?.items || [])
+      .filter((item) => item && item.kind !== 'discount')
+      .map((item) => String(item.label || '').trim())
+      .filter(Boolean);
+    const unique = [...new Set(names)];
+    return unique.length ? unique.join(' + ') : 'One-time service';
+  }
+  // A multi-service plan names every quoted service (SSR parity:
+  // quotedServiceNames.join(' + ')) — the per-section cards below carry
+  // each service's own cadence, so the eyebrow stays cadence-free here.
+  const recurringSections = pricingServices(pricing).filter((section) => section?.isRecurring);
+  if (recurringSections.length > 1) {
+    return recurringSections.map((section) => section.label || serviceLabelForKey(section.key)).join(' + ');
   }
   const category = frequencyServiceCategory(frequency, pricing);
   const service = recurringServiceForEstimate(pricing);
@@ -2973,9 +2991,7 @@ export default function EstimateViewPage() {
   const showAskBar = !['accepted', 'declined', 'expired'].includes(cta?.terminalState);
   const serviceCategory = estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
   const copy = estimateCopyFor(serviceCategory);
-  // One-time-only estimates (pre-slab, cleanouts, …) never say "choose your
-  // ... option" — there is no option to choose; use the quote-phrased headline.
-  const headline = estimateHeadlineFor(copy, { isOneTimeOnly: estimate?.isOneTimeOnly === true });
+  const headline = UNIVERSAL_HEADLINE;
   const headerContactProps = {
     customerFirstName: estimate.customerFirstName,
     customerName: estimate.customerName,
@@ -3222,7 +3238,6 @@ export default function EstimateViewPage() {
       <Header
         {...headerContactProps}
         serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
-        canChooseOneTime={estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0}
         headline={headline}
       />
 
