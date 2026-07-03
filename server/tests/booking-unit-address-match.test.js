@@ -32,6 +32,12 @@ describe('unitsConflict', () => {
     expect(unitsConflict('Apt #4', '#4')).toBe(false);
     expect(unitsConflict('Suite #210', 'Ste 210')).toBe(false);
   });
+
+  test('structural designators are NOT interchangeable with apt/unit (codex rd4)', () => {
+    expect(unitsConflict('Bldg 2', 'Apt 2')).toBe(true);
+    expect(unitsConflict('Floor 2', 'Unit 2')).toBe(true);
+    expect(unitsConflict('Bldg 2', 'Bldg 2')).toBe(false);
+  });
 });
 
 describe('addressMatchesCustomer with units', () => {

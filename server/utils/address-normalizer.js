@@ -301,12 +301,18 @@ function normalizeUnitLine(value) {
   return ['Unit', ...tokens.map(normalizeUnitToken)].join(' ');
 }
 
+// Designators that all mean "the dwelling unit" — interchangeable across
+// notations ("Apt 4" = "Unit 4" = "Ste 4" = "#4" → "Unit 4"). Structural
+// designators (bldg / floor / lot / space) are NOT interchangeable — Bldg 2
+// is a different door than Apt 2 — and keep their designator in the key.
+const INTERCHANGEABLE_UNIT_DESIGNATORS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite']);
+
 // Designator-stripped comparison key for a NORMALIZED unit line:
-// "Apt 4B" / "Unit 4B" → "4b". Multi-token units keep their full shape so
-// "Bldg 2 Apt 4" never collides with "Apt 4".
+// "Apt 4B" / "Unit 4B" → "4b", but "Bldg 2" → "bldg 2". Multi-token units
+// keep their full shape so "Bldg 2 Apt 4" never collides with "Apt 4".
 function unitLineValueKey(normalizedUnitLine) {
   const tokens = String(normalizedUnitLine || '').toLowerCase().split(' ').filter(Boolean);
-  return tokens.length === 2 && UNIT_DESIGNATORS.has(tokens[0]) ? tokens[1] : tokens.join(' ');
+  return tokens.length === 2 && INTERCHANGEABLE_UNIT_DESIGNATORS.has(tokens[0]) ? tokens[1] : tokens.join(' ');
 }
 
 // Split a street line into its street part and a trailing inline unit —

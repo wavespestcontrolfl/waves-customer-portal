@@ -319,9 +319,17 @@ describe('normalizeUnitLine', () => {
 });
 
 describe('unitLineValueKey', () => {
-  test('drops a lone designator so notations compare equal', () => {
+  test('drops a lone interchangeable designator so notations compare equal', () => {
     expect(unitLineValueKey('Apt 4B')).toBe('4b');
     expect(unitLineValueKey('Unit 4B')).toBe('4b');
+    expect(unitLineValueKey('Suite 210')).toBe('210');
+  });
+
+  test('structural designators keep their designator — Bldg 2 is not Apt 2', () => {
+    expect(unitLineValueKey('Bldg 2')).toBe('bldg 2');
+    expect(unitLineValueKey('Fl 2')).toBe('fl 2');
+    expect(unitLineValueKey('Lot 2')).toBe('lot 2');
+    expect(unitLineValueKey('Bldg 2')).not.toBe(unitLineValueKey('Apt 2'));
   });
 
   test('multi-token units keep their full shape', () => {

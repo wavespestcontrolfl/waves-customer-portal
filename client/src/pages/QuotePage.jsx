@@ -598,6 +598,15 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          // When a subpremise exists, formatted still carries it inline — send
+          // the street-only line1 (+ components) so the server keeps the unit
+          // in line2 and feeds the parcel lookup a clean street address.
+          ...(resolvedAddress.line2 ? {
+            address_line1: resolvedAddress.line1 || undefined,
+            city: resolvedAddress.city || undefined,
+            state: resolvedAddress.state || undefined,
+            zip: resolvedAddress.zip || undefined,
+          } : {}),
           address_line2: resolvedAddress.line2 || undefined,
           interest: intake.interest,
           frequency: intake.frequency,
@@ -659,6 +668,12 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          ...(resolvedAddress.line2 ? {
+            address_line1: resolvedAddress.line1 || undefined,
+            city: resolvedAddress.city || undefined,
+            state: resolvedAddress.state || undefined,
+            zip: resolvedAddress.zip || undefined,
+          } : {}),
           address_line2: resolvedAddress.line2 || undefined,
           interest: 'other',
           otherService: intake.otherService,
@@ -700,6 +715,12 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          ...(resolvedAddress.line2 ? {
+            address_line1: resolvedAddress.line1 || undefined,
+            city: resolvedAddress.city || undefined,
+            state: resolvedAddress.state || undefined,
+            zip: resolvedAddress.zip || undefined,
+          } : {}),
           address_line2: resolvedAddress.line2 || undefined,
           interest: intake.interest,
           frequency: intake.frequency,

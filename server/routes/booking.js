@@ -1369,7 +1369,9 @@ async function createSelfBooking(payload = {}) {
       const startLabel = minToTime12(timeToMin(slot_start));
       const endLabel = minToTime12(endMin);
       const timeLabel = `${startLabel} - ${endLabel}`;
-      const addressLabel = `${customer.address_line1}, ${customer.city}`;
+      // line1 is street-only once units live in address_line2 — the
+      // confirmation must still show the apartment the visit is booked for.
+      const addressLabel = `${[customer.address_line1, customer.address_line2].filter(Boolean).join(', ')}, ${customer.city}`;
       const smsBody = await renderSmsTemplate(
         'self_booking_confirmation',
         {

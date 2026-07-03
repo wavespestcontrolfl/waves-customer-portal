@@ -374,6 +374,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
       line1: req.body.address_line1 || req.body.addressLine1,
+      line2: req.body.address_line2 || req.body.addressLine2 || req.body.unit,
       city,
       state: req.body.state,
       zip,
@@ -844,7 +845,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (!existingCust.lead_source_channel) updates.lead_source_channel = entryChannel;
         if (!existingCust.lead_source_area && quoteCity) updates.lead_source_area = String(quoteCity).slice(0, 50);
         if (!existingCust.email && emailLc) updates.email = emailLc;
-        if (!existingCust.address_line1 && quoteAddress) updates.address_line1 = quoteAddress;
+        if (!existingCust.address_line1 && quoteAddress) {
+          updates.address_line1 = quoteAddress;
+          // Unit rides ONLY with a whole-address fill — this public route
+          // resolves the customer without proven identity, so a unit must
+          // never be bolted onto an existing address (same rule as /api/leads).
+          if (normalizedAddress.line2) updates.address_line2 = normalizedAddress.line2;
+        }
         if (!existingCust.city && quoteCity) updates.city = quoteCity;
         if (!existingCust.state && quoteState) updates.state = quoteState;
         if (!existingCust.zip && quoteZip) updates.zip = quoteZip;
@@ -864,6 +871,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           email: emailLc,
           phone: contactPhone,
           address_line1: quoteAddress,
+          address_line2: normalizedAddress.line2 || null,
           city: quoteCity || '',
           state: quoteState || 'FL',
           zip: quoteZip || '',
