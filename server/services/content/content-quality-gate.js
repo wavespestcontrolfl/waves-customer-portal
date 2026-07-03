@@ -518,22 +518,26 @@ function checkSourceInternalLink(draft) {
   return { ok: true };
 }
 
-// Explicit allowlist of known Waves phone numbers — FULL 10 digits (all 941
-// today, from server/config/locations.js): 318-7612 LWR/Bradenton, 297-2817
-// Parrish, 297-2606 Sarasota, 297-3337 Venice, 240-2066 NP, 297-5749 main
-// (PC + Palmetto). Keyed on the full number: the previous last-7 key let any
-// customer number sharing a Waves line's last seven digits in a DIFFERENT
-// area code pass as the business phone. Anything not on the list is treated
-// as customer PII.
-const WAVES_PHONES = new Set([
-  '9413187612', '9412972817', '9412972606', '9412973337', '9412402066', '9412975749',
-]);
+// Single-sourced from waves-phones.js (shared with seo-completion-gate and
+// content-guardrails' tel: destination check) — the per-file copies had
+// already drifted once (last-7 vs full-10 keys).
+const { WAVES_PHONES, isWavesPhone } = require('./waves-phones');
 
-function isWavesPhone(raw) {
-  const digits = String(raw || '').replace(/\D/g, '');
-  // Normalize to last 10 digits (drops a leading 1).
-  const last10 = digits.length >= 10 ? digits.slice(-10) : null;
-  return !!last10 && WAVES_PHONES.has(last10);
+// Waves' own office street addresses (config/locations.js) are legitimate
+// city-service NAP furniture — strip them before the PII address scan so
+// the business's own address can never hard-fail the redaction gate.
+function stripWavesOfficeAddresses(text) {
+  let out = String(text || '');
+  try {
+    const { WAVES_LOCATIONS } = require('../../config/locations');
+    for (const loc of WAVES_LOCATIONS || []) {
+      const addr = String(loc?.address || '').split(',')[0].trim(); // street portion
+      if (!addr) continue;
+      const re = new RegExp(addr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'gi');
+      out = out.replace(re, '[waves-office]');
+    }
+  } catch { /* locations unavailable — scan unstripped (more conservative) */ }
+  return out;
 }
 
 function checkRedactionPassed(draft) {
@@ -559,6 +563,25 @@ function checkRedactionPassed(draft) {
   const emails = body.match(/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/g) || [];
   if (emails.some((e) => !e.toLowerCase().endsWith('@wavespestcontrol.com'))) {
     return { ok: false, reason: 'email_in_body' };
+  }
+  // Names + street addresses via the pii-redactor's own patterns — phones
+  // and emails alone left exactly the gap this hard check exists to close:
+  // customer-derived local proof like "John Smith at 4867 Maple Street"
+  // sailed through. Waves' own office addresses (NAP furniture) are
+  // stripped first so they can never hard-fail the gate; the redactor's
+  // staff/place allowlist handles team names. ZIP findings are deliberately
+  // NOT failed — "Venice, FL 34285" is service-area furniture, and a
+  // customer ZIP only identifies anyone alongside an address, which fails
+  // on its own.
+  try {
+    const { redact } = require('./pii-redactor');
+    const scanned = redact(stripWavesOfficeAddresses(body));
+    const hit = (scanned.findings || []).find((f) => f.type === 'name' || f.type === 'address');
+    if (hit) return { ok: false, reason: `unredacted_${hit.type}_in_body` };
+  } catch (err) {
+    // Redactor unavailable = we cannot prove the body is clean — this is a
+    // HARD publish gate, so fail closed rather than silently passing.
+    return { ok: false, reason: `pii_scan_unavailable:${err.message}` };
   }
   return { ok: true };
 }

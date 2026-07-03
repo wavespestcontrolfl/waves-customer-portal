@@ -265,14 +265,10 @@ function schemaMentionsHiddenFaq(draft = {}, renderedHtml = null) {
   return /FAQPage/i.test(schemaText) && extractVisibleFaqs(body).length === 0;
 }
 
-// Full 10-digit Waves lines (all 941 — from server/config/locations.js:
-// 318-7612 LWR/Bradenton, 297-2817 Parrish, 297-2606 Sarasota, 297-3337
-// Venice, 240-2066 NP, 297-5749 main). Keyed on the FULL number: a last-7
-// key let any customer number sharing a Waves line's last seven digits in a
-// different area code pass as "the business phone".
-const WAVES_PHONES = new Set([
-  '9413187612', '9412972817', '9412972606', '9412973337', '9412402066', '9412975749',
-]);
+// Single-sourced from waves-phones.js (shared with content-quality-gate and
+// content-guardrails' tel: destination check) — the per-file copies had
+// already drifted once (last-7 vs full-10 keys).
+const { WAVES_PHONES } = require('./waves-phones');
 
 function detectPii(body = '') {
   const text = String(body || '');

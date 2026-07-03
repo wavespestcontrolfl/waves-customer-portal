@@ -435,3 +435,29 @@ describe('outbound-link gate: schemes WITHOUT :// in link destinations (Codex ro
     }
   });
 });
+
+describe('outbound-link gate: Waves tel links + no-slash http (Codex round 4)', () => {
+  test('the writer-mandated tap-to-call Waves link passes', () => {
+    for (const body of [
+      'Call us at [(941) 297-5749](tel:+19412975749) for a same-day quote.',
+      'Call [(941) 297-2606](tel:9412972606).',
+      'Dial <tel:+19412972817> now.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    }
+  });
+  test('a tel link to a NON-Waves number is P0', () => {
+    const r = guardrails.evaluate({ body: 'Call [me](tel:+12125551234) instead.' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+  test('no-slash http(s) destinations are P0 (browsers navigate them but the host scan never saw them)', () => {
+    for (const body of [
+      '[spam](http:evil.com) here.',
+      '<a href="https:evil.com/x">x</a>',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+});

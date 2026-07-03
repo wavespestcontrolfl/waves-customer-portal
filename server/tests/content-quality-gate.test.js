@@ -181,6 +181,24 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
     expect(checkRedactionPassed({ body: 'Email info@wavespestcontrol.com to book.' }).ok).toBe(true);
     expect(checkRedactionPassed({ body: 'Email info@wavespestcontrol.com or karen@gmail.com.' }).ok).toBe(false);
   });
+  test('redaction: customer NAMES and street ADDRESSES hard-fail (Codex round 4 — phones/emails alone left the exact gap this gate closes)', () => {
+    const addr = checkRedactionPassed({ body: 'John Smith at 4867 Maple Street told us the ants were back within a week.' });
+    expect(addr.ok).toBe(false);
+    expect(addr.reason).toMatch(/unredacted_(name|address)_in_body/);
+    const name = checkRedactionPassed({ body: 'My name is john smith and i want a quote' });
+    expect(name.ok).toBe(false);
+    expect(name.reason).toBe('unredacted_name_in_body');
+  });
+  test('redaction: Waves\' own office address is NAP furniture, never PII', () => {
+    expect(checkRedactionPassed({
+      body: 'Our Bradenton office at 13649 Luxe Ave #110, Bradenton, FL 34211 serves Lakewood Ranch.',
+    }).ok).toBe(true);
+  });
+  test('redaction: staff names and normal service copy stay clean', () => {
+    expect(checkRedactionPassed({
+      body: 'Owner Jose Alvarado has treated 500+ homes. Termites swarm in Venice every spring; call (941) 297-3337.',
+    }).ok).toBe(true);
+  });
 });
 
 // ── refresh checks ──────────────────────────────────────────────────

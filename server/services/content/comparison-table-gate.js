@@ -326,9 +326,17 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   const scanText = draftScanTexts(draft, body);
   const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
   const nameScanText = stripQuotesForNames(scanText);
-  const briefNorm = String(operatorBriefText || '').toLowerCase().replace(/\s+/g, ' ');
-  const operatorAuthorized = (name) => !!briefNorm
-    && briefNorm.includes(String(name).toLowerCase().replace(/\s+/g, ' '));
+  // Authorized names come from running the SAME mention detector over the
+  // operator's brief text — both sides canonicalize identically, so a brief
+  // that says "Massey" authorizes a draft that writes the canonical "Massey
+  // Services" (a raw substring compare missed every alias↔canonical pair).
+  const authorizedNames = new Set();
+  if (operatorBriefText) {
+    for (const m of competitorFacts.findBusinessMentions(stripQuotesForNames(String(operatorBriefText)))) {
+      authorizedNames.add(String(m.name).toLowerCase());
+    }
+  }
+  const operatorAuthorized = (name) => authorizedNames.has(String(name).toLowerCase());
 
   const known = new Set();
   const unknown = new Set();

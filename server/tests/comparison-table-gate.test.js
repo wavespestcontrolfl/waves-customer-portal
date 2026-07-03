@@ -707,4 +707,16 @@ describe('table-less drafts: operator-authorized competitor naming (Codex round 
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
   });
+  test('an ALIAS in the brief authorizes the canonical name in the draft (Codex round 4)', () => {
+    // Authorization runs findBusinessMentions over the brief text, so both
+    // sides canonicalize identically — a raw substring compare missed every
+    // alias↔canonical pair ("Massey" in the brief vs "Massey Services" in
+    // the draft) and hard-blocked legitimate operator intercepts.
+    const r = gate.evaluate({
+      body: 'Massey Services publishes its termite bond terms; here is what the contract covers.',
+    }, { operatorBriefText: 'why massey termite bonds confuse homeowners\nmassey bond explained' });
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
 });

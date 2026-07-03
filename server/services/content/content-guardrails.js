@@ -235,17 +235,24 @@ const ABSOLUTE_URL_RE = /\b([a-z][a-z0-9+.-]*):\/\/[^\s<>()"'\]]+/gi;
 //     bracketed form `[x](<scheme:…>)`,
 //   - href/src attributes: `href="scheme:…"`,
 //   - CommonMark autolinks: `<scheme:…>` (no whitespace inside by spec).
-// Policy: only http(s) (which then flows through the host allowlist) and
-// mailto (recipient-validated below) may pass; everything else is P0.
-const MD_DEST_SCHEME_RE = /\]\(\s*<?\s*([a-z][a-z0-9+.-]*):/gi;
-const ATTR_SCHEME_RE = /\b(?:href|src)\s*=\s*["']?\s*([a-z][a-z0-9+.-]*):/gi;
-const AUTOLINK_SCHEME_RE = /<([a-z][a-z0-9+.-]*):[^>\s]*>/gi;
-const ALLOWED_DEST_SCHEMES = new Set(['http', 'https', 'mailto']);
+// Policy: http(s) must be a proper `scheme://` form (group 2) — a no-slash
+// `[spam](http:evil.com)` still NAVIGATES externally in browsers but never
+// reaches the `://` host-allowlist scan, so it is rejected here; mailto is
+// recipient-validated below; tel is Waves-number-validated below (the
+// writer prompt MANDATES tap-to-call [(941) 297-5749](tel:+19412975749)
+// links, so tel can't be blanket-blocked). Everything else is P0.
+const MD_DEST_SCHEME_RE = /\]\(\s*<?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
+const ATTR_SCHEME_RE = /\b(?:href|src)\s*=\s*["']?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
+const AUTOLINK_SCHEME_RE = /<([a-z][a-z0-9+.-]*):(\/\/)?[^>\s]*>/gi;
+const ALLOWED_DEST_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
 // Protocol-relative URL (//host/path) — scheme-less external reference that
 // bypasses an https?:// scan. Requires a dotted host with a TLD so prose
 // slashes ("and//or", path fragments) don't trip it.
 const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=])\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?=[/\s"')\]]|$)/i;
 const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
+// tel: destinations — validated against the Waves phone allowlist, exactly
+// like mailto recipients are validated against the business domain.
+const TEL_RE = /\btel:([+\d][\d().\s-]{5,18}\d)/gi;
 
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = String(text || '');
@@ -256,8 +263,19 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     while ((dm = destRe.exec(body)) !== null) {
       const scheme = dm[1].toLowerCase();
       if (!ALLOWED_DEST_SCHEMES.has(scheme)) {
-        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a link destination with the "${scheme}:" scheme ("${dm[0].slice(0, 60)}") — only http(s) links to allowlisted hosts, @wavespestcontrol.com mailto links, or relative internal paths are permitted.`);
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a link destination with the "${scheme}:" scheme ("${dm[0].slice(0, 60)}") — only http(s) links to allowlisted hosts, @wavespestcontrol.com mailto links, Waves tel: links, or relative internal paths are permitted.`);
       }
+      if ((scheme === 'http' || scheme === 'https') && dm[2] !== '//') {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a no-slash "${scheme}:" destination ("${dm[0].slice(0, 60)}") — browsers still navigate these externally but the host can't be allowlist-checked. Use a full ${scheme}:// URL or a relative internal path.`);
+      }
+    }
+  }
+  const telRe = new RegExp(TEL_RE.source, 'gi');
+  let t;
+  while ((t = telRe.exec(body)) !== null) {
+    const { isWavesPhone } = require('./waves-phones');
+    if (!isWavesPhone(t[1])) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a tel: link to "${t[1].trim()}", which is not a Waves phone number — tap-to-call links may only dial the business's own lines.`);
     }
   }
   const allowed = allowedLinkHosts({ operatorCitations, requiredSourceUrls });
