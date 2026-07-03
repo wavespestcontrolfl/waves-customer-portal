@@ -393,6 +393,11 @@ export default function QuotePage({ serviceSlug = '' }) {
   // a Turnstile token + an off-screen honeypot, mirroring the marketing forms.
   const honeypotRef = useRef(null);
   const [turnstileToken, setTurnstileToken] = useState('');
+  // Turnstile tokens are single-use. A failed POST (after the server already
+  // spent the token) must force a fresh one, or the retry gets rejected as
+  // timeout-or-duplicate. Bumping the nonce remounts the widget → new token.
+  const [turnstileNonce, setTurnstileNonce] = useState(0);
+  const resetTurnstile = () => { setTurnstileToken(''); setTurnstileNonce((n) => n + 1); };
 
   useEffect(() => {
     setStage('intake');
@@ -672,6 +677,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       setStage('result-other');
     } catch (e) {
       setError(e?.message || 'Could not send your request. Please call us.');
+      resetTurnstile();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -714,6 +720,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       setStage('result-other');
     } catch (e) {
       setError(e?.message || 'Could not send your request. Please call us.');
+      resetTurnstile();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -1117,7 +1124,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                     nothing until VITE_TURNSTILE_SITE_KEY is set. */}
                 {intakeIdx === INTAKE_STEPS.length - 1 && (
                   <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center' }}>
-                    <TurnstileWidget onToken={setTurnstileToken} />
+                    <TurnstileWidget key={`ts-${turnstileNonce}`} onToken={setTurnstileToken} />
                   </div>
                 )}
 

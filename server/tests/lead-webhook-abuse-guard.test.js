@@ -68,6 +68,24 @@ describe('verifyTurnstileToken', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  test('blank / whitespace-only token → fails CLOSED before any network call', async () => {
+    process.env.TURNSTILE_SECRET_KEY = 'secret';
+    fetchSpy = jest.spyOn(global, 'fetch');
+    const r = await verifyTurnstileToken('   ', '1.2.3.4');
+    expect(r).toMatchObject({ ok: false, enforced: true, reason: 'missing_token' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('missing-input-response verdict → fails CLOSED, not config_error (codex P2)', async () => {
+    process.env.TURNSTILE_SECRET_KEY = 'secret';
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: false, 'error-codes': ['missing-input-response'] }),
+    });
+    const r = await verifyTurnstileToken('present-token', '1.2.3.4');
+    expect(r).toMatchObject({ ok: false, enforced: true, reason: 'rejected' });
+  });
+
   test('Cloudflare success:true → verified', async () => {
     process.env.TURNSTILE_SECRET_KEY = 'secret';
     fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({

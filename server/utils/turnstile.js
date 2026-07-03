@@ -12,8 +12,9 @@ const VERIFY_TIMEOUT_MS = 4000;
 // misconfiguration and must fail OPEN, so a secret typo can't 403 every real
 // lead. https://developers.cloudflare.com/turnstile/get-started/server-side-validation/#error-codes
 const TOKEN_FAILURE_CODES = new Set([
-  'invalid-input-response', // the token is invalid or malformed
-  'timeout-or-duplicate',   // the token already got used or has expired
+  'invalid-input-response',  // the token is invalid or malformed
+  'timeout-or-duplicate',    // the token already got used or has expired
+  'missing-input-response',  // no token was supplied — a definitive token failure
 ]);
 
 /**
@@ -44,8 +45,11 @@ async function verifyTurnstileToken(token, remoteip) {
   if (!secret) {
     return { ok: true, enforced: false, reason: 'not_configured' };
   }
-  if (!token || typeof token !== 'string') {
-    // Secret is set → we intend to enforce → a missing token is a real failure.
+  const trimmedToken = typeof token === 'string' ? token.trim() : '';
+  if (!trimmedToken) {
+    // Secret is set → we intend to enforce → a missing/blank token is a real
+    // failure. Reject here rather than letting siteverify return
+    // missing-input-response (which would otherwise have to be caught below).
     return { ok: false, enforced: true, reason: 'missing_token' };
   }
 
@@ -54,7 +58,7 @@ async function verifyTurnstileToken(token, remoteip) {
   try {
     const params = new URLSearchParams();
     params.set('secret', secret);
-    params.set('response', token);
+    params.set('response', trimmedToken);
     if (remoteip) params.set('remoteip', String(remoteip));
 
     const res = await fetch(SITEVERIFY_URL, {
