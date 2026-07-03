@@ -1645,6 +1645,13 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         .where({ id: run.social_media_post_id })
         .update({
           platforms_posted: JSON.stringify(assessment.mergedPublishResult.platforms),
+          // publishToAll derived the row status from THIS attempt alone, so a
+          // no-success retry (IG failed/skipped while attempt-1's FB video is
+          // already live) just flipped a live post to 'failed'. Re-derive from
+          // the merged record: any cross-attempt success = 'published' — the
+          // same any-success rule publishToAll itself applies. (published_at
+          // was already stamped by the attempt that first succeeded.)
+          ...(assessment.mergedPublishResult.success ? { status: 'published' } : {}),
           ...(Object.keys(mergedContent).length ? { published_content: JSON.stringify(mergedContent) } : {}),
         })
         .catch(() => null);
