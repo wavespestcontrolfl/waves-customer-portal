@@ -12,6 +12,7 @@
  */
 import { useEffect, useId, useRef, useState } from 'react';
 import WavesAIScheduleSearch from '../booking/WavesAIScheduleSearch';
+import { estimateCard } from './cardStyles';
 
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -250,7 +251,7 @@ export default function SlotPicker({
 
   if (loading) {
     return (
-      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16, color: W.textCaption, fontSize: 14 }}>
+      <div style={estimateCard({ color: W.textCaption, fontSize: 14 })}>
         Loading available times…
       </div>
     );
@@ -258,7 +259,7 @@ export default function SlotPicker({
 
   if (error) {
     return (
-      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+      <div style={estimateCard()}>
         <div style={{ fontSize: 14, color: W.textBody }}>
           Couldn't load times right now. <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call (941) 297-5749</a> and we'll get you scheduled.
         </div>
@@ -293,7 +294,7 @@ export default function SlotPicker({
 
   if (allSlots.length === 0) {
     return (
-      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+      <div style={estimateCard()}>
         {heading}
         {finder}
         <div style={{ fontSize: 14, color: W.textBody }}>
@@ -307,7 +308,7 @@ export default function SlotPicker({
   const more = allSlots.slice(INITIAL_VISIBLE, INITIAL_VISIBLE + 3);
 
   return (
-    <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+    <div style={estimateCard()}>
       {heading}
       {finder}
       {initial.map((slot) => (

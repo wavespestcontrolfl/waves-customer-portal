@@ -4,6 +4,8 @@
  * Customer taps toggle checked state; selected set is carried through to
  * the accept handler as part of the final payload.
  */
+import { estimateCard } from './cardStyles';
+
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', green: '#16A34A',
   navy: '#0F172A', blueDeeper: '#1B2C5B', textBody: '#334155', textCaption: '#64748B',
@@ -20,10 +22,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
   if (items.length === 0) return null;
 
   return (
-    <div style={{
-      background: W.white, borderRadius: 14, padding: 24,
-      border: `1px solid ${W.border}`, marginBottom: 16,
-    }}>
+    <div style={estimateCard()}>
       <div style={{ fontSize: 12, fontWeight: 700, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6 }}>
         Customize your visit

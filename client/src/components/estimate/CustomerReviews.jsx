@@ -7,6 +7,7 @@
  * broken or empty.
  */
 import { useEffect, useRef, useState } from 'react';
+import { estimateCard } from './cardStyles';
 
 const W = {
   blueDeeper: '#1B2C5B', yellow: '#FFD700',
@@ -111,10 +112,7 @@ export default function CustomerReviews() {
   const visible = Array.from({ length: visibleCount }, (_, offset) => reviews[(start + offset) % reviews.length]);
 
   return (
-    <section style={{
-      background: W.white, borderRadius: 14, padding: 24,
-      border: `1px solid ${W.warmBorder}`, marginBottom: 16,
-    }}>
+    <section style={estimateCard()}>
       <h2 style={{
         fontFamily: "'Source Serif 4', Georgia, serif",
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,

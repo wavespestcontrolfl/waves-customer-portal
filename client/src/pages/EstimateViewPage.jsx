@@ -36,6 +36,8 @@ import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceBu
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import CustomerReviews from '../components/estimate/CustomerReviews';
+import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
+import { estimateCard } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
@@ -438,16 +440,12 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
   const showYourWorkFacts = Array.isArray(showYourWork?.facts) ? showYourWork.facts : [];
 
   return (
-    <section style={{
+    <section style={estimateCard({
       // Solid warm tan (matches the server-rendered estimate's .ai-card).
       // The previous gradient faded to #FFFFFF at the bottom, which erased
       // the contrast against the white metric/signal boxes inside the card.
       background: '#F2EEE0',
-      border: `1px solid ${ESTIMATE_BORDER}`,
-      borderRadius: 12,
-      padding: 24,
-      marginBottom: 16,
-    }}>
+    })}>
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
@@ -723,10 +721,7 @@ function MembershipCard({ membership }) {
   const valStyle = { color: '#1F7A4D', fontSize: 14, fontWeight: 600, textAlign: 'right' };
 
   return (
-    <section style={{
-      background: '#F2EEE0', border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12,
-      padding: 24, marginBottom: 16, display: 'grid', gap: 14,
-    }}>
+    <section style={{ ...estimateCard({ background: '#F2EEE0' }), display: 'grid', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
           <h2 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
@@ -816,10 +811,7 @@ const PORTAL_SHOWCASE_FEATURES = [
 
 function PortalShowcaseCard() {
   return (
-    <section style={{
-      background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12,
-      padding: 24, marginBottom: 16, display: 'grid', gap: 16,
-    }}>
+    <section style={{ ...estimateCard(), display: 'grid', gap: 16 }}>
       <div>
         <h2 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
           Your customer portal
@@ -907,15 +899,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   }, [asking, askToken, question, selectedFrequency, serviceMode, token]);
 
   return (
-    <section style={{
-      background: COLORS.white,
-      border: '1px solid #CFE7F5',
-      borderRadius: 12,
-      padding: 24,
-      marginBottom: 16,
-      display: 'grid',
-      gap: 12,
-    }}>
+    <section style={{ ...estimateCard({ border: '1px solid #CFE7F5' }), display: 'grid', gap: 12 }}>
       <div>
         <div style={{
           fontSize: 12,
@@ -1244,14 +1228,7 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
   const isReceived = status === 'received';
   const isError = status === 'error';
   return (
-    <section style={{
-      background: COLORS.white,
-      border: `1px solid ${ESTIMATE_BORDER}`,
-      borderRadius: 12,
-      padding: 16,
-      marginBottom: 16,
-      boxShadow: '0 1px 6px rgba(15,23,42,0.04)',
-    }}>
+    <section style={estimateCard({ padding: 16 })}>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
         <div style={{
           width: 36,
@@ -1364,11 +1341,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
   const totalIsQuoteRequired = hasQuoteRequired && total <= 0;
 
   return (
-    <div style={{
-      background: COLORS.white, borderRadius: 16, padding: 18,
-      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 16,
-      boxShadow: '0 1px 6px rgba(15,23,42,0.04)',
-    }}>
+    <div style={estimateCard({ padding: 18 })}>
       <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 10 }}>
         One-time services
       </div>
@@ -1478,14 +1451,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
   const annualRangeLow = showLowConfidenceRange && annual ? round2(Number(annual) - annualBand) : null;
   const annualRangeHigh = showLowConfidenceRange && annual ? round2(Number(annual) + annualBand) : null;
   return (
-    <section style={{
-      background: COLORS.white,
-      border: `1px solid ${ESTIMATE_BORDER}`,
-      borderRadius: 16,
-      padding: 24,
-      margin: '4px 0 16px',
-      boxShadow: '0 8px 24px rgba(15,23,42,.06)',
-    }}>
+    <section style={estimateCard()}>
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
@@ -1605,13 +1571,7 @@ function formatAppointmentLabel(appointment = {}) {
 
 function ExistingAppointmentCard({ appointment }) {
   return (
-    <div style={{
-      background: COLORS.white,
-      borderRadius: 16,
-      padding: 24,
-      border: `1px solid ${ESTIMATE_BORDER}`,
-      marginBottom: 16,
-    }}>
+    <div style={estimateCard()}>
       <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         Existing appointment
       </div>
@@ -2152,13 +2112,7 @@ function AcceptanceModeCard({ acceptance }) {
     // Payment-only accept (guarantee-only renewal) — informational, no call
     // CTA: the accept button below handles the whole flow.
     return (
-      <div style={{
-        background: COLORS.white,
-        borderRadius: 16,
-        padding: 24,
-        border: `1px solid ${ESTIMATE_BORDER}`,
-        marginBottom: 16,
-      }}>
+      <div style={estimateCard()}>
         <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
           No appointment needed.
         </div>
@@ -2174,13 +2128,7 @@ function AcceptanceModeCard({ acceptance }) {
   // this is informational (no call-to-book), explaining who schedules the visit.
   if (acceptance.mode === 'commercial_site_confirmation') {
     return (
-      <div style={{
-        background: COLORS.white,
-        borderRadius: 16,
-        padding: 24,
-        border: `1px solid ${ESTIMATE_BORDER}`,
-        marginBottom: 16,
-      }}>
+      <div style={estimateCard()}>
         <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
           Approve online — we handle the scheduling.
         </div>
@@ -3169,6 +3117,7 @@ export default function EstimateViewPage() {
           proposalPdfEmailed={proposalPdfEmailed}
         />
         {showAcceptedRecap ? renderQuoteDetailCards(true, estimate.acceptedServiceMode || serviceMode) : null}
+        <AppShowcaseCard />
         <CustomerReviews />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
@@ -3226,6 +3175,7 @@ export default function EstimateViewPage() {
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
+        <AppShowcaseCard />
         <CustomerReviews />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
@@ -3389,6 +3339,7 @@ export default function EstimateViewPage() {
         </>
       )}
 
+      <AppShowcaseCard />
       <CustomerReviews />
       <QuestionsEscapeHatch estimateSlug={estimate.slug} />
       <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
