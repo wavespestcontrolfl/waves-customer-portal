@@ -37,10 +37,48 @@ const DOC_LINKS = [
     note: 'Direct label/SDS documents owner-provided from SiteOne 2026-07-03.',
   },
   {
+    // Owner's strongest match: the LabelSDS Pro Plus T&O Micro label shows
+    // item #098186 (Florida Friendly / T&O Chelated Micro-Nutrient Package,
+    // 2 x 2.5 gal case) and the SDS is the matching ProPlus T&O Micro
+    // Nutrient sheet.
     pattern: '%Chelated AM + Micros%',
-    labelUrl: 'https://www.siteone.com/pdf/sdsPDF?resourceId=8928',
+    labelUrl: 'https://labelsds.com/document.php?file=Pro+Plus+TO+Micro+Label.pdf&product=4254',
+    sdsUrl: 'https://labelsds.com/document.php?file=ProPlus+Micro+SDS+11-20-14.pdf&product=4254',
     replaceLabelUrls: ['https://www.siteone.com/en/098186b-lesco-florida-friendly-am-turfgrass-ornamental-chleated-liquid-micronutrient/p/574274'],
-    note: 'T&O Chelated Micronutrient Package label/spec doc owner-provided from SiteOne 2026-07-03.',
+    note: 'Pro Plus T&O Micro label (item #098186, Florida Friendly package) + ProPlus T&O Micro Nutrient SDS owner-provided 2026-07-03.',
+  },
+  // The four dry granular rows use the generic "LESCO Granular Fertilizer –
+  // All Analyses" SDS per the owner's direction: SiteOne exposes that exact
+  // SDS under the 15-0-15 row and the sheet states it covers granular
+  // fertilizers with and without micronutrients. Swap to product-specific
+  // SDS documents if they surface later.
+  {
+    pattern: '%15-0-15%',
+    labelUrl: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/labelAsset/rb-ue-labels-27652_336165_label_098586-label-732419/rb-ue-labels-27652-336165-label-098586-label-732419.pdf',
+    sdsUrl: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/safetyDataSheet/rb-ue-msds-2209_336165_msds_1015sds-308654/rb-ue-msds-2209-336165-msds-1015sds-308654.pdf',
+    replaceLabelUrls: ['https://www.siteone.com/en/098586wb-lesco-15-0-15-30-polyplus-opti45-as-1-fe-04-mn-245s-mop-turfgrass-granular-fertilizer/p/1061038'],
+    note: 'Direct SiteOne label (098586) + LESCO Granular All-Analyses SDS owner-provided 2026-07-03.',
+  },
+  {
+    // No direct label PDF found — the label link stays the SiteOne product
+    // page seeded by 20260703000002; only the SDS fills here.
+    pattern: '%7-1-7%',
+    sdsUrl: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/safetyDataSheet/rb-ue-msds-2209_336165_msds_1015sds-308654/rb-ue-msds-2209-336165-msds-1015sds-308654.pdf',
+    note: 'LESCO Granular All-Analyses SDS owner-provided 2026-07-03 (no product-specific label PDF found; label stays the SiteOne product page).',
+  },
+  {
+    pattern: '%0-0-18 Bio KMAG%',
+    labelUrl: 'https://www.siteone.com/pdf/sdsPDF?resourceId=21211&skuId=396974',
+    sdsUrl: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/safetyDataSheet/rb-ue-msds-2209_336165_msds_1015sds-308654/rb-ue-msds-2209-336165-msds-1015sds-308654.pdf',
+    replaceLabelUrls: ['https://www.siteone.com/en/510333-lesco-0-0-18-bio-kmag-1-fe-1-mg-1-mn-217-s-organic-turf-granular-fertilizer-40-lb-bag/p/396974'],
+    note: 'Product information/label PDF (510333) + LESCO Granular All-Analyses SDS owner-provided 2026-07-03.',
+  },
+  {
+    pattern: '%Elite 0-0-28%',
+    labelUrl: 'https://www.siteone.com/pdf/sdsPDF?resourceId=126596&skuId=334404',
+    sdsUrl: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/safetyDataSheet/rb-ue-msds-2209_336165_msds_1015sds-308654/rb-ue-msds-2209-336165-msds-1015sds-308654.pdf',
+    replaceLabelUrls: ['https://www.siteone.com/en/015171-lesco-elite-0-0-28-am-75-fe-65-mn-9-s-turfgrass-granular-fertilizer-50-lb-bag/p/4465'],
+    note: 'Elite family spec/catalog PDF (incl. 015171 0-0-28) + LESCO Granular All-Analyses SDS owner-provided 2026-07-03.',
   },
   {
     pattern: '%Moisture Manager%',
