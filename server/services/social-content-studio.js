@@ -731,13 +731,14 @@ async function recentCreativeConceptKeys(limit = 6) {
 // Mirrors publishToAll's fbReady/igReady env checks.
 function hasVideoCapableChannel(channels) {
   const list = Array.isArray(channels) ? channels : [];
-  const fbReady = SOCIAL_FLAGS.facebookEnabled
-    && !!process.env.FACEBOOK_ACCESS_TOKEN && !!process.env.FACEBOOK_PAGE_ID;
-  // publishToAll's igReady is derived from fbReady (FACEBOOK_PAGE_ID included)
-  // — IG Graph publishing rides the page credentials — so mirror that exactly:
-  // an IG-only config missing the page id must not buy a clip publish will skip.
-  const igReady = fbReady
-    && SOCIAL_FLAGS.instagramEnabled && !!process.env.INSTAGRAM_ACCOUNT_ID;
+  // Mirror publishToAll's readiness SPLIT exactly: its fbReady is CREDENTIALS-
+  // only (page token + page id — IG Graph publishing rides those even with
+  // Facebook posting off), while the SOCIAL_FACEBOOK_ENABLED / _INSTAGRAM_
+  // flags each gate only their own platform entry. So an IG-only config with
+  // Facebook disabled still earns a video, and one missing the page id doesn't.
+  const pageCreds = !!process.env.FACEBOOK_ACCESS_TOKEN && !!process.env.FACEBOOK_PAGE_ID;
+  const fbReady = SOCIAL_FLAGS.facebookEnabled && pageCreds;
+  const igReady = SOCIAL_FLAGS.instagramEnabled && pageCreds && !!process.env.INSTAGRAM_ACCOUNT_ID;
   return (list.includes('facebook') && fbReady) || (list.includes('instagram') && igReady);
 }
 
