@@ -1075,6 +1075,10 @@ router.get('/applicators', async (req, res, next) => {
           // dedicated printed-name column wins over the casual display name
           // used across customer comms.
           name: String(t.applicator_printed_name || '').trim() || t.name,
+          // The display name certificates saved BEFORE the printed-name
+          // column existed — the create form matches stored drafts against
+          // it and upgrades them to the printed name.
+          legacyName: t.name,
           fdacsId: expired ? null : (String(t.fl_applicator_license || '').trim() || null),
         };
       }),

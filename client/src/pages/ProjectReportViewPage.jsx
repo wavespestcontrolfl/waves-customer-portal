@@ -363,11 +363,18 @@ export default function ProjectReportViewPage() {
     ? `Hey ${firstName}, here's your Certificate of Compliance.`
     : `Hey ${firstName}, here's your ${typeLabel.toLowerCase()} report.`;
   // Mirrors the customer estimate hero: the full service address under the
-  // headline, not just "City, FL". Certificates prefer the treatment address
-  // from the document itself (pre-construction lots may differ from the
-  // customer's billing address).
-  const subhead = (isCertificate ? String(findings.treatment_address || '').trim() : '')
-    || data.customerAddress || data.cityState || '';
+  // headline, not just "City, FL". Document types use the REPORT's own
+  // recorded address, never the live customer row: a certificate's treatment
+  // address (a pre-construction lot may differ from billing — with only a
+  // lot/block recorded, fall to City, FL rather than print the billing
+  // street), and a WDO's inspected property (the findings are the archived
+  // as-sent snapshot, so this can't drift from the filed FDACS PDF even if
+  // the customer row later changes).
+  const subhead = isCertificate
+    ? (String(findings.treatment_address || '').trim() || data.cityState || '')
+    : data.projectType === 'wdo_inspection'
+      ? (String(findings.property_address || '').trim() || data.customerAddress || data.cityState || '')
+      : (data.customerAddress || data.cityState || '');
 
   return (
     <div style={{
@@ -519,7 +526,6 @@ export default function ProjectReportViewPage() {
           <CertificateOfCompliance
             findings={findings}
             customerName={data.customerName}
-            customerAddress={data.customerAddress}
             technicianName={data.technicianName}
             projectDateLabel={projectDateLabel}
           />
@@ -692,7 +698,7 @@ function CertificateFieldGrid({ fields, compact }) {
   );
 }
 
-function CertificateOfCompliance({ findings, customerName, customerAddress, technicianName, projectDateLabel }) {
+function CertificateOfCompliance({ findings, customerName, technicianName, projectDateLabel }) {
   const f = findings || {};
   const applications = [
     certificateApplicationLines(f),
@@ -710,7 +716,12 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
     f.treatment_date ? formatReportDate(f.treatment_date) : projectDateLabel || '',
     formatAppointmentTime(f.treatment_time),
   ].filter(Boolean).join(' · ');
-  const addressValue = f.treatment_address || customerAddress || '';
+  // The Treatment address line prints ONLY the recorded treatment address:
+  // the send gate allows lot/block-only certificates (pre-construction lots
+  // often have no street yet), and back-filling the customer's billing
+  // street here would fabricate a compliance field. The Lot/Block line
+  // below carries those certificates.
+  const addressValue = f.treatment_address || '';
   const lotLine = [f.lot_block, f.subdivision].filter(Boolean).join(' · ');
   const applicatorLine = [
     f.applicator_name || technicianName || '',
