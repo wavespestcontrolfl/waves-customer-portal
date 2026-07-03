@@ -217,3 +217,35 @@ describe('recoverStreetAddress — fail-open', () => {
     expect(out.recovered).toBeNull();
   });
 });
+
+describe('recoverStreetAddress — phase 1.5 (upstream dictation candidates)', () => {
+  test('decoder-supplied street alternatives are tried before the phonetic model call', async () => {
+    let phoneticCalled = false;
+    const out = await recoverStreetAddress({
+      extracted: GARBLED,
+      avStatus: 'missing_component',
+      extraStreetCandidates: ['Seafoam Trail'],
+      deps: deps({
+        autocomplete: async (input) => (input.includes('Seafoam') ? ['5039 Seafoam Trail, Lakewood Ranch, FL, USA'] : []),
+        phonetic: async () => { phoneticCalled = true; return []; },
+      }),
+    });
+    expect(out.recovered).toMatchObject({ address_line1: '5039 Seafoam Trail' });
+    expect(out.method).toBe('dictation');
+    expect(phoneticCalled).toBe(false);
+  });
+
+  test('falls through to phonetic when dictation candidates find nothing', async () => {
+    const out = await recoverStreetAddress({
+      extracted: GARBLED,
+      avStatus: 'missing_component',
+      extraStreetCandidates: ['Wrong Street'],
+      deps: deps({
+        autocomplete: async (input) => (input.includes('Seafoam') ? ['5039 Seafoam Trail, Lakewood Ranch, FL, USA'] : []),
+        phonetic: async () => ['Seafoam Trail'],
+      }),
+    });
+    expect(out.recovered).toMatchObject({ address_line1: '5039 Seafoam Trail' });
+    expect(out.method).toBe('phonetic');
+  });
+});

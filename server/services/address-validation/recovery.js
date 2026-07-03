@@ -138,12 +138,15 @@ async function confirmPrediction(prediction, { houseNumber, callerZip, callerCit
  *
  * @param {object} opts.extracted  flat V1-style record: address_line1/city/state/zip
  * @param {string} opts.avStatus   the Address Validation status for that record
+ * @param {string[]} [opts.extraStreetCandidates]  street-name re-hearings an
+ *   upstream pass already produced (contact-dictation decoder) — tried before
+ *   this module spends its own phonetic model call.
  * @param {object} [opts.deps]     injectable { autocomplete, phonetic, validate } for tests
  * @returns {{ attempted: boolean, recovered: object|null, candidates: string[], method: string|null }}
  *   recovered = { address_line1, city, state, zip } — set only on exactly ONE confirmed premise.
  *   candidates = distinct house-number-matching prediction strings (for the review payload).
  */
-async function recoverStreetAddress({ extracted = {}, avStatus, deps = {} } = {}) {
+async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandidates = [], deps = {} } = {}) {
   const none = { attempted: false, recovered: null, candidates: [], method: null };
   if (!ENABLED() || !RECOVERABLE_STATUSES.has(avStatus)) return none;
 
@@ -175,7 +178,17 @@ async function recoverStreetAddress({ extracted = {}, avStatus, deps = {} } = {}
     let method = 'autocomplete';
     let predictions = distinct((await autocomplete(`${street}, ${locality}`) || []).filter(matchesHouse));
 
-    // Phase 2: phonetic re-hearings, each anchored to the caller's house number.
+    // Phase 1.5: re-hearings an upstream pass (contact-dictation decoder)
+    // already produced — free candidates before spending our own model call.
+    if (!predictions.length && extraStreetCandidates.length) {
+      method = 'dictation';
+      for (const candidate of extraStreetCandidates.slice(0, MAX_CANDIDATES)) {
+        const preds = await autocomplete(`${houseNumber} ${candidate}, ${locality}`);
+        predictions.push(...distinct((preds || []).filter(matchesHouse)));
+      }
+    }
+
+    // Phase 2: our own phonetic re-hearings, anchored to the caller's house number.
     if (!predictions.length) {
       method = 'phonetic';
       const candidates = await phonetic({ streetName, city: callerCity, state: extracted.state || 'FL', zip: callerZip });
