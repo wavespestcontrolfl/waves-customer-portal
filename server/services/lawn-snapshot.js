@@ -61,6 +61,19 @@ const SCORE_FINDINGS = [
     cautious: true,
     foldedIntoStress: true,
   },
+  {
+    // Residual catch for a tech-confirmed low Stress/Damage that the specific
+    // disease/thatch findings don't explain (drought / mechanical / insect). Kept
+    // LAST so the loop can check whether a folded finding already fired.
+    key: 'stress_damage_signals',
+    label: 'Stress / damage signals',
+    scoreKey: 'stress_damage',
+    threshold: 70,
+    severeThreshold: 45,
+    customerLabel: 'stress or damage signals',
+    cautious: true,
+    stressResidual: true,
+  },
 ];
 
 function parseJsonObject(value, fallback = {}) {
@@ -168,19 +181,20 @@ function customerCopyForFinding({ finding, locationLabel }) {
 
 function deriveFindings(inputs = {}) {
   const assessment = inputs.assessment || {};
+  // The tech's confirmed consolidated Stress score (explicit column, else the
+  // worst of fungus/thatch for legacy rows). Findings folded into Stress defer to
+  // this so a Stress correction the tech made isn't contradicted.
+  const stressDamage = assessment.stress_damage != null
+    ? scoreValue(assessment.stress_damage)
+    : Math.min(scoreValue(assessment.fungus_control) ?? 100, scoreValue(assessment.thatch_level) ?? 100);
   const scores = {
     turf_density: scoreValue(assessment.turf_density),
     weed_suppression: scoreValue(assessment.weed_suppression),
     color_health: scoreValue(assessment.color_health),
     fungus_control: scoreValue(assessment.fungus_control),
     thatch_level: scoreValue(assessment.thatch_level),
+    stress_damage: stressDamage,
   };
-  // The tech's confirmed consolidated Stress score (explicit column, else the
-  // worst of fungus/thatch for legacy rows). Findings folded into Stress defer to
-  // this so a Stress correction the tech made isn't contradicted.
-  const stressDamage = assessment.stress_damage != null
-    ? scoreValue(assessment.stress_damage)
-    : Math.min(scores.fungus_control ?? 100, scores.thatch_level ?? 100);
   const evidencePhoto = chooseEvidencePhoto(inputs.photos || []);
   const locationLabel = locationLabelFromPhoto(evidencePhoto);
 
@@ -192,6 +206,11 @@ function deriveFindings(inputs = {}) {
     // reads below the threshold — so a tech who raised Stress above it (overruling
     // a stale AI fungus/thatch) doesn't get a contradicting customer finding.
     if (rule.foldedIntoStress && stressDamage != null && stressDamage >= rule.threshold) continue;
+    // The generic Stress/Damage finding is the RESIDUAL catch — surface it only when
+    // the specific folded findings (disease/thatch) didn't already fire, i.e. the
+    // tech confirmed low Stress from drought/mechanical/insect while fungus/thatch
+    // read healthy. Otherwise the specific finding already covers it (no double-report).
+    if (rule.stressResidual && findings.some((f) => f.key === 'possible_disease_pressure' || f.key === 'thatch_watch')) continue;
     const severity = score < rule.severeThreshold ? Math.max(3, severityFromScore(score)) : severityFromScore(score);
     const finding = {
       key: rule.key,
