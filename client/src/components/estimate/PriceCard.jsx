@@ -234,14 +234,14 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       </div>
 
       {showVisitsLine ? (
-        <div style={{ marginTop: 10, color: W.blueDeeper, fontSize: 14, fontWeight: 800 }}>
+        <div style={{ marginTop: 10, color: W.blueDeeper, fontSize: 13, fontWeight: 700 }}>
           <span aria-hidden="true" style={{ color: W.green, marginRight: 6 }}>&#10003;</span>
           {visitsPerYear} application{visitsPerYear === 1 ? '' : 's'} per year included
         </div>
       ) : null}
 
       {showSavings && savings > 0 && waveGuardTier && !showLowConfidenceRange ? (
-        <div style={{ marginTop: 12, color: W.green, fontSize: 16, fontWeight: 800 }}>
+        <div style={{ marginTop: 12, color: W.green, fontSize: 14, fontWeight: 800 }}>
           You save {fmtMoney(savings)}{periodLabel} with WaveGuard {waveGuardTier}
         </div>
       ) : null}
@@ -296,7 +296,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       ) : null}
 
       {showGuarantee ? (
-        <div style={{ fontSize: 16, color: W.blueDeeper, marginTop: 14, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 13, color: W.blueDeeper, marginTop: 12, lineHeight: 1.5 }}>
           {wording?.guaranteeLine || DEFAULT_WORDING.guaranteeLine}
         </div>
       ) : null}
