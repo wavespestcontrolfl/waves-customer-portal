@@ -21,7 +21,7 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 const { backfillCallLeadAttribution } = require('../services/ads/call-attribution');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
-const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, normalizeStreetLine } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
@@ -314,7 +314,17 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       if (!existing.lead_source) updates.lead_source = leadSource.source;
       if (!existing.lead_source_detail) updates.lead_source_detail = leadSource.detail;
       if (!existing.email && email) updates.email = email;
-      if (!existing.address_line1 && address) updates.address_line1 = address;
+      if (!existing.address_line1 && address) {
+        updates.address_line1 = address;
+        if (normalizedAddress.line2) updates.address_line2 = normalizedAddress.line2;
+      } else if (
+        // Attach a newly provided unit only when the submitted street line
+        // matches the one on file — never bolt a unit onto a different address.
+        !existing.address_line2 && normalizedAddress.line2 && existing.address_line1
+        && normalizeStreetLine(existing.address_line1) === normalizedAddress.line1
+      ) {
+        updates.address_line2 = normalizedAddress.line2;
+      }
       if (!existing.city && (normalizedAddress.city || zipCity)) updates.city = normalizedAddress.city || zipCity;
       if (!existing.state && normalizedAddress.state) updates.state = normalizedAddress.state;
       if (!existing.zip && normalizedAddress.zip) updates.zip = normalizedAddress.zip;
@@ -339,6 +349,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         first_name: firstName, last_name: lastName,
         phone: phoneFormatted, email: email || null,
         address_line1: address || '',
+        address_line2: normalizedAddress.line2 || null,
         city: resolvedCity,
         state: normalizedAddress.state || 'FL',
         zip: normalizedAddress.zip || '',
@@ -1105,6 +1116,7 @@ function buildLeadWebhookIntake(body = {}) {
   const normalizedAddress = normalizeLeadAddress({
     raw: rawAddress,
     line1: body.address_line1 || body.addressLine1,
+    line2: body.address_line2 || body.addressLine2 || body.unit,
     city: body.city,
     state: body.state,
     zip: body.zip,

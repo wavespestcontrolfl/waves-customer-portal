@@ -14,7 +14,9 @@ const SWFL_BOUNDS = {
  *   value       — controlled input string
  *   onChange    — (value) => void  (fires on typing)
  *   onSelect    — (parts) => void  (fires when user picks a suggestion)
- *                 parts: { formatted, line1, city, state, zip, lat, lng }
+ *                 parts: { formatted, line1, line2, city, state, zip, lat, lng }
+ *                 line2 = Google subpremise (unit/apt) when the user typed one;
+ *                 line1 stays street-only so geocode/parcel matching is clean
  *   placeholder
  *   autoFocus
  *   style       — inline style overrides for the input
@@ -88,6 +90,7 @@ export default function AddressAutocomplete({
         const parts = {
           formatted: p.formatted_address || '',
           line1,
+          line2: get('subpremise'),
           city: get('locality') || get('sublocality') || get('postal_town'),
           state: getShort('administrative_area_level_1'),
           zip: get('postal_code'),
@@ -156,6 +159,7 @@ export default function AddressAutocomplete({
           const parts = {
             formatted: p.formatted_address || typed,
             line1,
+            line2: get('subpremise'),
             city: get('locality') || get('sublocality') || get('postal_town'),
             state: getShort('administrative_area_level_1'),
             zip: get('postal_code'),

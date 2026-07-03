@@ -280,6 +280,27 @@ function normalizeZip(value) {
   return matches?.length ? matches[matches.length - 1] : '';
 }
 
+function normalizeUnitToken(token) {
+  return /^[A-Za-z]?\d+[A-Za-z]?$/.test(token) ? token.toUpperCase() : titleToken(token);
+}
+
+// Second address line (unit / apt / suite). Kept separate from line1 so the
+// street line stays clean for geocoding and house-number parcel matching. A
+// bare value ("4B", "#12") gains a "Unit" designator; a value that already
+// leads with one keeps it, title-cased.
+function normalizeUnitLine(value) {
+  const cleaned = cleanString(value).replace(/,/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60).trim();
+  if (!cleaned) return '';
+  const body = cleaned.replace(/^#\s*/, '');
+  if (!body) return '';
+  const tokens = body.split(' ').filter(Boolean);
+  const firstKey = tokens[0].replace(/\./g, '').toLowerCase();
+  if (UNIT_DESIGNATORS.has(firstKey)) {
+    return [titleToken(firstKey), ...tokens.slice(1).map(normalizeUnitToken)].join(' ');
+  }
+  return ['Unit', ...tokens.map(normalizeUnitToken)].join(' ');
+}
+
 function splitStreetAndCity(value) {
   const tokens = cleanString(value).split(' ').filter(Boolean);
   if (tokens.length < 2) return { line1: value, city: '' };
@@ -379,6 +400,12 @@ function normalizeLeadAddress(input = {}) {
   const parsed = parseRawAddress(raw);
 
   const line1 = normalizeStreetLine(input.line1 || input.addressLine1 || input.address_line1 || components.line1 || parsed.line1);
+  const rawLine2 = normalizeUnitLine(
+    input.line2 || input.addressLine2 || input.address_line2 || input.unit || components.line2 || components.unit
+  );
+  // A raw/fallback submission can carry the unit inline in line1 AND in the
+  // dedicated field — don't render it twice.
+  const line2 = rawLine2 && line1.toLowerCase().includes(rawLine2.toLowerCase()) ? '' : rawLine2;
   const city = titleCaseWords(input.city || components.city || parsed.city);
   const state = normalizeState(input.state || components.state || parsed.state || 'FL') || 'FL';
   const zip = normalizeZip(input.zip || components.zip || parsed.zip);
@@ -387,11 +414,12 @@ function normalizeLeadAddress(input = {}) {
   const stateZip = (city || zip)
     ? [state, zip].filter(Boolean).join(' ')
     : '';
-  const fullAddress = [line1, city, stateZip].filter(Boolean).join(', ');
+  const fullAddress = [line1, line2, city, stateZip].filter(Boolean).join(', ');
 
   return {
     raw,
     line1,
+    line2,
     city,
     state,
     zip,
@@ -414,6 +442,7 @@ module.exports = {
   normalizeLeadAddress,
   formatAddress,
   normalizeStreetLine,
+  normalizeUnitLine,
   titleCaseWords,
   normalizeState,
   parseRawAddress,

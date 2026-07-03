@@ -10,6 +10,7 @@ const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { applyContactNormalization } = require('../utils/intake-normalize');
+const { normalizeUnitLine } = require('../utils/address-normalizer');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
   isOneTimeBookingSource,
@@ -879,6 +880,7 @@ async function createSelfBooking(payload = {}) {
         phone: phoneDigits,
         email: new_customer.email || null,
         address_line1: new_customer.address_line1 || null,
+        address_line2: normalizeUnitLine(new_customer.address_line2) || null,
         city: new_customer.city || null,
         state: new_customer.state || 'FL',
         zip: new_customer.zip || null,
@@ -1505,7 +1507,12 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       first_name: str(nc.first_name, 120),
       last_name: str(nc.last_name, 120),
       email: str(nc.email, 200),
-      address_line1: str(nc.address_line1 || b.address, 250),
+      // booking_intents has no unit column — keep the unit inline so the
+      // recovery link/prefill still carries it.
+      address_line1: str(
+        [nc.address_line1, normalizeUnitLine(nc.address_line2)].filter(Boolean).join(', ') || b.address,
+        250
+      ),
       city: str(nc.city, 120),
       state: str(nc.state, 40),
       zip: str(nc.zip, 20),

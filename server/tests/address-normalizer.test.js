@@ -1,4 +1,4 @@
-const { normalizeLeadAddress, parseRawAddress, formatAddress } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, parseRawAddress, formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 
 describe('address normalizer', () => {
   test('splits the malformed Bill Waterman Parrish address into street/city/state/zip', () => {
@@ -240,6 +240,62 @@ describe('address normalizer', () => {
       zip: '34236',
       fullAddress: '123 Main St Apt 4, Sarasota, FL 34236',
     });
+  });
+
+  test('carries a dedicated unit field as line2 and into fullAddress', () => {
+    expect(normalizeLeadAddress({
+      line1: '123 Main St', line2: '4b', city: 'Sarasota', state: 'FL', zip: '34236',
+    })).toMatchObject({
+      line1: '123 Main St',
+      line2: 'Unit 4B',
+      fullAddress: '123 Main St, Unit 4B, Sarasota, FL 34236',
+    });
+  });
+
+  test('accepts the unit via the address_line2 / unit input keys', () => {
+    expect(normalizeLeadAddress({
+      line1: '123 Main St', address_line2: 'apt 4', city: 'Sarasota', zip: '34236',
+    }).line2).toBe('Apt 4');
+    expect(normalizeLeadAddress({
+      line1: '123 Main St', unit: '#12', city: 'Sarasota', zip: '34236',
+    }).line2).toBe('Unit 12');
+  });
+
+  test('does not duplicate a unit already inline in the street line', () => {
+    expect(normalizeLeadAddress({
+      raw: '123 Main St Apt 4 Sarasota FL 34236', line2: 'Apt 4',
+    })).toMatchObject({
+      line1: '123 Main St Apt 4',
+      line2: '',
+      fullAddress: '123 Main St Apt 4, Sarasota, FL 34236',
+    });
+  });
+
+  test('line2 stays empty when no unit is provided (fullAddress unchanged)', () => {
+    const result = normalizeLeadAddress({ raw: '17394 Whiskey Crk Trl, Parrish, FL 34219, USA' });
+    expect(result.line2).toBe('');
+    expect(result.fullAddress).toBe('17394 Whiskey Crk Trl, Parrish, FL 34219');
+  });
+});
+
+describe('normalizeUnitLine', () => {
+  test('bare unit values gain a Unit designator and uppercase the token', () => {
+    expect(normalizeUnitLine('4b')).toBe('Unit 4B');
+    expect(normalizeUnitLine('302')).toBe('Unit 302');
+    expect(normalizeUnitLine('#12')).toBe('Unit 12');
+  });
+
+  test('existing designators are kept and title-cased', () => {
+    expect(normalizeUnitLine('apt 4b')).toBe('Apt 4B');
+    expect(normalizeUnitLine('SUITE 210')).toBe('Suite 210');
+    expect(normalizeUnitLine('unit 7')).toBe('Unit 7');
+  });
+
+  test('empty and whitespace-only input returns empty string', () => {
+    expect(normalizeUnitLine('')).toBe('');
+    expect(normalizeUnitLine('   ')).toBe('');
+    expect(normalizeUnitLine(null)).toBe('');
+    expect(normalizeUnitLine('#')).toBe('');
   });
 });
 
