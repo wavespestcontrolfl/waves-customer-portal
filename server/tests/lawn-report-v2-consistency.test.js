@@ -86,11 +86,12 @@ describe('Lawn Report V2 — consistency golden fixtures', () => {
         expect(blockers).toEqual([]);
       });
 
-      test('Water/Coverage is never "strong" when the photo read mentions dry/uneven', () => {
-        const obs = `${lawnAssessment.observations} ${lawnAssessment.aiSummary || ''}`.toLowerCase();
-        const dry = /\b(dry|drought|uneven|irrigation|coverage)\b/.test(obs);
+      test('Water/Coverage is not shown as a diagnosis card (redundant with Water This Week)', () => {
+        // The Water/Coverage card was removed from the customer-facing diagnosis —
+        // its score was fungus/over-water derived, not a real moisture reading, and
+        // the "Water This Week" card owns watering with real rain + irrigation data.
         const water = reportV2.diagnosis.find((c) => c.key === 'water_moisture_stress');
-        if (dry) expect(water.status).not.toBe('strong');
+        expect(water).toBeUndefined();
       });
 
       test('customer action is never a Waves-owned next-visit task', () => {

@@ -27,7 +27,7 @@ const CARD = COLORS.white;
 const TAN = '#F2EEE0';
 
 // ── Status system ─────────────────────────────────────────────────────────────
-// One vocabulary shared by the overall score, the 5 diagnosis cards, water, and
+// One vocabulary shared by the overall score, the diagnosis cards, water, and
 // mowing. Customer-safe words only — never "diseased", "infestation", etc.
 export const STATUS = {
   strong: { label: 'Strong', color: COLORS.green },
@@ -260,7 +260,7 @@ function KeyLine({ label, value, dot }) {
   );
 }
 
-// ── 2. Five-category photo diagnosis ────────────────────────────────────────────
+// ── 2. Photo diagnosis cards ────────────────────────────────────────────────────
 // Field photos as a horizontal strip + ONE consolidated analysis across all photos
 // (never the per-photo vision blurbs). Renders above the Photo Diagnosis scores.
 function SliderArrow({ dir, onClick, disabled }) {
@@ -540,8 +540,10 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
         </div>
       ) : null}
       {/* No irrigation schedule on file → a real CTA (not a text link) explaining the
-          payoff (a precise reading) and deep-linking to the portal to add it. */}
-      {(status === 'unknown' || !Number.isFinite(irrigation)) && irrigationHref ? (
+          payoff (a precise reading) and deep-linking to the portal to add it. Once the
+          customer has added their schedule (water.scheduleOnFile), the CTA is hidden
+          even if this week's computed irrigation is null/zero. */}
+      {!water.scheduleOnFile && (status === 'unknown' || !Number.isFinite(irrigation)) && irrigationHref ? (
         <div style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>Get a water reading built for your lawn</div>
           <div style={{ fontSize: 13.5, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>

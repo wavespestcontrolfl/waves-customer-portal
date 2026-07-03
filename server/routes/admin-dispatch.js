@@ -586,6 +586,29 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   return blocks;
 }
 
+// Manufacturer re-entry interval (REI) for the products applied this visit, in
+// minutes — the most restrictive (max) across products. Returns null when no
+// applied product carries an REI so the caller keeps the service-line default.
+// Used to make the "Exterior ready in …" countdown reflect the product label
+// instead of a flat default.
+async function maxProductReentryMinutes(knex, submittedProducts = []) {
+  const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
+  if (!productIds.length) return null;
+  const rows = await knex('products_catalog')
+    .whereIn('id', productIds)
+    .select('rei_hours')
+    .catch(() => []);
+  let maxMinutes = null;
+  for (const row of rows) {
+    const hours = Number(row.rei_hours);
+    if (Number.isFinite(hours) && hours >= 0) {
+      const minutes = Math.round(hours * 60);
+      if (maxMinutes == null || minutes > maxMinutes) maxMinutes = minutes;
+    }
+  }
+  return maxMinutes;
+}
+
 async function actualProductInventoryBlocks(submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return [];
@@ -3083,8 +3106,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // its re-entry window even when only exterior areas were chipped.
             // This is the gate: the advisory is persisted here and the report
             // build can only zero it further, never restore it.
+            // Exterior re-entry ("Ready in …") reflects the manufacturer REI of
+            // the products actually applied — the most restrictive wins — falling
+            // back to the service-line default when no product carries an REI. Kept
+            // no lower than the default so a 0-hr / "until dry" product still shows
+            // a sensible dry-down window.
+            const productReentryMin = await maxProductReentryMinutes(trx, products || []);
+            const advisoryDefaultsForVisit = productReentryMin != null
+              ? {
+                ...reportConfig.advisoryDefaults,
+                exterior_reentry_min: Math.max(
+                  Number(reportConfig.advisoryDefaults?.exterior_reentry_min) || 0,
+                  productReentryMin,
+                ),
+              }
+              : reportConfig.advisoryDefaults;
             const advisoryNormalized = buildCompletionAdvisory({
-              advisoryDefaults: reportConfig.advisoryDefaults,
+              advisoryDefaults: advisoryDefaultsForVisit,
               completionAreas,
               protocolActionScopes: reportProtocolActionScopes,
               applications: products || [],

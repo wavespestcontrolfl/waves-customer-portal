@@ -187,6 +187,9 @@ function mapWater(waterContext, waterSnapshot = null) {
       confidence: waterSnapshot.confidence || 'medium',
       explanation: snapshotWaterExplanation(waterSnapshot, grassLabel),
       source: 'area_snapshot',
+      // A stored per-week irrigation figure means the customer has a schedule on
+      // file — the "add your watering schedule" CTA should not show.
+      scheduleOnFile: num(waterSnapshot.irrigation_inches_per_week) != null,
     };
   }
   if (!waterContext) return null;
@@ -201,6 +204,10 @@ function mapWater(waterContext, waterSnapshot = null) {
     confidence: advice.profileMissing ? 'low' : (advice.rainKnown ? 'high' : 'medium'),
     explanation: waterExplanation(advice, target, grassLabel),
     source: 'irrigation_advice',
+    // The customer has an irrigation schedule on file when the advice engine
+    // reports the profile is present (or we have a real per-week figure). Used to
+    // suppress the "add your watering schedule" CTA once they've added one.
+    scheduleOnFile: advice.profileMissing === false || num(waterContext.irrigationInchesPerWeek) != null,
   };
 }
 
@@ -358,16 +365,33 @@ function buildAftercare(applications) {
   const apps = Array.isArray(applications) ? applications : [];
   let watering = null;
   let reentry = null;
+  // Whether ANY product applied today needs watering-in (fertilizer) vs. a
+  // keep-off / do-not-water product (e.g. Celsius WG post-emergent). If the
+  // products disagree, "water in" wins — the product that needs it sets the
+  // requirement for the whole visit.
+  let waterInRequired = null; // true / false / null(unknown)
   for (const a of apps) {
     const p = (a && a.product) || a || {};
     const facts = (a && a.approved_report_product_facts) || {};
+    const req = p.irrigation_required ?? facts.irrigationRequired ?? null;
+    if (req === true) waterInRequired = true;
+    else if (req === false && waterInRequired == null) waterInRequired = false;
     if (!watering) watering = (p.irrigation_notes || facts.irrigationNotes || '').trim() || null;
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
   }
+  // Prefer the product's own irrigation_notes copy; otherwise state the water-in
+  // requirement plainly from the irrigation_required flag so the customer knows
+  // whether to water today (fertilizer) or hold off (herbicide).
   if (!watering) {
-    watering = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
+    if (waterInRequired === true) {
+      watering = 'Water in today’s application — give the lawn a normal watering within the next 24 hours to move the product into the soil, unless your technician advised otherwise.';
+    } else if (waterInRequired === false) {
+      watering = 'No watering is needed to activate today’s treatment — in fact, hold off on watering the treated areas for the rest of the day so the product can work. Keep your normal schedule after that.';
+    } else {
+      watering = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
+    }
   }
-  return { watering, reentry };
+  return { watering, reentry, waterInRequired };
 }
 
 // Short topic phrase for the headline, from the top issue card's category.
@@ -553,8 +577,16 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const trends = buildTrends(lawnAssessment, mowingHeight);
   if (trendSeasonNote) trends.seasonalNote = trendSeasonNote;
 
+  // The "Water / Coverage" diagnosis card is intentionally NOT displayed: its
+  // score is derived from the fungus/over-water signals (not a true moisture
+  // measurement), and the dedicated "Water This Week" card already owns the
+  // watering story with real rain + irrigation data. We still COMPUTE the
+  // category above so the insights + coverage-watch reconciliation keep working;
+  // we only drop it from the customer-facing cards.
+  const displayDiagnosis = diagnosis.filter((c) => c.key !== 'water_moisture_stress');
+
   return {
-    snapshot, diagnosis, insights, water, mowing, treatment, heroPhoto, photos: photoList, photoSummary,
+    snapshot, diagnosis: displayDiagnosis, insights, water, mowing, treatment, heroPhoto, photos: photoList, photoSummary,
     beforeAfter, progression, progressionNote, aftercare, seasonalNote, smsSummary, trends,
   };
 }

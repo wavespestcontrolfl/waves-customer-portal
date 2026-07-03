@@ -160,7 +160,11 @@ function approvedReportProductFacts(catalog = {}) {
     serviceReportSummary: catalog.service_report_summary || catalog.public_summary || catalog.portal_summary || null,
     precautionSummary: catalog.customer_precaution_summary || catalog.customer_safety_summary || catalog.pet_kid_guidance_text || null,
     reentrySummary: catalog.reentry_summary || catalog.reentry_text || null,
+    reentryHours: Number.isFinite(Number(catalog.rei_hours)) ? Number(catalog.rei_hours) : null,
     irrigationNotes: catalog.irrigation_notes || null,
+    // Tri-state: true = water in after application (e.g. fertilizer), false =
+    // keep off / do not water in (e.g. Celsius WG post-emergent), null = unknown.
+    irrigationRequired: catalog.irrigation_required == null ? null : Boolean(catalog.irrigation_required),
     labelVerifiedAt: catalog.label_verified_at || null,
     labelVersion: catalog.label_version || null,
   };
@@ -189,7 +193,9 @@ async function attachApprovedReportProductFacts(knex, products = []) {
         'pet_kid_guidance_text',
         'reentry_text',
         'reentry_summary',
+        'rei_hours',
         'irrigation_notes',
+        'irrigation_required',
         'label_verified_at',
         'label_version',
         'approved_for_service_report',
@@ -2079,7 +2085,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         service_report_summary: product.approved_report_product_facts?.serviceReportSummary || null,
         precaution_summary: product.approved_report_product_facts?.precautionSummary || null,
         reentry_summary: product.approved_report_product_facts?.reentrySummary || null,
+        reentry_hours: product.approved_report_product_facts?.reentryHours ?? null,
         irrigation_notes: product.approved_report_product_facts?.irrigationNotes || null,
+        irrigation_required: product.approved_report_product_facts?.irrigationRequired ?? null,
         label_verified_at: product.approved_report_product_facts?.labelVerifiedAt || null,
         label_version: product.approved_report_product_facts?.labelVersion || null,
         facts_approved: !!product.approved_report_product_facts,
@@ -2536,9 +2544,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
-    // customerPhone/customerEmail intentionally NOT in the public report payload —
-    // the report token is a shareable bearer credential, so contact PII must not
-    // ride it. (Recap SMS loads the phone server-side via its own query.)
+    // Owner directive: the customer's own contact details appear on their report
+    // (matching the completion screen / invoice), so the report reads as a complete
+    // service document. NOTE: the report token is a shareable bearer credential with
+    // no expiry, so this contact PII rides a forwardable link — the report is already
+    // noindex + no-referrer, which limits exposure to deliberate forwarding.
+    customerPhone: service.phone || null,
+    customerEmail: service.email || null,
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     // Membership tier for this visit (see reportWaveGuardTier above). Consumed by the
     // report viewer to suppress the per-visit "Time on site" duration for members while
