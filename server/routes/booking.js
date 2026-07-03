@@ -10,7 +10,7 @@ const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { applyContactNormalization } = require('../utils/intake-normalize');
-const { normalizeUnitLine } = require('../utils/address-normalizer');
+const { normalizeUnitLine, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
   isOneTimeBookingSource,
@@ -205,16 +205,37 @@ function streetNameTokens(value) {
   return [...new Set(ADDRESS_SUFFIX_VARIANTS[token] || [token])];
 }
 
-function addressMatchesCustomer(customer, address, zip) {
+// The identity of a unit is its value, not its designator — "Apt A", "#A",
+// and "Unit A" are the same door. Drop a single leading designator after
+// normalization; anything longer ("Bldg 2 Apt 4") keeps its full shape.
+function unitValueKey(value) {
+  const normalized = normalizeUnitLine(value).toLowerCase();
+  if (!normalized) return '';
+  const tokens = normalized.split(' ');
+  return tokens.length === 2 && UNIT_DESIGNATORS.has(tokens[0]) ? tokens[1] : normalized;
+}
+
+// Units only conflict when BOTH sides carry one — a blank side stays
+// compatible, since most on-file addresses predate unit capture.
+function unitsConflict(customerLine2, submittedUnit) {
+  const a = unitValueKey(customerLine2);
+  const b = unitValueKey(submittedUnit);
+  return !!a && !!b && a !== b;
+}
+
+function addressMatchesCustomer(customer, address, zip, unit) {
   const lookupAddress = normalizeAddress(address);
   const customerAddress = normalizeAddress(customer?.address_line1);
   if (!lookupAddress || !customerAddress || lookupAddress !== customerAddress) return false;
+  // Same street is NOT the same household in a multi-unit building — a
+  // submitted unit that disagrees with the one on file fails verification.
+  if (unitsConflict(customer?.address_line2, unit)) return false;
   const lookupZip = normalizeZip(zip);
   const customerZip = normalizeZip(customer?.zip);
   return !lookupZip || !customerZip || lookupZip === customerZip;
 }
 
-async function findUniqueCustomerByAddress(address, city, zip) {
+async function findUniqueCustomerByAddress(address, city, zip, unit) {
   const normalizedAddress = normalizeAddress(address);
   if (!normalizedAddress) return null;
   const number = streetNumber(address);
@@ -240,10 +261,11 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   });
 
   const candidates = await query
-    .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone')
+    .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone')
     .limit(1000);
 
-  const matches = candidates.filter(customer => normalizeAddress(customer.address_line1) === normalizedAddress);
+  const matches = candidates.filter(customer => normalizeAddress(customer.address_line1) === normalizedAddress
+    && !unitsConflict(customer.address_line2, unit));
   const normalizedZip = normalizeZip(zip);
   const cityValue = String(city || '').trim().toLowerCase();
   if (normalizedZip || cityValue) {
@@ -271,8 +293,8 @@ async function findUniqueCustomerByAddress(address, city, zip) {
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
 router.get('/customer-lookup', async (req, res, next) => {
   try {
-    const { phone, address, city, zip } = req.query;
-    const customerFields = ['id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip'];
+    const { phone, address, city, zip, unit } = req.query;
+    const customerFields = ['id', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
     const phoneCustomerFields = [...customerFields, 'phone'];
     let customer = null;
 
@@ -296,7 +318,7 @@ router.get('/customer-lookup', async (req, res, next) => {
       // disclosing. The booking funnel always collects the address (step 1)
       // before the phone step, so legitimate returning-customer autofill is
       // unaffected; only the address-less enumeration path is closed.
-      if (customer && !(address && addressMatchesCustomer(customer, address, zip))) {
+      if (customer && !(address && addressMatchesCustomer(customer, address, zip, unit))) {
         customer = null;
       }
       return res.json({ customer: customer || null });
@@ -312,7 +334,7 @@ router.get('/customer-lookup', async (req, res, next) => {
       // would hit the phone-on-file guard (409) on a valid booking. Tightening
       // the id->booking trust (book-on-behalf via a guessed address) is a
       // separate, pre-existing hardening item, not in scope here.
-      const match = await findUniqueCustomerByAddress(address, city, zip);
+      const match = await findUniqueCustomerByAddress(address, city, zip, unit);
       return res.json({
         customer: match ? { id: match.id } : null,
         possible_match: !!match,
@@ -864,7 +886,7 @@ async function createSelfBooking(payload = {}) {
       if (
         !addressVerifiedCustomer
         || !new_customer
-        || !addressMatchesCustomer(addressVerifiedCustomer, new_customer.address_line1, new_customer.zip)
+        || !addressMatchesCustomer(addressVerifiedCustomer, new_customer.address_line1, new_customer.zip, new_customer.address_line2)
       ) {
         return { ok: false, status: 400, error: 'Address verification required for existing customer booking' };
       }
@@ -899,6 +921,22 @@ async function createSelfBooking(payload = {}) {
 
     const customer = await db('customers').where('id', custId).first();
     if (!customer) return { ok: false, status: 404, error: 'Customer not found' };
+
+    // Returning booker supplying a unit their record lacks: attach it, but only
+    // when the submitted street line matches the record (same rule as
+    // lead-webhook — never bolt a unit onto a different address). New customers
+    // already got it at insert.
+    if (!createdCustomerId && new_customer?.address_line2 && !customer.address_line2) {
+      const submittedUnit = normalizeUnitLine(new_customer.address_line2);
+      if (submittedUnit && addressMatchesCustomer(customer, new_customer.address_line1, new_customer.zip, new_customer.address_line2)) {
+        try {
+          await db('customers').where('id', customer.id).update({ address_line2: submittedUnit });
+          customer.address_line2 = submittedUnit;
+        } catch (unitErr) {
+          logger.warn(`[booking] could not persist unit for customer ${customer.id}: ${unitErr.message}`);
+        }
+      }
+    }
     await db('notification_prefs')
       .insert({ customer_id: custId })
       .onConflict('customer_id')
@@ -1689,6 +1727,8 @@ module.exports = router;
 module.exports._internals = {
   isOneTimeBookingSource,
   cleanBookingServiceLabel,
+  addressMatchesCustomer,
+  unitsConflict,
   // Read-only engine surface reused by the voice agent's quoting tools so a
   // phoned-in availability check runs the exact same route-aware slot finder as
   // the web /book funnel (no duplicated scheduling logic).

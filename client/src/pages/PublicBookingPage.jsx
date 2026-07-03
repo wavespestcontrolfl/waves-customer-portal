@@ -218,6 +218,7 @@ export default function PublicBookingPage() {
       const params = new URLSearchParams({ address: lookupAddress });
       if (nextAddress.city) params.set('city', nextAddress.city);
       if (nextAddress.zip) params.set('zip', nextAddress.zip);
+      if (nextAddress.line2) params.set('unit', nextAddress.line2);
       const res = await fetch(`${API_BASE}/booking/customer-lookup?${params}`);
       if (!res.ok) return;
       const data = await res.json();
@@ -255,6 +256,7 @@ export default function PublicBookingPage() {
       if (lookupAddress) params.set('address', lookupAddress);
       if (address.city) params.set('city', address.city);
       if (address.zip) params.set('zip', address.zip);
+      if (address.line2) params.set('unit', address.line2);
       const res = await fetch(`${API_BASE}/booking/customer-lookup?${params}`);
       if (res.ok) {
         const data = await res.json();
@@ -547,11 +549,19 @@ export default function PublicBookingPage() {
                 <AddressAutocomplete
                   autoFocus
                   value={address.line1}
-                  onChange={(v) => updateAddress(a => ({ ...a, line1: v, formatted: '' }))}
+                  onChange={(v) => updateAddress(a => ({ ...a, line1: v, line2: '', formatted: '' }))}
                   onSelect={(parts) => {
                     const nextAddress = {
-                      line1: parts.formatted || parts.line1 || address.line1,
-                      line2: parts.line2 || address.line2,
+                      // When Google returns a subpremise, keep line1 street-only —
+                      // the unit lives in line2 and must not also ride inline in
+                      // the stored street line (double-persist).
+                      line1: parts.line2
+                        ? (parts.line1 || parts.formatted || address.line1)
+                        : (parts.formatted || parts.line1 || address.line1),
+                      // Never carry a previous unit across a street selection — a
+                      // stale apartment on an unrelated address would persist. A
+                      // fresh subpremise wins; otherwise the unit box resets.
+                      line2: parts.line2 || '',
                       formatted: parts.formatted || parts.line1 || address.formatted,
                       city: parts.city || address.city,
                       state: parts.state || address.state,
@@ -569,14 +579,21 @@ export default function PublicBookingPage() {
                 />
               </div>
               <div>
-                {/* Unit is display/record-only — availability, geocode, and the
-                    existing-customer match all key off the street line, so
-                    typing here must not reset them (plain setAddress, not
-                    updateAddress). */}
+                {/* Availability/slots key off the street line, so typing here
+                    must not reset them (plain setAddress, not updateAddress).
+                    The address-matched account MUST reset though — Apt B is not
+                    Apt A's household — and the match re-checks on blur with the
+                    unit included so the server can compare units. */}
                 <input
                   type="text"
                   value={address.line2}
-                  onChange={(e) => setAddress(a => ({ ...a, line2: e.target.value }))}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setAddress(a => ({ ...a, line2: v }));
+                    setExistingCustomerId(null);
+                    setAddressMayMatchCustomer(false);
+                  }}
+                  onBlur={() => { if (address.line1) checkExistingCustomerByAddress(address); }}
                   placeholder="Apt / Unit # (optional)"
                   style={inputStyle}
                 />
