@@ -28,7 +28,7 @@ import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import FrequencySlider from '../components/estimate/FrequencySlider';
-import PriceCard from '../components/estimate/PriceCard';
+import PriceCard, { priceCardSavingsInfo } from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
@@ -903,8 +903,8 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
             padding: '0 18px',
             background: ESTIMATE_BUTTON_BG,
             color: COLORS.white,
-            fontSize: 14,
-            fontWeight: 700,
+            fontSize: 15,
+            fontWeight: 800,
             cursor: asking || !question.trim() ? 'not-allowed' : 'pointer',
             // Stay clearly navy while disabled — at 0.65 the button read
             // as gray next to the other brand buttons.
@@ -2198,6 +2198,8 @@ export function ServiceSection({
             frequency={current}
             waveGuardTier={section?.waveGuardTierEligible !== false ? waveGuardTier : null}
             wording={copy.priceWording}
+            showSavings={servicesLength === 1}
+            showGuarantee={servicesLength === 1}
           />
         ) : null}
 
@@ -2955,6 +2957,25 @@ export default function EstimateViewPage() {
             );
           })}
           </div>
+
+          {/* Bundle save lines render once, BELOW all service boxes. */}
+          {services.length > 1 ? services.map((section) => {
+            const frequency = selectedFrequencyForSection(section, selected);
+            const info = frequency ? priceCardSavingsInfo(frequency) : null;
+            if (!info || section?.waveGuardTierEligible === false || !waveGuardTier) return null;
+            return (
+              <div key={`${section.key}-savings`} style={{ textAlign: 'center', color: '#16A34A', fontSize: 16, fontWeight: 800, marginTop: 4 }}>
+                You save {fmtMoney(info.savings)}{info.periodLabel} with WaveGuard {waveGuardTier}
+              </div>
+            );
+          }) : null}
+
+          {/* One guarantee line for the whole plan — not one per box. */}
+          {services.length > 1 ? (
+            <div style={{ textAlign: 'center', fontSize: 16, color: ESTIMATE_TEXT, marginTop: 10, lineHeight: 1.5 }}>
+              Try us risk-free — 90-day money-back guarantee.
+            </div>
+          ) : null}
 
           {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta /> : null}
 

@@ -96,7 +96,23 @@ const DEFAULT_WORDING = {
   guaranteeLine: 'Try us risk-free — 90-day money-back guarantee.',
 };
 
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING }) {
+// Savings + period for a frequency entry — shared with the bundle layout,
+// which renders the "You save …" lines BELOW all service boxes instead of
+// inside each card. Mirrors the in-card math exactly (incl. the
+// rounding-noise floor).
+export function priceCardSavingsInfo(frequency = {}) {
+  if (frequency.quoteRequired === true || frequency.monthly == null) return null;
+  const billingKey = billingKeyForFrequency(frequency);
+  const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
+  const periodLabel = billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo';
+  const cadencePrice = Math.round(Number(frequency.monthly) * intervalMonths * 100) / 100;
+  const anchorPrice = Number(frequency.perVisit || 0);
+  const raw = anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
+  const savings = raw >= 0.05 ? raw : 0;
+  return savings > 0 ? { savings, periodLabel } : null;
+}
+
+export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true }) {
   if (!frequency) return null;
 
   const monthly = frequency.monthly;
@@ -107,7 +123,6 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
   const periodLabel = wording?.periodLabelByKey?.[billingKey]
     || (billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo');
-  const serviceCadenceLabel = isSeparateServiceCadence(frequency) ? frequency.label : null;
   const cadencePrice = quoteRequired || monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
   const anchorPrice = Number(frequency.perVisit || 0);
   // cadencePrice round-trips through the rounded monthly figure (e.g. a $94
@@ -164,7 +179,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       marginBottom: 6,
     }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginTop: 8 }}>
-        {savings > 0 && !showLowConfidenceRange ? (
+        {showSavings && savings > 0 && !showLowConfidenceRange ? (
           <span style={{
             fontFamily: "'Source Serif 4', Georgia, serif",
             fontSize: 26,
@@ -207,7 +222,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         ) : null}
       </div>
 
-      {savings > 0 && waveGuardTier && !showLowConfidenceRange ? (
+      {showSavings && savings > 0 && waveGuardTier && !showLowConfidenceRange ? (
         <div style={{ marginTop: 12, color: W.green, fontSize: 16, fontWeight: 800 }}>
           You save {fmtMoney(savings)}{periodLabel} with WaveGuard {waveGuardTier}
         </div>
@@ -232,12 +247,6 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       {quoteRequired && quoteReason ? (
         <div style={{ fontSize: 15, color: '#92400E', marginTop: 10, lineHeight: 1.45, fontWeight: 700 }}>
           {quoteReason}
-        </div>
-      ) : null}
-
-      {serviceCadenceLabel ? (
-        <div style={{ fontSize: 14, color: '#475569', marginTop: 8, fontWeight: 700 }}>
-          Service visits: {serviceCadenceLabel}
         </div>
       ) : null}
 
@@ -268,9 +277,11 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </div>
       ) : null}
 
-      <div style={{ fontSize: 16, color: W.blueDeeper, marginTop: 14, lineHeight: 1.5 }}>
-        {wording?.guaranteeLine || DEFAULT_WORDING.guaranteeLine}
-      </div>
+      {showGuarantee ? (
+        <div style={{ fontSize: 16, color: W.blueDeeper, marginTop: 14, lineHeight: 1.5 }}>
+          {wording?.guaranteeLine || DEFAULT_WORDING.guaranteeLine}
+        </div>
+      ) : null}
 
       {treatmentRows.length ? (
         <div style={{ display: 'grid', gap: 12, marginTop: 18 }}>

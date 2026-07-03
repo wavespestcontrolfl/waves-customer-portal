@@ -91,8 +91,8 @@ export default function WavesAIScheduleSearch({
           type="submit"
           disabled={asking || !query.trim()}
           style={{
-            minHeight: 46, border: 0, borderRadius: 10, padding: '0 18px',
-            background: t.accent, color: t.accentText, fontSize: 14, fontWeight: 700,
+            minHeight: 46, border: 0, borderRadius: 10, padding: '0 20px',
+            background: t.accent, color: t.accentText, fontSize: 15, fontWeight: 800,
             cursor: asking || !query.trim() ? 'not-allowed' : 'pointer',
             opacity: asking || !query.trim() ? 0.8 : 1,
           }}
@@ -110,8 +110,8 @@ export default function WavesAIScheduleSearch({
               disabled={asking}
               onClick={() => { setQuery(chip); run(chip); }}
               style={{
-                border: `1px solid ${t.border}`, background: t.inputBg, color: t.text,
-                borderRadius: 999, padding: '7px 12px', fontSize: 13, fontWeight: 600,
+                border: 0, background: t.accent, color: t.accentText,
+                borderRadius: 999, padding: '8px 14px', fontSize: 13, fontWeight: 700,
                 cursor: asking ? 'not-allowed' : 'pointer', opacity: asking ? 0.8 : 1,
               }}
             >

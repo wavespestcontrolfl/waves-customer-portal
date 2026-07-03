@@ -135,7 +135,8 @@ describe('ServiceSection', () => {
 
     expect(screen.getByText('$72')).toBeInTheDocument();
     expect(screen.getByText('/mo')).toBeInTheDocument();
-    expect(screen.getByText('Service visits: Bi-monthly')).toBeInTheDocument();
+    // The "Service visits: …" cadence line was removed per owner directive.
+    expect(screen.queryByText(/Service visits:/)).not.toBeInTheDocument();
     expect(screen.queryByText('/bi-monthly')).not.toBeInTheDocument();
   });
 
