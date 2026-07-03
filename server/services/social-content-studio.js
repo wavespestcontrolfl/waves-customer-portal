@@ -1479,6 +1479,38 @@ function runVariants(preview = {}) {
   return [];
 }
 
+// Pure: merge a prior approval attempt's platform successes with the current
+// attempt and decide whether the approval is COMPLETE. Rules:
+// - success: any platform success across attempts (the post-level rule).
+// - videoPosted: a video approval needs at least one reel/video success.
+// - videoBlocked: a video approval stays incomplete while any REQUESTED Meta
+//   channel has been attempted and failed without ever succeeding — so a
+//   half-posted FB+IG pair keeps the run retryable for the missing platform.
+//   A SKIP (platform not configured/enabled) doesn't block: it can never
+//   succeed, and the capability gate means a video variant only exists when
+//   at least one Meta channel was publish-ready.
+// Exported for tests.
+function assessApprovalPublish({ isVideoVariant, channels, priorPlatforms, current } = {}) {
+  const priorSuccesses = (Array.isArray(priorPlatforms) ? priorPlatforms : []).filter((p) => p?.success);
+  const platforms = [...priorSuccesses, ...((current && current.platforms) || [])];
+  const success = platforms.some((p) => p?.success);
+  const videoPosted = !isVideoVariant
+    || platforms.some((p) => p?.success && (p.mediaType === 'reel' || p.mediaType === 'video'));
+  const metaChannels = (channels || []).filter((c) => c === 'facebook' || c === 'instagram');
+  const videoBlocked = !!isVideoVariant && metaChannels.some((channel) => {
+    const entries = platforms.filter((p) => p?.platform === channel);
+    if (entries.some((p) => p?.success)) return false;
+    return entries.some((p) => p && !p.skipped && !p.dryRun); // attempted + failed
+  });
+  return {
+    success,
+    videoPosted,
+    videoBlocked,
+    complete: success && videoPosted && !videoBlocked,
+    mergedPublishResult: { ...(current || {}), success, platforms },
+  };
+}
+
 async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
   if (!(await hasTable('social_content_studio_runs'))) {
     return { ok: false, status: 503, error: 'social_content_studio_runs table is unavailable' };
@@ -1532,32 +1564,48 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     const city = run.city || preview.inputs?.city || input.city;
     const gbpLocationId = preview.inputs?.locationId || locationForCity(city).id;
 
-    const publishResult = await SocialMediaService.publishToAll({
-      title: run.topic || preview.inputs?.topic || 'Waves update',
-      description: run.service || preview.inputs?.service || '',
-      link: preview.suggestedLink,
-      guid: `${AUTONOMOUS_SOURCE}_approved_${run.id}`,
-      source: AUTONOMOUS_SOURCE,
-      customContent: preview.drafts,
-      channels,
-      imageUrl: chosenImageUrl,
-      gbpImageUrl: httpUrlOrNull(imageVariant?.gbpImageUrl),
-      videoUrl: chosenVideoUrl,
-      noAiImage: true, // stored visual only — never a fresh literal AI image
-      gbpLocationIds: [gbpLocationId],
-      postId: run.social_media_post_id || null,
-    });
+    // Retry of a partially-published approval: channels that already posted in
+    // a PRIOR attempt (recorded on the run's publish_result) are skipped this
+    // time — a video failure after a GBP success retries WITHOUT double-posting
+    // GBP, and a half-posted FB+IG pair retries only the missing platform. GBP
+    // posts per-location but is treated as one channel: any location success
+    // skips it (re-posting the succeeded locations would duplicate).
+    const priorRecord = toJson(run.publish_result, {})?.platforms;
+    const priorPlatforms = Array.isArray(priorRecord) ? priorRecord : [];
+    const alreadyPosted = new Set(priorPlatforms.filter((p) => p?.success).map((p) => p?.platform));
+    const remainingChannels = channels.filter((channel) => !alreadyPosted.has(channel));
 
-    // A VIDEO approval only counts as published if the video itself posted
-    // somewhere (an IG Reel or FB video success). Without this, a GBP image
-    // success alone would finalize the run as "published" while no platform
-    // carries the Reel the admin actually approved — unretryable and the audit
-    // row would imply the video shipped.
-    const videoPosted = !isVideoVariant
-      || (publishResult.platforms || []).some(
-        (p) => p?.success && (p.mediaType === 'reel' || p.mediaType === 'video')
-      );
-    const published = publishResult.success && videoPosted && !SOCIAL_FLAGS.dryRun;
+    // Nothing left to attempt → assess purely from the record (defensive; a
+    // fully-posted run normally finalizes on the attempt that completed it).
+    const publishResult = remainingChannels.length
+      ? await SocialMediaService.publishToAll({
+        title: run.topic || preview.inputs?.topic || 'Waves update',
+        description: run.service || preview.inputs?.service || '',
+        link: preview.suggestedLink,
+        guid: `${AUTONOMOUS_SOURCE}_approved_${run.id}`,
+        source: AUTONOMOUS_SOURCE,
+        customContent: preview.drafts,
+        channels: remainingChannels,
+        imageUrl: chosenImageUrl,
+        gbpImageUrl: httpUrlOrNull(imageVariant?.gbpImageUrl),
+        videoUrl: chosenVideoUrl,
+        noAiImage: true, // stored visual only — never a fresh literal AI image
+        gbpLocationIds: [gbpLocationId],
+        postId: run.social_media_post_id || null,
+      })
+      : { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' };
+
+    // A VIDEO approval only finalizes when the video itself posted AND no
+    // requested Meta channel is left attempted-but-failed (see
+    // assessApprovalPublish) — a GBP-only success can't consume the draft, and
+    // an FB-posted/IG-failed split stays retryable for Instagram alone.
+    const assessment = assessApprovalPublish({
+      isVideoVariant,
+      channels,
+      priorPlatforms,
+      current: publishResult,
+    });
+    const published = assessment.complete && !SOCIAL_FLAGS.dryRun;
 
     // Consume the review from the candidate queue only after a REAL publish —
     // same invariants as the autonomous publish path (never on dry-run/failure,
@@ -1591,16 +1639,18 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     const updated = await updateAutonomousRun(run.id, {
       status: published ? 'published' : 'draft_created',
       preview: approvedPreview,
-      publishResult,
+      // The MERGED record (prior successes + this attempt) — the next retry's
+      // channel narrowing and the audit trail both read from it.
+      publishResult: assessment.mergedPublishResult,
       socialMediaPostId: run.social_media_post_id,
       skipReason: published ? null
         : SOCIAL_FLAGS.dryRun ? 'approve ran in dry-run mode — not published'
-        : publishResult.success && !videoPosted
-          ? 'approve publish incomplete: no platform posted the video — check platform results before retrying (non-video channels may already have posted)'
+        : assessment.success && !assessment.complete
+          ? 'approve publish incomplete: the video has not posted on every requested Meta channel — a retry publishes only the missing channels'
           : 'approve publish failed: all platforms skipped or failed',
     });
 
-    return { ok: true, published, dryRun: SOCIAL_FLAGS.dryRun, publishResult, run: updated };
+    return { ok: true, published, dryRun: SOCIAL_FLAGS.dryRun, publishResult: assessment.mergedPublishResult, run: updated };
   });
 
   if (result?.skipped) {
@@ -1913,6 +1963,7 @@ module.exports = {
   FASTEST_RISER_PROFILES,
   SEASONAL_AUTONOMOUS_TOPICS,
   approveAutonomousRun,
+  assessApprovalPublish,
   autonomousStatus,
   buildCampaignCardInput,
   buildCampaignDrafts,

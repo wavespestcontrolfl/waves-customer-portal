@@ -1378,7 +1378,13 @@ const SocialMediaService = {
           let r;
           try {
             r = hasVideo
-              ? await withRetry(() => postToFacebookVideo(content, link, videoUrl), { label: 'facebook' })
+              // NOT wrapped in withRetry: the /videos create is non-idempotent.
+              // If Meta accepts the upload but the response is lost/times out,
+              // a retry creates a DUPLICATE page video (same rationale as the
+              // IG container flow below). A transient failure surfaces as an
+              // FB partial failure, and the approval's channel-narrowed retry
+              // re-attempts only Facebook.
+              ? await postToFacebookVideo(content, link, videoUrl)
               : await withRetry(() => postToFacebook(content, link, generatedImageUrl), { label: 'facebook' });
           } catch (fbErr) {
             if (!hasVideo && generatedImageUrl && /Facebook photo API/i.test(String(fbErr.message))) {
