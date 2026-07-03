@@ -140,8 +140,14 @@ async function recordLawnProtocolCompletion(trx, {
     : [];
 
   const requiredTasks = window.requiredTasks || [];
-  const checklist = normalizeChecklist(completionInput, requiredTasks);
-  const missingTasks = missingRequiredTasks(checklist, requiredTasks);
+  // The completion screen no longer submits a protocol checklist (read-only
+  // protocol redesign). When none was provided, record an explicitly empty
+  // checklist with no missing tasks — normalizeChecklist would otherwise
+  // backfill every required task as incomplete, and Command Center's
+  // missingRequired30d would count every closeout as non-compliant.
+  const checklistProvided = Boolean(completionInput?.checklist || completionInput?.tasks);
+  const checklist = checklistProvided ? normalizeChecklist(completionInput, requiredTasks) : [];
+  const missingTasks = checklistProvided ? missingRequiredTasks(checklist, requiredTasks) : [];
   const treatedSqft = Number(completionInput.treatedSqft || completionInput.treated_sqft || plan?.mixCalculator?.lawnSqft || 0) || null;
   const carrier = Number(completionInput.carrierGalPer1000 || completionInput.carrier_gal_per_1000 || plan?.mixCalculator?.carrierGalPer1000 || 0) || null;
   const totalCarrier = Number(completionInput.totalCarrierGal || completionInput.total_carrier_gal || 0)
@@ -186,6 +192,9 @@ async function recordLawnProtocolCompletion(trx, {
       recheck_due_date: defaultRecheckDueDate(window, completionInput, serviceDate),
       metadata: JSON.stringify({
         source: 'dispatch_completion',
+        // Distinguishes "no checklist collected" (read-only protocol flow)
+        // from "checklist collected with nothing missing" for audits.
+        checklistCollected: checklistProvided,
         customerNoteTemplates: window.customerNoteTemplates || [],
         serviceReportContext: window.serviceReportContext || {},
         assessmentBridge: window.assessmentBridge || {},
