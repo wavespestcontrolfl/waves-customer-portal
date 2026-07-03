@@ -155,6 +155,15 @@ export default function SlotPicker({
     return { summary: body.summary };
   };
 
+  const clearFinder = () => {
+    latestPickedRequestRef.current += 1;
+    setSearchData(null);
+    setPickedDate(null);
+    setPickedData(null);
+    setPickedLoading(false);
+    onSelect(null);
+  };
+
   const onPickDate = async (date) => {
     const requestId = latestPickedRequestRef.current + 1;
     latestPickedRequestRef.current = requestId;
@@ -226,6 +235,19 @@ export default function SlotPicker({
         onSearch={runAiSearch}
       />
       {searchData ? <div>{renderSlotList(searchData)}</div> : null}
+      {searchData || pickedData ? (
+        <button
+          type="button"
+          onClick={clearFinder}
+          style={{
+            justifySelf: 'start', background: 'transparent', border: 'none', padding: 0,
+            color: W.blueDeeper, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+            textDecoration: 'underline', textUnderlineOffset: 3,
+          }}
+        >
+          Clear search — show the soonest openings
+        </button>
+      ) : null}
       <div style={{ border: `1px solid ${W.border}`, borderRadius: 12, padding: 14, background: W.white, boxShadow: ESTIMATE_INNER_SHADOW }}>
         <label htmlFor={pickedDateInputId} style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
           Can't find a date? Pick one that works for you.
@@ -320,11 +342,11 @@ export default function SlotPicker({
     <div style={estimateCard()}>
       {heading}
       {finder}
-      {initial.map((slot) => (
+      {searchData || pickedData || pickedLoading ? null : initial.map((slot) => (
         <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
       ))}
 
-      {more.length > 0 ? (
+      {(searchData || pickedData || pickedLoading) ? null : more.length > 0 ? (
         <>
           <button
             type="button"

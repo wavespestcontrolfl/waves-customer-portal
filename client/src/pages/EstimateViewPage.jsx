@@ -2203,7 +2203,7 @@ export function ServiceSection({
         {current ? (
           <PriceCard
             frequency={current}
-            waveGuardTier={section?.waveGuardTierEligible !== false ? waveGuardTier : null}
+            waveGuardTier={servicesLength > 1 ? null : (section?.waveGuardTierEligible !== false ? waveGuardTier : null)}
             wording={copy.priceWording}
             showSavings={servicesLength === 1}
             showGuarantee={servicesLength === 1}
@@ -2924,6 +2924,20 @@ export default function EstimateViewPage() {
     if (mode === 'recurring') {
       return (
         <>
+          {/* Multi-service plans show the WaveGuard tier ONCE, above the
+              boxes on the left — not repeated in every card. */}
+          {services.length > 1 && waveGuardTier ? (
+            <div style={{ marginBottom: 12 }}>
+              <span style={{
+                display: 'inline-block', padding: '5px 11px',
+                background: '#EEF2FF', color: COLORS.blueDeeper,
+                borderRadius: 6, fontSize: 13, fontWeight: 700, letterSpacing: '0.02em',
+              }}>
+                WaveGuard {waveGuardTier}
+              </span>
+            </div>
+          ) : null}
+
           {/* Multi-service plans render side by side (owner directive) —
               each service keeps its own boxed price section. */}
           <div style={services.length > 1

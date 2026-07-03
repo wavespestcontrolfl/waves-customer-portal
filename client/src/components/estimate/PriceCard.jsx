@@ -290,7 +290,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       ) : null}
 
       {dayPrice && !showLowConfidenceRange ? (
-        <div style={{ fontSize: 15, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 13, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
           {(wording?.dayLine || DEFAULT_WORDING.dayLine).replace('{amount}', fmtMoney(dayPrice))}
         </div>
       ) : null}
