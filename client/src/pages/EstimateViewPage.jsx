@@ -2558,6 +2558,13 @@ export default function EstimateViewPage() {
   }, [reservation]);
 
   const onToggleAddOn = useCallback(async (sectionKey, key) => {
+    // Draft preview: PUT /preferences persists into estimate_data, and the
+    // server 400s a draft anyway (isEstimateAcceptActive) — but its "no
+    // longer active" message reads like a broken draft. Explain instead.
+    if (adminDraftPreview) {
+      setError('Draft preview — add-on choices are the customer\'s to make once the estimate is sent.');
+      return;
+    }
     const sectionAddOns = selectedAddOns[sectionKey] || new Set();
     const nextChecked = !sectionAddOns.has(key);
     setSelectedAddOns((prev) => {
@@ -2583,7 +2590,7 @@ export default function EstimateViewPage() {
         return { ...prev, [sectionKey]: nextForSection };
       });
     }
-  }, [loadEstimate, selectedAddOns, token]);
+  }, [adminDraftPreview, loadEstimate, selectedAddOns, token]);
 
   const releaseHeldReservation = useCallback((scheduledServiceId) => {
     if (!scheduledServiceId) return;
