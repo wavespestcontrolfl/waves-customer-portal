@@ -49,10 +49,23 @@ describe('get_product_info safety block', () => {
     });
   });
 
-  test('irrigation_required false gives the hold-off copy', async () => {
-    mockRow = { name: 'Celsius WG', irrigation_required: false };
+  test('irrigation_required false reports "not required", never a prohibition', async () => {
+    // K-Flow / Green Flo liquid fertilizers are seeded false but should still be
+    // watered in — false means "not required", not "do not water".
+    mockRow = { name: 'LESCO K-Flow 0-0-25', irrigation_required: false };
     const result = await productInfo();
-    expect(result.safety.watering_in).toBe('Do not water in — let it dry on the leaf');
+    expect(result.safety.watering_in).toBe('Watering-in not required per the label');
+    expect(result.safety.watering_in).not.toMatch(/do not water/i);
+  });
+
+  test('irrigation_notes carry real label nuance when present', async () => {
+    mockRow = {
+      name: 'Celsius WG',
+      irrigation_required: false,
+      irrigation_notes: 'Do not irrigate for 24 hours — keep on the leaf.',
+    };
+    const result = await productInfo();
+    expect(result.safety.watering_in).toBe('Do not irrigate for 24 hours — keep on the leaf.');
   });
 
   test('absent safety fields are omitted, not emitted as blanks', async () => {

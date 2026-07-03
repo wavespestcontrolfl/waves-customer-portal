@@ -319,9 +319,18 @@ async function getProductInfo(productName) {
     reentry: product.reentry_text || product.reentry_summary || undefined,
     rei_hours: product.rei_hours != null ? product.rei_hours : undefined,
     rainfast_minutes: product.rainfast_minutes != null ? product.rainfast_minutes : undefined,
-    watering_in: product.irrigation_required == null
-      ? undefined
-      : (product.irrigation_required ? 'Water in after application' : 'Do not water in — let it dry on the leaf'),
+    // irrigation_required records only whether watering-in is REQUIRED. A false
+    // value means "not required" — NOT "prohibited" (many liquid fertilizers are
+    // seeded false yet benefit from watering in). Never turn it into a do-not-
+    // water instruction the label doesn't back; the customer report path makes
+    // the same call. irrigation_notes carries any real label nuance.
+    watering_in: product.irrigation_required === true
+      ? 'Water in after application'
+      : (product.irrigation_notes
+          ? String(product.irrigation_notes)
+          : (product.irrigation_required === false
+              ? 'Watering-in not required per the label'
+              : undefined)),
     epa_reg_number: product.epa_reg_number || product.epa_registration_number || undefined,
     label_url: product.label_url || undefined,
     sds_url: product.sds_url || undefined,
