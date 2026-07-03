@@ -251,8 +251,10 @@ const REF_DEF_SCHEME_RE = /^ {0,3}\[[^\]]+\]:\s*<?\s*([a-z][a-z0-9+.-]*):(\/\/)?
 const ALLOWED_DEST_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
 // Protocol-relative URL (//host/path) — scheme-less external reference that
 // bypasses an https?:// scan. Requires a dotted host with a TLD so prose
-// slashes ("and//or", path fragments) don't trip it.
-const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=])\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?=[/\s"')\]]|$)/i;
+// slashes ("and//or", path fragments) don't trip it. `<` in the prefix
+// class covers Markdown's angle-bracketed destination form,
+// `[x](<//evil.example/x>)`, and `>` in the terminator lookahead closes it.
+const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=<])\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?=[/\s"')\]>]|$)/i;
 const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
 // tel: destinations — validated against the Waves phone allowlist, exactly
 // like mailto recipients are validated against the business domain. The
@@ -262,8 +264,31 @@ const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
 // `tel:911` and `tel:abc` must reach isWavesPhone and fail there.
 const TEL_RE = /\btel:([^\s"'<>)\]]*)/gi;
 
+// Single-pass HTML-entity decode (ASCII range) for the link scan: a browser
+// decodes `href="javascript&#58;alert(1)"` (or &colon;/&#x3a;) into a live
+// javascript: link, so the scanner must see what the browser sees. &amp; is
+// decoded LAST, mirroring a single browser decode — `&amp;#58;` renders as
+// literal "&#58;" text, not a colon, and must stay that way here too.
+// Scanning a decoded COPY can only find more, never less (fail-closed).
+function decodeEntitiesForScan(s) {
+  return String(s)
+    .replace(/&#x([0-9a-f]{1,6});/gi, (m0, h) => {
+      const c = parseInt(h, 16);
+      return c > 0 && c < 128 ? String.fromCharCode(c) : m0;
+    })
+    .replace(/&#(\d{1,7});/g, (m0, d) => {
+      const c = parseInt(d, 10);
+      return c > 0 && c < 128 ? String.fromCharCode(c) : m0;
+    })
+    .replace(/&colon;/gi, ':')
+    .replace(/&sol;/gi, '/')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&amp;/gi, '&');
+}
+
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
-  const body = String(text || '');
+  const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
   for (const src of [MD_DEST_SCHEME_RE, ATTR_SCHEME_RE, AUTOLINK_SCHEME_RE, REF_DEF_SCHEME_RE]) {
     const destRe = new RegExp(src.source, src.flags);
@@ -307,13 +332,30 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   }
   const mailtoRe = new RegExp(MAILTO_RE.source, 'gi');
   while ((m = mailtoRe.exec(body)) !== null) {
-    // Validate only the RECIPIENT portion: headers/query after `?` must not
-    // count ("mailto:attacker@x?subject=info@wavespestcontrol.com" would
-    // otherwise pass an endsWith check), and every comma-separated recipient
-    // must be on the company domain.
-    const recipients = m[1].split('?')[0].split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
+    // The address portion before `?` never inherits trust from the query
+    // ("mailto:attacker@x?subject=info@wavespestcontrol.com" must fail an
+    // endsWith check), and every comma-separated recipient must be on the
+    // company domain.
+    const [addressPart, queryPart] = m[1].split('?');
+    const recipients = String(addressPart || '').split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
     if (recipients.length === 0 || recipients.some((r) => !r.endsWith('@wavespestcontrol.com'))) {
-      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link to "${m[1].split('?')[0]}" — only @wavespestcontrol.com addresses are allowed.`);
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link to "${addressPart}" — only @wavespestcontrol.com addresses are allowed.`);
+    }
+    // Query headers can ADD recipients (to/cc/bcc) — those are subject to
+    // the same allowlist; a malformed/undecodable value fails closed.
+    for (const kv of String(queryPart || '').split('&')) {
+      if (!kv) continue;
+      const eq = kv.indexOf('=');
+      const key = (eq === -1 ? kv : kv.slice(0, eq)).trim().toLowerCase();
+      if (key !== 'to' && key !== 'cc' && key !== 'bcc') continue; // subject/body etc. carry no recipients
+      let value = eq === -1 ? '' : kv.slice(eq + 1);
+      try { value = decodeURIComponent(value); } catch {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable "${key}" header — remove it.`);
+      }
+      const extra = value.split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
+      if (extra.length === 0 || extra.some((r) => !r.endsWith('@wavespestcontrol.com'))) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link whose "${key}" header adds a non-Waves recipient — only @wavespestcontrol.com addresses are allowed.`);
+      }
     }
   }
   const proto = body.match(PROTOCOL_RELATIVE_RE);

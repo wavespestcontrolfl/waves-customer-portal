@@ -552,85 +552,23 @@ class AutonomousRunner {
       return finalized;
     }
     if (contentGuardrails && draft) {
-      // For a refresh, the draft carries only editable meta — the live page's
-      // domains are frozen by publishRefresh. Hydrate them so the brand-token
-      // check enforces against the page that will actually be written. If we
-      // CAN'T read the live page (null/throw), fail CLOSED: route to review
-      // rather than silently treating it as hub-only and skipping the guard
-      // (which would let a literal-brand draft leak onto a spoke domain).
-      let liveDomains = null;
-      if (brief.action_type === 'refresh_existing_page') {
-        const publisher = getAstroPublisher();
-        if (publisher?.getLiveFrontmatter) {
-          let liveFm;
-          try {
-            liveFm = await publisher.getLiveFrontmatter(brief.target_url || opp.page_url);
-          } catch (err) {
-            logger.warn(`[autonomous-runner] live frontmatter load for guardrails failed: ${err.message}`);
-            liveFm = null;
-          }
-          if (liveFm == null) {
-            const finalized = await finalize(run, t0, {
-              outcome: 'skipped_gate_fail',
-              skip_reason: 'refresh_domains_load_failed',
-              reviewer_notes: `Could not read live page frontmatter to enforce the brand-token guard for a multi-domain refresh (${brief.target_url || opp.page_url}) — routed to review (fail-closed).`,
-            });
-            await this._pendingReviewClaimOrThrow(queue, opp.id, 'refresh_domains_load_failed', { claimToken });
-            return finalized;
-          }
-          liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
-        }
+      // Option derivation is shared with the named-competitor approval
+      // re-check (_deriveGuardrailOptions) so the stored-draft revalidation
+      // can never drift from what parked the run.
+      let guardOptions;
+      try {
+        guardOptions = await this._deriveGuardrailOptions(opp, brief);
+      } catch (err) {
+        if (err.code !== 'REFRESH_DOMAINS_LOAD_FAILED') throw err;
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'refresh_domains_load_failed',
+          reviewer_notes: `Could not read live page frontmatter to enforce the brand-token guard for a multi-domain refresh (${brief.target_url || opp.page_url}) — routed to review (fail-closed).`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'refresh_domains_load_failed', { claimToken });
+        return finalized;
       }
-      // Narrow operator-FAQ exception: an operator_intercept brief whose
-      // seeded manifest explicitly requires an FAQ (operator_brief.
-      // faq_required, derived from the manifest payload — owner directive
-      // 2026-06-11: FAQPage on every intercept post) may keep its FAQ even
-      // on a FAQ-blocked service id (the termite-cluster consumer-protection
-      // posts). Bucket AND the composed brief flag must both agree; mined
-      // opportunities can never set this.
-      const operatorFaqException = opp.bucket === OPERATOR_INTERCEPT_BUCKET
-        && brief?.voice_constraints?.operator_brief?.faq_required === true;
-      // For NEW spoke-targeted posts the publisher stamps frontmatter.domains to
-      // the spoke AFTER these gates run, so the draft's own frontmatter still
-      // reads hub-only here. Pass the brief's resolved spoke domains explicitly
-      // so the brand-token guard enforces against the domain the post will
-      // ACTUALLY publish to — the intentional hub-link anchor is exempt, any
-      // other literal-brand mention on the spoke still fails. Refresh keeps the
-      // live-page domains hydrated above.
-      const spokeDomains = Array.isArray(brief.target_sites) ? brief.target_sites.filter(Boolean) : [];
-      const guardDomains = liveDomains != null
-        ? liveDomains
-        : (spokeDomains.length ? spokeDomains : null);
-      // A spoke seed keeps the coarse 'pest' service for the link gates but tags
-      // a FAQ-blocked pest topic on operator_brief.faq_blocked_topic; fold it
-      // into the service the FAQ-blocked guard sees (faqBlockedFinding already
-      // accepts an array) so a writer-added FAQ on a blocked topic still P0s.
-      const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
-      const baseService = opp.service || brief.service || null;
-      const guardService = faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService;
-      // Operator-intercept sourcing exception for the outbound-link guard:
-      // the seeded brief BINDS the writer to link its required_sources
-      // in-body (intercept-brief-seeder: "every source below must be linked
-      // in the body"), and source_notes direct it to LOCATE further sources
-      // (UF/IFAS, regulators, curated competitors' own pages). Bucket AND
-      // brief must agree — mined opportunities can never set these, so
-      // mined drafts stay internal-links-only.
-      const linkOperatorBrief = opp.bucket === OPERATOR_INTERCEPT_BUCKET
-        ? (brief?.voice_constraints?.operator_brief || null)
-        : null;
-      const requiredSourceUrls = Array.isArray(linkOperatorBrief?.required_sources)
-        ? linkOperatorBrief.required_sources
-        : [];
-      const operatorCitations = Array.isArray(linkOperatorBrief?.source_notes)
-        && linkOperatorBrief.source_notes.length > 0;
-      const guardResult = contentGuardrails.evaluate(draft, {
-        service: guardService,
-        primaryKeyword: brief.target_keyword || null,
-        domains: guardDomains,
-        operatorFaqException,
-        requiredSourceUrls,
-        operatorCitations,
-      });
+      const guardResult = contentGuardrails.evaluate(draft, guardOptions);
       run.content_guardrails_result = guardResult;
       if (!guardResult.pass) {
         const blocking = guardResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
@@ -2306,6 +2244,29 @@ class AutonomousRunner {
       }
     }
 
+    // Re-run the content guardrails on the stored draft too — the price/
+    // brand/FAQ/link P0s ran only before parking, and publishOrUpdatePage
+    // does not run them again, so the tampered-draft defense above was one
+    // gate short: an off-fleet URL or hardcoded price inserted into
+    // draft_payload after parking would still have published on approval.
+    // Same fail-closed posture as the comparison re-check; options come
+    // from the SAME derivation runNext used (_deriveGuardrailOptions), so
+    // the revalidation can't drift from what parked the run.
+    const guardrailsMod = getContentGuardrails();
+    if (!guardrailsMod) {
+      const e = new Error('Content-guardrails module unavailable — cannot re-validate the stored draft before publishing (fail closed)');
+      e.statusCode = 409;
+      throw e;
+    }
+    const guardOptions = await this._deriveGuardrailOptions(opp, brief); // throws 422 on refresh live-domain load failure — operator retries
+    const guardRecheck = guardrailsMod.evaluate(draft, guardOptions);
+    if (!guardRecheck.pass) {
+      const codes = guardRecheck.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1').map((f) => `${f.severity} ${f.code}`).join('; ');
+      const e = new Error(`Content guardrails no longer pass on the stored draft: ${codes}`);
+      e.statusCode = 409;
+      throw e;
+    }
+
     // Same canary / publish-cap guards as the autonomous lane (now serialized
     // under the engine lock so the cap read is authoritative).
     const seoRes = parseJsonMaybe(run.seo_completion_gate_result) || {};
@@ -2408,6 +2369,71 @@ class AutonomousRunner {
       published_url: patch.published_url || null,
       astro_pr_url: patch.astro_pr_url || null,
       publish_status: patch.publish_status || null,
+    };
+  }
+
+  /**
+   * The content-guardrails options for a given opportunity+brief — ONE
+   * derivation shared by runNext's gate and the named-competitor approval
+   * re-check, so the stored-draft revalidation can never drift from what
+   * parked the run.
+   *
+   * - Refresh actions hydrate the LIVE page's domains (publishRefresh
+   *   freezes frontmatter, so the draft's own domains lie); an unreadable
+   *   live page throws REFRESH_DOMAINS_LOAD_FAILED — fail CLOSED, never
+   *   silently treat a multi-domain refresh as hub-only.
+   * - New spoke-targeted posts pass the brief's resolved spoke domains
+   *   explicitly (the publisher stamps frontmatter.domains AFTER gating).
+   * - Operator-intercept briefs carry the narrow FAQ exception and the
+   *   sourcing exceptions (required_sources / source_notes); mined
+   *   opportunities can never set these.
+   */
+  async _deriveGuardrailOptions(opp, brief) {
+    let liveDomains = null;
+    if (brief.action_type === 'refresh_existing_page') {
+      const publisher = getAstroPublisher();
+      if (publisher?.getLiveFrontmatter) {
+        let liveFm;
+        try {
+          liveFm = await publisher.getLiveFrontmatter(brief.target_url || opp.page_url);
+        } catch (err) {
+          logger.warn(`[autonomous-runner] live frontmatter load for guardrails failed: ${err.message}`);
+          liveFm = null;
+        }
+        if (liveFm == null) {
+          const e = new Error(`Could not read live page frontmatter for ${brief.target_url || opp.page_url} — cannot enforce the brand-token guard (fail closed)`);
+          e.code = 'REFRESH_DOMAINS_LOAD_FAILED';
+          e.statusCode = 422;
+          throw e;
+        }
+        liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
+      }
+    }
+    const operatorBrief = opp.bucket === OPERATOR_INTERCEPT_BUCKET
+      ? (brief?.voice_constraints?.operator_brief || null)
+      : null;
+    // Narrow operator-FAQ exception (owner directive 2026-06-11: FAQPage on
+    // every intercept post) — manifest-derived, never from generated content.
+    const operatorFaqException = operatorBrief?.faq_required === true;
+    const spokeDomains = Array.isArray(brief.target_sites) ? brief.target_sites.filter(Boolean) : [];
+    const guardDomains = liveDomains != null
+      ? liveDomains
+      : (spokeDomains.length ? spokeDomains : null);
+    // A spoke seed keeps the coarse 'pest' service for the link gates but
+    // tags a FAQ-blocked pest topic on operator_brief.faq_blocked_topic —
+    // fold it in so a writer-added FAQ on a blocked topic still P0s.
+    // Deliberately NOT bucket-gated (unlike the exceptions above): this
+    // TIGHTENS the guard, and spoke seeds carry it outside the intercept
+    // bucket.
+    const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
+    const baseService = opp.service || brief.service || null;
+    return {
+      service: faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService,
+      primaryKeyword: brief.target_keyword || null,
+      domains: guardDomains,
+      operatorFaqException,
+      requiredSourceUrls: Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : [],
+      operatorCitations: Array.isArray(operatorBrief?.source_notes) && operatorBrief.source_notes.length > 0,
     };
   }
 

@@ -502,3 +502,34 @@ describe('outbound-link gate: universal tel validation, reference defs, trailing
     expect(spam.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
   });
 });
+
+describe('outbound-link gate: angle-bracket protocol-relative, entity-encoded schemes, mailto headers (Codex round 6)', () => {
+  test('angle-bracketed protocol-relative destinations are P0 (inline and reference-style)', () => {
+    for (const body of [
+      'Click [x](<//evil.example/x>) now.',
+      '[x][r] link\n\n[r]: <//evil.example/x>',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+  test('entity-encoded schemes are decoded before the scan (what the browser sees)', () => {
+    for (const body of [
+      '<a href="javascript&#58;alert(1)">x</a>',
+      '<a href="javascript&#x3a;alert(1)">x</a>',
+      '<a href="javascript&colon;alert(1)">x</a>',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+    // single decode, like a browser: &amp;#58; renders as literal text
+    const prose = guardrails.evaluate({ body: 'Literal text about &amp;#58; entities in prose.' }, {});
+    expect(prose.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+  test('mailto to/cc/bcc query headers are held to the same recipient allowlist', () => {
+    const bcc = guardrails.evaluate({ body: 'Email [us](mailto:info@wavespestcontrol.com?bcc=attacker@gmail.com).' }, {});
+    expect(bcc.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    const ok = guardrails.evaluate({ body: 'Email [us](mailto:info@wavespestcontrol.com?cc=office@wavespestcontrol.com&subject=Hi).' }, {});
+    expect(ok.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});
