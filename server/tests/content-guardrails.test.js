@@ -534,6 +534,34 @@ describe('outbound-link gate: angle-bracket protocol-relative, entity-encoded sc
   });
 });
 
+describe('control-char destinations, padded tel digits, semicolon recipients (Codex round 9)', () => {
+  test('embedded tab/newline in a link destination is P0 (browsers strip them while parsing)', () => {
+    for (const body of [
+      '<a href="java&#x09;script:alert(1)">x</a>',
+      '[x](java&#10;script:alert(1))',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+  test('tel links must be a dialable Waves shape — a padded number ending in an owned line is P0', () => {
+    for (const body of ['Call [x](tel:9999412975749).', 'Call [x](tel:219412975749).']) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+    expect(guardrails.evaluate({ body: 'Call [(941) 297-5749](tel:+19412975749).' }, {})
+      .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+  test('mailto recipients split on semicolons too (address portion and headers)', () => {
+    expect(guardrails.evaluate({ body: 'Email [x](mailto:attacker@gmail.com;info@wavespestcontrol.com?subject=Hi).' }, {})
+      .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    expect(guardrails.evaluate({ body: 'Email [x](mailto:info@wavespestcontrol.com?cc=attacker@gmail.com%3Binfo@wavespestcontrol.com).' }, {})
+      .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    expect(guardrails.evaluate({ body: 'Email [us](mailto:info@wavespestcontrol.com;office@wavespestcontrol.com).' }, {})
+      .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});
+
 describe('quoted prices + encoded mailto header names (Codex round 8)', () => {
   test('quoted amounts are hard prices too', () => {
     expect(guardrails.findHardcodedPrice('The plan is "$9" per month flat.')).toBeTruthy();

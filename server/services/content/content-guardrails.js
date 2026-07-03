@@ -299,9 +299,19 @@ function decodeEntitiesForScan(s) {
     .replace(/&amp;/gi, '&');
 }
 
+// A link DESTINATION carrying embedded tab/CR/newline (usually smuggled in
+// via entities, decoded above): browsers STRIP these while parsing hrefs,
+// so "java&#x09;script:" is a live javascript: link whose scheme no regex
+// sees contiguously. Fail closed on any control character inside an
+// href/src value or a markdown destination.
+const DEST_CONTROL_RE = /\]\(\s*<?[^)]*[\t\r\n][^)]*\)|\b(?:href|src)\s*=\s*"[^"]*[\t\r\n][^"]*"|\b(?:href|src)\s*=\s*'[^']*[\t\r\n][^']*'/;
+
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
+  if (DEST_CONTROL_RE.test(body)) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a link destination with embedded control characters (tab/newline) — browsers strip these while parsing, which can smuggle an executable scheme. Remove them.');
+  }
   for (const src of [MD_DEST_SCHEME_RE, ATTR_SCHEME_RE, AUTOLINK_SCHEME_RE, REF_DEF_SCHEME_RE]) {
     const destRe = new RegExp(src.source, src.flags);
     let dm;
@@ -318,8 +328,15 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   const telRe = new RegExp(TEL_RE.source, 'gi');
   let t;
   while ((t = telRe.exec(body)) !== null) {
+    // The dialer places the WHOLE digit string, so length is validated
+    // BEFORE the allowlist: isWavesPhone keys on the last 10 digits (right
+    // for finding a Waves number inside prose), but a padded
+    // tel:9999412975749 would dial a non-Waves number that merely ENDS in
+    // an owned line. Exactly 10 digits, or 11 with a leading 1, only.
+    const digits = String(t[1] || '').replace(/\D/g, '');
+    const dialableShape = digits.length === 10 || (digits.length === 11 && digits[0] === '1');
     const { isWavesPhone } = require('./waves-phones');
-    if (!isWavesPhone(t[1])) {
+    if (!dialableShape || !isWavesPhone(digits)) {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a tel: link to "${t[1].trim() || '(empty)'}", which is not a Waves phone number — tap-to-call links may only dial the business's own lines.`);
     }
   }
@@ -356,7 +373,10 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     try { addressPart = decodeURIComponent(String(rawAddressPart || '')); } catch {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable address ("${String(rawAddressPart || '').slice(0, 60)}") — remove it.`);
     }
-    const recipients = addressPart.split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
+    // Split on semicolons as well as commas — common mail clients accept
+    // both as recipient separators, so "attacker@x;info@waves…" must not
+    // pass as one string that happens to END on the company domain.
+    const recipients = addressPart.split(/[,;]/).map((r) => r.trim().toLowerCase()).filter(Boolean);
     if (recipients.length === 0 || recipients.some((r) => !r.endsWith('@wavespestcontrol.com'))) {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link to "${addressPart.slice(0, 80)}" — only @wavespestcontrol.com addresses are allowed.`);
     }
@@ -378,7 +398,7 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
       try { value = decodeURIComponent(value); } catch {
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable "${key}" header — remove it.`);
       }
-      const extra = value.split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
+      const extra = value.split(/[,;]/).map((r) => r.trim().toLowerCase()).filter(Boolean);
       if (extra.length === 0 || extra.some((r) => !r.endsWith('@wavespestcontrol.com'))) {
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link whose "${key}" header adds a non-Waves recipient — only @wavespestcontrol.com addresses are allowed.`);
       }

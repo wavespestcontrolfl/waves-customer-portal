@@ -224,6 +224,20 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
       body: 'We treat homes across Boca Grande and Sun City Center every quarter, with same-day service in Englewood.',
     }).ok).toBe(true);
   });
+  test('redaction: markdown headings are structural furniture, not customer quotes (Codex round 9)', () => {
+    expect(checkRedactionPassed({
+      body: '## Our Process\n\nWe inspect first.\n\n## Why Choose Waves Pest Control\n\nBecause we live in Sarasota and answer the phone.',
+    }).ok).toBe(true);
+    // prose PII below a heading still fails
+    expect(checkRedactionPassed({
+      body: '## Our Process\n\nJohn Smith at 4867 Maple Street told us the ants were back.',
+    }).ok).toBe(false);
+  });
+  test('redaction: regional non-service cities (Fort Myers) are place pairs, not names (Codex round 9)', () => {
+    expect(checkRedactionPassed({
+      body: 'Residents in Fort Myers and Cape Coral see tegu lizards moving north toward Venice every year.',
+    }).ok).toBe(true);
+  });
   test('redaction: compact E.164 customer phones are caught (Codex round 8 — 11-digit runs had no interior boundary to match)', () => {
     const r = checkRedactionPassed({ body: 'Call our Sarasota line at (941) 297-2606 or the customer at +19415551234.' });
     expect(r.ok).toBe(false);

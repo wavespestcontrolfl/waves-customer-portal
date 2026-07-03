@@ -363,14 +363,20 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   // Case-INSENSITIVE provider/legal-entity passes: a disparaged target
   // written lowercase or all-caps ("acme pest solutions is dishonest")
   // otherwise never enters genericNames and the negativity scan passes.
-  // The GENERIC_LEAD_EXCLUSIONS inside the patterns match case-insensitively
-  // too, so ordinary lowercase category prose ("local pest control company")
-  // stays excluded exactly as its Title Case form is. With /i, lowercase
-  // words become valid NAME tokens, so a capture can swallow its own
-  // preceding negativity ("Avoid the dishonest Acme Pest Solutions") — the
-  // capture is therefore SPLIT at its last interior negativity token: the
-  // name becomes what follows it, and the negativity sits back OUTSIDE the
-  // name where the neg-before-name directed check sees it.
+  // In the Title Case pass, capitalization is what stops ordinary prose
+  // from bridging into a "name"; the CI variant recreates that anchor by
+  // excluding common prose words (interrogatives, prepositions, comparison
+  // verbs) from EVERY token position, not just the lead — otherwise
+  // fragments like "compared with professional pest control" become
+  // genericNames and any nearby negativity ("useless compared with…")
+  // blocks a normal article. And because lowercase adjectives are valid
+  // CI tokens, a capture can still swallow its own preceding negativity
+  // ("dishonest acme pest solutions") — captures are SPLIT at their last
+  // interior negativity token so the adjective sits back OUTSIDE the name
+  // where the neg-before-name directed check sees it.
+  const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Need|Needs|Want|Wants|Consider|Considering|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better`;
+  const CI_TOKEN = `(?!(?:${CI_PROSE_EXCLUSIONS})\\b)[a-z][a-z0-9&'.\\-]*`;
+  const CI_PROVIDER_NAME_RE = new RegExp(`\\b(${CI_TOKEN}(?:\\s+(?:${CI_TOKEN}|of|and|&)){0,3}\\s+(?:${INDUSTRY_SUFFIX_SRC}))\\b`, 'gi');
   const NEG_INSIDE_RE_SRC = `(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+`;
   const splitAtNegativity = (name) => {
     const inner = new RegExp(NEG_INSIDE_RE_SRC, 'gi');
@@ -380,7 +386,7 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     while ((mm = inner.exec(nm)) !== null) cut = mm.index + mm[0].length;
     return cut >= 0 ? nm.slice(cut).trim() : nm;
   };
-  for (const m of nameScanText.matchAll(providerNameRe('gi'))) {
+  for (const m of nameScanText.matchAll(CI_PROVIDER_NAME_RE)) {
     const nm = splitAtNegativity(m[1]);
     if (nm && !OWN_BRAND_RE.test(nm)) genericNames.add(nm);
   }

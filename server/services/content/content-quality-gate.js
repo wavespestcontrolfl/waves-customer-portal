@@ -584,7 +584,13 @@ function checkRedactionPassed(draft) {
   // on its own.
   try {
     const { redact } = require('./pii-redactor');
-    const scanned = redact(stripWavesOfficeAddresses(body));
+    // Markdown HEADING lines are excluded from the PII scan: section titles
+    // like "## Our Process" / "## Why Choose Waves Pest Control" are
+    // title-case pairs the redactor's standalone name heuristic reads as
+    // customer names, and generated headings are structural furniture, not
+    // customer-derived quotes. Body prose keeps the full scan.
+    const scanBody = body.replace(/^#{1,6}\s.*$/gm, '');
+    const scanned = redact(stripWavesOfficeAddresses(scanBody));
     const hit = (scanned.findings || []).find((f) => f.type === 'name' || f.type === 'address');
     if (hit) return { ok: false, reason: `unredacted_${hit.type}_in_body` };
     // 'low' confidence means the redactor itself says its heuristics were

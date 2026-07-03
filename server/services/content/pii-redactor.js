@@ -125,7 +125,13 @@ const NAME_ALLOWLIST = new Set([
 // must still redact even though Laurel is a service area. Config-unavailable
 // leaves the pair set empty (fail-closed direction: more redaction, never
 // less).
-const CITY_PAIR_ALLOWLIST = new Set();
+const CITY_PAIR_ALLOWLIST = new Set([
+  // Regional cities OUTSIDE the service map that SWFL content routinely
+  // mentions ("Residents in Fort Myers see tegu lizards") — the name-pair
+  // heuristic reads them as First+Last otherwise.
+  'fort myers', 'cape coral', 'bonita springs', 'marco island',
+  'st petersburg', 'saint petersburg', 'plant city', 'winter haven',
+]);
 try {
   const { CITY_TO_LOCATION } = require('../../config/locations');
   for (const city of Object.keys(CITY_TO_LOCATION || {})) {
@@ -134,7 +140,7 @@ try {
       CITY_PAIR_ALLOWLIST.add(`${words[i]} ${words[i + 1]}`);
     }
   }
-} catch { /* locations unavailable — pair set stays empty */ }
+} catch { /* locations unavailable — the hand list above still applies */ }
 
 const NAME_ALLOWLIST_LOWER = new Set([...NAME_ALLOWLIST].map((w) => w.toLowerCase()));
 

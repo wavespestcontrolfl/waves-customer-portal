@@ -716,6 +716,14 @@ describe('table-less drafts: operator-authorized competitor naming (Codex round 
     expect(clean.pass).toBe(true);
     expect(clean.findings).toHaveLength(0);
   });
+  test('prose fragments ending in an industry suffix are NOT names (Codex round 9)', () => {
+    // The CI pass excludes common prose words from every token position —
+    // "compared with professional pest control" must not become a
+    // genericName that nearby negativity ("useless") gets directed at.
+    const r = gate.evaluate({ body: 'Store-bought sprays are useless compared with professional pest control.' });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
   test('a detection-only alias in the brief authorizes the FULLER surface form (word-boundary containment, Codex round 7)', () => {
     // "Aptive" (brief) and "Aptive Environmental" (draft) canonicalize to
     // DIFFERENT unknown names — exact-string matching sent the operator's
