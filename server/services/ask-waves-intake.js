@@ -69,8 +69,8 @@ const PRICE_TALK_RE = new RegExp(
   '\\$\\s*\\d' // $45, $ 100
   + `|\\b${EN_AMOUNT}\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks
   + `|\\b${ES_AMOUNT}\\s+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, cuarenta y cinco dólares
-  + `|\\b${EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|visit|treatment|application|year|yr\\b)` // 45/mo, forty five per month, 45 a month, 45 each visit
-  + `|\\b${ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b`, // 45 al mes, cuarenta cada mes
+  + `|\\b${EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|quarter|week|visit|treatment|application|year|yr\\b|qtr\\b|wk\\b)` // 45/mo, forty five per month, 108 per quarter, 45 each visit
+  + `|\\b${ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|trimestre|semana|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b`, // 45 al mes, 90 por trimestre, cuarenta cada mes
   'i',
 );
 const PRICE_REDIRECT_REPLY = `Exact pricing comes straight from your property details — square footage, lot size, the works — so I never have to guess. Tap "Get my price" and I'll pull your real number in about 20 seconds, or call us at ${COMPANY.phone}.`;
@@ -192,21 +192,24 @@ function normalizeIntakeResult(json, source) {
   const serviceKeys = Array.isArray(json.service_keys)
     ? [...new Set(json.service_keys.filter((k) => QUOTABLE_KEYS.has(k)))]
     : [];
-  const result = scrubPriceTalk({
+  // Intent-consistent handling, enforced in code not just the prompt.
+  // Emergency/support turns never steer into the quote flow — and when such a
+  // reply ALSO contains price talk, it must NOT get the generic "Get my price"
+  // redirect (that would strip the 911/medical or portal guidance and still
+  // sound price-oriented); it gets the matching safe copy instead.
+  if (intent === 'emergency' || intent === 'existing_customer') {
+    const safeReply = PRICE_TALK_RE.test(reply)
+      ? (intent === 'emergency' ? EMERGENCY_FALLBACK_RESULT.reply : SUPPORT_FALLBACK_RESULT.reply)
+      : reply;
+    return { reply: safeReply, intent, service_keys: [], ready_for_quote: false, source };
+  }
+  return scrubPriceTalk({
     reply,
     intent,
     service_keys: serviceKeys,
     ready_for_quote: json.ready_for_quote === true,
     source,
   });
-  // Intent-consistent CTA, enforced in code not just the prompt (and AFTER the
-  // price scrub, which forces ready_for_quote on): a provider that classifies
-  // emergency or existing_customer must never also steer into the quote flow.
-  if (result.intent === 'emergency' || result.intent === 'existing_customer') {
-    result.ready_for_quote = false;
-    result.service_keys = [];
-  }
-  return result;
 }
 
 // Best-effort conversation log into the existing assistant tables so Ask Waves
@@ -219,11 +222,18 @@ async function logIntakeExchange({ sessionId, message, reply, intent }) {
   if (!identifier) return;
   try {
     const now = new Date();
+    // Honor the 30-minute timeout the same way WavesAssistant does: only reuse
+    // a session that hasn't expired, and mark stale actives timed out so a
+    // returning visitor starts a NEW admin conversation / query-mining thread.
     let session = await db('agent_sessions')
       .where({ channel: 'ask_waves', channel_identifier: identifier, status: 'active' })
+      .where('timeout_at', '>', now)
       .orderBy('last_activity_at', 'desc')
       .first();
     if (!session) {
+      await db('agent_sessions')
+        .where({ channel: 'ask_waves', channel_identifier: identifier, status: 'active' })
+        .update({ status: 'timeout', resolved_by: 'timeout', updated_at: now });
       [session] = await db('agent_sessions').insert({
         channel: 'ask_waves',
         channel_identifier: identifier,
