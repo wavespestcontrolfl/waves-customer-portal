@@ -17,6 +17,8 @@ export default function RetentionSection({
   kpis,
   kpisLoading,
   kpisError,
+  kpiTargets,
+  kpiHistory,
   mrrTrend,
   cohort,
   reviewTrend,
@@ -39,8 +41,14 @@ export default function RetentionSection({
             <>
               {kpis.momentum && (
                 <>
+                  {/* Net tiles keep their sign-based red; metricKey adds the
+                      sparkline (no default target for momentum metrics). */}
                   <KpiTile
                     label="Net MRR"
+                    metricKey="net_mrr"
+                    metricValue={kpis.momentum.mrr?.net}
+                    targets={kpiTargets}
+                    history={kpiHistory}
                     value={signed(kpis.momentum.mrr?.net, fmtMoney)}
                     sub={`+${fmtMoneyCompact(kpis.momentum.mrr?.new ?? 0)} new · ${fmtMoneyCompact(kpis.momentum.mrr?.churned ?? 0)} lost`}
                     alert={kpis.momentum.mrr?.net < 0}
@@ -52,6 +60,10 @@ export default function RetentionSection({
                   />
                   <KpiTile
                     label="Net Customers"
+                    metricKey="net_customers"
+                    metricValue={kpis.momentum.customers?.net}
+                    targets={kpiTargets}
+                    history={kpiHistory}
                     value={signed(kpis.momentum.customers?.net, fmtInt)}
                     sub={`+${fmtInt(kpis.momentum.customers?.new ?? 0)} new · ${fmtInt(kpis.momentum.customers?.lost ?? 0)} lost`}
                     alert={kpis.momentum.customers?.net < 0}
@@ -65,15 +77,21 @@ export default function RetentionSection({
               )}
               <KpiTile
                 label="Retention"
+                metricKey="retention_pct"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   kpis.retention.pct != null ? `${kpis.retention.pct}%` : "—"
                 }
                 sub={`${kpis.retention.lost} lost`}
-                alert={kpis.retention.pct != null && kpis.retention.pct < 85}
-                chart={{ kind: "gauge", value: kpis.retention.pct, max: 100, target: 85 }}
+                chart={{ kind: "gauge", value: kpis.retention.pct, max: 100 }}
               />
               <KpiTile
                 label="CSAT"
+                metricKey="csat_avg"
+                targets={kpiTargets}
+                history={kpiHistory}
+                n={kpis.quality.csatResponses || null}
                 value={
                   kpis.quality.csatAvg != null
                     ? `${kpis.quality.csatAvg}/10`
@@ -84,15 +102,10 @@ export default function RetentionSection({
                     ? `${kpis.quality.csatResponses} rate-page responses`
                     : "no responses yet"
                 }
-                alert={
-                  kpis.quality.csatAvg != null &&
-                  parseFloat(kpis.quality.csatAvg) < 8
-                }
                 chart={{
                   kind: "gauge",
                   value: kpis.quality.csatAvg != null ? parseFloat(kpis.quality.csatAvg) : null,
                   max: 10,
-                  target: 8,
                 }}
               />
             </>

@@ -33,6 +33,8 @@ export default function GrowthSection({
   kpis,
   kpisLoading,
   kpisError,
+  kpiTargets,
+  kpiHistory,
   funnel,
   revenueByCity,
   capAlloc,
@@ -142,8 +144,13 @@ export default function GrowthSection({
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
           {kpis && (
             <>
+              {/* Threshold tones come from the kpi_targets store via
+                  metricKey; `alert` keeps only the unavailable-data red. */}
               <KpiTile
                 label="Lead → Booked"
+                metricKey="lead_conversion"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   !salesUnavailable && sales.conversion != null
                     ? `${sales.conversion}%`
@@ -154,14 +161,14 @@ export default function GrowthSection({
                     ? "lead metrics unavailable"
                     : `${sales.booked ?? 0}/${sales.leads ?? 0} leads`
                 }
-                alert={
-                  salesUnavailable ||
-                  (sales.conversion != null && sales.conversion < 20)
-                }
-                chart={{ kind: "gauge", value: sales.conversion, max: 100, target: 20 }}
+                alert={salesUnavailable}
+                chart={{ kind: "gauge", value: salesUnavailable ? null : sales.conversion, max: 100 }}
               />
               <KpiTile
                 label="Response Speed"
+                metricKey="response_speed_min"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   !salesUnavailable && sales.avgResponseMin != null
                     ? `${sales.avgResponseMin}m`
@@ -172,11 +179,8 @@ export default function GrowthSection({
                     ? "lead metrics unavailable"
                     : "lead → first contact"
                 }
-                alert={
-                  salesUnavailable ||
-                  (sales.avgResponseMin != null && sales.avgResponseMin > 60)
-                }
-                chart={{ kind: "bullet", value: sales.avgResponseMin, target: 60, lowerIsBetter: true }}
+                alert={salesUnavailable}
+                chart={{ kind: "bullet", value: salesUnavailable ? null : sales.avgResponseMin }}
               />
               <KpiTile
                 label="Call → Booking"

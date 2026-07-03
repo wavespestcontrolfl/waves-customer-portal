@@ -91,6 +91,10 @@ export default function DashboardPageV2() {
   // true = the LATEST alerts fetch failed (value above is a kept-previous).
   // ActionInbox suppresses the green all-clear while stale.
   const [alertsStale, setAlertsStale] = useState(false);
+  // KPI-target store rows keyed by metric, + per-metric sparkline series
+  // (wave3). null while unfetched — tiles fall back to DEFAULT_KPI_TARGETS.
+  const [kpiTargets, setKpiTargets] = useState(null);
+  const [kpiHistory, setKpiHistory] = useState(null);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -234,6 +238,24 @@ export default function DashboardPageV2() {
     setReviewTrend((prev) => rev ?? prev);
     setCohort((prev) => coh ?? prev);
     setCapAlloc((prev) => cap ?? prev);
+
+    // Wave 3 — KPI-target store + sparkline history for the tiles. A new wave
+    // (never appended to 1/2) so the added fetches can't push an existing
+    // wave over the per-user rate-limit budget. Both fail soft: tiles fall
+    // back to DEFAULT_KPI_TARGETS / no sparkline.
+    const wave3 = await Promise.all([
+      track("/kpi-targets", adminFetch("/admin/kpi-targets")),
+      track("/kpi-history", adminFetch("/admin/dashboard/kpi-history?days=90")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [tgt, hist] = wave3;
+    setKpiTargets((prev) => {
+      if (!Array.isArray(tgt?.targets)) return prev;
+      const byMetric = {};
+      for (const row of tgt.targets) byMetric[row.metric] = row;
+      return byMetric;
+    });
+    setKpiHistory((prev) => (hist?.series && typeof hist.series === "object" ? hist.series : prev));
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -441,7 +463,16 @@ export default function DashboardPageV2() {
     timeZone: "America/New_York",
   });
   const firstName = adminFirstName();
-  const kpiStripProps = { kpis, kpisLoading, kpisError };
+  // Sparklines are daily MONTH-TO-DATE snapshots (kpi-snapshot cron) — under
+  // any other period the tile's number and the trend would silently disagree
+  // on basis, so the series only render while the selector is on MTD.
+  const kpiStripProps = {
+    kpis,
+    kpisLoading,
+    kpisError,
+    kpiTargets,
+    kpiHistory: period === "mtd" ? kpiHistory : null,
+  };
 
   return (
     <div className="dashboard-blackout font-sans bg-surface-page min-h-full p-3 sm:p-6 pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6 text-zinc-900">
@@ -504,6 +535,7 @@ export default function DashboardPageV2() {
           <AiChartsPanel />
         </div>
       )}
+
 
       <GrowthSection
         data={data}

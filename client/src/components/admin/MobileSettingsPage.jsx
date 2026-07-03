@@ -37,6 +37,11 @@ const SECTIONS = [
     to: "/admin/settings?tab=service-reports",
   },
   {
+    key: "kpi-targets",
+    label: "KPI Targets",
+    to: "/admin/settings?tab=kpi-targets",
+  },
+  {
     key: "integrations",
     label: "Integrations",
     to: "/admin/settings?tab=integrations",
