@@ -27,6 +27,7 @@ const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
 const { verifyTurnstileToken } = require('../utils/turnstile');
+const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -141,22 +142,6 @@ const leadWebhookPhoneLimiter = rateLimit({
   skip: (req) => process.env.NODE_ENV !== 'production' || !leadSubmittedPhoneKey(req),
 });
 
-// Honeypot trap: the public forms render a visually-hidden, autocomplete-off
-// `fax_number` input that real users never see or fill. Any non-empty value is
-// an indiscriminate bot that populated every field. Pure + exported for tests.
-// (`fax_number` chosen deliberately — modern browsers/password managers don't
-// autofill fax, so a real visitor won't trip it.)
-function isHoneypotTripped(body) {
-  if (!body || body.fax_number === undefined || body.fax_number === null) return false;
-  const v = body.fax_number;
-  // Humans submit an empty string (or omit the field). Any non-empty string —
-  // or ANY non-string JSON value (number/array/object) a bot crafts — means the
-  // hidden field was populated. Rejecting non-strings matters because
-  // findField(/number|phone/) could otherwise read a numeric fax_number as the
-  // phone fallback and let the bot through (codex P2).
-  if (typeof v === 'string') return v.trim() !== '';
-  return true;
-}
 
 // POST /api/webhooks/lead — website lead-form submission webhook
 router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res) => {
@@ -186,20 +171,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // widget posts (cf-turnstile-response), so a form that renders the widget
     // without remapping still verifies instead of 403-ing after rollout (codex P1).
     const turnstileToken = body && (body.turnstile_token || body['cf-turnstile-response']);
-    // Resolve the submitting host so verify() can select the token's OWNING
-    // widget secret and call siteverify exactly once — Turnstile tokens are
-    // single-use, so probing other widgets' secrets would spend the token (codex
-    // P1). Origin/Referer are browser-set and reliable on the cross-origin POST
-    // from the astro fleet; fall back to the page URL we already capture.
-    const hostFromUrl = (u) => { try { return new URL(u).hostname.toLowerCase(); } catch (_e) { return ''; } };
-    const submitHost =
-      hostFromUrl(req.headers.origin)
-      || hostFromUrl(req.headers.referer)
-      || hostFromUrl(body && body.page_url)
-      || hostFromUrl(body && body.landing_url)
-      || hostFromUrl(body && body.attribution && body.attribution.landing_url)
-      || (body && typeof body.domain === 'string' ? body.domain.toLowerCase() : '');
-    const turnstile = await verifyTurnstileToken(turnstileToken, req.ip, submitHost);
+    // resolveSubmitHost lets verify() select the token's OWNING widget secret and
+    // call siteverify exactly once — tokens are single-use, so probing other
+    // widgets' secrets would spend it (codex P1). See utils/lead-abuse.
+    const turnstile = await verifyTurnstileToken(turnstileToken, req.ip, resolveSubmitHost(req));
     if (!turnstile.ok) {
       logger.info(
         `[lead-webhook] turnstile ${turnstile.reason} ` +
