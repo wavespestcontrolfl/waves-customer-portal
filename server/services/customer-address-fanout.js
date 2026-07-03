@@ -98,9 +98,15 @@ function snapshotMatchesContact(snapshot, contact) {
 function placeCorroborates(contact, place) {
   const placeZip = (String(place.zip || '').match(/\d{5}/) || [])[0] || null;
   const contactZip = String(contact.zip || '').trim().slice(0, 5);
-  if (placeZip && /^\d{5}$/.test(contactZip)) return placeZip === contactZip;
+  const contactHasZip = /^\d{5}$/.test(contactZip);
+  if (placeZip && contactHasZip) return placeZip === contactZip;
   const contactCityKey = addressMatchKey(contact.city);
   const placeCityKey = addressMatchKey(place.city);
+  // A snapshot that NAMES a place cannot be corroborated by a contact that
+  // offers none — a place-less customer row being filled in must not adopt a
+  // same-street snapshot from a different city. (The reverse stays
+  // permissive: a place-less snapshot has no evidence to contradict.)
+  if ((placeZip || placeCityKey) && !contactHasZip && !contactCityKey) return false;
   if (!contactCityKey || !placeCityKey) return true;
   return placeCityKey === contactCityKey;
 }
@@ -153,7 +159,10 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   const matched = leadRows.filter((r) => leadMatchesContact(r, before) || leadMatchesContact(r, after));
   const leadGroups = [
     { rows: matched.filter((r) => !String(r.address || '').includes(',')), address: after.address_line1 },
-    { rows: hasCityZip ? matched.filter((r) => String(r.address || '').includes(',')) : [], address: fullAddress },
+    // leads.address is varchar(255) (default knex string) — an oversized full
+    // string would throw INSIDE the caller's transaction and roll back the
+    // whole customer edit.
+    { rows: hasCityZip ? matched.filter((r) => String(r.address || '').includes(',')) : [], address: fullAddress.slice(0, 255) },
   ];
   for (const group of leadGroups) {
     // city/zip are patched only when the customer row actually HAS them — a
@@ -165,21 +174,20 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
     // No-op rows are skipped entirely: fan-out runs on address-field PRESENCE
     // (resaves included), and bumping updated_at on an unchanged lead would
     // silently move it out of the staleness/follow-up queries keyed on it.
-    const ids = group.rows
+    const rowsToPatch = group.rows
       .filter((r) => addressMatchKey(r.address) !== addressMatchKey(group.address)
         || (leadPatch.city !== undefined && addressMatchKey(r.city) !== addressMatchKey(leadPatch.city))
-        || (leadPatch.zip !== undefined && addressMatchKey(r.zip) !== addressMatchKey(leadPatch.zip)))
-      .map((r) => r.id);
-    if (!ids.length) continue;
-    // The update re-asserts ownership + open status: a concurrent relink
-    // (leads.customer_id is written by live paths, e.g. public-quote) or a
-    // close landing between select and update must not receive this
-    // customer's address.
-    counts.leads += await conn('leads')
-      .whereIn('id', ids)
-      .where({ customer_id: customerId })
-      .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
-      .update(leadPatch);
+        || (leadPatch.zip !== undefined && addressMatchKey(r.zip) !== addressMatchKey(leadPatch.zip)));
+    // Per-row updates that re-assert ownership, open status, AND the exact
+    // address the row was selected with: a concurrent relink (public-quote
+    // writes leads.customer_id), a close, or an admin lead-address edit
+    // landing between select and update must not be overwritten.
+    for (const r of rowsToPatch) {
+      counts.leads += await conn('leads')
+        .where({ id: r.id, customer_id: customerId, address: r.address })
+        .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
+        .update(leadPatch);
+    }
   }
 
   // Estimates snapshot ONE full display string, so rebuilding it needs the
@@ -235,7 +243,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
       // patch gets no write (and no updated_at bump).
       if (!patch.estimate_data && String(row.address || '') === fullAddress) continue;
       counts.estimates += await conn('estimates')
-        .where({ id: row.id, customer_id: customerId })
+        .where({ id: row.id, customer_id: customerId, address: row.address })
         .whereIn('status', OPEN_ESTIMATE_STATUSES)
         .whereNull('archived_at')
         .update(patch);

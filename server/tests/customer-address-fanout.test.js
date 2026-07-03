@@ -59,7 +59,21 @@ describe('addressMatchKey / snapshotMatchesLine1', () => {
   });
 
   test('full single-line snapshots match their street line via the first comma segment', () => {
-    expect(snapshotMatchesLine1('4857 Tobermory Way, Bradenton, FL 34211, USA', '4857 Tobermory Way')).toBe(true);
+    expect(snapshotMatchesContact('4857 Tobermory Way, Bradenton, FL 34211, USA', {
+      address_line1: '4857 Tobermory Way', city: 'Bradenton', zip: '34211',
+    })).toBe(true);
+  });
+
+  test('a place-bearing snapshot never matches a contact with NO place evidence', () => {
+    // A place-less customer row being filled in must not adopt a same-street
+    // snapshot that names its own (possibly different) city.
+    expect(snapshotMatchesContact('4857 Tobermory Way, Sarasota, FL 34240', {
+      address_line1: '4857 Tobermory Way',
+    })).toBe(false);
+    // The reverse stays permissive: a bare snapshot has nothing to contradict.
+    expect(snapshotMatchesContact('4857 Tobermory Way', {
+      address_line1: '4857 Tobermory Way',
+    })).toBe(true);
   });
 
   test('a different house number on the same street does not match', () => {
@@ -72,15 +86,18 @@ describe('addressMatchKey / snapshotMatchesLine1', () => {
   });
 
   test('a unit carried as its own comma segment does not match either', () => {
-    expect(snapshotMatchesLine1('123 Main St, Apt 2, Bradenton, FL 34205', '123 Main St')).toBe(false);
-    expect(snapshotMatchesLine1('123 Main St, # 4, Bradenton, FL', '123 Main St')).toBe(false);
+    const contact = { address_line1: '123 Main St', city: 'Bradenton', zip: '34205' };
+    expect(snapshotMatchesContact('123 Main St, Apt 2, Bradenton, FL 34205', contact)).toBe(false);
+    expect(snapshotMatchesContact('123 Main St, # 4, Bradenton, FL', contact)).toBe(false);
     // a city segment is NOT a unit segment
-    expect(snapshotMatchesLine1('123 Main St, Bradenton, FL 34205', '123 Main St')).toBe(true);
+    expect(snapshotMatchesContact('123 Main St, Bradenton, FL 34205', contact)).toBe(true);
   });
 
   test('suffix spelling differences compare equal (Street vs St)', () => {
     expect(snapshotMatchesLine1('123 Main Street', '123 Main St')).toBe(true);
-    expect(snapshotMatchesLine1('123 Main Street, Bradenton, FL 34205', '123 Main St')).toBe(true);
+    expect(snapshotMatchesContact('123 Main Street, Bradenton, FL 34205', {
+      address_line1: '123 Main St', city: 'Bradenton', zip: '34205',
+    })).toBe(true);
   });
 
   test('a full snapshot for the same street name in a DIFFERENT place never matches', () => {
