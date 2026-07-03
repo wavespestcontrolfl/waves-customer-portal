@@ -63,6 +63,11 @@ describe('scrubPriceTalk — the no-price invariant', () => {
     'About 25 each visit.',
     'Around fifty every treatment.',
     'Como cuarenta cada mes.',
+    // quarterly/weekly cadence (Codex round 5 P1)
+    'That runs 108 per quarter.',
+    'Around ninety per quarter for that.',
+    'Serían 90 por trimestre.',
+    'Como veinte por semana.',
   ])('replaces a reply containing a price: %s', (reply) => {
     const out = scrubPriceTalk({ ...base, reply });
     expect(out.reply).not.toMatch(PRICE_TALK_RE);
@@ -79,6 +84,8 @@ describe('scrubPriceTalk — the no-price invariant', () => {
     'La visita dura unos 30 minutos.',
     'The barrier is guaranteed for 12 months.',
     'We come back once a month during mosquito season.',
+    'We rotate the bait stations every quarter.',
+    'Revisamos las estaciones cada trimestre.',
   ])('leaves price-free replies untouched: %s', (reply) => {
     expect(scrubPriceTalk({ ...base, reply }).reply).toBe(reply);
   });
@@ -132,15 +139,37 @@ describe('normalizeIntakeResult', () => {
     },
   );
 
-  test('emergency intent beats the price-scrub CTA force', () => {
+  test('emergency reply with price talk keeps the 911 guidance, not the price redirect', () => {
     const out = normalizeIntakeResult({
       reply: 'Plans are $45 a month but call 911 first.',
       intent: 'emergency',
       ready_for_quote: false,
     }, 'openai');
-    expect(out.reply).not.toMatch(PRICE_TALK_RE);
+    expect(out.reply).toBe(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('911');
+    expect(out.reply).not.toContain('Get my price');
     expect(out.ready_for_quote).toBe(false);
     expect(out.service_keys).toEqual([]);
+  });
+
+  test('existing_customer reply with price talk gets portal copy, not the price redirect', () => {
+    const out = normalizeIntakeResult({
+      reply: 'Your plan is $54 a month — check your account.',
+      intent: 'existing_customer',
+      ready_for_quote: true,
+    }, 'openai');
+    expect(out.reply).toBe(SUPPORT_FALLBACK_RESULT.reply);
+    expect(out.reply).not.toContain('Get my price');
+    expect(out.ready_for_quote).toBe(false);
+  });
+
+  test('emergency reply WITHOUT price talk passes through untouched', () => {
+    const out = normalizeIntakeResult({
+      reply: 'Call 911 right away if breathing is affected.',
+      intent: 'emergency',
+    }, 'openai');
+    expect(out.reply).toBe('Call 911 right away if breathing is affected.');
+    expect(out.ready_for_quote).toBe(false);
   });
 
   test('missing/empty reply returns null so the caller falls down the ladder', () => {
@@ -386,6 +415,26 @@ describe('looksLikeEmergency', () => {
     'picaduras de mosquito en el patio por la tarde',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
+  });
+});
+
+describe('isPlausibleMessageBody — shared route-400 / daily-cap-skip check', () => {
+  const { isPlausibleMessageBody } = require('../routes/public-ai-intake');
+
+  test('accepts a normal message body', () => {
+    expect(isPlausibleMessageBody({ message: 'ants in my kitchen' })).toBe(true);
+  });
+
+  test.each([
+    [undefined],
+    [null],
+    [{}],
+    [{ message: '' }],
+    [{ message: '   ' }],
+    [{ message: 42 }],
+    [{ message: 'x'.repeat(2001) }],
+  ])('rejects implausible body %#', (body) => {
+    expect(isPlausibleMessageBody(body)).toBe(false);
   });
 });
 

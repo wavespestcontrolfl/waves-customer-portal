@@ -38,6 +38,15 @@ const intakeLimiter = rateLimit({
   skip: () => !isEnabled('askWaves'),
 });
 
+// Single source of truth for "this body could actually reach the model" —
+// the route's own 400 validation AND the mount-level daily paid-LLM cap both
+// use it, so an empty/oversized/garbage POST is rejected without ever
+// spending the 120/day bucket (a scanner can't starve real chat turns).
+function isPlausibleMessageBody(body) {
+  const message = typeof body?.message === 'string' ? body.message.trim() : '';
+  return !!message && message.length <= _internals.MESSAGE_MAX_LEN;
+}
+
 router.get('/status', (req, res) => {
   res.json({ enabled: isEnabled('askWaves') });
 });
@@ -47,13 +56,12 @@ router.post('/message', intakeLimiter, async (req, res, next) => {
     if (!isEnabled('askWaves')) {
       return res.status(503).json({ error: 'Ask Waves is not available right now.' });
     }
-    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
-    if (!message) return res.status(400).json({ error: 'Message required' });
-    if (message.length > _internals.MESSAGE_MAX_LEN) {
-      return res.status(400).json({ error: 'Message too long' });
+    if (!isPlausibleMessageBody(req.body)) {
+      const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+      return res.status(400).json({ error: message ? 'Message too long' : 'Message required' });
     }
     const result = await processIntakeMessage({
-      message,
+      message: req.body.message.trim(),
       history: req.body?.history,
       sessionId: req.body?.sessionId,
     });
@@ -62,3 +70,4 @@ router.post('/message', intakeLimiter, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.isPlausibleMessageBody = isPlausibleMessageBody;

@@ -253,10 +253,12 @@ const paidEstimatorDailyLimiter = rateLimit({
 // ceiling on top — same spend rationale as paidEstimatorDailyLimiter, higher
 // cap because a real quote conversation is many turns while an estimator
 // session is one lookup. Counts ONLY requests that can actually reach the
-// model: POST /message with the gate on. GET /status (page-view gate check),
-// non-POST scanner probes of /message, and dark-launch probes while
-// GATE_ASK_WAVES is off all get 503/404s without an LLM call — none of them
-// may burn the paid budget for a shared/NAT'd IP and 429 later real turns.
+// model: a plausible POST /message body with the gate on. GET /status
+// (page-view gate check), non-POST scanner probes, dark-launch probes while
+// GATE_ASK_WAVES is off, and empty/oversized bodies (the route 400s them
+// before any model call — shared isPlausibleMessageBody check) all resolve
+// without an LLM call, so none of them may burn the paid budget for a
+// shared/NAT'd IP and 429 later real turns.
 const askWavesDailyLimiter = rateLimit({
   windowMs: 24 * 60 * 60 * 1000, // 24 hours
   max: 120,
@@ -265,7 +267,8 @@ const askWavesDailyLimiter = rateLimit({
   skip: (req) => process.env.NODE_ENV !== 'production'
     || req.method !== 'POST'
     || !/^\/message\/?$/.test(req.path)
-    || !require('./config/feature-gates').isEnabled('askWaves'),
+    || !require('./config/feature-gates').isEnabled('askWaves')
+    || !require('./routes/public-ai-intake').isPlausibleMessageBody(req.body),
 });
 
 // Body parsing
