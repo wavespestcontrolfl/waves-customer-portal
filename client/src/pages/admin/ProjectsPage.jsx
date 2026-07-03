@@ -452,18 +452,6 @@ function projectFieldLabel(typeCfg, key) {
   return field?.label || humanizeProjectKey(key);
 }
 
-// Client-side mirror of the public endpoint's fdacsPdfAvailable check (the
-// last archived filing carries the S3 key of the filled, signed FDACS PDF).
-// The project detail payload includes the raw wdo_sent_filings column.
-function projectHasArchivedFdacsFiling(project) {
-  let filings = project?.wdo_sent_filings;
-  if (typeof filings === "string") {
-    try { filings = JSON.parse(filings); } catch { filings = null; }
-  }
-  const lastFiling = Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
-  return Boolean(lastFiling?.s3_key);
-}
-
 function formatProjectPreviewValue(value) {
   if (Array.isArray(value)) return value.filter(Boolean).join(", ");
   if (value && typeof value === "object") {
@@ -730,13 +718,14 @@ function CustomerProjectReportPreview({
   // staff approve must match what the customer actually sees: internal keys
   // filtered, and the raw findings hidden when the AI-drafted sectioned
   // narrative is present (the narrative is the customer rendering of them).
-  // WDO keeps findings unless a filled FDACS filing is archived, mirroring
-  // the public page's fdacsPdfAvailable rule.
+  // WDO keeps findings unless a filled FDACS filing is archived —
+  // fdacs_pdf_available is computed by the detail endpoint with the same
+  // rule as the public page (the raw archive index isn't served).
   const aiNarrativeSections = recommendations
     ? parseSections(String(recommendations))
     : null;
   const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
-    && (project.project_type !== WDO_TYPE || projectHasArchivedFdacsFiling(project));
+    && (project.project_type !== WDO_TYPE || Boolean(project.fdacs_pdf_available));
   const findingsEntries = suppressFindingsForNarrative ? [] : Object.entries(findings || {}).filter(
     ([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && hasMeaningfulValue(formatProjectPreviewValue(v)),
   );

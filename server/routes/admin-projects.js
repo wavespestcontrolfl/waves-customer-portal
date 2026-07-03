@@ -1192,6 +1192,14 @@ router.get('/:id', async (req, res, next) => {
         // lists filings via GET /:id/wdo-filings instead.
         wdo_sent_filings: undefined,
         wdo_sent_filings_count: loadWdoFilings(project).length,
+        // Same computation as the public report page's fdacsPdfAvailable —
+        // the customer-preview needs it to mirror the page's WDO findings
+        // suppression rule (the raw archive index is stripped above).
+        fdacs_pdf_available: (() => {
+          const filings = loadWdoFilings(project);
+          const lastFiling = filings.length ? filings[filings.length - 1] : null;
+          return Boolean(lastFiling?.s3_key && config.s3?.bucket);
+        })(),
         property_profile: propertyProfile,
         wdo_history: wdoHistory,
         wdo_applicator: wdoApplicator,
