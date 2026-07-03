@@ -7110,11 +7110,9 @@ export function CompletionPanel({
   );
   const [selectedRecommendationLabels, setSelectedRecommendationLabels] =
     useState([]);
-  const [protocolTaskStatus, setProtocolTaskStatus] = useState({});
-  const [protocolTreatedSqft, setProtocolTreatedSqft] = useState("");
   const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
     useState("");
-  const [skippedProtocolProducts, setSkippedProtocolProducts] = useState({});
+  const [treatmentPlanMixItems, setTreatmentPlanMixItems] = useState([]);
   const [officeApprovalReasonCode, setOfficeApprovalReasonCode] = useState("");
   const [officeApprovalNote, setOfficeApprovalNote] = useState("");
   const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState("");
@@ -7406,12 +7404,15 @@ export function CompletionPanel({
   );
   // The protocol is now a read-only reference (mixing ratios), so the checklist
   // and default-product-disposition no longer gate completion. Real safeguards
-  // stay: the tech must still enter actual amounts for the products they applied,
-  // and inventory blocks still hold.
+  // stay: a WaveGuard lawn completion must record at least one applied product
+  // (an empty list would write a protocol completion with no actuals or
+  // inventory deductions), every applied product needs actual amounts, and
+  // inventory blocks still hold.
   const protocolActualsCompletionBlocked =
     calibrationRequired &&
     !isIncompleteVisit &&
-    (selectedProductsMissingActualAmount.length > 0 ||
+    (selectedProducts.length === 0 ||
+      selectedProductsMissingActualAmount.length > 0 ||
       treatmentPlanInventoryBlocks.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter((p) => {
@@ -7509,9 +7510,11 @@ export function CompletionPanel({
     : tankCleanoutCompletionBlocked
       ? "Tank Cleanout Required"
       : protocolActualsCompletionBlocked
-        ? selectedProductsMissingActualAmount.length
-          ? "Product Actuals Required"
-          : "Inventory Blocked"
+        ? !selectedProducts.length
+          ? "Products Applied Required"
+          : selectedProductsMissingActualAmount.length
+            ? "Product Actuals Required"
+            : "Inventory Blocked"
         : blackoutCompletionBlocked
           ? canApproveOfficeExceptions
             ? "Office Approval Required"
@@ -7713,26 +7716,20 @@ export function CompletionPanel({
           setEquipmentSystemId(selectedCalibration.equipment_system_id);
           setCalibrationId(selectedCalibration.id || "");
         }
-        const requiredTasks =
-          data?.plan?.closeout?.requiredProtocolTasks ||
-          data?.plan?.protocol?.structured?.window?.requiredTasks ||
-          [];
-        setProtocolTaskStatus((prev) => {
-          const next = { ...prev };
-          requiredTasks.forEach((task) => {
-            if (!(task in next)) next[task] = false;
-          });
-          return next;
-        });
-        if (!protocolTreatedSqft && data?.plan?.mixCalculator?.lawnSqft) {
-          setProtocolTreatedSqft(String(data.plan.mixCalculator.lawnSqft));
-        }
-        if (!protocolCarrierGalPer1000 && data?.plan?.mixCalculator?.carrierGalPer1000) {
-          setProtocolCarrierGalPer1000(String(data.plan.mixCalculator.carrierGalPer1000));
-        }
+        // The carrier feeds the read-only mix box, so it must track every plan
+        // fetch — equipment/calibration changes refetch with a new carrier. The
+        // old set-once-when-empty latch predates removing the carrier input;
+        // with no input left to preserve, latching would show mix amounts for
+        // the previous equipment after a calibration switch.
+        setProtocolCarrierGalPer1000(
+          data?.plan?.mixCalculator?.carrierGalPer1000
+            ? String(data.plan.mixCalculator.carrierGalPer1000)
+            : "",
+        );
         const baseItems = data?.plan?.protocol?.base || [];
         const conditionalItems = data?.plan?.protocol?.conditional || [];
         const mixItems = data?.plan?.mixCalculator?.items || [];
+        setTreatmentPlanMixItems(mixItems);
         setTreatmentPlanSubstitutions(
           mixItems.map((item) => item?.substitution).filter(Boolean),
         );
@@ -8711,6 +8708,12 @@ export function CompletionPanel({
           return;
         }
       }
+    }
+    if (calibrationRequired && !isIncompleteVisit && !selectedProducts.length) {
+      alert(
+        "Add the products applied on this visit before closeout — a WaveGuard lawn completion records product actuals.",
+      );
+      return;
     }
     if (
       calibrationRequired &&
@@ -9904,6 +9907,7 @@ export function CompletionPanel({
               <Field label="Lawn Care Protocol">
                 <ProtocolMixSummary
                   protocol={treatmentPlanStructuredProtocol}
+                  mixItems={treatmentPlanMixItems}
                   carrierGalPer1000={
                     protocolCarrierGalPer1000 ||
                     treatmentPlanStructuredProtocol.window.defaultCarrierGalPer1000
@@ -11666,6 +11670,7 @@ export function CompletionPanel({
               <div style={{ marginBottom: 10 }}>
                 <ProtocolMixSummary
                   protocol={treatmentPlanStructuredProtocol}
+                  mixItems={treatmentPlanMixItems}
                   carrierGalPer1000={
                     protocolCarrierGalPer1000 ||
                     treatmentPlanStructuredProtocol.window.defaultCarrierGalPer1000
@@ -13203,23 +13208,41 @@ function formatMixAmount(n) {
 }
 
 // Read-only Lawn Care Protocol reference: the protocol window (title + goal) and,
-// for each default product, how much to put in a 110-gallon tank
-// (ratePer1000 × tank-coverage). No inputs, no checklist — the tech reads it and
-// records what they actually applied through the Products Applied list. Inventory
-// blocks (a real stock safeguard) still surface here.
-function ProtocolMixSummary({ protocol, carrierGalPer1000, inventoryBlocks = [], theme }) {
+// for each product in the generated plan, how much to put in a 110-gallon tank
+// (ratePer1000 × tank-coverage). Rows come from plan.mixCalculator.items — the
+// per-visit mix, which carries engine-derived nutrition rates, selected
+// conditionals, and approved substitutes that the static protocol definitions
+// don't. No inputs, no checklist — the tech reads it and records what they
+// actually applied through the Products Applied list. Inventory blocks (a real
+// stock safeguard) still surface here.
+function ProtocolMixSummary({ protocol, mixItems = [], carrierGalPer1000, inventoryBlocks = [], theme }) {
   if (!protocol?.window) return null;
   const t = theme || {};
   const carrier = Number(carrierGalPer1000);
   const hasCarrier = Number.isFinite(carrier) && carrier > 0;
-  // The protocol's products for this visit. Prefer the ones flagged in-plan; if
-  // the plan doesn't flag any, fall back to every protocol product that carries a
-  // usable rate so the reference box still lists the mix.
+  const planRows = (mixItems || [])
+    .filter((item) => item?.product)
+    .map((item) => ({
+      key: item.product.id || item.product.name,
+      name: item.product.name,
+      // Null when the engine couldn't derive a rate — rendered as "—", never 0.
+      ratePer1000: Number(item.mix?.ratePer1000) || null,
+      rateUnit: item.mix?.rateUnit || null,
+    }));
+  // Fallback while the plan hasn't loaded (or matched no catalog products):
+  // static protocol rows, defaults preferred, excluding rows without a usable
+  // stored rate — a null rate must not read as a concrete 0.
   const allProducts = protocol.products || [];
   const planned = allProducts.filter((p) => p.defaultInPlan);
-  const products = (planned.length ? planned : allProducts).filter(
-    (p) => Number.isFinite(Number(p.ratePer1000)),
-  );
+  const staticRows = (planned.length ? planned : allProducts)
+    .filter((p) => Number(p.ratePer1000) > 0)
+    .map((p) => ({
+      key: p.id || p.productId || p.productName,
+      name: p.productName,
+      ratePer1000: Number(p.ratePer1000),
+      rateUnit: p.rateUnit || null,
+    }));
+  const rows = planRows.length ? planRows : staticRows;
   return (
     <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 12, padding: 12 }}>
       <div style={{ fontFamily: t.font, fontSize: 13, fontWeight: 700, color: t.ink }}>
@@ -13230,21 +13253,22 @@ function ProtocolMixSummary({ protocol, carrierGalPer1000, inventoryBlocks = [],
           {protocol.window.goal}
         </div>
       ) : null}
-      {products.length ? (
+      {rows.length ? (
         <div style={{ marginTop: 10 }}>
           <div style={{ fontFamily: t.font, fontSize: 11, fontWeight: 700, color: t.muted, textTransform: "uppercase", letterSpacing: 0.3 }}>
             Mix for a {PROTOCOL_TANK_GAL}-gal tank
           </div>
           <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 5 }}>
-            {products.map((p) => {
-              const rate = Number(p.ratePer1000);
-              const amt = hasCarrier && Number.isFinite(rate) ? rate * (PROTOCOL_TANK_GAL / carrier) : null;
-              const key = p.id || p.productId || p.productName;
+            {rows.map((row, i) => {
+              const amt =
+                hasCarrier && row.ratePer1000 > 0
+                  ? row.ratePer1000 * (PROTOCOL_TANK_GAL / carrier)
+                  : null;
               return (
-                <div key={key} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontFamily: t.font, fontSize: 13, color: t.ink }}>
-                  <span>{p.productName}</span>
+                <div key={row.key || i} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontFamily: t.font, fontSize: 13, color: t.ink }}>
+                  <span>{row.name}</span>
                   <strong style={{ whiteSpace: "nowrap" }}>
-                    {amt != null ? `${formatMixAmount(amt)} ${p.rateUnit || "oz"}` : "—"}
+                    {amt != null ? `${formatMixAmount(amt)} ${row.rateUnit || "oz"}` : "—"}
                   </strong>
                 </div>
               );
