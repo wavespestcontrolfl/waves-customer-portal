@@ -31,6 +31,26 @@ const REENTRY_PLACEHOLDER =
   'Follow the product label and technician service report before re-entering treated areas.';
 const CUSTOMER_REENTRY = 'Keep people and pets off treated areas until dry.';
 
+// SpeedZone Southern / EW (EPA 2217-1031), owner-verified against the current
+// specimen label + EPA PPLS. do_not_tank_mix_with is the label's spray-prep /
+// tank-mix restriction, stored as the existing jsonb-array convention.
+const SPEEDZONE_TANK_MIX = [
+  'Additives that alter spray-solution pH below 5 or above 8.',
+  'Liquid fertilizers or mixtures that fail jar-test compatibility, or that form flakes, sludge, gels, precipitates, a separate oily layer, or oil globules.',
+  'Adjuvant or spray-additive combinations, unless prior experience shows the tank mixture will not cause objectionable turf injury.',
+];
+// Operational SOUTHERN warm-season annual cap: 1.5 fl oz/1K max rate x 2
+// broadcast applications/site/year = 3.00. The broader label-wide seasonal
+// ceiling (4.41 fl oz/1K = 12 pt/A) is recorded in rate_notes only, so it does
+// not become the active southern-turf cap.
+const SPEEDZONE_MAX_ANNUAL_PER_1000 = 3.0;
+const SPEEDZONE_RATE_NOTES =
+  'Waves / SW Florida warm-season turf listed on the label: 0.7–1.5 fl oz/1,000 sq ft (2–4 pt/A). ' +
+  'Max operational annual/seasonal broadcast total is 3.00 fl oz/1,000 sq ft — the label allows at most 2 broadcast applications per site per year. ' +
+  'Cool-season listed turf: 1.5–2.2 fl oz/1,000 sq ft (4–6 pt/A). ' +
+  'Label-wide broadcast ceiling is 2.2 fl oz/1,000 sq ft per application and 4.41 fl oz/1,000 sq ft per season/year (12 pt/A); do not use that higher cap for southern warm-season residential turf unless the container label/site permits. ' +
+  'Minimum retreatment interval: 30 days (non-cropland), 21 days (sod farms). Spot treatment cannot exceed 1,000 sq ft in any given acre.';
+
 const SAFETY_BY_EPA = [
   {
     epa: '100-1680', // Acelepryn Xtra
@@ -71,6 +91,9 @@ const SAFETY_BY_EPA = [
     rei_hours: 0,
     reentry: CUSTOMER_REENTRY,
     rainfast_minutes: 180,
+    do_not_tank_mix_with: SPEEDZONE_TANK_MIX,
+    max_annual_per_1000: SPEEDZONE_MAX_ANNUAL_PER_1000,
+    rate_notes: SPEEDZONE_RATE_NOTES,
   },
 ];
 
@@ -82,13 +105,25 @@ exports.up = async function up(knex) {
   for (const f of SAFETY_BY_EPA) {
     const rows = await knex('products_catalog')
       .where({ epa_reg_number: f.epa })
-      .select('id', 'signal_word', 'rei_hours', 'rainfast_minutes', 'reentry_text', 'reentry_summary', 'irrigation_notes');
+      .select('id', 'signal_word', 'rei_hours', 'rainfast_minutes', 'reentry_text', 'reentry_summary',
+        'irrigation_notes', 'do_not_tank_mix_with', 'max_annual_per_1000', 'rate_notes');
     for (const row of rows) {
       const patch = {};
       if (f.signal_word && isBlank(row.signal_word)) patch.signal_word = f.signal_word;
       if (f.rei_hours != null && row.rei_hours == null) patch.rei_hours = f.rei_hours;
       if (f.rainfast_minutes != null && row.rainfast_minutes == null) patch.rainfast_minutes = f.rainfast_minutes;
       if (f.irrigation_notes && isBlank(row.irrigation_notes)) patch.irrigation_notes = f.irrigation_notes;
+      // jsonb columns: only fill when null (a deliberate empty [] is left alone),
+      // and JSON.stringify so knex doesn't bind an array as multi-value params.
+      if (f.do_not_tank_mix_with && row.do_not_tank_mix_with == null) {
+        patch.do_not_tank_mix_with = JSON.stringify(f.do_not_tank_mix_with);
+      }
+      if (f.max_annual_per_1000 != null && row.max_annual_per_1000 == null) {
+        patch.max_annual_per_1000 = f.max_annual_per_1000;
+      }
+      if (f.rate_notes && row.rate_notes == null) {
+        patch.rate_notes = JSON.stringify(f.rate_notes);
+      }
       // Re-entry text: fill when empty OR still the generic placeholder; never
       // overwrite a real prior value.
       if (f.reentry && (isBlank(row.reentry_text) || row.reentry_text === REENTRY_PLACEHOLDER)) {
