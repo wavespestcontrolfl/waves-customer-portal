@@ -130,7 +130,10 @@ async function confirmPrediction(prediction, { houseNumber, callerZip, callerCit
     // matching on house number alone is not evidence it's the caller's street.
     return null;
   }
-  return { ...n, county: av.county || null };
+  // avResult rides along so enforce-mode routing can treat a recovered
+  // premise as the validated verdict it is (the winning candidate DID pass
+  // Address Validation) instead of re-blocking on the original garble.
+  return { ...n, county: av.county || null, avResult: av };
 }
 
 /**
@@ -197,7 +200,13 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
         predictions.push(...distinct((preds || []).filter(matchesHouse)));
       }
     }
-    if (!predictions.length) return { attempted: true, recovered: null, candidates: [], method: null };
+    if (!predictions.length) return { attempted: true, recovered: null, candidates: [], method: null, avResult: null };
+
+    // More matches than we can afford to confirm = we cannot PROVE uniqueness,
+    // and "exactly one confirmed premise" is the entire adoption contract — a
+    // fourth unvalidated prediction could be a different real street. Hand the
+    // whole list to a human instead of adopting from a truncated view.
+    const truncated = predictions.length > MAX_CONFIRMATIONS;
 
     const confirmed = [];
     for (const prediction of predictions.slice(0, MAX_CONFIRMATIONS)) {
@@ -207,7 +216,7 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
     // Distinct confirmed premises — two different validated streets is genuine
     // ambiguity, which belongs to a human, not an auto-adopt.
     const premiseKeys = new Set(confirmed.map((c) => `${cityKey(c.street_line_1)}|${zip5(c.postal_code)}`));
-    const recovered = premiseKeys.size === 1
+    const recovered = !truncated && premiseKeys.size === 1
       ? {
         address_line1: confirmed[0].street_line_1,
         city: confirmed[0].city,
@@ -215,7 +224,13 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
         zip: confirmed[0].postal_code,
       }
       : null;
-    return { attempted: true, recovered, candidates: predictions.slice(0, MAX_CONFIRMATIONS), method: recovered ? method : null };
+    return {
+      attempted: true,
+      recovered,
+      candidates: predictions.slice(0, MAX_CONFIRMATIONS + 2),
+      method: recovered ? method : null,
+      avResult: recovered ? confirmed[0].avResult : null,
+    };
   } catch (err) {
     logger.warn(`[address-recovery] failed open: ${err.message}`);
     return { attempted: true, recovered: null, candidates: [], method: null };

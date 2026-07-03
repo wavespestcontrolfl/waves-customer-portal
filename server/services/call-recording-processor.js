@@ -2269,6 +2269,84 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+
+    // ── Contact-field dictation decoder (runs in EVERY mode, BEFORE the
+    // routing gate so enforce mode benefits too) ──────────────────────────
+    // The transcript is EVIDENCE, not the source of truth for dictated
+    // emails/addresses: a purpose-built decoder pass reads the diarized
+    // transcript plus the dictation-focused second-pass transcript and emits
+    // normalized CANDIDATES with confidence + a ready-to-read confirmation
+    // question. Exactly one strong, validated email candidate is adopted
+    // (behind the same cross-customer ownership gate as the domain-typo
+    // correction); anything ambiguous rides the review card — and if the
+    // primary extraction already stored an email from that same ambiguous
+    // dictation, it is DEMOTED to email_raw so no write/send path can use a
+    // value the decoder could not confirm. Street alternatives feed the
+    // address-recovery lookup below. Fail-open.
+    let contactDictation = null;
+    let dictationEmailPayload = null;
+    try {
+      if (transcription && (contactPassTranscript || detectContactDictationSignals(transcription).any)) {
+        contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
+      }
+      if (contactDictation) {
+        const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
+        dictationEmailPayload = emailDecision.payload;
+        if (emailDecision.adopt) {
+          // Same ownership gate as the domain-typo adoption in the bridge: a
+          // decoded email already on file for ANOTHER contact is never
+          // auto-adopted onto this caller (fails closed). email_raw keeps the
+          // rejected as-transcribed value as evidence.
+          const ownCustomerId = call.customer_id
+            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+            || null;
+          const ownedElsewhere = await require('./email-bounce-recovery')
+            .correctedAddressOwnedByOther(emailDecision.adopt, ownCustomerId)
+            .catch(() => true);
+          if (!ownedElsewhere) {
+            extracted.email = emailDecision.adopt;
+            logger.info(`[call-proc-dictation] Adopted decoded dictated email for ${maskSid(callSid)}`);
+          } else {
+            logger.info(`[call-proc-dictation] Skipped decoded email — on file for another contact (${maskSid(callSid)})`);
+          }
+        } else if (emailDecision.hold && extracted.email) {
+          // Quarantine: the stored email came from dictation the decoder
+          // could not confirm (ambiguous / risk-flagged) — demote it before
+          // the customer/lead upserts and first-touch sends read it.
+          if (!extracted.email_raw) extracted.email_raw = extracted.email;
+          extracted.email = null;
+          logger.info(`[call-proc-dictation] Demoted unconfirmed dictated email to email_raw for ${maskSid(callSid)}`);
+        }
+      }
+    } catch (dictationErr) {
+      logger.warn(`[call-proc-dictation] decoder skipped for ${maskSid(callSid)}: ${dictationErr.message}`);
+    }
+
+    // ── Garbled-street recovery (every mode; consumed by BOTH gates) ─────
+    // Runs before the routing gate: in enforce mode a recovered street must
+    // reach canAutoRoute as the validated verdict it is, or the very garble
+    // this feature fixes would still block routing and persist raw.
+    const rawStreetBeforeAdopt = extracted.address_line1 || null;
+    let addressRecovery = null;
+    if (v2AddressValidation && RECOVERABLE_STATUSES.has(v2AddressValidation.status)) {
+      addressRecovery = await recoverStreetAddress({
+        extracted,
+        avStatus: v2AddressValidation.status,
+        // Street re-hearings the contact-dictation decoder already produced
+        // from BOTH transcripts — tried before recovery spends its own
+        // phonetic model call.
+        extraStreetCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+      }).catch(() => null);
+    }
+    // The winning recovery candidate passed Address Validation itself, so the
+    // ENFORCE gate consumes that verdict (validated_accept/corrected) instead
+    // of the original unresolvable one. The persisted ai_address_validation
+    // shadow row keeps the ORIGINAL verdict; the shadow bridge also receives
+    // the original + the recovery result and applies its own adoption rule.
+    const effectiveAddressValidation = (addressRecovery?.recovered && addressRecovery.avResult)
+      ? addressRecovery.avResult
+      : v2AddressValidation;
+
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2Extraction = v2Result?.extraction || null;
@@ -2287,7 +2365,7 @@ const CallRecordingProcessor = {
           await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
           logger.warn(`[call-proc-v2] Fail-closed for ${callSid}: v2_extraction_status=${failReason}`);
         } else {
-          const addressValidation = v2AddressValidation;
+          const addressValidation = effectiveAddressValidation;
           const routingResult = canAutoRoute(v2Extraction, { contactPhone, addressValidation });
           const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation });
           // Strip model address flags too when AV accepted/corrected — otherwise
@@ -2318,6 +2396,31 @@ const CallRecordingProcessor = {
               .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory' }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
+          }
+
+          // A recovered street auto-routes on the recovered verdict above, but
+          // the read-back reminder must still reach the Needs Review inbox —
+          // the office confirms the corrected street with the caller before
+          // the visit, exactly like the shadow bridge surfaces it.
+          if (addressRecovery?.recovered) {
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'address_recovered',
+                extraction: v2Extraction,
+                severity: 'advisory',
+                extraPayload: {
+                  address_as_heard: rawStreetBeforeAdopt,
+                  address_recovered: addressRecovery.recovered.address_line1,
+                  address_candidates: addressRecovery.candidates || [],
+                  recovery_method: addressRecovery.method || null,
+                  ...(contactDictation?.addresses?.[0]?.confirmation_question
+                    ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
+                },
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore();
+            bridgeNeedsConfirmation.push('address_recovered');
           }
 
           if (!routingResult.allowed) {
@@ -2387,47 +2490,6 @@ const CallRecordingProcessor = {
       }
     }
 
-    // ── Contact-field dictation decoder (runs in EVERY mode) ─────────────
-    // The transcript is EVIDENCE, not the source of truth for dictated
-    // emails/addresses: a purpose-built decoder pass reads the diarized
-    // transcript plus the dictation-focused second-pass transcript and emits
-    // normalized CANDIDATES with confidence + a ready-to-read confirmation
-    // question. Exactly one strong, validated email candidate is adopted
-    // (behind the same cross-customer ownership gate as the domain-typo
-    // correction); anything ambiguous rides the review card. Street
-    // alternatives feed the address-recovery lookup below. Fail-open.
-    let contactDictation = null;
-    let dictationEmailPayload = null;
-    try {
-      if (transcription && (contactPassTranscript || detectContactDictationSignals(transcription).any)) {
-        contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
-      }
-      if (contactDictation) {
-        const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
-        dictationEmailPayload = emailDecision.payload;
-        if (emailDecision.adopt) {
-          // Same ownership gate as the domain-typo adoption in the bridge: a
-          // decoded email already on file for ANOTHER contact is never
-          // auto-adopted onto this caller (fails closed). email_raw keeps the
-          // rejected as-transcribed value as evidence.
-          const ownCustomerId = call.customer_id
-            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
-            || null;
-          const ownedElsewhere = await require('./email-bounce-recovery')
-            .correctedAddressOwnedByOther(emailDecision.adopt, ownCustomerId)
-            .catch(() => true);
-          if (!ownedElsewhere) {
-            extracted.email = emailDecision.adopt;
-            logger.info(`[call-proc-dictation] Adopted decoded dictated email for ${maskSid(callSid)}`);
-          } else {
-            logger.info(`[call-proc-dictation] Skipped decoded email — on file for another contact (${maskSid(callSid)})`);
-          }
-        }
-      }
-    } catch (dictationErr) {
-      logger.warn(`[call-proc-dictation] decoder skipped for ${maskSid(callSid)}: ${dictationErr.message}`);
-    }
-
     // ── Address-validation bridge (shadow mode only) ─────────────────────
     // When V2 is enabled but NOT yet driving routing, the Google Address
     // Validation verdict (v2AddressValidation) is computed on every call but
@@ -2459,24 +2521,10 @@ const CallRecordingProcessor = {
             );
           } catch (_e) { /* fall back to model flags only */ }
         }
-        // Second-chance street lookup: Address Validation only validates what
-        // it's given — when the transcription garbled the street phonetically
-        // ("Seafoam Trail" → "C Phone Trl") AV returns missing_component and
-        // the raw garble used to persist untouched. Recovery asks Places
-        // Autocomplete (then Gemini phonetic re-hearings, each re-confirmed
-        // through AV) what the caller plausibly said; the bridge adopts the
-        // result only when exactly ONE real premise survives confirmation.
-        let addressRecovery = null;
-        if (v2AddressValidation && RECOVERABLE_STATUSES.has(v2AddressValidation.status)) {
-          addressRecovery = await recoverStreetAddress({
-            extracted,
-            avStatus: v2AddressValidation.status,
-            // Street re-hearings the contact-dictation decoder already
-            // produced from BOTH transcripts — tried before recovery spends
-            // its own phonetic model call.
-            extraStreetCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
-          }).catch(() => null);
-        }
+        // addressRecovery + rawStreetBeforeAdopt were computed above the
+        // routing gate (shared with enforce mode); the bridge receives the
+        // ORIGINAL AV verdict plus the recovery result and applies its own
+        // exactly-one-confirmed-premise adoption rule.
         const { normalizedAddress, normalizedEmail, needsConfirmation } = deriveCallReviewBridge({
           addressValidation: v2AddressValidation,
           extracted,
@@ -2484,9 +2532,16 @@ const CallRecordingProcessor = {
           callerRelationship: v2Ext?.caller?.relationship_to_property,
           addressRecovery,
         });
-        // Keep the as-heard street for the triage payload before adoption
-        // overwrites it — the reviewer needs both sides of the correction.
-        const rawStreetBeforeAdopt = extracted.address_line1 || null;
+        // Decoder-only email evidence: when the primary extraction captured
+        // NO email (empty email + email_raw) the bridge's email review stays
+        // silent, which would drop the decoder's candidates/question on the
+        // floor — exactly the malformed dictation this pass quarantines.
+        // Force a read-back reason so the triage item (with payload) exists.
+        if (dictationEmailPayload
+            && !needsConfirmation.includes('email_unverified')
+            && !needsConfirmation.includes('email_invalid')) {
+          needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
           // reads extracted.* below, so both records get the corrected address.
@@ -2577,6 +2632,13 @@ const CallRecordingProcessor = {
       // blocks the pipeline.
       try {
         const { normalizedEmail: correctedEmail, needsConfirmation: emailReasons } = deriveEmailReview(extracted);
+        // Same decoder-only fallback as the shadow branch: dictation evidence
+        // with no extracted email must still open a read-back triage item.
+        if (dictationEmailPayload
+            && !emailReasons.includes('email_unverified')
+            && !emailReasons.includes('email_invalid')) {
+          emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
         if (correctedEmail) {
           // Same ownership gate as the shadow-bridge site above (fails closed),
           // with the same phone/name fallback for a not-yet-linked known caller.

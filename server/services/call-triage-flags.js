@@ -266,6 +266,9 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   'missing_last_name',
   'rental_or_tenant_occupied',
   'second_service_address',
+  // Recovered-street read-back reminder — informs the callback, never blocks
+  // routing (the recovered premise passed Address Validation).
+  'address_recovered',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."

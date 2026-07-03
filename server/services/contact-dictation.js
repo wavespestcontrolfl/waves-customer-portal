@@ -229,13 +229,20 @@ async function decodeDictatedContacts({ transcript, contactPassTranscript = null
  *     contradicts the spelling") is exactly the mail-the-wrong-person case,
  *     no matter how confident the value looks.
  *
- * Returns { adopt: string|null, payload: object|null }. payload is attached
- * to the email triage item so the reviewer sees the candidates and the exact
- * question to ask, instead of a bare "email was spelled out" flag.
+ * Returns { adopt: string|null, hold: boolean, payload: object|null }.
+ *   adopt — value to write into extracted.email (ownership-gated by caller).
+ *   hold  — the dictation evidence is ambiguous/risk-flagged and an email the
+ *     primary extraction already captured came from that SAME dictation, so
+ *     it must be DEMOTED (email → email_raw) before any write/send path reads
+ *     it — quarantine is meaningless if the risky value stays stored. The only
+ *     existing value that survives dictation review is one the decoder cleanly
+ *     agrees with (single risk-free strong candidate equal to it).
+ *   payload — attached to the email triage item so the reviewer sees the
+ *     candidates and the exact question to ask.
  */
 function applyEmailDictationPolicy({ extracted = {}, dictation = null } = {}) {
   const entry = dictation?.emails?.[0];
-  if (!entry || (!entry.candidates.length && !entry.raw_spoken)) return { adopt: null, payload: null };
+  if (!entry || (!entry.candidates.length && !entry.raw_spoken)) return { adopt: null, hold: false, payload: null };
 
   const payload = {
     email_as_heard: entry.raw_spoken || null,
@@ -252,9 +259,9 @@ function applyEmailDictationPolicy({ extracted = {}, dictation = null } = {}) {
   const conflictsWithExtracted = !!existing && !!top && existing !== top.value;
 
   if (single && !conflictsWithExtracted) {
-    return { adopt: existing === top.value ? null : top.value, payload };
+    return { adopt: existing === top.value ? null : top.value, hold: false, payload };
   }
-  return { adopt: null, payload };
+  return { adopt: null, hold: !!existing, payload };
 }
 
 module.exports = {

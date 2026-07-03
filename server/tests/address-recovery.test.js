@@ -249,3 +249,42 @@ describe('recoverStreetAddress — phase 1.5 (upstream dictation candidates)', (
     expect(out.method).toBe('phonetic');
   });
 });
+
+describe('recoverStreetAddress — truncation + avResult', () => {
+  test('more house-number matches than we can confirm → never auto-adopt (uniqueness unprovable)', async () => {
+    const out = await recoverStreetAddress({
+      extracted: GARBLED,
+      avStatus: 'missing_component',
+      deps: deps({
+        autocomplete: async () => [
+          '5039 Seafoam Trail, Lakewood Ranch, FL, USA',
+          '5039 Sea Fawn Court, Lakewood Ranch, FL, USA',
+          '5039 Seaford Way, Lakewood Ranch, FL, USA',
+          '5039 Seafarer Lane, Lakewood Ranch, FL, USA',
+        ],
+      }),
+    });
+    expect(out.recovered).toBeNull();
+    expect(out.candidates.length).toBe(4);
+  });
+
+  test('recovered result carries the winning Address Validation verdict (avResult)', async () => {
+    const out = await recoverStreetAddress({
+      extracted: GARBLED,
+      avStatus: 'missing_component',
+      deps: deps({ autocomplete: async () => ['5039 Seafoam Trail, Lakewood Ranch, FL, USA'] }),
+    });
+    expect(out.recovered).not.toBeNull();
+    expect(out.avResult).toMatchObject({ status: 'validated_accept' });
+    expect(out.avResult.normalized.street_line_1).toBe('5039 Seafoam Trail');
+  });
+
+  test('no recovery → no avResult', async () => {
+    const out = await recoverStreetAddress({
+      extracted: GARBLED,
+      avStatus: 'missing_component',
+      deps: deps({}),
+    });
+    expect(out.avResult).toBeNull();
+  });
+});

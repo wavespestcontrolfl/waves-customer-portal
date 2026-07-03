@@ -97,27 +97,71 @@ describe('applyEmailDictationPolicy', () => {
     expect(out.adopt).toBeNull();
   });
 
-  test('conflict with a clean already-extracted email → no adopt (hold both for read-back)', () => {
+  test('conflict with a clean already-extracted email → no adopt, HOLD the stored value', () => {
     const out = applyEmailDictationPolicy({
       extracted: { email: 'other@person.com' },
       dictation: dictationWith([{ value: 'wcw63@gmail.com', confidence: 0.9, basis: [], risks: [] }]),
     });
     expect(out.adopt).toBeNull();
+    expect(out.hold).toBe(true);
     expect(out.payload).not.toBeNull();
   });
 
-  test('candidate equal to extracted email → nothing to adopt, payload still surfaces', () => {
+  test('candidate equal to extracted email → nothing to adopt, no hold, payload still surfaces', () => {
     const out = applyEmailDictationPolicy({
       extracted: { email: 'wcw63@gmail.com' },
       dictation: dictationWith([{ value: 'wcw63@gmail.com', confidence: 0.9, basis: [], risks: [] }]),
     });
     expect(out.adopt).toBeNull();
+    expect(out.hold).toBe(false);
     expect(out.payload.email_candidates).toHaveLength(1);
   });
 
+  test('ambiguous candidates with an extracted email among them → HOLD (demote before writes)', () => {
+    const out = applyEmailDictationPolicy({
+      extracted: { email: 'wwcw63@gmail.com' },
+      dictation: dictationWith([
+        { value: 'wcw63@gmail.com', confidence: 0.82, basis: [], risks: [] },
+        { value: 'wwcw63@gmail.com', confidence: 0.45, basis: [], risks: [] },
+      ]),
+    });
+    expect(out.adopt).toBeNull();
+    expect(out.hold).toBe(true);
+  });
+
+  test('risk-flagged single candidate equal to the extracted email → HOLD', () => {
+    const out = applyEmailDictationPolicy({
+      extracted: { email: 'wwcw63@gmail.com' },
+      dictation: dictationWith([{ value: 'wwcw63@gmail.com', confidence: 0.8, basis: [], risks: ['summary contradicts spelling'] }]),
+    });
+    expect(out.adopt).toBeNull();
+    expect(out.hold).toBe(true);
+  });
+
+  test('undecodable dictation (raw evidence, zero candidates) with an extracted email → HOLD', () => {
+    const out = applyEmailDictationPolicy({
+      extracted: { email: 'wwcw63@gmail.com' },
+      dictation: dictationWith([]),
+    });
+    expect(out.adopt).toBeNull();
+    expect(out.hold).toBe(true);
+    expect(out.payload.email_candidates).toEqual([]);
+  });
+
+  test('ambiguous candidates but NO extracted email → no hold (nothing to demote)', () => {
+    const out = applyEmailDictationPolicy({
+      extracted: { email: null },
+      dictation: dictationWith([
+        { value: 'wcw63@gmail.com', confidence: 0.82, basis: [], risks: [] },
+        { value: 'wwcw63@gmail.com', confidence: 0.45, basis: [], risks: [] },
+      ]),
+    });
+    expect(out.hold).toBe(false);
+  });
+
   test('no dictation → inert', () => {
-    expect(applyEmailDictationPolicy({ extracted: {}, dictation: null })).toEqual({ adopt: null, payload: null });
-    expect(applyEmailDictationPolicy({ extracted: {}, dictation: { emails: [], addresses: [] } })).toEqual({ adopt: null, payload: null });
+    expect(applyEmailDictationPolicy({ extracted: {}, dictation: null })).toEqual({ adopt: null, hold: false, payload: null });
+    expect(applyEmailDictationPolicy({ extracted: {}, dictation: { emails: [], addresses: [] } })).toEqual({ adopt: null, hold: false, payload: null });
   });
 });
 
