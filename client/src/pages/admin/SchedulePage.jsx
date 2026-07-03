@@ -375,7 +375,7 @@ const AREAS_BY_SERVICE = {
   lawn: [
     "Front yard",
     "Back yard",
-    "Side yard",
+    "Side yards",
   ],
   universal: [
     "No issues found",
@@ -7974,7 +7974,12 @@ export function CompletionPanel({
     );
     setRecapStaleAfterEdit(false);
     setAreasServiced(
-      Array.isArray(savedDraft.areasServiced) ? savedDraft.areasServiced : [],
+      // Map the legacy singular "Side yard" to the renamed "Side yards" so a draft
+      // saved before the rename restores as the currently-rendered option (and
+      // dedupe, so re-selecting can't submit both strings). Other values pass through.
+      Array.isArray(savedDraft.areasServiced)
+        ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
+        : [],
     );
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
@@ -8437,7 +8442,16 @@ export function CompletionPanel({
         applicationArea: "",
         areaValue: "",
         areaUnit: areaRequirement?.unit || "",
-        targets: [],
+        // Prefill the targets from the manufacturer label (products_catalog
+        // target_pests) so the tech starts from what the product is labeled to
+        // control and trims rather than typing from scratch. Editable as before.
+        // Protocol-added products (addProduct(action.product)) are serialized
+        // without target_pests, so fall back to the loaded catalog row by id.
+        targets: normalizeLabelTargets(
+          product.target_pests
+            ?? product.targetPests
+            ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
+        ),
       },
     ]);
     setProductSearch("");
@@ -13457,6 +13471,17 @@ const checkboxRow = {
 // Quick-pick suggestions for the per-product pest-target picker. The field is
 // free-text (string[]), so this list is convenience only — techs can type any
 // target. Common SWFL household/lawn pests.
+// Normalize a products_catalog.target_pests value (JSONB array, or a stringified
+// one) into a clean string[] for prefilling a product's Targets from its label.
+function normalizeLabelTargets(value) {
+  let v = value;
+  if (typeof v === "string") {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  if (!Array.isArray(v)) return [];
+  return v.map((t) => String(t).trim()).filter(Boolean);
+}
+
 const PEST_TARGET_SUGGESTIONS = [
   "Ghost ants",
   "Big-headed ants",
