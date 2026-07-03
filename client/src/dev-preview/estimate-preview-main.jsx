@@ -69,12 +69,15 @@ const PEST_ADD_ONS = [
   { key: 'exterior_sweep', label: 'Exterior eave sweep', preChecked: true, detail: 'Save $10/visit if removed. No eave/cobweb sweep on the exterior — tech still performs the perimeter treatment.' },
 ];
 
+const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
+
 const pestFrequency = (key, label, monthly, perVisit, annual) => ({
   key,
   label,
   monthly,
   annual,
   perVisit,
+  visitsPerYear: CADENCE_VISITS[key],
   included: [{ key: 'pest_control', label: 'Pest Control', detail: null }],
   addOns: PEST_ADD_ONS,
 });
@@ -182,6 +185,7 @@ function bundleScenario() {
             key: 'standard',
             label: 'Lawn Program',
             serviceCategory: 'lawn_care',
+            visitsPerYear: 8,
             monthly: 85,
             annual: 1020,
             billingFrequencyKey: 'monthly',
@@ -204,6 +208,7 @@ function bundleScenario() {
             key: 'monthly',
             label: 'Monthly',
             serviceCategory: 'mosquito',
+            visitsPerYear: 12,
             monthly: 52,
             annual: 624,
             perVisit: 52,

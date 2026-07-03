@@ -82,7 +82,7 @@ function scrollToBookingSection() {
 // jumps the customer straight to the scheduling section.
 function GetServiceTodayCta() {
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', marginTop: 16 }}>
+    <div style={{ display: 'flex', justifyContent: 'center', margin: '16px 0 24px' }}>
       <button
         type="button"
         onClick={scrollToBookingSection}
@@ -202,13 +202,20 @@ function serviceLabelForKey(key) {
   switch (key) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'lawn_care': return 'Lawn Care';
-    case 'mosquito': return 'Mosquito';
+    case 'mosquito': return 'Mosquito Control';
     case 'termite_bait': return 'Termite Bait';
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'pest_control': return 'Pest Control';
     default: return 'Service';
   }
+}
+
+// Customer-facing service label — normalizes the server's short section
+// labels (owner directive: "Mosquito" always reads "Mosquito Control").
+function displayServiceLabel(label) {
+  const clean = String(label || '').trim();
+  return /^mosquito$/i.test(clean) ? 'Mosquito Control' : clean;
 }
 
 function serviceKeysForEstimateSection(section = {}) {
@@ -979,11 +986,11 @@ export function getServiceLabel(frequency, estimate, pricing) {
   // each service's own cadence, so the eyebrow stays cadence-free here.
   const recurringSections = pricingServices(pricing).filter((section) => section?.isRecurring);
   if (recurringSections.length > 1) {
-    return recurringSections.map((section) => section.label || serviceLabelForKey(section.key)).join(' + ');
+    return recurringSections.map((section) => displayServiceLabel(section.label) || serviceLabelForKey(section.key)).join(' + ');
   }
   const category = frequencyServiceCategory(frequency, pricing);
   const service = recurringServiceForEstimate(pricing);
-  const serviceLabel = service?.label || serviceLabelForKey(category);
+  const serviceLabel = displayServiceLabel(service?.label) || serviceLabelForKey(category);
   if (estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
     const recurringLabel = frequency?.label
       ? (labelAlreadyIncludesService(frequency.label, serviceLabel) ? frequency.label : `${frequency.label} ${serviceLabel}`)
@@ -1262,10 +1269,10 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   return (
     <div style={estimateCard()}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-        <span style={{ fontFamily: FONTS.serif, fontSize: 42, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1 }}>
+        <span style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1 }}>
         {fmtMoney(oneTimePrice)}
         </span>
-        <span style={{ fontSize: 18, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
+        <span style={{ fontSize: 15, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
       <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 14, lineHeight: 1.55 }}>
         {oneTimePriceCopy(breakdown)}
@@ -2180,7 +2187,7 @@ export function ServiceSection({
             margin: '0 0 14px',
             fontWeight: 800,
           }}>
-            {section.label || 'Service'}
+            {displayServiceLabel(section.label) || 'Service'}
           </h3>
         ) : null}
 

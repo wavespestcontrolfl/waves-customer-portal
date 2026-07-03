@@ -222,6 +222,7 @@ export default function SlotPicker({
       <WavesAIScheduleSearch
         theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.border, surface: W.white, inputBg: W.offWhite }}
         showEyebrow={false}
+        subtitle={null}
         onSearch={runAiSearch}
       />
       {searchData ? <div>{renderSlotList(searchData)}</div> : null}

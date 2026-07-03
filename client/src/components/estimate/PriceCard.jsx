@@ -135,6 +135,17 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const savings = rawSavings >= SAVINGS_ROUNDING_NOISE ? rawSavings : 0;
   // True daily rate: annual cost / 365 (monthly * 12 / 365).
   const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;
+  // Applications-per-year highlight — only when the count is unambiguous.
+  const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
+  const treatmentVisitRows = Array.isArray(frequency.perServiceTreatments)
+    ? frequency.perServiceTreatments.filter((row) => Number(row?.visitsPerYear) > 0)
+    : [];
+  const visitsPerYear = Number(frequency.visitsPerYear) > 0
+    ? Number(frequency.visitsPerYear)
+    : (treatmentVisitRows.length === 1
+      ? Number(treatmentVisitRows[0].visitsPerYear)
+      : (CADENCE_VISITS[frequency.key] || null));
+  const showVisitsLine = !quoteRequired && Number.isFinite(visitsPerYear) && visitsPerYear > 0;
   // A narrow low-confidence commercial line prices as a ±pct RANGE tied to the
   // displayed cadence price ("$X–$Y/mo, confirmed on site"). The server flags the
   // frequency with lowConfidenceRangePct; the WIDE case is already quote-required
@@ -182,7 +193,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         {showSavings && savings > 0 && !showLowConfidenceRange ? (
           <span style={{
             fontFamily: "'Source Serif 4', Georgia, serif",
-            fontSize: 20,
+            fontSize: 16,
             color: '#9CA3AF',
             textDecoration: 'line-through',
             lineHeight: 1,
@@ -192,7 +203,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         ) : null}
         <span style={{
           fontFamily: "'Source Serif 4', Georgia, serif",
-          fontSize: quoteRequired ? 36 : showLowConfidenceRange ? 34 : 42,
+          fontSize: quoteRequired ? 30 : showLowConfidenceRange ? 28 : 32,
           fontWeight: 500,
           color: W.blueDeeper,
           lineHeight: 1,
@@ -204,7 +215,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           : fmtMoney(cadencePrice)}
         </span>
         {!quoteRequired ? (
-          <span style={{ fontSize: 18, fontWeight: 500, color: '#6B7280' }}>{periodLabel}</span>
+          <span style={{ fontSize: 15, fontWeight: 500, color: '#6B7280' }}>{periodLabel}</span>
         ) : null}
         {waveGuardTier ? (
           <span style={{
@@ -221,6 +232,13 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           </span>
         ) : null}
       </div>
+
+      {showVisitsLine ? (
+        <div style={{ marginTop: 10, color: W.blueDeeper, fontSize: 14, fontWeight: 800 }}>
+          <span aria-hidden="true" style={{ color: W.green, marginRight: 6 }}>&#10003;</span>
+          {visitsPerYear} application{visitsPerYear === 1 ? '' : 's'} per year included
+        </div>
+      ) : null}
 
       {showSavings && savings > 0 && waveGuardTier && !showLowConfidenceRange ? (
         <div style={{ marginTop: 12, color: W.green, fontSize: 16, fontWeight: 800 }}>
