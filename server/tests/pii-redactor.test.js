@@ -248,6 +248,18 @@ describe('lowercase transcripts (regression — the heuristics were capitalizati
     const r = redact('its about a 10 minute drive from the office and takes 3 easy steps to set up');
     expect(r.text).not.toContain('[address]');
   });
+  test('capitalized signal + lowercase name is still redacted (Codex round 2)', () => {
+    // Sentence-initial signals are the norm at message start; pre-fix the
+    // lowercase pass required an all-lowercase signal, so these returned raw
+    // names — short enough to keep the effectively-lowercase cap from firing.
+    const a = redact('My name is john smith please call');
+    expect(a.text).toContain('[name]');
+    expect(a.text).not.toContain('john');
+    expect(a.confidence).not.toBe('high');
+    const b = redact('Name: john smith, needs a quote for rodents');
+    expect(b.text).toContain('[name]');
+    expect(b.text).not.toContain('smith');
+  });
   test('lowercase name signal ignores non-name continuations and allowlisted tokens', () => {
     expect(redact('my name is not on the account but my husband handles it').text).not.toContain('[name]');
     // staff/owner names stay (allowlist, case-insensitive)

@@ -628,3 +628,42 @@ describe('table-less drafts: negativity must be DIRECTED at generic business nam
     expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
   });
 });
+
+describe('table-less drafts: directed-scan tightening (Codex round 2)', () => {
+  test('ACTIVE-verb disparagement with the name as subject is P0 (no linking verb needed)', () => {
+    for (const body of [
+      'Acme Pest Solutions scams customers in Venice.',
+      'Acme Pest Solutions charges hidden fees on every renewal.',
+      'Gulf Coast Termite Specialists routinely rips off homeowners.',
+    ]) {
+      const r = gate.evaluate({ body });
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+  test('title-case noun use of "scams" with no victim object does not trip the active-verb pattern', () => {
+    const r = gate.evaluate({
+      body: 'Check licenses before you sign anything.',
+      frontmatter: { title: 'How to Avoid Pest Control Scams in Sarasota' },
+    });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('a reliability negative aimed at DIY sprays near a business-shaped title phrase does NOT block', () => {
+    // Bare 60-char proximity previously P1\'d this exact title shape.
+    const r = gate.evaluate({
+      body: 'Store-bought products lose potency fast in Florida humidity.',
+      frontmatter: { title: 'Sarasota Pest Control Guide: Why DIY Sprays Are Unreliable' },
+    });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('reliability negatives as the direct predicate or verb-linked still flag P1', () => {
+    for (const body of [
+      'Acme Pest Solutions never answers the phone.',
+      'Acme Pest Solutions is unresponsive during termite swarming season.',
+    ]) {
+      const r = gate.evaluate({ body });
+      expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY' || f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    }
+  });
+});

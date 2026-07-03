@@ -221,14 +221,19 @@ function hostAllowed(host, allowed) {
   return false;
 }
 
-// Absolute URLs anywhere in the text — markdown links/images, raw HTML
-// attributes, and bare prose URLs all contain this shape.
-const ABSOLUTE_URL_RE = /\bhttps?:\/\/[^\s<>()"'\]]+/gi;
+// ANY absolute-scheme URL anywhere in the text — markdown links/images, raw
+// HTML attributes, and bare prose URLs all contain this shape. Group 1 is the
+// scheme: http(s) goes through the host allowlist; every other scheme
+// (ftp:, gopher:, …) is rejected outright — the gate fails closed on any
+// external reference, not just web links.
+const ABSOLUTE_URL_RE = /\b([a-z][a-z0-9+.-]*):\/\/[^\s<>()"'\]]+/gi;
 // href/src carrying an executable or data scheme — never valid in a draft.
 const UNSAFE_SCHEME_HREF_RE = /\b(?:href|src)\s*=\s*["']?\s*(?:javascript|data|vbscript|file)\s*:/i;
 // The same unsafe schemes as a Markdown/MDX link destination — `[x](javascript:…)`
 // has no href= text and no https?:// shape, so the two scanners above miss it.
-const UNSAFE_SCHEME_MD_DEST_RE = /\]\(\s*(?:javascript|data|vbscript|file)\s*:/i;
+// The optional `<` covers Markdown's angle-bracketed destination form,
+// `[x](<javascript:…>)`, which is equally valid MDX.
+const UNSAFE_SCHEME_MD_DEST_RE = /\]\(\s*<?\s*(?:javascript|data|vbscript|file)\s*:/i;
 // Protocol-relative URL (//host/path) — scheme-less external reference that
 // bypasses an https?:// scan. Requires a dotted host with a TLD so prose
 // slashes ("and//or", path fragments) don't trip it.
@@ -245,6 +250,10 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
   let m;
   while ((m = urlRe.exec(body)) !== null) {
+    const scheme = m[1].toLowerCase();
+    if (scheme !== 'http' && scheme !== 'https') {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a "${scheme}:" URL ("${m[0].slice(0, 60)}") — only http(s) links to allowlisted hosts (or relative internal paths) are permitted.`);
+    }
     let host = null;
     try { host = new URL(m[0]).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
@@ -254,8 +263,13 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   }
   const mailtoRe = new RegExp(MAILTO_RE.source, 'gi');
   while ((m = mailtoRe.exec(body)) !== null) {
-    if (!m[1].toLowerCase().endsWith('@wavespestcontrol.com')) {
-      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link to "${m[1]}" — only @wavespestcontrol.com addresses are allowed.`);
+    // Validate only the RECIPIENT portion: headers/query after `?` must not
+    // count ("mailto:attacker@x?subject=info@wavespestcontrol.com" would
+    // otherwise pass an endsWith check), and every comma-separated recipient
+    // must be on the company domain.
+    const recipients = m[1].split('?')[0].split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
+    if (recipients.length === 0 || recipients.some((r) => !r.endsWith('@wavespestcontrol.com'))) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link to "${m[1].split('?')[0]}" — only @wavespestcontrol.com addresses are allowed.`);
     }
   }
   const proto = body.match(PROTOCOL_RELATIVE_RE);

@@ -379,3 +379,35 @@ describe('outbound-link gate: unsafe schemes in Markdown destinations (Codex rou
     expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 });
+
+describe('outbound-link gate: scheme + mailto hardening (Codex round 2)', () => {
+  test('non-http absolute schemes are P0 even to otherwise-benign hosts', () => {
+    for (const body of [
+      'Grab the [file](ftp://spam.example/x) today.',
+      '<a href="ftp://spam.example/x">download</a>',
+      'Old-school gopher://archive.example/1 reference.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+  test('angle-bracketed unsafe Markdown destinations are P0', () => {
+    const r = guardrails.evaluate({ body: 'Click [here](<javascript:alert(1)>) now.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+  test('mailto recipient is validated before the query string (endsWith spoof)', () => {
+    const r = guardrails.evaluate({ body: 'Email [us](mailto:attacker@gmail.com?subject=info@wavespestcontrol.com).' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+  test('every comma-separated mailto recipient must be on the business domain', () => {
+    expect(guardrails.evaluate({ body: 'Email [both](mailto:info@wavespestcontrol.com,bob@gmail.com).' }, {})
+      .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+    expect(guardrails.evaluate({ body: 'Email [both](mailto:info@wavespestcontrol.com,office@wavespestcontrol.com).' }, {})
+      .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+  test('a business mailto with a subject query still passes', () => {
+    const r = guardrails.evaluate({ body: 'Email [us](mailto:info@wavespestcontrol.com?subject=Quote%20request).' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});

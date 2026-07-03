@@ -66,6 +66,27 @@ const PROVIDER_DISPARAGEMENT_RE = new RegExp([
 // Negative service-reliability claims about a provider. Flagged inside table
 // blocks OR in prose/title/meta when within PROXIMITY of a named competitor.
 const PROVIDER_NEGATIVE_RE = /\b(unreliable|unresponsive|no[\s-]?shows?|never (?:answers?|calls?|shows?)\b|hard to reach|leaves? you waiting|ghosts? you|won'?t call (?:you )?back|don'?t show up)\b/i;
+
+// ACTIVE disparaging predicates — verb-plus-victim shapes ("scams customers",
+// "charges hidden fees") for the generic-name directed scan. The victim object
+// (or the fee/bait idiom) is REQUIRED so title-case noun uses stay clean:
+// "How to Avoid Pest Control Scams in Sarasota" captures the business-shaped
+// "Avoid Pest Control" but "Scams in" has no victim, so it does not trip.
+const DISPARAGEMENT_VICTIM = "(?:its\\s+|their\\s+)?(?:customers?|clients?|homeowners?|residents?|seniors?|people|folks|you\\b)";
+const ACTIVE_DISPARAGEMENT_SRC = [
+  `scams?\\s+${DISPARAGEMENT_VICTIM}`,
+  `rips?\\s+${DISPARAGEMENT_VICTIM}\\s+off`,
+  `rips?\\s+off\\s+${DISPARAGEMENT_VICTIM}`,
+  `gouges?\\s+(?:${DISPARAGEMENT_VICTIM}|prices)`,
+  `overcharges?(?:\\s+(?:${DISPARAGEMENT_VICTIM}|for\\b))?`,
+  'charges?\\s+hidden\\s+fees?',
+  `cheats?\\s+${DISPARAGEMENT_VICTIM}`,
+  `deceives?\\s+${DISPARAGEMENT_VICTIM}`,
+  `lies\\s+to\\s+${DISPARAGEMENT_VICTIM}`,
+  `defrauds?\\s+${DISPARAGEMENT_VICTIM}`,
+  'pulls?\\s+(?:a\\s+)?bait[\\s-]and[\\s-]switch',
+  'uses?\\s+bait[\\s-]and[\\s-]switch',
+].join('|');
 const PROVIDER_NEGATIVE_PROXIMITY = 90; // chars between a reliability term and a competitor name
 
 // Self-declared ranking / superlative framing. Scanned over body + title/meta,
@@ -359,14 +380,27 @@ function evaluateProse(draft, body) {
     // Negative adjective immediately modifying the name ("the dishonest
     // Acme Pest Solutions").
     const negBeforeName = new RegExp(`(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
-    if (directedP0.test(nameScanText) || negBeforeName.test(nameScanText)) {
+    // ACTIVE disparaging predicate right after the name ("<Name> scams
+    // customers", "<Name> charges hidden fees") — the linking-verb shape
+    // above misses transitive verbs, and these victim-anchored idioms only
+    // read with the name as subject. Up to two adverbs may intervene.
+    const activeP0 = new RegExp(
+      `${escaped}(?:'s)?\\s+(?:(?:also|often|always|never|routinely|repeatedly|regularly|frequently|just|really|constantly)\\s+){0,2}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i',
+    );
+    if (directedP0.test(nameScanText) || negBeforeName.test(nameScanText) || activeP0.test(nameScanText)) {
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
         `Draft directs disparaging language at "${name}". State neutral attributes only — in prose, the title, and the meta.`));
       break;
     }
-    // Service-reliability negative predicated on the name within the same
-    // sentence ("<Name> never answers the phone") → P1 review.
-    const directedReliability = new RegExp(`${escaped}(?:'s)?\\b[^.!?\\n]{0,60}(?:${PROVIDER_NEGATIVE_RE.source})`, 'i');
+    // Service-reliability negative predicated on the name — either as the
+    // DIRECT predicate ("<Name> never answers the phone", "<Name> no-shows")
+    // or linked through a subject verb ("<Name> is unreliable"). A bare
+    // reliability term merely NEAR the name is not enough: "Sarasota Pest
+    // Control Guide: Why DIY Sprays Are Unreliable" aims the negative at DIY
+    // sprays, not the business-shaped phrase, and must pass.
+    const directedReliability = new RegExp(
+      `${escaped}(?:'s)?\\b(?:\\s+\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
+    );
     if (directedReliability.test(nameScanText)) {
       findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
         `Draft makes a negative service-reliability claim about "${name}". Routed to human review — state neutral, verifiable attributes only.`));

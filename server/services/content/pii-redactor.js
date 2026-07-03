@@ -94,8 +94,10 @@ const NAME_SIGNAL_SINGLE = /\b([Mm]y name is|[Tt]his is|[Ii]'?m|[Ii] am|[Nn]ame:
 // too ambiguous in lowercase prose ("this is great", "i'm sure"). The
 // stopword lookaheads keep "my name is not on the account" and similar
 // non-name continuations out; the allowlist check in redactNames still
-// protects staff/place tokens.
-const NAME_SIGNAL_LOWERCASE = /\b(my name is|name:)\s+(?!(?:not|no|the|a|an|on|in|at|to|so|very|really|actually|probably|still|already|also|just|spelled|pronounced|misspelled|wrong|correct|different)\b)([a-z][a-z'-]{1,15})(\s+(?!(?:and|but|i|we|you|calling|speaking|here|from|with|at|on|in|by|not|is|was)\b)[a-z][a-z'-]{1,20})?\b/g;
+// protects staff/place tokens. The SIGNAL tolerates sentence-initial
+// capitalization ("My name is john smith" / "Name: john") — only the NAME
+// tokens must be lowercase, since a capitalized name is the other pass's job.
+const NAME_SIGNAL_LOWERCASE = /\b([Mm]y name is|[Nn]ame:)\s+(?!(?:not|no|the|a|an|on|in|at|to|so|very|really|actually|probably|still|already|also|just|spelled|pronounced|misspelled|wrong|correct|different)\b)([a-z][a-z'-]{1,15})(\s+(?!(?:and|but|i|we|you|calling|speaking|here|from|with|at|on|in|by|not|is|was)\b)[a-z][a-z'-]{1,20})?\b/g;
 
 // Words that look like names but are common false positives in this
 // domain (pest names, neighborhoods, products, businesses, etc.).
