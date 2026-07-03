@@ -24,9 +24,20 @@ describe('isHoneypotTripped', () => {
     expect(isHoneypotTripped({ fax_number: '18005551234' })).toBe(true);
   });
 
-  test('never throws on a null/undefined body', () => {
+  test('a non-string JSON value counts as filled (bot crafting JSON) (codex P2)', () => {
+    // A bot can send fax_number as a number/array/object over JSON; without this
+    // findField(/number|phone/) could even read a numeric fax_number as phone.
+    expect(isHoneypotTripped({ fax_number: 18005551234 })).toBe(true);
+    expect(isHoneypotTripped({ fax_number: 0 })).toBe(true);
+    expect(isHoneypotTripped({ fax_number: ['x'] })).toBe(true);
+    expect(isHoneypotTripped({ fax_number: { a: 1 } })).toBe(true);
+    expect(isHoneypotTripped({ fax_number: true })).toBe(true);
+  });
+
+  test('never throws on a null/undefined body or null field', () => {
     expect(isHoneypotTripped(null)).toBe(false);
     expect(isHoneypotTripped(undefined)).toBe(false);
+    expect(isHoneypotTripped({ fax_number: null })).toBe(false);
   });
 });
 
@@ -71,7 +82,7 @@ describe('verifyTurnstileToken', () => {
     );
   });
 
-  test('Cloudflare success:false → fails CLOSED with error codes', async () => {
+  test('token failure (invalid-input-response) → fails CLOSED', async () => {
     process.env.TURNSTILE_SECRET_KEY = 'secret';
     fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
@@ -80,6 +91,37 @@ describe('verifyTurnstileToken', () => {
     const r = await verifyTurnstileToken('bad-token', '1.2.3.4');
     expect(r).toMatchObject({ ok: false, enforced: true, reason: 'rejected' });
     expect(r.codes).toEqual(['invalid-input-response']);
+  });
+
+  test('expired/duplicate token → fails CLOSED', async () => {
+    process.env.TURNSTILE_SECRET_KEY = 'secret';
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: false, 'error-codes': ['timeout-or-duplicate'] }),
+    });
+    const r = await verifyTurnstileToken('stale-token', '1.2.3.4');
+    expect(r).toMatchObject({ ok: false, enforced: true, reason: 'rejected' });
+  });
+
+  test('config error (typoed/wrong secret) → fails OPEN, not a rejection (codex P1)', async () => {
+    process.env.TURNSTILE_SECRET_KEY = 'wrong-secret';
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: false, 'error-codes': ['invalid-input-secret'] }),
+    });
+    const r = await verifyTurnstileToken('good-token', '1.2.3.4');
+    expect(r).toMatchObject({ ok: true, enforced: false, reason: 'config_error' });
+    expect(r.codes).toEqual(['invalid-input-secret']);
+  });
+
+  test('bad-request / internal-error config codes → fail OPEN', async () => {
+    process.env.TURNSTILE_SECRET_KEY = 'secret';
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: false, 'error-codes': ['bad-request', 'internal-error'] }),
+    });
+    const r = await verifyTurnstileToken('good-token', '1.2.3.4');
+    expect(r).toMatchObject({ ok: true, enforced: false, reason: 'config_error' });
   });
 
   test('siteverify 5xx → fails OPEN', async () => {

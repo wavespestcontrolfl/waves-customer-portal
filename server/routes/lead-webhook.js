@@ -147,8 +147,15 @@ const leadWebhookPhoneLimiter = rateLimit({
 // (`fax_number` chosen deliberately — modern browsers/password managers don't
 // autofill fax, so a real visitor won't trip it.)
 function isHoneypotTripped(body) {
-  const v = body && body.fax_number;
-  return typeof v === 'string' && v.trim() !== '';
+  if (!body || body.fax_number === undefined || body.fax_number === null) return false;
+  const v = body.fax_number;
+  // Humans submit an empty string (or omit the field). Any non-empty string —
+  // or ANY non-string JSON value (number/array/object) a bot crafts — means the
+  // hidden field was populated. Rejecting non-strings matters because
+  // findField(/number|phone/) could otherwise read a numeric fax_number as the
+  // phone fallback and let the bot through (codex P2).
+  if (typeof v === 'string') return v.trim() !== '';
+  return true;
 }
 
 // POST /api/webhooks/lead — website lead-form submission webhook
@@ -175,7 +182,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     //    but never block. Enforcement (403) begins only once the owner sets the
     //    secret AND the Astro widget has propagated AND the gate is flipped on.
     //    Misconfiguration / Cloudflare errors fail OPEN (see utils/turnstile).
-    const turnstile = await verifyTurnstileToken(body && body.turnstile_token, req.ip);
+    // Accept both our explicit field and the stock Turnstile field name the
+    // widget posts (cf-turnstile-response), so a form that renders the widget
+    // without remapping still verifies instead of 403-ing after rollout (codex P1).
+    const turnstileToken = body && (body.turnstile_token || body['cf-turnstile-response']);
+    const turnstile = await verifyTurnstileToken(turnstileToken, req.ip);
     if (!turnstile.ok) {
       logger.info(
         `[lead-webhook] turnstile ${turnstile.reason} ` +

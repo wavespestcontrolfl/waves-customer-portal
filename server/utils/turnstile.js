@@ -6,6 +6,16 @@ const logger = require('../services/logger');
 const SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const VERIFY_TIMEOUT_MS = 4000;
 
+// Cloudflare error-codes that mean the TOKEN itself is bad → a definitive
+// failure we enforce (fail CLOSED). Every OTHER success:false response —
+// missing/invalid/typoed secret, bad-request, internal-error — is OUR OWN
+// misconfiguration and must fail OPEN, so a secret typo can't 403 every real
+// lead. https://developers.cloudflare.com/turnstile/get-started/server-side-validation/#error-codes
+const TOKEN_FAILURE_CODES = new Set([
+  'invalid-input-response', // the token is invalid or malformed
+  'timeout-or-duplicate',   // the token already got used or has expired
+]);
+
 /**
  * Verify a Cloudflare Turnstile token.
  *
@@ -23,7 +33,9 @@ const VERIFY_TIMEOUT_MS = 4000;
  * (only when the GATE_LEAD_TURNSTILE gate is on); this helper never throws and
  * never blocks on its own.
  *
- * @param {string} token       cf-turnstile-response token from the form
+ * @param {string} token       the Turnstile token from the form (the route
+ *                             accepts either `turnstile_token` or the stock
+ *                             `cf-turnstile-response` field)
  * @param {string} [remoteip]  submitter IP, forwarded to Cloudflare for scoring
  * @returns {Promise<{ok: boolean, enforced: boolean, reason: string, codes?: string[]}>}
  */
@@ -62,12 +74,18 @@ async function verifyTurnstileToken(token, remoteip) {
     if (data && data.success) {
       return { ok: true, enforced: true, reason: 'verified' };
     }
-    return {
-      ok: false,
-      enforced: true,
-      reason: 'rejected',
-      codes: Array.isArray(data && data['error-codes']) ? data['error-codes'] : [],
-    };
+    const codes = Array.isArray(data && data['error-codes'])
+      ? data['error-codes'].map((c) => String(c))
+      : [];
+    // Only a definitive TOKEN failure enforces. A config error (bad/typoed/
+    // wrong-widget secret, bad-request, internal-error) also comes back as
+    // success:false — treating it as a rejection would 403 every real lead on
+    // our own misconfiguration, so it fails OPEN (codex P1).
+    if (codes.some((c) => TOKEN_FAILURE_CODES.has(c))) {
+      return { ok: false, enforced: true, reason: 'rejected', codes };
+    }
+    logger.warn(`[turnstile] siteverify config error ${JSON.stringify(codes)} — failing open`);
+    return { ok: true, enforced: false, reason: 'config_error', codes };
   } catch (err) {
     // Timeout / network error → fail OPEN.
     logger.warn(`[turnstile] siteverify error (${err.name}: ${err.message}) — failing open`);

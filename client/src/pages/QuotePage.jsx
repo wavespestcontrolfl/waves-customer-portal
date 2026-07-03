@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import AddressAutocomplete from '../components/AddressAutocomplete';
+import TurnstileWidget from '../components/TurnstileWidget';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import { COLORS, FONTS, SHADOWS } from '../theme-brand';
@@ -388,6 +389,10 @@ export default function QuotePage({ serviceSlug = '' }) {
 
   const inputRef = useRef(null);
   const submitInFlightRef = useRef(false);
+  // Bot-spam guard for the /api/leads submits (submitOther / submitOneTime):
+  // a Turnstile token + an off-screen honeypot, mirroring the marketing forms.
+  const honeypotRef = useRef(null);
+  const [turnstileToken, setTurnstileToken] = useState('');
 
   useEffect(() => {
     setStage('intake');
@@ -659,6 +664,8 @@ export default function QuotePage({ serviceSlug = '' }) {
           source: normalizedServiceSlug ? `quote-page-${normalizedServiceSlug}` : 'quote-page-divert',
           attribution: attribution || undefined,
           ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
+          fax_number: honeypotRef.current?.value || '',
+          turnstile_token: turnstileToken || undefined,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -699,6 +706,8 @@ export default function QuotePage({ serviceSlug = '' }) {
           source: `quote-page-${intake.frequency}`,
           attribution: attribution || undefined,
           ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
+          fax_number: honeypotRef.current?.value || '',
+          turnstile_token: turnstileToken || undefined,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1089,6 +1098,28 @@ export default function QuotePage({ serviceSlug = '' }) {
                 )}
 
                 {error && <div style={sError}>{error}</div>}
+
+                {/* Off-screen honeypot: bots that fill every field trip the
+                    server-side fax_number drop on /api/leads; real users never
+                    see it. */}
+                <input
+                  ref={honeypotRef}
+                  name="fax_number"
+                  type="text"
+                  tabIndex={-1}
+                  autoComplete="off"
+                  aria-hidden="true"
+                  style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, opacity: 0 }}
+                />
+
+                {/* Turnstile on the final step, where the submit routes to
+                    /api/leads (Other / one-time / not-sure flows). Renders
+                    nothing until VITE_TURNSTILE_SITE_KEY is set. */}
+                {intakeIdx === INTAKE_STEPS.length - 1 && (
+                  <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center' }}>
+                    <TurnstileWidget onToken={setTurnstileToken} />
+                  </div>
+                )}
 
                 <div style={{
                   marginTop: 24,
