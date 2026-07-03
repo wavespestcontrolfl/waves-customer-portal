@@ -2544,13 +2544,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
-    // Owner directive: the customer's own contact details appear on their report
-    // (matching the completion screen / invoice), so the report reads as a complete
-    // service document. NOTE: the report token is a shareable bearer credential with
-    // no expiry, so this contact PII rides a forwardable link — the report is already
-    // noindex + no-referrer, which limits exposure to deliberate forwarding.
-    customerPhone: service.phone || null,
-    customerEmail: service.email || null,
+    // customerPhone/customerEmail intentionally NOT in the public report payload —
+    // the report token is a shareable, non-expiring bearer credential, so contact
+    // PII must not ride it. (Recap SMS loads the phone server-side via its own query.)
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     // Membership tier for this visit (see reportWaveGuardTier above). Consumed by the
     // report viewer to suppress the per-visit "Time on site" duration for members while

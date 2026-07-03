@@ -33,20 +33,6 @@ import ActivityCard from '../components/ActivityCard';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
-
-// Pretty-print a stored phone (+17206334021 / 7206334021) as (720) 633-4021.
-// Falls back to the raw value for anything that isn't a US 10/11-digit number.
-function formatCustomerPhone(phone) {
-  if (!phone) return '';
-  const digits = String(phone).replace(/\D/g, '');
-  if (digits.length === 11 && digits.startsWith('1')) {
-    return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
-  }
-  if (digits.length === 10) {
-    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
-  }
-  return phone;
-}
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const ESTIMATE_BG = '#FAF8F3';
 const ESTIMATE_BORDER = '#E7E2D7';
@@ -1642,15 +1628,6 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <div className="section-eyebrow">Service report{serviceLabel ? ` · ${serviceLabel}` : ''}</div>
         <h1 className="sr-title">Hey {firstName}, {smartStatus.heading}</h1>
         {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
-        {(data.customerPhone || data.customerEmail) && (
-          <div className="service-meta-contact">
-            {data.customerPhone && (
-              <a href={`tel:${String(data.customerPhone).replace(/[^\d+]/g, '')}`}>{formatCustomerPhone(data.customerPhone)}</a>
-            )}
-            {data.customerPhone && data.customerEmail && <span className="service-meta-contact-sep"> · </span>}
-            {data.customerEmail && <a href={`mailto:${data.customerEmail}`}>{data.customerEmail}</a>}
-          </div>
-        )}
       </div>
       <div className="service-status-card">
         <div className="service-status-main">
@@ -4767,13 +4744,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 12px;
           line-height: 1.5;
           font-weight: 500;
-        }
-        .service-meta-contact a {
-          color: inherit;
-          text-decoration: none;
-        }
-        .service-meta-contact a:hover {
-          text-decoration: underline;
         }
         .tech-visit-line {
           display: flex;

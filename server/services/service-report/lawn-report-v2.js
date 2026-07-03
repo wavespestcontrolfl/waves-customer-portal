@@ -363,33 +363,33 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
 // invents no number. Re-entry text comes from the label when available.
 function buildAftercare(applications) {
   const apps = Array.isArray(applications) ? applications : [];
-  let watering = null;
+  let productNote = null;
   let reentry = null;
-  // Whether ANY product applied today needs watering-in (fertilizer) vs. a
-  // keep-off / do-not-water product (e.g. Celsius WG post-emergent). If the
-  // products disagree, "water in" wins — the product that needs it sets the
-  // requirement for the whole visit.
-  let waterInRequired = null; // true / false / null(unknown)
+  // Whether ANY product applied today must be watered IN (fertilizer). true = a
+  // product requires watering-in; false = watering-in is simply not required for
+  // the product(s) seen (NOT that watering is prohibited); null = unknown.
+  let waterInRequired = null;
   for (const a of apps) {
     const p = (a && a.product) || a || {};
     const facts = (a && a.approved_report_product_facts) || {};
     const req = p.irrigation_required ?? facts.irrigationRequired ?? null;
     if (req === true) waterInRequired = true;
     else if (req === false && waterInRequired == null) waterInRequired = false;
-    if (!watering) watering = (p.irrigation_notes || facts.irrigationNotes || '').trim() || null;
+    if (!productNote) productNote = (p.irrigation_notes || facts.irrigationNotes || '').trim() || null;
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
   }
-  // Prefer the product's own irrigation_notes copy; otherwise state the water-in
-  // requirement plainly from the irrigation_required flag so the customer knows
-  // whether to water today (fertilizer) or hold off (herbicide).
-  if (!watering) {
-    if (waterInRequired === true) {
-      watering = 'Water in today’s application — give the lawn a normal watering within the next 24 hours to move the product into the soil, unless your technician advised otherwise.';
-    } else if (waterInRequired === false) {
-      watering = 'No watering is needed to activate today’s treatment — in fact, hold off on watering the treated areas for the rest of the day so the product can work. Keep your normal schedule after that.';
-    } else {
-      watering = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
-    }
+  // A REQUIRED water-in is the strongest signal — it wins over a product's generic
+  // irrigation note. Otherwise prefer the product's own label note. irrigation_required
+  // false only means watering-in isn't required (not that watering is prohibited), so
+  // it and the unknown case both fall to the neutral "keep your normal schedule" copy —
+  // we never publish a do-not-water instruction the label doesn't back.
+  let watering;
+  if (waterInRequired === true) {
+    watering = 'Water in today’s application — give the lawn a normal watering within the next 24 hours to move the product into the soil, unless your technician advised otherwise.';
+  } else if (productNote) {
+    watering = productNote;
+  } else {
+    watering = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
   }
   return { watering, reentry, waterInRequired };
 }
@@ -519,7 +519,12 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const topIssue = issues[0] || null;
 
   // "Why 68": name the category dragging the score down, reassure on the rest.
-  const scored = diagnosis.filter((c) => Number.isFinite(num(c.score)));
+  // Only the DISPLAYED categories — the Water/Coverage card is hidden (its score
+  // is fungus-derived, not a real moisture read), so it must never be named as the
+  // driver of a score with no matching card on screen.
+  const scored = diagnosis.filter(
+    (c) => c.key !== 'water_moisture_stress' && Number.isFinite(num(c.score)),
+  );
   const lowest = scored.slice().sort((a, b) => num(a.score) - num(b.score))[0];
   const scoreExplanation = (lowest && num(lowest.score) < 60 && scored.length > 2)
     ? `Your lawn is stable overall — the score is mainly pulled down by ${lowest.label.toLowerCase()}, while the other areas are generally in a healthy range.`
