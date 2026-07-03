@@ -115,9 +115,14 @@ const DOC_LINKS = [
   // decision rule, not retail Hydretain Liquid. Two exact-name entries so
   // down() restores each row to its own prior state.
   {
+    // On prod this row's label_url is empty; databases seeded by
+    // 20260530000022 carry the generic hydretain.com homepage here, so it is
+    // listed as replaceable too (down() restores the homepage, which matches
+    // the fresh-DB prior state; prod's prior state was empty).
     pattern: 'Hydretain Liquid',
     labelUrl: 'https://www.hydretain.com/wp-content/uploads/2018/10/HydESP_2.5GalLab_US_C_LRWEB_R20171129.pdf',
     sdsUrl: 'https://www.hydretain.com/wp-content/uploads/2018/10/HydESP_SDS_R20160226.pdf',
+    replaceLabelUrls: ['https://www.hydretain.com/'],
     note: 'Hydretain ES Plus 2.5-gal label/SDS (Ecologel) owner-provided 2026-07-03 — row matches the professional product (2.5 gal, 9 fl oz/1K).',
   },
   {
@@ -221,20 +226,34 @@ const THREE_WAY = {
 // Guarded to the exact wrong value so an admin correction is never clobbered.
 const EPA_CORRECTIONS = [
   {
+    // The 100-1680 product is chlorantraniliprole + THIAMETHOXAM (IRAC
+    // 28 + 4A per the verified Syngenta SDS) — the seeded 432-1652
+    // classification carried bifenthrin / 28+3A, which would keep the
+    // WaveGuard MOA-rotation and reporting logic treating this as a
+    // pyrethroid product. Classification fixes are guarded to the exact
+    // stale values (prod already carries the corrected active_ingredient;
+    // fresh DBs still carry the seed's bifenthrin text).
     pattern: 'Acelepryn Xtra',
     from: '432-1652',
     to: '100-1680',
-    note: 'EPA Reg. No. corrected 432-1652 → 100-1680 per owner ruling 2026-07-03 (GreenCast/Greenbook/EPA label agree).',
+    fieldFixes: [
+      { column: 'irac_group', from: ['28+3A'], to: '28+4A' },
+      { column: 'active_ingredient', from: ['Chlorantraniliprole + Bifenthrin'], to: 'Chlorantraniliprole & Thiamethoxam' },
+    ],
+    note: 'EPA Reg. No. corrected 432-1652 → 100-1680 per owner ruling 2026-07-03 (GreenCast/Greenbook/EPA label agree); IRAC corrected 28+3A → 28+4A (thiamethoxam, not bifenthrin, per the verified Syngenta SDS).',
   },
+  // Exact-name patterns so each SpeedZone row keeps its own up()/down()
+  // pairing — a shared pattern would let the first down() pass rewrite
+  // both rows before the second pass runs.
   {
-    pattern: '%SpeedZone Southern%',
+    pattern: 'SpeedZone Southern',
     from: '2217-987',
     to: '2217-1031',
     note: 'EPA Reg. No. corrected 2217-987 (unsupported) → 2217-1031 (SpeedZone Southern EW) per owner ruling 2026-07-03; inventory SKU SPEEDZONE-SOUTHERN-EW confirms EW.',
   },
   {
     // The EW-named duplicate row carries no reg at all.
-    pattern: '%SpeedZone Southern%',
+    pattern: 'SpeedZone Southern EW',
     from: 'N/A',
     to: '2217-1031',
     note: 'EPA Reg. No. set to 2217-1031 (SpeedZone Southern EW) per owner ruling 2026-07-03.',
@@ -276,16 +295,21 @@ exports.up = async function up(knex) {
   }
 
   for (const fix of EPA_CORRECTIONS) {
+    const columns = ['id', 'label_source_note', ...(fix.fieldFixes || []).map((f) => f.column)];
     const rows = await knex('products_catalog')
       .where('name', 'ilike', fix.pattern)
       .where({ epa_reg_number: fix.from })
-      .select('id', 'label_source_note');
+      .select(columns);
     for (const row of rows) {
-      await knex('products_catalog').where({ id: row.id }).update({
+      const update = {
         epa_reg_number: fix.to,
         label_source_note: appendNote(row.label_source_note, fix.note),
         updated_at: knex.fn.now(),
-      });
+      };
+      for (const field of fix.fieldFixes || []) {
+        if (field.from.includes(row[field.column])) update[field.column] = field.to;
+      }
+      await knex('products_catalog').where({ id: row.id }).update(update);
     }
   }
 
@@ -336,7 +360,19 @@ exports.down = async function down(knex) {
     }
   }
 
+  // Exact-name patterns keep each row paired with its own original value.
+  // The IRAC fix reverts alongside the reg (guarded to the corrected value);
+  // active_ingredient is left at the corrected value on purpose — prod
+  // carried the corrected text before this migration, so reverting it would
+  // reintroduce the bifenthrin error there.
   for (const fix of EPA_CORRECTIONS) {
+    for (const field of fix.fieldFixes || []) {
+      if (field.column !== 'irac_group') continue;
+      await knex('products_catalog')
+        .where('name', 'ilike', fix.pattern)
+        .where({ epa_reg_number: fix.to, [field.column]: field.to })
+        .update({ [field.column]: field.from[0], updated_at: knex.fn.now() });
+    }
     await knex('products_catalog')
       .where('name', 'ilike', fix.pattern)
       .where({ epa_reg_number: fix.to })
