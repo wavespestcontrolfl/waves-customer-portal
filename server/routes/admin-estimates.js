@@ -263,6 +263,15 @@ function assertEstimateSendable(estimate) {
     err.statusCode = 400;
     throw err;
   }
+  // Some rows have no share token (quote-wizard mirrors, legacy imports).
+  // Without this gate the customer link is built by template literal and the
+  // SMS/email ships a literal /estimate/null — a dead link — while the
+  // estimate still gets stamped `sent`.
+  if (!String(estimate.token || '').trim()) {
+    const err = new Error('This estimate has no customer link token, so there is nothing to send. Rebuild it in the estimate tool to mint a shareable link.');
+    err.statusCode = 400;
+    throw err;
+  }
   if (!SENDABLE_ESTIMATE_STATUSES.has(String(estimate.status || 'draft'))) {
     const err = new Error(`Estimate status ${estimate.status || 'unknown'} cannot be sent.`);
     err.statusCode = 400;

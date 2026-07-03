@@ -129,6 +129,7 @@ describe('assertEstimateSendable proposal exemption', () => {
   // — otherwise resends/follow-ups of a sent proposal would re-block.
   const sentProposalRow = (extraData = {}) => ({
     status: 'sent',
+    token: 'tok-proposal-test',
     monthly_total: 583,
     estimate_data: {
       proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [] }] },
@@ -145,6 +146,7 @@ describe('assertEstimateSendable proposal exemption', () => {
   it('still blocks a quote-required estimate that is NOT an authored proposal', () => {
     expect(() => assertEstimateSendable({
       status: 'sent',
+      token: 'tok-qr-test',
       monthly_total: 100,
       estimate_data: { result: { recurring: { services: [{ quoteRequired: true }] } } },
     })).toThrow(/quote-required|manual review/i);
@@ -162,6 +164,7 @@ describe('assertEstimateSendable commercial risk-type gate', () => {
   // before it can be sent — the risk type drives the service cadence.
   const commercialPestRow = (riskType) => ({
     status: 'sent',
+    token: 'tok-commercial-test',
     monthly_total: 200,
     estimate_data: {
       result: { lineItems: [{ service: 'commercial_pest', annual: 2400, estimatedPricing: true }] },
@@ -180,8 +183,33 @@ describe('assertEstimateSendable commercial risk-type gate', () => {
   it('does not block a commercial estimate without a cadence-relevant line', () => {
     expect(() => assertEstimateSendable({
       status: 'sent',
+      token: 'tok-commercial-lawn-test',
       monthly_total: 200,
       estimate_data: { result: { lineItems: [{ service: 'commercial_lawn', annual: 1200 }] } },
     })).not.toThrow();
+  });
+});
+
+describe('assertEstimateSendable share-token gate', () => {
+  // Quote-wizard mirror rows are inserted with token=NULL. Without this gate
+  // the customer link is built by template literal, so the SMS/email ships a
+  // literal /estimate/null dead link and the estimate still gets stamped sent.
+  const tokenlessRow = (token) => ({
+    status: 'draft',
+    token,
+    monthly_total: 150,
+    estimate_data: {},
+  });
+
+  it('blocks a row with a NULL token', () => {
+    expect(() => assertEstimateSendable(tokenlessRow(null))).toThrow(/no customer link token/i);
+  });
+
+  it('blocks a blank-string token', () => {
+    expect(() => assertEstimateSendable(tokenlessRow('   '))).toThrow(/no customer link token/i);
+  });
+
+  it('allows an otherwise-sendable row with a real token', () => {
+    expect(() => assertEstimateSendable(tokenlessRow('tok-real'))).not.toThrow();
   });
 });
