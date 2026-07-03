@@ -188,6 +188,7 @@ describe('admin estimate email delivery', () => {
   test('blocks sending quote-required estimates', () => {
     expect(() => router._internals.assertEstimateSendable({
       id: 'estimate-quote-required',
+      token: 'tok-estimate-quote-required',
       status: 'draft',
       estimate_data: {
         result: {
@@ -203,6 +204,7 @@ describe('admin estimate email delivery', () => {
   test('blocks sending estimates without a billable total', () => {
     expect(() => router._internals.assertEstimateSendable({
       id: 'estimate-zero-total',
+      token: 'tok-estimate-zero-total',
       status: 'draft',
       monthly_total: 0,
       onetime_total: 0,
@@ -243,6 +245,7 @@ describe('admin estimate email delivery', () => {
     expect(router._internals.estimateDataHasBlockingLeadAutomation(estimateData)).toBe(true);
     expect(() => router._internals.assertEstimateSendable({
       id: 'estimate-auto-review',
+      token: 'tok-estimate-auto-review',
       status: 'draft',
       estimate_data: estimateData,
     })).toThrow(/Automated lead estimates need manual review/);
@@ -275,6 +278,7 @@ describe('admin estimate email delivery', () => {
     expect(router._internals.estimateDataHasBlockingLeadAutomation(estimateData)).toBe(false);
     expect(() => router._internals.assertEstimateSendable({
       id: 'estimate-auto-generated',
+      token: 'tok-estimate-auto-generated',
       status: 'draft',
       monthly_total: 89,
       estimate_data: estimateData,
@@ -284,6 +288,7 @@ describe('admin estimate email delivery', () => {
   test('blocks sending estimates with unresolved manager approval', () => {
     expect(() => router._internals.assertEstimateSendable({
       id: 'estimate-manager-approval',
+      token: 'tok-estimate-manager-approval',
       status: 'draft',
       estimate_data: {
         result: {
@@ -405,6 +410,7 @@ describe('admin estimate email delivery', () => {
   test('allows manager-approval estimates after approval reason is recorded', () => {
     expect(() => router._internals.assertEstimateSendable({
       id: 'estimate-manager-approved',
+      token: 'tok-estimate-manager-approved',
       status: 'draft',
       onetime_total: 150,
       estimate_data: {

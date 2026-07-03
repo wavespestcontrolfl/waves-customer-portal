@@ -796,6 +796,11 @@ function estimateAmountDisplay(estimate) {
 }
 
 function canSendEstimate(estimate) {
+  // Rows without a share token (quote-wizard mirrors, legacy imports) have no
+  // customer link to send — the SMS/email would carry a literal /estimate/null.
+  // The server now refuses these too (assertEstimateSendable); hiding the
+  // affordance keeps the operator from hitting that error blind.
+  if (!String(estimate?.token || "").trim()) return false;
   return estimateAmountDisplay(estimate).value > 0;
 }
 

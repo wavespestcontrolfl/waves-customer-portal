@@ -434,26 +434,6 @@ const RODENT_GUARANTEE_ELIGIBILITY_KEYS = [
   "rgNoActivityAfterFinalCheck",
 ];
 
-const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
-  "dethatchingCleanupLevel",
-  "dethatchingDebrisRemovalIncluded",
-  "dethatchingAccess",
-  "dethatchingManagerApproved",
-  "dethatchingManagerApprovalReason",
-  "grassType",
-  "thatchProbe1Inches",
-  "thatchProbe2Inches",
-  "thatchProbe3Inches",
-  "thatchDepthInches",
-  "thatchMeasurementSource",
-  // Commercial cadence: changing the business type re-prices pest/rodent, so it
-  // must invalidate a generated estimate (else Save persists stale totals).
-  "commercialRiskType",
-  "treeShrubDensity",
-  "mosquitoPressure",
-  ...RODENT_GUARANTEE_ELIGIBILITY_KEYS,
-]);
-
 const MOSQUITO_PROTOCOL_STEPS = [
   "Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.",
   "Use a gas-powered backpack sprayer for a directed barrier application to mosquito resting zones. Keep applications off blooms and avoid pollinator activity windows.",
@@ -2352,7 +2332,19 @@ export default function EstimateToolViewV2({
     };
   }, [form]);
 
-  const [estimate, setEstimate] = useState(null);
+  const [estimate, setEstimateState] = useState(null);
+  // Monotonic invalidation version for the generated estimate. Every
+  // setEstimate(null) bumps it; doGenerate snapshots it at start and discards
+  // its result if an invalidation landed while /calculate-estimate was in
+  // flight — otherwise the resolving generate re-mounts a price computed from
+  // pre-edit inputs, and Save would persist that stale engineRequest (which
+  // the server replays verbatim, so the recompute agrees with the stale price
+  // and no drift notice fires).
+  const estimateVersionRef = useRef(0);
+  const setEstimate = useCallback((value) => {
+    if (value === null) estimateVersionRef.current += 1;
+    setEstimateState(value);
+  }, []);
   const [savedId, setSavedId] = useState(null);
   const [savedViewUrl, setSavedViewUrl] = useState(null);
   // Full-screen, pricing-only "present to customer" mode — hides the booking
@@ -2456,11 +2448,16 @@ export default function EstimateToolViewV2({
       }
       return next;
     });
-    if (key.startsWith("svc") || DETHATCHING_ESTIMATE_RESET_FIELDS.has(key)) {
-      setEstimate(null);
-      setSavedId(null);
-      setSavedViewUrl(null);
-    }
+    // Every CheckboxV2 key is a pricing input or pricing gate (service
+    // selections, palm/trenching/pre-slab flags, rodent surcharges, rg
+    // eligibility, dethatching approvals…), so any flip invalidates a
+    // generated estimate. An allowlist here previously let flags like
+    // rodentTrappingEmergency slip through: the preview kept the pre-flip
+    // price, Save persisted the pre-flip engineRequest, and the server's
+    // authoritative replay agreed with the stale number — no drift notice.
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
   }, []);
   const setCustomerChoiceOption = useCallback((enabled) => {
     setForm((f) => {
@@ -2996,7 +2993,13 @@ export default function EstimateToolViewV2({
       msg: "Analyzing satellite imagery with AI...",
     });
     setSatelliteData(null);
+    // Clearing measuredTurfSf is already a pricing edit, and the analysis
+    // below rewrites lot/bed/palm/termite inputs — invalidate up front exactly
+    // like doLookup so a generated estimate can't sit on pre-analysis inputs.
     setForm((f) => ({ ...f, measuredTurfSf: "" }));
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
     try {
       const r = await fetch("/api/admin/lookup/satellite-ai", {
         method: "POST",
@@ -3071,6 +3074,11 @@ export default function EstimateToolViewV2({
         }
         return next;
       });
+      // Invalidate again at apply time: a Generate run while the analysis was
+      // in flight would otherwise keep a price from pre-analysis inputs.
+      setEstimate(null);
+      setSavedId(null);
+      setSavedViewUrl(null);
 
       const verify = (data.fieldVerify || []).length;
       const conf =
@@ -3090,6 +3098,10 @@ export default function EstimateToolViewV2({
 
   async function doGenerate(overrides = {}) {
     if (generating) return null;
+    // Snapshot the invalidation version. Inputs stay editable while the
+    // calculate call is in flight, so an edit that lands mid-flight must make
+    // this generate discard its result (it was priced from pre-edit inputs).
+    const versionAtStart = estimateVersionRef.current;
     setGenerating(true);
     try {
       const selectedServices = [];
@@ -3580,6 +3592,13 @@ export default function EstimateToolViewV2({
       // be the authority on the persisted price (Decision #2). This is the same
       // payload sent to /calculate-estimate above.
       result.engineRequest = { profile, selectedServices, options };
+      if (estimateVersionRef.current !== versionAtStart) {
+        // A pricing edit landed while the calculate call was in flight; the
+        // invalidation already cleared the preview. Mounting this result would
+        // pair stale pricing with the new form state (and Save would persist
+        // the stale engineRequest), so drop it and let the operator regenerate.
+        return null;
+      }
       setEstimate(result);
       setSavedId(null);
       setSavedViewUrl(null);
@@ -3650,19 +3669,21 @@ export default function EstimateToolViewV2({
       const onetimeDiffers =
         Number.isFinite(serverOnetime) &&
         Math.abs(serverOnetime - (onetimeTotal || 0)) >= 0.5;
+      let recomputeNotice = null;
       if ((monthlyDiffers || onetimeDiffers) && d.pricingAuthority === "SERVER") {
-        setPriceRecomputeNotice({
+        recomputeNotice = {
           serverMonthly: monthlyDiffers ? serverMonthly : null,
           clientMonthly: monthlyDiffers ? monthlyTotal || 0 : null,
           serverOnetime: onetimeDiffers ? serverOnetime : null,
           clientOnetime: onetimeDiffers ? onetimeTotal || 0 : null,
-        });
-      } else {
-        setPriceRecomputeNotice(null);
+        };
       }
+      setPriceRecomputeNotice(recomputeNotice);
       setSavedId(id);
       setSavedViewUrl(viewUrl);
-      return { id, viewUrl };
+      // recomputeNotice rides along so saveAndSend can gate the send on it —
+      // the banner state set above renders too late to stop an in-flight send.
+      return { id, viewUrl, recomputeNotice };
     } catch (e) {
       alert(e.message);
       return null;
@@ -3897,9 +3918,35 @@ export default function EstimateToolViewV2({
       }
     }
     const saved = savedId
-      ? { id: savedId, viewUrl: savedViewUrl }
+      ? // Already-saved path: any drift was surfaced by that earlier save and
+        // still lives in the banner state — gate on it the same way.
+        { id: savedId, viewUrl: savedViewUrl, recomputeNotice: priceRecomputeNotice }
       : await doSave();
-    if (saved?.id) await doSend(saved.id, method);
+    if (!saved?.id) return;
+    // Server-authoritative repricing (Decision #2) can move the number at save
+    // time (pricing-constant changes, existing-customer combined-tier fold).
+    // Without this gate the send fires before the recompute banner is even
+    // readable, so a price the operator never saw goes to the customer.
+    if (saved.recomputeNotice) {
+      const n = saved.recomputeNotice;
+      const parts = [];
+      if (n.serverMonthly != null) {
+        parts.push(
+          `$${n.serverMonthly.toFixed(2)}/mo (preview showed $${Number(n.clientMonthly || 0).toFixed(2)}/mo)`,
+        );
+      }
+      if (n.serverOnetime != null) {
+        parts.push(
+          `$${n.serverOnetime.toFixed(2)} one-time (preview showed $${Number(n.clientOnetime || 0).toFixed(2)})`,
+        );
+      }
+      const proceed = window.confirm(
+        `The server recomputed the final price on save: ${parts.join(", ")}.\n\n` +
+          "This recomputed price is what the customer will see. Send it?",
+      );
+      if (!proceed) return;
+    }
+    await doSend(saved.id, method);
   }
 
   async function previewCustomerEstimate() {
@@ -4165,7 +4212,7 @@ export default function EstimateToolViewV2({
                       form={form}
                       satelliteUrl={satelliteData?.imageUrl || null}
                       presentMode
-                      onSelectPestFreq={(apps) => {
+                      onSelectPestFreq={async (apps) => {
                         // Ignore tier taps while a recalc is in flight: doGenerate
                         // early-returns on `generating`, but the form mutation below
                         // would still apply, pairing the in-flight (old-tier) estimate
@@ -4178,10 +4225,18 @@ export default function EstimateToolViewV2({
                         // estimate in place when it resolves. Still mirror set()'s
                         // saved-state reset, since changing the cadence invalidates the
                         // saved record (keeps the "unsaved preview" warning accurate).
+                        const prevPestFreq = form.pestFreq;
                         setForm((f) => ({ ...f, pestFreq: String(apps) }));
                         setSavedId(null);
                         setSavedViewUrl(null);
-                        doGenerate({ pestFreq: apps });
+                        const regenerated = await doGenerate({ pestFreq: apps });
+                        // A failed regenerate leaves the previous estimate mounted —
+                        // restore its cadence so the visible price and form.pestFreq
+                        // stay paired (Save in that state would persist the old-cadence
+                        // engineRequest under inputs claiming the new cadence).
+                        if (!regenerated) {
+                          setForm((f) => ({ ...f, pestFreq: prevPestFreq }));
+                        }
                       }}
                     />
                   </EstimateErrorBoundary>
