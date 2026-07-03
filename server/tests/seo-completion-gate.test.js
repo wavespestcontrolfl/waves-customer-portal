@@ -248,3 +248,21 @@ describe('seo-completion-gate', () => {
     });
   });
 });
+
+describe('detectHardcodedPrice / detectPii parity (regression)', () => {
+  const { detectHardcodedPrice, detectPii } = SeoCompletionGate._internals;
+
+  test('comma-grouped price is detected — "$1,200" previously produced no finding', () => {
+    expect(detectHardcodedPrice('A termite bond costs $1,200 per year flat.')).toBe(true);
+    expect(detectHardcodedPrice('Bait stations cost $9 each.')).toBe(true);
+  });
+  test('regulatory-fine exemption now matches content-guardrails (single-sourced policy)', () => {
+    expect(detectHardcodedPrice('The county ordinance carries fines of up to $1,000 per violation.')).toBe(false);
+    expect(detectHardcodedPrice('Use our calculator — quotes land near $1,200 depending on size.')).toBe(false);
+  });
+  test('phone allowlist keys on the FULL number, not the last seven digits', () => {
+    // Same last-7 as the LWR Waves line, different area code → customer PII.
+    expect(detectPii('Call 212-318-7612 anytime.')).toBe(true);
+    expect(detectPii('Call (941) 318-7612 anytime.')).toBe(false);
+  });
+});

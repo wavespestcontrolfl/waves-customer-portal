@@ -8,12 +8,14 @@
  *
  * This module covers the page-policy gaps the audit found ABSENT or
  * blog-only:
- *   P0 HARDCODED_PRICE      — dollar figures in body (must link to calculator)
- *   P0 BRAND_TOKEN_LEAK     — literal "Waves Pest Control" on a multi-domain
- *                             page instead of the {{brandName}} token
- *   P0 FAQ_BLOCKED_SERVICE  — an FAQ section on a service whose FAQs are
- *                             policy-blocked (bed bug, cockroach, rodent, …)
- *   P2 KEYWORD_STUFFING     — primary keyword density above threshold
+ *   P0 HARDCODED_PRICE          — dollar figures in body (must link to calculator)
+ *   P0 BRAND_TOKEN_LEAK         — literal "Waves Pest Control" on a multi-domain
+ *                                 page instead of the {{brandName}} token
+ *   P0 FAQ_BLOCKED_SERVICE      — an FAQ section on a service whose FAQs are
+ *                                 policy-blocked (bed bug, cockroach, rodent, …)
+ *   P0 DISALLOWED_EXTERNAL_LINK — a link/URL pointing off the hub/spoke fleet
+ *                                 (spam/injection guard — drafts link internally)
+ *   P2 KEYWORD_STUFFING         — primary keyword density above threshold
  *
  * Phone-number injection is NOT re-checked here — content-quality-gate's
  * redaction hard check already rejects any non-Waves phone in the body.
@@ -39,21 +41,39 @@ function finding(severity, code, message) {
   return { severity, code, message };
 }
 
-function priceFinding(body) {
-  const text = String(body || '');
-  const priceRe = /(^|[\s(])\$\s?\d{2,5}\b|\b\d{2,5}\s+(?:dollars|bucks)\b/gi;
+// Dollar amounts: "$95", "$9", "$1,200", "$12500", "95 dollars", "1,200 bucks".
+// Comma-grouped thousands MUST be covered — a bare \d{2,5} stops at the comma,
+// so "$1,200 per year" (exactly the fabricated-price shape for termite bonds /
+// annual plans) produced no finding at all.
+const PRICE_RE_SRC = '(^|[\\s(])\\$\\s?(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\b|\\b(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\s+(?:dollars|bucks)\\b';
+
+/**
+ * findHardcodedPrice(text) → the offending price string, or null. Applies the
+ * calculator/quote-framing and regulatory-fine exemptions, so callers share
+ * ONE price policy. Exported for seo-completion-gate (its previous private
+ * copy had drifted: no comma support, no regulatory exemption).
+ */
+function findHardcodedPrice(text) {
+  const s = String(text || '');
+  const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
-  while ((match = priceRe.exec(text)) !== null) {
-    const window = text.slice(Math.max(0, match.index - 80), Math.min(text.length, match.index + 120));
+  while ((match = priceRe.exec(s)) !== null) {
+    const window = s.slice(Math.max(0, match.index - 80), Math.min(s.length, match.index + 120));
     // Allowed when the surrounding copy points at the calculator / quote / a
     // "varies" framing rather than asserting a hard price.
     if (/\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
     // Regulatory fines are not Waves service pricing. Allow ordinance/citation
     // contexts while still blocking customer-facing service price claims.
     if (isRegulatoryPenaltyAmount(match[0].trim(), window)) continue;
-    return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${match[0].trim()}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.`);
+    return match[0].trim();
   }
   return null;
+}
+
+function priceFinding(body) {
+  const hit = findHardcodedPrice(body);
+  if (!hit) return null;
+  return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${hit}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.`);
 }
 
 function isRegulatoryPenaltyAmount(amount, context) {
@@ -108,9 +128,11 @@ function brandTokenFinding(text, domains, { allowHubAnchor = false } = {}) {
     .filter((d) => d && !HUB_DOMAINS.has(d)); // only spoke domains make it multi-domain
   if (list.length === 0) return null; // hub-only page — literal brand is fine
   const body = String(text || '');
-  if (!/\bWaves\s+Pest\s+Control\b/.test(body)) return null;
+  // Case-insensitive: "WAVES PEST CONTROL" / "waves pest control" leak the
+  // brand across spoke domains exactly like the canonical casing does.
+  if (!/\bWaves\s+Pest\s+Control\b/i.test(body)) return null;
   const allowed = allowHubAnchor ? hubLinkAnchorRanges(body) : [];
-  const brandRe = /\bWaves\s+Pest\s+Control\b/g;
+  const brandRe = /\bWaves\s+Pest\s+Control\b/gi;
   let match;
   while ((match = brandRe.exec(body)) !== null) {
     const start = match.index;
@@ -119,6 +141,73 @@ function brandTokenFinding(text, domains, { allowHubAnchor = false } = {}) {
     if (!insideHubAnchor) {
       return finding('P0', 'BRAND_TOKEN_LEAK', 'Multi-domain page uses the literal "Waves Pest Control" outside a hub-link anchor instead of the {{brandName}} token — brand leaks across spoke domains.');
     }
+  }
+  return null;
+}
+
+// ── outbound-link gate ──────────────────────────────────────────────
+// Generated drafts link INTERNALLY only: the writer prompts mandate "never
+// invent URLs" / internal targets, and the audited live corpus is 100%
+// relative links. Any absolute URL pointing off the hub/spoke fleet is
+// therefore either a hallucinated citation or an injected spam/malicious
+// backlink (untrusted SERP/PAA text reaches the writer prompt), so it fails
+// CLOSED as a P0. If a citation domain is ever editorially approved, extend
+// the allowlist via CONTENT_ALLOWED_LINK_DOMAINS (comma-separated hostnames)
+// without a deploy.
+const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
+
+function normalizeHost(host) {
+  return String(host || '').trim().toLowerCase().replace(/\.$/, '').replace(/^www\./, '');
+}
+
+function allowedLinkHosts() {
+  const hosts = new Set();
+  for (const d of HUB_DOMAINS) hosts.add(normalizeHost(d));
+  for (const d of SPOKE_SITE_KEYS) hosts.add(normalizeHost(d));
+  for (const d of String(process.env.CONTENT_ALLOWED_LINK_DOMAINS || '').split(',')) {
+    const h = normalizeHost(d);
+    if (h) hosts.add(h);
+  }
+  return hosts;
+}
+
+// Absolute URLs anywhere in the text — markdown links/images, raw HTML
+// attributes, and bare prose URLs all contain this shape.
+const ABSOLUTE_URL_RE = /\bhttps?:\/\/[^\s<>()"'\]]+/gi;
+// href/src carrying an executable or data scheme — never valid in a draft.
+const UNSAFE_SCHEME_HREF_RE = /\b(?:href|src)\s*=\s*["']?\s*(?:javascript|data|vbscript|file)\s*:/i;
+// Protocol-relative URL (//host/path) — scheme-less external reference that
+// bypasses an https?:// scan. Requires a dotted host with a TLD so prose
+// slashes ("and//or", path fragments) don't trip it.
+const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=])\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?=[/\s"')\]]|$)/i;
+const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
+
+function externalLinkFinding(text) {
+  const body = String(text || '');
+  if (!body) return null;
+  if (UNSAFE_SCHEME_HREF_RE.test(body)) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains an href/src with an executable scheme (javascript:/data:) — remove it.');
+  }
+  const allowed = allowedLinkHosts();
+  const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
+  let m;
+  while ((m = urlRe.exec(body)) !== null) {
+    let host = null;
+    try { host = new URL(m[0]).hostname; } catch { host = null; }
+    const norm = normalizeHost(host);
+    if (!norm || !allowed.has(norm)) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || m[0].slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
+    }
+  }
+  const mailtoRe = new RegExp(MAILTO_RE.source, 'gi');
+  while ((m = mailtoRe.exec(body)) !== null) {
+    if (!m[1].toLowerCase().endsWith('@wavespestcontrol.com')) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link to "${m[1]}" — only @wavespestcontrol.com addresses are allowed.`);
+    }
+  }
+  const proto = body.match(PROTOCOL_RELATIVE_RE);
+  if (proto) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a protocol-relative URL ("${proto[0].trim()}") — use a relative internal path or an allowlisted absolute URL.`);
   }
   return null;
 }
@@ -242,6 +331,9 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   const findings = [
     // Price must cover everything that ships: body AND meta.
     priceFinding(publishableText),
+    // Outbound links are scanned across body AND meta too — an injected spam
+    // URL hiding in a meta description ships exactly like one in the body.
+    externalLinkFinding(publishableText),
     // Brand-token covers body AND meta too, but the hub-anchor exemption applies
     // ONLY to body markdown — editable meta is scanned strictly (a literal hub
     // brand in a spoke's title/description is a real leak, not an anchor).
@@ -270,5 +362,8 @@ module.exports = {
   isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
   KEYWORD_DENSITY_MAX,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES },
+  // single source of truth for the hardcoded-price policy — consumed by
+  // seo-completion-gate so the two price P0s can never drift again.
+  findHardcodedPrice,
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts },
 };

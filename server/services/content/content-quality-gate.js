@@ -14,7 +14,8 @@
  *   Extra checks by page type:
  *     city-service        nap_consistent, local_proof_present,
  *                         cta_above_fold, service_menu_present,
- *                         FAQ_from_customer_calls, LocalBusiness+Service schema
+ *                         FAQ_from_customer_calls, LocalBusiness+Service schema,
+ *                         redaction_passed
  *     customer-question   answer_in_first_paragraph,
  *                         source_internal_link, redaction_passed,
  *                         (FAQPage schema NOT required — deprecated May 7 2026)
@@ -104,6 +105,13 @@ const PAGE_TYPE_CHECKS = {
     { name: 'service_menu_present', weight: 6, evaluate: checkServiceMenu },
     { name: 'faq_from_customer_calls', weight: 6, evaluate: checkFaqFromCustomer },
     { name: 'localbusiness_service_schema', weight: 6, isHard: true, evaluate: checkLocalBusinessServiceSchema },
+    // Hard: city-service bodies are built from customer-derived signals
+    // (FAQ-from-calls, local proof) exactly like customer-question pages,
+    // but this was the ONE body-writing lane with no publish-time PII
+    // check — a customer name/phone/email surviving the insights miner's
+    // redactor published unchecked. Same check the customer-question
+    // bundle enforces.
+    { name: 'redaction_passed', weight: 8, isHard: true, evaluate: checkRedactionPassed },
   ],
   'customer-question': [
     // Both hard: commons (37) + redaction (8) = 45 already clears this
@@ -147,7 +155,7 @@ const PAGE_TYPE_CHECKS = {
 // Common hard checks sum to 37. Ceiling → threshold per page type
 // (75% of ceiling, floored at one-worst-case-soft-miss — see
 // computeMinTotalScores):
-//   city-service      37+36 = 73 → 54 (75% formula; hard sum 43)
+//   city-service      37+44 = 81 → 60 (75% formula; hard sum 51)
 //   customer-question 37+22 = 59 → 59 (all-hard bundle)
 //   refresh           37+10 = 47 → 47 (all-hard bundle)
 //   supporting-blog   37+20 = 57 → 51 (= 57 - voice 6; formula's 42 sat
@@ -367,11 +375,13 @@ function checkPreviewSuccess(_draft, _brief, context) {
 
 function checkNapConsistent(draft, brief) {
   const body = String(draft.body || '');
-  // NAP = Name, Address, Phone. For a city-service page, must include
-  // a Waves phone number tied to that city (per the WAVES_HUB_CITY_PHONES
-  // mapping in the repo) and a service-area mention.
+  // NAP = Name, Address, Phone. For a city-service page, must include a
+  // WAVES phone number (WAVES_PHONES allowlist). The previous any-phone
+  // regex let a stray CUSTOMER number satisfy the "phone present"
+  // requirement — the one check meant to assert the business's own NAP.
   if (!/Waves Pest Control/i.test(body)) return { ok: false, reason: 'business_name_missing' };
-  if (!/\b\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(body)) return { ok: false, reason: 'phone_missing' };
+  const phones = body.match(/\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g) || [];
+  if (!phones.some(isWavesPhone)) return { ok: false, reason: 'waves_phone_missing' };
   return { ok: true };
 }
 
@@ -508,14 +518,23 @@ function checkSourceInternalLink(draft) {
   return { ok: true };
 }
 
-// Explicit allowlist of known Waves phone numbers (last 7 digits — all
-// in the 941 area code today). Per memory: 318-7612 LWR/Bradenton,
-// 297-2817 Parrish, 297-2606 Sarasota, 297-3337 Venice, 240-2066 NP,
-// 297-5749 main (PC + Palmetto). Anything not on the list is treated
-// as customer PII regardless of area code.
-const WAVES_PHONE_LAST_SEVEN = new Set([
-  '3187612', '2972817', '2972606', '2973337', '2402066', '2975749',
+// Explicit allowlist of known Waves phone numbers — FULL 10 digits (all 941
+// today, from server/config/locations.js): 318-7612 LWR/Bradenton, 297-2817
+// Parrish, 297-2606 Sarasota, 297-3337 Venice, 240-2066 NP, 297-5749 main
+// (PC + Palmetto). Keyed on the full number: the previous last-7 key let any
+// customer number sharing a Waves line's last seven digits in a DIFFERENT
+// area code pass as the business phone. Anything not on the list is treated
+// as customer PII.
+const WAVES_PHONES = new Set([
+  '9413187612', '9412972817', '9412972606', '9412973337', '9412402066', '9412975749',
 ]);
+
+function isWavesPhone(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  // Normalize to last 10 digits (drops a leading 1).
+  const last10 = digits.length >= 10 ? digits.slice(-10) : null;
+  return !!last10 && WAVES_PHONES.has(last10);
+}
 
 function checkRedactionPassed(draft) {
   const body = String(draft.body || '');
@@ -527,15 +546,18 @@ function checkRedactionPassed(draft) {
   const phoneMatches = body.match(phoneRe) || [];
   for (const raw of phoneMatches) {
     const digits = raw.replace(/\D/g, '');
-    // Normalize to last 10 digits (drops a leading 1).
     const last10 = digits.length >= 10 ? digits.slice(-10) : null;
     if (!last10) return { ok: false, reason: 'malformed_phone_number_in_body' };
-    const last7 = last10.slice(-7);
-    if (!WAVES_PHONE_LAST_SEVEN.has(last7)) {
+    if (!WAVES_PHONES.has(last10)) {
       return { ok: false, reason: `non_business_phone_number_in_body:${last10}` };
     }
   }
-  if (/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/.test(body)) {
+  // Waves' own addresses are legitimate page furniture (city-service NAP
+  // blocks carry info@wavespestcontrol.com); every other email is customer
+  // PII. The previous any-email hard fail false-positived the business's
+  // own contact line.
+  const emails = body.match(/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/g) || [];
+  if (emails.some((e) => !e.toLowerCase().endsWith('@wavespestcontrol.com'))) {
     return { ok: false, reason: 'email_in_body' };
   }
   return { ok: true };

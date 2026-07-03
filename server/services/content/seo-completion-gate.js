@@ -13,7 +13,7 @@ const {
   extractVisibleFaqs,
   pestPracticesComplete,
 } = require('./blog-seo-contract');
-const { isFaqBlockedService } = require('./content-guardrails');
+const { isFaqBlockedService, findHardcodedPrice } = require('./content-guardrails');
 
 const P0_CODES = new Set([
   'P0_MISSING_TITLE',
@@ -265,8 +265,13 @@ function schemaMentionsHiddenFaq(draft = {}, renderedHtml = null) {
   return /FAQPage/i.test(schemaText) && extractVisibleFaqs(body).length === 0;
 }
 
-const WAVES_PHONE_LAST_SEVEN = new Set([
-  '3187612', '2972817', '2972606', '2973337', '2402066', '2975749',
+// Full 10-digit Waves lines (all 941 — from server/config/locations.js:
+// 318-7612 LWR/Bradenton, 297-2817 Parrish, 297-2606 Sarasota, 297-3337
+// Venice, 240-2066 NP, 297-5749 main). Keyed on the FULL number: a last-7
+// key let any customer number sharing a Waves line's last seven digits in a
+// different area code pass as "the business phone".
+const WAVES_PHONES = new Set([
+  '9413187612', '9412972817', '9412972606', '9412973337', '9412402066', '9412975749',
 ]);
 
 function detectPii(body = '') {
@@ -277,21 +282,16 @@ function detectPii(body = '') {
     const digits = raw.replace(/\D/g, '');
     const last10 = digits.length >= 10 ? digits.slice(-10) : null;
     if (!last10) return true;
-    if (!WAVES_PHONE_LAST_SEVEN.has(last10.slice(-7))) return true;
+    if (!WAVES_PHONES.has(last10)) return true;
   }
   return /[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/.test(text);
 }
 
+// Single-sourced from content-guardrails (comma-grouped amounts, single-digit
+// prices, calculator-framing AND regulatory-fine exemptions) — this gate's
+// previous private copy had drifted on all four.
 function detectHardcodedPrice(body = '') {
-  const text = String(body || '');
-  const priceRe = /(^|[\s(])\$\s?\d{2,5}\b|\b\d{2,5}\s+(?:dollars|bucks)\b/gi;
-  let match;
-  while ((match = priceRe.exec(text)) !== null) {
-    const window = text.slice(Math.max(0, match.index - 80), Math.min(text.length, match.index + 120));
-    if (/\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
-    return true;
-  }
-  return false;
+  return findHardcodedPrice(body) !== null;
 }
 
 function hasDuplicateIntentFailure(result = {}) {

@@ -246,3 +246,92 @@ describe('isFaqBlockedService (exported policy helper)', () => {
     }
   });
 });
+
+describe('hardcoded price: comma-grouped and single-digit amounts (regression)', () => {
+  test('comma-grouped price is P0 — "$1,200" previously produced no finding at all', () => {
+    const r = guardrails.evaluate({ body: 'A termite bond costs $1,200 per year with no exceptions.' }, {});
+    expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE' && f.severity === 'P0')).toBe(true);
+  });
+  test('five-figure comma price and "dollars" word form are P0', () => {
+    expect(guardrails.findHardcodedPrice('Full tenting runs $12,500 for large homes.')).toBe('$12,500');
+    expect(guardrails.findHardcodedPrice('Expect to pay 1,200 dollars up front.')).toBe('1,200 dollars');
+  });
+  test('single-digit price is P0 — "$9" previously slipped the 2-digit minimum', () => {
+    const r = guardrails.evaluate({ body: 'The bait stations cost $9 each at the store.' }, {});
+    expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE' && f.severity === 'P0')).toBe(true);
+  });
+  test('comma-grouped amounts keep the calculator and regulatory exemptions', () => {
+    expect(guardrails.findHardcodedPrice('Use our calculator — most quotes land near $1,200 depending on home size.')).toBe(null);
+    expect(guardrails.findHardcodedPrice('The county ordinance carries fines of up to $1,000 per violation.')).toBe(null);
+  });
+  test('findHardcodedPrice is exported for the seo-completion gate (single-sourced policy)', () => {
+    expect(typeof guardrails.findHardcodedPrice).toBe('function');
+    expect(guardrails.findHardcodedPrice('no price talk here')).toBe(null);
+  });
+});
+
+describe('brand-token leak: case-insensitive (regression)', () => {
+  const spokeDomains = ['sarasotaflpestcontrol.com'];
+  test('ALL-CAPS and lowercase brand leak on a spoke like the canonical casing', () => {
+    for (const brand of ['WAVES PEST CONTROL', 'waves pest control', 'Waves Pest Control']) {
+      const r = guardrails.evaluate({ body: `${brand} treats homes here.` }, { domains: spokeDomains });
+      expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+  test('hub-anchor exemption still applies regardless of casing', () => {
+    const body = 'Backed by [waves pest control in Sarasota](https://www.wavespestcontrol.com/pest-control-sarasota-fl/).';
+    const r = guardrails.evaluate({ body }, { domains: spokeDomains });
+    expect(r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK')).toBe(false);
+  });
+});
+
+describe('outbound-link gate (DISALLOWED_EXTERNAL_LINK)', () => {
+  test('an off-fleet absolute link is P0 — the injected-spam-backlink shape', () => {
+    const r = guardrails.evaluate({ body: 'Read [this guide](https://evil-seo.example/buy-links) for more.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+  test('hub, spoke, and relative internal links are allowed', () => {
+    const body = [
+      'See [the hub](https://www.wavespestcontrol.com/pest-library/),',
+      'the spoke at https://sarasotaflpestcontrol.com/blog/x/,',
+      'and [pricing](/pest-control-calculator/).',
+    ].join(' ');
+    const r = guardrails.evaluate({ body }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+  test('a spam URL hiding in editable meta is scanned too', () => {
+    const r = guardrails.evaluate({
+      body: 'Clean body copy.',
+      frontmatter: { meta_description: 'Best tips — see https://spam.example/x for more.' },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+  test('executable schemes and protocol-relative URLs are P0', () => {
+    expect(guardrails.evaluate({ body: '<a href="javascript:alert(1)">x</a>' }, {}).pass).toBe(false);
+    expect(guardrails.evaluate({ body: 'Load from //cdn.evil.example/x.js today.' }, {}).pass).toBe(false);
+  });
+  test('mailto: only allows the business domain', () => {
+    expect(guardrails.evaluate({ body: 'Email [us](mailto:info@wavespestcontrol.com).' }, {}).findings
+      .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    expect(guardrails.evaluate({ body: 'Email [me](mailto:bob@gmail.com).' }, {}).findings
+      .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+  test('prose slashes and path fragments do not trip the protocol-relative check', () => {
+    const r = guardrails.evaluate({ body: 'Rates vary and//or depend on size; see src//content notes.' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+  test('CONTENT_ALLOWED_LINK_DOMAINS extends the allowlist without a deploy', () => {
+    const prev = process.env.CONTENT_ALLOWED_LINK_DOMAINS;
+    process.env.CONTENT_ALLOWED_LINK_DOMAINS = 'entnemdept.ufl.edu, epa.gov';
+    try {
+      const r = guardrails.evaluate({ body: 'Per [UF/IFAS](https://entnemdept.ufl.edu/creatures/) research.' }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+      const r2 = guardrails.evaluate({ body: 'Per [somewhere](https://other.example/) instead.' }, {});
+      expect(r2.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.CONTENT_ALLOWED_LINK_DOMAINS;
+      else process.env.CONTENT_ALLOWED_LINK_DOMAINS = prev;
+    }
+  });
+});

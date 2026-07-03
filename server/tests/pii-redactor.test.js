@@ -219,3 +219,44 @@ describe('internals', () => {
     expect(looksLikeFalsePositiveName('Tracy', 'Smith')).toBe(false);
   });
 });
+
+describe('lowercase transcripts (regression — the heuristics were capitalization-blind)', () => {
+  test('lowercase address and self-introduced name are redacted', () => {
+    const r = redact('my name is john smith and i live at 4867 maple street in bradenton');
+    expect(r.text).toContain('[name]');
+    expect(r.text).toContain('[address]');
+    expect(r.text).not.toContain('john');
+    expect(r.text).not.toContain('4867');
+  });
+  test('lowercase FL ZIP is redacted', () => {
+    const r = redact('we are in venice florida 34285 near the beach');
+    expect(r.text).toContain('[zip]');
+    expect(r.text).not.toContain('34285');
+  });
+  test('an effectively all-lowercase text can never report high confidence', () => {
+    // Pre-fix, this exact shape returned the text UNCHANGED with confidence
+    // 'high', so the downstream "never quote low confidence" guard never fired.
+    const r = redact('my name is john smith and i live at 4867 maple street in bradenton');
+    expect(r.confidence).toBe('low');
+    const noHit = redact('please just have somebody call me back about the ants in the kitchen whenever you get a chance');
+    expect(noHit.confidence).toBe('low');
+  });
+  test('short lowercase fragments keep high confidence (no PII surface)', () => {
+    expect(redact('ok thanks').confidence).toBe('high');
+  });
+  test('measure words do not false-positive as lowercase addresses', () => {
+    const r = redact('its about a 10 minute drive from the office and takes 3 easy steps to set up');
+    expect(r.text).not.toContain('[address]');
+  });
+  test('lowercase name signal ignores non-name continuations and allowlisted tokens', () => {
+    expect(redact('my name is not on the account but my husband handles it').text).not.toContain('[name]');
+    // staff/owner names stay (allowlist, case-insensitive)
+    expect(redact('my name is adam by the way').text).toContain('adam');
+  });
+  test('capitalized behavior is unchanged', () => {
+    const r = redact('Hi, this is John Smith at 4867 Maple Street');
+    expect(r.text).toContain('[name]');
+    expect(r.text).toContain('[address]');
+    expect(r.confidence).toBe('medium');
+  });
+});

@@ -115,10 +115,13 @@ describe('hard checks: schema/canonical/indexable', () => {
 // ── city-service checks ─────────────────────────────────────────────
 
 describe('city-service: nap / proof / cta / menu / faq / schema', () => {
-  test('NAP check requires brand + phone', () => {
-    expect(checkNapConsistent({ body: 'Waves Pest Control · 941-555-1234' }).ok).toBe(true);
+  test('NAP check requires brand + a WAVES phone (not just any phone)', () => {
+    expect(checkNapConsistent({ body: 'Waves Pest Control · (941) 297-2606' }).ok).toBe(true);
     expect(checkNapConsistent({ body: 'No phone here.' }).ok).toBe(false);
-    expect(checkNapConsistent({ body: 'Just 941-555-1234' }).ok).toBe(false);
+    expect(checkNapConsistent({ body: 'Just (941) 297-2606' }).ok).toBe(false);
+    // A stray CUSTOMER number must NOT satisfy the business-NAP requirement —
+    // the pre-fix any-phone regex accepted it as "the phone".
+    expect(checkNapConsistent({ body: 'Waves Pest Control · 941-555-1234' })).toEqual({ ok: false, reason: 'waves_phone_missing' });
   });
   test('local proof requires quantified/quoted/tech signal', () => {
     expect(checkLocalProof({ body: '500+ jobs in Bradenton' }).ok).toBe(true);
@@ -170,6 +173,13 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
     expect(checkRedactionPassed({ body: 'Reach me at 941-555-9876.' }).ok).toBe(false);
     // Parenthesized customer number — earlier regex missed this entirely.
     expect(checkRedactionPassed({ body: 'My cell is (212) 555-1234.' }).ok).toBe(false);
+    // A customer number sharing a Waves line's LAST SEVEN digits in another
+    // area code — the pre-fix last-7 allowlist key accepted it as Waves.
+    expect(checkRedactionPassed({ body: 'Call 212-318-7612 anytime.' }).ok).toBe(false);
+  });
+  test('redaction: Waves\' own email is page furniture, customer emails are PII', () => {
+    expect(checkRedactionPassed({ body: 'Email info@wavespestcontrol.com to book.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'Email info@wavespestcontrol.com or karen@gmail.com.' }).ok).toBe(false);
   });
 });
 
@@ -292,7 +302,7 @@ describe('evaluate (full gate)', () => {
     // checks alone satisfy would let a draft miss EVERY soft check. The
     // old single global threshold (city-service-derived 54) made smaller
     // bundles unpassable: refresh maxes at 47.
-    expect(MIN_TOTAL_SCORES['city-service']).toBe(54); // 75% formula (hard sum 43)
+    expect(MIN_TOTAL_SCORES['city-service']).toBe(60); // 75% formula (ceiling 81, hard sum 51 incl. redaction 8)
     expect(MIN_TOTAL_SCORES['customer-question']).toBe(59); // all-hard bundle
     expect(MIN_TOTAL_SCORES.refresh).toBe(47); // all-hard bundle
     expect(MIN_TOTAL_SCORES['supporting-blog']).toBe(51); // 57 - voice 6

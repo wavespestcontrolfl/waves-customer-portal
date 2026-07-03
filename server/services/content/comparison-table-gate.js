@@ -8,11 +8,18 @@
  * earns that demand by HELPING the reader choose, never by faking a ranking or
  * trashing competitors.
  *
- * SCOPE: only drafts that embed a <ComparisonTable> are scrutinized; others pass
- * untouched. For a comparison draft, the competitor / disparagement / ranking
- * checks scan the whole body PLUS the title/meta (the public legal surface), and
- * the option-column classification FAILS CLOSED on anything that is not a
- * recognized provider CATEGORY, Waves, or a curated allowlist competitor.
+ * SCOPE: drafts that embed a <ComparisonTable> get the FULL regime — the
+ * competitor / disparagement / ranking checks scan the whole body PLUS the
+ * title/meta (the public legal surface), and the option-column classification
+ * FAILS CLOSED on anything that is not a recognized provider CATEGORY, Waves,
+ * or a curated allowlist competitor.
+ *
+ * Drafts WITHOUT a table are no longer waved through: they get the NAMED-
+ * TARGET legal scan (evaluateProse below). Defamation needs a target, and a
+ * table-less draft was previously never scanned at all — "Acme Pest Solutions
+ * is dishonest" in ordinary prose passed every gate. Category negativity with
+ * no named business ("store-bought sprays are useless", consumer-protection
+ * prose like "avoid pest control scams") deliberately does NOT trip it.
  *
  * NAMED competitors are doubly guarded: the gate enforces allowlist + per-table
  * sourced attribution + only-curated-facts + no-disparagement/ranking, AND a
@@ -259,6 +266,96 @@ function claimSupported(text, attrValues) {
   return false;
 }
 
+function draftScanTexts(draft, body) {
+  const fm = draft?.frontmatter || {};
+  const metaText = ['title', 'meta_description', 'metaTitle', 'metaDescription']
+    .map((k) => fm[k]).filter(Boolean).map(String).join('\n');
+  return metaText ? `${body}\n${metaText}` : body;
+}
+
+/**
+ * evaluateProse(draft, body) — the table-less legal scan. Flags:
+ *   P0 COMPARISON_DISPARAGEMENT   — a disparaging/negative term within
+ *      proximity of ANY business-looking name (curated competitor, provider-
+ *      suffix name, or legal-entity name)
+ *   P1 COMPARISON_NEGATIVE_RELIABILITY — a service-reliability negative near
+ *      a business-looking name
+ *   P0 COMPARISON_UNKNOWN_COMPETITOR   — a recognized competitor NOT on the
+ *      curated allowlist named anywhere (its claims can't be verified)
+ *   P1 COMPARISON_COMPETITOR_IN_PROSE  — an allowlisted competitor named
+ *      outside a comparison table (existing policy: table cells only, where
+ *      every claim is validated)
+ * A business-shaped name with NO nearby negativity is fine here (unlike the
+ * table path's fail-closed UNCLASSIFIED_OPTION) — "Sarasota Pest Control
+ * Guide" as a title must not block a normal post.
+ */
+function evaluateProse(draft, body) {
+  const findings = [];
+  const scanText = draftScanTexts(draft, body);
+  const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
+  const nameScanText = stripQuotesForNames(scanText);
+
+  const known = new Set();
+  const unknown = new Set();
+  const candidates = new Set();
+  for (const m of competitorFacts.findBusinessMentions(nameScanText)) {
+    (m.inAllowlist ? known : unknown).add(m.name);
+  }
+  for (const m of nameScanText.matchAll(providerNameRe('g'))) {
+    const nm = m[1].trim();
+    if (!OWN_BRAND_RE.test(nm)) candidates.add(nm);
+  }
+  for (const m of nameScanText.matchAll(legalEntityRe('g'))) {
+    const nm = m[1].trim();
+    if (!OWN_BRAND_RE.test(nm)) candidates.add(nm);
+  }
+  for (const n of known) candidates.add(n);
+  for (const n of unknown) candidates.add(n);
+
+  if (candidates.size) {
+    const names = [...candidates];
+    const nearCandidate = (idx, len) => {
+      const window = nameScanText
+        .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+      return names.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
+    };
+    // Disparaging term OR negative adjective near a business name → P0.
+    const p0Re = new RegExp(`${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b`, 'gi');
+    let am;
+    while ((am = p0Re.exec(scanText)) !== null) {
+      if (nearCandidate(am.index, am[0].length)) {
+        findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+          `Draft disparages a named business ("${am[0].trim()}" near a business name). State neutral attributes only — in prose, the title, and the meta.`));
+        break;
+      }
+    }
+    // Negative service-reliability claim near a business name → P1 review.
+    const negRe = new RegExp(PROVIDER_NEGATIVE_RE.source, 'gi');
+    let nm;
+    while ((nm = negRe.exec(scanText)) !== null) {
+      if (nearCandidate(nm.index, nm[0].length)) {
+        findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
+          `Draft makes a negative service-reliability claim near a named business ("${nm[0].trim()}"). Routed to human review — state neutral, verifiable attributes only.`));
+        break;
+      }
+    }
+  }
+
+  for (const nm of unknown) {
+    findings.push(finding('P0', 'COMPARISON_UNKNOWN_COMPETITOR',
+      `Names "${nm}", a recognized competitor not on the curated competitor-facts allowlist — its claims cannot be verified. Remove the mention or add "${nm}" to competitor-facts.js with sourced, dated facts.`));
+  }
+  for (const nm of known) {
+    findings.push(finding('P1', 'COMPARISON_COMPETITOR_IN_PROSE',
+      `Names competitor "${nm}" in prose/title/meta with no comparison table — claims there are not validated against competitor-facts.js. Name a competitor ONLY inside a <ComparisonTable> (every cell is checked).`));
+  }
+
+  const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
+  return { pass, findings, requiresHumanReview: false };
+}
+
 /**
  * evaluate(draft, { namedCompetitorEnabled }) → { pass, findings, requiresHumanReview }
  */
@@ -266,12 +363,13 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   const body = String(draft?.body || draft?.content || '');
   const findings = [];
   const blocks = extractComparisonBlocks(body);
-  if (!body || blocks.length === 0) return { pass: true, findings, requiresHumanReview: false };
+  if (!body) return { pass: true, findings, requiresHumanReview: false };
+  if (blocks.length === 0) return evaluateProse(draft, body);
 
   const fm = draft?.frontmatter || {};
   const metaText = ['title', 'meta_description', 'metaTitle', 'metaDescription']
     .map((k) => fm[k]).filter(Boolean).map(String).join('\n');
-  const scanText = metaText ? `${body}\n${metaText}` : body;
+  const scanText = draftScanTexts(draft, body);
   // For NAME detection only, drop double quotes AND backslashes (so an embedded-
   // quote brand like All "U" Need Pest Control — or its escaped \"U\" form — is
   // read as one name, not a "Need Pest Control" fragment). Apostrophes are kept
@@ -504,6 +602,7 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
 
 module.exports = {
   evaluate,
+  evaluateProse,
   extractComparisonBlocks,
   extractCaption,
   extractColumns,

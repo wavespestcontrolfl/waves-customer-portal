@@ -24,8 +24,10 @@
  *   'medium' heuristic name detection fired OR address pattern matched
  *            (false-positive prone)
  *   'low'    text has long unstructured runs, mixed case proper nouns,
- *            or any unicode unrecognized class — gates downstream from
- *            quoting publicly
+ *            any unicode unrecognized class, OR is effectively all-
+ *            lowercase (the capitalized-name heuristics are blind there,
+ *            so nothing they "didn't find" can be trusted) — gates
+ *            downstream from quoting publicly
  *
  * Pure functions — no DB, no logger. Caller decides what to do with
  * `low` confidence output (typically: never quote publicly).
@@ -45,12 +47,14 @@ const PATTERNS = [
   { type: 'card', token: '[card]', re: /\b(?:\d[ -]?){13,19}\b/g },
 
   // Street addresses — house number + street name + suffix.
-  // Conservative: requires a numeric prefix, capitalized street name(s),
-  // and a recognized suffix abbreviation.
+  // Case-INSENSITIVE: SMS/voice transcripts are frequently all-lowercase
+  // ("i live at 4867 maple street"), and a capitalized-only pattern was
+  // blind to them. The lookahead excludes common measure words so casual
+  // phrases like "a 10 minute drive" / "3 easy steps" don't redact.
   {
     type: 'address',
     token: '[address]',
-    re: /\b\d{1,6}\s+([A-Z][a-zA-Z]+\s+){1,4}(St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Cir|Circle|Pl|Place|Pkwy|Parkway|Hwy|Highway|Ter|Terrace|Trl|Trail)\.?\b/g,
+    re: /\b\d{1,6}\s+(?!(?:minutes?|hours?|seconds?|days?|weeks?|months?|years?|miles?|blocks?|steps?|feet|foot|stars?|points?|percent|dollars?|bucks?)\b)([A-Za-z][a-zA-Z]+\s+){1,4}(St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Cir|Circle|Pl|Place|Pkwy|Parkway|Hwy|Highway|Ter|Terrace|Trl|Trail)\.?\b/gi,
   },
 
   // Long URLs — anything > 40 chars likely has tracking / query PII.
@@ -59,7 +63,7 @@ const PATTERNS = [
   // 5-digit ZIP only when adjacent to an FL state hint OR after a
   // redacted [address] marker (we redact a second pass after the address
   // pass to catch trailing ZIPs).
-  { type: 'zip', token: '[zip]', re: /\b(FL|Florida)\s+\d{5}(-\d{4})?\b/g },
+  { type: 'zip', token: '[zip]', re: /\b(FL|Florida)\s+\d{5}(-\d{4})?\b/gi },
 ];
 
 // Heuristic first+last name detection — separate pass so we can
@@ -83,6 +87,16 @@ const STANDALONE_NAME_PAIR = /\b([A-Z][a-z]{1,15})\s+([A-Z][a-z]{1,20})\b/g;
 // "Hi, this is Anthony" is still covered by the "this is" signal.
 const NAME_SIGNAL_SINGLE = /\b([Mm]y name is|[Tt]his is|[Ii]'?m|[Ii] am|[Nn]ame:|[Ii]t'?s)[,]?\s+([A-Z][a-z]{1,15})\b/g;
 
+// LOWERCASE names after an unambiguous signal. The capitalized heuristics
+// above are blind to all-lowercase transcripts ("my name is john smith"),
+// which are the NORM for SMS and voice-to-text. Only the strongest signals
+// qualify ("my name is" / "name:") — weaker ones ("this is", "i'm") are far
+// too ambiguous in lowercase prose ("this is great", "i'm sure"). The
+// stopword lookaheads keep "my name is not on the account" and similar
+// non-name continuations out; the allowlist check in redactNames still
+// protects staff/place tokens.
+const NAME_SIGNAL_LOWERCASE = /\b(my name is|name:)\s+(?!(?:not|no|the|a|an|on|in|at|to|so|very|really|actually|probably|still|already|also|just|spelled|pronounced|misspelled|wrong|correct|different)\b)([a-z][a-z'-]{1,15})(\s+(?!(?:and|but|i|we|you|calling|speaking|here|from|with|at|on|in|by|not|is|was)\b)[a-z][a-z'-]{1,20})?\b/g;
+
 // Words that look like names but are common false positives in this
 // domain (pest names, neighborhoods, products, businesses, etc.).
 const NAME_ALLOWLIST = new Set([
@@ -98,6 +112,8 @@ const NAME_ALLOWLIST = new Set([
   'Adam', // owner — name appears in public reviews already
   'Virginia', 'Jose', 'Jacob', 'Alvarado', 'Heaton', // staff
 ]);
+
+const NAME_ALLOWLIST_LOWER = new Set([...NAME_ALLOWLIST].map((w) => w.toLowerCase()));
 
 function looksLikeFalsePositiveName(first, last) {
   if (!first || !last) return true;
@@ -146,6 +162,17 @@ function redactNames(text, findings) {
     return `${prefix} [name]`;
   });
 
+  // Pass 1c: lowercase name(s) after an unambiguous signal ("my name is john
+  // smith"). Allowlist compare is case-insensitive here — the tokens arrive
+  // lowercase.
+  out = out.replace(NAME_SIGNAL_LOWERCASE, (match, prefix, first, last) => {
+    const lastClean = last ? last.trim() : '';
+    if (NAME_ALLOWLIST_LOWER.has(first) || (lastClean && NAME_ALLOWLIST_LOWER.has(lastClean))) return match;
+    if (first.length < 2) return match;
+    nameMatchCount++;
+    return `${prefix} [name]`;
+  });
+
   if (nameMatchCount > 0) findings.push({ type: 'name', count: nameMatchCount });
   return out;
 }
@@ -177,7 +204,25 @@ function redact(text) {
   // Downgrade to low if we still see suspicious unstructured runs.
   if (suspiciousUnstructured(out)) confidence = 'low';
 
+  // An (effectively) all-lowercase text is one the capitalization-based name
+  // heuristics are mostly BLIND to — the lowercase signal pass above only
+  // covers explicit self-introductions. Reporting 'high' here is what let
+  // lowercase transcripts with unredacted names sail past the downstream
+  // "never quote low confidence" protection. Cap at 'low' so such text is
+  // never quoted publicly, redacted or not.
+  if (effectivelyLowercase(String(text))) confidence = 'low';
+
   return { text: out, confidence, findings };
+}
+
+// True when the text is long enough to carry PII but has (almost) no
+// uppercase letters — i.e. the capitalized-name/address heuristics cannot be
+// trusted to have seen anything. Short fragments ("ok thanks") stay 'high'.
+function effectivelyLowercase(text) {
+  const letters = String(text).match(/[a-zA-Z]/g) || [];
+  if (letters.length < 40) return false;
+  const upper = letters.reduce((n, c) => n + (c >= 'A' && c <= 'Z' ? 1 : 0), 0);
+  return upper / letters.length < 0.02;
 }
 
 function suspiciousUnstructured(text) {
@@ -204,5 +249,6 @@ module.exports = {
     looksLikeFalsePositiveName,
     redactNames,
     suspiciousUnstructured,
+    effectivelyLowercase,
   },
 };

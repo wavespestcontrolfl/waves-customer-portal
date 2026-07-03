@@ -464,6 +464,21 @@ class AutonomousRunner {
     const factsCtx = run.facts_sufficiency;
     if (factsCtx && factsCtx.applicable && factsCtx.sufficient && draft) {
       const claimsValidator = getClaimsLedgerValidator();
+      if (!claimsValidator) {
+        // Fail CLOSED (same posture as the uniqueness-gate-unavailable path):
+        // this draft REQUIRES claims validation — a facts_pack was supplied
+        // and the agent was told to emit a ledger — so an unloadable
+        // validator must route to review, not silently skip the
+        // hallucinated-fact P0s.
+        run.claims_ledger_result = { pass: false, findings: [{ severity: 'P1', code: 'CLAIMS_LEDGER_UNAVAILABLE', message: 'claims-ledger-validator module failed to load' }] };
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'claims_ledger_unavailable',
+          reviewer_notes: 'Claims-ledger validator module failed to load — failing closed; draft routed to review instead of publishing unvalidated local claims.',
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_unavailable', { claimToken });
+        return finalized;
+      }
       if (claimsValidator) {
         let claimsResult;
         try {
@@ -498,9 +513,22 @@ class AutonomousRunner {
 
     // 3c. Content guardrails — page-policy checks on the drafted body
     // (hardcoded price on any page type, brand-token leak on multi-domain
-    // pages, FAQ on a policy-blocked service, keyword stuffing). Applies to
-    // every body-content action. P0/P1 → human review.
+    // pages, FAQ on a policy-blocked service, disallowed external links,
+    // keyword stuffing). Applies to every body-content action. P0/P1 →
+    // human review. Module-load failure fails CLOSED below — these are the
+    // price/brand/FAQ/link P0s, and a bad deploy must not silently disable
+    // them while runs keep publishing.
     const contentGuardrails = getContentGuardrails();
+    if (!contentGuardrails && draft) {
+      run.content_guardrails_result = { pass: false, findings: [{ severity: 'P0', code: 'CONTENT_GUARDRAILS_UNAVAILABLE', message: 'content-guardrails module failed to load' }] };
+      const finalized = await finalize(run, t0, {
+        outcome: 'skipped_gate_fail',
+        skip_reason: 'content_guardrails_unavailable',
+        reviewer_notes: 'Content-guardrails module failed to load — failing closed; draft routed to review instead of publishing without the price/brand/FAQ/link P0 checks.',
+      });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_unavailable', { claimToken });
+      return finalized;
+    }
     if (contentGuardrails && draft) {
       // For a refresh, the draft carries only editable meta — the live page's
       // domains are frozen by publishRefresh. Hydrate them so the brand-token
@@ -582,11 +610,24 @@ class AutonomousRunner {
     // buyer's-guide listicles honest: no disparagement, no self-declared
     // rankings, named competitors only from the curated competitor-facts
     // allowlist, and every named-competitor post routed to a human. Applies to
-    // any body-content action; a draft with no comparison table passes
-    // untouched. P0/P1 → human review. namedCompetitorComparison is gated OFF
-    // in prod by default, so a named-competitor draft routes to review rather
-    // than auto-publishing until the owner enables it.
+    // any body-content action; a draft with NO comparison table still gets the
+    // named-target legal scan (disparagement/reliability negativity near a
+    // business name, competitor naming outside a table). P0/P1 → human review.
+    // namedCompetitorComparison is gated OFF in prod by default, so a
+    // named-competitor draft routes to review rather than auto-publishing
+    // until the owner enables it. Module-load failure fails CLOSED below —
+    // these are the disparagement/unknown-competitor P0s.
     const comparisonGate = getComparisonTableGate();
+    if (!comparisonGate && draft) {
+      run.comparison_table_result = { pass: false, findings: [{ severity: 'P1', code: 'COMPARISON_TABLE_GATE_UNAVAILABLE', message: 'comparison-table-gate module failed to load' }] };
+      const finalized = await finalize(run, t0, {
+        outcome: 'skipped_gate_fail',
+        skip_reason: 'comparison_table_unavailable',
+        reviewer_notes: 'Comparison-table gate module failed to load — failing closed; draft routed to review instead of publishing without the disparagement/competitor checks.',
+      });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_unavailable', { claimToken });
+      return finalized;
+    }
     if (comparisonGate && draft) {
       let namedCompetitorEnabled = false;
       try {

@@ -98,10 +98,18 @@ describe('comparison-table-gate', () => {
     expect(r.pass).toBe(true);
   });
 
-  test('finding B: a non-comparison draft mentioning a competitor/IPM passes untouched', () => {
+  test('finding B (superseded): a non-comparison draft naming a competitor now routes to review', () => {
+    // Previously this passed untouched — the no-table early return skipped
+    // ALL scanning, so prose competitor claims (and defamation) were never
+    // checked. Policy: a competitor may be named ONLY inside a
+    // <ComparisonTable>, where every cell is validated. IPM/category prose
+    // without the competitor name still passes (see the table-less suite).
     const r = gate.evaluate({ body: 'Integrated Pest Management works. Orkin is a national brand. No table here.' }, { namedCompetitorEnabled: true });
-    expect(r.pass).toBe(true);
-    expect(r.findings).toHaveLength(0);
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE' && f.severity === 'P1')).toBe(true);
+    const clean = gate.evaluate({ body: 'Integrated Pest Management works. No table here.' }, { namedCompetitorEnabled: true });
+    expect(clean.pass).toBe(true);
+    expect(clean.findings).toHaveLength(0);
   });
 
   test('finding E: a self-declared ranking in PROSE (outside the table) is caught', () => {
@@ -551,5 +559,47 @@ describe('comparison-table-gate', () => {
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
     expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
+});
+
+describe('table-less drafts: named-target legal scan (regression — these previously passed untouched)', () => {
+  test('disparaging an arbitrary business-shaped name in plain prose is P0', () => {
+    const r = gate.evaluate({ body: 'Acme Pest Solutions is dishonest and will overcharge you for everything they do.' });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+  test('a negative service-reliability claim near a business name is P1', () => {
+    const r = gate.evaluate({ body: 'Gulf Coast Termite Specialists never answers the phone when customers call about warranty work.' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY' && f.severity === 'P1')).toBe(true);
+  });
+  test('an allowlisted competitor named in prose with no table is P1 (table cells only)', () => {
+    const r = gate.evaluate({ body: 'Orkin offers free same-day service in Sarasota, which many homeowners like.' }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE' && f.severity === 'P1')).toBe(true);
+  });
+  test('title/meta are part of the scanned legal surface', () => {
+    const r = gate.evaluate({
+      body: 'Ordinary body copy about ants.',
+      frontmatter: { meta_description: 'Why Terminix is unreliable and what to do instead.' },
+    });
+    expect(r.pass).toBe(false);
+  });
+  test('a clean normal blog post passes', () => {
+    const r = gate.evaluate({ body: 'Centipedes eat roaches, silverfish, and other small insects around Southwest Florida homes.' });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('a business-shaped phrase with NO nearby negativity does not block (unlike the table path)', () => {
+    const r = gate.evaluate({
+      body: 'Here is how to keep ants out of your kitchen this summer.',
+      frontmatter: { title: 'Sarasota Pest Control Guide: Kitchen Ants' },
+    });
+    expect(r.pass).toBe(true);
+  });
+  test('consumer-protection prose with no named target stays allowed', () => {
+    const r = gate.evaluate({ body: 'Avoid pest control scams by checking licenses. Watch out for hidden fees when comparing quotes.' });
+    expect(r.pass).toBe(true);
+  });
+  test('empty body still passes', () => {
+    expect(gate.evaluate({ body: '' }).pass).toBe(true);
   });
 });
