@@ -3307,7 +3307,7 @@ export default function EstimateViewPage() {
         </>
       )}
 
-      <AppShowcaseCard />
+      <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
       <CustomerReviews />
       <QuestionsEscapeHatch estimateSlug={estimate.slug} />
       <GuaranteeStrip licenseNumber={estimate.licenseNumber} />

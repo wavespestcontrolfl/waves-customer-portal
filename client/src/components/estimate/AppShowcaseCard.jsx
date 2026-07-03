@@ -89,7 +89,10 @@ function StoreBadge({ url, label, children }) {
   );
 }
 
-export default function AppShowcaseCard() {
+// onBookToday: scroll-to-booking callback — the "Book today!" CTA renders
+// only when the page can actually self-book (omitted on accepted/terminal
+// and review-before-booking states).
+export default function AppShowcaseCard({ onBookToday = null }) {
   const anyStoreLive = !!(APP_STORE_URL || PLAY_STORE_URL);
   return (
     <section style={estimateCard()}>
@@ -174,6 +177,29 @@ export default function AppShowcaseCard() {
           ) : null}
         </div>
       </div>
+
+      {onBookToday ? (
+        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 18 }}>
+          <button
+            type="button"
+            onClick={onBookToday}
+            style={{
+              minHeight: 44,
+              minWidth: 220,
+              padding: '0 28px',
+              background: W.blueDeeper,
+              color: W.white,
+              border: 'none',
+              borderRadius: 10,
+              fontSize: 15,
+              fontWeight: 800,
+              cursor: 'pointer',
+            }}
+          >
+            Book today!
+          </button>
+        </div>
+      ) : null}
     </section>
   );
 }
