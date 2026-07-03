@@ -1159,7 +1159,11 @@ export default function CreateProjectModal({
               </div>
 
               <div>
-                <label style={labelStyle}>Inspection / project date</label>
+                {/* The certificate has no separate findings-level date — this
+                    project date IS the date of treatment it prints. */}
+                <label style={labelStyle}>
+                  {projectType === 'pre_treatment_termite_certificate' ? 'Date of treatment' : 'Inspection / project date'}
+                </label>
                 <input
                   type="date"
                   value={projectDate}

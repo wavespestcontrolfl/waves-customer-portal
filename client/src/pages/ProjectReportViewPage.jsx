@@ -229,6 +229,7 @@ const FIELD_LABELS = {
   linear_feet: 'Linear feet treated',
   trench_depth_ft: 'Trench / rod depth (ft)',
   gallons_applied: 'Gallons applied',
+  additional_applications: 'Additional applications',
   applicator_name: "Applicator's printed name",
   applicator_fdacs_id: 'Applicator FDACS ID #',
   applicator_attestation: 'Applicator attestation',
@@ -811,22 +812,24 @@ function AtAGlance({ rows }) {
  * concentration, sq ft, gallons, FDACS ID, warranty) satisfy FDACS Rule
  * 5E-14.106 treatment-record requirements simultaneously.
  */
-function CertificateOfCompliance({ findings, customerName, customerAddress, technicianName, projectDateLabel }) {
-  const f = findings || {};
-  const method = f.treatment_method === 'Other' && f.treatment_method_other
-    ? f.treatment_method_other
-    : f.treatment_method;
-  const product = f.product_name === 'Other' && f.product_name_other
-    ? f.product_name_other
-    : f.product_name;
-  const productLine = [product, f.epa_registration ? `EPA Reg. ${f.epa_registration}` : '']
+// Per-application display lines (method / product / A.I. / coverage) —
+// computed identically for the flat primary-application keys and for each
+// additional_applications row.
+function certificateApplicationLines(app = {}) {
+  const method = app.treatment_method === 'Other' && app.treatment_method_other
+    ? app.treatment_method_other
+    : app.treatment_method;
+  const product = app.product_name === 'Other' && app.product_name_other
+    ? app.product_name_other
+    : app.product_name;
+  const productLine = [product, app.epa_registration ? `EPA Reg. ${app.epa_registration}` : '']
     .filter(Boolean)
     .join(' · ');
   const aiLine = [
-    f.active_ingredient,
-    f.concentration_pct ? `${String(f.concentration_pct).replace(/%$/, '')}%` : '',
+    app.active_ingredient,
+    app.concentration_pct ? `${String(app.concentration_pct).replace(/%$/, '')}%` : '',
   ].filter(Boolean).join(' — ');
-  const trenchDepthRaw = String(f.trench_depth_ft || '').trim();
+  const trenchDepthRaw = String(app.trench_depth_ft || '').trim();
   const trenchDepthLine = !trenchDepthRaw
     ? ''
     : /depth/i.test(trenchDepthRaw)
@@ -835,11 +838,76 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
       // create form accepts it, so appending ft would print "6 in ft depth".
       : `${valueWithUnit(trenchDepthRaw, 'ft', /("|\b(ft|foot|feet|inch|inches)\b|\din\b|\bin\b)/i)} depth`;
   const coverageLine = [
-    valueWithUnit(f.square_footage, 'sq ft', /\b(sq\.?\s*ft|square\s*feet|sf)\b/i),
-    valueWithUnit(f.linear_feet, 'linear ft', /\b(linear\s*ft|lineal\s*ft|lf)\b/i),
+    valueWithUnit(app.square_footage, 'sq ft', /\b(sq\.?\s*ft|square\s*feet|sf)\b/i),
+    valueWithUnit(app.linear_feet, 'linear ft', /\b(linear\s*ft|lineal\s*ft|lf)\b/i),
     trenchDepthLine,
-    gallonsApplied(f.gallons_applied),
+    gallonsApplied(app.gallons_applied),
   ].filter(Boolean).join(' · ');
+  return { method, productLine, aiLine, coverageLine };
+}
+
+// Additional per-product applications recorded on the certificate. Rows the
+// tech added but never filled in are dropped (matching the send gate).
+function certificateAdditionalApplications(findings = {}) {
+  const rows = Array.isArray(findings.additional_applications) ? findings.additional_applications : [];
+  return rows.filter((row) => row && typeof row === 'object' && !Array.isArray(row)
+    && Object.values(row).some((value) => String(value ?? '').trim() !== ''));
+}
+
+function CertificateFieldGrid({ fields, compact }) {
+  return (
+    <div style={{
+      padding: compact ? 0 : '16px 24px 8px',
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+      rowGap: 14,
+      columnGap: 18,
+    }}>
+      {fields.map(([label, value]) => (
+        <div key={label}>
+          <div style={{
+            fontFamily: FONT_BODY,
+            fontSize: 12,
+            fontWeight: 700,
+            textTransform: 'uppercase',
+            letterSpacing: 0,
+            color: ESTIMATE_MUTED,
+            marginBottom: 5,
+          }}>
+            {label}
+          </div>
+          <div style={{
+            fontFamily: FONT_BODY,
+            fontSize: 14,
+            fontWeight: 700,
+            color: ESTIMATE_TEXT,
+            minHeight: 20,
+            borderBottom: `1px solid ${ESTIMATE_BORDER}`,
+            paddingBottom: 4,
+            wordBreak: 'break-word',
+          }}>
+            {value || '—'}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CertificateOfCompliance({ findings, customerName, customerAddress, technicianName, projectDateLabel }) {
+  const f = findings || {};
+  const applications = [
+    certificateApplicationLines(f),
+    ...certificateAdditionalApplications(f).map(certificateApplicationLines),
+  ];
+  const multiApplication = applications.length > 1;
+  const { method, productLine, aiLine, coverageLine } = applications[0];
+  // FBC 1816.1.7's "method of treatment" line lists every method on a
+  // combined job (e.g. "Soil barrier (chemical) + Wood treatment (borate)");
+  // the per-application blocks below carry each product's own record.
+  const methodValue = multiApplication
+    ? applications.map((app) => app.method).filter(Boolean).join(' + ')
+    : method;
   const treatmentDateValue = [
     f.treatment_date ? formatReportDate(f.treatment_date) : projectDateLabel || '',
     formatAppointmentTime(f.treatment_time),
@@ -855,17 +923,22 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
     f.renewal_due ? `Renewal due ${f.renewal_due}` : '',
   ].filter(Boolean).join(' · ');
 
+  // Single-application certificates keep the original one-grid layout; a
+  // combined job moves the per-product lines into the Application blocks
+  // below so each product prints its own chemistry and coverage.
   const fields = [
     ['Treatment address', addressValue],
     ['Lot / Block / Subdivision', lotLine],
     ['Building permit #', f.permit_number],
     ['Builder / General contractor', f.builder_contractor],
     ['Date & time of treatment', treatmentDateValue],
-    ['Method of treatment', method],
+    ['Method of treatment', methodValue],
     ['Wood-destroying organism treated for', f.wdo_target],
-    ['Product used', productLine],
-    ['Active ingredient & concentration', aiLine],
-    ['Coverage', coverageLine],
+    ...(multiApplication ? [] : [
+      ['Product used', productLine],
+      ['Active ingredient & concentration', aiLine],
+      ['Coverage', coverageLine],
+    ]),
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', warrantyLine],
   ];
@@ -928,41 +1001,39 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
       </div>
 
       {/* Field grid */}
-      <div style={{
-        padding: '16px 24px 8px',
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-        rowGap: 14,
-        columnGap: 18,
-      }}>
-        {fields.map(([label, value]) => (
-          <div key={label}>
-            <div style={{
-              fontFamily: FONT_BODY,
-              fontSize: 12,
-              fontWeight: 700,
-              textTransform: 'uppercase',
-              letterSpacing: 0,
-              color: ESTIMATE_MUTED,
-              marginBottom: 5,
-            }}>
-              {label}
+      <CertificateFieldGrid fields={fields} />
+
+      {/* Per-application product records (FDACS 5E-14.106) — one block per
+          product when the job combined methods (e.g. soil barrier + wood
+          treatment). Single-product certificates keep these lines in the
+          main grid above. */}
+      {multiApplication && (
+        <div style={{ padding: '8px 24px 8px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {applications.map((app, index) => (
+            <div
+              key={index}
+              style={{
+                border: `1px solid ${ESTIMATE_BORDER}`,
+                borderRadius: 12,
+                padding: '14px 16px',
+              }}
+            >
+              <div style={{ ...eyebrowStyle, marginBottom: 12 }}>
+                Application {index + 1}{app.method ? ` — ${app.method}` : ''}
+              </div>
+              <CertificateFieldGrid
+                compact
+                fields={[
+                  ['Method of treatment', app.method],
+                  ['Product used', app.productLine],
+                  ['Active ingredient & concentration', app.aiLine],
+                  ['Coverage', app.coverageLine],
+                ]}
+              />
             </div>
-            <div style={{
-              fontFamily: FONT_BODY,
-              fontSize: 14,
-              fontWeight: 700,
-              color: ESTIMATE_TEXT,
-              minHeight: 20,
-              borderBottom: `1px solid ${ESTIMATE_BORDER}`,
-              paddingBottom: 4,
-              wordBreak: 'break-word',
-            }}>
-              {value || '—'}
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* FBC required compliance statement (exact wording per 1816.1.7) */}
       <div style={{ padding: '16px 24px 4px' }}>

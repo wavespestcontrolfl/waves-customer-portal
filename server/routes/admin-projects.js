@@ -459,6 +459,56 @@ const WDO_AUTOFILL_ADMIN_KEYS = new Set([
   'structures_inspected',
 ]);
 
+// Additional per-product applications on the pre-treatment certificate
+// (findings.additional_applications). Rows the tech added but never filled
+// in are ignored — they don't render and don't block the send.
+function certAdditionalApplications(findings) {
+  const rows = Array.isArray(findings?.additional_applications) ? findings.additional_applications : [];
+  return rows.filter((row) => row && typeof row === 'object' && !Array.isArray(row)
+    && Object.values(row).some(hasMeaningfulValue));
+}
+
+// Per-application completeness checks for the pre-treatment certificate.
+// Runs once over the flat primary-application keys (the original cert_*
+// keys/labels) and once per additional application row.
+function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
+  const productName = app.product_name === 'Other' ? app.product_name_other : app.product_name;
+  const rawMethod = app.treatment_method;
+  const method = rawMethod === 'Other' ? app.treatment_method_other : rawMethod;
+  // Coverage requirements vary by application method. Liquid soil barriers
+  // (chemical) are sized by gallons of finished solution applied across a
+  // measured area. Wood treatments (borate) are measured by treated area
+  // but volume varies by saturation. Bait systems install discrete stations
+  // around a perimeter — there is no "gallons applied." Gate the gallons
+  // check accordingly so the send flow doesn't 422 on bait-system jobs.
+  const isBaitSystem = rawMethod === 'Bait system';
+  const isWoodTreatment = rawMethod === 'Wood treatment (borate)';
+  const needsGallons = !isBaitSystem && !isWoodTreatment;
+  // A finished-solution concentration only exists for liquid soil barriers.
+  // Bait stations and direct wood treatments have no dilution to record —
+  // the create form deliberately leaves concentration_pct blank for them,
+  // so requiring it here would dead-end those certificates at send.
+  const needsConcentration = needsGallons;
+  const hasArea = hasMeaningfulValue(app.square_footage) || hasMeaningfulValue(app.linear_feet);
+  const coverageOk = needsGallons
+    ? hasArea && hasMeaningfulValue(app.gallons_applied)
+    : hasArea;
+  const coverageLabel = needsGallons
+    ? 'Coverage (sq ft or linear ft + gallons applied)'
+    : 'Coverage (sq ft or linear ft)';
+  return [
+    { key: `${keyPrefix}treatment_method`, label: `${labelPrefix}Method of treatment`, ok: hasMeaningfulValue(method) },
+    { key: `${keyPrefix}product`, label: `${labelPrefix}Product used`, ok: hasMeaningfulValue(productName) },
+    {
+      key: `${keyPrefix}active_ingredient`,
+      label: `${labelPrefix}${needsConcentration ? 'Active ingredient + concentration' : 'Active ingredient'}`,
+      ok: hasMeaningfulValue(app.active_ingredient)
+        && (!needsConcentration || hasMeaningfulValue(app.concentration_pct)),
+    },
+    { key: `${keyPrefix}coverage`, label: `${labelPrefix}${coverageLabel}`, ok: coverageOk },
+  ];
+}
+
 function evaluateProjectSendReadiness({ project, customer }) {
   const typeCfg = getProjectType(project?.project_type);
   const findings = normalizeFindings(project?.findings);
@@ -491,42 +541,17 @@ function evaluateProjectSendReadiness({ project, customer }) {
   }
 
   if (project?.project_type === 'pre_treatment_termite_certificate') {
-    const productName = findings.product_name === 'Other' ? findings.product_name_other : findings.product_name;
-    const rawMethod = findings.treatment_method;
-    const method = rawMethod === 'Other' ? findings.treatment_method_other : rawMethod;
-    // Coverage requirements vary by application method. Liquid soil barriers
-    // (chemical) are sized by gallons of finished solution applied across a
-    // measured area. Wood treatments (borate) are measured by treated area
-    // but volume varies by saturation. Bait systems install discrete stations
-    // around a perimeter — there is no "gallons applied." Gate the gallons
-    // check accordingly so the send flow doesn't 422 on bait-system jobs.
-    const isBaitSystem = rawMethod === 'Bait system';
-    const isWoodTreatment = rawMethod === 'Wood treatment (borate)';
-    const needsGallons = !isBaitSystem && !isWoodTreatment;
-    // A finished-solution concentration only exists for liquid soil barriers.
-    // Bait stations and direct wood treatments have no dilution to record —
-    // the create form deliberately leaves concentration_pct blank for them,
-    // so requiring it here would dead-end those certificates at send.
-    const needsConcentration = needsGallons;
-    const hasArea = hasMeaningfulValue(findings.square_footage) || hasMeaningfulValue(findings.linear_feet);
-    const coverageOk = needsGallons
-      ? hasArea && hasMeaningfulValue(findings.gallons_applied)
-      : hasArea;
-    const coverageLabel = needsGallons
-      ? 'Coverage (sq ft or linear ft + gallons applied)'
-      : 'Coverage (sq ft or linear ft)';
     required.push(
       { key: 'cert_treatment_address', label: 'Treatment address (or lot/block)', ok: hasMeaningfulValue(findings.treatment_address) || hasMeaningfulValue(findings.lot_block) },
       { key: 'cert_treatment_date', label: 'Date of treatment', ok: hasMeaningfulValue(findings.treatment_date) || hasMeaningfulValue(project?.project_date) },
-      { key: 'cert_treatment_method', label: 'Method of treatment', ok: hasMeaningfulValue(method) },
-      { key: 'cert_product', label: 'Product used', ok: hasMeaningfulValue(productName) },
-      {
-        key: 'cert_active_ingredient',
-        label: needsConcentration ? 'Active ingredient + concentration' : 'Active ingredient',
-        ok: hasMeaningfulValue(findings.active_ingredient)
-          && (!needsConcentration || hasMeaningfulValue(findings.concentration_pct)),
-      },
-      { key: 'cert_coverage', label: coverageLabel, ok: coverageOk },
+      ...certApplicationChecks(findings, { keyPrefix: 'cert_', labelPrefix: '' }),
+      // A combined job (e.g. soil barrier + wood treatment) records each
+      // extra product as its own application row — every row with content
+      // must be as complete as the primary before the certificate can send.
+      ...certAdditionalApplications(findings).flatMap((row, index) => certApplicationChecks(row, {
+        keyPrefix: `cert_app${index + 2}_`,
+        labelPrefix: `Application ${index + 2}: `,
+      })),
       { key: 'cert_applicator_name', label: "Applicator's printed name", ok: hasMeaningfulValue(findings.applicator_name) },
       { key: 'cert_applicator_fdacs_id', label: 'Applicator FDACS ID #', ok: hasMeaningfulValue(findings.applicator_fdacs_id) },
       // Applicator attestation satisfies FBC 1816.1.7 authorized-signature
@@ -767,10 +792,29 @@ async function getCustomerCommunicationContext(customerId) {
     .join('\n');
 }
 
+// Array findings (certificate application rows) flatten to readable
+// "key: value" rows — String() on an object would feed the writer
+// "[object Object]".
+function formatFindingForPrompt(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (item && typeof item === 'object'
+        ? Object.entries(item)
+          .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
+          .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`)
+          .join(', ')
+        : String(item ?? '')))
+      .filter((line) => line.trim() !== '')
+      .join(' | ');
+  }
+  return String(value ?? '');
+}
+
 function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines, communicationContext }) {
   const labelMap = Object.fromEntries((typeCfg.findingsFields || []).map(f => [f.key, f.label]));
   const findingsLines = Object.entries(findings || {})
-    .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
+    .map(([k, v]) => [k, formatFindingForPrompt(v)])
+    .filter(([, v]) => v.trim() !== '')
     .map(([k, v]) => `${labelMap[k] || k.replace(/_/g, ' ')}: ${v}`)
     .join('\n') || '[no structured findings captured]';
 

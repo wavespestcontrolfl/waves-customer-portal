@@ -214,4 +214,60 @@ describe('admin project route guards', () => {
     });
     expect(soil.missing.map((item) => item.key)).toContain('cert_active_ingredient');
   });
+
+  test('certificate send readiness validates each additional application like the primary', () => {
+    const completePrimary = {
+      treatment_address: '123 Main St, Bradenton, FL 34202',
+      treatment_method: 'Soil barrier (chemical)',
+      product_name: 'Termidor SC',
+      active_ingredient: 'fipronil',
+      concentration_pct: '0.060',
+      square_footage: '1800',
+      gallons_applied: '180',
+      applicator_name: 'Adam Benetti',
+      applicator_fdacs_id: 'JF123456',
+      applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).',
+    };
+    const evaluate = (findings) => evaluateProjectSendReadiness({
+      project: {
+        id: 'project-cert-multi',
+        customer_id: 'customer-1',
+        project_date: '2026-05-18',
+        project_type: 'pre_treatment_termite_certificate',
+        findings,
+      },
+      customer: { id: 'customer-1' },
+    });
+
+    // Combined job: complete soil-barrier primary + complete wood-treatment
+    // row sends clean. Wood treatments need area but no concentration/gallons.
+    const combined = evaluate({
+      ...completePrimary,
+      additional_applications: [{
+        treatment_method: 'Wood treatment (borate)',
+        product_name: 'Bora-Care',
+        epa_registration: '64405-1',
+        active_ingredient: 'disodium octaborate tetrahydrate',
+        square_footage: '2200',
+      }],
+    });
+    expect(combined.missing).toEqual([]);
+
+    // A row with content must be as complete as the primary — missing pieces
+    // block the send under Application-2 keys.
+    const incomplete = evaluate({
+      ...completePrimary,
+      additional_applications: [{ treatment_method: 'Soil barrier (chemical)' }],
+    });
+    expect(incomplete.missing.map((item) => item.key)).toEqual(expect.arrayContaining([
+      'cert_app2_product',
+      'cert_app2_active_ingredient',
+      'cert_app2_coverage',
+    ]));
+
+    // Rows added but never touched (accidental "Add") are ignored, and
+    // non-array garbage can't crash the gate.
+    expect(evaluate({ ...completePrimary, additional_applications: [{}] }).missing).toEqual([]);
+    expect(evaluate({ ...completePrimary, additional_applications: 'oops' }).missing).toEqual([]);
+  });
 });
