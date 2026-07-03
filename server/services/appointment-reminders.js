@@ -20,6 +20,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
+const { buildRescheduleLink } = require('./reschedule-link');
 
 // Service states for which a reminder must never fire. A reminder row can be
 // armed (cancelled=false) while its underlying scheduled_service moved into one
@@ -118,14 +119,23 @@ function apptChannel(value) {
 // ({ ok, skipped, blocked, reason, ... }). Idempotent via AppointmentEmail's
 // per-occurrence keys, so calling it as both a fallback and a primary send for
 // the same occurrence will not double-deliver. Best-effort — never throws.
-async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service' }) {
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
+    // Callers that already minted the reschedule link for their SMS leg pass
+    // it through; paths that reach email directly (undelivered-SMS fallback,
+    // booking's channel-aware confirmation) mint it here so the email's
+    // "Reschedule appointment" CTA still renders. Best-effort — null just
+    // hides the CTA block.
+    let resolvedRescheduleUrl = rescheduleUrl;
+    if (!resolvedRescheduleUrl && scheduledServiceId && (kind === 'confirmation' || kind === '72h' || kind === '24h')) {
+      resolvedRescheduleUrl = (await buildRescheduleLink(scheduledServiceId, { customerId })).url;
+    }
     if (kind === 'confirmation') {
-      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel });
+      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
     }
     if (kind === '72h' || kind === '24h') {
-      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind });
+      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl });
     }
     return { ok: false, reason: 'unsupported_kind' };
   } catch (err) {
@@ -163,9 +173,9 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 //             customer is still reached (no admin alert unless BOTH fail)
 //   'both'  → send SMS and email
 // Returns true if the customer was reached on any channel. Best-effort.
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt }) {
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt }) {
   const ch = apptChannel(channel);
-  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel };
+  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl };
 
   // Run the caller's SMS closure defensively. Some callers (e.g. the estimate
   // accept flow) throw on a blocked/undeliverable send; for email/both that must
@@ -638,6 +648,10 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       const date = formatDate(apptTime);
       const time = formatTime(apptTime);
 
+      // Self-serve reschedule deep link — one mint shared by the SMS clause
+      // and the email CTA. Best-effort: a null link renders clean copy.
+      const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
+
       // Honor the customer's channel preference (sms | email | both). The
       // 'sms' default is unchanged: SMS first, email fallback on failure.
       const sent = await deliverAppointmentNotice({
@@ -647,11 +661,12 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         scheduledServiceId,
         apptTime,
         serviceLabel,
+        rescheduleUrl: reschedule.url,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = contact.name || customer.first_name || 'there';
           return renderTemplate(
             'appointment_confirmation',
-            { first_name: firstName, service_type: serviceLabel, date, time, day },
+            { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
           );
         }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId }),
@@ -1085,6 +1100,9 @@ const AppointmentReminders = {
             const time = formatTime(apptTime);
 
             const serviceLabel = smsServiceLabelStored(r.service_type);
+            // Self-serve reschedule deep link — one mint shared by the SMS
+            // clause and the email CTA. Best-effort: null renders clean copy.
+            const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
             await deliverAppointmentNotice({
               channel: channel72,
               kind: '72h',
@@ -1092,11 +1110,12 @@ const AppointmentReminders = {
               scheduledServiceId: r.scheduled_service_id,
               apptTime,
               serviceLabel,
+              rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
                 const firstName = contact.name || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time },
+                  { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1145,6 +1164,9 @@ const AppointmentReminders = {
             const time = formatTime(apptTime);
 
             const serviceLabel = smsServiceLabelStored(r.service_type);
+            // Self-serve reschedule deep link — one mint shared by the SMS
+            // clause and the email CTA. Best-effort: null renders clean copy.
+            const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
             await deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
@@ -1152,11 +1174,12 @@ const AppointmentReminders = {
               scheduledServiceId: r.scheduled_service_id,
               apptTime,
               serviceLabel,
+              rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
                 const firstName = contact.name || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_24h',
-                  { first_name: firstName, service_type: serviceLabel, time },
+                  { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),

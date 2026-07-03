@@ -589,12 +589,19 @@ const TwilioService = {
       ? formatTime(service.window_start)
       : "a time to be confirmed";
 
+    // Self-serve reschedule deep link clause — reminder_24h renders with
+    // {reschedule_line}, and getTemplate suppresses the whole SMS on an
+    // unresolved placeholder, so this path must always pass it too.
+    const { buildRescheduleLink } = require("./reschedule-link");
+    const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
+
     const body =
       typeof smsTemplatesRouter.getTemplate === "function"
         ? await smsTemplatesRouter.getTemplate("reminder_24h", {
             first_name: customer.first_name || "",
             service_type: service.service_type || "service",
             time,
+            reschedule_line: reschedule.line,
           }, { workflow: "twilio_reminder_24h", entity_type: "scheduled_service", entity_id: scheduledServiceId })
         : null;
     if (!body) {
