@@ -346,6 +346,28 @@ async function supersedeRun(run, queueRow) {
  *     IndexNow never pings a 404.
  */
 async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = null, mergedAt = null } = {}) {
+  // FIRST observation of the merge → persist astro_pr_merged_at before any
+  // pending return. finalize legitimately stays pending for the 30–45 min
+  // production deploy, and without a DB-visible marker the daily publish
+  // cap (which counted only completed_published) couldn't see merges in
+  // flight — a backlog could exceed the cap by one merge per tick until
+  // deploys caught up. whereNull keeps the first-observed time stable
+  // across the many pending re-polls. Covers human merges too (they also
+  // go live and consume the day's publish budget). Fail-soft: the marker
+  // is cap accounting — a write error must never block reconciliation
+  // (the cap just stays conservative-by-omission for that run, as before).
+  try {
+    const mergedAtMsRaw = mergedAt ? Date.parse(mergedAt) : NaN;
+    await db('autonomous_runs')
+      .where('id', run.id)
+      .whereNull('astro_pr_merged_at')
+      .update({
+        astro_pr_merged_at: Number.isFinite(mergedAtMsRaw) ? new Date(mergedAtMsRaw) : new Date(),
+        updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] astro_pr_merged_at stamp failed for run ${run.id}: ${err.message}`);
+  }
   // Fresh queue re-check at finalize time: the tick-start validation is
   // stale by now (GitHub lookup + live-URL gating take seconds), and an
   // operator requeue/dismiss landing in that window must win — never mark a
@@ -597,15 +619,33 @@ async function maybeAutoMerge(run, pr) {
   //     (older days, human-cleared Codex findings) can't all auto-merge on
   //     the same afternoon. Capped runs stay parked for a human merge or
   //     tomorrow's ticks; count errors fail closed (no merge this tick).
+  //     `>= 0`, matching the runner's zero-inclusive semantics: a cap of 0
+  //     is an ops freeze and must also stop the poller from draining parked
+  //     PRs (a `> 0` guard skipped the cap entirely at 0).
   const maxPerDay = Number(process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY);
-  if (Number.isFinite(maxPerDay) && maxPerDay > 0) {
+  if (Number.isFinite(maxPerDay) && maxPerDay >= 0) {
     const { parseETDateTime, etDateString } = require('../../utils/datetime-et');
     const startOfEtDay = parseETDateTime(`${etDateString(new Date())}T00:00`);
+    // Two countable shapes, mutually exclusive by outcome:
+    //   - finalized publishes (completed_published stamped today), and
+    //   - merged-but-not-finalized runs: still parked at the pending
+    //     outcome but with astro_pr_merged_at stamped today by
+    //     finalizeMerged. Without these, every merge awaiting its 30–45
+    //     min production deploy was invisible to the cap and a backlog
+    //     could exceed it by one merge per 2-minute tick.
     const row = await db('autonomous_runs')
       .where('action_type', run.action_type)
       .where('shadow_mode', false)
-      .where('outcome', 'completed_published')
-      .where('completed_at', '>=', startOfEtDay)
+      .where(function countable() {
+        this.where(function finalized() {
+          this.where('outcome', 'completed_published')
+            .where('completed_at', '>=', startOfEtDay);
+        }).orWhere(function mergedInFlight() {
+          this.where('outcome', PENDING_OUTCOME)
+            .whereIn('skip_reason', PENDING_SKIP_REASONS)
+            .where('astro_pr_merged_at', '>=', startOfEtDay);
+        });
+      })
       .count('id as count')
       .first();
     if (Number(row?.count || 0) >= maxPerDay) {

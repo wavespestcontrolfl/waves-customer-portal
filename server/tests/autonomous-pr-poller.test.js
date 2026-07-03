@@ -115,11 +115,16 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         return q;
       }),
       whereNot: jest.fn(() => q),
+      whereNull: jest.fn(function (col) {
+        q._filters[`null:${col}`] = true;
+        return q;
+      }),
       whereNotNull: jest.fn(() => q),
       orderBy: jest.fn(() => q),
       orderByRaw: jest.fn(() => q),
       limit: jest.fn(() => q),
       count: jest.fn(function () { q._isCount = true; return q; }),
+      orWhere: jest.fn(() => q),
       select: jest.fn(() => Promise.resolve(table === 'opportunity_queue' ? queueRows : pending)),
       first: jest.fn(() => {
         // maybeAutoMerge's daily publish-cap count on autonomous_runs.
@@ -154,7 +159,11 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
 }
 
 function runUpdates(updates) {
-  return updates.filter((u) => u.table === 'autonomous_runs');
+  // Run STATE transitions only — finalizeMerged's astro_pr_merged_at
+  // first-observation stamp (day-cap accounting, fires on every merged-PR
+  // observation) is filtered out so state assertions stay exact; the stamp
+  // has its own dedicated test in the daily-publish-cap suite.
+  return updates.filter((u) => u.table === 'autonomous_runs' && !('astro_pr_merged_at' in u.updates));
 }
 
 beforeEach(() => {
@@ -1062,5 +1071,49 @@ describe('daily publish cap on auto-merge (audit regression — poller had no da
 
     expect(gh.mergePr).toHaveBeenCalled();
     expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('a cap of 0 is an ops freeze: the poller must not drain parked PRs (Codex round 1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = '0';
+    // Zero publishes today — the old `> 0` guard skipped the cap entirely
+    // here, so a Codex-clean parked PR still auto-merged despite the freeze.
+    setupDb({ pending: [makeRun()], publishedTodayCount: 0 });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'daily_publish_cap_reached' });
+  });
+
+  test('finalizeMerged stamps astro_pr_merged_at on first observation (whereNull-guarded) so in-flight merges count against the cap (Codex round 1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({ pending: [makeRun()] });
+    // Merged PR whose production deploy hasn't landed: finalize stays
+    // pending, but the merge marker must already be persisted — it is the
+    // only DB-visible evidence the day cap can count during the 30–45 min
+    // deploy window.
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'closed', merged: true,
+      merged_at: '2026-06-11T05:00:00Z', merge_commit_sha: 'mergesha1',
+    });
+    pagesPoll.deploymentCreatedAtMs.mockReturnValue(Date.parse('2026-06-11T04:00:00Z')); // pre-merge deploy only
+    pagesPoll.deploymentCommitSha.mockReturnValue('someoldsha');
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_production_deploy' });
+    const stamp = updates.find((u) =>
+      u.table === 'autonomous_runs' && u.updates.astro_pr_merged_at instanceof Date);
+    expect(stamp).toBeDefined();
+    // first-observation only (stable across pending re-polls) and stamped
+    // with the PR's merged_at, not "now"
+    expect(stamp.filters['null:astro_pr_merged_at']).toBe(true);
+    expect(stamp.updates.astro_pr_merged_at.toISOString()).toBe('2026-06-11T05:00:00.000Z');
   });
 });
