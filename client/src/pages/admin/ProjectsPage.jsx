@@ -9,6 +9,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
 import { INTERNAL_FINDING_KEYS } from "../../lib/wdoReportFields";
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from "../../components/tech/ProjectFindingFieldInput";
+import { parseSections } from "../ProjectReportViewPage";
 import { COLORS, FONTS } from "../../theme-brand";
 
 /**
@@ -451,6 +452,18 @@ function projectFieldLabel(typeCfg, key) {
   return field?.label || humanizeProjectKey(key);
 }
 
+// Client-side mirror of the public endpoint's fdacsPdfAvailable check (the
+// last archived filing carries the S3 key of the filled, signed FDACS PDF).
+// The project detail payload includes the raw wdo_sent_filings column.
+function projectHasArchivedFdacsFiling(project) {
+  let filings = project?.wdo_sent_filings;
+  if (typeof filings === "string") {
+    try { filings = JSON.parse(filings); } catch { filings = null; }
+  }
+  const lastFiling = Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
+  return Boolean(lastFiling?.s3_key);
+}
+
 function formatProjectPreviewValue(value) {
   if (Array.isArray(value)) return value.filter(Boolean).join(", ");
   if (value && typeof value === "object") {
@@ -713,9 +726,18 @@ function CustomerProjectReportPreview({
 }) {
   const typeLabel = typeCfg?.label || TYPE_LABELS[project.project_type] || "Inspection";
   const reportTitle = String(title || "").trim() || typeLabel;
-  // Same internal-key filter as the customer-facing report page — the preview
-  // staff approve must match what the customer actually sees.
-  const findingsEntries = Object.entries(findings || {}).filter(
+  // Same suppression rules as the customer-facing report page — the preview
+  // staff approve must match what the customer actually sees: internal keys
+  // filtered, and the raw findings hidden when the AI-drafted sectioned
+  // narrative is present (the narrative is the customer rendering of them).
+  // WDO keeps findings unless a filled FDACS filing is archived, mirroring
+  // the public page's fdacsPdfAvailable rule.
+  const aiNarrativeSections = recommendations
+    ? parseSections(String(recommendations))
+    : null;
+  const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
+    && (project.project_type !== WDO_TYPE || projectHasArchivedFdacsFiling(project));
+  const findingsEntries = suppressFindingsForNarrative ? [] : Object.entries(findings || {}).filter(
     ([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && hasMeaningfulValue(formatProjectPreviewValue(v)),
   );
   const visiblePhotos = (photos || []).slice(0, 4);

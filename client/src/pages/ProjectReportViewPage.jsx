@@ -363,7 +363,13 @@ export default function ProjectReportViewPage() {
   // raw findings list would repeat the same content — the narrative is the
   // customer-facing rendering of it. Raw findings still show on reports
   // without a drafted narrative, otherwise they'd have no body at all.
+  // WDO exception: a legacy/pre-archive WDO report has no filled FDACS PDF
+  // to link, so its structured findings (FDACS finding, live WDO, damage,
+  // inaccessible areas…) are the only formal record on the page — never
+  // suppress those unless the archived filled form is available.
   const aiNarrativeSections = data.recommendations ? parseSections(String(data.recommendations)) : null;
+  const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
+    && (data.projectType !== 'wdo_inspection' || Boolean(data.fdacsPdfAvailable));
   const atAGlanceRows = buildAtAGlance({ data, reportTitle });
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   const headline = isCertificate
@@ -445,7 +451,7 @@ export default function ProjectReportViewPage() {
               FBC-compliant document layout) and whenever the AI-drafted
               sectioned narrative is present (the narrative IS the customer
               rendering of these fields — showing both reads twice). */}
-          {!isCertificate && !aiNarrativeSections && findingsEntries.length > 0 && (
+          {!isCertificate && !suppressFindingsForNarrative && findingsEntries.length > 0 && (
             <div style={{ marginTop: 16 }}>
               <div style={{ ...eyebrowStyle, marginBottom: 10 }}>
                 Findings
@@ -1037,7 +1043,9 @@ function PhotoGrid({ title, photos, noCard }) {
 const REQUIRED_SECTION_HEADINGS = ['WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE RECOMMEND'];
 const SECTION_HEADINGS = ['CUSTOMER CONCERN', 'WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE DID', 'WHAT WE RECOMMEND'];
 
-function parseSections(text) {
+// Exported for the admin ProjectsPage customer-report preview, which must
+// apply the same findings-suppression rule as this page (preview == final).
+export function parseSections(text) {
   const hasAll = REQUIRED_SECTION_HEADINGS.every(h => text.includes(h));
   if (!hasAll) return null;
   const sections = [];

@@ -31,6 +31,7 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const ProjectEmail = require('../services/project-email');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('../services/project-report-links');
+const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const {
   buildProjectCloseoutPreview,
   completeProjectBackedService,
@@ -48,7 +49,6 @@ const { publicPortalUrl } = require('../utils/portal-url');
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
-const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024 },
@@ -1131,22 +1131,14 @@ router.get('/:id', async (req, res, next) => {
       .where({ project_id: project.id })
       .orderBy(['visit', 'sort_order', 'created_at']);
 
-    let upcomingAppointment = null;
-    if (project.scheduled_service_id) {
-      upcomingAppointment = await db('scheduled_services as s')
-        .where({ 's.id': project.scheduled_service_id, 's.customer_id': project.customer_id })
-        .where('s.scheduled_date', '>=', etDateString())
-        .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
-        .leftJoin('technicians as st', 's.technician_id', 'st.id')
-        .select(
-          's.service_type',
-          's.scheduled_date',
-          's.window_start',
-          's.window_end',
-          'st.name as technician_name',
-        )
-        .first();
-    }
+    // Same follow-up scoping as the public report page (shared helper) so
+    // the staff preview can never show a different "Follow-up" than the
+    // customer's copy — the old linked-visit-only lookup printed the just-
+    // treated visit itself as its own follow-up on the service day.
+    const upcomingAppointment = await findReportFollowupAppointment({
+      customerId: project.customer_id,
+      scheduledServiceId: project.scheduled_service_id,
+    });
 
     const closeoutPreview = isAdmin(req)
       ? await buildProjectCloseoutPreview(project.id).catch((err) => {

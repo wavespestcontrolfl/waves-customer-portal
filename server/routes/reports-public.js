@@ -10,6 +10,7 @@ const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
+const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
@@ -138,7 +139,6 @@ const reportEventLimiter = rateLimit({
   message: { error: 'Too many report events. Please try again in a minute.' },
 });
 
-const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 const ALLOWED_REPORT_EVENTS = new Set([
   'service_report_viewed',
   'ai_summary_viewed',
@@ -374,42 +374,19 @@ router.get('/project/:token/data', async (req, res, next) => {
       return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };
     }));
 
-    const appointmentSelect = [
-      's.id',
-      's.service_type',
-      's.scheduled_date',
-      's.window_start',
-      's.window_end',
-      's.status',
-      'st.name as technician_name',
-    ];
-    const todayET = etDateString();
     // The report labels this "Follow-up" / "your next visit", so it must be
-    // the customer's NEXT active appointment — never the visit the report
-    // documents. The old lookup only ever matched the linked appointment,
-    // which on the service day is the just-treated visit itself (still
-    // on_site/en_route), so the report printed today's service as its own
-    // follow-up while the real next appointment was ignored.
-    //
-    // Scoped to reports tied to a documented visit: a standalone/ad hoc
-    // report has no visit this would follow, and its token may be shared
-    // with third parties (e.g. a WDO report in a real-estate transaction),
-    // so surfacing the customer's unrelated routine schedule there would be
-    // both wrong and a disclosure. Unlinked reports keep the report's own
-    // followup_date fallback.
-    let upcomingAppointment = null;
-    if (project.scheduled_service_id) {
-      upcomingAppointment = await db('scheduled_services as s')
-        .where('s.customer_id', project.customer_id)
-        .where('s.scheduled_date', '>=', todayET)
-        .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
-        .whereNot('s.id', project.scheduled_service_id)
-        .leftJoin('technicians as st', 's.technician_id', 'st.id')
-        .orderBy('s.scheduled_date', 'asc')
-        .orderBy('s.window_start', 'asc')
-        .select(appointmentSelect)
-        .first();
-    }
+    // the documented visit's own continuation — never the visit the report
+    // documents (the old bug: on the service day the linked appointment is
+    // the just-treated visit itself, so the report printed today's service
+    // as its own follow-up), and never an unrelated appointment on the
+    // customer's calendar (a shareable report token must not disclose the
+    // routine schedule). Scoping rules live in the shared helper, which the
+    // admin project detail endpoint also uses so the staff preview matches
+    // this page.
+    const upcomingAppointment = await findReportFollowupAppointment({
+      customerId: project.customer_id,
+      scheduledServiceId: project.scheduled_service_id,
+    });
 
     // WDO: serve the as-sent findings snapshot archived at send time, so the
     // public link always matches the emailed signed FDACS-13645 PDF even if
