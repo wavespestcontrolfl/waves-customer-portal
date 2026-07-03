@@ -164,16 +164,27 @@ async function performPropertyLookup(address, options = {}) {
       // typo hint would stay dark until the 180-day TTL. Audit once on hit
       // (county gates resolve from the raw address zip/city — no geocode on
       // this path), attach, persist. A null audit (GIS failure) is NOT
-      // persisted — it simply retries next hit.
+      // persisted — it simply retries next hit. Like the fresh path, county
+      // evidence does not skip the audit when the record's own house number
+      // disagrees with the typed one — a cached SNAPPED record must not keep
+      // serving the unflagged neighbor parcel until expiry.
+      const cachedSnapped = cached.property_record
+        ? typedNumberDisagreesWithRecord(address, cached.property_record)
+        : null;
       if (
         cached.property_record
         && cached.property_record._addressAudit === undefined
-        && !hasCountyEvidence(cached.property_record)
+        && (!hasCountyEvidence(cached.property_record) || cachedSnapped)
       ) {
         const audit = await auditAddressHouseNumber(address, null).catch(() => null);
-        if (audit) {
-          cached.property_record._addressAudit = audit;
-          await attachAddressAuditToCachedLookup(address, audit);
+        const marker = audit
+          || (cachedSnapped
+            ? { county: null, houseNumber: cachedSnapped.typed, streetLabel: null, streetExists: null, hasExactMatch: false, parcelCount: 0, nearestNumbers: [] }
+            : null);
+        if (marker) {
+          if (cachedSnapped) marker.snappedRecord = cachedSnapped;
+          cached.property_record._addressAudit = marker;
+          await attachAddressAuditToCachedLookup(address, marker);
         }
       }
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
