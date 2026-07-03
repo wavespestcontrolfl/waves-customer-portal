@@ -2141,8 +2141,11 @@ const CallRecordingProcessor = {
           // caller already has it on their own record; a different person
           // would receive the new lead's first-touch email). Fails closed.
           // No address value in the log.
+          // call.customer_id (the known-caller link) is passed as the OWN
+          // customer, so a correction matching the linked customer's own
+          // on-file email is adopted rather than treated as another party's.
           const ownedElsewhere = await require('./email-bounce-recovery')
-            .correctedAddressOwnedByOther(normalizedEmail, null)
+            .correctedAddressOwnedByOther(normalizedEmail, call.customer_id || null)
             .catch(() => true);
           if (!ownedElsewhere) {
             extracted.email = normalizedEmail;
@@ -2185,9 +2188,10 @@ const CallRecordingProcessor = {
       try {
         const { normalizedEmail: correctedEmail, needsConfirmation: emailReasons } = deriveEmailReview(extracted);
         if (correctedEmail) {
-          // Same ownership gate as the shadow-bridge site above (fails closed).
+          // Same ownership gate as the shadow-bridge site above (fails closed);
+          // the known-caller link counts as the caller's own record.
           const ownedElsewhere = await require('./email-bounce-recovery')
-            .correctedAddressOwnedByOther(correctedEmail, null)
+            .correctedAddressOwnedByOther(correctedEmail, call.customer_id || null)
             .catch(() => true);
           if (!ownedElsewhere) {
             extracted.email = correctedEmail;
