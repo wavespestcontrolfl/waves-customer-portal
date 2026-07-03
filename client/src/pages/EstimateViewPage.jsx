@@ -2162,13 +2162,15 @@ export function ServiceSection({
   waveGuardTier,
   afterPrice = null,
   showGetServiceCta = false,
+  showAddOns: showAddOnsProp = true,
 }) {
   if (!section) return null;
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
   const current = frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
   const copy = section.copy || {};
   const showSlider = frequencies.length > 1;
-  const showAddOns = section.isPest
+  const showAddOns = showAddOnsProp
+    && section.isPest
     && section.isRecurring
     && renderFlags.showPestRecurringAddOns === true
     && Array.isArray(current?.addOns)
@@ -2974,6 +2976,7 @@ export default function EstimateViewPage() {
                 waveGuardTier={waveGuardTier}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
+                showAddOns={readOnly}
               />
             );
           })}
@@ -3269,6 +3272,27 @@ export default function EstimateViewPage() {
               <AcceptanceModeCard acceptance={acceptance} />
             )}
           </div>
+
+          {/* Pest visit-preference toggles ("Skip parts you don't need")
+              live BELOW the schedule card (owner directive). */}
+          {serviceMode === 'recurring' && renderFlags.showPestRecurringAddOns === true
+            ? services
+              .filter((section) => section.isPest && section.isRecurring)
+              .map((section) => {
+                const frequency = selectedFrequencyForSection(section, selected);
+                const addOns = Array.isArray(frequency?.addOns) ? frequency.addOns : [];
+                if (!addOns.length) return null;
+                return (
+                  <AddOnsBlock
+                    key={`${section.key}-visit-prefs`}
+                    addOns={addOns}
+                    selectedKeys={selectedAddOns[section.key] || new Set()}
+                    onToggle={(key) => onToggleAddOn(section.key, key)}
+                    disabled={ctaPhase === 'submitting'}
+                  />
+                );
+              })
+            : null}
 
           {existingAppointment ? (
             <ExistingAppointmentCard appointment={existingAppointment} />
