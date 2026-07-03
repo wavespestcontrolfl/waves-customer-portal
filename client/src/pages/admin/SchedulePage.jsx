@@ -5331,8 +5331,6 @@ function LawnAssessmentCompletionBlock({
     EMPTY_PROTOCOL_FIELD_CHECKS,
   );
   const [confirmedId, setConfirmedId] = useState(null);
-  const [snapshotReview, setSnapshotReview] = useState(null);
-  const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -5358,7 +5356,6 @@ function LawnAssessmentCompletionBlock({
     setStressFlags(EMPTY_LAWN_STRESS_FLAGS);
     setProtocolFieldChecks(EMPTY_PROTOCOL_FIELD_CHECKS);
     setConfirmedId(null);
-    setSnapshotReview(null);
     setError("");
     onConfirmed?.(null);
     if (!service?.id) return () => { cancelled = true; };
@@ -5384,7 +5381,6 @@ function LawnAssessmentCompletionBlock({
         if (assessment.confirmed_by_tech) {
           setConfirmedId(assessment.id);
           onConfirmed?.(assessment.id);
-          loadSnapshotReview(assessment.id);
         }
       })
       .catch(() => {})
@@ -5396,49 +5392,6 @@ function LawnAssessmentCompletionBlock({
       cancelled = true;
     };
   }, [service?.id]);
-
-  async function loadSnapshotReview(assessmentId) {
-    if (!assessmentId) return;
-    setSnapshotLoading(true);
-    try {
-      const data = await adminFetch(`/admin/lawn-assessment/${assessmentId}/snapshot`);
-      setSnapshotReview(data);
-    } catch {
-      setSnapshotReview(null);
-    } finally {
-      setSnapshotLoading(false);
-    }
-  }
-
-  async function patchSnapshot(snapshotId, body) {
-    if (!snapshotId || !confirmedId) return;
-    setSnapshotLoading(true);
-    try {
-      await adminFetch(`/admin/lawn-assessment/snapshots/${snapshotId}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      });
-      await loadSnapshotReview(confirmedId);
-    } catch (err) {
-      setError(err.message || "Snapshot update failed");
-      setSnapshotLoading(false);
-    }
-  }
-
-  async function patchRecommendation(recommendationId, body) {
-    if (!recommendationId || !confirmedId) return;
-    setSnapshotLoading(true);
-    try {
-      await adminFetch(`/admin/lawn-assessment/recommendations/${recommendationId}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      });
-      await loadSnapshotReview(confirmedId);
-    } catch (err) {
-      setError(err.message || "Recommendation update failed");
-      setSnapshotLoading(false);
-    }
-  }
 
   async function addPhotos(event) {
     const files = Array.from(event.target.files || []);
@@ -5530,7 +5483,6 @@ function LawnAssessmentCompletionBlock({
       const assessmentId = response?.assessment?.id || result.assessment.id;
       setConfirmedId(assessmentId);
       onConfirmed?.(assessmentId);
-      await loadSnapshotReview(assessmentId);
     } catch (err) {
       setError(err.message || "Confirm failed");
     } finally {
@@ -5910,7 +5862,6 @@ function LawnAssessmentCompletionBlock({
                 setTechScores(null);
                 setProtocolFieldChecks(EMPTY_PROTOCOL_FIELD_CHECKS);
                 setConfirmedId(null);
-                setSnapshotReview(null);
                 setError("");
                 onConfirmed?.(null);
               }}
@@ -5933,96 +5884,10 @@ function LawnAssessmentCompletionBlock({
           </div>
         </>
       )}
-      {(snapshotLoading || snapshotReview?.snapshot) && (
-        <ScheduleLawnSnapshotReview
-          review={snapshotReview}
-          loading={snapshotLoading}
-          onSnapshotAction={patchSnapshot}
-          onRecommendationAction={patchRecommendation}
-        />
-      )}
       {error && <div style={{ fontSize: 12, color: D.red, lineHeight: 1.45 }}>{error}</div>}
     </div>
   );
 }
-
-function ScheduleLawnSnapshotReview({ review, loading, onSnapshotAction, onRecommendationAction }) {
-  const snapshot = review?.snapshot;
-  const cards = review?.recommendationCards || [];
-  if (loading && !snapshot) {
-    return <div style={{ fontSize: 12, color: D.muted }}>Loading snapshot review...</div>;
-  }
-  if (!snapshot) return null;
-
-  return (
-    <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: D.white }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 800, color: D.heading }}>Customer snapshot</div>
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-            {snapshot.status} · {snapshot.customer_visible ? "Customer visible" : "Internal only"}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <button type="button" onClick={() => onSnapshotAction(snapshot.id, { approve: true })} style={miniOutlineButton}>
-            Approve
-          </button>
-          <button type="button" onClick={() => onSnapshotAction(snapshot.id, { customer_visible: true })} style={miniOutlineButton}>
-            Show
-          </button>
-          <button type="button" onClick={() => onSnapshotAction(snapshot.id, { hide: true })} style={{ ...miniOutlineButton, color: D.red }}>
-            Hide
-          </button>
-        </div>
-      </div>
-      <div style={{ fontSize: 12, color: D.text, lineHeight: 1.45, marginTop: 8 }}>
-        {snapshot.summary_customer}
-      </div>
-      {cards.length > 0 && (
-        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
-          {cards.map((card) => (
-            <div key={card.id} style={{ borderTop: `1px solid ${D.border}`, paddingTop: 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>{card.title}</div>
-              <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                {card.status} · {card.customer_visible ? "Customer visible" : "Internal only"}
-              </div>
-              {card.performance && (
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
-                  Shown {card.performance.counts?.recommendation_shown || card.performance.counts?.shown || 0}
-                  {" · "}Clicked {card.performance.counts?.recommendation_clicked || card.performance.counts?.clicked || 0}
-                  {" · "}CTR {Number.isFinite(Number(card.performance.clickThroughRate)) ? `${Math.round(Number(card.performance.clickThroughRate) * 100)}%` : "—"}
-                </div>
-              )}
-              <div style={{ display: "flex", gap: 5, marginTop: 6, flexWrap: "wrap" }}>
-                <button type="button" onClick={() => onRecommendationAction(card.id, { approve: true })} style={miniOutlineButton}>
-                  Approve
-                </button>
-                <button type="button" onClick={() => onRecommendationAction(card.id, { customer_visible: true })} style={miniOutlineButton}>
-                  Show
-                </button>
-                <button type="button" onClick={() => onRecommendationAction(card.id, { dismiss: true })} style={{ ...miniOutlineButton, color: D.red }}>
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const miniOutlineButton = {
-  height: 28,
-  padding: "0 8px",
-  borderRadius: 6,
-  border: `1px solid ${D.border}`,
-  background: D.white,
-  color: D.text,
-  fontSize: 11,
-  fontWeight: 800,
-  cursor: "pointer",
-};
 
 const scoreButtonStyle = {
   width: 24,

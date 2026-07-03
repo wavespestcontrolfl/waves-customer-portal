@@ -306,12 +306,6 @@ class ApiClient {
     return this.request(`/lawn-health/${customerId}/photos/${assessmentId}`);
   }
 
-  trackLawnRecommendationEvent(customerId, payload) {
-    return this.request(`/lawn-health/${customerId}/recommendation-events`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-  }
 
   // ---- Feed / Weather ----
   getBlogPosts() {

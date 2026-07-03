@@ -1869,7 +1869,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
       // signal. Watering guidance now comes from the data-driven water balance
       // (grass×season target vs. portal irrigation inches + 7-day rainfall) in
       // irrigationAdvice / LawnWaterBalance. The column still exists and is read by
-      // other surfaces (lawn-snapshot, waveguard-plan-engine), so it is not emitted here.
+      // other surfaces (waveguard-plan-engine), so it is not emitted here.
       irrigationInchesPerWeek: turfProfile.irrigation_inches_per_week
         ?? assessment.irrigation_inches_per_week
         ?? propertyPrefs?.irrigation_inches_per_week
