@@ -152,6 +152,21 @@ describe('estimate AI support context', () => {
             signal_word: 'Warning',
             reentry_summary: 'Unverified re-entry claim.',
           },
+          {
+            // Seeded-lane shape (20260530000022): verified via
+            // label_verified_at/label_version, label_verified_by never set.
+            name: 'Drive XLR8',
+            category: 'herbicide',
+            active_ingredient: 'Quinclorac',
+            active: true,
+            label_verified_by: null,
+            label_verified_at: '2026-05-30T00:00:00Z',
+            label_version: 'EPA accepted label record',
+            signal_word: 'Caution',
+            rei_hours: 0,
+            rainfast_minutes: 60,
+            reentry_text: 'Keep pets off until sprays have dried.',
+          },
         ],
       }),
       question: 'Is the herbicide safe for pets?',
@@ -171,6 +186,15 @@ describe('estimate AI support context', () => {
     expect(unverified.snippet).not.toContain('Warning');
     expect(unverified.snippet).not.toContain('Unverified re-entry claim');
     expect(unverified.signalWord).toBeNull();
+
+    // Rows verified only via label_verified_at/label_version (the seeded
+    // label-facts lane never sets label_verified_by) still count as verified.
+    const seedVerified = result.productCatalog.find((row) => row.activeIngredient === 'Quinclorac');
+    expect(seedVerified.labelVerified).toBe(true);
+    expect(seedVerified.snippet).toContain('Label verified in admin catalog');
+    expect(seedVerified.snippet).toContain('Label signal word: Caution');
+    expect(seedVerified.snippet).toContain('Keep pets off until sprays have dried');
+    expect(seedVerified.rainfastMinutes).toBe(60);
   });
 
   test('public support sources only expose external citation metadata', () => {

@@ -320,7 +320,7 @@ async function searchProductCatalog(db, terms, productNames = []) {
             .orWhere('moa_group', 'ilike', like);
         }
       })
-      .select('name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified_by',
+      .select('name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified_by', 'label_verified_at', 'label_version',
         'signal_word', 'ppe_text', 'rei_hours', 'rainfast_minutes', 'reentry_summary', 'reentry_text', 'irrigation_notes')
       .limit(8);
 
@@ -329,9 +329,12 @@ async function searchProductCatalog(db, terms, productNames = []) {
       // irrigation timing) let Ask Waves answer "is it pet safe?" from the
       // product's own reviewed label instead of generic knowledge. Fail
       // closed: only label-verified rows may drive customer safety claims.
+      // Verification is stamped inconsistently across lanes — admin review
+      // sets label_verified_by, the seeded label facts set label_verified_at
+      // and/or label_version — so any of the three counts.
       // rei_hours = 0 is the owner-confirmed residential value ("until
       // sprays have dried"), NOT a zero-hour claim; null = unknown.
-      const labelVerified = !!row.label_verified_by;
+      const labelVerified = !!(row.label_verified_by || row.label_verified_at || row.label_version);
       const reentryText = labelVerified
         ? trimSnippet(row.reentry_summary || row.reentry_text || '')
           || (row.rei_hours == null ? '' : (Number(row.rei_hours) === 0
@@ -350,7 +353,7 @@ async function searchProductCatalog(db, terms, productNames = []) {
         row.active_ingredient ? `Active ingredient: ${row.active_ingredient}` : '',
         row.moa_group ? `MOA: ${row.moa_group}` : '',
         row.epa_reg_number ? `EPA Reg. No. ${row.epa_reg_number}` : '',
-        row.label_verified_by ? 'Label verified in admin catalog' : '',
+        labelVerified ? 'Label verified in admin catalog' : '',
         ...safetyParts,
       ].filter(Boolean);
       return {

@@ -664,6 +664,31 @@ function activeIngredientsFromSupport(context = {}, question = '') {
   return [...new Set(ingredients.map(cleanText).filter(Boolean))].slice(0, 8);
 }
 
+// Deterministic label-safety line for the forced-fallback safety answer, built
+// from the label-verified catalog rows estimate-ai-context attaches. Safety
+// questions never reach the live models (the force-fallback gate below), so
+// these reviewed label facts must surface here or nowhere. Fail closed: only
+// rows estimate-ai-context marked labelVerified carry these fields at all.
+// Applicator PPE is deliberately excluded — it is what the technician wears,
+// and in a customer answer it reads as customer instructions.
+function labelSafetyFactsFromSupport(context = {}) {
+  const verified = supportRows(context)
+    .filter((row) => row.source === 'admin_product_catalog' && row.labelVerified);
+  if (!verified.length) return '';
+  const reentries = [...new Set(verified.map((row) => cleanText(row.reentry || '')).filter(Boolean))];
+  const signalWords = [...new Set(verified.map((row) => cleanText(row.signalWord || '')).filter(Boolean))];
+  const rainfast = verified
+    .map((row) => Number(row.rainfastMinutes))
+    .filter((minutes) => Number.isFinite(minutes) && minutes > 0);
+  const parts = [];
+  if (reentries.length === 1) parts.push(`Label re-entry guidance: ${reentries[0].replace(/\.$/, '')}.`);
+  else if (reentries.length > 1) parts.push(`Label re-entry guidance by product: ${reentries.map((text) => text.replace(/\.$/, '')).join('; ')}.`);
+  if (signalWords.length) parts.push(`Label signal word${signalWords.length > 1 ? 's' : ''}: ${signalWords.join(', ')}.`);
+  // Multiple products: quote the longest (most conservative) rainfast window.
+  if (rainfast.length) parts.push(`Treated areas are rainfast in about ${Math.max(...rainfast)} minutes.`);
+  return parts.join(' ');
+}
+
 function summarizeSupportContext(context = {}, question = '') {
   return supportRows(context)
     .filter((row) => supportRowMatchesQuestion(row, question))
@@ -849,14 +874,20 @@ function answerEstimateQuestionFallback(question, context = {}) {
 
   if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application)\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
+    const labelSafetyFacts = labelSafetyFactsFromSupport(context);
     const labelCopy = 'Your technician will follow the product label directions for every application.';
     if (activeIngredients.length) {
       return [
         `${treatmentApproachForQuestion(question, context)} Active ingredients/classes in the admin catalog for this service type include ${activeIngredients.join(', ')}.`,
+        labelSafetyFacts,
         `${labelCopy} If you have pets, kids, sensitivities, or want the exact product for your home that day, call or text Waves at ${phone}.`,
       ].filter(Boolean).join(' ');
     }
-    return `${treatmentApproachForQuestion(question, context)} ${labelCopy} If you have pets, kids, sensitivities, or a specific product question, call or text Waves at ${phone} so the team can give instructions for your home.`;
+    return [
+      `${treatmentApproachForQuestion(question, context)}`,
+      labelSafetyFacts,
+      `${labelCopy} If you have pets, kids, sensitivities, or a specific product question, call or text Waves at ${phone} so the team can give instructions for your home.`,
+    ].filter(Boolean).join(' ');
   }
 
   if (/\b(lawn|turf|weed|fungus|grass|fertil)\b/.test(q)) {
