@@ -60,6 +60,8 @@ const OPENAI_COMPLETENESS_FALLBACK_CHARS = Number(process.env.OPENAI_COMPLETENES
 const OPENAI_TRANSCRIPTION_PROMPT = `Transcribe this phone call recording for Waves Pest Control (pest control and lawn care, Southwest Florida).
 
 Preserve fillers like "um" and "uh", numbers, addresses, phone numbers, and proper nouns exactly as spoken.
+Street names in addresses are real words or proper names — prefer a plausible street name over a nonsense phonetic rendering.
+When a caller spells something letter-by-letter or with phonetic markers like "B as in boy", write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
 const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
 // v2 extraction uses Gemini 2.5 Pro — most capable model for the deeply-nested
@@ -1306,6 +1308,8 @@ Rules:
 - Label every turn "Agent:" or "Caller:" on its own line.
 - "Agent" means Waves staff. "Caller" means the external customer/contact, including on outbound calls placed by Waves.
 - Transcribe verbatim — preserve fillers ("um", "uh"), numbers, addresses, phone numbers, and proper nouns exactly as spoken.
+- Street names in addresses are real words or proper names — prefer a plausible street name over a nonsense phonetic rendering.
+- When a caller spells something letter-by-letter or with phonetic markers ("B as in boy"), write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 - If audio is silent, unintelligible, or only voicemail tones, output exactly: [VOICEMAIL] or [NO SPEECH].
 - Do NOT summarize, translate, or add commentary. Output the transcript only, nothing before or after.` },
             ],
