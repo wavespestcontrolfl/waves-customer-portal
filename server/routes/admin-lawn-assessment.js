@@ -24,7 +24,7 @@ const { getProtocolWindowContext, summarizeProtocolContext } = require('../servi
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
 const config = require('../config');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts } = require('../utils/datetime-et');
 
 function applyLawnServiceFilter(query, alias = 'ss') {
   return query.where(function () {
@@ -647,12 +647,16 @@ router.post('/assess', async (req, res, next) => {
     // If serviceId is provided, validate it exists AND belongs to the
     // supplied customerId. 404 for missing, 400 for ownership mismatch
     // — different errors so the panel can surface the correct message.
+    // Hoisted so the vision-context build can anchor season/protocol to the
+    // validated visit's date instead of the current clock.
+    let scheduledService = null;
     if (serviceId) {
       const svc = await db('scheduled_services').where({ id: serviceId }).first();
       if (!svc) return res.status(404).json({ error: 'serviceId not found' });
       if (svc.customer_id !== customerId) {
         return res.status(400).json({ error: 'serviceId does not belong to customerId' });
       }
+      scheduledService = svc;
     }
 
     // Photo quality gating — runs in parallel with a small cap so a
@@ -694,15 +698,26 @@ router.post('/assess', async (req, res, next) => {
     // visit). The photo stays the primary evidence — buildVisionPrompt tells the
     // model not to let context override what the image shows. All lookups are
     // best-effort; a miss just omits that line.
-    const visitNow = new Date();
-    const visitMonth = visitNow.getMonth() + 1;
+    // Anchor the visit to the scheduled service's date (a business event in
+    // Eastern time) when we have one, else "now" in ET — never the raw server
+    // clock (Railway is UTC), which would flip the month/season near a boundary.
+    const visitServiceDateStr = scheduledService?.scheduled_date
+      ? String(scheduledService.scheduled_date).slice(0, 10)
+      : etDateString(new Date());
+    const visitDate = /^\d{4}-\d{2}-\d{2}$/.test(visitServiceDateStr)
+      ? new Date(`${visitServiceDateStr}T12:00:00-05:00`)
+      : new Date();
+    const visitMonth = etParts(visitDate).month;
     const visionContext = {
       season: lawnAssessment.getSeason(visitMonth),
       month: visitMonth,
       region: 'Southwest Florida',
     };
-    if (req.body.turfHeightIn != null && req.body.turfHeightIn !== '') {
-      visionContext.turfHeightIn = req.body.turfHeightIn;
+    // Mowing height — only accept a value in the same 0.5–8 in range the completion
+    // path enforces, so an out-of-range typed reading never biases the scoring.
+    const turfHeightNum = Number(req.body.turfHeightIn);
+    if (Number.isFinite(turfHeightNum) && turfHeightNum >= 0.5 && turfHeightNum <= 8) {
+      visionContext.turfHeightIn = turfHeightNum;
     }
     if (req.body.technicianNotes) visionContext.technicianNotes = String(req.body.technicianNotes);
     try {
@@ -716,9 +731,14 @@ router.post('/assess', async (req, res, next) => {
       if (irr.length) visionContext.irrigation = irr.join(', ');
     } catch (err) { logger.warn(`[lawn-assessment] turf-profile context lookup failed: ${err.message}`); }
     try {
+      // The PREVIOUS visit's summary — strictly a service before this one, and never
+      // this same service (re-analysis/backfill), so a later or same-visit summary
+      // can't leak in as "prior context" and bias the new score.
       const prior = await db('lawn_assessments')
         .where({ customer_id: customerId })
         .whereNotNull('ai_summary')
+        .andWhere('service_date', '<', visitServiceDateStr)
+        .modify((q) => { if (serviceId) q.andWhere(function () { this.whereNull('service_id').orWhereNot('service_id', serviceId); }); })
         .orderBy('service_date', 'desc')
         .first('ai_summary');
       if (prior?.ai_summary) visionContext.priorSummary = String(prior.ai_summary);
@@ -731,10 +751,16 @@ router.post('/assess', async (req, res, next) => {
     // just omit these lines.
     try {
       const grassCtx = await loadCustomerGrassContext(customerId, db);
-      const track = grassCtx.trackKey || 'st_augustine';
-      const protoCtx = await getProtocolWindowContext(db, { serviceDate: visitNow, grassTrack: track });
+      // Only claim planned products when we actually know the turf track — never
+      // guess st_augustine, which would attribute the wrong protocol's products.
+      const track = grassCtx.trackKey;
+      const protoCtx = track
+        ? await getProtocolWindowContext(db, { serviceDate: visitDate, grassTrack: track })
+        : null;
       const structured = protoCtx ? summarizeProtocolContext(protoCtx) : null;
-      const plannedProducts = (structured?.products || []).filter((p) => p.productName);
+      // Only the products actually IN this visit's plan — conditional/optional
+      // rescue rows are not applied, so they must not be reported as planned.
+      const plannedProducts = (structured?.products || []).filter((p) => p.productName && p.defaultInPlan);
       if (plannedProducts.length) {
         visionContext.productsApplied = plannedProducts.map((p) => (
           p.role ? `${p.productName} (${String(p.role).replace(/_/g, ' ')})` : p.productName
@@ -760,8 +786,9 @@ router.post('/assess', async (req, res, next) => {
             if (safety) bits.push(String(safety).trim());
             const reentry = c.reentry_summary || c.reentry_text;
             if (reentry) bits.push(`re-entry: ${String(reentry).trim()}`);
+            const reiHours = c.rei_hours == null ? null : Number(c.rei_hours);
             if (c.irrigation_notes) bits.push(`watering: ${String(c.irrigation_notes).trim()}`);
-            else if (Number.isFinite(Number(c.rei_hours))) bits.push(`REI ${Number(c.rei_hours)}h`);
+            else if (Number.isFinite(reiHours) && reiHours > 0) bits.push(`REI ${reiHours}h`);
             if (bits.length) constraints.push(`${c.name}: ${bits.join('; ')}`);
           }
           if (constraints.length) visionContext.labelConstraints = constraints.slice(0, 6);
