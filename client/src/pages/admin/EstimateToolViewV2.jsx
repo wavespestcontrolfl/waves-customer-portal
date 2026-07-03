@@ -57,6 +57,10 @@ import {
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
+import {
+  normalizePhoneDigits,
+  mergePhoneLookupMatch,
+} from "./estimateSendPhoneLookup";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -2347,6 +2351,13 @@ export default function EstimateToolViewV2({
   }, []);
   const [savedId, setSavedId] = useState(null);
   const [savedViewUrl, setSavedViewUrl] = useState(null);
+  // Send-form phone lookup guards (rules in estimateSendPhoneLookup.js):
+  // the sequence + abort pair kills stale responses so a slow lookup for a
+  // previous number can't land on a newer one, and the auto-fill ref tracks
+  // what the lookup wrote so it never clobbers operator-entered name/email.
+  const sendPhoneLookupSeqRef = useRef(0);
+  const sendPhoneLookupAbortRef = useRef(null);
+  const sendPhoneAutoFillRef = useRef({ name: null, email: null });
   // Full-screen, pricing-only "present to customer" mode — hides the booking
   // section + book CTA so the operator can show prices in person (issue: in-person
   // billing display). Reuses CustomerEstimatePreviewV2 with presentMode=true.
@@ -6486,31 +6497,53 @@ export default function EstimateToolViewV2({
                     type="tel"
                     value={form.customerPhone || ""}
                     onChange={async (e) => {
-                      let raw = e.target.value.replace(/\D/g, "");
-                      if (raw.length === 11 && raw.startsWith("1"))
-                        raw = raw.slice(1);
-                      const digits = raw.slice(0, 10);
+                      const digits = normalizePhoneDigits(e.target.value);
                       set("customerPhone", digits);
-                      if (digits.length >= 7) {
-                        try {
-                          const r = await fetch(
-                            `/api/admin/customers?search=${encodeURIComponent(digits)}&limit=1`,
-                            { headers: authHeaders },
+                      // Every edit supersedes any in-flight lookup — bump the
+                      // sequence and abort the fetch so a slow response for a
+                      // previous number can never land on a newer one (a stale
+                      // match here means the quote texts a stranger).
+                      const seq = ++sendPhoneLookupSeqRef.current;
+                      if (sendPhoneLookupAbortRef.current) {
+                        sendPhoneLookupAbortRef.current.abort();
+                        sendPhoneLookupAbortRef.current = null;
+                      }
+                      // Only a complete number may fire the lookup — a 7-digit
+                      // prefix can match a same-exchange stranger.
+                      if (digits.length !== 10) return;
+                      const controller = new AbortController();
+                      sendPhoneLookupAbortRef.current = controller;
+                      try {
+                        const r = await fetch(
+                          `/api/admin/customers?search=${encodeURIComponent(digits)}&limit=1`,
+                          { headers: authHeaders, signal: controller.signal },
+                        );
+                        if (!r.ok || seq !== sendPhoneLookupSeqRef.current)
+                          return;
+                        const d = await r.json();
+                        if (seq !== sendPhoneLookupSeqRef.current) return;
+                        // A miss (c = null) must run the merge too: fields the
+                        // previous lookup filled would otherwise stay in place
+                        // and pair the old customer's name/email with the new
+                        // number on send. The merge clears owned fields on a
+                        // miss and never touches operator-entered ones.
+                        const c = (d.customers || d)?.[0] || null;
+                        setForm((f) => {
+                          const { updates, autoFill } = mergePhoneLookupMatch(
+                            f,
+                            c,
+                            sendPhoneAutoFillRef.current,
                           );
-                          if (r.ok) {
-                            const d = await r.json();
-                            const c = (d.customers || d)?.[0];
-                            if (c) {
-                              set(
-                                "customerName",
-                                `${c.firstName} ${c.lastName}`,
-                              );
-                              set("customerEmail", c.email || "");
-                            }
-                          }
-                        } catch {
-                          /* ignore */
-                        }
+                          sendPhoneAutoFillRef.current = autoFill;
+                          return { ...f, ...updates };
+                        });
+                        // Contact fields feed the saved record — mirror the
+                        // CONTACT_FIELDS reset set() applies (saved snapshot
+                        // is stale; the generated estimate is not).
+                        setSavedId(null);
+                        setSavedViewUrl(null);
+                      } catch {
+                        /* aborted or failed lookup — never block typing */
                       }
                     }}
                     placeholder="9415551234"
