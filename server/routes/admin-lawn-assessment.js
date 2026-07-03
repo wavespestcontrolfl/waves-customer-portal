@@ -18,11 +18,13 @@ const RecommendationEngine = require('../services/lawn-recommendation-engine');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
 const { seasonAwareAdjustment } = require('../services/service-report/lawn-seasonality');
 const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
+const { loadCustomerGrassContext } = require('../services/lawn-grass-context');
+const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
 
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
 const config = require('../config');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts } = require('../utils/datetime-et');
 
 function applyLawnServiceFilter(query, alias = 'ss') {
   return query.where(function () {
@@ -645,12 +647,16 @@ router.post('/assess', async (req, res, next) => {
     // If serviceId is provided, validate it exists AND belongs to the
     // supplied customerId. 404 for missing, 400 for ownership mismatch
     // — different errors so the panel can surface the correct message.
+    // Hoisted so the vision-context build can anchor season/protocol to the
+    // validated visit's date instead of the current clock.
+    let scheduledService = null;
     if (serviceId) {
       const svc = await db('scheduled_services').where({ id: serviceId }).first();
       if (!svc) return res.status(404).json({ error: 'serviceId not found' });
       if (svc.customer_id !== customerId) {
         return res.status(400).json({ error: 'serviceId does not belong to customerId' });
       }
+      scheduledService = svc;
     }
 
     // Photo quality gating — runs in parallel with a small cap so a
@@ -686,13 +692,148 @@ router.post('/assess', async (req, res, next) => {
       ? passedIndices
       : photos.map((_, i) => i);
 
+    // Context for the vision prompt: what we already know about this lawn/visit,
+    // so the model reasons with it instead of guessing (grass type, season,
+    // region, irrigation, mowing height, the tech's own notes, and the prior
+    // visit). The photo stays the primary evidence — buildVisionPrompt tells the
+    // model not to let context override what the image shows. All lookups are
+    // best-effort; a miss just omits that line.
+    // Anchor the visit to the scheduled service's date (a business event in
+    // Eastern time) when we have one, else "now" in ET — never the raw server
+    // clock (Railway is UTC), which would flip the month/season near a boundary.
+    // Normalize whether pg hands back the DATE column as a 'YYYY-MM-DD' string or a
+    // Date object — String(Date) is "Fri Jul 03 2026 …", which would fail the regex
+    // and silently fall back to today's clock (defeating the whole schedule anchor).
+    const rawScheduledDate = scheduledService?.scheduled_date;
+    const scheduledDateStr = rawScheduledDate == null
+      ? null
+      : (rawScheduledDate instanceof Date
+        ? rawScheduledDate.toISOString().slice(0, 10)
+        : String(rawScheduledDate).slice(0, 10));
+    const visitServiceDateStr = scheduledDateStr && /^\d{4}-\d{2}-\d{2}$/.test(scheduledDateStr)
+      ? scheduledDateStr
+      : etDateString(new Date());
+    const visitDate = /^\d{4}-\d{2}-\d{2}$/.test(visitServiceDateStr)
+      ? new Date(`${visitServiceDateStr}T12:00:00-05:00`)
+      : new Date();
+    const visitMonth = etParts(visitDate).month;
+    const visionContext = {
+      season: lawnAssessment.getSeason(visitMonth),
+      month: visitMonth,
+      region: 'Southwest Florida',
+    };
+    // Mowing height — only accept a value in the same 0.5–8 in range the completion
+    // path enforces, so an out-of-range typed reading never biases the scoring.
+    const turfHeightNum = Number(req.body.turfHeightIn);
+    if (Number.isFinite(turfHeightNum) && turfHeightNum >= 0.5 && turfHeightNum <= 8) {
+      visionContext.turfHeightIn = turfHeightNum;
+    }
+    if (req.body.technicianNotes) visionContext.technicianNotes = String(req.body.technicianNotes);
+    // Canonical grass context — resolves the turf type + protocol track from the
+    // profile OR the legacy customers.lawn_type, so a customer with only lawn_type
+    // still gets a known grass type (and the right protocol track below) rather than
+    // silently falling back to the prompt's St. Augustine default.
+    let grassCtx = {};
+    try { grassCtx = await loadCustomerGrassContext(customerId, db); } catch (err) { logger.warn(`[lawn-assessment] grass-context lookup failed: ${err.message}`); }
+    if (grassCtx.grassTypeLabel) visionContext.grassType = grassCtx.grassTypeLabel;
+    try {
+      const turf = await db('customer_turf_profiles')
+        .where({ customer_id: customerId })
+        .first('irrigation_type', 'irrigation_inches_per_week');
+      const irr = [];
+      const irrType = grassCtx.irrigationSystem || turf?.irrigation_type;
+      if (irrType) irr.push(String(irrType).replace(/_/g, ' '));
+      if (turf?.irrigation_inches_per_week != null) irr.push(`${turf.irrigation_inches_per_week} in/wk`);
+      if (irr.length) visionContext.irrigation = irr.join(', ');
+    } catch (err) { logger.warn(`[lawn-assessment] irrigation context lookup failed: ${err.message}`); }
+    try {
+      // The PREVIOUS visit's summary — strictly a service SCHEDULED before this one.
+      // lawn_assessments.service_date is the assessment RUN date (can be out of
+      // schedule order on backfills), so bound by the linked scheduled_services
+      // .scheduled_date (falling back to service_date only for rows with no
+      // service_id), and never this same service, so a later/same-visit summary
+      // can't leak in and bias the new score.
+      const prior = await db('lawn_assessments as la')
+        .leftJoin('scheduled_services as ss', 'la.service_id', 'ss.id')
+        .where('la.customer_id', customerId)
+        .whereNotNull('la.ai_summary')
+        .andWhere(function () {
+          this.where('ss.scheduled_date', '<', visitServiceDateStr)
+            .orWhere(function () { this.whereNull('la.service_id').andWhere('la.service_date', '<', visitServiceDateStr); });
+        })
+        .modify((q) => { if (serviceId) q.andWhere(function () { this.whereNull('la.service_id').orWhereNot('la.service_id', serviceId); }); })
+        .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC')
+        .first('la.ai_summary');
+      if (prior?.ai_summary) visionContext.priorSummary = String(prior.ai_summary);
+    } catch (err) { logger.warn(`[lawn-assessment] prior-summary context lookup failed: ${err.message}`); }
+
+    // The products this visit's protocol calls for, plus their label
+    // safety/irrigation notes. Knowing a herbicide is in the plan helps the model
+    // read temporary chemical injury as treatment rather than disease; a fungicide
+    // frames brown patches as being treated. Best-effort — protocol/catalog misses
+    // just omit these lines.
+    try {
+      // Only claim planned products when we actually know the turf track — never
+      // guess st_augustine, which would attribute the wrong protocol's products.
+      const track = grassCtx.trackKey;
+      // Honor the window the office linked on the appointment (catch-up / rescheduled
+      // / manually-assigned visits): a keyed window overrides the date-derived one so
+      // the model sees the products the tech is actually expected to apply.
+      const assignedWindowKey = scheduledService?.lawn_protocol_window_key || null;
+      const protoCtx = track
+        ? await getProtocolWindowContext(db, { serviceDate: visitDate, grassTrack: track, windowKey: assignedWindowKey })
+        : null;
+      const structured = protoCtx ? summarizeProtocolContext(protoCtx) : null;
+      // Only claim products we're CERTAIN were applied: default-in-plan AND
+      // unconditional. A product carrying gates (ordinance / heat / disease-soil,
+      // etc.) may be blocked at closeout, so without evaluating those gates here we
+      // must not tell the vision model it was applied. Conservative by design — a
+      // gated product just omits its line rather than risk a false "was treated" cue.
+      const hasGates = (g) => (Array.isArray(g) ? g.length > 0 : !!g && typeof g === 'object' && Object.keys(g).length > 0);
+      const plannedProducts = (structured?.products || [])
+        .filter((p) => p.productName && p.defaultInPlan && !hasGates(p.gates));
+      if (plannedProducts.length) {
+        visionContext.productsApplied = plannedProducts.map((p) => (
+          p.role ? `${p.productName} (${String(p.role).replace(/_/g, ' ')})` : p.productName
+        ));
+        const ids = [...new Set(plannedProducts.map((p) => p.productId).filter(Boolean))];
+        if (ids.length) {
+          const catalogRows = await db('products_catalog')
+            .whereIn('id', ids)
+            .select(
+              'name',
+              'customer_precaution_summary',
+              'customer_safety_summary',
+              'reentry_summary',
+              'reentry_text',
+              'irrigation_notes',
+              'rei_hours',
+            )
+            .catch(() => []);
+          const constraints = [];
+          for (const c of catalogRows) {
+            const bits = [];
+            const safety = c.customer_precaution_summary || c.customer_safety_summary;
+            if (safety) bits.push(String(safety).trim());
+            const reentry = c.reentry_summary || c.reentry_text;
+            if (reentry) bits.push(`re-entry: ${String(reentry).trim()}`);
+            const reiHours = c.rei_hours == null ? null : Number(c.rei_hours);
+            if (c.irrigation_notes) bits.push(`watering: ${String(c.irrigation_notes).trim()}`);
+            else if (Number.isFinite(reiHours) && reiHours > 0) bits.push(`REI ${reiHours}h`);
+            if (bits.length) constraints.push(`${c.name}: ${bits.join('; ')}`);
+          }
+          if (constraints.length) visionContext.labelConstraints = constraints.slice(0, 6);
+        }
+      }
+    } catch (err) { logger.warn(`[lawn-assessment] protocol-products context lookup failed: ${err.message}`); }
+
     // Multi-photo AI runs in parallel with the same small cap. Each
     // analyzePhoto call is itself two vision-API calls (Claude +
     // Gemini) under the hood — capping at 3 keeps the upper bound
     // at 6 concurrent vision calls per /assess request, which is
     // well inside both providers' burst limits.
     const photoResults = await withConcurrency(photosToAnalyze, 3, (photo) =>
-      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg'),
+      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg', visionContext),
     );
 
     // Map AI result back to original photo index. validResults preserves
@@ -730,16 +871,25 @@ router.post('/assess', async (req, res, next) => {
     // Determine season and apply adjustment. Prefer a WEATHER-driven normalization —
     // St. Augustine slows by actual cold, not the calendar — using the customer's
     // recent overnight lows. Falls back to the legacy month bucket on any miss.
+    // Use the SAME visit month (scheduled service date, ET) the prompt used, so the
+    // model and the persisted score normalization agree — not the UTC server clock.
     const now = new Date();
-    const month = now.getMonth() + 1;
+    const month = visitMonth;
     const season = lawnAssessment.getSeason(month);
+    // fetchRecentMinTempF returns the trailing window ending TODAY, so it only makes
+    // sense for a visit being analyzed same-day. For a backfilled/non-today visit,
+    // today's warm/cold nights would wrongly override the visit month's dormancy
+    // fallback — so skip the weather read and let the month bucket drive the season.
+    const visitIsToday = visitServiceDateStr === etDateString(now);
     let recentMinTempF = null;
-    try {
-      const cust = await db('customers').where({ id: customerId }).select('latitude', 'longitude').first();
-      if (cust && Number.isFinite(Number(cust.latitude)) && Number.isFinite(Number(cust.longitude))) {
-        recentMinTempF = await fetchRecentMinTempF({ latitude: Number(cust.latitude), longitude: Number(cust.longitude) });
-      }
-    } catch (err) { logger.warn(`[lawn-assessment] recent-temp lookup failed: ${err.message}`); }
+    if (visitIsToday) {
+      try {
+        const cust = await db('customers').where({ id: customerId }).select('latitude', 'longitude').first();
+        if (cust && Number.isFinite(Number(cust.latitude)) && Number.isFinite(Number(cust.longitude))) {
+          recentMinTempF = await fetchRecentMinTempF({ latitude: Number(cust.latitude), longitude: Number(cust.longitude) });
+        }
+      } catch (err) { logger.warn(`[lawn-assessment] recent-temp lookup failed: ${err.message}`); }
+    }
     const adjustedScores = Number.isFinite(recentMinTempF)
       ? seasonAwareAdjustment(displayScores, { month, recentMinTempF })
       : lawnAssessment.applySeasonalAdjustment(displayScores, month);

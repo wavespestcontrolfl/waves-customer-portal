@@ -5319,6 +5319,9 @@ function LawnAssessmentCompletionBlock({
   // documents. Stored on the same shared turf-height state.
   gaugeHeightIn = null,
   onGaugeHeight,
+  // The tech's free-text visit notes (owned by CompletionPanel) — passed through
+  // so the AI photo analysis can factor them in alongside the images.
+  technicianNotes = "",
 }) {
   const [photos, setPhotos] = useState([]);
   const [result, setResult] = useState(null);
@@ -5480,6 +5483,9 @@ function LawnAssessmentCompletionBlock({
             data: photo.data.split(",")[1],
             mimeType: photo.mimeType || "image/jpeg",
           })),
+          // Extra context for the vision model (see buildVisionPrompt server-side).
+          turfHeightIn: gaugeHeightIn,
+          technicianNotes,
         }),
       });
       if (response.success === false) {
@@ -9948,6 +9954,7 @@ export function CompletionPanel({
                   onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
                   gaugeHeightIn={turfHeight.heightIn}
                   onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
+                  technicianNotes={notes}
                 />
               </Field>
             )}
@@ -11872,6 +11879,7 @@ export function CompletionPanel({
                 onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
                 gaugeHeightIn={turfHeight.heightIn}
                 onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
+                technicianNotes={notes}
               />
             </div>
           )}
