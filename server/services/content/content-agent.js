@@ -231,7 +231,11 @@ const ContentAgent = {
       wordCount: postData?.word_count || null,
       qaScore: null,
       publishedUrl: postData?.url || null,
-      socialDistributed: toolsExecuted.some(t => t.tool === 'distribute_to_social'),
+      // Invoked is not distributed: the tool now refuses non-live posts
+      // (returns skipped/error) — the summary must not tell operators a
+      // share happened when no platform was posted to.
+      socialDistributed: toolsExecuted.some(t => t.tool === 'distribute_to_social'
+        && !t.result?.skipped && !t.result?.error),
       toolsExecuted: toolsExecuted.map(t => t.tool),
       durationSeconds: Math.round(durationMs / 1000),
       report: finalReport,

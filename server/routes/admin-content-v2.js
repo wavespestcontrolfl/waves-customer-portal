@@ -580,7 +580,11 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[content] publish-astro failed: ${err.message}`);
-    const isClientErr = err.code === 'BLOG_FRONTMATTER_INVALID' || err.code === 'BLOG_GUARDRAILS_FAILED';
+    // Content-policy rejections are the author's to fix — 400, not 500
+    // (a 500 here reads as a server failure and can trip error alerting).
+    const isClientErr = err.code === 'BLOG_FRONTMATTER_INVALID'
+      || err.code === 'BLOG_GUARDRAILS_FAILED'
+      || err.code === 'BLOG_COMPARISON_GATE_FAILED';
     res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
   }
 });
