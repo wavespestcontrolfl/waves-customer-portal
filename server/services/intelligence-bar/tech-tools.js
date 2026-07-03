@@ -310,6 +310,23 @@ async function getProductInfo(productName) {
   const product = await db('products_catalog').whereILike('name', `%${productName}%`).first();
   if (!product) return { error: `Product "${productName}" not found` };
 
+  // Label/SDS-derived safety fields so the model states grounded PPE / re-entry
+  // instead of recalling them from training memory. Null fields are omitted so
+  // the model doesn't read a blank as "none required".
+  const safety = {
+    signal_word: product.signal_word || undefined,
+    ppe: product.ppe_text || undefined,
+    reentry: product.reentry_text || product.reentry_summary || undefined,
+    rei_hours: product.rei_hours != null ? product.rei_hours : undefined,
+    rainfast_minutes: product.rainfast_minutes != null ? product.rainfast_minutes : undefined,
+    watering_in: product.irrigation_required == null
+      ? undefined
+      : (product.irrigation_required ? 'Water in after application' : 'Do not water in — let it dry on the leaf'),
+    epa_reg_number: product.epa_reg_number || product.epa_registration_number || undefined,
+    label_url: product.label_url || undefined,
+    sds_url: product.sds_url || undefined,
+  };
+
   return {
     name: product.name,
     category: product.category,
@@ -320,6 +337,7 @@ async function getProductInfo(productName) {
     default_rate: product.default_rate,
     default_unit: product.default_unit,
     sku: product.sku,
+    safety,
   };
 }
 
