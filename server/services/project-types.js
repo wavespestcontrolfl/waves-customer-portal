@@ -900,7 +900,10 @@ const PROJECT_TYPES = {
       { key: 'subdivision', label: 'Subdivision / Community', type: 'text', placeholder: 'e.g. Lakewood Ranch — Star Farms' },
       { key: 'permit_number', label: 'Building permit #', type: 'text', placeholder: 'Issued by the building department' },
       { key: 'builder_contractor', label: 'Builder / General contractor', type: 'customer_search', placeholder: 'Search customer database or type contractor name' },
-      { key: 'treatment_date', label: 'Date of treatment', type: 'date' },
+      // No treatment_date field: the project-level date IS the treatment date
+      // (the forms label it that way for this type, and the certificate prints
+      // it). Legacy findings.treatment_date still renders and satisfies the
+      // send gate.
       { key: 'treatment_time', label: 'Time of treatment', type: 'time' },
       { key: 'treatment_method', label: 'Method of treatment', type: 'select', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
       { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text' },
@@ -914,6 +917,34 @@ const PROJECT_TYPES = {
       { key: 'linear_feet', label: 'Linear feet treated', type: 'text', placeholder: 'For trenching / perimeter applications' },
       { key: 'trench_depth_ft', label: 'Trench / rod depth (ft)', type: 'text', placeholder: 'Vertical barrier depth, e.g. 0.5 (label rate is per ft of depth)' },
       { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text' },
+      // Jobs that combine methods (e.g. a Bora-Care wood treatment plus a
+      // Termidor soil barrier) record each product as its own application so
+      // the certificate carries a per-product FDACS 5E-14.106 record instead
+      // of one ambiguous set of chemistry fields. The fields above are
+      // Application 1; each extra application repeats this sub-schema in the
+      // findings' `additional_applications` array.
+      {
+        key: 'additional_applications',
+        label: 'Additional applications',
+        type: 'applications',
+        itemLabel: 'Application',
+        // Row headers continue the numbering after the primary application.
+        itemIndexOffset: 2,
+        addLabel: 'Add another application',
+        description: 'Record each additional product applied on this job (e.g. a wood treatment alongside the soil barrier).',
+        fields: [
+          { key: 'treatment_method', label: 'Method of treatment', type: 'select', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
+          { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text', showWhen: { field: 'treatment_method', value: 'Other' } },
+          { key: 'product_name', label: 'Product used', type: 'product_search', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care'] },
+          { key: 'epa_registration', label: 'EPA registration #', type: 'text', placeholder: 'e.g. 7969-210' },
+          { key: 'active_ingredient', label: 'Active ingredient', type: 'text', placeholder: 'e.g. fipronil' },
+          { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', placeholder: 'e.g. 0.060' },
+          { key: 'square_footage', label: 'Square footage treated', type: 'text' },
+          { key: 'linear_feet', label: 'Linear feet treated', type: 'text', placeholder: 'For trenching / perimeter applications' },
+          { key: 'trench_depth_ft', label: 'Trench / rod depth (ft)', type: 'text', placeholder: 'Vertical barrier depth, e.g. 0.5 (label rate is per ft of depth)' },
+          { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text' },
+        ],
+      },
       { key: 'applicator_name', label: "Applicator's printed name", type: 'text' },
       { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text' },
       // FBC 1816.1.7 requires an "authorized signature of the licensed

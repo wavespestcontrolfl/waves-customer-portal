@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import AddressAutocomplete from '../AddressAutocomplete';
 import { adminFetch } from '../../lib/adminFetch';
+import { computePretreatChemistry } from '../../lib/termitePretreatRates';
 import DictationButton from './DictationButton';
 
 // Append a dictated chunk to an existing field value with a single space.
@@ -552,7 +553,196 @@ function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyl
 }
 
 export function hasCatalogBackedProjectFields(fields = []) {
-  return fields.some((field) => field.type === 'product_search');
+  return fields.some((field) => field.type === 'product_search'
+    || (Array.isArray(field.fields) && hasCatalogBackedProjectFields(field.fields)));
+}
+
+export function normalizeApplicationRows(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((row) => row && typeof row === 'object' && !Array.isArray(row));
+}
+
+function rowChemistryInputs(row = {}) {
+  return {
+    productName: row.product_name,
+    squareFootage: row.square_footage,
+    linearFeet: row.linear_feet,
+    trenchDepthFt: row.trench_depth_ft,
+  };
+}
+
+// Keep a row's concentration/gallons in step with the label-rate calculation,
+// with the same ownership rule as the primary application's sync effect but
+// expressed purely: a field is rewritten only while blank or still holding
+// the previous inputs' computed value — a hand-typed labeled rate survives.
+// A known bait/wood product force-clears both (no finished-solution chemistry
+// exists, so anything here would print wrong on the certificate).
+function applyRowChemistry(prevRow, nextRow) {
+  const prevChem = computePretreatChemistry(rowChemistryInputs(prevRow));
+  const nextChem = computePretreatChemistry(rowChemistryInputs(nextRow));
+  if (nextChem.status === 'unknown_product') return nextRow;
+  if (nextChem.status === 'not_applicable') {
+    return { ...nextRow, concentration_pct: '', gallons_applied: '' };
+  }
+  const owns = (key, prevAuto) => {
+    const current = String(nextRow[key] || '').trim();
+    return current === '' || current === String(prevAuto ?? '');
+  };
+  const out = { ...nextRow };
+  if (owns('concentration_pct', prevChem.status === 'ok' ? prevChem.concentrationPct : '')) {
+    out.concentration_pct = nextChem.concentrationPct;
+  }
+  if (owns('gallons_applied', prevChem.status === 'ok' ? prevChem.gallonsText : '')) {
+    out.gallons_applied = nextChem.gallonsText || '';
+  }
+  return out;
+}
+
+// Repeatable per-product application block (pre-treatment certificate):
+// each row carries its own method + product + EPA/A.I./concentration +
+// coverage so a combined job (soil barrier + wood treatment) records one
+// FDACS 5E-14.106 entry per product. Rows live in the findings as an array
+// of objects; the primary application stays in the flat top-level keys.
+function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyle, products, palette }) {
+  const rows = normalizeApplicationRows(value);
+  const subFields = Array.isArray(field.fields) ? field.fields : [];
+  const indexOffset = Number(field.itemIndexOffset) || 1;
+  const itemLabel = field.itemLabel || 'Item';
+
+  const updateRow = (index, key, nextValue) => {
+    const next = rows.map((row, i) => {
+      if (i !== index) return row;
+      return applyRowChemistry(row, { ...row, [key]: nextValue });
+    });
+    onChange(next);
+  };
+
+  const handleRowProductSelect = (index, product) => {
+    const productName = productLabel(product);
+    const epaRegistration = product?.epa_reg_number || product?.epaRegNumber || '';
+    const activeIngredient = product?.active_ingredient || product?.activeIngredient || '';
+    const next = rows.map((row, i) => {
+      if (i !== index) return row;
+      const picked = {
+        ...row,
+        product_name: productName || row.product_name || '',
+        ...(epaRegistration ? { epa_registration: epaRegistration } : {}),
+        ...(activeIngredient ? { active_ingredient: activeIngredient } : {}),
+      };
+      return applyRowChemistry(row, picked);
+    });
+    onChange(next);
+  };
+
+  const addRow = () => onChange([...rows, {}]);
+  const removeRow = (index) => onChange(rows.filter((_, i) => i !== index));
+
+  return (
+    <div id={id} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {field.description && (
+        <div style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.5 }}>{field.description}</div>
+      )}
+      {rows.map((row, index) => {
+        const chem = computePretreatChemistry(rowChemistryInputs(row));
+        return (
+          <div
+            key={index}
+            style={{
+              border: '1px solid #D7E3EA',
+              borderRadius: 12,
+              background: '#F8FCFE',
+              padding: '12px 14px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#1B2C5B' }}>
+                {itemLabel} {index + indexOffset}
+              </div>
+              <button
+                type="button"
+                onClick={() => removeRow(index)}
+                style={{
+                  border: '1px solid #D7E3EA',
+                  borderRadius: 8,
+                  background: '#FFFFFF',
+                  color: '#6B7280',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  padding: '6px 10px',
+                  cursor: 'pointer',
+                }}
+              >
+                Remove
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {subFields.map((subField) => {
+                if (subField.showWhen && String(row[subField.showWhen.field] || '') !== subField.showWhen.value) {
+                  return null;
+                }
+                return (
+                  <div key={subField.key}>
+                    <label
+                      htmlFor={`${id}-${index}-${subField.key}`}
+                      style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#1B2C5B', marginBottom: 6 }}
+                    >
+                      {subField.label}
+                    </label>
+                    <ProjectFindingFieldInput
+                      field={subField}
+                      id={`${id}-${index}-${subField.key}`}
+                      name={`${name}[${index}].${subField.key}`}
+                      value={row[subField.key] || ''}
+                      onChange={(nextValue) => updateRow(index, subField.key, nextValue)}
+                      inputStyle={inputStyle}
+                      products={products}
+                      onProductSelect={(product) => handleRowProductSelect(index, product)}
+                      palette={palette}
+                    />
+                    {subField.key === 'product_name' && chem.status === 'not_applicable' && chem.note && (
+                      <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>{chem.note}</div>
+                    )}
+                    {subField.key === 'concentration_pct' && chem.status === 'ok' && (
+                      <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                        Auto-filled with the label&apos;s standard pre-construction dilution — overtype to record a different labeled rate.
+                      </div>
+                    )}
+                    {subField.key === 'gallons_applied' && chem.status === 'ok' && chem.note && (
+                      <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                        Auto-calculated: {chem.note}.
+                      </div>
+                    )}
+                    {(subField.key === 'concentration_pct' || subField.key === 'gallons_applied') && chem.status === 'not_applicable' && (
+                      <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                        Not applicable for this product — kept blank on the certificate.
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+      <button
+        type="button"
+        onClick={addRow}
+        style={{
+          border: '1px dashed #CFE7F5',
+          borderRadius: 10,
+          background: '#FFFFFF',
+          color: '#1B2C5B',
+          fontSize: 14,
+          fontWeight: 800,
+          padding: '12px 14px',
+          cursor: 'pointer',
+          textAlign: 'center',
+        }}
+      >
+        + {field.addLabel || `Add ${itemLabel.toLowerCase()}`}
+      </button>
+    </div>
+  );
 }
 
 export default function ProjectFindingFieldInput({
@@ -566,6 +756,21 @@ export default function ProjectFindingFieldInput({
   onProductSelect,
   palette,
 }) {
+  if (field.type === 'applications') {
+    return (
+      <ApplicationsRepeaterInput
+        field={field}
+        id={id}
+        name={name}
+        value={value}
+        onChange={onChange}
+        inputStyle={inputStyle}
+        products={products}
+        palette={palette}
+      />
+    );
+  }
+
   if (field.type === 'address' && field.key !== 'property_address') {
     return (
       <AddressAutocomplete

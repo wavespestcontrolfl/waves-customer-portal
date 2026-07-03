@@ -8,7 +8,10 @@ import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import useIsMobile from "../../hooks/useIsMobile";
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
 import { INTERNAL_FINDING_KEYS } from "../../lib/wdoReportFields";
-import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from "../../components/tech/ProjectFindingFieldInput";
+import ProjectFindingFieldInput, {
+  hasCatalogBackedProjectFields,
+  normalizeApplicationRows,
+} from "../../components/tech/ProjectFindingFieldInput";
 import { parseSections } from "../ProjectReportViewPage";
 import { COLORS, FONTS } from "../../theme-brand";
 
@@ -301,6 +304,69 @@ function deliverySummary(channels = {}) {
     .join(" · ");
 }
 
+// Per-application completeness checks for the pre-treatment certificate.
+// Runs once over the flat primary-application keys (labelPrefix "") and once
+// per additional_applications row — mirror of the server gate in
+// server/routes/admin-projects.js.
+function certApplicationChecks(app = {}, labelPrefix = "") {
+  const productName = app.product_name === "Other"
+    ? app.product_name_other
+    : app.product_name;
+  const rawMethod = app.treatment_method;
+  const treatmentMethod = rawMethod === "Other"
+    ? app.treatment_method_other
+    : rawMethod;
+  // Method-aware coverage requirements — bait systems have no gallons, borate
+  // wood treatments may not either.
+  const isBaitSystem = rawMethod === "Bait system";
+  const isWoodTreatment = rawMethod === "Wood treatment (borate)";
+  const needsGallons = !isBaitSystem && !isWoodTreatment;
+  // A finished-solution concentration only exists for liquid soil barriers
+  // — same rule as the server gate.
+  const needsConcentration = needsGallons;
+  const hasArea =
+    hasMeaningfulValue(app.square_footage) ||
+    hasMeaningfulValue(app.linear_feet);
+  const coverageOk = needsGallons
+    ? hasArea && hasMeaningfulValue(app.gallons_applied)
+    : hasArea;
+  const coverageLabel = needsGallons
+    ? "Coverage + gallons applied"
+    : "Coverage (sq ft or linear ft)";
+  return [
+    {
+      label: `${labelPrefix}Method of treatment`,
+      ok: hasMeaningfulValue(treatmentMethod),
+    },
+    {
+      label: `${labelPrefix}Product used`,
+      ok: hasMeaningfulValue(productName),
+    },
+    {
+      label: `${labelPrefix}${
+        needsConcentration
+          ? "Active ingredient + concentration"
+          : "Active ingredient"
+      }`,
+      ok:
+        hasMeaningfulValue(app.active_ingredient) &&
+        (!needsConcentration || hasMeaningfulValue(app.concentration_pct)),
+    },
+    {
+      label: `${labelPrefix}${coverageLabel}`,
+      ok: coverageOk,
+    },
+  ];
+}
+
+// Rows the tech added but never touched are ignored (matching the server
+// gate and the certificate render) — only rows with content must be complete.
+function meaningfulApplicationRows(findings) {
+  return normalizeApplicationRows(findings?.additional_applications).filter(
+    (row) => Object.values(row).some(hasMeaningfulValue),
+  );
+}
+
 function evaluateProjectReadiness({
   project,
   typeCfg,
@@ -340,31 +406,6 @@ function evaluateProjectReadiness({
     );
   }
   if (isCertificate) {
-    const productName = findings?.product_name === "Other"
-      ? findings?.product_name_other
-      : findings?.product_name;
-    const rawMethod = findings?.treatment_method;
-    const treatmentMethod = rawMethod === "Other"
-      ? findings?.treatment_method_other
-      : rawMethod;
-    // Mirror server-side method-aware coverage requirements in
-    // server/routes/admin-projects.js — bait systems have no gallons, borate
-    // wood treatments may not either.
-    const isBaitSystem = rawMethod === "Bait system";
-    const isWoodTreatment = rawMethod === "Wood treatment (borate)";
-    const needsGallons = !isBaitSystem && !isWoodTreatment;
-    // A finished-solution concentration only exists for liquid soil barriers
-    // — same rule as the server gate.
-    const needsConcentration = needsGallons;
-    const hasArea =
-      hasMeaningfulValue(findings?.square_footage) ||
-      hasMeaningfulValue(findings?.linear_feet);
-    const coverageOk = needsGallons
-      ? hasArea && hasMeaningfulValue(findings?.gallons_applied)
-      : hasArea;
-    const coverageLabel = needsGallons
-      ? "Coverage + gallons applied"
-      : "Coverage (sq ft or linear ft)";
     required.push(
       {
         label: "Treatment address or lot/block",
@@ -378,26 +419,12 @@ function evaluateProjectReadiness({
           hasMeaningfulValue(findings?.treatment_date) ||
           hasMeaningfulValue(projectDate),
       },
-      {
-        label: "Method of treatment",
-        ok: hasMeaningfulValue(treatmentMethod),
-      },
-      {
-        label: "Product used",
-        ok: hasMeaningfulValue(productName),
-      },
-      {
-        label: needsConcentration
-          ? "Active ingredient + concentration"
-          : "Active ingredient",
-        ok:
-          hasMeaningfulValue(findings?.active_ingredient) &&
-          (!needsConcentration || hasMeaningfulValue(findings?.concentration_pct)),
-      },
-      {
-        label: coverageLabel,
-        ok: coverageOk,
-      },
+      ...certApplicationChecks(findings || {}),
+      // Each additional application carries its own product record, so each
+      // must be as complete as the primary before the certificate can send.
+      ...meaningfulApplicationRows(findings).flatMap((row, index) =>
+        certApplicationChecks(row, `Application ${index + 2}: `),
+      ),
       {
         label: "Applicator's printed name",
         ok: hasMeaningfulValue(findings?.applicator_name),
@@ -453,7 +480,14 @@ function projectFieldLabel(typeCfg, key) {
 }
 
 function formatProjectPreviewValue(value) {
-  if (Array.isArray(value)) return value.filter(Boolean).join(", ");
+  if (Array.isArray(value)) {
+    // Arrays of objects (certificate application rows) format each row on
+    // its own line; the preview block renders pre-wrap.
+    return value
+      .map((item) => formatProjectPreviewValue(item))
+      .filter((item) => hasMeaningfulValue(item))
+      .join("\n");
+  }
   if (value && typeof value === "object") {
     return Object.entries(value)
       .filter(([, v]) => hasMeaningfulValue(v))
@@ -2305,7 +2339,9 @@ function ProjectDetail({
         <div>
           {" "}
           <Label htmlFor={`${idPrefix}-project-date`}>
-            Inspection / project date
+            {project.project_type === CERTIFICATE_TYPE
+              ? "Date of treatment"
+              : "Inspection / project date"}
           </Label>{" "}
           <input
             id={`${idPrefix}-project-date`}
