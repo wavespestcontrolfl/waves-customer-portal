@@ -1711,7 +1711,16 @@ function applyParcelTurfBound(aiAnalysis, propertyRecord) {
       && !['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'].includes(commercialUseType)) {
     return aiAnalysis;
   }
-  const propertyType = String(propertyRecord.propertyType || '').toUpperCase();
+  // The attached/shared-turf exemption may only key off a TRUSTED type. An
+  // unverified web-search "Multifamily" (the Gateway Ave shape) must not leave
+  // the AI turf estimate unbounded on a parcel that will be priced residential
+  // (codex rd2 P1) — distrusted types get the cap, the conservative direction.
+  // Satellite-applied types stay exempt-eligible by design: the vision pass
+  // reclassifies attached units BEFORE this cap runs precisely so it can skip.
+  const typeEvidence = propertyRecord._fieldEvidence?.propertyType;
+  const typeTrusted = String(typeEvidence?.sourceType || '').toLowerCase() === 'satellite'
+    || recordCommercialSignalTrusted(propertyRecord);
+  const propertyType = typeTrusted ? String(propertyRecord.propertyType || '').toUpperCase() : '';
   if (/CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/.test(propertyType)) return aiAnalysis;
 
   const bound = parcelTurfBoundSqft(propertyRecord);
@@ -1879,11 +1888,38 @@ function recordCommercialSignalTrusted(rc) {
   return !evidence.fieldVerify;
 }
 
-// Null out an untrusted record for commercial-signal reads. Structured
+// A hybrid merge's unitCount may itself have been won by the same unverified
+// web source as the type — only an authoritative or field-verified count may
+// keep voting; otherwise fall back to the neutral 1.
+function trustedUnitCount(rc) {
+  const evidence = rc?._fieldEvidence?.unitCount;
+  if (!evidence) return rc?.unitCount;
+  const sourceType = String(evidence.sourceType || '').toLowerCase();
+  if (AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(sourceType)) return rc.unitCount;
+  return evidence.fieldVerify ? 1 : rc.unitCount;
+}
+
+// Sanitize an untrusted record for commercial-signal reads. Structured
 // satellite AI signals (propertyUse / commercialUseType) keep voting — vision
 // looked at THIS parcel, unlike a web-search hit on a neighboring listing.
+//
+// A HYBRID merge still carries authoritative county GIS strings in _raw (the
+// top-ranked county/cadastral record donates _raw, and buildCadastralRecord
+// deliberately preserves land-use it can't normalize into a propertyType —
+// municipal, common area, co-op). Nulling the whole record would let those
+// county-backed commercial parcels fall through to residential pricing (codex
+// rd2 P1) — so strip ONLY the untrusted type strings and web-sourced unit
+// count, and keep the county signals. An AI-only merge has nothing
+// authoritative to keep.
 function commercialSignalRecord(rc) {
-  return recordCommercialSignalTrusted(rc) ? rc : null;
+  if (recordCommercialSignalTrusted(rc)) return rc;
+  if (rc?._source !== 'hybrid') return null;
+  return {
+    ...rc,
+    propertyType: '',
+    unitCount: trustedUnitCount(rc),
+    _raw: { ...(rc._raw || {}), propertyType: '' },
+  };
 }
 
 function detectCategory(rc, ai = {}) {

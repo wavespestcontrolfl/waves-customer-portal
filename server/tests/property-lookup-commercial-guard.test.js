@@ -184,6 +184,127 @@ describe('detectCategory with the evidence guard', () => {
   });
 });
 
+describe('hybrid county land-use survives an untrusted type (codex rd2 P1)', () => {
+  // A hybrid whose propertyType was won by an unverified web hit, but whose
+  // county GIS donated authoritative land-use strings in _raw —
+  // buildCadastralRecord deliberately carries these even when they can't be
+  // normalized into a propertyType.
+  function hybridMunicipalRecord(overrides = {}) {
+    return untrustedAiRecord({
+      _source: 'hybrid',
+      _raw: { landUse: 'MUNICIPAL GOVERNMENT', zoning: '' },
+      ...overrides,
+    });
+  }
+
+  test('county municipal land-use still classifies COMMERCIAL despite the untrusted type', () => {
+    expect(detectCategory(hybridMunicipalRecord(), {})).toBe('COMMERCIAL');
+  });
+
+  test('county common-area land-use still classifies COMMERCIAL', () => {
+    expect(detectCategory(untrustedAiRecord({
+      _source: 'hybrid',
+      _raw: { landUse: 'HOA COMMON AREA' },
+    }), {})).toBe('COMMERCIAL');
+  });
+
+  test('the untrusted type string itself is still suppressed on the hybrid', () => {
+    // Same record, but land-use carries no commercial signal — the LoopNet
+    // "Multifamily" alone must not flip it.
+    expect(detectCategory(untrustedAiRecord({
+      _source: 'hybrid',
+      _raw: { landUse: 'VACANT RESIDENTIAL' },
+    }), {})).toBe('RESIDENTIAL');
+  });
+
+  test('AI-only merges keep nothing — raw web strings stay suppressed', () => {
+    expect(detectCategory(untrustedAiRecord({
+      _raw: { landUse: 'MULTIFAMILY 10+ UNITS' },
+    }), {})).toBe('RESIDENTIAL');
+  });
+
+  test('subtype resolves from the preserved county land-use', () => {
+    expect(resolveCommercialSubtype(hybridMunicipalRecord(), {})).toBe('government_municipal');
+  });
+
+  test('web-sourced unverified unitCount on a hybrid cannot vote COMMERCIAL', () => {
+    expect(detectCategory(untrustedAiRecord({
+      _source: 'hybrid',
+      unitCount: 12,
+      _fieldEvidence: {
+        ...untrustedAiRecord()._fieldEvidence,
+        unitCount: { value: 12, sourceType: 'unknown', fieldVerify: true, score: 30 },
+      },
+    }), {})).toBe('RESIDENTIAL');
+  });
+
+  test('county-sourced unitCount on a hybrid still votes COMMERCIAL', () => {
+    expect(detectCategory(untrustedAiRecord({
+      _source: 'hybrid',
+      unitCount: 12,
+      _fieldEvidence: {
+        ...untrustedAiRecord()._fieldEvidence,
+        unitCount: { value: 12, sourceType: 'county', fieldVerify: false, score: 100 },
+      },
+    }), {})).toBe('COMMERCIAL');
+  });
+});
+
+describe('parcel turf cap ignores untrusted types (codex rd2 P1)', () => {
+  const { applyParcelTurfBound } = routePrivate;
+
+  function oversizedTurfAnalysis() {
+    return { estimatedTurfSf: 20000, propertyUse: 'RESIDENTIAL', commercialUseType: 'NONE' };
+  }
+
+  test('untrusted web-search Multifamily no longer skips the parcel cap', () => {
+    const ai = oversizedTurfAnalysis();
+    const rc = untrustedAiRecord({ _parcel: { polygonAreaSqft: 8000 } });
+    applyParcelTurfBound(ai, rc);
+    expect(ai.turfCappedToParcel).toBe(true);
+    expect(ai.estimatedTurfSf).toBe(8000);
+    expect(ai._turfPreCapSf).toBe(20000);
+  });
+
+  test('trusted county Multifamily still skips the cap (shared turf is legitimate)', () => {
+    const ai = oversizedTurfAnalysis();
+    const rc = countyCommercialRecord({
+      propertyType: 'Multifamily',
+      _parcel: { polygonAreaSqft: 8000 },
+      _fieldEvidence: {
+        propertyType: { value: 'Multifamily', sourceType: 'county', fieldVerify: false, score: 100 },
+      },
+    });
+    applyParcelTurfBound(ai, rc);
+    expect(ai.turfCappedToParcel).toBeUndefined();
+    expect(ai.estimatedTurfSf).toBe(20000);
+  });
+
+  test('satellite-applied townhome still skips the cap (vision reclassifies before the cap by design)', () => {
+    const ai = oversizedTurfAnalysis();
+    const rc = untrustedAiRecord({
+      propertyType: 'Interior Townhome',
+      _parcel: { polygonAreaSqft: 8000 },
+      _fieldEvidence: {
+        propertyType: {
+          value: 'Interior Townhome', sourceType: 'satellite', sourceLabel: 'satellite imagery', fieldVerify: true, score: 50,
+        },
+      },
+    });
+    applyParcelTurfBound(ai, rc);
+    expect(ai.turfCappedToParcel).toBeUndefined();
+    expect(ai.estimatedTurfSf).toBe(20000);
+  });
+
+  test('untrusted single-family shape still gets the ordinary cap (no regression)', () => {
+    const ai = oversizedTurfAnalysis();
+    const rc = untrustedAiRecord({ propertyType: 'Single Family', _parcel: { polygonAreaSqft: 8000 } });
+    applyParcelTurfBound(ai, rc);
+    expect(ai.turfCappedToParcel).toBe(true);
+    expect(ai.estimatedTurfSf).toBe(8000);
+  });
+});
+
 describe('subtype / detection-source respect the guard', () => {
   test('untrusted record text cannot pick the commercial subtype', () => {
     // Satellite says commercial; the LoopNet "Multifamily" string must not
