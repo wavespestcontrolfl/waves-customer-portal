@@ -2143,10 +2143,15 @@ class AutonomousRunner {
           // for the main lane — one batch could open up to batchLimit PRs the
           // same day and, with AUTONOMOUS_BLOG_AUTO_MERGE on, merge them all.
           // Closed-unmerged / superseded runs rewrite skip_reason and drop
-          // back out of the count.
+          // back out of the count. astro_pr_url NOT NULL: a malformed
+          // adapter result can park with the pending reason but NO PR (the
+          // reviewer routes it manually) — that's not a publish in flight,
+          // and counting it would let one bad adapter response consume the
+          // whole day/week cap and block real publishes until it rolls over.
           .orWhere(function prPending() {
             this.where('outcome', 'completed_pending_review')
-              .whereIn('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge']);
+              .whereIn('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge'])
+              .whereNotNull('astro_pr_url');
           });
       })
       .count('id as count')

@@ -2311,6 +2311,11 @@ describe('_countPublishedSince counts publishes IN FLIGHT (audit regression — 
         captured.whereIn.push([col, vals]);
         return q;
       }),
+      whereNotNull: jest.fn(function (col) {
+        captured.whereNotNull = captured.whereNotNull || [];
+        captured.whereNotNull.push(col);
+        return q;
+      }),
       count: jest.fn(() => q),
       first: jest.fn(() => Promise.resolve({ count: 4 })),
     };
@@ -2331,5 +2336,10 @@ describe('_countPublishedSince counts publishes IN FLIGHT (audit regression — 
     expect(captured.whereIn).toEqual(expect.arrayContaining([
       ['skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge']],
     ]));
+    // Codex round 2: the pending branch must require a REAL PR — a
+    // malformed adapter result parks with the pending reason but NO
+    // astro_pr_url (routed manually), and counting it would let one bad
+    // response consume the whole day/week cap.
+    expect(captured.whereNotNull).toEqual(['astro_pr_url']);
   });
 });
