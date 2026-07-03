@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import TurnstileWidget from '../components/TurnstileWidget';
+import { useTurnstile } from '../lib/useTurnstile';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import { COLORS, FONTS, SHADOWS } from '../theme-brand';
@@ -391,13 +392,12 @@ export default function QuotePage({ serviceSlug = '' }) {
   const submitInFlightRef = useRef(false);
   // Bot-spam guard for the /api/leads submits (submitOther / submitOneTime):
   // a Turnstile token + an off-screen honeypot, mirroring the marketing forms.
+  // The hook awaits the async token before posting (so a fast click doesn't send
+  // an empty token) and remounts the widget on a failed submit for a fresh
+  // single-use token. It never blocks — server verification fails open while the
+  // gate is off, so a slow/blocked widget can't trap a real lead.
   const honeypotRef = useRef(null);
-  const [turnstileToken, setTurnstileToken] = useState('');
-  // Turnstile tokens are single-use. A failed POST (after the server already
-  // spent the token) must force a fresh one, or the retry gets rejected as
-  // timeout-or-duplicate. Bumping the nonce remounts the widget → new token.
-  const [turnstileNonce, setTurnstileNonce] = useState(0);
-  const resetTurnstile = () => { setTurnstileToken(''); setTurnstileNonce((n) => n + 1); };
+  const turnstile = useTurnstile();
 
   useEffect(() => {
     setStage('intake');
@@ -653,6 +653,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       const phoneDigits = intake.phone.replace(/\D/g, '');
       const otherLabel = OTHER_OPTIONS.find(o => o.value === intake.otherService)?.label || intake.otherService;
       const resolvedAddress = await resolveAddressForSubmit();
+      const turnstileToken = await turnstile.getToken();
       const res = await fetch(`${API_BASE}/leads`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -677,7 +678,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       setStage('result-other');
     } catch (e) {
       setError(e?.message || 'Could not send your request. Please call us.');
-      resetTurnstile();
+      turnstile.reset();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -696,6 +697,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       const { firstName, lastName } = splitName(intake.name);
       const phoneDigits = intake.phone.replace(/\D/g, '');
       const resolvedAddress = await resolveAddressForSubmit();
+      const turnstileToken = await turnstile.getToken();
       const res = await fetch(`${API_BASE}/leads`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -720,7 +722,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       setStage('result-other');
     } catch (e) {
       setError(e?.message || 'Could not send your request. Please call us.');
-      resetTurnstile();
+      turnstile.reset();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -1119,12 +1121,14 @@ export default function QuotePage({ serviceSlug = '' }) {
                   style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, opacity: 0 }}
                 />
 
-                {/* Turnstile on the final step, where the submit routes to
-                    /api/leads (Other / one-time / not-sure flows). Renders
-                    nothing until VITE_TURNSTILE_SITE_KEY is set. */}
-                {intakeIdx === INTAKE_STEPS.length - 1 && (
+                {/* Turnstile only on the final step of the flows that actually
+                    POST to /api/leads (Other / one-time / not-sure) — mirrors the
+                    submitIntake routing. The ongoing/recurring path goes to
+                    /public/estimator/property-lookup (no token), so no challenge
+                    there. Renders nothing until VITE_TURNSTILE_SITE_KEY is set. */}
+                {intakeIdx === INTAKE_STEPS.length - 1 && (isOtherFlow || intake.frequency !== 'ongoing') && (
                   <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center' }}>
-                    <TurnstileWidget key={`ts-${turnstileNonce}`} onToken={setTurnstileToken} />
+                    <TurnstileWidget key={`ts-${turnstile.nonce}`} onToken={turnstile.onToken} />
                   </div>
                 )}
 

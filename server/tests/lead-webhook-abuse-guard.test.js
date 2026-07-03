@@ -76,6 +76,14 @@ describe('verifyTurnstileToken', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  test('oversized (>2048) token → fails CLOSED locally, no network call (codex P1)', async () => {
+    process.env.TURNSTILE_SECRET_KEY = 'secret';
+    fetchSpy = jest.spyOn(global, 'fetch');
+    const r = await verifyTurnstileToken('x'.repeat(2049), '1.2.3.4');
+    expect(r).toMatchObject({ ok: false, enforced: true, reason: 'malformed_token' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   test('missing-input-response verdict → fails CLOSED, not config_error (codex P2)', async () => {
     process.env.TURNSTILE_SECRET_KEY = 'secret';
     fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({

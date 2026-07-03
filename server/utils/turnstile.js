@@ -5,6 +5,12 @@ const logger = require('../services/logger');
 // token; we confirm it here against Cloudflare before trusting the submission.
 const SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const VERIFY_TIMEOUT_MS = 4000;
+// Cloudflare caps a valid Turnstile response token at 2048 chars. A longer
+// token is malformed / attacker-crafted; reject it locally as a definitive
+// token failure so it never reaches siteverify (where it would return
+// bad-request and — since bad-request is treated as OUR config error and fails
+// OPEN — could otherwise bypass the gate).
+const MAX_TOKEN_LENGTH = 2048;
 
 // Cloudflare error-codes that mean the TOKEN itself is bad → a definitive
 // failure we enforce (fail CLOSED). Every OTHER success:false response —
@@ -51,6 +57,11 @@ async function verifyTurnstileToken(token, remoteip) {
     // failure. Reject here rather than letting siteverify return
     // missing-input-response (which would otherwise have to be caught below).
     return { ok: false, enforced: true, reason: 'missing_token' };
+  }
+  if (trimmedToken.length > MAX_TOKEN_LENGTH) {
+    // Oversized → malformed / attacker-crafted. Fail CLOSED locally so it can't
+    // ride the bad-request → config_error → fail-open path (codex P1).
+    return { ok: false, enforced: true, reason: 'malformed_token' };
   }
 
   const controller = new AbortController();
