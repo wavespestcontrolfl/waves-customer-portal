@@ -243,6 +243,12 @@ function deriveNextAction({ lead, estimate, stage, now = new Date() }) {
     return { nextAction: 'create_estimate', needsAction: true, nextActionLabel: 'Create estimate', isStale: false };
   }
   if (stage === PIPELINE_STAGES.ESTIMATE_DRAFT) {
+    // A swept-expired row with no sent/viewed stamp (e.g. an expired
+    // scheduled send) derives as draft-stage, but /send rejects expired
+    // estimates — Extend first.
+    if (estimateExpired) {
+      return { nextAction: 'extend_estimate', needsAction: true, nextActionLabel: 'Extend expiration', isStale: true };
+    }
     return { nextAction: 'send_estimate', needsAction: true, nextActionLabel: 'Send estimate', isStale: false };
   }
   if (stage === PIPELINE_STAGES.ESTIMATE_SENT) {
@@ -488,6 +494,10 @@ function opportunityMatchesFilter(opportunity, filter) {
     case 'follow_up':
       return opportunity.nextAction === 'follow_up' || (
         opportunity.needsAction === true
+        // Extend-only rows (expired estimates) need action, but Follow Up is
+        // exactly the action the server refuses for them — keep them out of
+        // the Follow Up queue/count.
+        && opportunity.nextAction !== 'extend_estimate'
         && [PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED, PIPELINE_STAGES.CONTACTED].includes(opportunity.stage)
       );
     case 'duplicate_risk':

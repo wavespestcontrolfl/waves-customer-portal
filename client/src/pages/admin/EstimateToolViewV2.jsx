@@ -1012,11 +1012,26 @@ function cadenceFromPestTier(tier) {
   return { key: "quarterly", label: "Quarterly", intervalMonths: 3, period: "/quarter" };
 }
 
-function fallbackCadenceForPreview() {
-  // No pest tier (lawn/tree/mosquito-led estimates): the non-pest recurring
-  // programs bill monthly and the engine's grandTotal is already a monthly
-  // number. The old quarterly fallback multiplied it ×3 — a lawn-only
-  // estimate previewed "$360/quarter" while the customer page bills $120/mo.
+function fallbackCadenceForPreview(E) {
+  // Mirror the customer page (estimate-public renderPage): with no pest tier,
+  // a termite-bait recurring line displays the total on the QUARTERLY cadence
+  // (hasTermiteBait → selectedRecurringFrequencyKey 'quarterly'); every other
+  // non-pest program bills monthly and the engine's grandTotal is already a
+  // monthly number. The old unconditional-quarterly fallback showed a
+  // lawn-only estimate as "$360/quarter" when the customer is billed $120/mo.
+  const services = Array.isArray(E?.recurring?.services) ? E.recurring.services : [];
+  const hasTermiteBait = services.some((s) => {
+    const label = String(s?.service || s?.name || s?.label || s?.displayName || "").toLowerCase();
+    return label.includes("termite") && label.includes("bait");
+  });
+  if (hasTermiteBait) {
+    return {
+      key: "quarterly",
+      label: "Quarterly",
+      intervalMonths: 3,
+      period: "/quarter",
+    };
+  }
   return {
     key: "monthly",
     label: "Monthly",
@@ -4420,6 +4435,11 @@ export default function EstimateToolViewV2({
                       trenchingConcreteLF: "",
                       trenchingDirtLF: "",
                       trenchingConcretePct: "",
+                      // The footprint-derivation choice is a per-property
+                      // measurement method — left true, the next property
+                      // auto-prices trenching from ITS footprint with the
+                      // missing-measurement warning suppressed.
+                      trenchingEstimateFromFootprint: false,
                       _termiteFootprintAuto: false,
                       _trenchingPerimeterAuto: false,
                       _boracareSqftAuto: false,

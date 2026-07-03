@@ -107,6 +107,12 @@ function actionConfig(kind, opportunity) {
 }
 
 function primaryAction(opportunity) {
+  // An expired estimate's only working action is Extend — the send and
+  // follow-up paths both refuse expired rows — so it wins the primary slot
+  // whatever the stage (a swept expired scheduled-send derives as draft).
+  if (opportunity.estimateId && opportunity.nextAction === "extend_estimate") {
+    return { label: "Extend Expiration", kind: "extend_estimate" };
+  }
   switch (opportunity.stage) {
     case PIPELINE_STAGES.NEW_LEAD:
       return { label: "Contact", kind: "navigate", to: communicationUrl(opportunity) };
@@ -120,12 +126,6 @@ function primaryAction(opportunity) {
         : { label: "Create Estimate", kind: "navigate", to: createEstimateUrl(opportunity) };
     case PIPELINE_STAGES.ESTIMATE_SENT:
     case PIPELINE_STAGES.ESTIMATE_VIEWED:
-      // Expired estimate (normalizer flips nextAction): Follow Up would 400
-      // ("Estimate status expired cannot be sent") — Extend is the action
-      // that actually works, so it gets the primary slot.
-      if (opportunity.estimateId && opportunity.nextAction === "extend_estimate") {
-        return { label: "Extend Expiration", kind: "extend_estimate" };
-      }
       return opportunity.estimateId
         ? { label: "Follow Up", kind: "follow_up" }
         : { label: "Contact", kind: "navigate", to: communicationUrl(opportunity) };
@@ -166,7 +166,12 @@ function menuActions(opportunity) {
       actions.push({ label: "Mark Annual Prepay", kind: "mark_annual_prepay" });
       actions.push({ label: "Mark Declined", kind: "decline_estimate" });
     }
-    if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED, PIPELINE_STAGES.LOST].includes(opportunity.stage)) {
+    if (
+      [PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED, PIPELINE_STAGES.LOST].includes(opportunity.stage)
+      // Expired rows offer Extend whatever the stage (a swept expired
+      // scheduled-send derives as draft-stage).
+      || opportunity.nextAction === "extend_estimate"
+    ) {
       actions.push({ label: "Extend Expiration", kind: "extend_estimate" });
     }
   }
