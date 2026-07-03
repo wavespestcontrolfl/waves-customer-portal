@@ -374,7 +374,6 @@ router.get('/project/:token/data', async (req, res, next) => {
       return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };
     }));
 
-    let upcomingAppointment = null;
     const appointmentSelect = [
       's.id',
       's.service_type',
@@ -385,15 +384,24 @@ router.get('/project/:token/data', async (req, res, next) => {
       'st.name as technician_name',
     ];
     const todayET = etDateString();
-    if (project.scheduled_service_id) {
-      upcomingAppointment = await db('scheduled_services as s')
-        .where({ 's.id': project.scheduled_service_id, 's.customer_id': project.customer_id })
-        .where('s.scheduled_date', '>=', todayET)
-        .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
-        .leftJoin('technicians as st', 's.technician_id', 'st.id')
-        .select(appointmentSelect)
-        .first();
-    }
+    // The report labels this "Follow-up" / "your next visit", so it must be
+    // the customer's NEXT active appointment — never the visit the report
+    // documents. The old lookup only ever matched the linked appointment,
+    // which on the service day is the just-treated visit itself (still
+    // on_site/en_route), so the report printed today's service as its own
+    // follow-up while the real next appointment was ignored.
+    const upcomingAppointment = await db('scheduled_services as s')
+      .where('s.customer_id', project.customer_id)
+      .where('s.scheduled_date', '>=', todayET)
+      .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
+      .modify((query) => {
+        if (project.scheduled_service_id) query.whereNot('s.id', project.scheduled_service_id);
+      })
+      .leftJoin('technicians as st', 's.technician_id', 'st.id')
+      .orderBy('s.scheduled_date', 'asc')
+      .orderBy('s.window_start', 'asc')
+      .select(appointmentSelect)
+      .first();
 
     // WDO: serve the as-sent findings snapshot archived at send time, so the
     // public link always matches the emailed signed FDACS-13645 PDF even if

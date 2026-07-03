@@ -271,157 +271,10 @@ function includesAny(text, words) {
   return words.some(word => value.includes(word));
 }
 
-function getProjectKind(projectType) {
-  if (projectType === 'wdo_inspection') return 'wdo';
-  if (projectType === 'termite_inspection' || projectType === 'termite_treatment') return 'termite';
-  if (projectType === 'rodent_exclusion' || projectType === 'rodent_trapping') return 'rodent';
-  if (projectType === 'wildlife_trapping') return 'wildlife';
-  if (projectType === 'bed_bug') return 'bed_bug';
-  if (projectType === 'flea') return 'flea';
-  if (projectType === 'pest_inspection' || projectType === 'one_time_pest_treatment' || projectType === 'cockroach') return 'pest';
-  if (projectType === 'pre_treatment_termite_certificate') return 'pre_treat_cert';
-  return 'general';
-}
-
-function getRiskInsight(kind, allText) {
-  if (kind === 'rodent') {
-    if (includesAny(allText, ['roof rat'])) {
-      return 'Roof rats are strong climbers, so soffits, roof returns, vents, utility gaps, and overhanging vegetation can become repeat access routes. Once inside, they may contaminate insulation, gnaw wiring or AC lines, and keep returning until openings are sealed.';
-    }
-    if (includesAny(allText, ['norway rat'])) {
-      return 'Norway rats usually work from ground-level burrows, wall gaps, garage seals, and utility penetrations. Activity can expand quickly when food, water, and shelter stay available, so exclusion and sanitation matter as much as trap placement.';
-    }
-    if (includesAny(allText, ['mouse', 'mice'])) {
-      return 'Mice can fit through very small openings and often use garage seals, pipe gaps, and stored materials as cover. A small opening can keep producing activity until the access route is corrected.';
-    }
-    return 'Rodents do more than create noise or droppings. They can contaminate stored items and insulation, chew wiring and soft building materials, and keep cycling through the same access points until exclusion work closes the routes.';
-  }
-  if (kind === 'wildlife') {
-    return 'Wildlife activity is usually driven by access, shelter, or food sources around the property. Trapping works best when the active animal, travel pattern, and follow-up check plan are documented together.';
-  }
-  if (kind === 'termite') {
-    return 'Termites can damage wood framing and trim from concealed areas before the surface looks severe. Early treatment and moisture correction help limit repair costs and reduce the chance of activity spreading.';
-  }
-  if (kind === 'wdo') {
-    return 'Wood-destroying organisms and moisture conditions can affect structural materials over time. Correcting the source early helps protect the property and keeps inspection findings from becoming larger repair issues.';
-  }
-  if (kind === 'bed_bug') {
-    return 'Bed bugs spread through resting areas, furniture, luggage, and personal items, and missed preparation can make follow-up activity harder to control. A complete treatment plan and the scheduled recheck are what keep the problem contained.';
-  }
-  if (kind === 'flea') {
-    return 'Fleas can continue emerging from eggs and pupae after the first service, especially around pet resting areas, rugs, furniture edges, shaded yard areas, and wildlife travel zones. Vacuuming, pet flea prevention, and follow-up timing are what keep the cycle from restarting.';
-  }
-  if (kind === 'pest') {
-    return 'General pest pressure is usually strongest where food, water, shelter, or entry gaps line up. Treating the current activity while correcting those conditions helps prevent the same issue from returning.';
-  }
-  return 'Targeted service works best when the finding, source condition, and follow-up plan all match the specific issue documented in the report.';
-}
-
-function buildClientSnapshot({ projectType, findings, recommendations }) {
-  const kind = getProjectKind(projectType);
-  // Certificate of Compliance is a delivered legal document, not a sales/triage
-  // snapshot — the document itself communicates "next step" via warranty terms.
-  if (kind === 'pre_treat_cert') return null;
-
-  const allText = [
-    projectType,
-    recommendations,
-    ...Object.values(findings || {}),
-  ].filter(Boolean).join(' ').toLowerCase();
-
-  const hasAction = shouldShowBookingCta(recommendations);
-  const hasMoisture = includesAny(allText, ['moisture', 'wood rot', 'rot ', 'leak', 'eave', 'attic']);
-  const hasWdo = includesAny(allText, ['termite', 'wdo', 'wood-destroying', 'shelter tube', 'frass', 'boracare', 'bora care']);
-  const hasRodent = includesAny(allText, ['rodent', 'rat', 'mouse', 'entry point', 'exclusion', 'trap']);
-  const clean = includesAny(allText, ['no visible signs', 'no activity', 'none observed', 'not observed']) && !hasAction;
-
-  if (clean) {
-    return {
-      priority: 'Monitor',
-      meaning: kind === 'rodent'
-        ? 'No active rodent pressure was documented at the time of inspection.'
-        : 'No visible active issue was documented at the time of inspection.',
-      insight: getRiskInsight(kind, allText),
-      next: kind === 'rodent'
-        ? 'Keep exterior access points monitored and contact Waves if scratching, droppings, odors, or new entry signs appear.'
-        : 'Keep routine service and address new activity, moisture, or access issues if they appear.',
-    };
-  }
-  if (kind === 'rodent' || (kind === 'general' && hasRodent)) {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Rodent activity usually continues until entry points, travel routes, and nesting conditions are corrected together.',
-      insight: getRiskInsight('rodent', allText),
-      next: hasAction ? 'Schedule the recommended exclusion, trapping, or follow-up plan.' : 'Review the mapped areas and contact Waves with any activity changes.',
-    };
-  }
-  if (kind === 'wildlife') {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Wildlife trapping depends on safe trap placement, documented activity, and timely follow-up checks.',
-      insight: getRiskInsight('wildlife', allText),
-      next: hasAction ? 'Follow the recommended trapping, access-control, or follow-up plan.' : 'Review the documented activity and contact Waves if animal movement changes.',
-    };
-  }
-  if (kind === 'termite') {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Termite activity or conditions that support termites can affect wood members and may worsen if the source is not corrected.',
-      insight: getRiskInsight('termite', allText),
-      next: hasAction ? 'Review the recommendation and schedule the listed termite treatment or follow-up.' : 'Review the findings and contact Waves if you want help prioritizing treatment options.',
-    };
-  }
-  if (kind === 'wdo' || (kind === 'general' && (hasWdo || hasMoisture))) {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Moisture, wood damage, or WDO evidence can affect structural materials and may worsen if the source is not corrected.',
-      insight: getRiskInsight('wdo', allText),
-      next: hasAction ? 'Review the recommendation and schedule the listed treatment or follow-up.' : 'Review the findings and contact Waves if you want help prioritizing repairs or treatment.',
-    };
-  }
-  if (kind === 'bed_bug') {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Bed bug work depends on treatment coverage, customer preparation, and a timely follow-up check.',
-      insight: getRiskInsight('bed_bug', allText),
-      next: hasAction ? 'Complete the listed preparation steps and keep the recommended follow-up on schedule.' : 'Review the treated rooms and contact Waves if activity is seen before the follow-up window.',
-    };
-  }
-  if (kind === 'flea') {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Flea work depends on treating the active areas while breaking the egg, larva, pupa, and adult cycle.',
-      insight: getRiskInsight('flea', allText),
-      next: hasAction ? 'Complete the prep steps, keep vacuuming on schedule, and follow the listed treatment or follow-up plan.' : 'Review the inspected areas and contact Waves if bites or pet activity continue.',
-    };
-  }
-  if (kind === 'pest') {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'The report documents pest pressure or conducive conditions that can keep activity returning if they are not addressed.',
-      insight: getRiskInsight('pest', allText),
-      next: hasAction ? 'Use the recommendation below to book the correct pest service.' : 'Review the findings and contact Waves if the activity changes or spreads.',
-    };
-  }
-  if (hasAction) {
-    return {
-      priority: 'Action recommended',
-      meaning: 'The inspection found conditions that benefit from a targeted service or follow-up.',
-      insight: getRiskInsight(kind, allText),
-      next: 'Use the recommendation below to book the correct next visit.',
-    };
-  }
-  return null;
-}
-
-function buildAtAGlance({ data, reportTitle, clientSnapshot }) {
+function buildAtAGlance({ data, reportTitle }) {
   const rows = [
     ['Service type', reportTitle],
   ];
-  if (clientSnapshot) {
-    rows.push(['Next step', clientSnapshot.priority]);
-    rows.push(['Recommended action', clientSnapshot.next]);
-  }
   if (data.upcomingAppointment) {
     rows.push(['Follow-up', formatAppointmentWindow(data.upcomingAppointment)]);
   } else if (data.followupCompletedAt) {
@@ -505,12 +358,13 @@ export default function ProjectReportViewPage() {
     data.customerEmail ? `Email: ${data.customerEmail}` : '',
     data.customerPhone ? `Phone: ${data.customerPhone}` : '',
   ].filter(Boolean);
-  const clientSnapshot = buildClientSnapshot({
-    projectType: data.projectType,
-    findings,
-    recommendations: data.recommendations,
-  });
-  const atAGlanceRows = buildAtAGlance({ data, reportTitle, clientSnapshot });
+  // The structured findings feed the AI writer, so when the report carries
+  // the sectioned narrative (Customer Concern / What We Inspected / …) the
+  // raw findings list would repeat the same content — the narrative is the
+  // customer-facing rendering of it. Raw findings still show on reports
+  // without a drafted narrative, otherwise they'd have no body at all.
+  const aiNarrativeSections = data.recommendations ? parseSections(String(data.recommendations)) : null;
+  const atAGlanceRows = buildAtAGlance({ data, reportTitle });
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   const headline = isCertificate
     ? `Hey ${firstName}, here's your Certificate of Compliance.`
@@ -526,11 +380,15 @@ export default function ProjectReportViewPage() {
       display: 'flex',
       flexDirection: 'column',
     }}>
+      {/* Mirrors the pest/lawn service-report top bar (.sr-top): phone left,
+          logo right, same 62px bar on the shared 960px grid. */}
       <header style={{ background: B.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
           maxWidth: 960,
           margin: '0 auto',
+          minHeight: 62,
           padding: '16px 24px',
+          boxSizing: 'border-box',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -582,35 +440,12 @@ export default function ProjectReportViewPage() {
 
           {!isCertificate && atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
 
-          {clientSnapshot && (
-            <div style={{
-              marginTop: 16,
-              padding: 18,
-              borderRadius: 12,
-              background: 'linear-gradient(180deg, #F5F1E6 0%, #FFFFFF 100%)',
-              border: `1px solid ${ESTIMATE_BORDER}`,
-            }}>
-              <div style={{ ...eyebrowStyle, color: ESTIMATE_MUTED }}>
-                Next step: {clientSnapshot.priority}
-              </div>
-              <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
-                {clientSnapshot.meaning}
-              </div>
-              {clientSnapshot.insight && (
-                <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 6 }}>
-                  {clientSnapshot.insight}
-                </div>
-              )}
-              <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 6 }}>
-                {clientSnapshot.next}
-              </div>
-            </div>
-          )}
-
-          {/* Findings — suppressed on the Certificate of Compliance because
-              the Certificate block below renders the same data in its
-              branded, FBC-compliant document layout. */}
-          {!isCertificate && findingsEntries.length > 0 && (
+          {/* Findings — suppressed on the Certificate of Compliance (the
+              Certificate block below renders the same data in its branded,
+              FBC-compliant document layout) and whenever the AI-drafted
+              sectioned narrative is present (the narrative IS the customer
+              rendering of these fields — showing both reads twice). */}
+          {!isCertificate && !aiNarrativeSections && findingsEntries.length > 0 && (
             <div style={{ marginTop: 16 }}>
               <div style={{ ...eyebrowStyle, marginBottom: 10 }}>
                 Findings
@@ -744,8 +579,16 @@ export default function ProjectReportViewPage() {
         </div>
 
         <ReportTrustStrip />
+
+        {/* Same closing treatment as the pest/lawn service reports: a
+            for-your-records note plus the document brand footer (company
+            block + service-area links) — not the newsletter/social footer. */}
+        <footer style={{ color: ESTIMATE_MUTED, fontSize: 12, lineHeight: 1.6, padding: '22px 0 0' }}>
+          Questions about this report? Ask Waves in your portal or call {WAVES_PHONE_DISPLAY}.
+          {' '}This report is provided for your records.
+        </footer>
+        <BrandFooter variant="document" />
       </main>
-      <BrandFooter />
     </div>
   );
 }
