@@ -865,6 +865,152 @@ async function notifyRecoverySuccess({ recovery, bouncedEmail, correctedEmail, r
   });
 }
 
+/**
+ * Feedback loop for hard bounces on emails sent OUTSIDE the email_messages
+ * ledger (newsletter confirmations, automation one-offs, any direct SendGrid
+ * send). attemptRecovery can only see tracked sends; before this, an untracked
+ * bounce created its suppression silently and the dead address was discovered
+ * hours later when an estimate send hit it ("Suppressed: bounce"). When the
+ * bounced address is on file for a customer or an open lead — i.e. it is an
+ * OPERATIONAL contact, which is also what filters marketing-list cruft out —
+ * alert the office (deduped) and stamp the lead's needs_confirmation so the
+ * Leads UI shows the dead email without a click-through.
+ */
+async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
+  try {
+    const email = String(bouncedEmail || '').trim().toLowerCase();
+    if (!email) return { skipped: 'no_email' };
+
+    // CUSTOMER_EMAIL_FIELDS is a hardcoded constant — safe to interpolate.
+    // The OR chain is GROUPED so the deleted_at filter applies to the whole
+    // disjunction (ungrouped, SQL precedence would AND it onto the last OR
+    // term only and a soft-deleted customer could still be alerted/linked).
+    let customer = await db('customers')
+      .where(function anyEmailField() {
+        this.whereRaw(CUSTOMER_EMAIL_FIELDS.map((f) => `LOWER(${f}) = ?`).join(' OR '), CUSTOMER_EMAIL_FIELDS.map(() => email));
+      })
+      .whereNull('deleted_at')
+      .first('id', 'first_name', 'last_name', 'phone')
+      .catch(() => null);
+    // Closed set mirrors the lead pipeline's CLOSED_STATUSES (leads-tools) —
+    // a bounce for a duplicate/disqualified lead is exactly the marketing
+    // cruft the contact-match filter exists to keep out.
+    const CLOSED_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+    const leads = await db('leads')
+      .whereRaw('LOWER(email) = ?', [email])
+      .where(function openOnly() { this.whereNull('status').orWhereNotIn('status', CLOSED_LEAD_STATUSES); })
+      .select('id', 'first_name', 'last_name', 'phone', 'extracted_data')
+      .catch(() => []);
+    // Per-record recipient emails are checked ALWAYS, not only when the
+    // customer/lead match missed: service outlines go to
+    // estimates.customer_email and contract packets to
+    // customer_contracts.recipient_email, and with a shared inbox (property
+    // manager) the record row is the only evidence of which account the send
+    // belonged to. No status filter on estimates — outlines can be sent after
+    // acceptance too, and any match identifies the account.
+    // BOTH record tables are checked — a shared recipient address can sit on
+    // an estimate AND a contract for different accounts, and short-circuiting
+    // on the first hit would hide the other affected customer.
+    const estimate = await db('estimates')
+      .whereRaw('LOWER(customer_email) = ?', [email])
+      .whereNull('archived_at')
+      .orderBy('created_at', 'desc')
+      .first('id', 'customer_id', 'customer_name')
+      .catch(() => null);
+    const contract = await db('customer_contracts')
+      .whereRaw('LOWER(recipient_email) = ?', [email])
+      .orderBy('created_at', 'desc')
+      .first('id', 'customer_id', 'recipient_name')
+      .catch(() => null);
+    const records = [
+      estimate ? { type: 'estimate', row: estimate } : null,
+      contract ? { type: 'contract', row: contract } : null,
+    ].filter(Boolean);
+    const viaRecord = records[0]?.row || null;
+    if (!customer && !leads.length && !viaRecord) return { skipped: 'no_contact_match' };
+
+    // Record-linked customers: the first becomes the primary identity when
+    // nothing matched directly; every DISTINCT other one gets an "also tied
+    // to" mention so no affected account stays hidden.
+    let recordCustomers = [];
+    for (const rec of records) {
+      if (!rec.row.customer_id) continue;
+      if (String(rec.row.customer_id) === String(customer?.id || '')) continue;
+      if (recordCustomers.some((rc) => String(rc.customer.id) === String(rec.row.customer_id))) continue;
+      const rc = await db('customers')
+        .where({ id: rec.row.customer_id })
+        .whereNull('deleted_at')
+        .first('id', 'first_name', 'last_name', 'phone')
+        .catch(() => null);
+      if (rc) recordCustomers.push({ type: rec.type, customer: rc });
+    }
+    if (!customer && recordCustomers.length) {
+      customer = recordCustomers[0].customer;
+      recordCustomers = recordCustomers.slice(1).filter((rc) => String(rc.customer.id) !== String(customer.id));
+    }
+
+    for (const lead of leads) {
+      try {
+        const data = typeof lead.extracted_data === 'string'
+          ? JSON.parse(lead.extracted_data || '{}')
+          : (lead.extracted_data || {});
+        const needs = Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
+        if (!needs.includes('email_bounced')) {
+          data.needs_confirmation = [...needs, 'email_bounced'];
+          await db('leads').where({ id: lead.id })
+            .update({ extracted_data: JSON.stringify(data), updated_at: new Date() });
+          // The lead card's visible warning area renders from lead_activities,
+          // not extracted_data — without a timeline row the dead-email marker
+          // would only ever live in the (dismissable) notification.
+          await db('lead_activities').insert({
+            lead_id: lead.id,
+            activity_type: 'ai_triage',
+            description: '⚠ CONFIRM BEFORE DISPATCH: email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
+            performed_by: 'Email Delivery Monitor',
+            metadata: JSON.stringify({ needs_confirmation: ['email_bounced'] }),
+          }).catch((err) => logger.warn(`[bounce-recovery] lead activity insert failed for ${lead.id}: ${err.message}`));
+        }
+      } catch (err) {
+        logger.warn(`[bounce-recovery] email_bounced stamp failed for lead ${lead.id}: ${err.message}`);
+      }
+    }
+
+    const who = customer
+      ? (`${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'customer')
+      : leads.length
+        ? (`${leads[0].first_name || ''} ${leads[0].last_name || ''}`.trim() || 'lead')
+        : ((viaRecord?.customer_name || viaRecord?.recipient_name || '').trim() || 'customer');
+    const alsoNote = recordCustomers.map(({ type, customer: rc }) => {
+      const name = `${rc.first_name || ''} ${rc.last_name || ''}`.trim() || 'another customer';
+      return ` The address is also the recipient on ${type === 'estimate' ? 'an estimate' : 'a contract'} for ${name} (/admin/customers/${rc.id}) — the bounced send may belong to that account.`;
+    }).join('');
+    // Lead-only matches are precisely the callback case — fall back to the
+    // lead's phone when there is no customer row.
+    const callbackPhone = customer?.phone || leads[0]?.phone || null;
+    const linkCustomerId = customer?.id || null;
+    const phoneHint = callbackPhone ? ` Confirm by phone: ${callbackPhone}.` : '';
+    const reason = String(ev.reason || ev.response || '').trim() || 'mailbox rejected';
+    await adminAlertDeduped({
+      dedupeKey: `bounced-contact:${email}`,
+      windowHours: 168,
+      category: 'alert',
+      title: 'Email bounced — needs a correct address',
+      body: `${email} for ${who} hard-bounced (${reason}) and is now suppressed — estimates and receipts will not deliver until it is corrected.${phoneHint}${alsoNote}`,
+      link: linkCustomerId ? `/admin/customers/${linkCustomerId}` : '/admin/leads',
+      metadata: {
+        customer_id: linkCustomerId,
+        lead_id: leads[0]?.id || null,
+        record_links: recordCustomers.map(({ type, customer: rc }) => ({ type, customer_id: rc.id })),
+        source: 'untracked_bounce',
+      },
+    });
+    return { alerted: true, customerId: linkCustomerId, leadsStamped: leads.length };
+  } catch (err) {
+    logger.error(`[bounce-recovery] alertBouncedContactAddress failed: ${err.message}`);
+    return { error: err.message };
+  }
+}
+
 module.exports = {
   RECOVERY_CATEGORY,
   recoveryEnabled,
@@ -874,6 +1020,7 @@ module.exports = {
   decideRecoveryAction,
   asmGroupIdForStream,
   attemptRecovery,
+  alertBouncedContactAddress,
   commitRecoveryOnDelivery,
   handleRecoveryBounce,
   // exported for tests

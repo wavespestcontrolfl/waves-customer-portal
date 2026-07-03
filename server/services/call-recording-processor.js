@@ -41,7 +41,7 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
@@ -78,6 +78,9 @@ const CONFIRM_REASON_TEXT = {
   missing_last_name: "no last name captured — get the account holder's full name",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
   second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
+  email_unverified: 'email was spelled out on the call — read it back to the caller before relying on it (spelled letters mishear)',
+  email_invalid: 'captured email is not a valid address — re-collect it on the callback',
+  email_bounced: 'email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -2355,7 +2358,7 @@ const CallRecordingProcessor = {
             );
           } catch (_e) { /* fall back to model flags only */ }
         }
-        const { normalizedAddress, needsConfirmation } = deriveCallReviewBridge({
+        const { normalizedAddress, normalizedEmail, needsConfirmation } = deriveCallReviewBridge({
           addressValidation: v2AddressValidation,
           extracted,
           v2TriageFlags: bridgeTriageFlags,
@@ -2370,6 +2373,35 @@ const CallRecordingProcessor = {
           if (normalizedAddress.zip) extracted.zip = normalizedAddress.zip;
           if (v2AddressValidation?.status === 'corrected') {
             logger.info(`[call-proc-bridge] Adopted Google-corrected address for ${maskSid(callSid)}`);
+          }
+        }
+        if (normalizedEmail) {
+          // Same adopt-before-upsert contract as the address above: fix the
+          // high-confidence domain typo before the customer/lead writes and the
+          // first-touch emails (newsletter confirmation, lead response) read
+          // extracted.email — catching at intake what bounce-recovery would
+          // otherwise have to repair after a bounce. Ownership gate mirrors
+          // bounce-recovery's rule: a corrected address already on file for
+          // ANY contact is never auto-adopted onto this caller (a same-person
+          // caller already has it on their own record; a different person
+          // would receive the new lead's first-touch email). Fails closed.
+          // No address value in the log.
+          // The caller's own customer id exempts their own on-file email from
+          // the ownership gate. call.customer_id may be unresolved here even
+          // for a known customer (shared caller phone → Step 3 reconciles by
+          // name later), so fall back to the same phone/name resolution Step 3
+          // uses before treating the correction as another party's.
+          const ownCustomerId = call.customer_id
+            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+            || null;
+          const ownedElsewhere = await require('./email-bounce-recovery')
+            .correctedAddressOwnedByOther(normalizedEmail, ownCustomerId)
+            .catch(() => true);
+          if (!ownedElsewhere) {
+            extracted.email = normalizedEmail;
+            logger.info(`[call-proc-bridge] Adopted high-confidence email domain correction for ${maskSid(callSid)}`);
+          } else {
+            logger.info(`[call-proc-bridge] Skipped email domain correction — corrected address on file for another contact (${maskSid(callSid)})`);
           }
         }
         if (needsConfirmation.length) {
@@ -2396,6 +2428,54 @@ const CallRecordingProcessor = {
         }
       } catch (bridgeErr) {
         logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
+      }
+    } else {
+      // Enforce-mode (DRIVES_ROUTING) / V2-off fallback: the shadow bridge
+      // above owns email hygiene when it runs, but first-touch sends read
+      // extracted.email in EVERY mode — the domain-typo correction and the
+      // read-back reasons must not be shadow-only. Advisory only, never
+      // blocks the pipeline.
+      try {
+        const { normalizedEmail: correctedEmail, needsConfirmation: emailReasons } = deriveEmailReview(extracted);
+        if (correctedEmail) {
+          // Same ownership gate as the shadow-bridge site above (fails closed),
+          // with the same phone/name fallback for a not-yet-linked known caller.
+          const ownCustomerId = call.customer_id
+            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+            || null;
+          const ownedElsewhere = await require('./email-bounce-recovery')
+            .correctedAddressOwnedByOther(correctedEmail, ownCustomerId)
+            .catch(() => true);
+          if (!ownedElsewhere) {
+            extracted.email = correctedEmail;
+            logger.info(`[call-proc] Adopted high-confidence email domain correction for ${maskSid(callSid)}`);
+          } else {
+            logger.info(`[call-proc] Skipped email domain correction — corrected address on file for another contact (${maskSid(callSid)})`);
+          }
+        }
+        if (emailReasons.length) {
+          bridgeNeedsConfirmation.push(...emailReasons);
+          // Same Needs Review surfacing as the shadow branch: the inbox is
+          // driven by triage_items rows, so without these an auto-routed call
+          // in enforce/V2-off mode would never show the read-back prompt.
+          for (const flag of emailReasons.slice(0, 10)) {
+            try {
+              await db('triage_items')
+                .insert(buildTriageItem({
+                  callLogId: call.id,
+                  flag,
+                  extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                  severity: 'advisory',
+                }))
+                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                .ignore();
+            } catch (triageErr) {
+              logger.warn(`[call-proc] email triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+            }
+          }
+        }
+      } catch (emailErr) {
+        logger.warn(`[call-proc] email review skipped for ${maskSid(callSid)}: ${emailErr.message}`);
       }
     }
 

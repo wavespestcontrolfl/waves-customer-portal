@@ -1,3 +1,5 @@
+const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
+
 const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
 
 // A reachable number, not a withheld-caller-ID placeholder. Twilio delivers
@@ -361,9 +363,17 @@ function streetCompareKey(s) {
  * `extracted` record, and the V2 model triage flags, returns:
  *   - normalizedAddress: the {address_line1, city, state, zip} subset to adopt
  *     when AV decisively accepted/corrected an in-area premise (null otherwise),
+ *   - normalizedEmail: a HIGH-confidence domain-typo correction of the captured
+ *     email ("jane@gmial.com" → "jane@gmail.com") to adopt BEFORE the upsert and
+ *     the first-touch sends read extracted.email (null otherwise) — catching at
+ *     intake what bounce-recovery would otherwise repair after a bounce,
  *   - needsConfirmation: human-review reasons — an unverifiable / out-of-area
- *     address (only when a street was actually given), caller-not-owner, and a
- *     missing surname on a real (hot/warm) prospect.
+ *     address (only when a street was actually given), caller-not-owner, a
+ *     missing surname on a real (hot/warm) prospect, and a transcription-spelled
+ *     email (email_unverified / email_invalid) to read back on the callback.
+ *     The email reasons are ADVISORY ONLY, mirroring address_unverified here:
+ *     they ride needs_confirmation, never the routing triage flags — most
+ *     spelled emails are fine and must not hold a call for review.
  * Pure: no side effects. The caller mutates `extracted` and persists the reasons.
  */
 function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [], callerRelationship = null } = {}) {
@@ -435,7 +445,53 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
     needsConfirmation.push('rental_or_tenant_occupied');
   }
 
-  return { normalizedAddress, needsConfirmation };
+  // Email review — shared with the enforce-mode/V2-off fallback in the call
+  // processor, so email hygiene is never shadow-bridge-only.
+  const emailReview = deriveEmailReview(extracted);
+  needsConfirmation.push(...emailReview.needsConfirmation);
+
+  return { normalizedAddress, normalizedEmail: emailReview.normalizedEmail, needsConfirmation };
+}
+
+// Syntactic sanity only — deliverability is unknowable until a send. Anything
+// failing this is transcription garbage, not an address worth storing plans on.
+const BASIC_EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/**
+ * Email review — pure, extraction-mode-independent (the call processor runs
+ * it via the shadow bridge OR directly in enforce/V2-off modes; first-touch
+ * sends read extracted.email in every mode).
+ *
+ * A transcription-spelled email is the top source of hard bounces (letters
+ * mishear: "A-L-L-E-N-S" → "K-L-L-E-N-S"; the mailbox can't be verified
+ * live), and the first automated email fires within seconds of intake — so
+ * every call-captured email gets a read-back reason, and a high-confidence
+ * domain typo is corrected up front. Local parts are NEVER touched
+ * (email-typo-correction contract): a wrong local part is only discoverable
+ * by asking the caller, which is what the reason drives.
+ * extracted.email_raw carries what intake normalization rejected (the
+ * normalizer nulls non-regex emails before this runs) so invalid captures
+ * still get their reason — and a missing-dot typo its fix.
+ */
+function deriveEmailReview(extracted = {}) {
+  const needsConfirmation = [];
+  let normalizedEmail = null;
+  const rawEmail = String(extracted.email || extracted.email_raw || '').trim().toLowerCase();
+  if (rawEmail) {
+    // Correction BEFORE shape classification: correctEmailDomain repairs
+    // shapes the basic regex rejects ("jane@gmailcom" → missing-dot rule), so
+    // classifying first would strand exactly the typos the adopt path fixes.
+    const candidate = correctEmailDomain(rawEmail);
+    if (candidate && meetsConfidence(candidate.confidence, 'high')) {
+      normalizedEmail = candidate.corrected;
+      needsConfirmation.push('email_unverified');
+    } else if (!BASIC_EMAIL_SHAPE.test(rawEmail)) {
+      needsConfirmation.push('email_invalid');
+    } else {
+      needsConfirmation.push('email_unverified');
+    }
+  }
+  return { normalizedEmail, needsConfirmation };
 }
 
 /**
@@ -459,6 +515,7 @@ module.exports = {
   mergeTriageFlags,
   suppressAddressFlagsForAV,
   deriveCallReviewBridge,
+  deriveEmailReview,
   detectRentalSignal,
   streetCompareKey,
   canAutoRoute,

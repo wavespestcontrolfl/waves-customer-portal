@@ -182,8 +182,8 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
   });
 
   test('empty input is safe', () => {
-    expect(deriveCallReviewBridge()).toEqual({ normalizedAddress: null, needsConfirmation: [] });
-    expect(deriveCallReviewBridge({})).toEqual({ normalizedAddress: null, needsConfirmation: [] });
+    expect(deriveCallReviewBridge()).toEqual({ normalizedAddress: null, normalizedEmail: null, needsConfirmation: [] });
+    expect(deriveCallReviewBridge({})).toEqual({ normalizedAddress: null, normalizedEmail: null, needsConfirmation: [] });
   });
 
   test.each(['tenant', 'property_manager'])('caller relationship %s → rental_or_tenant_occupied', (rel) => {

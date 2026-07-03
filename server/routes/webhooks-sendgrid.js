@@ -298,12 +298,32 @@ async function handleEvent(ev) {
     }
   }
 
+  // Hard-bounce feedback for sends OUTSIDE the email_messages ledger
+  // (newsletter confirmation, automation one-offs, fully untracked sends).
+  // attemptRecovery below can only repair tracked messages; without this, an
+  // untracked bounce creates its suppression silently and the dead address is
+  // discovered hours later when an estimate send hits it. The service alerts
+  // ONLY when the address is on file for a customer/open lead, which filters
+  // marketing-list cruft. Fire-and-forget for the same batch-stall reason as
+  // attemptRecovery; the 168h notification dedupe absorbs webhook redeliveries.
+  const alertUntrackedHardBounce = () => {
+    if (!bounceRecovery.isHardBounceEvent(ev)) return;
+    bounceRecovery.alertBouncedContactAddress(email, ev)
+      .catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
+  };
+
   if (newsletterDelivery) {
-    await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));
+    // Fire the alert only when the event was NEWLY processed — a SendGrid
+    // redelivery must not re-run the side effect (mirrors the emailMessage
+    // branch below); the notification dedupe + idempotent lead stamp remain
+    // the backstop for the fully-untracked branch, which has no event ledger.
+    const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));
+    if (processedNew) alertUntrackedHardBounce();
     return;
   }
   if (automationSend) {
-    await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
+    const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
+    if (processedNew) alertUntrackedHardBounce();
     return;
   }
   if (emailMessage) {
@@ -314,6 +334,8 @@ async function handleEvent(ev) {
     // awaiting — a slow Mail Send must not hold the /events request open and
     // stall the rest of the batch (SendGrid would retry the whole batch even
     // though this event is already marked processed). Best-effort, fire-and-forget.
+    // Tracked bounces are NOT routed through alertBouncedContactAddress —
+    // attemptRecovery has its own richer alert (alertUnrecoverableBounce).
     if (processedNew) {
       if (bounceRecovery.isHardBounceEvent(ev)) {
         bounceRecovery.attemptRecovery(emailMessage, ev)
@@ -325,7 +347,26 @@ async function handleEvent(ev) {
     }
     return;
   }
-  // Untracked send — ignore.
+  // Fully untracked send (direct sendgrid.sendOne callers) — no ledger row to
+  // update, but a suppression-worthy event must still land in
+  // email_suppressions (the template-library send gate reads it; without this
+  // future sends keep attempting the dead address) and a hard bounce on an
+  // operational contact must reach a human. recordEmailSuppressionForEvent is
+  // idempotent (update-else-insert), so webhook redeliveries are safe even
+  // without the event ledger.
+  // HARD BOUNCES ONLY: a dead mailbox is dead for every stream, so the
+  // null-group (global) suppression this records is correct. Group-scoped
+  // events (unsubscribes, spam reports) are skipped here — without the
+  // send's stream context a null group_key would make a newsletter opt-out
+  // block unrelated transactional email.
+  if (bounceRecovery.isHardBounceEvent(ev)) {
+    try {
+      await recordEmailSuppressionForEvent(ev, null, null, eventOccurredAt(ev));
+    } catch (err) {
+      logger.error(`[sendgrid-webhook] untracked suppression record failed: ${err.message}`);
+    }
+  }
+  alertUntrackedHardBounce();
   return;
 }
 
