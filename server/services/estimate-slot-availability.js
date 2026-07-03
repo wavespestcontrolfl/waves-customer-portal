@@ -190,60 +190,11 @@ function visitsForService(row = {}) {
   );
 }
 
-function estimatePropertyNumbers(estData = {}) {
-  const inputs = estData.inputs || estData.engineInputs || estData.result?.inputs || {};
-  const services = inputs.services || {};
-  return {
-    homeSqFt: firstPositiveNumber(inputs.homeSqFt, inputs.sqft, inputs.propertySqft, estData.homeSqFt),
-    lotSqFt: firstPositiveNumber(inputs.lotSqFt, inputs.lot_size, estData.lotSqFt),
-    lawnSqFt: firstPositiveNumber(
-      inputs.lawnSqFt,
-      inputs.turfSqFt,
-      services.lawn?.lawnSqFt,
-      services.lawn?.turfSqFt,
-      estData.lawnSqFt,
-    ),
-  };
-}
-
 function clampDuration(minutes) {
   const n = Number(minutes);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_OPTS.durationMinutes;
   const rounded = Math.ceil(n / 15) * 15;
   return Math.max(30, Math.min(MAX_ESTIMATE_SLOT_DURATION_MINUTES, rounded));
-}
-
-function durationForService(row = {}, estData = {}) {
-  const key = serviceKeyFor(row);
-  const visits = visitsForService(row);
-  const { homeSqFt, lotSqFt, lawnSqFt } = estimatePropertyNumbers(estData);
-
-  if (key === 'pest_control') {
-    if (/interior|initial|roach|cockroach/i.test(String(row.label || row.name || row.displayName || ''))) return 60;
-    if (visits >= 12) return 30;
-    if (visits >= 6) return 40;
-    return 60;
-  }
-  if (key === 'lawn_care') {
-    const turf = lawnSqFt || lotSqFt;
-    if (turf) return Math.max(45, Math.round(25 + (turf / 1000) * 4));
-    return 45;
-  }
-  if (key === 'mosquito') return 30;
-  if (key === 'tree_shrub') return Math.max(45, Math.round(25 + ((lotSqFt || 5000) / 1000) * 2));
-  if (key === 'termite_bait') return 45;
-  if (key === 'palm_injection') return 30;
-  if (key === 'rodent_bait') return 45;
-  if (key === 'foam_recurring') {
-    // Drill-and-foam visits run the full labor (1.0–3.0 hrs by point tier), so
-    // size the slot from the tier duration carried on the row, not the generic
-    // 45-min fallback. Default to ~1.5 hr (Moderate) when it wasn't carried.
-    const explicit = firstPositiveNumber(row.estimatedDurationMinutes, row.estimated_duration_minutes, row.durationMinutes);
-    if (explicit) return Math.min(MAX_ESTIMATE_SLOT_DURATION_MINUTES, Math.max(60, Math.round(explicit)));
-    return 90;
-  }
-  if (homeSqFt || lotSqFt) return 45;
-  return 30;
 }
 
 const FREQUENCY_LABELS = {
@@ -484,48 +435,10 @@ function formatServiceProfileLabel(services) {
   return parts.join(' + ');
 }
 
-// Per-service durations for a one-time visit, so a multi-service one-time accept
-// (e.g. a pest visit plus a Bora-Care wood treatment) reserves a slot sized for the
-// actual work instead of the default one-time length. Mirrors the public booking
-// page's per-service durations; the profile sums these and clampDuration caps the
-// total at MAX_ESTIMATE_SLOT_DURATION_MINUTES.
-const ONE_TIME_SERVICE_DURATION_MINUTES = {
-  pest_control: 60,
-  one_time_pest: 60,
-  pest_initial_roach: 75,
-  german_roach: 75,
-  bora_care: 90,
-  mosquito: 45,
-  one_time_mosquito: 45,
-  lawn_care: 60,
-  tree_shrub: 60,
-  termite: 90,
-  termite_bait: 90,
-  termite_trenching: 90,
-  pre_slab_termiticide: 90,
-  rodent: 60,
-};
-// Unknown/residual billable one-time rows (e.g. the positive "Other one-time
-// services" adjustment) keep the standard one-time length so they aren't
-// under-reserved — matches the prior DEFAULT_OPTS.durationMinutes fallback.
-const DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES = 60;
-// Tries each key in order (raw service key first, then the broad category): a
-// specialty like german_roach gets its own 75, while a raw alias not in the table
-// (e.g. termite_bait_installation) falls back to its category's duration (termite_bait
-// → 90) instead of the generic default.
-function oneTimeServiceDurationMinutes(...keys) {
-  for (const key of keys) {
-    const value = ONE_TIME_SERVICE_DURATION_MINUTES[String(key || '').toLowerCase()];
-    if (value) return value;
-  }
-  return DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES;
-}
-
 // Billable one-time services for a one-time accept, so the reserved appointment's
 // service label + notes show the actual mix (e.g. a pest visit plus a separately
 // billed Bora-Care wood treatment) instead of a generic "One-time service" that
-// hides paid add-ons from dispatch/tech, and so the slot is sized for the combined
-// work (each row carries its per-service duration; the profile sums them).
+// hides paid add-ons from dispatch/tech.
 //
 // Delegates to the canonical billing/normalization helpers so the mix matches what
 // is actually billed/accepted: normalizeOneTimeBreakdown already drops on-program
@@ -539,17 +452,13 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
 
   const rows = [];
   const seen = new Set();
-  // `service` is the category (used for the row's service field + label dedup) and
-  // `durationKey` is the raw service key for the duration lookup — a pest specialty
-  // classifies as the broad `pest_control` category but should keep its own duration
-  // (e.g. german_roach → 75, not the 60 of a plain pest visit).
-  const add = (service, label, ...durationKeys) => {
+  // `service` is the category (used for the row's service field + label dedup).
+  const add = (service, label) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
     seen.add(key);
-    const keys = durationKeys.length ? durationKeys : [service];
-    rows.push({ service, label: clean, visitsPerYear: null, durationMinutes: oneTimeServiceDurationMinutes(...keys) });
+    rows.push({ service, label: clean, visitsPerYear: null });
   };
   const labelForCategory = (category) => (typeof oneTimeInvoiceLabelForCategory === 'function'
     ? oneTimeInvoiceLabelForCategory(category)
@@ -590,7 +499,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     if (!label || label.toLowerCase() === service) {
       label = (category && labelForCategory(category)) || label;
     }
-    add(category || service || 'one_time_service', label, service, category);
+    add(category || service || 'one_time_service', label);
   }
   return rows;
 }
@@ -610,13 +519,16 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
           service: key,
           label,
           visitsPerYear: visitsForService(row),
-          durationMinutes: durationForService(row, estData),
         };
       })
       .filter((row) => row.service && row.label);
 
-  const totalDuration = services.reduce((sum, svc) => sum + (Number(svc.durationMinutes) || 0), 0);
-  const durationMinutes = clampDuration(userOpts.durationMinutes || totalDuration || DEFAULT_OPTS.durationMinutes);
+  // Owner directive (2026-07-03): every service call books at the flat
+  // 60-minute default — techs adjust individual appointments afterward.
+  // Per-service labor sizing used to be summed here; the lawn formula fell
+  // back to full LOT sqft (the measured turf lives at inputs.measuredTurfSf,
+  // a key it never read) and inflated self-booked visits to 90 minutes.
+  const durationMinutes = clampDuration(userOpts.durationMinutes || DEFAULT_OPTS.durationMinutes);
   const serviceLabel = formatServiceProfileLabel(services)
     || estimate.service_interest
     || (serviceMode === 'one_time' ? 'One-time service' : 'Estimate service');
@@ -1516,7 +1428,6 @@ module.exports = {
     compareCustomerFacingSlots,
     spreadWindowsAcrossDay,
     resolveEstimateSlotProfile,
-    durationForService,
     addMinutesToHHMM,
     slotWindowFitsDay,
     clearCaches() { wrapperCache.clear(); geocodeCache.clear(); },

@@ -1250,7 +1250,7 @@ router.get('/', async (req, res, next) => {
         leadScore: s.lead_score, lawnType: s.lawn_type,
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
-        estimatedDuration: s.estimated_duration_minutes || estimateDuration(normalizedType, s.property_sqft, s.lot_sqft),
+        estimatedDuration: s.estimated_duration_minutes || 60,
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
@@ -1721,7 +1721,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
     const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
     const zone = getZone(customer?.city, customer?.zip);
-    let duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
+    // Owner directive (2026-07-03): every service call defaults to 60 minutes;
+    // the service-record default or an explicit tech-entered duration wins below.
+    let duration = 60;
 
     // Look up service from services table for duration/pricing
     let serviceRecord = null;
@@ -5074,18 +5076,6 @@ function fmtTime(t) {
   if (!t) return '';
   const [h, m] = t.split(':').map(Number);
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
-}
-
-function estimateDuration(serviceType, propertySqft, lotSqft) {
-  const s = (serviceType || '').toLowerCase();
-  if (s.includes('lawn') || s.includes('turf')) return Math.round(8 + (lotSqft || 5000) / 1000 * 1.75);
-  if (s.includes('pest') && s.includes('interior')) return Math.round(20 + (propertySqft || 1800) / 1000 * 5);
-  if (s.includes('pest')) return Math.round(25 + (propertySqft || 1800) / 1000 * 3);
-  if (s.includes('mosquito')) return Math.round(15 + (lotSqft || 5000) / 1000 * 2);
-  if (s.includes('tree') || s.includes('shrub')) return Math.round(25 + (lotSqft || 5000) / 1000 * 2);
-  if (s.includes('termite')) return 20;
-  if (s.includes('rodent')) return 25;
-  return 30;
 }
 
 function haversine(lat1, lng1, lat2, lng2) {

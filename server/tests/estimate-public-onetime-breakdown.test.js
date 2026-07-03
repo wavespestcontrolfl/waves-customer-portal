@@ -1405,50 +1405,28 @@ describe('public estimate one-time breakdown', () => {
     expect(profile.serviceLabel).toContain('Bora-Care');
   });
 
-  test('one-time slot is sized for the add-on: pest visit + Bora-Care reserves a longer slot', () => {
-    const base = {
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [] } } },
-    };
-    // Pest visit alone keeps the 60-minute one-time length.
-    const pestOnly = estimateSlotAvailability.resolveEstimateSlotProfile(base, { serviceMode: 'one_time' });
-    expect(pestOnly.durationMinutes).toBe(60);
-
-    // Pest visit (60) + Bora-Care wood treatment (90) → a 150-minute slot.
-    const withBora = estimateSlotAvailability.resolveEstimateSlotProfile({
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] } } },
-    }, { serviceMode: 'one_time' });
-    expect(withBora.durationMinutes).toBe(150);
-  });
-
-  test('one-time slot duration uses the raw service key, the termite key, and a 60-min default', () => {
+  test('one-time slots book the flat 60-minute default regardless of the service mix', () => {
+    // Owner directive (2026-07-03): every service call defaults to 60 minutes;
+    // techs adjust individual appointments afterward. Add-ons still surface in
+    // the label (previous test) but no longer stretch the reserved slot.
     const mk = (estimate) => estimateSlotAvailability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
 
-    // Pest visit (60) + a German-roach cleanout specialty priced by its raw key (75,
-    // not the broad pest 60) = 135.
+    // Pest visit alone.
     expect(mk({
       show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 500 }] } } },
-    }).durationMinutes).toBe(135);
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [] } } },
+    }).durationMinutes).toBe(60);
 
-    // A standalone Termite Inspection (service 'termite') reserves 90, not the default.
+    // Pest visit + Bora-Care wood treatment: still 60.
+    expect(mk({
+      show_one_time_option: true,
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] } } },
+    }).durationMinutes).toBe(60);
+
+    // Standalone termite inspection: still 60.
     expect(mk({
       estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite', name: 'Termite Inspection', price: 175 }] } } },
-    }).durationMinutes).toBe(90);
-
-    // A termite-install alias (termite_bait_installation, not in the table) classifies
-    // as termite_bait and falls back to the category's 90, not the generic default.
-    expect(mk({
-      estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite_bait_installation', name: 'Termite Bait Installation', price: 1200 }] } } },
-    }).durationMinutes).toBe(90);
-
-    // An unknown/residual row (positive "Other one-time services" adjustment) keeps
-    // the 60-minute default rather than being under-reserved: pest 60 + adjustment 60.
-    expect(mk({
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 400, items: [] } } },
-    }).durationMinutes).toBe(120);
+    }).durationMinutes).toBe(60);
   });
 
   test('phase 0 mosquito recurring contract uses mosquito copy without pest gates', async () => {
