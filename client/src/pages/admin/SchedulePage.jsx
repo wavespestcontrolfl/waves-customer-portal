@@ -8934,8 +8934,10 @@ export function CompletionPanel({
         reviewScheduledFor: oneTimeRecapOnly
           ? null
           : selectedReviewScheduledFor,
-        areasTreated: areasServiced,
         timeOnSite: elapsed,
+        // Single source of truth for the treated areas. The server reads
+        // areasServiced (falling back to a legacy areasTreated only if present),
+        // so we no longer post the same list under both keys.
         areasServiced,
         customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
         protocolActionsCompleted: reportProtocolActions,

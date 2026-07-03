@@ -6225,6 +6225,31 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/schedule/next-visit?customerId=X — the customer's next upcoming
+// visit, used by the completion panel's "Next scheduled visit" card. Returns the
+// soonest FUTURE scheduled service (after today, ET) that is still on the books
+// (not cancelled/rescheduled/completed/skipped/no-show). Returns { nextVisit: null }
+// when there's nothing scheduled ahead.
+router.get('/next-visit', async (req, res, next) => {
+  try {
+    const customerId = req.query.customerId;
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    const today = etDateString();
+    const row = await db('scheduled_services')
+      .where({ customer_id: customerId })
+      .andWhere('scheduled_date', '>', today)
+      .whereNotIn('status', ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'])
+      .orderBy('scheduled_date', 'asc')
+      .first(
+        'id',
+        db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as date"),
+        'service_type as serviceType',
+      );
+    if (!row) return res.json({ nextVisit: null });
+    res.json({ nextVisit: { id: row.id, date: row.date, serviceType: row.serviceType } });
+  } catch (err) { next(err); }
+});
+
 router._test = {
   buildAssignedScheduleEtaQuery,
   buildTechStatusQuery,
