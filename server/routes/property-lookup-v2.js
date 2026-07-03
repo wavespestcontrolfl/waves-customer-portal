@@ -269,16 +269,26 @@ async function performPropertyLookup(address, options = {}) {
   // record's own house number disagrees with the typed one, run the audit
   // anyway so the panel flags the customer's number instead of silently
   // pricing the neighbor's parcel.
-  if (!hasCountyEvidence(result.propertyRecord)
-      || typedNumberDisagreesWithRecord(address, result.propertyRecord)) {
+  const snappedRecord = typedNumberDisagreesWithRecord(address, result.propertyRecord);
+  if (!hasCountyEvidence(result.propertyRecord) || snappedRecord) {
     // Canonical address for the street (typo-fixed names make the roll
     // findable); typedAddress so the audit checks the CUSTOMER'S house number
     // even when Google snapped a nonexistent number to the nearest premise.
     const audit = await auditAddressHouseNumber(canonicalLookupAddress(address, geo), geo, { typedAddress: address })
       .catch(() => null);
-    if (audit) {
-      result.addressAudit = audit;
-      if (result.propertyRecord) result.propertyRecord._addressAudit = audit;
+    // A typed-vs-record number disagreement is a finding in ITSELF — even
+    // when the typed number also exists on the roll (audit exact match), the
+    // record below still describes the SNAPPED premise, so the mismatch must
+    // reach the panel rather than be swallowed by the audit's verdict. A
+    // failed audit still carries the marker.
+    const marker = audit
+      || (snappedRecord
+        ? { county: null, houseNumber: snappedRecord.typed, streetLabel: null, streetExists: null, hasExactMatch: false, parcelCount: 0, nearestNumbers: [] }
+        : null);
+    if (marker) {
+      if (snappedRecord) marker.snappedRecord = snappedRecord;
+      result.addressAudit = marker;
+      if (result.propertyRecord) result.propertyRecord._addressAudit = marker;
     }
   }
 
@@ -1512,7 +1522,9 @@ function typedNumberDisagreesWithRecord(address, rc) {
   const typed = (String(address || '').match(/^\s*(\d+)\s/) || [])[1] || null;
   const recordLine = rc?.addressLine1 || rc?._parcel?.situsAddress || '';
   const record = (String(recordLine).match(/^\s*(\d+)\s/) || [])[1] || null;
-  return !!(typed && record && typed !== record);
+  return typed && record && typed !== record
+    ? { typed: parseInt(typed, 10), record: parseInt(record, 10) }
+    : null;
 }
 
 const FALLBACK_CRITICAL_FIELDS = ['squareFootage', 'lotSize', 'stories', 'propertyType'];
@@ -2109,6 +2121,23 @@ function calcPestPressureMult(pressure) {
 function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
   const flags = [];
 
+  // Geocoder snapped the typed house number to a different premise — this
+  // outranks (and replaces) the ordinary audit flags: even a roll-confirmed
+  // typed number doesn't change the fact that the record below describes the
+  // SNAPPED building, not the one the customer gave.
+  if (addressAudit && addressAudit.snappedRecord) {
+    const { typed, record } = addressAudit.snappedRecord;
+    const rollNote = addressAudit.hasExactMatch
+      ? `Both numbers exist on the ${addressAudit.county} county roll — confirm which property is the customer's before pricing`
+      : addressAudit.streetExists
+        ? `The county roll has no ${typed}${addressAudit.nearestNumbers.length ? ` (nearest existing: ${addressAudit.nearestNumbers.join(', ')})` : ''} — verify the address before pricing`
+        : 'Verify the address before pricing';
+    flags.push({
+      field: 'address',
+      reason: `Typed house number ${typed}, but the property record below describes ${record} — the geocoder snapped to a nearby premise. ${rollNote}`,
+      priority: 'HIGH',
+    });
+  } else
   // Address itself is suspect — first, because it explains every other
   // missing-data line on the panel. Only set when the county roll ANSWERED
   // (a GIS outage yields no audit at all, see auditAddressHouseNumber).

@@ -1798,7 +1798,10 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       const numbers = new Set();
       for (const s of situs) {
         for (const piece of String(s).split(';')) {
-          const norm = normalizeCountyStreetLine(piece);
+          // Roll rows can carry their own secondary designator ('123 MAIN ST
+          // APT 4') — strip it like the typed side, or the end-pinned
+          // patterns reject a street that IS on the roll.
+          const norm = stripUnitDesignators(normalizeCountyStreetLine(piece));
           if (!norm) continue;
           for (const hit of norm.matchAll(pattern)) numbers.add(parseInt(hit[1], 10));
         }
@@ -1823,7 +1826,31 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
 
       let numbers = collect(result.situs, strictPattern);
       if (!numbers.size) numbers = collect(result.situs, relaxedPattern);
-      if (!numbers.size) continue;
+      if (!numbers.size) {
+        // A truncated page with no matched rows proves nothing — the street
+        // could live entirely in the unreturned rows. Try the targeted
+        // exact-number query; a hit is positive evidence, anything else
+        // makes this county inconclusive (suppresses negative verdicts).
+        if (result.truncated) {
+          const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
+          if (targeted === null) { anyFailed = true; continue; }
+          const tNumbers = collect(targeted.situs, strictPattern);
+          for (const n of collect(targeted.situs, relaxedPattern)) tNumbers.add(n);
+          if (tNumbers.has(houseNumber)) {
+            return {
+              county,
+              houseNumber,
+              streetLabel,
+              streetExists: true,
+              hasExactMatch: true,
+              parcelCount: result.situs.length,
+              nearestNumbers: [],
+            };
+          }
+          anyFailed = true; // inconclusive — not proof the street is missing
+        }
+        continue;
+      }
 
       let hasExactMatch = numbers.has(houseNumber);
       // The 2000-row page cap can hide the real number on a long street — a
