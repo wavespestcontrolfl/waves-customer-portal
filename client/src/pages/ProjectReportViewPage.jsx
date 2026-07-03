@@ -4,7 +4,6 @@ import {
   COLORS as B,
   FONTS,
 } from '../theme-brand';
-import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
@@ -345,20 +344,7 @@ export default function ProjectReportViewPage() {
   const primaryPhotos = (data.photos || []).filter(p => p.visit === 'primary');
   const followupPhotos = (data.photos || []).filter(p => p.visit === 'followup');
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
-  const sentDateLabel = data.sentAt ? formatReportDate(data.sentAt) : '';
-  const showSentDate = sentDateLabel && reportDateKey(data.sentAt) !== reportDateKey(data.projectDate);
-  const reportMetaStyle = { fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45 };
   const isCertificate = data.projectType === 'pre_treatment_termite_certificate';
-  const contactDateLabel = isCertificate
-    ? (projectDateLabel ? `Treatment date: ${projectDateLabel}${data.technicianName ? ` · Applicator: ${data.technicianName}` : ''}` : '')
-    : (projectDateLabel ? `Inspection date: ${projectDateLabel}${data.technicianName ? ` · ${data.technicianName}` : ''}` : '');
-  const contactRows = [
-    contactDateLabel,
-    showSentDate ? `Report sent: ${sentDateLabel}` : '',
-    data.customerAddress || '',
-    data.customerEmail ? `Email: ${data.customerEmail}` : '',
-    data.customerPhone ? `Phone: ${data.customerPhone}` : '',
-  ].filter(Boolean);
   // The structured findings feed the AI writer, so when the report carries
   // the sectioned narrative (Customer Concern / What We Inspected / …) the
   // raw findings list would repeat the same content — the narrative is the
@@ -376,7 +362,12 @@ export default function ProjectReportViewPage() {
   const headline = isCertificate
     ? `Hey ${firstName}, here's your Certificate of Compliance.`
     : `Hey ${firstName}, here's your ${typeLabel.toLowerCase()} report.`;
-  const subhead = data.customerAddress || data.cityState || '';
+  // Mirrors the customer estimate hero: the full service address under the
+  // headline, not just "City, FL". Certificates prefer the treatment address
+  // from the document itself (pre-construction lots may differ from the
+  // customer's billing address).
+  const subhead = (isCertificate ? String(findings.treatment_address || '').trim() : '')
+    || data.customerAddress || data.cityState || '';
 
   return (
     <div style={{
@@ -434,25 +425,20 @@ export default function ProjectReportViewPage() {
           ) : null}
         </div>
 
-        {/* Summary card */}
+        {/* Summary card — no "Report details" block (owner directive
+            2026-07-03): the hero already carries the address, the At-a-glance
+            carries the follow-up, and the certificate document carries its
+            own date/applicator. Certificates skip the card entirely (every
+            section inside is non-cert), so no empty white card renders above
+            the document. */}
+        {!isCertificate && (
         <div style={cardStyle}>
-          {contactRows.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div style={{ ...eyebrowStyle, marginBottom: 4 }}>Report details</div>
-              {contactRows.map(row => (
-                <div key={row} style={{ ...reportMetaStyle, whiteSpace: 'pre-wrap' }}>{row}</div>
-              ))}
-            </div>
-          )}
+          {atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
 
-          {!isCertificate && atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
-
-          {/* Findings — suppressed on the Certificate of Compliance (the
-              Certificate block below renders the same data in its branded,
-              FBC-compliant document layout) and whenever the AI-drafted
-              sectioned narrative is present (the narrative IS the customer
-              rendering of these fields — showing both reads twice). */}
-          {!isCertificate && !suppressFindingsForNarrative && findingsEntries.length > 0 && (
+          {/* Findings — suppressed whenever the AI-drafted sectioned
+              narrative is present (the narrative IS the customer rendering
+              of these fields — showing both reads twice). */}
+          {!suppressFindingsForNarrative && findingsEntries.length > 0 && (
             <div style={{ marginTop: 16 }}>
               <div style={{ ...eyebrowStyle, marginBottom: 10 }}>
                 Findings
@@ -500,8 +486,9 @@ export default function ProjectReportViewPage() {
           {/* Recommendations — if the text is the three-section AI-drafted
                format, render each section with its own heading. Otherwise
                fall back to the single "Recommendations" block. */}
-          {!isCertificate && data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} />}
+          {data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} />}
         </div>
+        )}
 
         {data.projectType === 'wdo_inspection' && (
           <div style={{ ...cardStyle, marginTop: 16 }}>
@@ -585,48 +572,10 @@ export default function ProjectReportViewPage() {
           </div>
         </div>
 
-        <ReportTrustStrip />
-
-        {/* Same closing treatment as the pest/lawn service reports: a
-            for-your-records note plus the document brand footer (company
-            block + service-area links) — not the newsletter/social footer. */}
-        <footer style={{ color: ESTIMATE_MUTED, fontSize: 12, lineHeight: 1.6, padding: '22px 0 0' }}>
-          Questions about this report? Ask Waves in your portal or call {WAVES_PHONE_DISPLAY}.
-          {' '}This report is provided for your records.
-        </footer>
-        <BrandFooter variant="document" />
+        {/* No trust strip / newsletter / brand-footer tail on project
+            reports (owner directive 2026-07-03) — the page ends with the
+            report content and contact CTA, like a delivered document. */}
       </main>
-    </div>
-  );
-}
-
-function ReportTrustStrip() {
-  const items = [
-    { label: 'Licensed & insured', detail: `FDACS LIC. ${WAVES_FDACS_LICENSE_NUMBER}` },
-    { label: 'Questions welcome', detail: 'call or text the Waves team' },
-    { label: 'Local service', detail: 'Southwest Florida pest specialists' },
-  ];
-
-  return (
-    <div style={{
-      marginTop: 32,
-      padding: '24px 16px',
-      background: B.offWhite,
-      borderTop: `1px solid ${ESTIMATE_BORDER}`,
-      borderRadius: 12,
-    }}>
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-        gap: 16,
-      }}>
-        {items.map((item) => (
-          <div key={item.label} style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT }}>{item.label}</div>
-            <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2 }}>{item.detail}</div>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

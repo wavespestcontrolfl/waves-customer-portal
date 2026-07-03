@@ -310,7 +310,7 @@ async function findProjectByReportSegment(segment) {
     .leftJoin('technicians as t', 'p.created_by_tech_id', 't.id')
     .select(
       'p.*',
-      'c.first_name', 'c.last_name', 'c.city', 'c.state',
+      'c.first_name', 'c.last_name', 'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
       't.name as technician_name',
     );
   if (lookup.type === 'full') {
@@ -416,6 +416,12 @@ router.get('/project/:token/data', async (req, res, next) => {
       title: project.title,
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
       cityState: `${project.city || ''}${project.state ? ', ' + project.state : ''}`.trim().replace(/^,\s*/, ''),
+      // Full service address for the hero — the report page mirrors the
+      // customer estimate, which shows the street address under the headline.
+      customerAddress: [
+        [project.address_line1, project.address_line2].filter(Boolean).join(' ').trim(),
+        [project.city, [project.state, project.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+      ].filter(Boolean).join(', '),
       technicianName: project.technician_name,
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
