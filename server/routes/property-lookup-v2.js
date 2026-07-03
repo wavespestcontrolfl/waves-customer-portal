@@ -1272,6 +1272,19 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       ? propertyTypeFromAttachment(ai)
       : null);
 
+  // On a RESIDENTIAL profile, never surface a record propertyType that
+  // normalizes to commercial (an untrusted "Multifamily"/"Commercial" alias the
+  // guard already refused to classify on). Left in place it would
+  // re-commercialize the profile at pricing time — isCommercialProfile runs
+  // normalizePricingPropertyType(profile.propertyType) and treats a commercial
+  // string as authoritative — undoing detectCategory's guard (codex P1). The
+  // raw value stays visible for the operator via profile.fieldEvidence
+  // .propertyType (which already carries the field-verify flag).
+  const residentialDisplayType =
+    (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) !== 'commercial')
+      ? rc.propertyType
+      : (visionPropertyType || 'Single Family');
+
   const landscapeComplexity = ai?.landscapeComplexity || 'MODERATE';
   const footprintSf = rc?.squareFootage
     ? Math.round(rc.squareFootage / (rc.stories || 1))
@@ -1296,7 +1309,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
 
     // ── CATEGORY / TYPE ──
     category,
-    propertyType: commercialProfile ? 'Commercial' : (rc?.propertyType || visionPropertyType || 'Single Family'),
+    propertyType: commercialProfile ? 'Commercial' : residentialDisplayType,
     isCommercial: commercialProfile,
     commercialSubtype,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
@@ -1825,23 +1838,44 @@ function hasStructuredCommercialAiSignal(ai = {}) {
   return commercialUseType === 'OTHER' || normalizePricingPropertyType(commercialUseType) === 'commercial';
 }
 
+// propertyType sourceTypes that describe THIS parcel authoritatively (a county
+// roll, cadastral FDOR roll, permit, builder floorplan, or a tech-verified
+// read) — as opposed to a web/listing hit that can describe a NEIGHBORING
+// parcel. Keyed off the merged field evidence's winning sourceType (see
+// SOURCE_TYPE_LABELS in services/property-lookup/ai-property-lookup.js).
+const AUTHORITATIVE_PROPERTY_TYPE_SOURCES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder']);
+
 // A record's type/zoning/land-use strings (and unit count) may only vote
-// COMMERCIAL when the record itself is trustworthy. County / cadastral /
-// hybrid merges always are, as are records with no evidence metadata
-// (verified overrides, legacy cache rows). But on an AI-web-search-only
-// merge, mergePropertyRecords already scored the propertyType field — if it
-// flagged it for manual verification (unknown/generic source, score < 65, or
-// provider disagreement), that same unverified string must not
-// single-handedly flip the profile to commercial pricing. Real miss
-// (2026-07-03): 6314 Gateway Ave isn't on the Sarasota roll, so the only
-// source was a grounded web search that landed on a LoopNet listing for a
-// DIFFERENT Gateway Ave parcel — propertyType "Multifamily" at 0/100 data
-// quality commercial-classified a residential lead.
+// COMMERCIAL when the record itself is trustworthy. Pure county / cadastral
+// merges always are, as are records with no evidence metadata (verified
+// overrides, legacy cache rows). But on an AI-web-search OR a HYBRID
+// (county+AI) merge, the winning propertyType may have come from an unverified
+// web hit even though other fields came from the county — mergePropertyRecords
+// keeps the WINNING source on the field evidence. So trust the commercial
+// signal only when that winning propertyType is itself from an authoritative
+// parcel source, or (for a web/listing source) it passed field verification.
+// Note fieldVerify alone can't gate this: the merge also raises it on mere
+// source *disagreement* even when authoritative county data won the field
+// (see recordPropertyTypeIsWeak), so a real county "Multifamily" that an AI
+// source contradicts must still classify COMMERCIAL — hence the sourceType
+// check. Real miss (2026-07-03): 6314 Gateway Ave isn't on the Sarasota roll,
+// so the only source was a grounded web search that landed on a LoopNet
+// listing for a DIFFERENT Gateway Ave parcel — propertyType "Multifamily" at
+// 0/100 data quality commercial-classified a residential lead.
 function recordCommercialSignalTrusted(rc) {
   if (!rc) return true;
-  if (rc._source && rc._source !== 'ai') return true;
+  // Pure county / cadastral merges are authoritative parcel data — trust even
+  // when a disagreement-driven verify flag is set on the field.
+  if (rc._source === 'county' || rc._source === 'cadastral') return true;
   const evidence = rc._fieldEvidence?.propertyType;
+  // No per-field evidence: verified overrides / legacy cache rows.
   if (!evidence) return true;
+  // AI or hybrid merge: trust only an authoritative-sourced propertyType, or a
+  // web/listing one that passed field verification (the AI-only bar). Closes
+  // the hybrid hole where a sparse county record + an unverified AI
+  // "Multifamily" listing still priced commercial (codex P1).
+  const sourceType = String(evidence.sourceType || '').toLowerCase();
+  if (AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(sourceType)) return true;
   return !evidence.fieldVerify;
 }
 
@@ -3361,6 +3395,7 @@ module.exports._private = {
   detectCategory,
   resolveCommercialSubtype,
   resolveCommercialDetectionSource,
+  isCommercialProfile,
   turfRiskReasons,
   visionContextPromptBlock,
 };

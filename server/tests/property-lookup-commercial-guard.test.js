@@ -29,7 +29,25 @@ const {
   detectCategory,
   resolveCommercialSubtype,
   resolveCommercialDetectionSource,
+  isCommercialProfile,
 } = routePrivate;
+
+// A hybrid (county + AI) merge whose WINNING propertyType came from the county
+// roll — authoritative even though disagreement raised the field-verify flag.
+function hybridCountyWonRecord(overrides = {}) {
+  return {
+    formattedAddress: '77 County Line Rd, Parrish, FL 34219',
+    propertyType: 'Commercial',
+    unitCount: 1,
+    _source: 'hybrid',
+    _fieldEvidence: {
+      propertyType: {
+        value: 'Commercial', confidence: 'high', sourceType: 'county', fieldVerify: true, score: 100,
+      },
+    },
+    ...overrides,
+  };
+}
 
 beforeEach(() => jest.clearAllMocks());
 
@@ -85,10 +103,22 @@ describe('recordCommercialSignalTrusted', () => {
     expect(recordCommercialSignalTrusted(untrustedAiRecord())).toBe(false);
   });
 
-  test('trusts county / hybrid / cadastral merges even when the field is flagged', () => {
-    for (const source of ['county', 'hybrid', 'cadastral']) {
+  test('trusts pure county / cadastral merges even when the field is flagged', () => {
+    for (const source of ['county', 'cadastral']) {
       expect(recordCommercialSignalTrusted(untrustedAiRecord({ _source: source }))).toBe(true);
     }
+  });
+
+  test('distrusts a hybrid merge whose propertyType was won by an unverified web source (codex P1)', () => {
+    // Sparse county fact merged with an AI "Multifamily" listing: _source is
+    // hybrid but the WINNING propertyType is still the unverified web hit.
+    expect(recordCommercialSignalTrusted(untrustedAiRecord({ _source: 'hybrid' }))).toBe(false);
+  });
+
+  test('trusts a hybrid merge when the county won the propertyType field', () => {
+    // Authoritative county-won type on a hybrid record, flagged only because an
+    // AI source disagreed — must still classify commercial (no regression).
+    expect(recordCommercialSignalTrusted(hybridCountyWonRecord())).toBe(true);
   });
 
   test('trusts an AI record whose propertyType passed field verification', () => {
@@ -127,6 +157,14 @@ describe('detectCategory with the evidence guard', () => {
       },
     });
     expect(detectCategory(rc, {})).toBe('COMMERCIAL');
+  });
+
+  test('hybrid merge with an AI-won unverified Multifamily classifies RESIDENTIAL (codex P1)', () => {
+    expect(detectCategory(untrustedAiRecord({ _source: 'hybrid' }), {})).toBe('RESIDENTIAL');
+  });
+
+  test('hybrid merge with a county-won commercial type still classifies COMMERCIAL', () => {
+    expect(detectCategory(hybridCountyWonRecord(), {})).toBe('COMMERCIAL');
   });
 
   test('unitCount from an untrusted record cannot vote COMMERCIAL', () => {
@@ -168,15 +206,19 @@ describe('subtype / detection-source respect the guard', () => {
 });
 
 describe('buildEnrichedProfile end-to-end', () => {
-  test('Gateway Ave profile comes back residential with the type preserved for the verify flag', () => {
+  test('Gateway Ave profile comes back residential and cannot re-commercialize at pricing (codex P1)', () => {
     const profile = buildEnrichedProfile(untrustedAiRecord(), {}, 27.26, -82.51);
     expect(profile.category).toBe('RESIDENTIAL');
     expect(profile.isCommercial).toBe(false);
     expect(profile.commercialSubtype).toBeNull();
     expect(profile.commercialDetectionSource).toBeNull();
-    // The unverified value stays visible (it already carries a field-verify
-    // flag in the UI) — the guard only stops it from driving pricing.
-    expect(profile.propertyType).toBe('Multifamily');
+    // The untrusted commercial alias is suppressed from the PRICED field so it
+    // can't flip the profile back to commercial via
+    // isCommercialProfile → normalizePricingPropertyType. Direct proof:
+    expect(profile.propertyType).toBe('Single Family');
+    expect(isCommercialProfile(profile)).toBe(false);
+    // …but the raw unverified value stays visible for the field-verify UI.
+    expect(profile.fieldEvidence.propertyType.value).toBe('Multifamily');
   });
 
   test('county-backed commercial profile is unchanged', () => {
