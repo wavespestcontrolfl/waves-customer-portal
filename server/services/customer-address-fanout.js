@@ -26,7 +26,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { formatAddress, normalizeStreetLine } = require('../utils/address-normalizer');
+const { formatAddress, normalizeStreetLine, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
 
 // Deliverable estimate states — mirrors SENDABLE_ESTIMATE_STATUSES in
 // routes/admin-estimates.js (scheduled/sending/send_failed rows still produce
@@ -49,10 +49,14 @@ function addressMatchKey(value) {
 }
 
 // A comma segment that is a secondary-unit designator ("Apt 2", "# 4",
-// "Suite 200") — a snapshot carrying one refers to a distinct unit even when
-// its street segment matches the customer's unitless line. "FL" (floor) is
-// deliberately absent: every Florida address has an ", FL 34211" segment.
-const UNIT_SEGMENT_RE = /^\s*(?:apt|apartment|unit|ste|suite|bldg|building|lot|trlr|rm|#)\.?\s*#?\s*[\w-]+\s*$/i;
+// "Suite 200", "Floor 2", "Space 12") — a snapshot carrying one refers to a
+// distinct unit even when its street segment matches the customer's unitless
+// line. Built from the address normalizer's shared UNIT_DESIGNATORS so the
+// two lists can't drift, EXCEPT "fl": every Florida address has an
+// ", FL 34211" segment ("floor" spelled out still counts). trlr/rm are USPS
+// designators the shared list doesn't carry.
+const UNIT_SEGMENT_DESIGNATORS = [...UNIT_DESIGNATORS].filter((d) => d !== 'fl').concat(['trlr', 'rm']);
+const UNIT_SEGMENT_RE = new RegExp(`^\\s*(?:${UNIT_SEGMENT_DESIGNATORS.join('|')}|#)\\.?\\s*#?\\s*[\\w-]+\\s*$`, 'i');
 
 // A tail segment carrying no city information (state, zip, country) — used
 // to find the city segment of a full single-line snapshot.

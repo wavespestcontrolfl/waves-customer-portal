@@ -418,4 +418,5 @@ module.exports = {
   normalizeState,
   parseRawAddress,
   STREET_SUFFIX_ALIASES,
+  UNIT_DESIGNATORS,
 };

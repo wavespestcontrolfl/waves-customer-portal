@@ -984,15 +984,20 @@ async function updateCustomer(customerId, updates) {
     .some((f) => clean[f] !== undefined);
   try {
     await db.transaction(async (trx) => {
+      // Row lock serializes overlapping address edits (see the Customers
+      // route): before/merged are re-derived from the locked row so a losing
+      // concurrent editor still matches the snapshots the winner moved.
+      const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
+      const lockedMerged = { ...lockedBefore, ...clean };
       await trx('customers').where('id', customerId).update(clean);
       if (addressSubmitted) {
-        await require('../customer-properties').syncPrimaryAddress(merged, trx);
+        await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
         // Open leads/estimates snapshot the address at creation and never
         // re-read customers.* — sync the copies that still match the old
         // address (matching rules in the fan-out service header). Presence-
         // triggered like the mirror above, so resubmitting the same address
         // also self-heals copies left stale by a pre-fix edit.
-        await require('../customer-address-fanout').propagateCustomerAddressChange({ before, after: merged }, trx);
+        await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
       }
     });
   } catch (e) {
@@ -1087,9 +1092,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
     const merged = { ...before, ...clean };
     try {
       await db.transaction(async (trx) => {
+        // Same row-lock serialization as the single-edit path.
+        const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
+        const lockedMerged = { ...lockedBefore, ...clean };
         await trx('customers').where('id', customerId).update({ ...clean, ...stageStamp });
-        await require('../customer-properties').syncPrimaryAddress(merged, trx);
-        await require('../customer-address-fanout').propagateCustomerAddressChange({ before, after: merged }, trx);
+        await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
+        await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
       });
     } catch (e) {
       if (e && e.code === '23505') {

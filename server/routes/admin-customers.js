@@ -2290,13 +2290,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // row exists.
       try {
         await db.transaction(async (trx) => {
+          // Serialize overlapping address edits on the same customer: the row
+          // lock makes a second editor WAIT, and before/after are re-derived
+          // from the locked row — a pre-transaction 'before' from the losing
+          // editor would no longer match snapshots the first edit already
+          // moved, stranding them.
+          const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
+          const lockedAfter = { ...lockedBefore, ...updates };
           await trx('customers').where({ id: req.params.id }).update(updates);
           if (addressChanged) {
-            await require('../services/customer-properties').syncPrimaryAddress(after, trx);
+            await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);
             // Open leads/estimates snapshot the address at creation and never
             // re-read customers.* — sync the copies that still match the old
             // address (matching rules in the fan-out service header).
-            await require('../services/customer-address-fanout').propagateCustomerAddressChange({ before, after }, trx);
+            await require('../services/customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedAfter }, trx);
           }
         });
       } catch (e) {

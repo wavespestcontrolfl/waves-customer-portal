@@ -9,6 +9,7 @@ jest.mock('../models/db', () => {
   const qb = {};
   qb.where = jest.fn(() => qb);
   qb.whereIn = jest.fn(() => qb);
+  qb.forUpdate = jest.fn(() => qb);
   qb.first = jest.fn();
   qb.update = jest.fn(() => Promise.resolve(1));
   const db = jest.fn(() => qb);
@@ -49,7 +50,8 @@ beforeEach(() => {
 
 test('an address change syncs the primary property atomically and re-geocodes', async () => {
   db.__qb.first
-    .mockResolvedValueOnce(baseRow) // before
+    .mockResolvedValueOnce(baseRow) // before (pre-transaction read)
+    .mockResolvedValueOnce(baseRow) // locked in-transaction read (FOR UPDATE)
     .mockResolvedValueOnce({ ...baseRow, address_line1: '9136 93rd Run E', city: 'Parrish', zip: '34219' }); // after
 
   const result = await executeTool('update_customer', {
@@ -94,6 +96,7 @@ test('resubmitting the same address still syncs + re-geocodes (self-heals a stal
   // would skip the heal; presence-based must still run sync + geocode.
   db.__qb.first
     .mockResolvedValueOnce(baseRow) // before — address already matches what we submit
+    .mockResolvedValueOnce(baseRow) // locked in-transaction read
     .mockResolvedValueOnce(baseRow); // after
 
   const result = await executeTool('update_customer', {
@@ -109,6 +112,7 @@ test('resubmitting the same address still syncs + re-geocodes (self-heals a stal
 test('a non-address change does not touch the property mirror or geocoder', async () => {
   db.__qb.first
     .mockResolvedValueOnce(baseRow) // before
+    .mockResolvedValueOnce(baseRow) // locked in-transaction read
     .mockResolvedValueOnce({ ...baseRow, crm_notes: 'gate code 1234' }); // after
 
   const result = await executeTool('update_customer', {
@@ -127,7 +131,9 @@ test('a bulk ADDRESS edit takes the per-row path: mirror + fan-out + re-geocode 
   const rowB = { ...baseRow, id: 'cust-b' };
   db.__qb.first
     .mockResolvedValueOnce(rowA) // before (cust-a)
-    .mockResolvedValueOnce(rowB); // before (cust-b)
+    .mockResolvedValueOnce(rowA) // locked read (cust-a)
+    .mockResolvedValueOnce(rowB) // before (cust-b)
+    .mockResolvedValueOnce(rowB); // locked read (cust-b)
 
   const result = await executeTool('bulk_update_customers', {
     customer_ids: ['cust-a', 'cust-b'],
