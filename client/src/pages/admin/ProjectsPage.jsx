@@ -12,6 +12,7 @@ import ProjectFindingFieldInput, {
   hasCatalogBackedProjectFields,
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
+import { parseSections } from "../ProjectReportViewPage";
 import { COLORS, FONTS } from "../../theme-brand";
 
 /**
@@ -747,9 +748,19 @@ function CustomerProjectReportPreview({
 }) {
   const typeLabel = typeCfg?.label || TYPE_LABELS[project.project_type] || "Inspection";
   const reportTitle = String(title || "").trim() || typeLabel;
-  // Same internal-key filter as the customer-facing report page — the preview
-  // staff approve must match what the customer actually sees.
-  const findingsEntries = Object.entries(findings || {}).filter(
+  // Same suppression rules as the customer-facing report page — the preview
+  // staff approve must match what the customer actually sees: internal keys
+  // filtered, and the raw findings hidden when the AI-drafted sectioned
+  // narrative is present (the narrative is the customer rendering of them).
+  // WDO keeps findings unless a filled FDACS filing is archived —
+  // fdacs_pdf_available is computed by the detail endpoint with the same
+  // rule as the public page (the raw archive index isn't served).
+  const aiNarrativeSections = recommendations
+    ? parseSections(String(recommendations))
+    : null;
+  const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
+    && (project.project_type !== WDO_TYPE || Boolean(project.fdacs_pdf_available));
+  const findingsEntries = suppressFindingsForNarrative ? [] : Object.entries(findings || {}).filter(
     ([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && hasMeaningfulValue(formatProjectPreviewValue(v)),
   );
   const visiblePhotos = (photos || []).slice(0, 4);
