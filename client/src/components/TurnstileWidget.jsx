@@ -32,6 +32,10 @@ export default function TurnstileWidget({ onToken, className }) {
         try { turnstile.remove(widgetIdRef.current); } catch { /* widget already gone */ }
       }
       widgetIdRef.current = null;
+      // Clear the parent's token — it belongs to this now-removed widget. Leaving
+      // it set would let a stale/expired token be reused if the widget remounts
+      // (e.g. Back off the final /quote step, then return).
+      onTokenRef.current('');
     };
   }, []);
 
