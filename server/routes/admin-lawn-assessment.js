@@ -1013,21 +1013,24 @@ router.post('/confirm', async (req, res, next) => {
       fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
       thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
     };
-    // Stress/Damage = worst of the tech-corrected fungus + thatch and the AI
-    // worst-spot floor stored at /assess (which already folds in insect/drought/
-    // mechanical and the worst per-photo disease/thatch). A tech correcting the
-    // overall fungus/thatch can push it lower; the AI worst-spot floor holds so
-    // a trouble spot isn't lost. Pre-stress_damage rows (null floor) fall back
-    // to worst-of(fungus, thatch) — never 0.
+    // Stress/Damage. The tech now corrects a single "Stress" score directly on
+    // the completion screen, so honor an explicit adjustedScores.stress_damage
+    // when sent. When it isn't (older clients, or a prefill re-confirm that only
+    // carries the AI values), fall back to the prior derivation: worst of the
+    // fungus + thatch scores and the AI worst-spot floor stored at /assess (which
+    // already folds in insect/drought/mechanical and the worst per-photo
+    // disease/thatch). Pre-stress_damage rows (null floor) fall back to
+    // worst-of(fungus, thatch) — never 0.
     {
       const aiFloor = Number.isFinite(Number(assessment.stress_damage))
         ? Number(assessment.stress_damage)
         : 95;
-      finalScores.stress_damage = Math.min(
+      const derivedStress = Math.min(
         Number(finalScores.fungus_control),
         Number(finalScores.thatch_level),
         aiFloor,
       );
+      finalScores.stress_damage = scoreValue(adjustedScores?.stress_damage, derivedStress);
     }
 
     const updateData = {

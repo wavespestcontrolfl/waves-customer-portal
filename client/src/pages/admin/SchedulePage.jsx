@@ -113,23 +113,16 @@ const CHIP_OBSERVATIONS_PEST = [
   "Customer concern discussed",
 ];
 const CHIP_OBSERVATIONS_LAWN = [
-  "Pest activity noted",
+  "Lawn stress/dry patches",
   "Standing water found",
   "Irrigation issue",
-  "Rodent signs",
-  "Lawn stress/dry patches",
-  "Fungus visible",
+  "Fungus/disease visible",
   "Weeds spreading",
+  "Lawn pest activity (chinch/armyworm/grubs)",
+  "Thinning/bare areas",
+  "Scalping/mowing damage",
   "Property access issue",
   "Customer concern discussed",
-  "Debris in gutters",
-  "Ant trails observed",
-  "Roach activity (live/dead)",
-  "Spider webs/egg sacs",
-  "Wasp/bee nests found",
-  "Moisture/conducive conditions",
-  "Entry points identified",
-  "Conducive vegetation against structure",
 ];
 const CHIP_OBSERVATIONS_TREE_SHRUB = [
   "Scale insects present",
@@ -155,9 +148,8 @@ const CHIP_RECOMMENDATIONS_PEST = [
 const CHIP_RECOMMENDATIONS_LAWN = [
   "Callback recommended",
   "Irrigation adjustment needed",
+  "Raise mowing height",
   "Follow-up in 2 weeks",
-  "Schedule interior next visit",
-  "Bait station replacement",
   "Customer wants estimate",
 ];
 const CHIP_RECOMMENDATIONS_TREE_SHRUB = [
@@ -5176,12 +5168,16 @@ function TypedFindingsSection({
   );
 }
 
+// The four scores the tech reviews/adjusts, matching the customer report's
+// consolidated diagnosis (Density / Weeds / Color / Stress-Damage). The AI still
+// assesses the underlying fungus/thatch/insect/drought/mechanical signals — those
+// stay on the assessment row for analytics + folding into stress_damage — but the
+// tech now corrects one "Stress" score directly instead of separate Fungus/Thatch.
 const LAWN_ASSESSMENT_METRICS = [
   { key: "turf_density", label: "Density" },
   { key: "weed_suppression", label: "Weeds" },
   { key: "color_health", label: "Color" },
-  { key: "fungus_control", label: "Fungus" },
-  { key: "thatch_level", label: "Thatch" },
+  { key: "stress_damage", label: "Stress" },
 ];
 
 const LAWN_STRESS_FLAGS = [
@@ -5253,8 +5249,11 @@ function parseAssessmentScores(row = {}) {
     turf_density: row.turf_density ?? row.turfDensity ?? 0,
     weed_suppression: row.weed_suppression ?? row.weedSuppression ?? 0,
     color_health: row.color_health ?? row.colorHealth ?? 0,
+    // Kept (not shown as chips) so a re-confirm preserves the AI values; the tech
+    // now corrects stress_damage directly instead of these two.
     fungus_control: row.fungus_control ?? row.fungusControl ?? 0,
     thatch_level: row.thatch_level ?? row.thatchLevel ?? 0,
+    stress_damage: row.stress_damage ?? row.stressDamage ?? 0,
   };
 }
 
@@ -5690,7 +5689,7 @@ function LawnAssessmentCompletionBlock({
       )}
       {hasResult && (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 6 }}>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
             {LAWN_ASSESSMENT_METRICS.map((metric) => {
               const value = Number(scoreSource?.[metric.key] || 0);
               return (
@@ -11071,6 +11070,8 @@ export function CompletionPanel({
                       <ProductTargetsPicker
                         idSuffix={sp.productId}
                         targets={sp.targets}
+                        suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
+                        noun={isLawn ? "weed or pest" : "pest"}
                         onChange={(next) =>
                           updateProduct(sp.productId, "targets", next)
                         }
@@ -13023,6 +13024,8 @@ export function CompletionPanel({
                   <ProductTargetsPicker
                     idSuffix={sp.productId}
                     targets={sp.targets}
+                    suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
+                    noun={isLawn ? "weed or pest" : "pest"}
                     onChange={(next) =>
                       updateProduct(sp.productId, "targets", next)
                     }
@@ -13470,13 +13473,41 @@ const PEST_TARGET_SUGGESTIONS = [
   "Scorpions",
 ];
 
-// Per-product pest-target multiselect: free-text chips with datalist
-// suggestions. Stored on the selected product as `targets` (string[]); the
-// completion route persists it to service_products.targets. Optional.
-function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
+// What a lawn product treats: weeds, turf-damaging insects, and turf diseases —
+// what a lawn tech actually enters as a product's target, not structural pests.
+const LAWN_TARGET_SUGGESTIONS = [
+  "Broadleaf weeds",
+  "Crabgrass",
+  "Nutsedge / sedge",
+  "Dollarweed",
+  "Doveweed",
+  "Chamberbitter",
+  "Spurge",
+  "Clover",
+  "Goosegrass",
+  "Torpedograss",
+  "Chinch bugs",
+  "Armyworms",
+  "Sod webworms",
+  "Grubs",
+  "Mole crickets",
+  "Fire ants",
+  "Nematodes",
+  "Brown patch / large patch",
+  "Dollar spot",
+  "Gray leaf spot",
+  "Take-all root rot",
+];
+
+// Per-product target multiselect: free-text chips with datalist suggestions.
+// Stored on the selected product as `targets` (string[]); the completion route
+// persists it to service_products.targets. Optional. `suggestions`/`noun` are
+// service-line aware — pest services get pests, lawn services get weeds/turf
+// pests/diseases — so the label and datalist match what's actually being treated.
+function ProductTargetsPicker({ targets, onChange, idSuffix, theme, suggestions = PEST_TARGET_SUGGESTIONS, noun = "pest" }) {
   const [draft, setDraft] = useState("");
   const list = Array.isArray(targets) ? targets : [];
-  const datalistId = `pest-targets-${idSuffix}`;
+  const datalistId = `targets-${idSuffix}`;
   function commit(raw) {
     const cleaned = String(raw || "")
       .split(",")
@@ -13550,7 +13581,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
         type="text"
         list={datalistId}
         value={draft}
-        placeholder={list.length ? "Add target…" : "Add pest target…"}
+        placeholder={list.length ? "Add target…" : `Add ${noun} target…`}
         onChange={(e) => {
           const value = e.target.value;
           if (value.includes(",")) {
@@ -13560,7 +13591,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
           // Auto-commit when the value exactly matches a suggestion (datalist
           // pick), so selecting works without relying on Enter/blur on mobile.
           if (
-            PEST_TARGET_SUGGESTIONS.some(
+            suggestions.some(
               (s) => s.toLowerCase() === value.trim().toLowerCase(),
             )
           ) {
@@ -13581,7 +13612,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
         style={{ ...theme.inputStyle, flex: "1 1 140px", minWidth: 120 }}
       />
       <datalist id={datalistId}>
-        {PEST_TARGET_SUGGESTIONS.map((p) => (
+        {suggestions.map((p) => (
           <option key={p} value={p} />
         ))}
       </datalist>
