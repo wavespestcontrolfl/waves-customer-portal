@@ -1272,6 +1272,19 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       ? propertyTypeFromAttachment(ai)
       : null);
 
+  // On a RESIDENTIAL profile, never surface a record propertyType that
+  // normalizes to commercial (an untrusted "Multifamily"/"Commercial" alias the
+  // guard already refused to classify on). Left in place it would
+  // re-commercialize the profile at pricing time — isCommercialProfile runs
+  // normalizePricingPropertyType(profile.propertyType) and treats a commercial
+  // string as authoritative — undoing detectCategory's guard (codex P1). The
+  // raw value stays visible for the operator via profile.fieldEvidence
+  // .propertyType (which already carries the field-verify flag).
+  const residentialDisplayType =
+    (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) !== 'commercial')
+      ? rc.propertyType
+      : (visionPropertyType || 'Single Family');
+
   const landscapeComplexity = ai?.landscapeComplexity || 'MODERATE';
   const footprintSf = rc?.squareFootage
     ? Math.round(rc.squareFootage / (rc.stories || 1))
@@ -1296,7 +1309,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
 
     // ── CATEGORY / TYPE ──
     category,
-    propertyType: commercialProfile ? 'Commercial' : (rc?.propertyType || visionPropertyType || 'Single Family'),
+    propertyType: commercialProfile ? 'Commercial' : residentialDisplayType,
     isCommercial: commercialProfile,
     commercialSubtype,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
@@ -1698,7 +1711,16 @@ function applyParcelTurfBound(aiAnalysis, propertyRecord) {
       && !['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'].includes(commercialUseType)) {
     return aiAnalysis;
   }
-  const propertyType = String(propertyRecord.propertyType || '').toUpperCase();
+  // The attached/shared-turf exemption may only key off a TRUSTED type. An
+  // unverified web-search "Multifamily" (the Gateway Ave shape) must not leave
+  // the AI turf estimate unbounded on a parcel that will be priced residential
+  // (codex rd2 P1) — distrusted types get the cap, the conservative direction.
+  // Satellite-applied types stay exempt-eligible by design: the vision pass
+  // reclassifies attached units BEFORE this cap runs precisely so it can skip.
+  const typeEvidence = propertyRecord._fieldEvidence?.propertyType;
+  const typeTrusted = String(typeEvidence?.sourceType || '').toLowerCase() === 'satellite'
+    || recordCommercialSignalTrusted(propertyRecord);
+  const propertyType = typeTrusted ? String(propertyRecord.propertyType || '').toUpperCase() : '';
   if (/CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/.test(propertyType)) return aiAnalysis;
 
   const bound = parcelTurfBoundSqft(propertyRecord);
@@ -1825,13 +1847,89 @@ function hasStructuredCommercialAiSignal(ai = {}) {
   return commercialUseType === 'OTHER' || normalizePricingPropertyType(commercialUseType) === 'commercial';
 }
 
+// propertyType sourceTypes that describe THIS parcel authoritatively (a county
+// roll, cadastral FDOR roll, permit, builder floorplan, or a tech-verified
+// read) — as opposed to a web/listing hit that can describe a NEIGHBORING
+// parcel. Keyed off the merged field evidence's winning sourceType (see
+// SOURCE_TYPE_LABELS in services/property-lookup/ai-property-lookup.js).
+const AUTHORITATIVE_PROPERTY_TYPE_SOURCES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder']);
+
+// A record's type/zoning/land-use strings (and unit count) may only vote
+// COMMERCIAL when the record itself is trustworthy. Pure county / cadastral
+// merges always are, as are records with no evidence metadata (verified
+// overrides, legacy cache rows). But on an AI-web-search OR a HYBRID
+// (county+AI) merge, the winning propertyType may have come from an unverified
+// web hit even though other fields came from the county — mergePropertyRecords
+// keeps the WINNING source on the field evidence. So trust the commercial
+// signal only when that winning propertyType is itself from an authoritative
+// parcel source, or (for a web/listing source) it passed field verification.
+// Note fieldVerify alone can't gate this: the merge also raises it on mere
+// source *disagreement* even when authoritative county data won the field
+// (see recordPropertyTypeIsWeak), so a real county "Multifamily" that an AI
+// source contradicts must still classify COMMERCIAL — hence the sourceType
+// check. Real miss (2026-07-03): 6314 Gateway Ave isn't on the Sarasota roll,
+// so the only source was a grounded web search that landed on a LoopNet
+// listing for a DIFFERENT Gateway Ave parcel — propertyType "Multifamily" at
+// 0/100 data quality commercial-classified a residential lead.
+function recordCommercialSignalTrusted(rc) {
+  if (!rc) return true;
+  // Pure county / cadastral merges are authoritative parcel data — trust even
+  // when a disagreement-driven verify flag is set on the field.
+  if (rc._source === 'county' || rc._source === 'cadastral') return true;
+  const evidence = rc._fieldEvidence?.propertyType;
+  // No per-field evidence: verified overrides / legacy cache rows.
+  if (!evidence) return true;
+  // AI or hybrid merge: trust only an authoritative-sourced propertyType, or a
+  // web/listing one that passed field verification (the AI-only bar). Closes
+  // the hybrid hole where a sparse county record + an unverified AI
+  // "Multifamily" listing still priced commercial (codex P1).
+  const sourceType = String(evidence.sourceType || '').toLowerCase();
+  if (AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(sourceType)) return true;
+  return !evidence.fieldVerify;
+}
+
+// A hybrid merge's unitCount may itself have been won by the same unverified
+// web source as the type — only an authoritative or field-verified count may
+// keep voting; otherwise fall back to the neutral 1.
+function trustedUnitCount(rc) {
+  const evidence = rc?._fieldEvidence?.unitCount;
+  if (!evidence) return rc?.unitCount;
+  const sourceType = String(evidence.sourceType || '').toLowerCase();
+  if (AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(sourceType)) return rc.unitCount;
+  return evidence.fieldVerify ? 1 : rc.unitCount;
+}
+
+// Sanitize an untrusted record for commercial-signal reads. Structured
+// satellite AI signals (propertyUse / commercialUseType) keep voting — vision
+// looked at THIS parcel, unlike a web-search hit on a neighboring listing.
+//
+// A HYBRID merge still carries authoritative county GIS strings in _raw (the
+// top-ranked county/cadastral record donates _raw, and buildCadastralRecord
+// deliberately preserves land-use it can't normalize into a propertyType —
+// municipal, common area, co-op). Nulling the whole record would let those
+// county-backed commercial parcels fall through to residential pricing (codex
+// rd2 P1) — so strip ONLY the untrusted type strings and web-sourced unit
+// count, and keep the county signals. An AI-only merge has nothing
+// authoritative to keep.
+function commercialSignalRecord(rc) {
+  if (recordCommercialSignalTrusted(rc)) return rc;
+  if (rc?._source !== 'hybrid') return null;
+  return {
+    ...rc,
+    propertyType: '',
+    unitCount: trustedUnitCount(rc),
+    _raw: { ...(rc._raw || {}), propertyType: '' },
+  };
+}
+
 function detectCategory(rc, ai = {}) {
   if (!rc && !ai) return 'RESIDENTIAL';
-  const text = commercialSignalText(rc, ai);
+  const signalRc = commercialSignalRecord(rc);
+  const text = commercialSignalText(signalRc, ai);
   if (/(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/.test(text)) return 'COMMERCIAL';
   if (/(apartment|apartments|multi\s*family|multifamily|hoa\s*common|common\s*area)/.test(text)) return 'COMMERCIAL';
   if (hasStructuredCommercialAiSignal(ai)) return 'COMMERCIAL';
-  if (rc?.unitCount && rc.unitCount > 4)
+  if (signalRc?.unitCount && signalRc.unitCount > 4)
     return 'COMMERCIAL';
   return 'RESIDENTIAL';
 }
@@ -1844,7 +1942,7 @@ function hasCommercialSignalText(rc = {}, ai = {}) {
 }
 
 function resolveCommercialSubtype(rc = {}, ai = {}) {
-  const text = commercialSignalText(rc, ai);
+  const text = commercialSignalText(commercialSignalRecord(rc), ai);
   if (/warehouse|light\s*industrial/.test(text)) return 'warehouse_light';
   if (/restaurant|food\s*service|commercial\s*kitchen/.test(text)) return 'restaurant_food_service';
   if (/medical|clinic/.test(text)) return 'medical_office';
@@ -1859,9 +1957,10 @@ function resolveCommercialSubtype(rc = {}, ai = {}) {
 }
 
 function resolveCommercialDetectionSource(rc = {}, ai = {}) {
-  if (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) === 'commercial') return 'property_record_property_type';
-  if (rc?.unitCount && rc.unitCount > 4) return 'property_record_unit_count';
-  if (hasCommercialSignalText(rc, {})) return 'property_record_commercial_signal';
+  const signalRc = commercialSignalRecord(rc);
+  if (signalRc?.propertyType && normalizePricingPropertyType(signalRc.propertyType) === 'commercial') return 'property_record_property_type';
+  if (signalRc?.unitCount && signalRc.unitCount > 4) return 'property_record_unit_count';
+  if (hasCommercialSignalText(signalRc || {}, {})) return 'property_record_commercial_signal';
   if (hasStructuredCommercialAiSignal(ai)) return 'satellite_ai_property_use';
   return 'commercial_signal';
 }
@@ -3328,6 +3427,11 @@ module.exports._private = {
   poolSource,
   propertyTypeFromAttachment,
   recordPropertyTypeIsWeak,
+  recordCommercialSignalTrusted,
+  detectCategory,
+  resolveCommercialSubtype,
+  resolveCommercialDetectionSource,
+  isCommercialProfile,
   turfRiskReasons,
   visionContextPromptBlock,
 };
