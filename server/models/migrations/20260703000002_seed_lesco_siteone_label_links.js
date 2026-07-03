@@ -29,6 +29,20 @@ const SITEONE_LINKS = [
     vendorUrl: 'https://www.siteone.com/en/098646-lesco-7-1-7-40-polyplus-1-fe-1-mg-1-mn-217-s-pc-urea-dap-mop-is-ms-k-mag-turfgrass-granular-fertilizer-50-lb-bag/p/336923',
   },
   {
+    pattern: '%24-2-11%',
+    vendorUrl: 'https://www.siteone.com/en/511144-lesco-24-2-11-50-nos-plus-bio-6-fe-mop-turfgrass-granular-fertilizer-50-lb-bag/p/678399',
+    labelUrl: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/labelAsset/550010088301_label/550010088301-label.pdf',
+    sdsUrl: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/safetyDataSheet/rb-ue-msds-2209_678399_msds_1015sds-384891/rb-ue-msds-2209-678399-msds-1015sds-384891.pdf',
+    siteoneSku: '511144',
+  },
+  {
+    pattern: '%17-0-10%',
+    vendorUrl: 'https://www.siteone.com/en/511551-lesco-17-0-10-50-crn-1-fe-1-mn-pscu-urea-sop-as-is-ms-turfgrass-mini-granular-fertilizer-50-lb-bag/p/915553',
+    labelUrl: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/labelAsset/553755447330_label/553755447330-label.pdf',
+    sdsUrl: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/safetyDataSheet/511551-sds/511551-sds.pdf',
+    siteoneSku: '511551',
+  },
+  {
     pattern: '%K-Flow 0-0-25%',
     vendorUrl: 'https://www.siteone.com/en/098504b-lesco-florida-friendly-k-flow-0-0-25-potassium-thiosulfate-17-s-turfgrass-ornamental-liquid-fertilizer/p/571580',
     labelUrl: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/labelAsset/rb-ue-labels-15325_332557_label_98504-120681/rb-ue-labels-15325-332557-label-98504-120681.pdf',
@@ -95,13 +109,14 @@ exports.up = async function up(knex) {
       .where(function () {
         this.where({ active: true }).orWhereNull('active');
       })
-      .select('id', 'label_url', 'sds_url', 'label_source_note');
+      .select('id', 'label_url', 'sds_url', 'siteone_sku', 'label_source_note');
 
     for (const row of rows) {
       const update = {};
       const usedVendorPageAsLabel = !entry.labelUrl;
       if (!row.label_url) update.label_url = entry.labelUrl || entry.vendorUrl;
       if (!row.sds_url && entry.sdsUrl) update.sds_url = entry.sdsUrl;
+      if (!row.siteone_sku && entry.siteoneSku) update.siteone_sku = entry.siteoneSku;
       if (!Object.keys(update).length) continue;
 
       const note = noteFor(entry, usedVendorPageAsLabel);
@@ -145,6 +160,12 @@ exports.down = async function down(knex) {
         .where('name', 'ilike', entry.pattern)
         .where({ sds_url: entry.sdsUrl })
         .update({ sds_url: null, updated_at: knex.fn.now() });
+    }
+    if (entry.siteoneSku) {
+      await knex('products_catalog')
+        .where('name', 'ilike', entry.pattern)
+        .where({ siteone_sku: entry.siteoneSku })
+        .update({ siteone_sku: null, updated_at: knex.fn.now() });
     }
   }
 
