@@ -245,6 +245,14 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
                            THEN opportunity_queue.status
                            ELSE 'pending'
                       END,
+             -- Reviving a skipped/expired row is a fresh explicit operator
+             -- signal — reset the lifetime claim budget, or a re-seeded
+             -- attempts_exhausted row would be pending yet unclaimable
+             -- (claimNext refuses it, the janitor instantly re-skips it).
+             attempt_count = CASE WHEN opportunity_queue.status IN ('skipped', 'expired')
+                                  THEN 0
+                                  ELSE opportunity_queue.attempt_count
+                             END,
              updated_at = now()
       `,
       [

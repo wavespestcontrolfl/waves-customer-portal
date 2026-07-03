@@ -2345,34 +2345,67 @@ class AutonomousRunner {
    * recoverStaleClaims skipping 'named_competitor_publishing' claims.
    *
    * staleMinutes must comfortably exceed a slow publish (Astro PR open +
-   * IndexNow + social ≈ a couple of minutes); 60 is generous.
+   * IndexNow + social ≈ a couple of minutes); 60 is generous — and as a
+   * second line of defense the sweep only runs while briefly HOLDING the
+   * engine advisory lock, so a still-alive approval (which holds that lock
+   * for its whole duration) can never be parked as crashed no matter how
+   * slow it is.
    */
   async recoverStuckNamedCompetitorPublishes({ staleMinutes = 60 } = {}) {
-    const cutoff = new Date(Date.now() - staleMinutes * 60000);
-    const REASON = 'named_competitor_publish_interrupted';
-    const note = `[${new Date().toISOString()}] janitor: named-competitor publish interrupted (stuck >${staleMinutes}m) — check GitHub for an open Astro PR or live post before requeueing; the publish may have completed externally before the crash`;
-    const runs = await db('autonomous_runs')
-      .where('outcome', 'publishing_named_competitor')
-      .where('updated_at', '<', cutoff)
-      .update({
-        outcome: 'completed_pending_review',
-        skip_reason: REASON,
-        reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),
-        updated_at: new Date(),
-      });
-    const opps = await db('opportunity_queue')
-      .where({ status: 'claimed', skip_reason: 'named_competitor_publishing' })
-      .where('claimed_at', '<', cutoff)
-      .update({
-        status: 'pending_review',
-        skip_reason: REASON,
-        completed_at: new Date(),
-        updated_at: new Date(),
-      });
-    if (runs > 0 || opps > 0) {
-      logger.error(`[autonomous-runner] parked ${runs} run(s) / ${opps} opportunit${opps === 1 ? 'y' : 'ies'} stuck in named-competitor publishing for human reconciliation (${REASON})`);
+    // Engine-lock probe before treating anything as crashed:
+    // approveAndPublishNamedCompetitor runs UNDER the engine advisory lock,
+    // so if this brief acquisition fails, an approval (or batch run) is
+    // still alive on some instance — a slow-but-live publish past the
+    // cutoff must not be parked out from under it (an operator could then
+    // requeue/dismiss while the original still opens a PR and persists
+    // final state). Holding the lock for the sweep also stops a new
+    // approval starting mid-sweep. Fail CLOSED on any probe error — unlike
+    // _withEngineLock's proceed-without-lock batch posture, a janitor that
+    // can't prove exclusivity just waits for the next 2-minute tick.
+    let lockConn = null;
+    try {
+      lockConn = await db.client.acquireConnection();
+      const res = await lockConn.query('SELECT pg_try_advisory_lock($1) AS locked', [ENGINE_PUBLISH_LOCK_KEY]);
+      if (res?.rows?.[0]?.locked !== true) {
+        try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+        return { runs: 0, opps: 0, skipped: 'engine_locked' };
+      }
+    } catch (err) {
+      logger.warn(`[autonomous-runner] named-competitor janitor: engine-lock probe failed (${err.message}); skipping this tick`);
+      if (lockConn) { try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ } }
+      return { runs: 0, opps: 0, skipped: 'lock_probe_failed' };
     }
-    return { runs, opps };
+    try {
+      const cutoff = new Date(Date.now() - staleMinutes * 60000);
+      const REASON = 'named_competitor_publish_interrupted';
+      const note = `[${new Date().toISOString()}] janitor: named-competitor publish interrupted (stuck >${staleMinutes}m) — check GitHub for an open Astro PR or live post before requeueing; the publish may have completed externally before the crash`;
+      const runs = await db('autonomous_runs')
+        .where('outcome', 'publishing_named_competitor')
+        .where('updated_at', '<', cutoff)
+        .update({
+          outcome: 'completed_pending_review',
+          skip_reason: REASON,
+          reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),
+          updated_at: new Date(),
+        });
+      const opps = await db('opportunity_queue')
+        .where({ status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .where('claimed_at', '<', cutoff)
+        .update({
+          status: 'pending_review',
+          skip_reason: REASON,
+          completed_at: new Date(),
+          updated_at: new Date(),
+        });
+      if (runs > 0 || opps > 0) {
+        logger.error(`[autonomous-runner] parked ${runs} run(s) / ${opps} opportunit${opps === 1 ? 'y' : 'ies'} stuck in named-competitor publishing for human reconciliation (${REASON})`);
+      }
+      return { runs, opps };
+    } finally {
+      try { await lockConn.query('SELECT pg_advisory_unlock($1)', [ENGINE_PUBLISH_LOCK_KEY]); }
+      catch (err) { logger.warn(`[autonomous-runner] named-competitor janitor: advisory unlock failed (${err.message}); lock auto-clears on session end`); }
+      try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+    }
   }
 
   // Load + JSONB-parse the brief the reviewed run was generated against

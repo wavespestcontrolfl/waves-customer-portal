@@ -385,7 +385,14 @@ class CompetitorGapMiner {
                mined_at = EXCLUDED.mined_at,
                expires_at = EXCLUDED.expires_at,
                action_type = EXCLUDED.action_type,
-               status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review')
+               -- 'skipped' is STICKY here, same rule as gsc-opportunity-miner:
+               -- this upsert runs from an unattended quarterly cron, so it
+               -- must not overturn operator dismissals or attempts_exhausted
+               -- sweeps ("won't be retried" contract). 'expired' still
+               -- revives (a re-mined gap is a fresh opportunity). Operator
+               -- paths that deliberately resurrect (review requeue, seeders)
+               -- write status='pending' directly and reset attempt_count.
+               status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
                              THEN opportunity_queue.status
                              ELSE 'pending'
                         END,

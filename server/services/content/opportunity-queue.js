@@ -67,6 +67,12 @@ class OpportunityQueue {
         // what the runner could claim (operator-seeded rows may carry a
         // future available_at — see migration 20260611000016).
         .whereRaw('(available_at IS NULL OR available_at <= now())')
+        // Same lifetime claim budget as claimNext — peek is consumed as
+        // "what the runner can claim" (_queueHasClaimable drives the 1pm
+        // catch-up; previewTop drives dashboards), so an exhausted pending
+        // row awaiting the janitor sweep must not trigger a catch-up batch
+        // that claimNext will immediately return empty from.
+        .where('attempt_count', '<', maxClaimAttempts())
         .orderBy('score', 'desc')
         .limit(limit);
       if (minScore != null) {

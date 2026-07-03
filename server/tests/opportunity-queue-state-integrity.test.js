@@ -133,9 +133,10 @@ describe('recoverStaleClaims vs named-competitor approval claims', () => {
 });
 
 describe('named-competitor publish janitor (autonomous-runner)', () => {
-  test('parks stuck runs + claimed opportunities at named_competitor_publish_interrupted — never a claimable state', async () => {
+  function loadRunnerWithJanitorDb({ lockAcquired = true } = {}) {
     jest.resetModules();
     const updates = [];
+    const lockQueries = [];
     jest.doMock('../models/db', () => {
       const fn = jest.fn((table) => {
         const q = {
@@ -146,9 +147,24 @@ describe('named-competitor publish janitor (autonomous-runner)', () => {
         return q;
       });
       fn.raw = jest.fn((sql, b) => ({ __raw: sql, bindings: b }));
+      fn.client = {
+        acquireConnection: jest.fn(async () => ({
+          query: jest.fn(async (sql) => {
+            lockQueries.push(sql);
+            if (/pg_try_advisory_lock/.test(sql)) return { rows: [{ locked: lockAcquired }] };
+            return { rows: [] };
+          }),
+        })),
+        releaseConnection: jest.fn(async () => {}),
+      };
       return fn;
     });
     const runner = require('../services/content/autonomous-runner');
+    return { runner, updates, lockQueries };
+  }
+
+  test('parks stuck runs + claimed opportunities at named_competitor_publish_interrupted — never a claimable state', async () => {
+    const { runner, updates, lockQueries } = loadRunnerWithJanitorDb({ lockAcquired: true });
 
     const res = await runner.recoverStuckNamedCompetitorPublishes({ staleMinutes: 60 });
 
@@ -170,5 +186,56 @@ describe('named-competitor publish janitor (autonomous-runner)', () => {
     // surfaces for a human but can't be blindly re-published or re-drafted.
     expect(oppUpdate.updates.status).toBe('pending_review');
     expect(oppUpdate.updates.skip_reason).toBe('named_competitor_publish_interrupted');
+    // the sweep ran under the engine lock and released it after
+    expect(lockQueries.some((s) => /pg_try_advisory_lock/.test(s))).toBe(true);
+    expect(lockQueries.some((s) => /pg_advisory_unlock/.test(s))).toBe(true);
+  });
+
+  test('a HELD engine lock means an approval is still alive: the janitor parks nothing (Codex round 1)', async () => {
+    const { runner, updates } = loadRunnerWithJanitorDb({ lockAcquired: false });
+
+    const res = await runner.recoverStuckNamedCompetitorPublishes({ staleMinutes: 60 });
+
+    expect(res).toEqual({ runs: 0, opps: 0, skipped: 'engine_locked' });
+    expect(updates).toHaveLength(0);
+  });
+});
+
+describe('resurrection paths reset the lifetime claim budget (Codex round 1)', () => {
+  test('both seeders and the refresh-audit upsert reset attempt_count when reviving skipped/expired rows; the cron miners never revive skipped', () => {
+    const fs = require('fs');
+    const resetSrc = [
+      '../services/content/intercept-brief-seeder',
+      '../services/content/spoke-seed-seeder',
+      '../services/seo/refresh-audit',
+    ];
+    for (const mod of resetSrc) {
+      const src = fs.readFileSync(require.resolve(mod), 'utf8');
+      expect(src).toMatch(/attempt_count = CASE WHEN opportunity_queue\.status IN \('skipped', 'expired'\)\s*\n\s*THEN 0/);
+    }
+    // The unattended miners keep 'skipped' sticky instead — a cron must not
+    // overturn a dismissal or an attempts_exhausted sweep.
+    for (const mod of ['../services/seo/gsc-opportunity-miner', '../services/seo/competitor-gap-miner']) {
+      const src = fs.readFileSync(require.resolve(mod), 'utf8');
+      expect(src).toMatch(/status IN \('claimed', 'done', 'pending_review', 'skipped'\)/);
+    }
+  });
+
+  test('peek applies the same attempt budget as claimNext (catch-up/preview parity)', async () => {
+    const q = {
+      _filters: [],
+      where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
+      orderBy: jest.fn(() => q),
+      limit: jest.fn(() => q),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    db.mockImplementation(() => q);
+
+    await queue.peek({});
+
+    expect(q._filters).toEqual(expect.arrayContaining([
+      ['attempt_count', '<', 5],
+    ]));
   });
 });
