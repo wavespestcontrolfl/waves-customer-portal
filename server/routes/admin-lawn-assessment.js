@@ -720,27 +720,41 @@ router.post('/assess', async (req, res, next) => {
       visionContext.turfHeightIn = turfHeightNum;
     }
     if (req.body.technicianNotes) visionContext.technicianNotes = String(req.body.technicianNotes);
+    // Canonical grass context — resolves the turf type + protocol track from the
+    // profile OR the legacy customers.lawn_type, so a customer with only lawn_type
+    // still gets a known grass type (and the right protocol track below) rather than
+    // silently falling back to the prompt's St. Augustine default.
+    let grassCtx = {};
+    try { grassCtx = await loadCustomerGrassContext(customerId, db); } catch (err) { logger.warn(`[lawn-assessment] grass-context lookup failed: ${err.message}`); }
+    if (grassCtx.grassTypeLabel) visionContext.grassType = grassCtx.grassTypeLabel;
     try {
       const turf = await db('customer_turf_profiles')
         .where({ customer_id: customerId })
-        .first('grass_type', 'irrigation_type', 'irrigation_inches_per_week');
-      if (turf?.grass_type) visionContext.grassType = String(turf.grass_type).replace(/_/g, ' ');
+        .first('irrigation_type', 'irrigation_inches_per_week');
       const irr = [];
-      if (turf?.irrigation_type) irr.push(String(turf.irrigation_type).replace(/_/g, ' '));
+      const irrType = grassCtx.irrigationSystem || turf?.irrigation_type;
+      if (irrType) irr.push(String(irrType).replace(/_/g, ' '));
       if (turf?.irrigation_inches_per_week != null) irr.push(`${turf.irrigation_inches_per_week} in/wk`);
       if (irr.length) visionContext.irrigation = irr.join(', ');
-    } catch (err) { logger.warn(`[lawn-assessment] turf-profile context lookup failed: ${err.message}`); }
+    } catch (err) { logger.warn(`[lawn-assessment] irrigation context lookup failed: ${err.message}`); }
     try {
-      // The PREVIOUS visit's summary — strictly a service before this one, and never
-      // this same service (re-analysis/backfill), so a later or same-visit summary
-      // can't leak in as "prior context" and bias the new score.
-      const prior = await db('lawn_assessments')
-        .where({ customer_id: customerId })
-        .whereNotNull('ai_summary')
-        .andWhere('service_date', '<', visitServiceDateStr)
-        .modify((q) => { if (serviceId) q.andWhere(function () { this.whereNull('service_id').orWhereNot('service_id', serviceId); }); })
-        .orderBy('service_date', 'desc')
-        .first('ai_summary');
+      // The PREVIOUS visit's summary — strictly a service SCHEDULED before this one.
+      // lawn_assessments.service_date is the assessment RUN date (can be out of
+      // schedule order on backfills), so bound by the linked scheduled_services
+      // .scheduled_date (falling back to service_date only for rows with no
+      // service_id), and never this same service, so a later/same-visit summary
+      // can't leak in and bias the new score.
+      const prior = await db('lawn_assessments as la')
+        .leftJoin('scheduled_services as ss', 'la.service_id', 'ss.id')
+        .where('la.customer_id', customerId)
+        .whereNotNull('la.ai_summary')
+        .andWhere(function () {
+          this.where('ss.scheduled_date', '<', visitServiceDateStr)
+            .orWhere(function () { this.whereNull('la.service_id').andWhere('la.service_date', '<', visitServiceDateStr); });
+        })
+        .modify((q) => { if (serviceId) q.andWhere(function () { this.whereNull('la.service_id').orWhereNot('la.service_id', serviceId); }); })
+        .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC')
+        .first('la.ai_summary');
       if (prior?.ai_summary) visionContext.priorSummary = String(prior.ai_summary);
     } catch (err) { logger.warn(`[lawn-assessment] prior-summary context lookup failed: ${err.message}`); }
 
@@ -750,12 +764,15 @@ router.post('/assess', async (req, res, next) => {
     // frames brown patches as being treated. Best-effort — protocol/catalog misses
     // just omit these lines.
     try {
-      const grassCtx = await loadCustomerGrassContext(customerId, db);
       // Only claim planned products when we actually know the turf track — never
       // guess st_augustine, which would attribute the wrong protocol's products.
       const track = grassCtx.trackKey;
+      // Honor the window the office linked on the appointment (catch-up / rescheduled
+      // / manually-assigned visits): a keyed window overrides the date-derived one so
+      // the model sees the products the tech is actually expected to apply.
+      const assignedWindowKey = scheduledService?.lawn_protocol_window_key || null;
       const protoCtx = track
-        ? await getProtocolWindowContext(db, { serviceDate: visitDate, grassTrack: track })
+        ? await getProtocolWindowContext(db, { serviceDate: visitDate, grassTrack: track, windowKey: assignedWindowKey })
         : null;
       const structured = protoCtx ? summarizeProtocolContext(protoCtx) : null;
       // Only the products actually IN this visit's plan — conditional/optional
@@ -840,8 +857,10 @@ router.post('/assess', async (req, res, next) => {
     // Determine season and apply adjustment. Prefer a WEATHER-driven normalization —
     // St. Augustine slows by actual cold, not the calendar — using the customer's
     // recent overnight lows. Falls back to the legacy month bucket on any miss.
+    // Use the SAME visit month (scheduled service date, ET) the prompt used, so the
+    // model and the persisted score normalization agree — not the UTC server clock.
     const now = new Date();
-    const month = now.getMonth() + 1;
+    const month = visitMonth;
     const season = lawnAssessment.getSeason(month);
     let recentMinTempF = null;
     try {
