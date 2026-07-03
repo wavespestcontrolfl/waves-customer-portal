@@ -98,7 +98,7 @@ describe("mergePhoneLookupMatch", () => {
     expect(updates).toEqual({ customerEmail: "bob@example.com" });
   });
 
-  it("does not write an empty name when the match has blank names", () => {
+  it("fills only the email when the match has blank names and the name is empty", () => {
     const { updates, changed } = mergePhoneLookupMatch(
       { customerName: "", customerEmail: "" },
       { firstName: "", lastName: "", email: "solo@example.com" },
@@ -106,6 +106,38 @@ describe("mergePhoneLookupMatch", () => {
     );
     expect(changed).toBe(true);
     expect(updates).toEqual({ customerEmail: "solo@example.com" });
+  });
+
+  it("clears an auto-filled name when the new match has blank names (no cross-customer pairing)", () => {
+    const prevAuto = { name: "Jane Doe", email: "jane@example.com" };
+    const { updates } = mergePhoneLookupMatch(
+      { customerName: "Jane Doe", customerEmail: "jane@example.com" },
+      { firstName: "", lastName: "", email: "acme@example.com" },
+      prevAuto,
+    );
+    expect(updates).toEqual({ customerName: "", customerEmail: "acme@example.com" });
+  });
+
+  it("clears auto-filled fields on a lookup miss (match=null)", () => {
+    const prevAuto = { name: "Jane Doe", email: "jane@example.com" };
+    const { updates, autoFill, changed } = mergePhoneLookupMatch(
+      { customerName: "Jane Doe", customerEmail: "jane@example.com" },
+      null,
+      prevAuto,
+    );
+    expect(changed).toBe(true);
+    expect(updates).toEqual({ customerName: "", customerEmail: "" });
+    expect(autoFill).toEqual({ name: "", email: "" });
+  });
+
+  it("keeps operator-entered fields on a lookup miss", () => {
+    const { updates, changed } = mergePhoneLookupMatch(
+      { customerName: "Bob Smith", customerEmail: "bob@lead.com" },
+      null,
+      { name: null, email: null },
+    );
+    expect(changed).toBe(false);
+    expect(updates).toEqual({});
   });
 
   it("reports changed=false when the form already matches", () => {

@@ -6522,8 +6522,12 @@ export default function EstimateToolViewV2({
                           return;
                         const d = await r.json();
                         if (seq !== sendPhoneLookupSeqRef.current) return;
-                        const c = (d.customers || d)?.[0];
-                        if (!c) return;
+                        // A miss (c = null) must run the merge too: fields the
+                        // previous lookup filled would otherwise stay in place
+                        // and pair the old customer's name/email with the new
+                        // number on send. The merge clears owned fields on a
+                        // miss and never touches operator-entered ones.
+                        const c = (d.customers || d)?.[0] || null;
                         setForm((f) => {
                           const { updates, autoFill } = mergePhoneLookupMatch(
                             f,

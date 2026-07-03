@@ -8,8 +8,12 @@
 //  - a field is only auto-filled while the operator does not "own" it — it
 //    is empty or still holds exactly what the previous auto-fill wrote
 //    (tracked in lastAutoFill). A prefilled lead email or a hand-edited
-//    name is never clobbered, and never wiped to "" by a match that has
-//    no email on file.
+//    name is never clobbered;
+//  - an owned field tracks the lookup result SYMMETRICALLY — fill, replace,
+//    or clear. Pass match=null on a lookup miss: leaving the previous
+//    match's name/email owned-in-place would pair them with the new number
+//    (same for a new match with no email, or a company-only row with blank
+//    names — the stale half must clear, not linger).
 
 export function normalizePhoneDigits(value) {
   let raw = String(value || "").replace(/\D/g, "");
@@ -25,13 +29,11 @@ export function mergePhoneLookupMatch(form, match, lastAutoFill = {}) {
 
   const updates = {};
   const autoFill = { ...lastAutoFill };
-  if (matchName && owned(form?.customerName, lastAutoFill.name)) {
+  if (owned(form?.customerName, lastAutoFill.name)) {
     if ((form?.customerName || "") !== matchName) updates.customerName = matchName;
     autoFill.name = matchName;
   }
   if (owned(form?.customerEmail, lastAutoFill.email)) {
-    // An owned email tracks the new match even when the match has no email —
-    // keeping the previous match's address would pair it with the new name.
     if ((form?.customerEmail || "") !== matchEmail) updates.customerEmail = matchEmail;
     autoFill.email = matchEmail;
   }
