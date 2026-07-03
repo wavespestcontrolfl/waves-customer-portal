@@ -1234,24 +1234,9 @@ router.post('/confirm', async (req, res, next) => {
       logger.error(`[lawn-assessment] Wiki linkTreatmentOutcome failed (non-blocking): ${wikiErr.message}`);
     }
 
-    // Property Health Snapshot + Smart Recommendation Cards. This is
-    // intentionally isolated from confirmation success: confirmation is the
-    // source-of-truth event, while snapshot generation can be retried by admin.
-    let propertySnapshot = null;
-    let recommendationCards = [];
-    try {
-      const generated = await generateSnapshotAndCards({
-        assessmentId,
-        serviceId: updated.service_id || null,
-        serviceRecordId: resolvedServiceRecordId,
-        customerId: updated.customer_id,
-        generatedBy: req.technician?.role === 'admin' ? 'admin' : 'tech',
-      });
-      propertySnapshot = generated.snapshot;
-      recommendationCards = generated.cards;
-    } catch (snapshotErr) {
-      logger.error(`[lawn-assessment] Snapshot/recommendation generation failed (non-blocking): ${snapshotErr.message}`);
-    }
+    // The legacy "Customer snapshot" (lawn_snapshot_v1) narrative + recommendation
+    // cards are retired — Lawn Report V2 owns the customer-facing story now — so we
+    // no longer generate them on confirm.
 
     // Knowledge Bridge + Lawn Intelligence: fire all async intelligence (non-blocking)
     setImmediate(async () => {
@@ -1301,18 +1286,6 @@ router.post('/confirm', async (req, res, next) => {
     res.json({
       success: true,
       assessment: updated,
-      propertySnapshot: propertySnapshot ? {
-        id: propertySnapshot.id,
-        status: propertySnapshot.status,
-        customer_visible: propertySnapshot.customer_visible,
-      } : null,
-      recommendationCards: recommendationCards.map((card) => ({
-        id: card.id,
-        type: card.type,
-        status: card.status,
-        customer_visible: card.customer_visible,
-        requires_human_approval: card.requires_human_approval,
-      })),
     });
   } catch (err) {
     next(err);
