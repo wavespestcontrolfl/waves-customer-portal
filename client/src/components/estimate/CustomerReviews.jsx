@@ -7,7 +7,7 @@
  * broken or empty.
  */
 import { useEffect, useRef, useState } from 'react';
-import { estimateCard } from './cardStyles';
+import { estimateCard, estimateInnerBox } from './cardStyles';
 
 const W = {
   blueDeeper: '#1B2C5B', yellow: '#FFD700',
@@ -43,10 +43,7 @@ function Stars({ rating }) {
 
 function ReviewCard({ review }) {
   return (
-    <div style={{
-      background: W.white, border: `1px solid ${W.warmBorder}`, borderRadius: 10,
-      padding: 16, display: 'flex', flexDirection: 'column', minHeight: 150,
-    }}>
+    <div style={estimateInnerBox({ padding: 16, display: 'flex', flexDirection: 'column', minHeight: 150 })}>
       <Stars rating={review.starRating} />
       <p style={{
         fontSize: 13, margin: '0 0 12px', lineHeight: 1.55, color: W.textBody,
@@ -113,6 +110,12 @@ export default function CustomerReviews() {
 
   return (
     <section style={estimateCard()}>
+      <div style={{
+        fontSize: 12, fontWeight: 700, color: W.textCaption,
+        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6,
+      }}>
+        Reviews
+      </div>
       <h2 style={{
         fontFamily: "'Source Serif 4', Georgia, serif",
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,

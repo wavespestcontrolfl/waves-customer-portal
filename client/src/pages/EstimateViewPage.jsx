@@ -29,7 +29,6 @@ import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import FrequencySlider from '../components/estimate/FrequencySlider';
 import PriceCard from '../components/estimate/PriceCard';
-import IncludedChecklist from '../components/estimate/IncludedChecklist';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
@@ -37,7 +36,7 @@ import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
-import { estimateCard } from '../components/estimate/cardStyles';
+import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
@@ -60,6 +59,51 @@ const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
 // the headline itself never has to guess at per-service phrasing — and can
 // never invite a "choose your option" on an estimate with nothing to choose.
 const UNIVERSAL_HEADLINE = 'Hello {first}, your estimate is ready!';
+
+// Small uppercase section kicker — same treatment as "How often?" /
+// "Customize your visit" so every card opens with a matching subheader.
+const SECTION_KICKER_STYLE = {
+  fontSize: 12,
+  fontWeight: 700,
+  color: ESTIMATE_MUTED,
+  textTransform: 'uppercase',
+  letterSpacing: '0.12em',
+  marginBottom: 6,
+};
+
+const BOOKING_SECTION_ID = 'estimate-booking-section';
+
+function scrollToBookingSection() {
+  const el = typeof document !== 'undefined' ? document.getElementById(BOOKING_SECTION_ID) : null;
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Primary booking CTA — same navy treatment as the add-service button;
+// jumps the customer straight to the scheduling section.
+function GetServiceTodayCta() {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', marginTop: 16 }}>
+      <button
+        type="button"
+        onClick={scrollToBookingSection}
+        style={{
+          minHeight: 44,
+          minWidth: 220,
+          padding: '0 28px',
+          background: ESTIMATE_BUTTON_BG,
+          color: COLORS.white,
+          border: 'none',
+          borderRadius: 10,
+          fontSize: 15,
+          fontWeight: 800,
+          cursor: 'pointer',
+        }}
+      >
+        Get service today!
+      </button>
+    </div>
+  );
+}
 
 function fmtMoney(n) {
   if (n == null) return '—';
@@ -346,10 +390,7 @@ function Page({ children }) {
 
 function SkeletonBlock() {
   return (
-    <div style={{
-      background: COLORS.white, borderRadius: 16, padding: 24,
-      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 16,
-    }}>
+    <div style={estimateCard()}>
       <div style={{ height: 12, width: 120, background: ESTIMATE_CHROME, borderRadius: 4 }} />
       <div style={{ height: 32, width: '60%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 14 }} />
       <div style={{ height: 14, width: '40%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 10 }} />
@@ -359,10 +400,7 @@ function SkeletonBlock() {
 
 function NotFoundCard() {
   return (
-    <div style={{
-      background: COLORS.white, borderRadius: 16, padding: 32, textAlign: 'center',
-      border: `1px solid ${ESTIMATE_BORDER}`, marginTop: 40,
-    }}>
+    <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
       <div style={{ fontSize: 32 }}></div>
       <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
       <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
@@ -440,52 +478,22 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
   const showYourWorkFacts = Array.isArray(showYourWork?.facts) ? showYourWork.facts : [];
 
   return (
-    <section style={estimateCard({
-      // Solid warm tan (matches the server-rendered estimate's .ai-card).
-      // The previous gradient faded to #FFFFFF at the bottom, which erased
-      // the contrast against the white metric/signal boxes inside the card.
-      background: '#F2EEE0',
-    })}>
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'flex-start',
-        gap: 16,
-        flexWrap: 'wrap',
-        marginBottom: 10,
-      }}>
-        <div style={{ minWidth: 0 }}>
-          <h2 style={{
-            fontFamily: FONTS.serif,
-            fontSize: 28,
-            fontWeight: 500,
-            lineHeight: 1.18,
-            color: ESTIMATE_TEXT,
-            margin: 0,
-            letterSpacing: 0,
-          }}>
-            {intelligence.title || copy?.aiTitle || 'Waves AI reviewed your property before pricing this estimate'}
-          </h2>
-        </div>
-        {/* Blue pill badge — mirrors the server-rendered estimate's
-            .intelligence-badge (background #E3F5FD / color #065A8C / pill).
-            Sits opposite the title in the flex header, exactly like the SSR. */}
-        <span style={{
-          flex: 'none',
-          alignSelf: 'flex-start',
-          padding: '6px 10px',
-          borderRadius: 999,
-          background: '#E3F5FD',
-          color: '#065A8C',
-          fontSize: 12,
-          fontWeight: 800,
-          lineHeight: 1,
-          letterSpacing: 0,
-          textTransform: 'uppercase',
-          whiteSpace: 'nowrap',
-        }}>
+    <section style={estimateCard()}>
+      <div style={{ marginBottom: 10 }}>
+        <div style={SECTION_KICKER_STYLE}>
           {intelligence.eyebrow || copy?.aiEyebrow || 'Waves AI'}
-        </span>
+        </div>
+        <h2 style={{
+          fontFamily: FONTS.serif,
+          fontSize: 28,
+          fontWeight: 500,
+          lineHeight: 1.18,
+          color: ESTIMATE_TEXT,
+          margin: 0,
+          letterSpacing: 0,
+        }}>
+          {intelligence.title || copy?.aiTitle || 'Waves AI reviewed your property before pricing this estimate'}
+        </h2>
       </div>
 
       <p style={{
@@ -530,12 +538,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
           {metrics.map((metric) => (
             <div
               key={`${metric.label}-${metric.value}`}
-              style={{
-                background: COLORS.white,
-                border: `1px solid ${ESTIMATE_BORDER}`,
-                borderRadius: 10,
-                padding: '10px 12px',
-              }}
+              style={estimateInnerBox({ padding: '10px 12px' })}
             >
               <div style={{
                 fontSize: 14,
@@ -721,7 +724,7 @@ function MembershipCard({ membership }) {
   const valStyle = { color: '#1F7A4D', fontSize: 14, fontWeight: 600, textAlign: 'right' };
 
   return (
-    <section style={{ ...estimateCard({ background: '#F2EEE0' }), display: 'grid', gap: 14 }}>
+    <section style={{ ...estimateCard(), display: 'grid', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
           <h2 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
@@ -839,7 +842,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   }, [asking, askToken, question, selectedFrequency, serviceMode, token]);
 
   return (
-    <section style={{ ...estimateCard({ border: '1px solid #CFE7F5' }), display: 'grid', gap: 12 }}>
+    <section style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
       <div>
         <div style={{
           fontSize: 12,
@@ -903,7 +906,9 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
             fontSize: 14,
             fontWeight: 700,
             cursor: asking || !question.trim() ? 'not-allowed' : 'pointer',
-            opacity: asking || !question.trim() ? 0.65 : 1,
+            // Stay clearly navy while disabled — at 0.65 the button read
+            // as gray next to the other brand buttons.
+            opacity: asking || !question.trim() ? 0.8 : 1,
           }}
         >
           {asking ? 'Asking...' : 'Ask'}
@@ -1795,11 +1800,7 @@ export function ReviewPhase({ slotId, existingAppointment, paymentPreference, se
           : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
       : '';
   return (
-    <div style={{
-      background: COLORS.white, borderRadius: 16, padding: 24,
-      borderTop: `4px solid ${ESTIMATE_BUTTON_BG}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
-      marginBottom: 16,
-    }}>
+    <div style={{ ...estimateCard(), borderTop: `4px solid ${ESTIMATE_BUTTON_BG}` }}>
       <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         {invoiceOnly
           ? 'Confirm your acceptance'
@@ -1881,11 +1882,7 @@ function SuccessCard({ acceptResult }) {
       ? `${serviceProgressLabel} is not held up by payment, and you can use the invoice link later.`
       : `${serviceProgressLabel} is not held up by payment.`;
     return (
-      <div style={{
-        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
-        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
-        marginBottom: 16,
-      }}>
+      <div style={{ ...estimateCard({ padding: 28, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           {title}
         </div>
@@ -1917,11 +1914,7 @@ function SuccessCard({ acceptResult }) {
 
   if (nextStep === 'prepay_invoice') {
     return (
-      <div style={{
-        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
-        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
-        marginBottom: 16,
-      }}>
+      <div style={{ ...estimateCard({ padding: 28, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           Your annual prepay is approved.
         </div>
@@ -1936,11 +1929,7 @@ function SuccessCard({ acceptResult }) {
     // Narrow low-confidence commercial: approved online, but the exact price is
     // confirmed on site before the first invoice — so no payment step here.
     return (
-      <div style={{
-        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
-        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
-        marginBottom: 16,
-      }}>
+      <div style={{ ...estimateCard({ padding: 28, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're approved — no payment needed yet.
         </div>
@@ -1954,11 +1943,7 @@ function SuccessCard({ acceptResult }) {
 
   if (nextStep === 'book_one_time') {
     return (
-      <div style={{
-        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
-        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
-        marginBottom: 16,
-      }}>
+      <div style={{ ...estimateCard({ padding: 28, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're approved for a one-time service.
         </div>
@@ -1982,11 +1967,7 @@ function SuccessCard({ acceptResult }) {
   }
 
   return (
-    <div style={{
-      background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
-      borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
-      marginBottom: 16,
-    }}>
+    <div style={{ ...estimateCard({ padding: 28, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
       <div style={{ fontSize: 40 }}></div>
       <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
         You're booked.
@@ -2173,6 +2154,7 @@ export function ServiceSection({
   renderFlags = {},
   waveGuardTier,
   afterPrice = null,
+  showGetServiceCta = false,
 }) {
   if (!section) return null;
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
@@ -2184,11 +2166,6 @@ export function ServiceSection({
     && renderFlags.showPestRecurringAddOns === true
     && Array.isArray(current?.addOns)
     && current.addOns.length > 0;
-  // A one-line checklist that just re-states the quoted service name tells
-  // the customer nothing ("What's included ✓ Pest Control") — only render
-  // when the list actually adds information.
-  const includedItems = Array.isArray(current?.included) ? current.included : [];
-  const showIncludedChecklist = includedItems.length > 1 || includedItems.some((item) => item?.detail);
 
   return (
     <section>
@@ -2223,11 +2200,11 @@ export function ServiceSection({
             wording={copy.priceWording}
           />
         ) : null}
+
+        {showGetServiceCta ? <GetServiceTodayCta /> : null}
       </div>
 
       {afterPrice}
-
-      {showIncludedChecklist ? <IncludedChecklist included={includedItems} /> : null}
 
       {showAddOns ? (
         <AddOnsBlock
@@ -2900,10 +2877,6 @@ export default function EstimateViewPage() {
   // service), so an excluded section (palm/rodent) never shows it even alongside
   // an eligible service, and an eligible single service / bundle always can.
   const waveGuardTier = pricing.combinedRecurring?.waveGuardTierLabel || pricing.waveGuardTier || null;
-  // The combined bundle summary card represents the whole recurring plan: show
-  // the tier only if any section in it is eligible (so an excluded-only bundle
-  // — e.g. palm + rodent — stays badge-free here too).
-  const combinedTierEligible = services.some((s) => s?.waveGuardTierEligible === true);
   // Combined card total reflects EVERY service's chosen cadence: when a combo
   // matches the per-section selections, use its authoritative total; otherwise
   // fall back to the pest-cadence entry (single-cadence / legacy bundles).
@@ -2942,6 +2915,11 @@ export default function EstimateViewPage() {
     if (mode === 'recurring') {
       return (
         <>
+          {/* Multi-service plans render side by side (owner directive) —
+              each service keeps its own boxed price section. */}
+          <div style={services.length > 1
+            ? { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, alignItems: 'start' }
+            : undefined}>
           {services.map((section) => {
             const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
               ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
@@ -2972,17 +2950,13 @@ export default function EstimateViewPage() {
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}
                 afterPrice={afterPrice}
+                showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
               />
             );
           })}
+          </div>
 
-          {services.length > 1 && renderFlags.showRecurringSummary ? (
-            <CombinedRecurringPriceCard
-              combined={pricing.combinedRecurring}
-              selectedFrequency={combinedFrequency}
-              waveGuardTier={combinedTierEligible ? waveGuardTier : null}
-            />
-          ) : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
@@ -3007,6 +2981,7 @@ export default function EstimateViewPage() {
           oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
           breakdown={pricing.oneTimeBreakdown}
         />
+        {!readOnly && canShowSlotPicker ? <GetServiceTodayCta /> : null}
         <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
         {!readOnly && renderFlags.showOneTimePestAddOns === true ? (
           services
@@ -3059,6 +3034,11 @@ export default function EstimateViewPage() {
           quoteReason={quoteRequiredReason}
           isProposal={isCommercialProposal}
           proposalPdfEmailed={proposalPdfEmailed}
+          // Booked + upcoming visit → show the date, not "we'll follow up".
+          appointmentLabel={cta.terminalState === 'accepted' && existingAppointment
+            ? formatAppointmentLabel(existingAppointment)
+            : null}
+          appointmentServiceType={cta.terminalState === 'accepted' ? existingAppointment?.serviceType || null : null}
         />
         {showAcceptedRecap ? renderQuoteDetailCards(true, estimate.acceptedServiceMode || serviceMode) : null}
         <AppShowcaseCard />
@@ -3232,19 +3212,21 @@ export default function EstimateViewPage() {
               the customer sees the price first. */}
           {aiPanelBlock}
 
-          {canShowSlotPicker ? (
-            <SlotPicker
-              token={token}
-              askToken={estimate.askToken}
-              selectedSlotId={selectedSlotId}
-              onSelect={setSelectedSlotId}
-              refreshSignal={slotsRefreshSignal}
-              serviceMode={serviceMode}
-              selectedFrequency={selectedFrequency}
-            />
-          ) : (
-            <AcceptanceModeCard acceptance={acceptance} />
-          )}
+          <div id={BOOKING_SECTION_ID}>
+            {canShowSlotPicker ? (
+              <SlotPicker
+                token={token}
+                askToken={estimate.askToken}
+                selectedSlotId={selectedSlotId}
+                onSelect={setSelectedSlotId}
+                refreshSignal={slotsRefreshSignal}
+                serviceMode={serviceMode}
+                selectedFrequency={selectedFrequency}
+              />
+            ) : (
+              <AcceptanceModeCard acceptance={acceptance} />
+            )}
+          </div>
 
           {existingAppointment ? (
             <ExistingAppointmentCard appointment={existingAppointment} />

@@ -4,7 +4,7 @@
  * Customer taps toggle checked state; selected set is carried through to
  * the accept handler as part of the final payload.
  */
-import { estimateCard } from './cardStyles';
+import { estimateCard, estimateInnerBox } from './cardStyles';
 
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', green: '#16A34A',
@@ -48,12 +48,10 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
         const savings = savingsFromDetail(item.detail);
         return (
           <label key={item.key} style={{
+            ...estimateInnerBox({ background: checked ? W.white : '#F7F5EE' }),
             display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16,
             padding: 16,
             marginTop: 12,
-            border: `1px solid ${W.border}`,
-            borderRadius: 10,
-            background: checked ? W.white : '#F7F5EE',
             cursor: disabled ? 'default' : 'pointer',
           }}>
             <div style={{ flex: 1 }}>

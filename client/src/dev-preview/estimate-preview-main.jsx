@@ -231,7 +231,30 @@ function acceptedScenario() {
   const base = pestScenario();
   return {
     ...base,
-    estimate: { ...base.estimate, status: 'accepted', acceptedServiceMode: 'recurring', acceptedFrequencyKey: 'quarterly' },
+    estimate: {
+      ...base.estimate,
+      status: 'accepted',
+      acceptedServiceMode: 'recurring',
+      acceptedFrequencyKey: 'quarterly',
+      // Booked upcoming visit — the server resolves this via
+      // findLinkedUpcomingAppointment and ships it on the acceptance
+      // contract; the accepted card shows the date instead of
+      // "we'll follow up".
+      acceptance: {
+        mode: 'existing_appointment',
+        ctaLabel: 'Confirm invoice option',
+        reason: null,
+        appointment: {
+          id: 'appt-preview-1',
+          scheduledDate: '2026-07-09',
+          windowStart: '09:00',
+          windowEnd: '10:00',
+          windowDisplay: '9:00–10:00 AM',
+          serviceType: 'Quarterly Pest Control',
+          status: 'confirmed',
+        },
+      },
+    },
     cta: { ...base.cta, canAccept: false, terminalState: 'accepted' },
   };
 }

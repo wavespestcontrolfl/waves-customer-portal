@@ -93,6 +93,12 @@ export default function AppShowcaseCard() {
   const anyStoreLive = !!(APP_STORE_URL || PLAY_STORE_URL);
   return (
     <section style={estimateCard()}>
+      <div style={{
+        fontSize: 12, fontWeight: 700, color: W.textCaption,
+        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6,
+      }}>
+        The Waves app
+      </div>
       <h2 style={{
         fontFamily: "'Source Serif 4', Georgia, serif",
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,

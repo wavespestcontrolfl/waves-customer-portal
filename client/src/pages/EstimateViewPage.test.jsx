@@ -289,6 +289,31 @@ describe('estimateAddServiceOffer', () => {
 });
 
 describe('TerminalStateCard', () => {
+  it('shows the booked visit date on an accepted estimate instead of follow-up copy', () => {
+    render(
+      <TerminalStateCard
+        state="accepted"
+        customerFirstName="William"
+        address="10225 Kalamazoo Pl"
+        appointmentLabel="Thursday, July 9 · 9:00–10:00 AM"
+        appointmentServiceType="Quarterly Pest Control"
+      />,
+    );
+
+    expect(screen.getByText(/you're booked/)).toBeInTheDocument();
+    expect(screen.getByText('Thursday, July 9 · 9:00–10:00 AM')).toBeInTheDocument();
+    expect(screen.getByText('Quarterly Pest Control')).toBeInTheDocument();
+    expect(screen.queryByText(/Our team will follow up/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the follow-up copy on an accepted estimate with no upcoming visit', () => {
+    render(
+      <TerminalStateCard state="accepted" customerFirstName="William" address="10225 Kalamazoo Pl" />,
+    );
+
+    expect(screen.getByText(/Our team will follow up/)).toBeInTheDocument();
+  });
+
   it('shows the quote-required reason in the blocked React estimate state', () => {
     render(
       <TerminalStateCard

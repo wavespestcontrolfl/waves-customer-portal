@@ -12,7 +12,7 @@
  */
 import { useEffect, useId, useRef, useState } from 'react';
 import WavesAIScheduleSearch from '../booking/WavesAIScheduleSearch';
-import { estimateCard } from './cardStyles';
+import { estimateCard, ESTIMATE_INNER_SHADOW } from './cardStyles';
 
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -54,6 +54,7 @@ function SlotCard({ slot, isSelected, onSelect }) {
         color: isSelected ? W.white : W.blueDeeper,
         border: `2px solid ${isSelected ? W.blueDeeper : W.border}`,
         borderRadius: 12, padding: '14px 16px',
+        boxShadow: ESTIMATE_INNER_SHADOW,
         cursor: 'pointer', marginBottom: 10,
         display: 'flex', flexDirection: 'column', gap: 4,
         transition: 'border-color 160ms ease, background 160ms ease, color 160ms ease',
@@ -220,10 +221,11 @@ export default function SlotPicker({
     <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
       <WavesAIScheduleSearch
         theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.border, surface: W.white, inputBg: W.offWhite }}
+        showEyebrow={false}
         onSearch={runAiSearch}
       />
       {searchData ? <div>{renderSlotList(searchData)}</div> : null}
-      <div style={{ border: `1px solid ${W.border}`, borderRadius: 12, padding: 14, background: W.offWhite }}>
+      <div style={{ border: `1px solid ${W.border}`, borderRadius: 12, padding: 14, background: W.white, boxShadow: ESTIMATE_INNER_SHADOW }}>
         <label htmlFor={pickedDateInputId} style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
           Can't find a date? Pick one that works for you.
         </label>
@@ -276,6 +278,12 @@ export default function SlotPicker({
 
   const heading = (
     <>
+      <div style={{
+        fontSize: 12, fontWeight: 700, color: W.textCaption,
+        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6,
+      }}>
+        Schedule your visit
+      </div>
       <div style={{
         fontSize: 22,
         fontWeight: 600,
