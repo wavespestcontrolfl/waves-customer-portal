@@ -237,7 +237,7 @@ describe('alertBouncedContactAddress', () => {
     const [, , body, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(body).toContain('Prop Manager');
     expect(body).toContain('Owner Two');
-    expect(opts.metadata.record_customer_id).toBe('cust-b');
+    expect(opts.metadata.record_links).toEqual([{ type: 'estimate', customer_id: 'cust-b' }]);
   });
 
   test('empty email is a safe no-op', async () => {

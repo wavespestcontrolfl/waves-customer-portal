@@ -908,33 +908,45 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
     // manager) the record row is the only evidence of which account the send
     // belonged to. No status filter on estimates — outlines can be sent after
     // acceptance too, and any match identifies the account.
+    // BOTH record tables are checked — a shared recipient address can sit on
+    // an estimate AND a contract for different accounts, and short-circuiting
+    // on the first hit would hide the other affected customer.
     const estimate = await db('estimates')
       .whereRaw('LOWER(customer_email) = ?', [email])
       .whereNull('archived_at')
       .orderBy('created_at', 'desc')
       .first('id', 'customer_id', 'customer_name')
       .catch(() => null);
-    const contract = estimate ? null : await db('customer_contracts')
+    const contract = await db('customer_contracts')
       .whereRaw('LOWER(recipient_email) = ?', [email])
       .orderBy('created_at', 'desc')
       .first('id', 'customer_id', 'recipient_name')
       .catch(() => null);
-    const viaRecord = estimate || contract;
+    const records = [
+      estimate ? { type: 'estimate', row: estimate } : null,
+      contract ? { type: 'contract', row: contract } : null,
+    ].filter(Boolean);
+    const viaRecord = records[0]?.row || null;
     if (!customer && !leads.length && !viaRecord) return { skipped: 'no_contact_match' };
 
-    // The record's linked customer: primary identity when nothing matched
-    // directly, an "also tied to" mention when a DIFFERENT customer matched.
-    let recordCustomer = null;
-    if (viaRecord?.customer_id && String(viaRecord.customer_id) !== String(customer?.id || '')) {
-      recordCustomer = await db('customers')
-        .where({ id: viaRecord.customer_id })
+    // Record-linked customers: the first becomes the primary identity when
+    // nothing matched directly; every DISTINCT other one gets an "also tied
+    // to" mention so no affected account stays hidden.
+    let recordCustomers = [];
+    for (const rec of records) {
+      if (!rec.row.customer_id) continue;
+      if (String(rec.row.customer_id) === String(customer?.id || '')) continue;
+      if (recordCustomers.some((rc) => String(rc.customer.id) === String(rec.row.customer_id))) continue;
+      const rc = await db('customers')
+        .where({ id: rec.row.customer_id })
         .whereNull('deleted_at')
         .first('id', 'first_name', 'last_name', 'phone')
         .catch(() => null);
+      if (rc) recordCustomers.push({ type: rec.type, customer: rc });
     }
-    if (!customer && recordCustomer) {
-      customer = recordCustomer;
-      recordCustomer = null;
+    if (!customer && recordCustomers.length) {
+      customer = recordCustomers[0].customer;
+      recordCustomers = recordCustomers.slice(1).filter((rc) => String(rc.customer.id) !== String(customer.id));
     }
 
     for (const lead of leads) {
@@ -968,16 +980,14 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
       : leads.length
         ? (`${leads[0].first_name || ''} ${leads[0].last_name || ''}`.trim() || 'lead')
         : ((viaRecord?.customer_name || viaRecord?.recipient_name || '').trim() || 'customer');
-    const alsoName = recordCustomer
-      ? (`${recordCustomer.first_name || ''} ${recordCustomer.last_name || ''}`.trim() || 'another customer')
-      : null;
-    const alsoNote = alsoName
-      ? ` The address is also the recipient on ${estimate ? 'an estimate' : 'a contract'} for ${alsoName} (/admin/customers/${recordCustomer.id}) — the bounced send may belong to that account.`
-      : '';
+    const alsoNote = recordCustomers.map(({ type, customer: rc }) => {
+      const name = `${rc.first_name || ''} ${rc.last_name || ''}`.trim() || 'another customer';
+      return ` The address is also the recipient on ${type === 'estimate' ? 'an estimate' : 'a contract'} for ${name} (/admin/customers/${rc.id}) — the bounced send may belong to that account.`;
+    }).join('');
     // Lead-only matches are precisely the callback case — fall back to the
     // lead's phone when there is no customer row.
     const callbackPhone = customer?.phone || leads[0]?.phone || null;
-    const linkCustomerId = customer?.id || viaRecord?.customer_id || null;
+    const linkCustomerId = customer?.id || null;
     const phoneHint = callbackPhone ? ` Confirm by phone: ${callbackPhone}.` : '';
     const reason = String(ev.reason || ev.response || '').trim() || 'mailbox rejected';
     await adminAlertDeduped({
@@ -990,8 +1000,7 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
       metadata: {
         customer_id: linkCustomerId,
         lead_id: leads[0]?.id || null,
-        record_customer_id: recordCustomer?.id || null,
-        record_type: estimate ? 'estimate' : (contract ? 'contract' : null),
+        record_links: recordCustomers.map(({ type, customer: rc }) => ({ type, customer_id: rc.id })),
         source: 'untracked_bounce',
       },
     });

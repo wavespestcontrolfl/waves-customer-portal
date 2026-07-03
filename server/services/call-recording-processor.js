@@ -2141,11 +2141,16 @@ const CallRecordingProcessor = {
           // caller already has it on their own record; a different person
           // would receive the new lead's first-touch email). Fails closed.
           // No address value in the log.
-          // call.customer_id (the known-caller link) is passed as the OWN
-          // customer, so a correction matching the linked customer's own
-          // on-file email is adopted rather than treated as another party's.
+          // The caller's own customer id exempts their own on-file email from
+          // the ownership gate. call.customer_id may be unresolved here even
+          // for a known customer (shared caller phone → Step 3 reconciles by
+          // name later), so fall back to the same phone/name resolution Step 3
+          // uses before treating the correction as another party's.
+          const ownCustomerId = call.customer_id
+            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+            || null;
           const ownedElsewhere = await require('./email-bounce-recovery')
-            .correctedAddressOwnedByOther(normalizedEmail, call.customer_id || null)
+            .correctedAddressOwnedByOther(normalizedEmail, ownCustomerId)
             .catch(() => true);
           if (!ownedElsewhere) {
             extracted.email = normalizedEmail;
@@ -2188,10 +2193,13 @@ const CallRecordingProcessor = {
       try {
         const { normalizedEmail: correctedEmail, needsConfirmation: emailReasons } = deriveEmailReview(extracted);
         if (correctedEmail) {
-          // Same ownership gate as the shadow-bridge site above (fails closed);
-          // the known-caller link counts as the caller's own record.
+          // Same ownership gate as the shadow-bridge site above (fails closed),
+          // with the same phone/name fallback for a not-yet-linked known caller.
+          const ownCustomerId = call.customer_id
+            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+            || null;
           const ownedElsewhere = await require('./email-bounce-recovery')
-            .correctedAddressOwnedByOther(correctedEmail, call.customer_id || null)
+            .correctedAddressOwnedByOther(correctedEmail, ownCustomerId)
             .catch(() => true);
           if (!ownedElsewhere) {
             extracted.email = correctedEmail;
