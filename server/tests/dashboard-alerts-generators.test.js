@@ -117,6 +117,13 @@ describe('Action Inbox generators', () => {
         && c.args[1] === INTERNAL_TEST_CUSTOMERS,
     );
     expect(excluded).toBeDefined();
+
+    // Soft-deleted leads are invisible on every Leads surface — an item the
+    // operator can't find must not page as critical.
+    const notDeleted = capture.find(
+      (c) => c.table === 'leads' && c.method === 'whereNull' && c.args[0] === 'deleted_at',
+    );
+    expect(notDeleted).toBeDefined();
   });
 
   test('leads_awaiting_contact: members are sorted (order-independent) so dismissal subset checks are stable', async () => {
@@ -253,6 +260,20 @@ describe('Action Inbox generators', () => {
         && c.args[1] === INTERNAL_TEST_CUSTOMERS,
     );
     expect(internal).toBeDefined();
+
+    // Soft-deleted leads are out of every Leads surface — no nagging on them.
+    const notDeleted = capture.find(
+      (c) => c.table === 'leads' && c.method === 'whereNull' && c.args[0] === 'deleted_at',
+    );
+    expect(notDeleted).toBeDefined();
+
+    // Windowed on first_contact_at — the same basis /leads-by-source uses —
+    // not created_at, which can differ for imported/backfilled leads.
+    const window = capture.find(
+      (c) => c.table === 'leads' && c.method === 'whereRaw'
+        && String(c.args[0]).includes("first_contact_at AT TIME ZONE 'America/New_York'"),
+    );
+    expect(window).toBeDefined();
   });
 
   test('legacy watch-state generators are back-tagged kind:"alert"', async () => {
