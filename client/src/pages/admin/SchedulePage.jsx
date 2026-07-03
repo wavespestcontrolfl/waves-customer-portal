@@ -383,7 +383,7 @@ const AREAS_BY_SERVICE = {
   lawn: [
     "Front yard",
     "Back yard",
-    "Side yard",
+    "Side yards",
   ],
   universal: [
     "No issues found",
@@ -8430,7 +8430,10 @@ export function CompletionPanel({
         applicationArea: "",
         areaValue: "",
         areaUnit: areaRequirement?.unit || "",
-        targets: [],
+        // Prefill the targets from the manufacturer label (products_catalog
+        // target_pests) so the tech starts from what the product is labeled to
+        // control and trims rather than typing from scratch. Editable as before.
+        targets: normalizeLabelTargets(product.target_pests || product.targetPests),
       },
     ]);
     setProductSearch("");
@@ -13446,6 +13449,17 @@ const checkboxRow = {
 // Quick-pick suggestions for the per-product pest-target picker. The field is
 // free-text (string[]), so this list is convenience only — techs can type any
 // target. Common SWFL household/lawn pests.
+// Normalize a products_catalog.target_pests value (JSONB array, or a stringified
+// one) into a clean string[] for prefilling a product's Targets from its label.
+function normalizeLabelTargets(value) {
+  let v = value;
+  if (typeof v === "string") {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  if (!Array.isArray(v)) return [];
+  return v.map((t) => String(t).trim()).filter(Boolean);
+}
+
 const PEST_TARGET_SUGGESTIONS = [
   "Ghost ants",
   "Big-headed ants",
