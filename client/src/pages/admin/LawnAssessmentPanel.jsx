@@ -477,7 +477,12 @@ export default function LawnAssessmentPanel() {
     try {
       // Send the tech-confirmed scores. Falls back to the server-adjusted
       // scores when the tech didn't change anything.
-      const adjustedScores = techScores || result.adjustedScores || result.displayScores;
+      const adjustedScores = { ...(techScores || result.adjustedScores || result.displayScores || {}) };
+      // This panel still edits Fungus/Thatch directly (no consolidated Stress chip),
+      // so never post a stale stress_damage — /confirm would treat it as an explicit
+      // override and ignore the Fungus/Thatch correction. Drop it so the server
+      // re-derives Stress from the corrected fungus/thatch.
+      delete adjustedScores.stress_damage;
       const protocol_field_checks = Object.fromEntries(
         Object.entries(protocolChecks).filter(([, value]) => value !== "" && value !== null),
       );
