@@ -35,8 +35,9 @@ import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
+import CustomerReviews from '../components/estimate/CustomerReviews';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { estimateCopyFor } from '../lib/estimate-copy';
+import { estimateCopyFor, estimateHeadlineFor } from '../lib/estimate-copy';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
 
@@ -328,7 +329,9 @@ function Page({ children }) {
       <div style={{ flex: 1, padding: '32px 20px 64px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
-      <BrandFooter />
+      {/* Estimate pages get the quiet contact footer — no newsletter signup
+          in the middle of a quote (matches the server-rendered estimate). */}
+      <BrandFooter variant="contact" />
     </div>
   );
 }
@@ -363,20 +366,39 @@ function NotFoundCard() {
   );
 }
 
-function Header({ customerFirstName, address, serviceLabel, canChooseOneTime, headline }) {
+// Mirrors the server-rendered hero's phone display: 10-digit US numbers get
+// the (xxx) xxx-xxxx treatment, anything else renders as stored.
+function formatCustomerPhone(phone) {
+  const raw = String(phone || '').replace(/\D/g, '');
+  const digits = raw.length === 11 && raw.startsWith('1') ? raw.slice(1) : raw;
+  if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  return String(phone || '').trim();
+}
+
+// Eyebrow type treatment — shared by the "Your estimate · …" kicker and the
+// customer-contact lines under the headline (matches the SSR .hero-contact).
+const HEADER_EYEBROW_STYLE = {
+  fontSize: 12,
+  color: ESTIMATE_MUTED,
+  letterSpacing: '0.12em',
+  textTransform: 'uppercase',
+  fontWeight: 700,
+};
+
+function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, canChooseOneTime, headline }) {
   const firstName = customerFirstName || 'there';
   const fallbackHeadline = `Hey {first}, ${canChooseOneTime ? 'choose your pest control option.' : "here's your custom quote."}`;
   const headlineText = String(headline || fallbackHeadline).replace('{first}', firstName);
+  const phoneDisplay = formatCustomerPhone(customerPhone);
+  const contactLines = [
+    customerName,
+    customerEmail,
+    phoneDisplay,
+    address,
+  ].map((line) => String(line || '').trim()).filter(Boolean);
   return (
     <div style={{ padding: '8px 0 24px' }}>
-      <div style={{
-        fontSize: 12,
-        color: ESTIMATE_MUTED,
-        letterSpacing: '0.12em',
-        textTransform: 'uppercase',
-        fontWeight: 700,
-        marginBottom: 6,
-      }}>
+      <div style={{ ...HEADER_EYEBROW_STYLE, marginBottom: 6 }}>
         Your estimate{serviceLabel ? ` · ${serviceLabel}` : ''}
       </div>
       <h1 style={{
@@ -390,8 +412,12 @@ function Header({ customerFirstName, address, serviceLabel, canChooseOneTime, he
       }}>
         {headlineText}
       </h1>
-      {address ? (
-        <div style={{ fontSize: 20, color: '#3F4A65', marginTop: 16, lineHeight: 1.35 }}>{address}</div>
+      {contactLines.length ? (
+        <div style={{ marginTop: 14, display: 'grid', gap: 4 }}>
+          {contactLines.map((line) => (
+            <div key={line} style={{ ...HEADER_EYEBROW_STYLE, lineHeight: 1.5 }}>{line}</div>
+          ))}
+        </div>
       ) : null}
     </div>
   );
@@ -2252,6 +2278,11 @@ export function ServiceSection({
     && renderFlags.showPestRecurringAddOns === true
     && Array.isArray(current?.addOns)
     && current.addOns.length > 0;
+  // A one-line checklist that just re-states the quoted service name tells
+  // the customer nothing ("What's included ✓ Pest Control") — only render
+  // when the list actually adds information.
+  const includedItems = Array.isArray(current?.included) ? current.included : [];
+  const showIncludedChecklist = includedItems.length > 1 || includedItems.some((item) => item?.detail);
 
   return (
     <section>
@@ -2285,7 +2316,7 @@ export function ServiceSection({
 
       {afterPrice}
 
-      <IncludedChecklist included={current?.included || []} />
+      {showIncludedChecklist ? <IncludedChecklist included={includedItems} /> : null}
 
       {showAddOns ? (
         <AddOnsBlock
@@ -2942,6 +2973,16 @@ export default function EstimateViewPage() {
   const showAskBar = !['accepted', 'declined', 'expired'].includes(cta?.terminalState);
   const serviceCategory = estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
   const copy = estimateCopyFor(serviceCategory);
+  // One-time-only estimates (pre-slab, cleanouts, …) never say "choose your
+  // ... option" — there is no option to choose; use the quote-phrased headline.
+  const headline = estimateHeadlineFor(copy, { isOneTimeOnly: estimate?.isOneTimeOnly === true });
+  const headerContactProps = {
+    customerFirstName: estimate.customerFirstName,
+    customerName: estimate.customerName,
+    customerEmail: estimate.customerEmail,
+    customerPhone: estimate.customerPhone,
+    address: estimate.address,
+  };
   const renderFlags = pricing?.renderFlags || {};
   const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
   // Resolve the tier label unconditionally; whether the badge actually renders
@@ -3091,7 +3132,7 @@ export default function EstimateViewPage() {
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
-        <Header customerFirstName={estimate.customerFirstName} address={estimate.address} headline={copy.headline} />
+        <Header {...headerContactProps} headline={headline} />
         <MembershipCard membership={estimate.membership} />
         <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar ? (
@@ -3112,6 +3153,7 @@ export default function EstimateViewPage() {
           proposalPdfEmailed={proposalPdfEmailed}
         />
         {showAcceptedRecap ? renderQuoteDetailCards(true, estimate.acceptedServiceMode || serviceMode) : null}
+        <CustomerReviews />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
     );
@@ -3120,7 +3162,7 @@ export default function EstimateViewPage() {
   if (ctaPhase === 'success') {
     return (
       <Page>
-        <Header customerFirstName={estimate.customerFirstName} address={estimate.address} headline={copy.headline} />
+        <Header {...headerContactProps} headline={headline} />
         <SuccessCard acceptResult={acceptResult} />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
@@ -3161,14 +3203,14 @@ export default function EstimateViewPage() {
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
         <Header
-          customerFirstName={estimate.customerFirstName}
-          address={estimate.address}
+          {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
-          headline={copy.headline}
+          headline={headline}
         />
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
+        <CustomerReviews />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
     );
@@ -3178,11 +3220,10 @@ export default function EstimateViewPage() {
     <Page>
       {adminDraftPreview ? <DraftPreviewBanner /> : null}
       <Header
-        customerFirstName={estimate.customerFirstName}
-        address={estimate.address}
+        {...headerContactProps}
         serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
         canChooseOneTime={estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0}
-        headline={copy.headline}
+        headline={headline}
       />
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
@@ -3333,6 +3374,7 @@ export default function EstimateViewPage() {
         </>
       )}
 
+      <CustomerReviews />
       <QuestionsEscapeHatch estimateSlug={estimate.slug} />
       <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
     </Page>
