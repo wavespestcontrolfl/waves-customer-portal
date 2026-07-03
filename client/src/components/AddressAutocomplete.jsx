@@ -98,7 +98,13 @@ export default function AddressAutocomplete({
           lng: p.geometry?.location?.lng?.() ?? null,
         };
         if (parts.state && parts.state !== 'FL') return;
-        lastSelectedRef.current = parts.formatted || parts.line1 || '';
+        // Record what the parent will DISPLAY, not the raw formatted string:
+        // for unit-bearing selections the parent shows street-only line1 (the
+        // unit lives in its own field), and a mismatched guard here would make
+        // the blur fallback re-geocode the street and wipe the unit.
+        lastSelectedRef.current = parts.line2
+          ? (parts.line1 || parts.formatted || '')
+          : (parts.formatted || parts.line1 || '');
         onSelectRef.current?.(parts);
       });
       acRef.current = ac;
@@ -167,7 +173,9 @@ export default function AddressAutocomplete({
             lng: p.geometry?.location?.lng?.() ?? null,
           };
           if (parts.state && parts.state !== 'FL') return;
-          lastSelectedRef.current = parts.formatted || parts.line1 || typed;
+          lastSelectedRef.current = parts.line2
+            ? (parts.line1 || parts.formatted || typed)
+            : (parts.formatted || parts.line1 || typed);
           onSelectRef.current?.(parts);
         });
       }}

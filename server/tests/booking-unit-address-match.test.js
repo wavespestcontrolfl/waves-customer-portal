@@ -27,6 +27,11 @@ describe('unitsConflict', () => {
     expect(unitsConflict('Apt A', 'Apt B')).toBe(true);
     expect(unitsConflict('Unit 101', '#102')).toBe(true);
   });
+
+  test('designator + hash notation is the same unit ("Apt #4" vs "#4")', () => {
+    expect(unitsConflict('Apt #4', '#4')).toBe(false);
+    expect(unitsConflict('Suite #210', 'Ste 210')).toBe(false);
+  });
 });
 
 describe('addressMatchesCustomer with units', () => {
@@ -57,5 +62,30 @@ describe('addressMatchesCustomer with units', () => {
 
   test('street mismatch still fails regardless of units', () => {
     expect(addressMatchesCustomer(customer, '999 Oak Ave', '34231', 'Apt A')).toBe(false);
+  });
+});
+
+describe('legacy inline units in address_line1 (pre-capture records)', () => {
+  const legacy = {
+    address_line1: '123 Main St Apt A',
+    address_line2: null,
+    zip: '34231',
+  };
+
+  test('split submission (street + dedicated unit) matches its own legacy record', () => {
+    expect(addressMatchesCustomer(legacy, '123 Main St', '34231', 'Apt A')).toBe(true);
+    expect(addressMatchesCustomer(legacy, '123 Main St', '34231', '#A')).toBe(true);
+  });
+
+  test('a different unit still conflicts with the inline one', () => {
+    expect(addressMatchesCustomer(legacy, '123 Main St', '34231', 'Apt B')).toBe(false);
+  });
+
+  test('street-only submission stays compatible (blank side rule)', () => {
+    expect(addressMatchesCustomer(legacy, '123 Main St', '34231', '')).toBe(true);
+  });
+
+  test('inline-on-both-sides still matches (old behavior preserved)', () => {
+    expect(addressMatchesCustomer(legacy, '123 Main St Apt A', '34231', '')).toBe(true);
   });
 });

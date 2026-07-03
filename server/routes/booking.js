@@ -10,7 +10,7 @@ const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { applyContactNormalization } = require('../utils/intake-normalize');
-const { normalizeUnitLine, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit } = require('../utils/address-normalizer');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
   isOneTimeBookingSource,
@@ -205,14 +205,11 @@ function streetNameTokens(value) {
   return [...new Set(ADDRESS_SUFFIX_VARIANTS[token] || [token])];
 }
 
-// The identity of a unit is its value, not its designator — "Apt A", "#A",
-// and "Unit A" are the same door. Drop a single leading designator after
-// normalization; anything longer ("Bldg 2 Apt 4") keeps its full shape.
+// The identity of a unit is its value, not its designator or notation —
+// "Apt A", "#A", and "Unit A" are the same door (normalizeUnitLine strips
+// '#'; unitLineValueKey drops a lone designator).
 function unitValueKey(value) {
-  const normalized = normalizeUnitLine(value).toLowerCase();
-  if (!normalized) return '';
-  const tokens = normalized.split(' ');
-  return tokens.length === 2 && UNIT_DESIGNATORS.has(tokens[0]) ? tokens[1] : normalized;
+  return unitLineValueKey(normalizeUnitLine(value));
 }
 
 // Units only conflict when BOTH sides carry one — a blank side stays
@@ -224,19 +221,25 @@ function unitsConflict(customerLine2, submittedUnit) {
 }
 
 function addressMatchesCustomer(customer, address, zip, unit) {
-  const lookupAddress = normalizeAddress(address);
-  const customerAddress = normalizeAddress(customer?.address_line1);
+  // Legacy records may still carry the unit inline in address_line1
+  // ("123 Main St Apt A", empty address_line2) — split both sides so a
+  // street-only + dedicated-unit submission still matches its own record.
+  const submitted = splitStreetLineUnit(address);
+  const onFile = splitStreetLineUnit(customer?.address_line1);
+  const lookupAddress = normalizeAddress(submitted.street);
+  const customerAddress = normalizeAddress(onFile.street);
   if (!lookupAddress || !customerAddress || lookupAddress !== customerAddress) return false;
   // Same street is NOT the same household in a multi-unit building — a
   // submitted unit that disagrees with the one on file fails verification.
-  if (unitsConflict(customer?.address_line2, unit)) return false;
+  if (unitsConflict(customer?.address_line2 || onFile.unit, unit || submitted.unit)) return false;
   const lookupZip = normalizeZip(zip);
   const customerZip = normalizeZip(customer?.zip);
   return !lookupZip || !customerZip || lookupZip === customerZip;
 }
 
 async function findUniqueCustomerByAddress(address, city, zip, unit) {
-  const normalizedAddress = normalizeAddress(address);
+  const submitted = splitStreetLineUnit(address);
+  const normalizedAddress = normalizeAddress(submitted.street);
   if (!normalizedAddress) return null;
   const number = streetNumber(address);
   if (!number) return null;
@@ -264,8 +267,11 @@ async function findUniqueCustomerByAddress(address, city, zip, unit) {
     .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone')
     .limit(1000);
 
-  const matches = candidates.filter(customer => normalizeAddress(customer.address_line1) === normalizedAddress
-    && !unitsConflict(customer.address_line2, unit));
+  const matches = candidates.filter((customer) => {
+    const onFile = splitStreetLineUnit(customer.address_line1);
+    return normalizeAddress(onFile.street) === normalizedAddress
+      && !unitsConflict(customer.address_line2 || onFile.unit, unit || submitted.unit);
+  });
   const normalizedZip = normalizeZip(zip);
   const cityValue = String(city || '').trim().toLowerCase();
   if (normalizedZip || cityValue) {
@@ -816,6 +822,12 @@ async function createSelfBooking(payload = {}) {
     // Resolve customer
     let custId = null;
     let estimate = null;
+    // Only identity-PROVEN paths (verified estimate token, phone-on-file
+    // match) may write a submitted unit onto an existing record. The
+    // address-verified path resolves an opaque id from a public street-address
+    // lookup — anyone who knows the address could otherwise attach an
+    // arbitrary unit to the customer.
+    let unitBackfillAllowed = false;
     if (estimate_id) {
       estimate = await db('estimates').where('id', estimate_id).first();
       // Do NOT resolve identity from an unverified quote-wizard / handoff draft
@@ -824,7 +836,10 @@ async function createSelfBooking(payload = {}) {
       // book under that customer. Only verified estimates (admin/accepted,
       // source !== 'quote_wizard') resolve identity; quote handoffs are used for
       // PRICING only, via pricing_estimate_id.
-      if (!custId && estimate && estimate.source !== 'quote_wizard') custId = estimate.customer_id;
+      if (!custId && estimate && estimate.source !== 'quote_wizard') {
+        custId = estimate.customer_id;
+        unitBackfillAllowed = true;
+      }
       // A quote-wizard estimate still resolves identity when the caller proves
       // possession of its SHARE token (the legacy /book/:estimateToken page
       // posts the token it loaded the estimate with). Share tokens are
@@ -837,6 +852,7 @@ async function createSelfBooking(payload = {}) {
           && estimate.token && estimate_share_token
           && String(estimate.token) === String(estimate_share_token)) {
         custId = estimate.customer_id;
+        unitBackfillAllowed = true;
       }
     }
     // NB: ?lead=<lead_id> is NOT trusted for identity. A lead_id is mintable
@@ -872,6 +888,7 @@ async function createSelfBooking(payload = {}) {
           return { ok: false, status: 400, error: 'Customer lookup mismatch' };
         }
         custId = existing.id;
+        unitBackfillAllowed = true;
       }
     }
 
@@ -923,10 +940,14 @@ async function createSelfBooking(payload = {}) {
     if (!customer) return { ok: false, status: 404, error: 'Customer not found' };
 
     // Returning booker supplying a unit their record lacks: attach it, but only
-    // when the submitted street line matches the record (same rule as
-    // lead-webhook — never bolt a unit onto a different address). New customers
-    // already got it at insert.
-    if (!createdCustomerId && new_customer?.address_line2 && !customer.address_line2) {
+    // on an identity-PROVEN path (unitBackfillAllowed — verified estimate or
+    // phone-on-file, never the public address-only lookup), only when the
+    // submitted street line matches the record (same rule as lead-webhook —
+    // never bolt a unit onto a different address), and never when a legacy
+    // record already carries the unit inline in address_line1 (double-store).
+    // New customers already got it at insert.
+    if (unitBackfillAllowed && !createdCustomerId && new_customer?.address_line2
+        && !customer.address_line2 && !splitStreetLineUnit(customer.address_line1).unit) {
       const submittedUnit = normalizeUnitLine(new_customer.address_line2);
       if (submittedUnit && addressMatchesCustomer(customer, new_customer.address_line1, new_customer.zip, new_customer.address_line2)) {
         try {

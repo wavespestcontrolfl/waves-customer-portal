@@ -287,18 +287,50 @@ function normalizeUnitToken(token) {
 // Second address line (unit / apt / suite). Kept separate from line1 so the
 // street line stays clean for geocoding and house-number parcel matching. A
 // bare value ("4B", "#12") gains a "Unit" designator; a value that already
-// leads with one keeps it, title-cased.
+// leads with one keeps it, title-cased. '#' is decoration, not unit identity
+// — "Apt #4", "#4", and "Apt 4" all mean unit 4 — so it's stripped globally
+// to keep stored values comparable across notations.
 function normalizeUnitLine(value) {
-  const cleaned = cleanString(value).replace(/,/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60).trim();
+  const cleaned = cleanString(value).replace(/[#,]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60).trim();
   if (!cleaned) return '';
-  const body = cleaned.replace(/^#\s*/, '');
-  if (!body) return '';
-  const tokens = body.split(' ').filter(Boolean);
+  const tokens = cleaned.split(' ').filter(Boolean);
   const firstKey = tokens[0].replace(/\./g, '').toLowerCase();
   if (UNIT_DESIGNATORS.has(firstKey)) {
     return [titleToken(firstKey), ...tokens.slice(1).map(normalizeUnitToken)].join(' ');
   }
   return ['Unit', ...tokens.map(normalizeUnitToken)].join(' ');
+}
+
+// Designator-stripped comparison key for a NORMALIZED unit line:
+// "Apt 4B" / "Unit 4B" → "4b". Multi-token units keep their full shape so
+// "Bldg 2 Apt 4" never collides with "Apt 4".
+function unitLineValueKey(normalizedUnitLine) {
+  const tokens = String(normalizedUnitLine || '').toLowerCase().split(' ').filter(Boolean);
+  return tokens.length === 2 && UNIT_DESIGNATORS.has(tokens[0]) ? tokens[1] : tokens.join(' ');
+}
+
+// Split a street line into its street part and a trailing inline unit —
+// "123 Main St Apt A" → { street: '123 Main St', unit: 'Apt A' }. Legacy
+// records stored units inline in address_line1 before dedicated unit capture
+// existed. Conservative on purpose: only a trailing "<designator> <unit-ish
+// value>" pair or a trailing "#<value>" token splits, so street names that
+// contain designator words ("4501 Space Coast Blvd") stay intact, and a line
+// that is ONLY a unit never splits down to an empty street.
+function splitStreetLineUnit(value) {
+  const line = cleanString(value).split(',')[0].trim();
+  const tokens = line.split(' ').filter(Boolean);
+  if (tokens.length >= 2) {
+    const last = tokens[tokens.length - 1].replace(/[.,]/g, '');
+    const secondLast = tokens[tokens.length - 2].replace(/[.,]/g, '').toLowerCase();
+    if (/^#\S+$/.test(last)) {
+      return { street: tokens.slice(0, -1).join(' '), unit: last };
+    }
+    if (tokens.length >= 3 && UNIT_DESIGNATORS.has(secondLast)
+        && /^#?[A-Za-z]?\d+[A-Za-z]?$|^[A-Za-z]$/.test(last)) {
+      return { street: tokens.slice(0, -2).join(' '), unit: `${tokens[tokens.length - 2]} ${last}` };
+    }
+  }
+  return { street: line, unit: '' };
 }
 
 function splitStreetAndCity(value) {
@@ -404,8 +436,13 @@ function normalizeLeadAddress(input = {}) {
     input.line2 || input.addressLine2 || input.address_line2 || input.unit || components.line2 || components.unit
   );
   // A raw/fallback submission can carry the unit inline in line1 AND in the
-  // dedicated field — don't render it twice.
-  const line2 = rawLine2 && line1.toLowerCase().includes(rawLine2.toLowerCase()) ? '' : rawLine2;
+  // dedicated field — don't render it twice. Compare by unit VALUE, not
+  // display text: "Apt 4" inline and a "#4" field are the same unit.
+  const inlineUnit = splitStreetLineUnit(line1).unit;
+  const line2 = rawLine2 && (
+    line1.toLowerCase().includes(rawLine2.toLowerCase())
+    || (inlineUnit && unitLineValueKey(normalizeUnitLine(inlineUnit)) === unitLineValueKey(rawLine2))
+  ) ? '' : rawLine2;
   const city = titleCaseWords(input.city || components.city || parsed.city);
   const state = normalizeState(input.state || components.state || parsed.state || 'FL') || 'FL';
   const zip = normalizeZip(input.zip || components.zip || parsed.zip);
@@ -443,6 +480,8 @@ module.exports = {
   formatAddress,
   normalizeStreetLine,
   normalizeUnitLine,
+  unitLineValueKey,
+  splitStreetLineUnit,
   titleCaseWords,
   normalizeState,
   parseRawAddress,

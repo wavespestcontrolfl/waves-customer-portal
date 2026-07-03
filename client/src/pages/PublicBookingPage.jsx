@@ -212,7 +212,12 @@ export default function PublicBookingPage() {
   }, []);
 
   const checkExistingCustomerByAddress = useCallback(async (nextAddress) => {
-    const lookupAddress = nextAddress.formatted || nextAddress.line1;
+    // Unit-bearing selections keep line1 street-only while formatted still
+    // carries the unit inline — look up by the street line so it can match
+    // street-only customers.address_line1; the unit travels as its own param.
+    const lookupAddress = nextAddress.line2
+      ? (nextAddress.line1 || nextAddress.formatted)
+      : (nextAddress.formatted || nextAddress.line1);
     if (!lookupAddress) return;
     try {
       const params = new URLSearchParams({ address: lookupAddress });
@@ -252,7 +257,9 @@ export default function PublicBookingPage() {
     if (digits.length !== 10) return;
     try {
       const params = new URLSearchParams({ phone: digits });
-      const lookupAddress = address.formatted || address.line1;
+      const lookupAddress = address.line2
+        ? (address.line1 || address.formatted)
+        : (address.formatted || address.line1);
       if (lookupAddress) params.set('address', lookupAddress);
       if (address.city) params.set('city', address.city);
       if (address.zip) params.set('zip', address.zip);
@@ -320,7 +327,7 @@ export default function PublicBookingPage() {
   useEffect(() => {
     if ((contact.phone || '').replace(/\D/g, '').length === 10 && selectedSlot) captureBookingIntent();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSlot?.start_time, selectedDate, service.id, address.line1]);
+  }, [selectedSlot?.start_time, selectedDate, service.id, address.line1, address.line2]);
 
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
     ? null
@@ -581,9 +588,10 @@ export default function PublicBookingPage() {
               <div>
                 {/* Availability/slots key off the street line, so typing here
                     must not reset them (plain setAddress, not updateAddress).
-                    The address-matched account MUST reset though — Apt B is not
-                    Apt A's household — and the match re-checks on blur with the
-                    unit included so the server can compare units. */}
+                    The address-matched account AND any phone-looked-up contact
+                    MUST reset though — Apt B is not Apt A's household, and the
+                    prior household's name/email must not prefill the contact
+                    step. The match re-checks on blur with the unit included. */}
                 <input
                   type="text"
                   value={address.line2}
@@ -592,6 +600,7 @@ export default function PublicBookingPage() {
                     setAddress(a => ({ ...a, line2: v }));
                     setExistingCustomerId(null);
                     setAddressMayMatchCustomer(false);
+                    setContact({ firstName: '', lastName: '', phone: '', email: '' });
                   }}
                   onBlur={() => { if (address.line1) checkExistingCustomerByAddress(address); }}
                   placeholder="Apt / Unit # (optional)"
