@@ -3199,7 +3199,7 @@ export default function EstimateViewPage() {
               <ExistingAppointmentCard appointment={existingAppointment} />
               <PaymentPreferenceButtons
                 onSelect={handlePaymentChoice}
-                disabled={false}
+                disabled={adminDraftPreview}
                 serviceMode={serviceMode}
                 setupFee={pricing.setupFee || null}
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
@@ -3303,7 +3303,12 @@ export default function EstimateViewPage() {
           {(existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
             <PaymentPreferenceButtons
               onSelect={handlePaymentChoice}
-              disabled={ctaPhase === 'submitting'}
+              // Draft preview: dead from first render (Codex rd 1), not just
+              // guarded on click — but rendered, so staff still see the exact
+              // payment options the customer will get. Forcing cta.canAccept
+              // false server-side would fall through to the null-terminal
+              // "expired" card and destroy the preview's purpose.
+              disabled={adminDraftPreview || ctaPhase === 'submitting'}
               serviceMode={serviceMode}
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}
