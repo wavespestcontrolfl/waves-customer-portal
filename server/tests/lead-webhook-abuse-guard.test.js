@@ -166,48 +166,57 @@ describe('verifyTurnstileToken', () => {
     expect(r).toMatchObject({ ok: true, enforced: false, reason: 'verify_error' });
   });
 
-  // Multiple widgets (>10-domain fleet) → comma-separated TURNSTILE_SECRET_KEY.
-  // A token issued by any widget must verify; a single secret is unaffected.
+  // Multiple widgets (>10-domain fleet) → TURNSTILE_SECRET_KEY is a JSON array
+  // mapping each widget's secret to its domains. A token is single-use, so it's
+  // verified with its OWNING widget's secret in exactly ONE siteverify call,
+  // selected by the submitting host (codex P1).
   const reject = { ok: true, json: async () => ({ success: false, 'error-codes': ['invalid-input-response'] }) };
   const pass = { ok: true, json: async () => ({ success: true }) };
-  const configErr = { ok: true, json: async () => ({ success: false, 'error-codes': ['invalid-input-secret'] }) };
+  const TWO_WIDGETS = JSON.stringify([
+    { secret: 'secretA', domains: ['wavespestcontrol.com', 'parrishpestcontrol.com'] },
+    { secret: 'secretB', domains: ['sarasotaflpestcontrol.com', 'waveslawncare.com'] },
+  ]);
 
-  test('two secrets: token valid for the SECOND widget → verified', async () => {
-    process.env.TURNSTILE_SECRET_KEY = 'secretA,secretB';
-    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValueOnce(reject).mockResolvedValueOnce(pass);
-    const r = await verifyTurnstileToken('widget-b-token', '1.2.3.4');
+  test('routes a group-1 host to secretA and verifies in ONE call', async () => {
+    process.env.TURNSTILE_SECRET_KEY = TWO_WIDGETS;
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(pass);
+    const r = await verifyTurnstileToken('tok', '1.2.3.4', 'www.parrishpestcontrol.com');
     expect(r).toMatchObject({ ok: true, enforced: true, reason: 'verified' });
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // the ONE call used secretA
+    expect(String(fetchSpy.mock.calls[0][1].body)).toContain('secret=secretA');
   });
 
-  test('two secrets: token valid for the FIRST widget → verified, no second call', async () => {
-    process.env.TURNSTILE_SECRET_KEY = 'secretA,secretB';
-    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValueOnce(pass).mockResolvedValueOnce(reject);
-    const r = await verifyTurnstileToken('widget-a-token', '1.2.3.4');
+  test('routes a group-2 host (portal-style subdomain covered by registrable domain) to secretB', async () => {
+    process.env.TURNSTILE_SECRET_KEY = TWO_WIDGETS;
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(pass);
+    const r = await verifyTurnstileToken('tok', '1.2.3.4', 'www.sarasotaflpestcontrol.com');
     expect(r).toMatchObject({ ok: true, enforced: true, reason: 'verified' });
-    expect(fetchSpy).toHaveBeenCalledTimes(1); // short-circuits on first success
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0][1].body)).toContain('secret=secretB');
   });
 
-  test('two secrets: EVERY secret rejects → fails CLOSED', async () => {
-    process.env.TURNSTILE_SECRET_KEY = 'secretA,secretB';
+  test('a token that the owning widget rejects → fails CLOSED (one call, no probing)', async () => {
+    process.env.TURNSTILE_SECRET_KEY = TWO_WIDGETS;
     fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(reject);
-    const r = await verifyTurnstileToken('junk-token', '1.2.3.4');
+    const r = await verifyTurnstileToken('junk', '1.2.3.4', 'sarasotaflpestcontrol.com');
     expect(r).toMatchObject({ ok: false, enforced: true, reason: 'rejected' });
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(1); // never probes the other secret
   });
 
-  test('two secrets: whitespace + empty entries are ignored', async () => {
-    process.env.TURNSTILE_SECRET_KEY = ' secretA , , secretB ';
-    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValueOnce(reject).mockResolvedValueOnce(pass);
-    const r = await verifyTurnstileToken('widget-b-token', '1.2.3.4');
+  test('host maps to NO widget → fails OPEN, no siteverify call (never probe a single-use token)', async () => {
+    process.env.TURNSTILE_SECRET_KEY = TWO_WIDGETS;
+    fetchSpy = jest.spyOn(global, 'fetch');
+    const r = await verifyTurnstileToken('tok', '1.2.3.4', 'evil-unknown-domain.com');
+    expect(r).toMatchObject({ ok: true, enforced: false, reason: 'no_widget_match' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('single plain-string secret still matches every host (back-compat)', async () => {
+    process.env.TURNSTILE_SECRET_KEY = 'lone-secret';
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(pass);
+    const r = await verifyTurnstileToken('tok', '1.2.3.4', 'anything.example.com');
     expect(r).toMatchObject({ ok: true, enforced: true, reason: 'verified' });
-    expect(fetchSpy).toHaveBeenCalledTimes(2); // only the two non-empty secrets
-  });
-
-  test('two secrets: one MISCONFIGURED + the other rejects → fails OPEN (misconfig hides a possibly-valid token)', async () => {
-    process.env.TURNSTILE_SECRET_KEY = 'typoedA,secretB';
-    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValueOnce(configErr).mockResolvedValueOnce(reject);
-    const r = await verifyTurnstileToken('maybe-widget-a-token', '1.2.3.4');
-    expect(r).toMatchObject({ ok: true, enforced: false, reason: 'config_error' });
+    expect(String(fetchSpy.mock.calls[0][1].body)).toContain('secret=lone-secret');
   });
 });

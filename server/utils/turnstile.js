@@ -73,27 +73,81 @@ async function verifyOneSecret(secret, token, remoteip) {
   }
 }
 
+// Parse TURNSTILE_SECRET_KEY into widgets. A leading '[' means the JSON
+// domain-routed form: [{secret, domains:[...]}]. Otherwise it's a single secret
+// string whose widget matches EVERY domain (domains:null) — the single-widget /
+// back-compat case.
+function parseWidgetSecrets(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith('[')) {
+    try {
+      const arr = JSON.parse(trimmed);
+      return (Array.isArray(arr) ? arr : [])
+        .filter((w) => w && typeof w.secret === 'string' && w.secret.trim())
+        .map((w) => ({
+          secret: w.secret.trim(),
+          domains: new Set(
+            (Array.isArray(w.domains) ? w.domains : [])
+              .map((d) => String(d || '').trim().toLowerCase())
+              .filter(Boolean)
+          ),
+        }));
+    } catch (_e) {
+      logger.warn('[turnstile] TURNSTILE_SECRET_KEY is not valid JSON — ignoring');
+      return [];
+    }
+  }
+  return [{ secret: trimmed, domains: null }];
+}
+
+// Registrable domain (eTLD+1) of a host — the fleet is all single-label .com
+// TLDs, so the last two labels suffice (www.x.com / portal.x.com → x.com).
+function registrableDomain(host) {
+  const h = String(host || '').toLowerCase().replace(/\.$/, '').replace(/:\d+$/, '');
+  const parts = h.split('.').filter(Boolean);
+  return parts.length >= 2 ? parts.slice(-2).join('.') : h;
+}
+
+// The secret of the widget that owns `host`, or null if none matches. A
+// single catch-all widget (domains:null) always wins.
+function selectSecretForHost(widgets, host) {
+  if (widgets.length === 1 && widgets[0].domains === null) return widgets[0].secret;
+  const h = String(host || '').toLowerCase();
+  const reg = registrableDomain(h);
+  for (const w of widgets) {
+    if (!w.domains) continue;
+    if (w.domains.has(h) || w.domains.has(reg)) return w.secret;
+  }
+  return null;
+}
+
 /**
  * Verify a Cloudflare Turnstile token.
  *
- * `TURNSTILE_SECRET_KEY` may be a SINGLE secret or a comma-separated list — one
- * per widget. Turnstile caps a widget at 10 hostnames, so the >10-domain fleet
- * needs multiple widgets (each with its own site key + secret); a token issued
- * by any of them must verify. We try each secret and accept the first that
- * validates the token. A single secret behaves exactly as before.
+ * `TURNSTILE_SECRET_KEY` is EITHER a single secret string (one widget, matches
+ * every domain — the single-widget / back-compat case), OR a JSON array mapping
+ * each widget's secret to the domains it covers:
+ *   [{"secret":"0x..A","domains":["wavespestcontrol.com","parrishpestcontrol.com",…]},
+ *    {"secret":"0x..B","domains":["sarasotaflpestcontrol.com",…]}]
+ * Turnstile caps a widget at 10 hostnames, so the >10-domain fleet needs
+ * multiple widgets. A Turnstile token is SINGLE-USE, so we must verify it with
+ * its OWNING widget's secret in exactly ONE siteverify call — probing other
+ * secrets first would spend the token and make the correct call fail as
+ * timeout-or-duplicate (codex P1). We pick the owning secret from the submitting
+ * `hostname` (its registrable domain → the widget whose domain list contains it).
  *
  * Fails OPEN (ok:true, enforced:false) whenever we CAN'T get a definitive
  * verdict, so a real submission is never lost to our own misconfiguration or a
  * Cloudflare hiccup:
  *   - no TURNSTILE_SECRET_KEY set                    → not_configured
+ *   - host maps to no configured widget              → no_widget_match
  *   - siteverify errors / times out / 5xx            → verify_error / http_5xx
- *   - ANY configured secret errors and none verify   → config_error (a token
- *     valid for a misconfigured widget would look invalid to the others, so we
- *     must not reject it)
+ *   - the owning secret is misconfigured             → config_error
  * Fails CLOSED (ok:false, enforced:true) only on a definitive negative:
  *   - secret set but token missing/blank             → missing_token
  *   - token longer than Cloudflare's 2048 cap        → malformed_token
- *   - EVERY properly-configured secret rejected it   → rejected
+ *   - the owning widget's secret rejected the token  → rejected
  *
  * The caller decides whether an enforced failure actually blocks the request
  * (only when the GATE_LEAD_TURNSTILE gate is on); this helper never throws and
@@ -103,12 +157,13 @@ async function verifyOneSecret(secret, token, remoteip) {
  *                             accepts either `turnstile_token` or the stock
  *                             `cf-turnstile-response` field)
  * @param {string} [remoteip]  submitter IP, forwarded to Cloudflare for scoring
+ * @param {string} [hostname]  the submitting host (from Origin/Referer/page URL),
+ *                             used to select the token's owning widget secret
  * @returns {Promise<{ok: boolean, enforced: boolean, reason: string, codes?: string[]}>}
  */
-async function verifyTurnstileToken(token, remoteip) {
-  const secrets = String(process.env.TURNSTILE_SECRET_KEY || '')
-    .split(',').map((s) => s.trim()).filter(Boolean);
-  if (secrets.length === 0) {
+async function verifyTurnstileToken(token, remoteip, hostname) {
+  const widgets = parseWidgetSecrets(process.env.TURNSTILE_SECRET_KEY);
+  if (widgets.length === 0) {
     return { ok: true, enforced: false, reason: 'not_configured' };
   }
   const trimmedToken = typeof token === 'string' ? token.trim() : '';
@@ -124,20 +179,16 @@ async function verifyTurnstileToken(token, remoteip) {
     return { ok: false, enforced: true, reason: 'malformed_token' };
   }
 
-  let firstOpen = null;   // a fail-OPEN result (config/transport) — our own fault
-  let lastReject = null;  // a definitive CLOSED rejection from a valid secret
-  for (const secret of secrets) {
-    const r = await verifyOneSecret(secret, trimmedToken, remoteip);
-    if (r.reason === 'verified') return r;          // any widget verifies → accept
-    if (r.ok) { if (!firstOpen) firstOpen = r; }    // config_error / transport
-    else { lastReject = r; }                        // definitive token rejection
+  const secret = selectSecretForHost(widgets, hostname);
+  if (!secret) {
+    // Couldn't map the submitting host to a widget → we don't know the token's
+    // owning secret, and probing others would spend this single-use token. Fail
+    // OPEN — never lose a real lead to our own mapping gap (honeypot + the
+    // rate limiter still apply).
+    logger.warn(`[turnstile] no widget matched host "${hostname || ''}" — failing open`);
+    return { ok: true, enforced: false, reason: 'no_widget_match' };
   }
-  // No secret verified the token. If ANY attempt failed OPEN (our misconfig or a
-  // Cloudflare hiccup), a token valid for THAT widget would look invalid to the
-  // others — so fail open, never lose a real lead. Only reject when every secret
-  // was reachable + properly configured and all rejected it.
-  if (firstOpen) return firstOpen;
-  return lastReject || { ok: false, enforced: true, reason: 'rejected' };
+  return verifyOneSecret(secret, trimmedToken, remoteip);
 }
 
 module.exports = { verifyTurnstileToken };
