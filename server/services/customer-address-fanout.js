@@ -84,11 +84,21 @@ function snapshotMatchesContact(snapshot, contact) {
   if (!segKey || segKey !== lineKey) return false;
   if (segments.length === 1) return true; // bare street line — nothing more to check
 
+  return placeCorroborates(contact, snapshotTailPlace(snapshot) || {});
+}
+
+// The place evidence a full single-line snapshot carries in its comma tail
+// (zip and/or a city segment); null for a bare street line. A tail like
+// ", FL" carries NO evidence — callers with separate city/zip columns fall
+// back to those.
+function snapshotTailPlace(snapshot) {
+  const segments = String(snapshot ?? '').split(',');
+  if (segments.length === 1) return null;
   const tail = segments.slice(1).join(' ');
-  const snapZip = (tail.match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || null;
-  const snapCitySeg = segments.slice(1).find((seg) => seg.trim() && !NON_CITY_TAIL_RE.test(seg)) || '';
-  const snapCity = snapCitySeg.replace(/\b(?:fl|florida)\b/gi, '').replace(/\b\d{5}(?:-\d{4})?\b/g, '');
-  return placeCorroborates(contact, { zip: snapZip, city: snapCity });
+  const zip = (tail.match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || null;
+  const citySeg = segments.slice(1).find((seg) => seg.trim() && !NON_CITY_TAIL_RE.test(seg)) || '';
+  const city = citySeg.replace(/\b(?:fl|florida)\b/gi, '').replace(/\b\d{5}(?:-\d{4})?\b/g, '');
+  return { zip, city };
 }
 
 // ZIP is the strong discriminator when both sides have one; postal-city names
@@ -147,7 +157,11 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // city/zip is never treated as a copy.
   const leadMatchesContact = (r, contact) => {
     if (!snapshotMatchesContact(r.address, contact)) return false;
-    if (String(r.address || '').includes(',')) return true; // tail already corroborated
+    // Only a tail carrying REAL place evidence (zip or city) counts as
+    // corroborated — "100 Main St, FL" names nothing, so the lead's separate
+    // city/zip columns must still agree.
+    const tail = snapshotTailPlace(r.address);
+    if (tail && (tail.zip || addressMatchKey(tail.city))) return true;
     return placeCorroborates(contact, { city: r.city, zip: r.zip });
   };
   // Some intake paths store a FULL single-line address in leads.address (the
@@ -232,16 +246,55 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
           .map((x) => addressMatchKey(String(x).replace(/\bflorida\b/gi, 'fl')))
           .join('|');
       };
-      const proposalAlreadyTarget = proposalTargetKey(proposalCurrent) === proposalTargetKey(fullAddress.slice(0, 200));
-      if (proposalCurrent && !proposalAlreadyTarget && matchesCustomerAddress(proposalCurrent)) {
-        patch.estimate_data = conn.raw(
-          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{proposal,propertyAddress}', to_jsonb(?::text)) - 'proposalDelivery'",
-          [fullAddress.slice(0, 200)],
-        );
+      const proposalTarget = fullAddress.slice(0, 200);
+      const proposalAlreadyTarget = proposalTargetKey(proposalCurrent) === proposalTargetKey(proposalTarget);
+      const patchPropertyAddress = !!(proposalCurrent && !proposalAlreadyTarget && matchesCustomerAddress(proposalCurrent));
+      // Synthesized-fallback proposals also carry the address as a BUILDING
+      // name (the PDF prints building.name) — patch those under the same
+      // guard, leaving truly custom building names alone.
+      const buildings = Array.isArray(data?.proposal?.buildings) ? data.proposal.buildings : null;
+      const patchedBuildings = buildings
+        ? buildings.map((b) => (
+          b && typeof b.name === 'string'
+            && matchesCustomerAddress(b.name)
+            && proposalTargetKey(b.name) !== proposalTargetKey(proposalTarget)
+            ? { ...b, name: proposalTarget }
+            : b))
+        : null;
+      const patchBuildings = !!(patchedBuildings && JSON.stringify(patchedBuildings) !== JSON.stringify(buildings));
+      if (patchPropertyAddress || patchBuildings) {
+        let expr = "COALESCE(estimate_data, '{}'::jsonb)";
+        const bindings = [];
+        if (patchPropertyAddress) {
+          expr = `jsonb_set(${expr}, '{proposal,propertyAddress}', to_jsonb(?::text))`;
+          bindings.push(proposalTarget);
+        }
+        if (patchBuildings) {
+          expr = `jsonb_set(${expr}, '{proposal,buildings}', ?::jsonb)`;
+          bindings.push(JSON.stringify(patchedBuildings));
+        }
+        patch.estimate_data = conn.raw(`${expr} - 'proposalDelivery'`, bindings);
       }
       // Same no-op rule as leads: an already-at-target row with no proposal
       // patch gets no write (and no updated_at bump).
       if (!patch.estimate_data && String(row.address || '') === fullAddress) continue;
+      if (patch.estimate_data) {
+        // The proposal patch was decided from the SELECTed estimate_data — a
+        // proposal save committing in between must not have its fresh content
+        // rewritten (or its delivery marker dropped) from that stale read.
+        // Revalidate the proposal address at update time; if it moved, apply
+        // the address-column sync alone and leave the new proposal be.
+        const n = await conn('estimates')
+          .where({ id: row.id, customer_id: customerId, address: row.address })
+          .whereRaw("estimate_data #>> '{proposal,propertyAddress}' IS NOT DISTINCT FROM ?", [proposalCurrent ?? null])
+          .whereIn('status', OPEN_ESTIMATE_STATUSES)
+          .whereNull('archived_at')
+          .update(patch);
+        counts.estimates += n;
+        if (n) continue;
+        delete patch.estimate_data;
+        if (String(row.address || '') === fullAddress) continue;
+      }
       counts.estimates += await conn('estimates')
         .where({ id: row.id, customer_id: customerId, address: row.address })
         .whereIn('status', OPEN_ESTIMATE_STATUSES)

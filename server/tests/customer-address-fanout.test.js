@@ -29,10 +29,11 @@ function makeConn(rowsByTable) {
         return qb;
       },
       whereIn: (col, vals) => { if (col === 'id') updateIds = vals; return qb; },
+      whereRaw: (sql, bindings) => { (qb.__whereRaw ||= []).push({ sql, bindings }); return qb; },
       whereNull: () => qb,
       select: () => Promise.resolve(rowsByTable[table] || []),
       update: (patch) => {
-        updates.push({ table, ids: updateIds, patch });
+        updates.push({ table, ids: updateIds, patch, whereRaw: qb.__whereRaw || [] });
         return Promise.resolve((updateIds || []).length);
       },
     };
@@ -350,6 +351,62 @@ describe('propagateCustomerAddressChange', () => {
     expect(leadPatch).not.toHaveProperty('city');
     expect(leadPatch).not.toHaveProperty('zip');
     expect(conn.__updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
+  });
+
+  test('a comma tail with NO place evidence still requires the lead columns to agree', async () => {
+    const conn = makeConn({
+      leads: [{ id: 'lead-fl-tail', address: '4867 Tobermorey Way, FL', city: 'Sarasota', zip: '34240' }],
+      estimates: [],
+    });
+
+    const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+
+    expect(counts.leads).toBe(0);
+    expect(conn.__updates).toHaveLength(0);
+  });
+
+  test('the proposal patch revalidates the proposal address at update time (concurrent-save guard)', async () => {
+    const conn = makeConn({
+      leads: [],
+      estimates: [{
+        id: 'est-prop',
+        address: '4867 Tobermorey Way, Lakewood Ranch, FL 34211',
+        estimate_data: { proposal: { propertyAddress: '4867 Tobermorey Way, Lakewood Ranch, FL 34211' } },
+      }],
+    });
+
+    await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+
+    const estUpdate = conn.__updates.find((u) => u.table === 'estimates');
+    const guard = estUpdate.whereRaw.find((w) => w.sql.includes("'{proposal,propertyAddress}'"));
+    expect(guard.bindings).toEqual(['4867 Tobermorey Way, Lakewood Ranch, FL 34211']);
+  });
+
+  test('a synthesized-fallback building named with the old address is patched; custom names are not', async () => {
+    const conn = makeConn({
+      leads: [],
+      estimates: [{
+        id: 'est-bldg',
+        address: '4867 Tobermorey Way, Lakewood Ranch, FL 34211',
+        estimate_data: {
+          proposal: {
+            propertyAddress: '4867 Tobermorey Way, Lakewood Ranch, FL 34211',
+            buildings: [
+              { name: '4867 Tobermorey Way, Lakewood Ranch, FL 34211', note: null },
+              { name: 'North Warehouse', note: 'custom' },
+            ],
+          },
+        },
+      }],
+    });
+
+    await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+
+    const patch = conn.__updates.find((u) => u.table === 'estimates').patch;
+    expect(patch.estimate_data.__raw).toContain("'{proposal,buildings}'");
+    const patched = JSON.parse(patch.estimate_data.bindings[1]);
+    expect(patched[0].name).toBe('4857 Tobermory Way, Bradenton, FL 34211');
+    expect(patched[1].name).toBe('North Warehouse');
   });
 
   test('missing customer id is a safe no-op', async () => {
