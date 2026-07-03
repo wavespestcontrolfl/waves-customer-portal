@@ -1056,7 +1056,7 @@ router.get('/applicators', async (req, res, next) => {
     const techs = await db('technicians')
       .where({ active: true })
       .orderBy('name')
-      .select('id', 'name', 'fl_applicator_license', 'license_expiry');
+      .select('id', 'name', 'applicator_printed_name', 'fl_applicator_license', 'license_expiry');
     const todayEt = etDateString();
     res.json({
       applicators: techs.map((t) => {
@@ -1071,7 +1071,14 @@ router.get('/applicators', async (req, res, next) => {
         const expired = Boolean(expiryDate && expiryDate < todayEt);
         return {
           id: t.id,
-          name: t.name,
+          // Certificates print the applicator's FULL legal name — the
+          // dedicated printed-name column wins over the casual display name
+          // used across customer comms.
+          name: String(t.applicator_printed_name || '').trim() || t.name,
+          // The display name certificates saved BEFORE the printed-name
+          // column existed — the create form matches stored drafts against
+          // it and upgrades them to the printed name.
+          legacyName: t.name,
           fdacsId: expired ? null : (String(t.fl_applicator_license || '').trim() || null),
         };
       }),
