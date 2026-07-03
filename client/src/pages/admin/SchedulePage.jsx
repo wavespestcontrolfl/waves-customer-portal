@@ -5245,16 +5245,24 @@ function readLawnAssessmentPhoto(file) {
 }
 
 function parseAssessmentScores(row = {}) {
-  return {
-    turf_density: row.turf_density ?? row.turfDensity ?? 0,
-    weed_suppression: row.weed_suppression ?? row.weedSuppression ?? 0,
-    color_health: row.color_health ?? row.colorHealth ?? 0,
-    // Kept (not shown as chips) so a re-confirm preserves the AI values; the tech
-    // now corrects stress_damage directly instead of these two.
-    fungus_control: row.fungus_control ?? row.fungusControl ?? 0,
-    thatch_level: row.thatch_level ?? row.thatchLevel ?? 0,
-    stress_damage: row.stress_damage ?? row.stressDamage ?? 0,
-  };
+  const turf_density = row.turf_density ?? row.turfDensity ?? 0;
+  const weed_suppression = row.weed_suppression ?? row.weedSuppression ?? 0;
+  const color_health = row.color_health ?? row.colorHealth ?? 0;
+  // Kept (not shown as chips) so a re-confirm preserves the AI values; the tech
+  // now corrects stress_damage directly instead of these two.
+  const fungus_control = row.fungus_control ?? row.fungusControl ?? 0;
+  const thatch_level = row.thatch_level ?? row.thatchLevel ?? 0;
+  // Legacy assessments (created before the stress_damage column) have a null
+  // stress_damage. Coercing that to 0 would make a plain re-confirm POST
+  // stress_damage: 0, which /confirm treats as an explicit "push Stress to 0"
+  // override and persists an artificially low score. Instead derive it exactly the
+  // way the server's confirm fallback does — min(fungus, thatch, AI-floor) with the
+  // legacy 95 floor — so posting the seeded chip value is a no-op, not an override.
+  const rawStress = row.stress_damage ?? row.stressDamage;
+  const stress_damage = rawStress != null
+    ? rawStress
+    : Math.min(Number(fungus_control) || 0, Number(thatch_level) || 0, 95);
+  return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
 }
 
 function parseStressFlags(value) {
