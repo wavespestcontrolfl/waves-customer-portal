@@ -239,11 +239,16 @@ async function executeContentTool(toolName, input) {
         });
       } catch { /* column may not exist */ }
 
+      // publishToAll returns { success, platforms } — the old `result.results`
+      // key never existed, so every outcome reported success_count 0/0 and
+      // the run summary couldn't distinguish "posted" from "nothing posted"
+      // (automation paused, all platforms skipped/failed).
+      const platformResults = Array.isArray(result?.platforms) ? result.platforms : [];
       return {
         post_id: input.post_id,
-        platforms: result.results || [],
-        success_count: (result.results || []).filter(r => r.success).length,
-        total_platforms: (result.results || []).length,
+        platforms: platformResults,
+        success_count: platformResults.filter(r => r.success).length,
+        total_platforms: platformResults.length,
       };
     }
 

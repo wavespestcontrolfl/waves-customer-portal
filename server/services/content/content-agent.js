@@ -231,11 +231,14 @@ const ContentAgent = {
       wordCount: postData?.word_count || null,
       qaScore: null,
       publishedUrl: postData?.url || null,
-      // Invoked is not distributed: the tool now refuses non-live posts
-      // (returns skipped/error) — the summary must not tell operators a
-      // share happened when no platform was posted to.
+      // Invoked is not distributed: the summary must not tell operators a
+      // share happened when no platform was posted to — the live-gate can
+      // refuse (skipped/error), and publishToAll can complete with every
+      // platform skipped/failed (automation paused, missing credentials).
+      // Only an actual platform success counts.
       socialDistributed: toolsExecuted.some(t => t.tool === 'distribute_to_social'
-        && !t.result?.skipped && !t.result?.error),
+        && !t.result?.skipped && !t.result?.error
+        && Number(t.result?.success_count) > 0),
       toolsExecuted: toolsExecuted.map(t => t.tool),
       durationSeconds: Math.round(durationMs / 1000),
       report: finalReport,
