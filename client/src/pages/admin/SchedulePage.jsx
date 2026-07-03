@@ -7967,7 +7967,12 @@ export function CompletionPanel({
     );
     setRecapStaleAfterEdit(false);
     setAreasServiced(
-      Array.isArray(savedDraft.areasServiced) ? savedDraft.areasServiced : [],
+      // Map the legacy singular "Side yard" to the renamed "Side yards" so a draft
+      // saved before the rename restores as the currently-rendered option (and
+      // dedupe, so re-selecting can't submit both strings). Other values pass through.
+      Array.isArray(savedDraft.areasServiced)
+        ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
+        : [],
     );
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
@@ -8433,7 +8438,13 @@ export function CompletionPanel({
         // Prefill the targets from the manufacturer label (products_catalog
         // target_pests) so the tech starts from what the product is labeled to
         // control and trims rather than typing from scratch. Editable as before.
-        targets: normalizeLabelTargets(product.target_pests || product.targetPests),
+        // Protocol-added products (addProduct(action.product)) are serialized
+        // without target_pests, so fall back to the loaded catalog row by id.
+        targets: normalizeLabelTargets(
+          product.target_pests
+            ?? product.targetPests
+            ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
+        ),
       },
     ]);
     setProductSearch("");
