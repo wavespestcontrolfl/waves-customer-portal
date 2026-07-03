@@ -8,7 +8,7 @@
  * when BOTH sides carry a unit and they disagree; a blank side stays
  * compatible because most on-file addresses predate unit capture.
  */
-const { addressMatchesCustomer, unitsConflict } = require('../routes/booking')._internals;
+const { addressMatchesCustomer, unitsConflict, stripInlineUnitFromLine } = require('../routes/booking')._internals;
 
 describe('unitsConflict', () => {
   test('no conflict when either side is blank', () => {
@@ -87,5 +87,32 @@ describe('legacy inline units in address_line1 (pre-capture records)', () => {
 
   test('inline-on-both-sides still matches (old behavior preserved)', () => {
     expect(addressMatchesCustomer(legacy, '123 Main St Apt A', '34231', '')).toBe(true);
+  });
+
+  test('multi-part inline units match their split submission (codex rd3)', () => {
+    const multi = { address_line1: '123 Main St Bldg 2 Apt 4', address_line2: null, zip: '34231' };
+    expect(addressMatchesCustomer(multi, '123 Main St', '34231', 'Bldg 2 Apt 4')).toBe(true);
+    expect(addressMatchesCustomer(multi, '123 Main St', '34231', 'Apt 9')).toBe(false);
+  });
+});
+
+describe('stripInlineUnitFromLine (double-entry dedup at insert)', () => {
+  test('strips an inline unit that value-matches the dedicated field', () => {
+    expect(stripInlineUnitFromLine('123 Main St Apt 4', 'Apt 4')).toBe('123 Main St');
+    expect(stripInlineUnitFromLine('123 Main St Apt 4', '#4')).toBe('123 Main St');
+  });
+
+  test('preserves trailing city/state text past the first comma', () => {
+    expect(stripInlineUnitFromLine('123 Main St Apt 4, Sarasota, FL 34231', 'Apt 4'))
+      .toBe('123 Main St, Sarasota, FL 34231');
+  });
+
+  test('a DIFFERENT inline unit is left untouched (conflict path handles it)', () => {
+    expect(stripInlineUnitFromLine('123 Main St Apt 4', 'Apt 9')).toBe('123 Main St Apt 4');
+  });
+
+  test('no dedicated unit → line untouched', () => {
+    expect(stripInlineUnitFromLine('123 Main St Apt 4', '')).toBe('123 Main St Apt 4');
+    expect(stripInlineUnitFromLine('123 Main St', 'Apt 4')).toBe('123 Main St');
   });
 });

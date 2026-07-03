@@ -350,6 +350,12 @@ describe('splitStreetLineUnit', () => {
 
   test('a line that is only a unit never splits to an empty street', () => {
     expect(splitStreetLineUnit('Apt 4')).toEqual({ street: 'Apt 4', unit: '' });
+    expect(splitStreetLineUnit('Bldg 2 Apt 4')).toEqual({ street: 'Bldg 2 Apt 4', unit: '' });
+  });
+
+  test('multi-part inline units peel fully (codex rd3)', () => {
+    expect(splitStreetLineUnit('123 Main St Bldg 2 Apt 4')).toEqual({ street: '123 Main St', unit: 'Bldg 2 Apt 4' });
+    expect(splitStreetLineUnit('123 Main St Bldg 2 #4')).toEqual({ street: '123 Main St', unit: 'Bldg 2 #4' });
   });
 });
 

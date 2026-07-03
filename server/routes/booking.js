@@ -220,6 +220,21 @@ function unitsConflict(customerLine2, submittedUnit) {
   return !!a && !!b && a !== b;
 }
 
+// A manual booking can enter the unit in BOTH fields ("123 Main St Apt 4" +
+// unit "Apt 4"). When the inline unit value-matches the dedicated one, strip
+// it from the street line so line1+line2 displays never repeat it. A
+// DIFFERENT inline unit is left untouched — addressMatchesCustomer treats
+// that as a conflict, never silent data loss. Only the first comma segment
+// is inspected; any trailing city/state text is preserved.
+function stripInlineUnitFromLine(line, submittedUnit) {
+  const submittedKey = unitValueKey(submittedUnit);
+  if (!submittedKey) return line;
+  const [first, ...rest] = String(line || '').split(',');
+  const split = splitStreetLineUnit(first);
+  if (!split.unit || unitValueKey(split.unit) !== submittedKey) return line;
+  return [split.street, ...rest].join(',');
+}
+
 function addressMatchesCustomer(customer, address, zip, unit) {
   // Legacy records may still carry the unit inline in address_line1
   // ("123 Main St Apt A", empty address_line2) — split both sides so a
@@ -918,7 +933,7 @@ async function createSelfBooking(payload = {}) {
         last_name: new_customer.last_name || '',
         phone: phoneDigits,
         email: new_customer.email || null,
-        address_line1: new_customer.address_line1 || null,
+        address_line1: stripInlineUnitFromLine(new_customer.address_line1, new_customer.address_line2) || null,
         address_line2: normalizeUnitLine(new_customer.address_line2) || null,
         city: new_customer.city || null,
         state: new_customer.state || 'FL',
@@ -1750,6 +1765,7 @@ module.exports._internals = {
   cleanBookingServiceLabel,
   addressMatchesCustomer,
   unitsConflict,
+  stripInlineUnitFromLine,
   // Read-only engine surface reused by the voice agent's quoting tools so a
   // phoned-in availability check runs the exact same route-aware slot finder as
   // the web /book funnel (no duplicated scheduling logic).

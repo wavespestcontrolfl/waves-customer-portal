@@ -310,27 +310,37 @@ function unitLineValueKey(normalizedUnitLine) {
 }
 
 // Split a street line into its street part and a trailing inline unit —
-// "123 Main St Apt A" → { street: '123 Main St', unit: 'Apt A' }. Legacy
-// records stored units inline in address_line1 before dedicated unit capture
-// existed. Conservative on purpose: only a trailing "<designator> <unit-ish
-// value>" pair or a trailing "#<value>" token splits, so street names that
-// contain designator words ("4501 Space Coast Blvd") stay intact, and a line
-// that is ONLY a unit never splits down to an empty street.
+// "123 Main St Apt A" → { street: '123 Main St', unit: 'Apt A' }, and
+// multi-part units peel fully: "123 Main St Bldg 2 Apt 4" →
+// { street: '123 Main St', unit: 'Bldg 2 Apt 4' }. Legacy records stored
+// units inline in address_line1 before dedicated unit capture existed.
+// Conservative on purpose: only trailing "<designator> <unit-ish value>"
+// pairs or a trailing "#<value>" token peel, so street names that contain
+// designator words ("4501 Space Coast Blvd") stay intact — and the remaining
+// street must still lead with a house number, so a line that is ONLY units
+// never splits down to a nonsense street.
 function splitStreetLineUnit(value) {
   const line = cleanString(value).split(',')[0].trim();
-  const tokens = line.split(' ').filter(Boolean);
-  if (tokens.length >= 2) {
+  let tokens = line.split(' ').filter(Boolean);
+  const unitParts = [];
+  while (tokens.length >= 2) {
     const last = tokens[tokens.length - 1].replace(/[.,]/g, '');
     const secondLast = tokens[tokens.length - 2].replace(/[.,]/g, '').toLowerCase();
     if (/^#\S+$/.test(last)) {
-      return { street: tokens.slice(0, -1).join(' '), unit: last };
+      unitParts.unshift(last);
+      tokens = tokens.slice(0, -1);
+      continue;
     }
     if (tokens.length >= 3 && UNIT_DESIGNATORS.has(secondLast)
         && /^#?[A-Za-z]?\d+[A-Za-z]?$|^[A-Za-z]$/.test(last)) {
-      return { street: tokens.slice(0, -2).join(' '), unit: `${tokens[tokens.length - 2]} ${last}` };
+      unitParts.unshift(`${tokens[tokens.length - 2]} ${last}`);
+      tokens = tokens.slice(0, -2);
+      continue;
     }
+    break;
   }
-  return { street: line, unit: '' };
+  if (!unitParts.length || !/^\d/.test(tokens[0] || '')) return { street: line, unit: '' };
+  return { street: tokens.join(' '), unit: unitParts.join(' ') };
 }
 
 function splitStreetAndCity(value) {

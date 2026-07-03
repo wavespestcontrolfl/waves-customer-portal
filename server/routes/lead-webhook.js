@@ -21,7 +21,7 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 const { backfillCallLeadAttribution } = require('../services/ads/call-attribution');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
-const { normalizeLeadAddress, normalizeStreetLine } = require('../utils/address-normalizer');
+const { normalizeLeadAddress } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
@@ -317,14 +317,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       if (!existing.address_line1 && address) {
         updates.address_line1 = address;
         if (normalizedAddress.line2) updates.address_line2 = normalizedAddress.line2;
-      } else if (
-        // Attach a newly provided unit only when the submitted street line
-        // matches the one on file — never bolt a unit onto a different address.
-        !existing.address_line2 && normalizedAddress.line2 && existing.address_line1
-        && normalizeStreetLine(existing.address_line1) === normalizedAddress.line1
-      ) {
-        updates.address_line2 = normalizedAddress.line2;
       }
+      // No unit backfill onto an EXISTING address here: this public webhook
+      // resolves the customer from the submitted phone alone, so a
+      // street-matching post could write an arbitrary unit onto someone's
+      // service address (dispatch corruption). The submitted unit still
+      // reaches staff via leads.address / extracted_data for review.
       if (!existing.city && (normalizedAddress.city || zipCity)) updates.city = normalizedAddress.city || zipCity;
       if (!existing.state && normalizedAddress.state) updates.state = normalizedAddress.state;
       if (!existing.zip && normalizedAddress.zip) updates.zip = normalizedAddress.zip;

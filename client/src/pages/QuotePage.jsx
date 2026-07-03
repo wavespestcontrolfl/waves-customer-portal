@@ -284,6 +284,7 @@ function addressPartsFromGoogleResult(result, fallback = '') {
   return {
     formatted: result?.formatted_address || fallback,
     line1,
+    line2: get('subpremise'),
     city: get('locality') || get('sublocality') || get('postal_town'),
     state: getShort('administrative_area_level_1') || 'FL',
     zip: get('postal_code'),
@@ -309,7 +310,7 @@ export default function QuotePage({ serviceSlug = '' }) {
   const [intakeIdx, setIntakeIdx] = useState(minIntakeIdx);
   const [dir, setDir] = useState('next');
   const [intake, setIntake] = useState(startingIntake);
-  const [address, setAddress] = useState({ formatted: '', line1: '', city: '', state: 'FL', zip: '' });
+  const [address, setAddress] = useState({ formatted: '', line1: '', line2: '', city: '', state: 'FL', zip: '' });
 
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -481,6 +482,9 @@ export default function QuotePage({ serviceSlug = '' }) {
     setAddress({
       formatted,
       line1: parts.line1 || formatted,
+      // Google subpremise (unit/apt) when the visitor typed one — carried as
+      // its own field so the street line stays clean for parcel matching.
+      line2: parts.line2 || '',
       city: parts.city || '',
       state: parts.state || 'FL',
       zip: parts.zip || '',
@@ -511,6 +515,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       const next = {
         formatted: parts.formatted || typed,
         line1: parts.line1 || typed,
+        line2: parts.line2 || address.line2 || '',
         city: parts.city || '',
         state: parts.state || 'FL',
         zip: parts.zip || '',
@@ -593,6 +598,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          address_line2: resolvedAddress.line2 || undefined,
           interest: intake.interest,
           frequency: intake.frequency,
           service_interest: selectedServiceInterest(intake),
@@ -653,6 +659,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          address_line2: resolvedAddress.line2 || undefined,
           interest: 'other',
           otherService: intake.otherService,
           service_interest: otherLabel,
@@ -693,6 +700,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          address_line2: resolvedAddress.line2 || undefined,
           interest: intake.interest,
           frequency: intake.frequency,
           service_interest: selectedServiceInterest(intake),
@@ -756,6 +764,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email,
           phone: intake.phone.replace(/\D/g, ''),
           address: address.line1 || address.formatted || intake.address,
+          address_line2: address.line2 || undefined,
           city: address.city,
           zip: address.zip,
           homeSqFt: sq,
