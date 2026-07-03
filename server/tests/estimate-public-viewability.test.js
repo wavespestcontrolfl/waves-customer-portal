@@ -1,6 +1,7 @@
 const {
   isEstimateCustomerViewable,
   isEstimateAcceptActive,
+  adminDraftPreviewEligible,
 } = require('../routes/estimate-public');
 
 const FUTURE = new Date(Date.now() + 86400000).toISOString();
@@ -59,5 +60,28 @@ describe('isEstimateAcceptActive — unpublished/expiry hardening', () => {
     expect(isEstimateAcceptActive({ status: 'viewed', expires_at: FUTURE })).toBe(true);
     // Preserves the existing onetime-breakdown expectation (viewed + null expiry).
     expect(isEstimateAcceptActive({ status: 'viewed', expires_at: null })).toBe(true);
+  });
+});
+
+describe('adminDraftPreviewEligible (staff draft preview — cheap half of the /data bypass)', () => {
+  it('is eligible only for unpublished rows with the explicit param', () => {
+    expect(adminDraftPreviewEligible({ status: 'draft' }, '1')).toBe(true);
+    expect(adminDraftPreviewEligible({ status: 'scheduled' }, '1')).toBe(true);
+  });
+
+  it('requires ?adminPreview=1 exactly', () => {
+    expect(adminDraftPreviewEligible({ status: 'draft' }, undefined)).toBe(false);
+    expect(adminDraftPreviewEligible({ status: 'draft' }, '')).toBe(false);
+    expect(adminDraftPreviewEligible({ status: 'draft' }, 'true')).toBe(false);
+  });
+
+  it('never applies to published/terminal/archived rows — they keep the normal gate', () => {
+    expect(adminDraftPreviewEligible({ status: 'sent' }, '1')).toBe(false);
+    expect(adminDraftPreviewEligible({ status: 'viewed' }, '1')).toBe(false);
+    expect(adminDraftPreviewEligible({ status: 'expired' }, '1')).toBe(false);
+    expect(adminDraftPreviewEligible({ status: 'send_failed' }, '1')).toBe(false);
+    expect(adminDraftPreviewEligible({ status: 'accepted' }, '1')).toBe(false);
+    expect(adminDraftPreviewEligible({ status: 'draft', archived_at: PAST }, '1')).toBe(false);
+    expect(adminDraftPreviewEligible(null, '1')).toBe(false);
   });
 });

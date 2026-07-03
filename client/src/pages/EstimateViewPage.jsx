@@ -2054,6 +2054,27 @@ function SuccessCard({ acceptResult }) {
   );
 }
 
+// Staff draft preview marker — rendered only when the /data payload carries
+// the JWT-verified adminDraftPreview flag. Customer-surface styling (matches
+// SlotIssueBanner), not the admin monochrome spec: this banner lives on the
+// customer page even though only staff ever see it.
+export function DraftPreviewBanner() {
+  return (
+    <div style={{
+      background: '#fff4e5', borderRadius: 12, padding: 14,
+      border: '1px solid #f5bb5c', marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.navy }}>
+        Draft preview — not sent to the customer yet
+      </div>
+      <div style={{ fontSize: 14, color: COLORS.navy, marginTop: 4 }}>
+        This is the exact page the customer will get. Booking, payment, and
+        requests stay disabled until the estimate is sent.
+      </div>
+    </div>
+  );
+}
+
 function SlotIssueBanner({ kind = 'conflict', onRetry }) {
   const expired = kind === 'expired';
   return (
@@ -2283,6 +2304,19 @@ export default function EstimateViewPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // Staff draft preview (?adminPreview=1 — opened from the estimate tool's
+  // "Customer View" / the estimates list's Preview). Makes the /data fetch
+  // attach the staff session's Bearer token so the server will serve an
+  // UNPUBLISHED draft through this page — the real customer renderer —
+  // instead of the diverging legacy SSR preview. Read once; the 3DS param
+  // scrub below leaves unrelated params (incl. this one) in place.
+  const [adminPreviewRequested] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('adminPreview') === '1';
+    } catch {
+      return false;
+    }
+  });
 
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
@@ -2423,7 +2457,19 @@ export default function EstimateViewPage() {
   const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
     setLoading(true);
     const isRefresh = initialViewCountedRef.current;
-    const r = await fetch(`${API_BASE}/estimates/${token}/data${isRefresh ? '?refresh=1' : ''}`);
+    const params = [];
+    if (isRefresh) params.push('refresh=1');
+    let fetchOpts;
+    if (adminPreviewRequested) {
+      params.push('adminPreview=1');
+      // Same-origin SPA: the staff session token lives in localStorage. An
+      // absent/expired token just means the server ignores the preview param
+      // and an unpublished draft 404s into the normal "link isn't valid"
+      // screen — never an error state.
+      const staffToken = localStorage.getItem('waves_admin_token');
+      if (staffToken) fetchOpts = { headers: { Authorization: `Bearer ${staffToken}` } };
+    }
+    const r = await fetch(`${API_BASE}/estimates/${token}/data${params.length ? `?${params.join('&')}` : ''}`, fetchOpts);
     if (r.status === 404) {
       setNotFound(true);
       setLoading(false);
@@ -2459,7 +2505,13 @@ export default function EstimateViewPage() {
     }
     setSelected(nextSelected);
     setSelectedAddOns(selectedAddOnsForServices(nextServices, nextSelected));
-  }, [token]);
+  }, [token, adminPreviewRequested]);
+
+  // Verified staff draft preview (server sets this only after checking the
+  // staff JWT): show the banner and keep every money/booking action inert —
+  // the server would 409 a draft accept anyway (isEstimateAcceptActive), but
+  // the preview shouldn't offer actions that can only fail.
+  const adminDraftPreview = data?.adminDraftPreview === true;
 
   // A different estimate token is a fresh session — let its first load count.
   useEffect(() => { initialViewCountedRef.current = false; }, [token]);
@@ -2506,6 +2558,13 @@ export default function EstimateViewPage() {
   }, [reservation]);
 
   const onToggleAddOn = useCallback(async (sectionKey, key) => {
+    // Draft preview: PUT /preferences persists into estimate_data, and the
+    // server 400s a draft anyway (isEstimateAcceptActive) — but its "no
+    // longer active" message reads like a broken draft. Explain instead.
+    if (adminDraftPreview) {
+      setError('Draft preview — add-on choices are the customer\'s to make once the estimate is sent.');
+      return;
+    }
     const sectionAddOns = selectedAddOns[sectionKey] || new Set();
     const nextChecked = !sectionAddOns.has(key);
     setSelectedAddOns((prev) => {
@@ -2531,7 +2590,7 @@ export default function EstimateViewPage() {
         return { ...prev, [sectionKey]: nextForSection };
       });
     }
-  }, [loadEstimate, selectedAddOns, token]);
+  }, [adminDraftPreview, loadEstimate, selectedAddOns, token]);
 
   const releaseHeldReservation = useCallback((scheduledServiceId) => {
     if (!scheduledServiceId) return;
@@ -2541,6 +2600,12 @@ export default function EstimateViewPage() {
   }, [token]);
 
   const handlePaymentChoice = useCallback(async (pref) => {
+    // Staff draft preview: every booking path starts here — keep it inert
+    // (no reservation, no deposit/card-hold intent) with an explaining error.
+    if (adminDraftPreview) {
+      setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
+      return;
+    }
     if (existingAppointment) {
       setPaymentPreference(pref);
       setReservation({ existingAppointmentId: existingAppointment.id });
@@ -2621,7 +2686,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
+  }, [adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -2662,6 +2727,12 @@ export default function EstimateViewPage() {
   }, [services, comboAxisKeys, comboModeActive]);
 
   const performAccept = useCallback(async () => {
+    // Defense in depth for the draft preview — handlePaymentChoice already
+    // blocks the flow before review, and the server 409s a draft accept.
+    if (adminDraftPreview) {
+      setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
+      return;
+    }
     setCtaPhase('submitting');
     setError(null);
     try {
@@ -2720,7 +2791,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('review');
     }
-  }, [existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
+  }, [adminDraftPreview, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -2821,6 +2892,15 @@ export default function EstimateViewPage() {
   }, []);
 
   const handleAddServiceRequest = useCallback(async () => {
+    // Draft preview: don't file a real bundle inquiry (it notifies the team)
+    // from a staff preview click — show what the customer would get instead.
+    if (adminDraftPreview) {
+      setAddServiceRequestState({
+        status: 'error',
+        message: 'Draft preview — customer requests are disabled until the estimate is sent.',
+      });
+      return;
+    }
     if (!addServiceOffer || addServiceRequestState.status === 'submitting') return;
     setAddServiceRequestState({ status: 'submitting', message: '' });
     try {
@@ -2844,7 +2924,7 @@ export default function EstimateViewPage() {
         message: err.message || `Could not send the request. Call ${WAVES_PHONE_DISPLAY}.`,
       });
     }
-  }, [addServiceOffer, addServiceRequestState.status, token]);
+  }, [adminDraftPreview, addServiceOffer, addServiceRequestState.status, token]);
 
   if (loading) {
     return <Page><Header customerFirstName={null} address={null} /><SkeletonBlock /><SkeletonBlock /></Page>;
@@ -3010,6 +3090,7 @@ export default function EstimateViewPage() {
     const showAcceptedRecap = cta.terminalState === 'accepted' && !!estimate.acceptedServiceMode;
     return (
       <Page>
+        {adminDraftPreview ? <DraftPreviewBanner /> : null}
         <Header customerFirstName={estimate.customerFirstName} address={estimate.address} headline={copy.headline} />
         <MembershipCard membership={estimate.membership} />
         <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
@@ -3078,6 +3159,7 @@ export default function EstimateViewPage() {
   if (reviewBeforeBooking) {
     return (
       <Page>
+        {adminDraftPreview ? <DraftPreviewBanner /> : null}
         <Header
           customerFirstName={estimate.customerFirstName}
           address={estimate.address}
@@ -3094,6 +3176,7 @@ export default function EstimateViewPage() {
 
   return (
     <Page>
+      {adminDraftPreview ? <DraftPreviewBanner /> : null}
       <Header
         customerFirstName={estimate.customerFirstName}
         address={estimate.address}
@@ -3116,7 +3199,7 @@ export default function EstimateViewPage() {
               <ExistingAppointmentCard appointment={existingAppointment} />
               <PaymentPreferenceButtons
                 onSelect={handlePaymentChoice}
-                disabled={false}
+                disabled={adminDraftPreview}
                 serviceMode={serviceMode}
                 setupFee={pricing.setupFee || null}
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
@@ -3220,7 +3303,12 @@ export default function EstimateViewPage() {
           {(existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
             <PaymentPreferenceButtons
               onSelect={handlePaymentChoice}
-              disabled={ctaPhase === 'submitting'}
+              // Draft preview: dead from first render (Codex rd 1), not just
+              // guarded on click — but rendered, so staff still see the exact
+              // payment options the customer will get. Forcing cta.canAccept
+              // false server-side would fall through to the null-terminal
+              // "expired" card and destroy the preview's purpose.
+              disabled={adminDraftPreview || ctaPhase === 'submitting'}
               serviceMode={serviceMode}
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}

@@ -1422,7 +1422,14 @@ function fmtDate(d) {
 
 function estimatePreviewHref(estimate) {
   if (!estimate?.token) return null;
-  return `/estimate/${encodeURIComponent(estimate.token)}`;
+  const base = `/estimate/${encodeURIComponent(estimate.token)}`;
+  // Unpublished rows render the legacy SSR page on the bare URL. The param
+  // routes staff to the REAL React customer page instead — the /data endpoint
+  // verifies the staff JWT before serving a draft, so the link stays inert
+  // for anyone else.
+  return ["draft", "scheduled"].includes(String(estimate?.status))
+    ? `${base}?adminPreview=1`
+    : base;
 }
 
 // Formats an appointment row from /admin/estimates as a short label like

@@ -6,6 +6,7 @@ const config = require('../config');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
+const { verifyStaffBearer } = require('../middleware/admin-auth');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, formatETDate } = require('../utils/datetime-et');
@@ -6350,15 +6351,25 @@ async function handleEstimateView(req, res, next) {
     const cardHoldForcesReactView = CardHolds.isCardHoldEnabled()
       && !effectiveInvoiceMode
       && (estimate.show_one_time_option === true || isStructuralOneTimeOnlyEstimate(estData, estimate));
+    // Staff can request the REAL React renderer for an unpublished row via
+    // ?adminPreview=1 (the estimate tool's "Customer View" + the estimates
+    // list's Preview). The param is NOT authorization — this route only
+    // serves the SPA shell; GET /:token/data does the staff-JWT check and
+    // still 404s the draft for anyone else, so a non-staff hit on the URL
+    // renders the React "link isn't valid" screen (strictly less exposure
+    // than the SSR draft page below).
+    const adminPreviewRequested = req.query.adminPreview === '1';
     const shouldUseReactEstimateView = (estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView)
       // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
       // renderer so office staff can still preview a draft via /estimate/<token>
-      // before it's sent. The React `/:token/data` gate 404s drafts (security),
-      // so routing them to React would break draft preview; the default flip
-      // only takes effect once the estimate is actually published.
-      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+      // before it's sent — UNLESS the staff preview param asks for the React
+      // page (the renderer the customer actually gets once it's sent; the
+      // /:token/data staff gate makes that path draft-safe). The use_v2_view
+      // default flip otherwise only takes effect once the estimate is
+      // actually published.
+      && (!UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status) || adminPreviewRequested);
     if (shouldUseReactEstimateView && req.path.startsWith('/estimate/')) {
       return next();
     }
@@ -9517,6 +9528,20 @@ function assertExistingAppointmentUpdateApplied(updatedCount) {
 // they are intentionally NOT here.
 const UNPUBLISHED_ESTIMATE_STATUSES = ['draft', 'scheduled'];
 
+// Whether a /:token/data request MAY be upgraded to a staff draft preview —
+// the only bypass of isEstimateCustomerViewable, and deliberately narrow:
+// unpublished (draft/scheduled), non-archived rows only, and only when the
+// caller explicitly asked (?adminPreview=1). Expired/send_failed/archived
+// stay 404 even for staff. This predicate is the cheap half; the caller must
+// ALSO verify a staff Bearer JWT (verifyStaffBearer) before honoring it —
+// the `waves_admin` marker cookie is a view-count signal, never authorization.
+function adminDraftPreviewEligible(estimate, adminPreviewParam) {
+  return adminPreviewParam === '1'
+    && !!estimate
+    && !estimate.archived_at
+    && UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+}
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
@@ -12345,12 +12370,22 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // server-HTML page short-circuited these to the expired/not-found shell
     // before building any payload; the data endpoint owns that guard for the
     // React path. Non-viewable → 404 (the SPA renders its "this link may have
-    // expired or isn't valid" screen). No admin bypass: this fetch carries no
-    // current-session credential (the public page sends no admin Bearer token),
-    // and the `waves_admin` marker cookie is a 2-year, logout-persistent
-    // view-count signal — not authorization — so previewing a draft/expired
-    // estimate goes through an authenticated admin surface, never this endpoint.
-    if (!isEstimateCustomerViewable(estimate)) {
+    // expired or isn't valid" screen).
+    //
+    // ONE bypass: the staff draft preview. When the page URL carries
+    // ?adminPreview=1 the SPA attaches the staff session's Bearer token, and
+    // an UNPUBLISHED row is served to a VERIFIED staff JWT only
+    // (verifyStaffBearer — same checks as adminAuthenticate+requireTechOrAdmin;
+    // the `waves_admin` marker cookie is a 2-year logout-persistent view-count
+    // signal, never authorization, and still grants nothing here). This is
+    // what lets "Customer View" show a draft through the RENDERER the customer
+    // actually gets, instead of the diverging legacy SSR page. Expired /
+    // send_failed / archived rows stay 404 even for staff, and every view
+    // side effect below is skipped — a preview must not count views or flip
+    // a draft's status.
+    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
+      && Boolean(await verifyStaffBearer(req));
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
@@ -12365,7 +12400,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
     // suppress the very first "viewed" count + admin notification.
     const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
-    if (!isInternalRefresh && shouldCountView(req, ip, estimate)) {
+    if (!adminDraftPreview && !isInternalRefresh && shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
           view_count: db.raw('COALESCE(view_count, 0) + 1'),
@@ -12387,7 +12422,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // First-view transition — keep admin preview clicks from making the
     // estimate look customer-opened. Internal React refreshes (?refresh=1) are
     // never the first view, so they must not flip status or notify admin twice.
-    if (!isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    // The staff draft preview is hard-excluded above IP/UA heuristics: the
+    // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
+    // effect) if a staff preview ever slipped through shouldApplyFirstView.
+    if (!adminDraftPreview && !isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
@@ -12562,6 +12600,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       : null;
 
     res.json({
+      // Only present on a verified staff draft preview — the React page keys
+      // its "draft preview, not sent" banner + accept guards off this. Absent
+      // (not false) otherwise so customer responses stay byte-identical.
+      ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,
@@ -12810,3 +12852,4 @@ module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTierDiscount;
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
+module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
