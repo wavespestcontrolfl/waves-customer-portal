@@ -1497,10 +1497,18 @@ function assessApprovalPublish({ isVideoVariant, channels, priorPlatforms, curre
   const videoPosted = !isVideoVariant
     || platforms.some((p) => p?.success && (p.mediaType === 'reel' || p.mediaType === 'video'));
   const metaChannels = (channels || []).filter((c) => c === 'facebook' || c === 'instagram');
+  // A requested Meta channel must be RESOLVED before a video approval can
+  // finalize: a success (now or prior), or a channel-level skip in the current
+  // attempt (unconfigured/disabled — can never succeed). A channel with no
+  // entry at all stays blocking: prior failures are not carried into the merge,
+  // so a retry that comes back with only a GLOBAL skip (automation disabled/
+  // paused → one {platform:'all', skipped} row) must not let the prior
+  // success finalize a run whose other Meta channel never got the video.
   const videoBlocked = !!isVideoVariant && metaChannels.some((channel) => {
     const entries = platforms.filter((p) => p?.platform === channel);
     if (entries.some((p) => p?.success)) return false;
-    return entries.some((p) => p && !p.skipped && !p.dryRun); // attempted + failed
+    if (entries.length && entries.every((p) => p?.skipped)) return false; // channel-level skip
+    return true; // failed, dry-run, or unresolved (global skip / never attempted)
   });
   return {
     success,
@@ -1531,7 +1539,18 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     const preview = toJson(run.preview, {});
     const input = toJson(run.input, {});
     const variants = runVariants(preview);
-    const idx = Number(variantIndex ?? 0);
+    const priorRecordFull = toJson(run.publish_result, {});
+    const priorHasSuccess = Array.isArray(priorRecordFull?.platforms)
+      && priorRecordFull.platforms.some((p) => p?.success);
+    let idx = Number(variantIndex ?? 0);
+    // Once any platform has actually posted, the creative is LOCKED to the
+    // variant that posted it: a retry (page refresh → variantIndex defaults to
+    // 0) must finish the same publish, not post a DIFFERENT still/video to the
+    // remaining channels while earlier channels carry the original.
+    const lockedIdx = priorHasSuccess ? Number(priorRecordFull?.approval?.variantIndex) : NaN;
+    if (Number.isInteger(lockedIdx) && lockedIdx >= 0 && lockedIdx < variants.length) {
+      idx = lockedIdx;
+    }
     if (!Number.isInteger(idx) || idx < 0 || idx >= variants.length) {
       return { ok: false, status: 400, error: variants.length ? `variantIndex must be 0..${variants.length - 1}` : 'run has no publishable image' };
     }
@@ -1570,8 +1589,7 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     // GBP, and a half-posted FB+IG pair retries only the missing platform. GBP
     // posts per-location but is treated as one channel: any location success
     // skips it (re-posting the succeeded locations would duplicate).
-    const priorRecord = toJson(run.publish_result, {})?.platforms;
-    const priorPlatforms = Array.isArray(priorRecord) ? priorRecord : [];
+    const priorPlatforms = Array.isArray(priorRecordFull?.platforms) ? priorRecordFull.platforms : [];
     const alreadyPosted = new Set(priorPlatforms.filter((p) => p?.success).map((p) => p?.platform));
     const remainingChannels = channels.filter((channel) => !alreadyPosted.has(channel));
 
@@ -1605,7 +1623,32 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       priorPlatforms,
       current: publishResult,
     });
+    // Stamp the approval's variant identity onto the stored record — the lock
+    // above reads it so retries can't switch creative mid-publish.
+    assessment.mergedPublishResult.approval = {
+      variantIndex: idx,
+      type: isVideoVariant ? 'video' : 'image',
+      conceptKey: chosen.conceptKey || null,
+    };
     const published = assessment.complete && !SOCIAL_FLAGS.dryRun;
+
+    // publishToAll's postId update wrote only THIS attempt's results to the
+    // post-history row; overwrite with the merged cross-attempt record so
+    // admin history and the per-platform failure alerting keep the earlier
+    // successes (e.g. attempt-1 Facebook video + retry Instagram Reel).
+    if (run.social_media_post_id && remainingChannels.length && priorPlatforms.length) {
+      const mergedContent = {};
+      for (const p of assessment.mergedPublishResult.platforms) {
+        if (p?.content) mergedContent[p.location ? `${p.platform}_${p.location}` : p.platform] = p.content;
+      }
+      await db('social_media_posts')
+        .where({ id: run.social_media_post_id })
+        .update({
+          platforms_posted: JSON.stringify(assessment.mergedPublishResult.platforms),
+          ...(Object.keys(mergedContent).length ? { published_content: JSON.stringify(mergedContent) } : {}),
+        })
+        .catch(() => null);
+    }
 
     // Consume the review from the candidate queue only after a REAL publish —
     // same invariants as the autonomous publish path (never on dry-run/failure,
@@ -1677,6 +1720,22 @@ async function rejectAutonomousRun(runId, { reason } = {}) {
     if (!run) return { ok: false, status: 404, error: 'autonomous run not found' };
     if (run.status !== 'draft_created') {
       return { ok: false, status: 409, error: `run is '${run.status}' — only draft_created runs can be rejected` };
+    }
+    // A partially-published approval (some platform already posted, e.g. GBP
+    // went out before the video failed) can NOT be rejected — marking it
+    // rejected would hide LIVE external posts behind a rejected draft. The
+    // path forward is retrying the approval (which narrows to the missing
+    // channels) or removing the live posts manually first.
+    const priorPlatforms = toJson(run.publish_result, {})?.platforms;
+    const postedPlatforms = (Array.isArray(priorPlatforms) ? priorPlatforms : [])
+      .filter((p) => p?.success)
+      .map((p) => (p.location ? `${p.platform}/${p.location}` : p.platform));
+    if (postedPlatforms.length) {
+      return {
+        ok: false,
+        status: 409,
+        error: `this run has already posted to ${Array.from(new Set(postedPlatforms)).join(', ')} — it cannot be rejected; retry the approval to finish publishing, or remove the live posts manually first`,
+      };
     }
     const note = cleanText(reason, 300);
     const updated = await updateAutonomousRun(run.id, {

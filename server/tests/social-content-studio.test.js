@@ -389,3 +389,35 @@ describe('assessApprovalPublish (approval retry semantics)', () => {
     expect(a.complete).toBe(false);
   });
 });
+
+describe('assessApprovalPublish (round 5: unresolved channels block)', () => {
+  const CHANNELS = ['gbp', 'facebook', 'instagram'];
+
+  test('a global-skip retry (automation paused) cannot finalize a half-posted video', () => {
+    const a = Studio.assessApprovalPublish({
+      isVideoVariant: true,
+      channels: CHANNELS,
+      priorPlatforms: [
+        { platform: 'facebook', success: true, mediaType: 'video' },
+        { platform: 'instagram', success: false, error: 'container timeout' },
+      ],
+      // publishToAll under a paused/disabled gate returns ONE global row —
+      // no per-channel entries — and prior failures are not carried forward.
+      current: { success: false, platforms: [{ platform: 'all', skipped: 'Automation is paused' }] },
+    });
+    expect(a.success).toBe(true); // the FB video is genuinely live
+    expect(a.videoPosted).toBe(true);
+    expect(a.videoBlocked).toBe(true); // instagram is unresolved, not skipped
+    expect(a.complete).toBe(false);
+  });
+
+  test('a requested Meta channel with no entry at all keeps the run retryable', () => {
+    const a = Studio.assessApprovalPublish({
+      isVideoVariant: true,
+      channels: CHANNELS,
+      priorPlatforms: [{ platform: 'facebook', success: true, mediaType: 'video' }],
+      current: { success: false, platforms: [] },
+    });
+    expect(a.complete).toBe(false);
+  });
+});
