@@ -50,6 +50,32 @@ Decision logic is the pure, unit-tested `deriveCallReviewBridge()` in
 routing is promoted (it is guarded on `!CALL_EXTRACTION_V2_DRIVES_ROUTING`), so it
 never double-acts with the enforce-mode gate.
 
+### 1b. Garbled-street recovery + email garble guard (2026-07-03)
+
+Validation alone can't fix a phonetic mis-transcription — the caller said
+"5039 **Seafoam** Trail" (Lakewood Ranch), the transcriber wrote "5039 **C
+Phone** Trl", Google returned `missing_component`, and the raw garble persisted
+onto the lead/customer with only an advisory flag. Two additions:
+
+- **Address recovery** (`server/services/address-validation/recovery.js`) — on
+  `missing_component` / `ambiguous` / `confirm_needed` with a house number, try
+  Places Autocomplete on the street as heard, then Gemini phonetic re-hearings
+  ("C Phone" → "Seafoam"), each candidate re-confirmed through Address
+  Validation (premise-level, house number + caller ZIP/city must corroborate).
+  Exactly ONE confirmed premise → adopted into the write with the advisory
+  `address_recovered` read-back flag; anything weaker → candidates attached to
+  the `address_unverified` triage payload ("did you mean …"). Fail-open; kill
+  switch `ADDRESS_RECOVERY_ENABLED=false`; model override
+  `GEMINI_RECOVERY_MODEL` (defaults to the extraction model).
+- **Email garble guard** — a spelled "W, C-as-in-Charlie, W, 63" transcribed as
+  "www.cw63 at gmail.com" is syntactically valid but not a mailbox (and may be
+  a **stranger's**). URL-shaped local parts (`www.`/`http`) are demoted to
+  `email_raw` (nothing stores or emails them) and flagged `email_invalid`; both
+  prompts now decode ASR-concatenated phonetic tokens ("blikenboy" = "B like in
+  boy") and trust decoded letters over the caller's transcribed read-back.
+- `leads.extracted_data.needs_confirmation` is now **merged across calls** (a
+  follow-up call no longer erases the earlier call's read-back warnings).
+
 ---
 
 ## 2. CSR / field call-handling checklist (process, no code)

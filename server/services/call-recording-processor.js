@@ -41,7 +41,8 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
+const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
@@ -73,6 +74,7 @@ const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2
 // silently-unverified address or an incomplete account holder.
 const CONFIRM_REASON_TEXT = {
   address_unverified: 'service address could not be verified — read it back to the caller',
+  address_recovered: 'street name was garbled in transcription — matched to a single validated address; read it back to the caller',
   out_of_service_area: 'address resolves outside the service area — verify the county',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
@@ -1545,6 +1547,8 @@ IMPORTANT — customer name rules:
 IMPORTANT — spelled-out names and emails are authoritative over how they sounded:
 - When the caller spells a name or email letter-by-letter, or with phonetic markers ("B as in boy", "V as in Victor", "N as in Nancy"), the SPELLED letters are the source of truth — use them, not the word as it was transcribed phonetically. Callers spell precisely because the spoken form is easy to mishear (e.g. the caller says "Smyth" but then spells S-M-I-T-H, so the correct value is "Smith", and the email is jane.smith@example.com — NOT smyth). This is an illustrative example only — never copy this name or email into the output.
 - When an email is described relative to the name (e.g. "first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
+- Transcription often CONCATENATES a phonetic spelling into nonsense tokens: "blikenboy, vlikenvictor" is "B like in boy, V like in Victor" — decode each such token to its letter (B, V). A run of these tokens ending in digits is a spelled email local part ("blikenboy vlikenvictor 42 at gmail.com" → bv42@gmail.com). Decode the letters even when the words are jammed together.
+- The decoded spelled letters ALSO beat the caller's own read-back of the finished email as transcribed — the read-back is one more chance for the transcriber to mishear. A transcribed local part that looks like a URL fragment ("www.", "http") is a mis-hearing, never a real mailbox: reconstruct it from the spelled letters, and if you cannot reconstruct it confidently, return null.
 
 IMPORTANT — customer contact rules:
 - Do not invent email addresses. Only return email when the caller clearly says or spells the complete address.
@@ -2358,12 +2362,28 @@ const CallRecordingProcessor = {
             );
           } catch (_e) { /* fall back to model flags only */ }
         }
+        // Second-chance street lookup: Address Validation only validates what
+        // it's given — when the transcription garbled the street phonetically
+        // ("Seafoam Trail" → "C Phone Trl") AV returns missing_component and
+        // the raw garble used to persist untouched. Recovery asks Places
+        // Autocomplete (then Gemini phonetic re-hearings, each re-confirmed
+        // through AV) what the caller plausibly said; the bridge adopts the
+        // result only when exactly ONE real premise survives confirmation.
+        let addressRecovery = null;
+        if (v2AddressValidation && RECOVERABLE_STATUSES.has(v2AddressValidation.status)) {
+          addressRecovery = await recoverStreetAddress({ extracted, avStatus: v2AddressValidation.status })
+            .catch(() => null);
+        }
         const { normalizedAddress, normalizedEmail, needsConfirmation } = deriveCallReviewBridge({
           addressValidation: v2AddressValidation,
           extracted,
           v2TriageFlags: bridgeTriageFlags,
           callerRelationship: v2Ext?.caller?.relationship_to_property,
+          addressRecovery,
         });
+        // Keep the as-heard street for the triage payload before adoption
+        // overwrites it — the reviewer needs both sides of the correction.
+        const rawStreetBeforeAdopt = extracted.address_line1 || null;
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
           // reads extracted.* below, so both records get the corrected address.
@@ -2373,6 +2393,9 @@ const CallRecordingProcessor = {
           if (normalizedAddress.zip) extracted.zip = normalizedAddress.zip;
           if (v2AddressValidation?.status === 'corrected') {
             logger.info(`[call-proc-bridge] Adopted Google-corrected address for ${maskSid(callSid)}`);
+          }
+          if (needsConfirmation.includes('address_recovered')) {
+            logger.info(`[call-proc-bridge] Recovered garbled street via ${addressRecovery?.method} for ${maskSid(callSid)}`);
           }
         }
         if (normalizedEmail) {
@@ -2412,12 +2435,23 @@ const CallRecordingProcessor = {
           // Shadow mode does not block the write -> severity 'advisory'.
           for (const flag of needsConfirmation.slice(0, 10)) {
             try {
+              // Address flags carry the correction evidence so the Needs
+              // Review card can show "heard X → matched Y" (or the candidate
+              // list when nothing was confidently confirmed) instead of a
+              // bare "could not be verified".
+              const isAddressFlag = flag === 'address_unverified' || flag === 'address_recovered';
               await db('triage_items')
                 .insert(buildTriageItem({
                   callLogId: call.id,
                   flag,
                   extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                   severity: 'advisory',
+                  extraPayload: isAddressFlag && addressRecovery?.attempted ? {
+                    address_as_heard: rawStreetBeforeAdopt,
+                    address_recovered: flag === 'address_recovered' ? extracted.address_line1 : null,
+                    address_candidates: addressRecovery.candidates || [],
+                    recovery_method: addressRecovery.method || null,
+                  } : null,
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                 .ignore();
@@ -3067,6 +3101,22 @@ const CallRecordingProcessor = {
             email: leadUpdates.email ?? current?.email,
           };
           const contact = leadContactCompleteness(mergedContact);
+          // needs_confirmation is NOT a rolling snapshot like the fields
+          // around it: the reasons are read-back reminders that stand until
+          // the office confirms them, and a follow-up call that never
+          // restates the address/email must not erase the earlier call's
+          // warnings (a quick "slab or footer?" callback was wiping
+          // address_unverified/email_unverified off the lead). Union prior +
+          // this call; a recovered address supersedes its stale unverified.
+          const priorNeedsConfirmation = (() => {
+            try {
+              const data = typeof current?.extracted_data === 'string'
+                ? JSON.parse(current.extracted_data)
+                : (current?.extracted_data || {});
+              return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
+            } catch { return []; }
+          })();
+          const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);
           leadUpdates.extracted_data = JSON.stringify({
             pain_points: extracted.pain_points,
             preferred_date_time: extracted.preferred_date_time,
@@ -3074,7 +3124,7 @@ const CallRecordingProcessor = {
             call_type: extracted.call_type || null,
             ...(extracted.is_voicemail ? { voicemail: true } : {}),
             ...(contact.missing.length ? { missing_for_qualification: contact.missing } : {}),
-            ...(bridgeNeedsConfirmation.length ? { needs_confirmation: bridgeNeedsConfirmation } : {}),
+            ...(mergedNeedsConfirmation.length ? { needs_confirmation: mergedNeedsConfirmation } : {}),
           });
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;

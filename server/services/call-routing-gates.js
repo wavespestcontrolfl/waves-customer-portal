@@ -80,6 +80,10 @@ function buildTriageItem({
   flag,
   extraction,
   severity = 'blocking',
+  // Flag-specific evidence merged into the payload (e.g. the as-heard vs
+  // recovered street + candidate list for address flags) so the Needs Review
+  // card can show WHAT to confirm, not just that something needs confirming.
+  extraPayload = null,
 }) {
   const flagToCategoryMap = {
     out_of_service_area: 'out_of_service_area',
@@ -105,6 +109,7 @@ function buildTriageItem({
     missing_last_name: 'name_review',
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
+    address_recovered: 'address_review',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;
@@ -120,6 +125,7 @@ function buildTriageItem({
       flag,
       confidence: extraction?.confidence?.overall,
       scheduling_status: extraction?.scheduling?.status,
+      ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {}),
     }),
     created_at: new Date(),
     updated_at: new Date(),

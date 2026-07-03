@@ -32,6 +32,19 @@ function cleanValidEmailOrNull(value) {
   return EMAIL_RE.test(email) ? email : null;
 }
 
+// A syntactically-valid email whose local part reads like a URL fragment is a
+// transcription artifact, not a mailbox — a caller spelling "W, C-as-in-
+// Charlie, W, 63" gets transcribed as "www.cw63 at gmail.com" and the literal
+// "www.cw63@gmail.com" may be a real stranger's mailbox. Transcript captures
+// matching this are demoted to email_raw (below) so no write path stores them
+// and no first-touch email fires. Transcript-specific by design: a TYPED
+// web-form email is the user's own claim and never runs through this.
+const GARBLED_TRANSCRIPT_EMAIL_RE = /^(?:www\.|https?[:.]|[^@]*\.(?:com|net|org)@)/i;
+function looksGarbledTranscriptEmail(value) {
+  const email = cleanEmail(value);
+  return !!email && GARBLED_TRANSCRIPT_EMAIL_RE.test(email);
+}
+
 function normalizeNanpPhone(value) {
   const raw = cleanText(value);
   if (!raw) return null;
@@ -163,17 +176,22 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     ? extracted
     : {};
   const normalizedPhone = normalizeCallPhone(source.phone, callerPhone);
+  const validEmail = cleanValidEmailOrNull(source.email);
+  // Regex-valid but URL-shaped ("www.cw63@gmail.com") = transcription garble;
+  // demote to email_raw with the rest of the rejects.
+  const usableEmail = validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null;
 
   return {
     ...source,
     first_name: cleanNullableText(source.first_name),
     last_name: cleanNullableText(source.last_name),
-    email: cleanValidEmailOrNull(source.email),
-    // The raw model email survives normalization when the regex rejects it —
-    // the call-review bridge needs it to flag email_invalid (and to attempt a
-    // missing-dot domain fix) for read-back on the callback; `email` stays the
-    // only value any write path stores.
-    email_raw: cleanValidEmailOrNull(source.email) ? null : (cleanNullableText(source.email) || null),
+    email: usableEmail,
+    // The raw model email survives normalization when the regex (or the
+    // transcript-garble guard) rejects it — the call-review bridge needs it to
+    // flag email_invalid (and to attempt a missing-dot domain fix) for
+    // read-back on the callback; `email` stays the only value any write path
+    // stores.
+    email_raw: usableEmail ? null : (cleanNullableText(source.email) || null),
     phone: normalizedPhone || null,
     address_line1: normalizeNullableStreetLine(source.address_line1),
     city: cleanNullableText(source.city),
@@ -277,6 +295,7 @@ module.exports = {
   cleanNullableText,
   cleanEmail,
   cleanValidEmailOrNull,
+  looksGarbledTranscriptEmail,
   normalizeNanpPhone,
   normalizePhoneForStorage,
   normalizeWebsiteQuoteContact,
