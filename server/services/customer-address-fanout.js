@@ -33,7 +33,13 @@ const { formatAddress, normalizeStreetLine } = require('../utils/address-normali
 // customer-facing email/PDF content on their next attempt, so their snapshot
 // must not go stale either). Terminal lead states mirror CLOSED_STATUSES in
 // intelligence-bar/leads-tools.js.
-const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed'];
+// 'sending' is deliberately ABSENT even though it is sendable: a row in that
+// state has an in-flight send holding the proposal PDF it already built —
+// rewriting the snapshot under it would let the final send stamp
+// proposalDelivery against an address the attached PDF never used. The row
+// still matches the old address once it settles (sent/send_failed), so the
+// next fan-out heals it.
+const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'];
 const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
 
 // Lowercased alphanumerics only — spacing/punctuation/casing differences
@@ -80,17 +86,23 @@ function snapshotMatchesContact(snapshot, contact) {
 
   const tail = segments.slice(1).join(' ');
   const snapZip = (tail.match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || null;
-  const contactZip = String(contact.zip || '').trim().slice(0, 5);
-  if (snapZip && /^\d{5}$/.test(contactZip)) return snapZip === contactZip;
+  const snapCitySeg = segments.slice(1).find((seg) => seg.trim() && !NON_CITY_TAIL_RE.test(seg)) || '';
+  const snapCity = snapCitySeg.replace(/\b(?:fl|florida)\b/gi, '').replace(/\b\d{5}(?:-\d{4})?\b/g, '');
+  return placeCorroborates(contact, { zip: snapZip, city: snapCity });
+}
 
+// ZIP is the strong discriminator when both sides have one; postal-city names
+// alias (Bradenton / Lakewood Ranch share 34211), so the city comparison only
+// applies when no zip comparison is possible. Missing data on either side
+// corroborates nothing and matches.
+function placeCorroborates(contact, place) {
+  const placeZip = (String(place.zip || '').match(/\d{5}/) || [])[0] || null;
+  const contactZip = String(contact.zip || '').trim().slice(0, 5);
+  if (placeZip && /^\d{5}$/.test(contactZip)) return placeZip === contactZip;
   const contactCityKey = addressMatchKey(contact.city);
-  if (!contactCityKey) return true;
-  const snapCitySeg = segments.slice(1).find((seg) => seg.trim() && !NON_CITY_TAIL_RE.test(seg));
-  if (!snapCitySeg) return true;
-  const snapCityKey = addressMatchKey(
-    snapCitySeg.replace(/\b(?:fl|florida)\b/gi, '').replace(/\b\d{5}(?:-\d{4})?\b/g, ''),
-  );
-  return !snapCityKey || snapCityKey === contactCityKey;
+  const placeCityKey = addressMatchKey(place.city);
+  if (!contactCityKey || !placeCityKey) return true;
+  return placeCityKey === contactCityKey;
 }
 
 // Back-compat shape for callers/tests that only have a street line.
@@ -122,28 +134,50 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   const leadRows = await conn('leads')
     .where({ customer_id: customerId })
     .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
-    .select('id', 'address');
+    .select('id', 'address', 'city', 'zip');
+  // A bare street-line lead keeps its place in the separate city/zip COLUMNS,
+  // so those must corroborate the contact the same way a full snapshot's tail
+  // does — a second property on an identically-named street in another
+  // city/zip is never treated as a copy.
+  const leadMatchesContact = (r, contact) => {
+    if (!snapshotMatchesContact(r.address, contact)) return false;
+    if (String(r.address || '').includes(',')) return true; // tail already corroborated
+    return placeCorroborates(contact, { city: r.city, zip: r.zip });
+  };
   // Some intake paths store a FULL single-line address in leads.address (the
   // contact-normalization backfill deliberately left those untouched) —
   // rewriting one with just the street line would drop its embedded
   // city/state/zip. Full-string snapshots get the rebuilt full address (which
   // needs city+zip, same rule as estimates below); street-line snapshots get
   // the street line.
-  const matched = leadRows.filter((r) => matchesCustomerAddress(r.address));
+  const matched = leadRows.filter((r) => leadMatchesContact(r, before) || leadMatchesContact(r, after));
   const leadGroups = [
-    { ids: matched.filter((r) => !String(r.address || '').includes(',')).map((r) => r.id), address: after.address_line1 },
-    { ids: hasCityZip ? matched.filter((r) => String(r.address || '').includes(',')).map((r) => r.id) : [], address: fullAddress },
+    { rows: matched.filter((r) => !String(r.address || '').includes(',')), address: after.address_line1 },
+    { rows: hasCityZip ? matched.filter((r) => String(r.address || '').includes(',')) : [], address: fullAddress },
   ];
   for (const group of leadGroups) {
-    if (!group.ids.length) continue;
     // city/zip are patched only when the customer row actually HAS them — a
     // street-only customer edit must not erase more complete location data
     // captured on the lead.
     const leadPatch = { address: group.address, updated_at: now };
     if (addressMatchKey(after.city)) leadPatch.city = after.city;
     if (addressMatchKey(after.zip)) leadPatch.zip = after.zip;
+    // No-op rows are skipped entirely: fan-out runs on address-field PRESENCE
+    // (resaves included), and bumping updated_at on an unchanged lead would
+    // silently move it out of the staleness/follow-up queries keyed on it.
+    const ids = group.rows
+      .filter((r) => addressMatchKey(r.address) !== addressMatchKey(group.address)
+        || (leadPatch.city !== undefined && addressMatchKey(r.city) !== addressMatchKey(leadPatch.city))
+        || (leadPatch.zip !== undefined && addressMatchKey(r.zip) !== addressMatchKey(leadPatch.zip)))
+      .map((r) => r.id);
+    if (!ids.length) continue;
+    // The update re-asserts ownership + open status: a concurrent relink
+    // (leads.customer_id is written by live paths, e.g. public-quote) or a
+    // close landing between select and update must not receive this
+    // customer's address.
     counts.leads += await conn('leads')
-      .whereIn('id', group.ids)
+      .whereIn('id', ids)
+      .where({ customer_id: customerId })
       .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
       .update(leadPatch);
   }
@@ -183,7 +217,12 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
       // already-correct proposal.
       const proposalTargetKey = (value) => {
         const segs = String(value ?? '').replace(/,?\s*(?:USA|United States)\s*$/i, '').split(',');
-        return [normalizeStreetLine(segs[0]), ...segs.slice(1)].map((x) => addressMatchKey(x)).join('|');
+        // State names normalize too ('Florida 34211' ≡ 'FL 34211') — the
+        // matcher treats them as the same place by zip, so a spelled-out
+        // state must not read as a stale proposal and drop proposalDelivery.
+        return [normalizeStreetLine(segs[0]), ...segs.slice(1)]
+          .map((x) => addressMatchKey(String(x).replace(/\bflorida\b/gi, 'fl')))
+          .join('|');
       };
       const proposalAlreadyTarget = proposalTargetKey(proposalCurrent) === proposalTargetKey(fullAddress.slice(0, 200));
       if (proposalCurrent && !proposalAlreadyTarget && matchesCustomerAddress(proposalCurrent)) {
@@ -192,8 +231,11 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
           [fullAddress.slice(0, 200)],
         );
       }
+      // Same no-op rule as leads: an already-at-target row with no proposal
+      // patch gets no write (and no updated_at bump).
+      if (!patch.estimate_data && String(row.address || '') === fullAddress) continue;
       counts.estimates += await conn('estimates')
-        .where({ id: row.id })
+        .where({ id: row.id, customer_id: customerId })
         .whereIn('status', OPEN_ESTIMATE_STATUSES)
         .whereNull('archived_at')
         .update(patch);

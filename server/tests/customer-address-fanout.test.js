@@ -239,8 +239,9 @@ describe('propagateCustomerAddressChange', () => {
 
     await propagateCustomerAddressChange({ before: AFTER, after: AFTER }, conn);
 
-    const patch = conn.__updates.find((u) => u.table === 'estimates').patch;
-    expect(patch.estimate_data).toBeUndefined();
+    // Better than merely keeping proposalDelivery: an already-at-target row
+    // with nothing to patch gets NO write at all (no updated_at bump).
+    expect(conn.__updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
   });
 
   test('a suffix-spelling-only difference from the target never drops proposalDelivery', async () => {
@@ -253,6 +254,54 @@ describe('propagateCustomerAddressChange', () => {
         address: '123 Main Street, Bradenton, FL 34211',
         estimate_data: {
           proposal: { propertyAddress: '123 Main Street, Bradenton, FL 34211' },
+          proposalDelivery: { pdfEmailed: true },
+        },
+      }],
+    });
+
+    await propagateCustomerAddressChange({
+      before: { ...AFTER, address_line1: '123 Main St' },
+      after: { ...AFTER, address_line1: '123 Main St' },
+    }, conn);
+
+    // The address column rewrites to the canonical form, but the proposal
+    // (same place, different suffix spelling) keeps its delivery marker.
+    const patch = conn.__updates.find((u) => u.table === 'estimates').patch;
+    expect(patch.estimate_data).toBeUndefined();
+  });
+
+  test('a bare-street lead whose own city/zip columns disagree is a different property — untouched', async () => {
+    const conn = makeConn({
+      leads: [{ id: 'lead-other-city', address: '4867 Tobermorey Way', city: 'Sarasota', zip: '34240' }],
+      estimates: [],
+    });
+
+    const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+
+    expect(counts.leads).toBe(0);
+    expect(conn.__updates).toHaveLength(0);
+  });
+
+  test('an unchanged lead resave is a no-op write (updated_at is never bumped for nothing)', async () => {
+    const conn = makeConn({
+      leads: [{ id: 'lead-current', address: '4857 Tobermory Way', city: 'Bradenton', zip: '34211' }],
+      estimates: [],
+    });
+
+    const counts = await propagateCustomerAddressChange({ before: AFTER, after: AFTER }, conn);
+
+    expect(counts.leads).toBe(0);
+    expect(conn.__updates).toHaveLength(0);
+  });
+
+  test('a spelled-out state in the proposal is the same place — proposalDelivery survives', async () => {
+    const conn = makeConn({
+      leads: [],
+      estimates: [{
+        id: 'est-state',
+        address: '123 Main Street, Bradenton, Florida 34211',
+        estimate_data: {
+          proposal: { propertyAddress: '123 Main Street, Bradenton, Florida 34211' },
           proposalDelivery: { pdfEmailed: true },
         },
       }],
