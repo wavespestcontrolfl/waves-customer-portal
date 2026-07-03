@@ -244,6 +244,10 @@ const ABSOLUTE_URL_RE = /\b([a-z][a-z0-9+.-]*):\/\/[^\s<>()"'\]]+/gi;
 const MD_DEST_SCHEME_RE = /\]\(\s*<?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
 const ATTR_SCHEME_RE = /\b(?:href|src)\s*=\s*["']?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
 const AUTOLINK_SCHEME_RE = /<([a-z][a-z0-9+.-]*):(\/\/)?[^>\s]*>/gi;
+// Reference-style Markdown definitions — `[bad]: javascript:alert(1)` on
+// its own line becomes the destination of every `[click][bad]` use, and
+// none of the three inline shapes above see it.
+const REF_DEF_SCHEME_RE = /^ {0,3}\[[^\]]+\]:\s*<?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gim;
 const ALLOWED_DEST_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
 // Protocol-relative URL (//host/path) — scheme-less external reference that
 // bypasses an https?:// scan. Requires a dotted host with a TLD so prose
@@ -251,14 +255,18 @@ const ALLOWED_DEST_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
 const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=])\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?=[/\s"')\]]|$)/i;
 const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
 // tel: destinations — validated against the Waves phone allowlist, exactly
-// like mailto recipients are validated against the business domain.
-const TEL_RE = /\btel:([+\d][\d().\s-]{5,18}\d)/gi;
+// like mailto recipients are validated against the business domain. The
+// capture is deliberately CATCH-ALL (anything up to a delimiter, even
+// empty): tel is whitelisted in the scheme pre-scan, so any tel: use whose
+// number portion this didn't match would fall through UNVALIDATED —
+// `tel:911` and `tel:abc` must reach isWavesPhone and fail there.
+const TEL_RE = /\btel:([^\s"'<>)\]]*)/gi;
 
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = String(text || '');
   if (!body) return null;
-  for (const src of [MD_DEST_SCHEME_RE, ATTR_SCHEME_RE, AUTOLINK_SCHEME_RE]) {
-    const destRe = new RegExp(src.source, 'gi');
+  for (const src of [MD_DEST_SCHEME_RE, ATTR_SCHEME_RE, AUTOLINK_SCHEME_RE, REF_DEF_SCHEME_RE]) {
+    const destRe = new RegExp(src.source, src.flags);
     let dm;
     while ((dm = destRe.exec(body)) !== null) {
       const scheme = dm[1].toLowerCase();
@@ -275,22 +283,26 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   while ((t = telRe.exec(body)) !== null) {
     const { isWavesPhone } = require('./waves-phones');
     if (!isWavesPhone(t[1])) {
-      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a tel: link to "${t[1].trim()}", which is not a Waves phone number — tap-to-call links may only dial the business's own lines.`);
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a tel: link to "${t[1].trim() || '(empty)'}", which is not a Waves phone number — tap-to-call links may only dial the business's own lines.`);
     }
   }
   const allowed = allowedLinkHosts({ operatorCitations, requiredSourceUrls });
   const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
   let m;
   while ((m = urlRe.exec(body)) !== null) {
+    // Trim trailing sentence punctuation: the bare-URL charset admits , ; .
+    // ! ? so prose like "see https://wavespestcontrol.com, then call" would
+    // otherwise parse hostname "wavespestcontrol.com," and P0 a legit link.
+    const rawUrl = m[0].replace(/[.,;:!?]+$/, '');
     const scheme = m[1].toLowerCase();
     if (scheme !== 'http' && scheme !== 'https') {
-      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a "${scheme}:" URL ("${m[0].slice(0, 60)}") — only http(s) links to allowlisted hosts (or relative internal paths) are permitted.`);
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a "${scheme}:" URL ("${rawUrl.slice(0, 60)}") — only http(s) links to allowlisted hosts (or relative internal paths) are permitted.`);
     }
     let host = null;
-    try { host = new URL(m[0]).hostname; } catch { host = null; }
+    try { host = new URL(rawUrl).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
     if (!hostAllowed(norm, allowed)) {
-      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || m[0].slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || rawUrl.slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
     }
   }
   const mailtoRe = new RegExp(MAILTO_RE.source, 'gi');

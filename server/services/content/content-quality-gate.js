@@ -521,7 +521,7 @@ function checkSourceInternalLink(draft) {
 // Single-sourced from waves-phones.js (shared with seo-completion-gate and
 // content-guardrails' tel: destination check) — the per-file copies had
 // already drifted once (last-7 vs full-10 keys).
-const { WAVES_PHONES, isWavesPhone } = require('./waves-phones');
+const { isWavesPhone } = require('./waves-phones');
 
 // Waves' own office street addresses (config/locations.js) are legitimate
 // city-service NAP furniture — strip them before the PII address scan so
@@ -531,9 +531,14 @@ function stripWavesOfficeAddresses(text) {
   try {
     const { WAVES_LOCATIONS } = require('../../config/locations');
     for (const loc of WAVES_LOCATIONS || []) {
-      const addr = String(loc?.address || '').split(',')[0].trim(); // street portion
-      if (!addr) continue;
-      const re = new RegExp(addr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'gi');
+      const street = String(loc?.address || '').split(',')[0].trim(); // street portion
+      if (!street) continue;
+      // Strip the BASE street (unit/suite marker removed): valid NAP copy
+      // may write "13649 Luxe Ave" without the "#110", and the base form is
+      // a substring of the full form, so one replacement covers both (a
+      // leftover " #110" fragment doesn't match the address pattern).
+      const base = street.split(/\s+(?:#|Ste\.?\b|Suite\b|Unit\b)/i)[0].trim() || street;
+      const re = new RegExp(base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'gi');
       out = out.replace(re, '[waves-office]');
     }
   } catch { /* locations unavailable — scan unstripped (more conservative) */ }
@@ -552,7 +557,9 @@ function checkRedactionPassed(draft) {
     const digits = raw.replace(/\D/g, '');
     const last10 = digits.length >= 10 ? digits.slice(-10) : null;
     if (!last10) return { ok: false, reason: 'malformed_phone_number_in_body' };
-    if (!WAVES_PHONES.has(last10)) {
+    // isWavesPhone, not the core-office set: spoke/refresh copy legitimately
+    // carries domain/GBP tracking lines, which are Waves' own numbers too.
+    if (!isWavesPhone(last10)) {
       return { ok: false, reason: `non_business_phone_number_in_body:${last10}` };
     }
   }
@@ -578,6 +585,15 @@ function checkRedactionPassed(draft) {
     const scanned = redact(stripWavesOfficeAddresses(body));
     const hit = (scanned.findings || []).find((f) => f.type === 'name' || f.type === 'address');
     if (hit) return { ok: false, reason: `unredacted_${hit.type}_in_body` };
+    // 'low' confidence means the redactor itself says its heuristics were
+    // blind on this text (effectively all-lowercase, long unstructured
+    // runs) — "no findings" proves nothing there, so a hard publish gate
+    // must fail: a lowercase customer quote with an unredacted name
+    // reports exactly low + zero findings. Generated drafts are properly
+    // capitalized markdown and never trip this.
+    if (scanned.confidence === 'low') {
+      return { ok: false, reason: 'pii_confidence_low' };
+    }
   } catch (err) {
     // Redactor unavailable = we cannot prove the body is clean — this is a
     // HARD publish gate, so fail closed rather than silently passing.

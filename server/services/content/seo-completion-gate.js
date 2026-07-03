@@ -267,8 +267,10 @@ function schemaMentionsHiddenFaq(draft = {}, renderedHtml = null) {
 
 // Single-sourced from waves-phones.js (shared with content-quality-gate and
 // content-guardrails' tel: destination check) — the per-file copies had
-// already drifted once (last-7 vs full-10 keys).
-const { WAVES_PHONES } = require('./waves-phones');
+// already drifted once (last-7 vs full-10 keys). isWavesPhone covers every
+// owned line incl. spoke/GBP tracking numbers, which legitimately appear in
+// refresh/spoke copy.
+const { isWavesPhone } = require('./waves-phones');
 
 function detectPii(body = '') {
   const text = String(body || '');
@@ -278,7 +280,7 @@ function detectPii(body = '') {
     const digits = raw.replace(/\D/g, '');
     const last10 = digits.length >= 10 ? digits.slice(-10) : null;
     if (!last10) return true;
-    if (!WAVES_PHONES.has(last10)) return true;
+    if (!isWavesPhone(last10)) return true;
   }
   return /[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/.test(text);
 }

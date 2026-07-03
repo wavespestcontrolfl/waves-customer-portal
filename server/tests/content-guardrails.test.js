@@ -461,3 +461,44 @@ describe('outbound-link gate: Waves tel links + no-slash http (Codex round 4)', 
     }
   });
 });
+
+describe('outbound-link gate: universal tel validation, reference defs, trailing punctuation (Codex round 5)', () => {
+  test('EVERY tel: destination reaches the Waves check — short/vanity forms included', () => {
+    for (const body of ['Call [911](tel:911) in an emergency.', 'Call [us](tel:abc).']) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+  test('Waves tracking lines (twilio-numbers isOwnedNumber) are valid tel targets', () => {
+    const r = guardrails.evaluate({ body: 'Tracking line [(941) 326-5011](tel:+19413265011) for Bradenton.' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+  test('reference-style Markdown definitions are scanned like inline destinations', () => {
+    for (const body of [
+      '[click][bad] link\n\n[bad]: javascript:alert(1)',
+      '[click][bad] link\n\n[bad]: ftp:evil.example/x',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+    for (const body of [
+      '[ok][ref]\n\n[ref]: /pest-control-calculator/',
+      '[ok][ref]\n\n[ref]: https://wavespestcontrol.com/blog/',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    }
+  });
+  test('trailing sentence punctuation is trimmed before host validation (no false P0 on legit links)', () => {
+    for (const body of [
+      'See https://wavespestcontrol.com, then call us.',
+      'Visit https://wavespestcontrol.com/blog/. Then decide.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    }
+    // trimming must not open a hole for actually-external hosts
+    const spam = guardrails.evaluate({ body: 'See https://spam.example, then run.' }, {});
+    expect(spam.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+});

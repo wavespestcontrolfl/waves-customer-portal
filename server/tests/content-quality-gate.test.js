@@ -199,6 +199,23 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
       body: 'Owner Jose Alvarado has treated 500+ homes. Termites swarm in Venice every spring; call (941) 297-3337.',
     }).ok).toBe(true);
   });
+  test('redaction: office address WITHOUT the suite marker is still NAP furniture (Codex round 5)', () => {
+    expect(checkRedactionPassed({
+      body: 'Our office at 13649 Luxe Ave, Bradenton, FL 34211 serves the area.',
+    }).ok).toBe(true);
+  });
+  test('redaction: LOW redactor confidence hard-fails — "no findings" proves nothing on lowercase text (Codex round 5)', () => {
+    const r = checkRedactionPassed({
+      body: 'john smith told our technician the ants came back after two days and he was not happy about it at all',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/pii_confidence_low|unredacted_name_in_body/);
+  });
+  test('redaction: Waves spoke/GBP tracking lines are business numbers, not PII (Codex round 5)', () => {
+    expect(checkRedactionPassed({
+      body: 'Termites swarm in Venice; call (941) 326-5011 for the Bradenton line.',
+    }).ok).toBe(true);
+  });
 });
 
 // ── refresh checks ──────────────────────────────────────────────────
@@ -474,7 +491,11 @@ describe('evaluate (full gate)', () => {
 
     const good = evaluate(
       fullDraft({
-        body: 'A termite swarm means a mature colony is nearby — here is how to identify one fast.\n\nSee our [termite inspection](/termite-inspection/) page for next steps.',
+        // Realistic capitalization density: a two-sentence all-lowercase-ish
+        // body dips under the redactor's effectively-lowercase threshold and
+        // trips the (correct) pii_confidence_low hard fail — real drafts are
+        // article-length with headings and proper nouns.
+        body: 'A termite swarm means a mature colony is nearby — here is how to identify one fast. Swarmers in Southwest Florida usually appear after warm spring rain, and Sarasota homes see them first.\n\nSee our [termite inspection](/termite-inspection/) page for next steps.',
       }),
       brief({ page_type: 'customer-question' }),
       { previewBuildSuccess: true, sitemapHasUrl: true }
