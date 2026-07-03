@@ -239,7 +239,7 @@ export default function SlotPicker({
           value={pickedDate || ''}
           onChange={(e) => onPickDate(e.target.value)}
           style={{
-            width: '100%', border: `1px solid ${W.border}`, borderRadius: 10,
+            width: '100%', boxSizing: 'border-box', border: `1px solid ${W.border}`, borderRadius: 10,
             padding: '12px 14px', fontSize: 15, color: W.navy, background: W.white,
           }}
         />
