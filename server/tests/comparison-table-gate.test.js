@@ -707,6 +707,17 @@ describe('table-less drafts: operator-authorized competitor naming (Codex round 
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
   });
+  test('a detection-only alias in the brief authorizes the FULLER surface form (word-boundary containment, Codex round 7)', () => {
+    // "Aptive" (brief) and "Aptive Environmental" (draft) canonicalize to
+    // DIFFERENT unknown names — exact-string matching sent the operator's
+    // own Aptive draft to the hard UNKNOWN_COMPETITOR block.
+    const r = gate.evaluate({
+      body: 'Aptive Environmental charges a $199 early-cancel fee per its published contract.',
+    }, { operatorBriefText: 'aptive cancellation fee explained\nhow to cancel aptive' });
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
   test('an ALIAS in the brief authorizes the canonical name in the draft (Codex round 4)', () => {
     // Authorization runs findBusinessMentions over the brief text, so both
     // sides canonicalize identically — a raw substring compare missed every

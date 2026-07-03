@@ -330,13 +330,29 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   // operator's brief text — both sides canonicalize identically, so a brief
   // that says "Massey" authorizes a draft that writes the canonical "Massey
   // Services" (a raw substring compare missed every alias↔canonical pair).
+  // Matching is word-boundary CONTAINMENT in either direction, not exact
+  // string: detection-only tokens canonicalize by surface form, so a brief
+  // that says "Aptive" and a draft that writes "Aptive Environmental"
+  // produce different unknown names for the same business — the operator's
+  // shorter token must still authorize the fuller one (and vice versa).
+  // Names on both sides come from findBusinessMentions' recognition corpus,
+  // so containment can't be gamed with arbitrary prose.
   const authorizedNames = new Set();
   if (operatorBriefText) {
     for (const m of competitorFacts.findBusinessMentions(stripQuotesForNames(String(operatorBriefText)))) {
       authorizedNames.add(String(m.name).toLowerCase());
     }
   }
-  const operatorAuthorized = (name) => authorizedNames.has(String(name).toLowerCase());
+  const wordBoundaryContains = (haystack, needle) =>
+    new RegExp(`(?:^|\\s)${needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')}(?:\\s|$)`, 'i').test(haystack);
+  const operatorAuthorized = (name) => {
+    const nm = String(name).toLowerCase();
+    if (authorizedNames.has(nm)) return true;
+    for (const auth of authorizedNames) {
+      if (wordBoundaryContains(nm, auth) || wordBoundaryContains(auth, nm)) return true;
+    }
+    return false;
+  };
 
   const known = new Set();
   const unknown = new Set();

@@ -533,3 +533,39 @@ describe('outbound-link gate: angle-bracket protocol-relative, entity-encoded sc
     expect(ok.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 });
+
+describe('outbound-link gate: encoded mailto separators, IP/localhost hosts, semicolonless entities (Codex round 7)', () => {
+  test('percent-encoded separators in the mailto address are decoded before allowlisting', () => {
+    const spoof = guardrails.evaluate({ body: 'Email [x](mailto:attacker@gmail.com%2Cinfo@wavespestcontrol.com).' }, {});
+    expect(spoof.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    const ok = guardrails.evaluate({ body: 'Email [us](mailto:info@wavespestcontrol.com%2Coffice@wavespestcontrol.com).' }, {});
+    expect(ok.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+  test('protocol-relative IP, IPv6, and localhost destinations are P0 (no alphabetic TLD required)', () => {
+    for (const body of [
+      'Click [x](//127.0.0.1/x) now.',
+      'Load //192.168.1.1/x today.',
+      '<a href="//localhost/x">x</a>',
+      'Try [x](//[::1]/admin) now.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+    // prose slashes still don't trip
+    const prose = guardrails.evaluate({ body: 'Rates vary and//or depend on size.' }, {});
+    expect(prose.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+  test('semicolonless numeric entities decode like a browser (greedy digit consumption included)', () => {
+    // decimal: 'a' is not a decimal digit, so &#58alert(1) is a live javascript: link
+    const dec = guardrails.evaluate({ body: '<a href="javascript&#58alert(1)">x</a>' }, {});
+    expect(dec.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    // hex: '/' stops consumption, so &#x3a//evil is a live javascript: link
+    const hex = guardrails.evaluate({ body: '<a href="javascript&#x3a//evil.example">x</a>' }, {});
+    expect(hex.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    // browser parity, not over-blocking: &#x3aalert greedily consumes "3aa"
+    // (U+03AA) — a browser does NOT produce a javascript: link there, and
+    // neither do we; plain prose references stay clean
+    const prose = guardrails.evaluate({ body: 'Item &#10 on the list is fine prose.' }, {});
+    expect(prose.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});

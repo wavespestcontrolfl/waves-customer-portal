@@ -216,6 +216,14 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
       body: 'Termites swarm in Venice; call (941) 326-5011 for the Bradenton line.',
     }).ok).toBe(true);
   });
+  test('redaction: CITY_TO_LOCATION service-area names are place furniture, never PII (Codex round 7)', () => {
+    expect(checkRedactionPassed({
+      body: 'Waves Pest Control serves Punta Gorda. Call (941) 297-5749.',
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: 'We treat homes across Boca Grande and Sun City Center every quarter, with same-day service in Englewood.',
+    }).ok).toBe(true);
+  });
 });
 
 // ── refresh checks ──────────────────────────────────────────────────

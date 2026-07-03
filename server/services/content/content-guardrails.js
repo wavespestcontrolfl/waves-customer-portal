@@ -250,11 +250,14 @@ const AUTOLINK_SCHEME_RE = /<([a-z][a-z0-9+.-]*):(\/\/)?[^>\s]*>/gi;
 const REF_DEF_SCHEME_RE = /^ {0,3}\[[^\]]+\]:\s*<?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gim;
 const ALLOWED_DEST_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
 // Protocol-relative URL (//host/path) — scheme-less external reference that
-// bypasses an https?:// scan. Requires a dotted host with a TLD so prose
-// slashes ("and//or", path fragments) don't trip it. `<` in the prefix
-// class covers Markdown's angle-bracketed destination form,
-// `[x](<//evil.example/x>)`, and `>` in the terminator lookahead closes it.
-const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=<])\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?=[/\s"')\]>]|$)/i;
+// bypasses an https?:// scan. Host shapes: dotted-TLD name, IPv4 literal,
+// bracketed IPv6 literal, or localhost — an IP/single-label host is just as
+// browser-navigable as a named one, so requiring an alphabetic TLD alone
+// left `//127.0.0.1/x` and `//localhost/x` clean. The dotted-TLD arm keeps
+// prose slashes ("and//or", path fragments) from tripping; `<` in the
+// prefix class covers Markdown's angle-bracketed destination form and `>`
+// in the terminator lookahead closes it.
+const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=<])\/\/(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\]|localhost\b|[a-z0-9][a-z0-9.-]*\.[a-z]{2,})(?=[/:\s"')\]>]|$)/i;
 const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
 // tel: destinations — validated against the Waves phone allowlist, exactly
 // like mailto recipients are validated against the business domain. The
@@ -271,12 +274,18 @@ const TEL_RE = /\btel:([^\s"'<>)\]]*)/gi;
 // literal "&#58;" text, not a colon, and must stay that way here too.
 // Scanning a decoded COPY can only find more, never less (fail-closed).
 function decodeEntitiesForScan(s) {
+  // The `;` is OPTIONAL on the numeric forms: HTML treats a semicolonless
+  // numeric character reference as a parse error but still decodes it in
+  // attribute values, so `href="javascript&#58alert(1)"` is a live
+  // javascript: link and the scanner must decode it identically. Named
+  // references keep the mandatory `;` (they are NOT legacy-decoded without
+  // it when followed by alphanumerics).
   return String(s)
-    .replace(/&#x([0-9a-f]{1,6});/gi, (m0, h) => {
+    .replace(/&#x([0-9a-f]{1,6});?/gi, (m0, h) => {
       const c = parseInt(h, 16);
       return c > 0 && c < 128 ? String.fromCharCode(c) : m0;
     })
-    .replace(/&#(\d{1,7});/g, (m0, d) => {
+    .replace(/&#(\d{1,7});?/g, (m0, d) => {
       const c = parseInt(d, 10);
       return c > 0 && c < 128 ? String.fromCharCode(c) : m0;
     })
@@ -335,11 +344,18 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     // The address portion before `?` never inherits trust from the query
     // ("mailto:attacker@x?subject=info@wavespestcontrol.com" must fail an
     // endsWith check), and every comma-separated recipient must be on the
-    // company domain.
-    const [addressPart, queryPart] = m[1].split('?');
-    const recipients = String(addressPart || '').split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
+    // company domain. Percent-DECODE before splitting: the mail client
+    // decodes "attacker@gmail.com%2Cinfo@wavespestcontrol.com" into two
+    // recipients, so the guard must split on what the client sees; an
+    // undecodable address fails closed.
+    const [rawAddressPart, queryPart] = m[1].split('?');
+    let addressPart;
+    try { addressPart = decodeURIComponent(String(rawAddressPart || '')); } catch {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable address ("${String(rawAddressPart || '').slice(0, 60)}") — remove it.`);
+    }
+    const recipients = addressPart.split(',').map((r) => r.trim().toLowerCase()).filter(Boolean);
     if (recipients.length === 0 || recipients.some((r) => !r.endsWith('@wavespestcontrol.com'))) {
-      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link to "${addressPart}" — only @wavespestcontrol.com addresses are allowed.`);
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link to "${addressPart.slice(0, 80)}" — only @wavespestcontrol.com addresses are allowed.`);
     }
     // Query headers can ADD recipients (to/cc/bcc) — those are subject to
     // the same allowlist; a malformed/undecodable value fails closed.

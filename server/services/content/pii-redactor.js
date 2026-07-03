@@ -115,6 +115,21 @@ const NAME_ALLOWLIST = new Set([
   'Virginia', 'Jose', 'Jacob', 'Alvarado', 'Heaton', // staff
 ]);
 
+// Every service-area name from the canonical CITY_TO_LOCATION map is place
+// furniture, never a customer name — "Waves Pest Control serves Punta
+// Gorda" must not produce a name finding (the hand-list above predates the
+// southern/Hillsborough reach: Punta Gorda, Boca Grande, Sun City Center,
+// Englewood, …). Config-unavailable just leaves the hand-list (fail-closed
+// direction: more redaction, never less).
+try {
+  const { CITY_TO_LOCATION } = require('../../config/locations');
+  for (const city of Object.keys(CITY_TO_LOCATION || {})) {
+    for (const word of city.split(/\s+/)) {
+      if (word.length >= 2) NAME_ALLOWLIST.add(word[0].toUpperCase() + word.slice(1));
+    }
+  }
+} catch { /* locations unavailable — keep the hand-list */ }
+
 const NAME_ALLOWLIST_LOWER = new Set([...NAME_ALLOWLIST].map((w) => w.toLowerCase()));
 
 function looksLikeFalsePositiveName(first, last) {
