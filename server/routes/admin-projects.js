@@ -1654,6 +1654,23 @@ router.post('/wdo-history', async (req, res, next) => {
   }
 });
 
+// Legacy certificate drafts (created before the findings-level treatment_date
+// field was removed from the registry) still carry findings.treatment_date,
+// which the certificate renderer prefers over the project date. The forms now
+// edit ONLY the project date, so once an editor actually CHANGES it, the
+// hidden legacy value must not keep printing a stale date — drop it so the
+// date the editor saw becomes the single source. An untouched legacy draft
+// keeps rendering its original attested findings date. Mutates `updates`.
+function dropStaleCertTreatmentDate(project, updates) {
+  if (project?.project_type !== 'pre_treatment_termite_certificate') return;
+  if (!hasMeaningfulValue(updates.project_date)) return;
+  if (updates.project_date === normalizeDateOnly(project.project_date)) return;
+  const findings = normalizeFindings(updates.findings !== undefined ? updates.findings : project.findings);
+  if (!hasMeaningfulValue(findings.treatment_date)) return;
+  const { treatment_date: _stale, ...rest } = findings;
+  updates.findings = rest;
+}
+
 // ---------------------------------------------------------------------------
 // PUT /api/admin/projects/:id — update findings / recommendations / title
 // ---------------------------------------------------------------------------
@@ -1666,6 +1683,7 @@ router.put('/:id', async (req, res, next) => {
     const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
+    dropStaleCertTreatmentDate(project, updates);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
     await db('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
@@ -3966,6 +3984,7 @@ router._private = {
   logProjectActivity,
   evaluateProjectSendReadiness,
   completeProjectBackedService,
+  dropStaleCertTreatmentDate,
 };
 
 module.exports = router;

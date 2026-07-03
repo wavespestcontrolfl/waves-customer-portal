@@ -19,6 +19,7 @@ const {
   detectedImageMime,
   validateUploadedImage,
   evaluateProjectSendReadiness,
+  dropStaleCertTreatmentDate,
 } = projectsRouter._private;
 
 describe('admin project route guards', () => {
@@ -269,5 +270,48 @@ describe('admin project route guards', () => {
     // non-array garbage can't crash the gate.
     expect(evaluate({ ...completePrimary, additional_applications: [{}] }).missing).toEqual([]);
     expect(evaluate({ ...completePrimary, additional_applications: 'oops' }).missing).toEqual([]);
+  });
+
+  test('editing a certificate project date drops the stale legacy findings treatment_date', () => {
+    const legacyProject = {
+      project_type: 'pre_treatment_termite_certificate',
+      project_date: '2026-06-18',
+      findings: { treatment_date: '2026-06-20', treatment_method: 'Soil barrier (chemical)' },
+    };
+
+    // Date actually changed → the hidden legacy key is dropped so the date
+    // the editor saw is what prints (findings echoed back by the client).
+    const changed = {
+      project_date: '2026-06-25',
+      findings: { treatment_date: '2026-06-20', treatment_method: 'Soil barrier (chemical)' },
+    };
+    dropStaleCertTreatmentDate(legacyProject, changed);
+    expect(changed.findings.treatment_date).toBeUndefined();
+    expect(changed.findings.treatment_method).toBe('Soil barrier (chemical)');
+
+    // Date changed on a findings-less update → legacy key stripped from the
+    // STORED findings so the edit still takes effect on the certificate.
+    const dateOnly = { project_date: '2026-06-25' };
+    dropStaleCertTreatmentDate(legacyProject, dateOnly);
+    expect(dateOnly.findings.treatment_date).toBeUndefined();
+    expect(dateOnly.findings.treatment_method).toBe('Soil barrier (chemical)');
+
+    // Untouched date → the attested legacy findings date keeps rendering.
+    const unchanged = {
+      project_date: '2026-06-18',
+      findings: { treatment_date: '2026-06-20' },
+    };
+    dropStaleCertTreatmentDate(legacyProject, unchanged);
+    expect(unchanged.findings.treatment_date).toBe('2026-06-20');
+
+    // Date cleared → never drop the only date the certificate has left.
+    const cleared = { project_date: null, findings: { treatment_date: '2026-06-20' } };
+    dropStaleCertTreatmentDate(legacyProject, cleared);
+    expect(cleared.findings.treatment_date).toBe('2026-06-20');
+
+    // Non-certificate projects are never touched.
+    const wdo = { project_date: '2026-06-25', findings: { treatment_date: '2026-06-20' } };
+    dropStaleCertTreatmentDate({ ...legacyProject, project_type: 'wdo_inspection' }, wdo);
+    expect(wdo.findings.treatment_date).toBe('2026-06-20');
   });
 });
