@@ -63,6 +63,36 @@ Return this exact JSON structure and nothing else — no markdown, no backticks,
   "observations": "<one concise paragraph>"
 }`;
 
+// Compose the vision prompt for a specific visit. The base scoring instructions
+// are unchanged; we APPEND a "known context" block so the model can reason with
+// what we already know (grass type, season, region, what was applied, its label
+// constraints, irrigation, mowing height, the tech's own notes, and the prior
+// visit) instead of guessing. The photo stays the primary evidence — the context
+// header explicitly tells the model not to invent issues the photo doesn't show.
+function buildVisionPrompt(context = {}) {
+  const c = context || {};
+  const lines = [];
+  const season = [c.season, c.month ? `month ${c.month}` : null].filter(Boolean).join(', ');
+  if (season) lines.push(`- Time of year: ${season}`);
+  if (c.region) lines.push(`- Region: ${c.region}`);
+  if (c.grassType) lines.push(`- Grass type on file: ${c.grassType} — confirm against the blades; only override if the morphology clearly differs.`);
+  if (c.turfHeightIn != null && c.turfHeightIn !== '') lines.push(`- Mowing height measured this visit: ${c.turfHeightIn} in (scalping vs. proper height helps you read stress/thinning).`);
+  if (c.irrigation) lines.push(`- Irrigation on file: ${c.irrigation}`);
+  if (Array.isArray(c.productsApplied) && c.productsApplied.length) {
+    lines.push(`- Products applied / planned this visit: ${c.productsApplied.join('; ')}`);
+  }
+  if (Array.isArray(c.labelConstraints) && c.labelConstraints.length) {
+    lines.push(`- Product label notes (safety / irrigation): ${c.labelConstraints.join('; ')}`);
+  }
+  if (c.technicianNotes) lines.push(`- Technician's field notes: ${String(c.technicianNotes).slice(0, 600)}`);
+  if (c.priorSummary) lines.push(`- Previous visit summary: ${String(c.priorSummary).slice(0, 400)}`);
+  if (!lines.length) return VISION_PROMPT;
+  return `${VISION_PROMPT}
+
+KNOWN VISIT CONTEXT — use this to inform your read, but the PHOTO is the primary evidence. Do NOT invent problems the photo doesn't show, and do NOT let the context inflate or deflate a score the image contradicts:
+${lines.join('\n')}`;
+}
+
 // ── Category mappings ───────────────────────────────────────────
 
 const FUNGAL_MAP = { none: 0, minor: 1, moderate: 2, severe: 3 };
@@ -104,7 +134,7 @@ function strictBool(v) {
   return v === true || String(v).trim().toLowerCase() === 'true';
 }
 
-async function callClaudeVision(base64Image, mimeType) {
+async function callClaudeVision(base64Image, mimeType, context = {}) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
 
   try {
@@ -117,7 +147,7 @@ async function callClaudeVision(base64Image, mimeType) {
         role: 'user',
         content: [
           { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
-          { type: 'text', text: VISION_PROMPT },
+          { type: 'text', text: buildVisionPrompt(context) },
         ],
       }],
     });
@@ -136,7 +166,7 @@ async function callClaudeVision(base64Image, mimeType) {
 
 // Single attempt against one Gemini model. Returns the parsed scores, or null on
 // any miss (HTTP error / empty output / unparseable JSON) so the caller can retry.
-async function geminiVisionAttempt(model, base64Image, mimeType) {
+async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
 
   const response = await fetch(url, {
@@ -146,7 +176,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
       contents: [{
         parts: [
           { inline_data: { mime_type: mimeType, data: base64Image } },
-          { text: VISION_PROMPT },
+          { text: buildVisionPrompt(context) },
         ],
       }],
       generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
@@ -168,7 +198,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
   return parsed;
 }
 
-async function callGeminiVision(base64Image, mimeType) {
+async function callGeminiVision(base64Image, mimeType, context = {}) {
   if (!GEMINI_KEY) return null;
 
   // Live model first, then the prior model on any miss (skip the retry if an
@@ -179,7 +209,7 @@ async function callGeminiVision(base64Image, mimeType) {
 
   for (const model of models) {
     try {
-      const parsed = await geminiVisionAttempt(model, base64Image, mimeType);
+      const parsed = await geminiVisionAttempt(model, base64Image, mimeType, context);
       if (parsed) return parsed;
     } catch (err) {
       logger.error(`Lawn assessment Gemini vision failed (${model}): ${err.message}`);
@@ -194,10 +224,10 @@ async function callGeminiVision(base64Image, mimeType) {
  * Analyze a single photo with both Claude and Gemini vision in parallel.
  * Returns { claude, gemini, composite, divergenceFlags }
  */
-async function analyzePhoto(base64Image, mimeType) {
+async function analyzePhoto(base64Image, mimeType, context = {}) {
   const [claudeResult, geminiResult] = await Promise.allSettled([
-    callClaudeVision(base64Image, mimeType),
-    callGeminiVision(base64Image, mimeType),
+    callClaudeVision(base64Image, mimeType, context),
+    callGeminiVision(base64Image, mimeType, context),
   ]);
 
   const claude = claudeResult.status === 'fulfilled' ? claudeResult.value : null;
@@ -453,6 +483,7 @@ async function resetBaseline(customerId, adminName, reason) {
 
 module.exports = {
   VISION_PROMPT,
+  buildVisionPrompt,
   analyzePhoto,
   averageScores,
   mapToDisplayScores,

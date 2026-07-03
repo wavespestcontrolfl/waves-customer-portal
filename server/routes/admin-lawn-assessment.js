@@ -686,13 +686,49 @@ router.post('/assess', async (req, res, next) => {
       ? passedIndices
       : photos.map((_, i) => i);
 
+    // Context for the vision prompt: what we already know about this lawn/visit,
+    // so the model reasons with it instead of guessing (grass type, season,
+    // region, irrigation, mowing height, the tech's own notes, and the prior
+    // visit). The photo stays the primary evidence — buildVisionPrompt tells the
+    // model not to let context override what the image shows. All lookups are
+    // best-effort; a miss just omits that line.
+    const visitNow = new Date();
+    const visitMonth = visitNow.getMonth() + 1;
+    const visionContext = {
+      season: lawnAssessment.getSeason(visitMonth),
+      month: visitMonth,
+      region: 'Southwest Florida',
+    };
+    if (req.body.turfHeightIn != null && req.body.turfHeightIn !== '') {
+      visionContext.turfHeightIn = req.body.turfHeightIn;
+    }
+    if (req.body.technicianNotes) visionContext.technicianNotes = String(req.body.technicianNotes);
+    try {
+      const turf = await db('customer_turf_profiles')
+        .where({ customer_id: customerId })
+        .first('grass_type', 'irrigation_type', 'irrigation_inches_per_week');
+      if (turf?.grass_type) visionContext.grassType = String(turf.grass_type).replace(/_/g, ' ');
+      const irr = [];
+      if (turf?.irrigation_type) irr.push(String(turf.irrigation_type).replace(/_/g, ' '));
+      if (turf?.irrigation_inches_per_week != null) irr.push(`${turf.irrigation_inches_per_week} in/wk`);
+      if (irr.length) visionContext.irrigation = irr.join(', ');
+    } catch (err) { logger.warn(`[lawn-assessment] turf-profile context lookup failed: ${err.message}`); }
+    try {
+      const prior = await db('lawn_assessments')
+        .where({ customer_id: customerId })
+        .whereNotNull('ai_summary')
+        .orderBy('service_date', 'desc')
+        .first('ai_summary');
+      if (prior?.ai_summary) visionContext.priorSummary = String(prior.ai_summary);
+    } catch (err) { logger.warn(`[lawn-assessment] prior-summary context lookup failed: ${err.message}`); }
+
     // Multi-photo AI runs in parallel with the same small cap. Each
     // analyzePhoto call is itself two vision-API calls (Claude +
     // Gemini) under the hood — capping at 3 keeps the upper bound
     // at 6 concurrent vision calls per /assess request, which is
     // well inside both providers' burst limits.
     const photoResults = await withConcurrency(photosToAnalyze, 3, (photo) =>
-      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg'),
+      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg', visionContext),
     );
 
     // Map AI result back to original photo index. validResults preserves
