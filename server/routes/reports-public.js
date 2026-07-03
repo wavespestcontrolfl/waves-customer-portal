@@ -390,18 +390,26 @@ router.get('/project/:token/data', async (req, res, next) => {
     // which on the service day is the just-treated visit itself (still
     // on_site/en_route), so the report printed today's service as its own
     // follow-up while the real next appointment was ignored.
-    const upcomingAppointment = await db('scheduled_services as s')
-      .where('s.customer_id', project.customer_id)
-      .where('s.scheduled_date', '>=', todayET)
-      .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
-      .modify((query) => {
-        if (project.scheduled_service_id) query.whereNot('s.id', project.scheduled_service_id);
-      })
-      .leftJoin('technicians as st', 's.technician_id', 'st.id')
-      .orderBy('s.scheduled_date', 'asc')
-      .orderBy('s.window_start', 'asc')
-      .select(appointmentSelect)
-      .first();
+    //
+    // Scoped to reports tied to a documented visit: a standalone/ad hoc
+    // report has no visit this would follow, and its token may be shared
+    // with third parties (e.g. a WDO report in a real-estate transaction),
+    // so surfacing the customer's unrelated routine schedule there would be
+    // both wrong and a disclosure. Unlinked reports keep the report's own
+    // followup_date fallback.
+    let upcomingAppointment = null;
+    if (project.scheduled_service_id) {
+      upcomingAppointment = await db('scheduled_services as s')
+        .where('s.customer_id', project.customer_id)
+        .where('s.scheduled_date', '>=', todayET)
+        .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
+        .whereNot('s.id', project.scheduled_service_id)
+        .leftJoin('technicians as st', 's.technician_id', 'st.id')
+        .orderBy('s.scheduled_date', 'asc')
+        .orderBy('s.window_start', 'asc')
+        .select(appointmentSelect)
+        .first();
+    }
 
     // WDO: serve the as-sent findings snapshot archived at send time, so the
     // public link always matches the emailed signed FDACS-13645 PDF even if
