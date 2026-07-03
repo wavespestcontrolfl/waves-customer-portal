@@ -1319,12 +1319,20 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips
-  // the post to build_failed if it blows up.
+  // the post to build_failed if it blows up. runExclusive: this tick
+  // contains the SCHEDULER-lane auto-merge (pollPost → mergeAstro for posts
+  // claimed at publish_status='publishing'), and a merge plus its post-merge
+  // chain must not double-run across overlapping deploy instances — the same
+  // rule the autonomous-pr-poll tick below already follows. It also keeps
+  // the per-poll merge cap meaningful (two concurrent ticks each merging
+  // "one" PR is two merges).
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
     try {
-      const PagesPoll = require('./content-astro/pages-poll');
-      await PagesPoll.pollPending();
+      await runExclusive('pages-poll', async () => {
+        const PagesPoll = require('./content-astro/pages-poll');
+        await PagesPoll.pollPending();
+      });
     } catch (err) {
       logger.error(`Pages poll failed: ${err.message}`);
     }

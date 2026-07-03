@@ -1567,7 +1567,7 @@ function canPublishRefresh(draft, brief = {}) {
 
 // ── Merge (approval → prod) ────────────────────────────────────────
 
-async function mergeAstro(postId) {
+async function mergeAstro(postId, { expectHeadSha = null } = {}) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.astro_pr_number) throw new Error('post has no open PR');
@@ -1584,12 +1584,25 @@ async function mergeAstro(postId) {
     if (pr.state !== 'open') {
       throw new Error(`PR #${pr.number} is ${pr.state}, cannot merge`);
     }
+    // Callers that gated on an EXTERNAL signal (pages-poll: "the branch's
+    // green build") bind that signal to a commit; if the PR head has moved
+    // since, the signal doesn't vouch for what would merge — refuse (the
+    // fresh head gets its own build + review, and the next tick retries).
+    if (expectHeadSha && pr.head?.sha
+        && String(expectHeadSha).trim().toLowerCase() !== String(pr.head.sha).trim().toLowerCase()) {
+      throw new Error(`PR #${pr.number} head ${String(pr.head.sha).slice(0, 7)} no longer matches the verified build commit ${String(expectHeadSha).slice(0, 7)}; re-verify before merge`);
+    }
     if (!isUnpublish) await assertOpenPublishPrIsHubOnly(post, pr);
     await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
 
     const result = await gh.mergePr(post.astro_pr_number, {
       method: 'squash',
       title: isUnpublish ? `Unpublish: ${post.title}`.slice(0, 72) : `Blog: ${post.title}`.slice(0, 72),
+      // Pin the merge to the exact head the hub-only/Codex gates just vetted —
+      // GitHub 409s if another push lands while this call is in flight
+      // (mergePr supports this; the autonomous poller already pins, this
+      // manual/scheduler path did not).
+      sha: pr.head?.sha,
     });
 
     await applyMergeEffect(postId, post, new Date(), isUnpublish, result?.sha);

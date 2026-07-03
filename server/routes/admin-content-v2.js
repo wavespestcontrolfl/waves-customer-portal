@@ -618,7 +618,12 @@ router.post('/blog/:id/refresh-astro', async (req, res, next) => {
     const PagesPoll = require('../services/content-astro/pages-poll');
     const post = await db('blog_posts').where({ id: req.params.id }).first();
     if (!post) return res.status(404).json({ error: 'post not found' });
-    const result = await PagesPoll.pollPost(post);
+    // allowMerge:false — this button is a STATUS refresh. pollPost's default
+    // otherwise runs the scheduler-lane auto-merge, so an admin click racing
+    // the 2-min cron tick could double-run a merge chain and sidestep the
+    // per-poll merge cap. Merging stays with the cron tick (or the explicit
+    // merge-astro endpoint).
+    const result = await PagesPoll.pollPost(post, { allowMerge: false });
     const refreshed = await db('blog_posts').where({ id: post.id }).first();
     res.json({ success: true, result, post: refreshed });
   } catch (err) {

@@ -2290,3 +2290,46 @@ describe('approveAndPublishNamedCompetitor — stale named-competitor run guard'
       .rejects.toMatchObject({ statusCode: 422 }); // got past the stale-run guard
   });
 });
+
+describe('_countPublishedSince counts publishes IN FLIGHT (audit regression — caps were a no-op for the PR lane)', () => {
+  test('counts completed_published OR parked-open-PR runs; asserts the exact pr-pending reasons', async () => {
+    // Self-contained module load: earlier loadRunnerWith() calls reset the
+    // registry and bind the runner to their own db mocks.
+    jest.resetModules();
+    const captured = { whereIn: [], where: [] };
+    const q = {
+      where: jest.fn(function (a, b) {
+        if (typeof a === 'function') { a.call(q); return q; }
+        captured.where.push([a, b]);
+        return q;
+      }),
+      orWhere: jest.fn(function (a) {
+        if (typeof a === 'function') a.call(q);
+        return q;
+      }),
+      whereIn: jest.fn(function (col, vals) {
+        captured.whereIn.push([col, vals]);
+        return q;
+      }),
+      count: jest.fn(() => q),
+      first: jest.fn(() => Promise.resolve({ count: 4 })),
+    };
+    jest.doMock('../models/db', () => jest.fn(() => q));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const runner = require('../services/content/autonomous-runner');
+
+    const n = await runner._countPublishedSince('new_supporting_blog', new Date('2026-07-02T04:00:00Z'));
+
+    expect(n).toBe(4);
+    // The blog lane never produces completed_published directly — a parked
+    // open PR must consume the cap at PR-open time or one batch can open
+    // batchLimit PRs the same day and auto-merge them all.
+    expect(captured.where).toEqual(expect.arrayContaining([
+      ['outcome', 'completed_published'],
+      ['outcome', 'completed_pending_review'],
+    ]));
+    expect(captured.whereIn).toEqual(expect.arrayContaining([
+      ['skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge']],
+    ]));
+  });
+});
