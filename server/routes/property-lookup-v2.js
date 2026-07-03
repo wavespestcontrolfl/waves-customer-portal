@@ -1825,13 +1825,41 @@ function hasStructuredCommercialAiSignal(ai = {}) {
   return commercialUseType === 'OTHER' || normalizePricingPropertyType(commercialUseType) === 'commercial';
 }
 
+// A record's type/zoning/land-use strings (and unit count) may only vote
+// COMMERCIAL when the record itself is trustworthy. County / cadastral /
+// hybrid merges always are, as are records with no evidence metadata
+// (verified overrides, legacy cache rows). But on an AI-web-search-only
+// merge, mergePropertyRecords already scored the propertyType field — if it
+// flagged it for manual verification (unknown/generic source, score < 65, or
+// provider disagreement), that same unverified string must not
+// single-handedly flip the profile to commercial pricing. Real miss
+// (2026-07-03): 6314 Gateway Ave isn't on the Sarasota roll, so the only
+// source was a grounded web search that landed on a LoopNet listing for a
+// DIFFERENT Gateway Ave parcel — propertyType "Multifamily" at 0/100 data
+// quality commercial-classified a residential lead.
+function recordCommercialSignalTrusted(rc) {
+  if (!rc) return true;
+  if (rc._source && rc._source !== 'ai') return true;
+  const evidence = rc._fieldEvidence?.propertyType;
+  if (!evidence) return true;
+  return !evidence.fieldVerify;
+}
+
+// Null out an untrusted record for commercial-signal reads. Structured
+// satellite AI signals (propertyUse / commercialUseType) keep voting — vision
+// looked at THIS parcel, unlike a web-search hit on a neighboring listing.
+function commercialSignalRecord(rc) {
+  return recordCommercialSignalTrusted(rc) ? rc : null;
+}
+
 function detectCategory(rc, ai = {}) {
   if (!rc && !ai) return 'RESIDENTIAL';
-  const text = commercialSignalText(rc, ai);
+  const signalRc = commercialSignalRecord(rc);
+  const text = commercialSignalText(signalRc, ai);
   if (/(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/.test(text)) return 'COMMERCIAL';
   if (/(apartment|apartments|multi\s*family|multifamily|hoa\s*common|common\s*area)/.test(text)) return 'COMMERCIAL';
   if (hasStructuredCommercialAiSignal(ai)) return 'COMMERCIAL';
-  if (rc?.unitCount && rc.unitCount > 4)
+  if (signalRc?.unitCount && signalRc.unitCount > 4)
     return 'COMMERCIAL';
   return 'RESIDENTIAL';
 }
@@ -1844,7 +1872,7 @@ function hasCommercialSignalText(rc = {}, ai = {}) {
 }
 
 function resolveCommercialSubtype(rc = {}, ai = {}) {
-  const text = commercialSignalText(rc, ai);
+  const text = commercialSignalText(commercialSignalRecord(rc), ai);
   if (/warehouse|light\s*industrial/.test(text)) return 'warehouse_light';
   if (/restaurant|food\s*service|commercial\s*kitchen/.test(text)) return 'restaurant_food_service';
   if (/medical|clinic/.test(text)) return 'medical_office';
@@ -1859,9 +1887,10 @@ function resolveCommercialSubtype(rc = {}, ai = {}) {
 }
 
 function resolveCommercialDetectionSource(rc = {}, ai = {}) {
-  if (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) === 'commercial') return 'property_record_property_type';
-  if (rc?.unitCount && rc.unitCount > 4) return 'property_record_unit_count';
-  if (hasCommercialSignalText(rc, {})) return 'property_record_commercial_signal';
+  const signalRc = commercialSignalRecord(rc);
+  if (signalRc?.propertyType && normalizePricingPropertyType(signalRc.propertyType) === 'commercial') return 'property_record_property_type';
+  if (signalRc?.unitCount && signalRc.unitCount > 4) return 'property_record_unit_count';
+  if (hasCommercialSignalText(signalRc || {}, {})) return 'property_record_commercial_signal';
   if (hasStructuredCommercialAiSignal(ai)) return 'satellite_ai_property_use';
   return 'commercial_signal';
 }
@@ -3328,6 +3357,10 @@ module.exports._private = {
   poolSource,
   propertyTypeFromAttachment,
   recordPropertyTypeIsWeak,
+  recordCommercialSignalTrusted,
+  detectCategory,
+  resolveCommercialSubtype,
+  resolveCommercialDetectionSource,
   turfRiskReasons,
   visionContextPromptBlock,
 };
