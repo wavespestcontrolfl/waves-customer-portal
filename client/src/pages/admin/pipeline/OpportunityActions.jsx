@@ -120,6 +120,12 @@ function primaryAction(opportunity) {
         : { label: "Create Estimate", kind: "navigate", to: createEstimateUrl(opportunity) };
     case PIPELINE_STAGES.ESTIMATE_SENT:
     case PIPELINE_STAGES.ESTIMATE_VIEWED:
+      // Expired estimate (normalizer flips nextAction): Follow Up would 400
+      // ("Estimate status expired cannot be sent") — Extend is the action
+      // that actually works, so it gets the primary slot.
+      if (opportunity.estimateId && opportunity.nextAction === "extend_estimate") {
+        return { label: "Extend Expiration", kind: "extend_estimate" };
+      }
       return opportunity.estimateId
         ? { label: "Follow Up", kind: "follow_up" }
         : { label: "Contact", kind: "navigate", to: communicationUrl(opportunity) };
@@ -147,7 +153,12 @@ function menuActions(opportunity) {
     if (opportunity.stage === PIPELINE_STAGES.ESTIMATE_DRAFT) {
       actions.push({ label: "Edit Estimate", kind: "navigate", to: "/admin/estimates?tab=estimates" });
     }
-    if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED].includes(opportunity.stage)) {
+    if (
+      [PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED].includes(opportunity.stage)
+      // Expired rows can't follow up (server refuses) — Extend Expiration is
+      // already in this menu and is the primary action for them.
+      && opportunity.nextAction !== "extend_estimate"
+    ) {
       actions.push({ label: "Follow Up", kind: "follow_up" });
     }
     if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED].includes(opportunity.stage)) {

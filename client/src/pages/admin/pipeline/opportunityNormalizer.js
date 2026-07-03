@@ -185,6 +185,16 @@ export function deriveNextAction({ lead, estimate, stage, now = new Date() }) {
     lead?.callback_at,
   ));
   const followUpDue = nextFollowUpAt ? nextFollowUpAt.getTime() <= nowMs : false;
+  // Mirrors server pipeline-opportunities.js: an expired estimate keeps its
+  // sent/viewed STAGE but the action flips to Extend — the follow-up/resend
+  // path refuses expired rows, so "Follow up" is a guaranteed 400. Detect the
+  // swept 'expired' status AND a past expiry the sweep hasn't stamped yet.
+  const estimateStatusForAction = normalizeStatus(estimate?.status);
+  const estimateExpiresAt = asDate(firstPresent(estimate?.expiresAt, estimate?.expires_at));
+  const estimateExpired = Boolean(estimate?.id)
+    && !["accepted", "declined"].includes(estimateStatusForAction)
+    && (estimateStatusForAction === "expired"
+      || (estimateExpiresAt ? estimateExpiresAt.getTime() < nowMs : false));
 
   if (stage === PIPELINE_STAGES.NEW_LEAD) {
     return { nextAction: "contact", needsAction: true, nextActionLabel: "Contact lead", isStale: false };
@@ -204,6 +214,9 @@ export function deriveNextAction({ lead, estimate, stage, now = new Date() }) {
     return { nextAction: "send_estimate", needsAction: true, nextActionLabel: "Send estimate", isStale: false };
   }
   if (stage === PIPELINE_STAGES.ESTIMATE_SENT) {
+    if (estimateExpired) {
+      return { nextAction: "extend_estimate", needsAction: true, nextActionLabel: "Extend expiration", isStale: true };
+    }
     const sentAt = asDate(firstPresent(estimate?.sentAt, estimate?.sent_at, estimate?.updatedAt, estimate?.updated_at));
     const stale = sentAt ? nowMs - sentAt.getTime() >= SENT_STALE_MS : false;
     return {
@@ -214,6 +227,9 @@ export function deriveNextAction({ lead, estimate, stage, now = new Date() }) {
     };
   }
   if (stage === PIPELINE_STAGES.ESTIMATE_VIEWED) {
+    if (estimateExpired) {
+      return { nextAction: "extend_estimate", needsAction: true, nextActionLabel: "Extend expiration", isStale: true };
+    }
     const viewedAt = asDate(firstPresent(estimate?.viewedAt, estimate?.viewed_at, estimate?.lastViewedAt, estimate?.last_viewed_at));
     const stale = viewedAt ? nowMs - viewedAt.getTime() >= VIEWED_STALE_MS : true;
     return {

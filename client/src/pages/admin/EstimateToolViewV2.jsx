@@ -1013,11 +1013,15 @@ function cadenceFromPestTier(tier) {
 }
 
 function fallbackCadenceForPreview() {
+  // No pest tier (lawn/tree/mosquito-led estimates): the non-pest recurring
+  // programs bill monthly and the engine's grandTotal is already a monthly
+  // number. The old quarterly fallback multiplied it ×3 — a lawn-only
+  // estimate previewed "$360/quarter" while the customer page bills $120/mo.
   return {
-    key: "quarterly",
-    label: "Quarterly",
-    intervalMonths: 3,
-    period: "/quarter",
+    key: "monthly",
+    label: "Monthly",
+    intervalMonths: 1,
+    period: "/mo",
   };
 }
 
@@ -4401,6 +4405,25 @@ export default function EstimateToolViewV2({
                       palmLicensedApplicator: false,
                       treeCount: "",
                       measuredTurfSf: "",
+                      // Structure-specific measurements must clear with the
+                      // property — leaving them meant house B could be quoted
+                      // on house A's attic sqft or trench footage. (Contact/
+                      // lead linkage intentionally survives Clear All; product
+                      // choices keep their defaults.)
+                      termiteFootprintSqFt: "",
+                      termitePerimeterLF: "",
+                      boracareSqft: "",
+                      boracareSurfaceLinearFt: "",
+                      boracareSurfaceHeightFt: "",
+                      preslabSqft: "",
+                      trenchingPerimeterLF: "",
+                      trenchingConcreteLF: "",
+                      trenchingDirtLF: "",
+                      trenchingConcretePct: "",
+                      _termiteFootprintAuto: false,
+                      _trenchingPerimeterAuto: false,
+                      _boracareSqftAuto: false,
+                      _preslabSqftAuto: false,
                     }));
                     setLookupStatus({ type: "", msg: "" });
                     setEnrichedProfile(null);
@@ -4408,6 +4431,9 @@ export default function EstimateToolViewV2({
                     setSatelliteStatus({ type: "", msg: "" });
                     setSatelliteData(null);
                     setEstimate(null);
+                    // A saved row priced on the cleared property is stale too.
+                    setSavedId(null);
+                    setSavedViewUrl(null);
                   }}
                 >
                   Clear All
@@ -6857,16 +6883,37 @@ export default function EstimateToolViewV2({
                     </Button>{" "}
                   </div>{" "}
                   <div className="max-h-[calc(100vh-120px)] overflow-y-auto pr-2">
-                    <CustomerEstimatePreviewV2
-                      E={E}
-                      R={R}
-                      form={form}
-                      satelliteUrl={satelliteData?.imageUrl || null}
-                      onSelectPestFreq={(apps) => {
-                        set("pestFreq", String(apps));
-                        doGenerate({ pestFreq: apps });
-                      }}
-                    />
+                    {presentQuoteRequired ? (
+                      // Custom-quote estimate: the in-page preview must not
+                      // render full prices the customer will never see — the
+                      // saved/public flow zeroes totals and the customer page
+                      // shows "your account manager will finalize" with no
+                      // dollar amounts. (Present mode already gates this;
+                      // engine numbers stay in the details panel below.)
+                      <div className="customer-preview-scope rounded-[14px] border border-[#E7E2D7] bg-white p-8 text-center mb-2">
+                        <div className="customer-preview-serif text-[24px] leading-tight text-[#1B2C5B] mb-3">
+                          This is a custom quote
+                        </div>
+                        <div className="mx-auto max-w-[460px] text-14 leading-relaxed text-[#6B7280]">
+                          The selected services need review before a firm
+                          price, so the customer page shows no dollar amounts —
+                          just that their account manager will finalize the
+                          quote. Engine pricing detail stays available under
+                          Estimator engine details below.
+                        </div>
+                      </div>
+                    ) : (
+                      <CustomerEstimatePreviewV2
+                        E={E}
+                        R={R}
+                        form={form}
+                        satelliteUrl={satelliteData?.imageUrl || null}
+                        onSelectPestFreq={(apps) => {
+                          set("pestFreq", String(apps));
+                          doGenerate({ pestFreq: apps });
+                        }}
+                      />
+                    )}
                     <details className="border-hairline border-zinc-300 rounded-sm bg-white mb-2">
                       <summary className="cursor-pointer px-4 py-3 text-13 font-medium text-zinc-900 list-none border-b-hairline border-zinc-200">
                         Estimator engine details

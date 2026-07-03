@@ -2565,15 +2565,19 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                               onClick: () => markEstimateAnnualPrepayAccepted(e),
                             },
                             (e.status === "sent" ||
-                              e.status === "viewed") && {
-                              key: "copy-link",
-                              label: "Copy estimate link",
-                              icon: <LinkIcon size={16} strokeWidth={1.75} />,
-                              onClick: () => {
-                                const link = `${window.location.origin}/estimate/${e.token || e.id}`;
-                                navigator.clipboard?.writeText(link);
+                              e.status === "viewed") &&
+                              // Rows without a share token have no customer
+                              // link — /estimate/<id> 404s for customers, so
+                              // never offer that as a copyable fallback.
+                              Boolean(e.token) && {
+                                key: "copy-link",
+                                label: "Copy estimate link",
+                                icon: <LinkIcon size={16} strokeWidth={1.75} />,
+                                onClick: () => {
+                                  const link = `${window.location.origin}/estimate/${e.token}`;
+                                  navigator.clipboard?.writeText(link);
+                                },
                               },
-                            },
                             estimateHasLawnLine(e) && {
                               key: "lawn-outline",
                               label: "Lawn service outline",
@@ -3269,12 +3273,14 @@ function MobileEstimateRow({
             icon: <DollarSign size={16} strokeWidth={1.75} />,
             onClick: () => onMarkAnnualPrepayAccepted?.(estimate),
           },
-          (estimate.status === "sent" || estimate.status === "viewed") && {
-            key: "copy-link",
-            label: "Copy estimate link",
-            icon: <LinkIcon size={16} strokeWidth={1.75} />,
-            onClick: () => onCopyLink?.(estimate),
-          },
+          (estimate.status === "sent" || estimate.status === "viewed") &&
+            // Same token gate as the desktop menu — no token, no customer link.
+            Boolean(estimate.token) && {
+              key: "copy-link",
+              label: "Copy estimate link",
+              icon: <LinkIcon size={16} strokeWidth={1.75} />,
+              onClick: () => onCopyLink?.(estimate),
+            },
           estimateHasLawnLine(estimate) && {
             key: "lawn-outline",
             label: "Lawn service outline",
@@ -3534,7 +3540,10 @@ function EstimatesMobileListView({
   );
 
   const copyEstimateLinkMobile = useCallback((e) => {
-    const link = `${window.location.origin}/estimate/${e.token || e.id}`;
+    // The menu item is token-gated, but keep the guard here too — an id-based
+    // /estimate/<id> URL 404s for customers and must never reach a clipboard.
+    if (!e.token) return;
+    const link = `${window.location.origin}/estimate/${e.token}`;
     navigator.clipboard?.writeText(link);
   }, []);
 
