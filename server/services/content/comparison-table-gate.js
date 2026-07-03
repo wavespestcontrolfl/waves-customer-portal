@@ -295,7 +295,8 @@ function draftScanTexts(draft, body) {
 }
 
 /**
- * evaluateProse(draft, body) — the table-less legal scan. Flags:
+ * evaluateProse(draft, body, { operatorBriefText }) — the table-less legal
+ * scan. Flags:
  *   P0 COMPARISON_DISPARAGEMENT   — a disparaging/negative term within
  *      proximity of ANY business-looking name (curated competitor, provider-
  *      suffix name, or legal-entity name)
@@ -309,12 +310,25 @@ function draftScanTexts(draft, body) {
  * A business-shaped name with NO nearby negativity is fine here (unlike the
  * table path's fail-closed UNCLASSIFIED_OPTION) — "Sarasota Pest Control
  * Guide" as a title must not block a normal post.
+ *
+ * operatorBriefText — the OPERATOR-authored intercept-brief text (title/
+ * keywords/thesis/outline). A recognized competitor the operator personally
+ * named there (e.g. the Aptive cancellation brief) is authorized content:
+ * instead of the hard UNKNOWN_COMPETITOR / COMPETITOR_IN_PROSE block, the
+ * draft sets requiresHumanReview so the runner parks it on the APPROVABLE
+ * named-competitor review path — a human still signs off every one, and
+ * the disparagement/reliability scans above still apply at full curated
+ * strictness. Names the operator did NOT write stay hard-blocked; mined
+ * briefs pass no text, so nothing changes for them.
  */
-function evaluateProse(draft, body) {
+function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   const findings = [];
   const scanText = draftScanTexts(draft, body);
   const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
   const nameScanText = stripQuotesForNames(scanText);
+  const briefNorm = String(operatorBriefText || '').toLowerCase().replace(/\s+/g, ' ');
+  const operatorAuthorized = (name) => !!briefNorm
+    && briefNorm.includes(String(name).toLowerCase().replace(/\s+/g, ' '));
 
   const known = new Set();
   const unknown = new Set();
@@ -408,17 +422,28 @@ function evaluateProse(draft, body) {
     }
   }
 
+  let requiresHumanReview = false;
   for (const nm of unknown) {
+    if (operatorAuthorized(nm)) {
+      // The operator named this competitor in the intercept brief — route
+      // to the approvable named-competitor review instead of hard-blocking.
+      requiresHumanReview = true;
+      continue;
+    }
     findings.push(finding('P0', 'COMPARISON_UNKNOWN_COMPETITOR',
       `Names "${nm}", a recognized competitor not on the curated competitor-facts allowlist — its claims cannot be verified. Remove the mention or add "${nm}" to competitor-facts.js with sourced, dated facts.`));
   }
   for (const nm of known) {
+    if (operatorAuthorized(nm)) {
+      requiresHumanReview = true;
+      continue;
+    }
     findings.push(finding('P1', 'COMPARISON_COMPETITOR_IN_PROSE',
       `Names competitor "${nm}" in prose/title/meta with no comparison table — claims there are not validated against competitor-facts.js. Name a competitor ONLY inside a <ComparisonTable> (every cell is checked).`));
   }
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
-  return { pass, findings, requiresHumanReview: false };
+  return { pass, findings, requiresHumanReview };
 }
 
 // Escape a detected business name for use inside a regex, tolerating the
@@ -430,14 +455,18 @@ function escapeForNameRe(name) {
 }
 
 /**
- * evaluate(draft, { namedCompetitorEnabled }) → { pass, findings, requiresHumanReview }
+ * evaluate(draft, { namedCompetitorEnabled, operatorBriefText })
+ *   → { pass, findings, requiresHumanReview }
+ * operatorBriefText applies to the TABLE-LESS path only (see evaluateProse):
+ * table cells always validate against curated competitor-facts — operator
+ * authorship can't make an unverifiable table claim verifiable.
  */
-function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
+function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '' } = {}) {
   const body = String(draft?.body || draft?.content || '');
   const findings = [];
   const blocks = extractComparisonBlocks(body);
   if (!body) return { pass: true, findings, requiresHumanReview: false };
-  if (blocks.length === 0) return evaluateProse(draft, body);
+  if (blocks.length === 0) return evaluateProse(draft, body, { operatorBriefText });
 
   const fm = draft?.frontmatter || {};
   const metaText = ['title', 'meta_description', 'metaTitle', 'metaDescription']

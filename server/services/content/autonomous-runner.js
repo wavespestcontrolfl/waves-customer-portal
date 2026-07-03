@@ -87,6 +87,28 @@ const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-see
 // claim path doesn't depend on the seeder module loading.
 const OPERATOR_INTERCEPT_BUCKET = 'operator_intercept';
 
+// The operator-authored text of an intercept brief (title/keywords/thesis/
+// outline), for the comparison gate's operator-authorized-competitor
+// exception: a recognized competitor the OPERATOR named there (e.g. the
+// Aptive cancellation brief) routes the draft to the approvable named-
+// competitor review path instead of a hard UNKNOWN_COMPETITOR block. Only
+// operator_intercept opportunities produce text — mined briefs get '', so
+// nothing changes for them. Both gate call sites (runNext and the approval
+// re-check) MUST derive this identically, or a draft parked as approvable
+// would fail its own approval re-evaluation.
+function operatorBriefTextForComparisonGate(opp, brief) {
+  if (!opp || opp.bucket !== OPERATOR_INTERCEPT_BUCKET) return '';
+  const ob = brief?.voice_constraints?.operator_brief || null;
+  if (!ob) return '';
+  return [
+    ob.working_title,
+    ob.primary_kw,
+    ob.thesis,
+    ...(Array.isArray(ob.secondary_kws) ? ob.secondary_kws : []),
+    ...(Array.isArray(ob.outline) ? ob.outline : []),
+  ].filter(Boolean).join('\n');
+}
+
 // City → GBP location for autonomous gbp_post distribution, backed by the
 // canonical CITY_TO_LOCATION map in config/locations.js. A post goes to the
 // single profile whose service area covers the opportunity's city — never
@@ -653,7 +675,10 @@ class AutonomousRunner {
       } catch (_) { namedCompetitorEnabled = false; }
       let comparisonResult;
       try {
-        comparisonResult = comparisonGate.evaluate(draft, { namedCompetitorEnabled });
+        comparisonResult = comparisonGate.evaluate(draft, {
+          namedCompetitorEnabled,
+          operatorBriefText: operatorBriefTextForComparisonGate(opp, brief),
+        });
       } catch (err) {
         logger.warn(`[autonomous-runner] comparison-table gate threw: ${err.message}`);
         comparisonResult = { pass: false, findings: [{ severity: 'P1', code: 'COMPARISON_TABLE_GATE_ERROR', message: err.message }] };
@@ -2263,12 +2288,18 @@ class AutonomousRunner {
     if (!opp) { const e = new Error('Opportunity not found'); e.statusCode = 404; throw e; }
 
     // Re-confirm the comparison gate still passes on the stored draft (defense
-    // against a tampered draft_payload between parking and approval).
+    // against a tampered draft_payload between parking and approval). Same
+    // operatorBriefText derivation as runNext's gate call — an operator-
+    // intercept draft parked as approvable BECAUSE the operator named the
+    // competitor must not fail its own approval re-evaluation.
     const gate = getComparisonTableGate();
     if (gate) {
       let namedEnabled = false;
       try { namedEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedEnabled = false; }
-      const g = gate.evaluate(draft, { namedCompetitorEnabled: namedEnabled });
+      const g = gate.evaluate(draft, {
+        namedCompetitorEnabled: namedEnabled,
+        operatorBriefText: operatorBriefTextForComparisonGate(opp, brief),
+      });
       if (!g.pass) {
         const codes = (g.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1').map((f) => f.code).join('; ');
         const e = new Error(`Comparison-table gate no longer passes: ${codes}`); e.statusCode = 409; throw e;

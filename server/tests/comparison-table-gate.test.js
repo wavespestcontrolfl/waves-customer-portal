@@ -667,3 +667,44 @@ describe('table-less drafts: directed-scan tightening (Codex round 2)', () => {
     }
   });
 });
+
+describe('table-less drafts: operator-authorized competitor naming (Codex round 3)', () => {
+  // The Aptive intercept brief's own text — the operator personally named
+  // the competitor, so the draft routes to the APPROVABLE named-competitor
+  // review path instead of a hard UNKNOWN_COMPETITOR block.
+  const BRIEF_TEXT = [
+    "Aptive's Cancellation Fee, Explained",
+    'aptive cancellation fee',
+    "What Aptive's contract actually costs and how the cancellation fee works",
+    'how to cancel aptive',
+  ].join('\n');
+
+  test('an operator-named recognized competitor passes with requiresHumanReview', () => {
+    const r = gate.evaluate({
+      body: 'Aptive charges a $199 early-cancel fee per its published contract terms; here is the dispute path.',
+      frontmatter: { title: "Aptive's Cancellation Fee, Explained" },
+    }, { operatorBriefText: BRIEF_TEXT });
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('the same draft with NO operator brief text stays hard-blocked (mined lane unchanged)', () => {
+    const r = gate.evaluate({ body: 'Aptive charges a $199 early-cancel fee per its contract terms.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && f.severity === 'P0')).toBe(true);
+  });
+  test('a competitor the operator did NOT name still flags', () => {
+    const r = gate.evaluate({
+      body: 'Aptive charges a cancellation fee, and Terminix has similar terms in its contracts.',
+    }, { operatorBriefText: BRIEF_TEXT });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
+  test('disparaging the operator-authorized name still blocks (full curated strictness)', () => {
+    const r = gate.evaluate({
+      body: 'Aptive is dishonest and scams customers out of hundreds every year.',
+    }, { operatorBriefText: BRIEF_TEXT });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+});

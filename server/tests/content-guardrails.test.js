@@ -411,3 +411,27 @@ describe('outbound-link gate: scheme + mailto hardening (Codex round 2)', () => 
     expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 });
+
+describe('outbound-link gate: schemes WITHOUT :// in link destinations (Codex round 3)', () => {
+  test('non-http schemes lacking :// are P0 in markdown, href, and autolink destinations', () => {
+    for (const body of [
+      'Grab the [file](ftp:spam.example/file) now.',
+      '<a href="webcal:evil.example">calendar</a>',
+      'Subscribe via <webcal:evil.example/feed> today.',
+      'Call <tel:2125551234> now.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+  test('prose colons, ratios, and angle-bracketed http autolinks do not trip the scheme scan', () => {
+    for (const body of [
+      'Plain prose with a colon: nothing else here.',
+      'The ratio is 3:1 for termite baiting.',
+      'Per <https://wavespestcontrol.com/blog/termites/> for details.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    }
+  });
+});

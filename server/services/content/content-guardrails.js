@@ -227,13 +227,20 @@ function hostAllowed(host, allowed) {
 // (ftp:, gopher:, …) is rejected outright — the gate fails closed on any
 // external reference, not just web links.
 const ABSOLUTE_URL_RE = /\b([a-z][a-z0-9+.-]*):\/\/[^\s<>()"'\]]+/gi;
-// href/src carrying an executable or data scheme — never valid in a draft.
-const UNSAFE_SCHEME_HREF_RE = /\b(?:href|src)\s*=\s*["']?\s*(?:javascript|data|vbscript|file)\s*:/i;
-// The same unsafe schemes as a Markdown/MDX link destination — `[x](javascript:…)`
-// has no href= text and no https?:// shape, so the two scanners above miss it.
-// The optional `<` covers Markdown's angle-bracketed destination form,
-// `[x](<javascript:…>)`, which is equally valid MDX.
-const UNSAFE_SCHEME_MD_DEST_RE = /\]\(\s*<?\s*(?:javascript|data|vbscript|file)\s*:/i;
+// ANY scheme in a link DESTINATION — schemes without '://' (ftp:host,
+// webcal:, tel:, javascript:) never match the URL scan above, so the
+// destination positions must be scanned for arbitrary schemes, not just the
+// executable set. Three destination shapes carry a scheme:
+//   - Markdown/MDX links and images: `[x](scheme:…)`, incl. the angle-
+//     bracketed form `[x](<scheme:…>)`,
+//   - href/src attributes: `href="scheme:…"`,
+//   - CommonMark autolinks: `<scheme:…>` (no whitespace inside by spec).
+// Policy: only http(s) (which then flows through the host allowlist) and
+// mailto (recipient-validated below) may pass; everything else is P0.
+const MD_DEST_SCHEME_RE = /\]\(\s*<?\s*([a-z][a-z0-9+.-]*):/gi;
+const ATTR_SCHEME_RE = /\b(?:href|src)\s*=\s*["']?\s*([a-z][a-z0-9+.-]*):/gi;
+const AUTOLINK_SCHEME_RE = /<([a-z][a-z0-9+.-]*):[^>\s]*>/gi;
+const ALLOWED_DEST_SCHEMES = new Set(['http', 'https', 'mailto']);
 // Protocol-relative URL (//host/path) — scheme-less external reference that
 // bypasses an https?:// scan. Requires a dotted host with a TLD so prose
 // slashes ("and//or", path fragments) don't trip it.
@@ -243,8 +250,15 @@ const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = String(text || '');
   if (!body) return null;
-  if (UNSAFE_SCHEME_HREF_RE.test(body) || UNSAFE_SCHEME_MD_DEST_RE.test(body)) {
-    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a link with an executable scheme (javascript:/data:) — remove it.');
+  for (const src of [MD_DEST_SCHEME_RE, ATTR_SCHEME_RE, AUTOLINK_SCHEME_RE]) {
+    const destRe = new RegExp(src.source, 'gi');
+    let dm;
+    while ((dm = destRe.exec(body)) !== null) {
+      const scheme = dm[1].toLowerCase();
+      if (!ALLOWED_DEST_SCHEMES.has(scheme)) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a link destination with the "${scheme}:" scheme ("${dm[0].slice(0, 60)}") — only http(s) links to allowlisted hosts, @wavespestcontrol.com mailto links, or relative internal paths are permitted.`);
+      }
+    }
   }
   const allowed = allowedLinkHosts({ operatorCitations, requiredSourceUrls });
   const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
