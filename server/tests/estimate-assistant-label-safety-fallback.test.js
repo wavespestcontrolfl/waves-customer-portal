@@ -154,6 +154,9 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     const answer = answerEstimateQuestionFallback('Is the mosquito spray safe for pets?', context);
     expect(answer).not.toContain('Label re-entry guidance');
     expect(answer).not.toContain('rainfast');
+    // The active-ingredient sentence is scoped the same way — the lawn
+    // herbicide must not be named in a mosquito answer either.
+    expect(answer).not.toContain('Quinclorac');
     expect(answer).toContain('follow the product label directions');
   });
 
@@ -203,9 +206,53 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     });
     expect(answer).toContain('Re-enter once sprays have dried');
     expect(answer).toContain('rainfast in about 45 minutes');
-    // The lawn herbicide the customer did NOT ask about stays out.
+    // The lawn herbicide the customer did NOT ask about stays out — of the
+    // label facts AND the active-ingredient sentence.
     expect(answer).not.toContain('rainfast in about 180 minutes');
     expect(answer).not.toContain('until dry.');
+    expect(answer).not.toContain('Quinclorac');
+    expect(answer).toContain('Bifenthrin');
+  });
+
+  test('short punctuated ingredient names like 2,4-D still narrow to their product', () => {
+    const answer = answerEstimateQuestionFallback('Is 2,4-D safe for pets?', {
+      serviceMode: 'recurring',
+      services: [
+        { label: 'Lawn Care', detail: 'Weed control applications', summary: 'Lawn Care — weed control' },
+        { label: 'Pest Control', detail: 'Exterior perimeter plan', summary: 'Pest Control — perimeter' },
+      ],
+      supportContext: {
+        productCatalog: [
+          {
+            source: 'admin_product_catalog',
+            category: 'herbicide',
+            activeIngredient: 'Carfentrazone + 2,4-D + MCPP + Dicamba',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Keep people and pets off treated areas until dry.',
+            rainfastMinutes: 180,
+            irrigationNotes: null,
+            serviceKeys: ['lawn_care'],
+          },
+          {
+            source: 'admin_product_catalog',
+            category: 'insecticide',
+            activeIngredient: 'Bifenthrin',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Re-enter once sprays have dried.',
+            rainfastMinutes: 45,
+            irrigationNotes: null,
+            serviceKeys: ['pest_control'],
+          },
+        ],
+      },
+    });
+    expect(answer).toContain('2,4-D');
+    expect(answer).toContain('rainfast in about 180 minutes');
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).not.toContain('rainfast in about 45 minutes');
+    expect(answer).not.toContain('Bifenthrin');
   });
 
   test('the force-fallback gate routes watering questions away from the live models', () => {
@@ -215,7 +262,15 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('When can I run the sprinklers again?')).toBe(true);
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How soon can I irrigate?')).toBe(true);
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Is it safe for my dog?')).toBe(true);
+    // Rainfast timing comes from reviewed rainfastMinutes — deterministic only.
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How soon is it rainfast?')).toBe(true);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains after treatment?')).toBe(true);
     // Non-safety questions still reach the live models.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What time will the technician arrive?')).toBe(false);
+  });
+
+  test('rainfast questions land in the safety branch and quote the label window', () => {
+    const answer = answerEstimateQuestionFallback('What if it rains after the treatment?', verifiedContext);
+    expect(answer).toContain('rainfast in about 180 minutes');
   });
 });

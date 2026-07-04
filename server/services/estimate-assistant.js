@@ -656,21 +656,26 @@ function supportRowMatchesQuestion(row = {}, question = '') {
   return !terms.length || terms.some((term) => text.includes(term));
 }
 
+// Both the active-ingredient sentence and the label-facts line answer from
+// the SAME scoped row set (scopeCatalogRowsToQuestion below) — a targeted
+// question must not name one product's ingredient while quoting another's
+// label, and a question with no attributable product names nothing.
 function activeIngredientsFromSupport(context = {}, question = '') {
-  const ingredients = [];
-  for (const row of supportRows(context)) {
-    if (row.source === 'admin_product_catalog' && row.activeIngredient) ingredients.push(row.activeIngredient);
-  }
+  const catalogRows = supportRows(context)
+    .filter((row) => row.source === 'admin_product_catalog');
+  const scoped = scopeCatalogRowsToQuestion(catalogRows, context, question);
+  const ingredients = scoped.map((row) => row.activeIngredient).filter(Boolean);
   return [...new Set(ingredients.map(cleanText).filter(Boolean))].slice(0, 8);
 }
 
 // Safety/product/treatment questions with support rows never reach the live
 // models — they force-route to the deterministic fallback so answers only
-// ever quote reviewed label facts. water/irrigat/sprinkl are here for the
-// same reason: label watering guidance lives in the fallback's safety
-// branch, so "when can I run the sprinklers?" must not go to an LLM that
-// could miss or hallucinate it.
-const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water\w*|irrigat\w*|sprinkl\w*)\b/i;
+// ever quote reviewed label facts. water/irrigat/sprinkl/rain/treatment are
+// here for the same reason: the label watering guidance and rainfast window
+// live in the fallback's safety branch, so "when can I run the sprinklers?"
+// or "what if it rains after treatment?" must not go to an LLM that could
+// miss or hallucinate them.
+const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water\w*|irrigat\w*|sprinkl\w*|rain\w*|treatments?)\b/i;
 
 // Generic treatment vocabulary says nothing about WHICH product a question
 // targets, so it never counts as naming one.
@@ -688,11 +693,54 @@ function catalogRowMentionsQuestion(row = {}, question = '') {
   const text = cleanText([row.activeIngredient, row.category, row.title, row.path]
     .filter(Boolean).join(' ')).toLowerCase();
   if (!text) return false;
-  return cleanText(question)
+  const matchesTerm = cleanText(question)
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((term) => term.length >= 4 && !GENERIC_QUESTION_TERMS.has(term))
     .some((term) => text.includes(term));
+  if (matchesTerm) return true;
+  // Short/punctuated active-ingredient names ("2,4-D", "Bti") never survive
+  // the >=4-char term filter above — compare whole normalized question words
+  // against normalized ingredient aliases by exact equality instead.
+  // Ingredient lists separate aliases with +, /, ; or "and" — NOT comma,
+  // which is part of names like 2,4-D.
+  const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const aliases = cleanText(row.activeIngredient || '')
+    .split(/[+/;]|\band\b/i)
+    .map(normalize)
+    .filter((alias) => alias.length >= 2);
+  if (!aliases.length) return false;
+  const questionWords = cleanText(question).split(/\s+/).map(normalize).filter(Boolean);
+  return aliases.some((alias) => questionWords.includes(alias));
+}
+
+// Scope targeted questions to the product(s) they target — the support
+// context is built from ALL estimate services, so on a multi-service
+// estimate the lawn herbicide's facts must not answer a mosquito question.
+// A question can target products two ways, and both count (union):
+//   - by service family ("mosquito spray", "the lawn and mosquito
+//     treatments") — EVERY named family, matched against the serviceKeys
+//     each row carries from the service library's default_products linkage;
+//   - by explicit name ("is bifenthrin safe?", "is 2,4-D safe?") —
+//     ingredient/category mention, which needs no family word at all.
+// A question that targets nothing ("is it pet safe?") keeps every row, and
+// a single-family estimate asked about only that same family needs no
+// attribution. No survivors = an empty set (callers fail closed to generic
+// copy) rather than the wrong treatment's rows.
+function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
+  if (!rows.length) return rows;
+  const questionFamilies = serviceFamiliesFromText(question);
+  const estimateFamilies = serviceKeysFromContext(context, '');
+  const soleFamilyMatchesQuestion = questionFamilies.length > 0
+    && estimateFamilies.length === 1
+    && questionFamilies.every((family) => family === estimateFamilies[0]);
+  const mentionedRows = rows.filter((row) => catalogRowMentionsQuestion(row, question));
+  if (soleFamilyMatchesQuestion || (!questionFamilies.length && !mentionedRows.length)) return rows;
+  const familyRows = questionFamilies.length
+    ? rows.filter((row) => Array.isArray(row.serviceKeys)
+      && row.serviceKeys.some((key) => questionFamilies.includes(key)))
+    : [];
+  return [...new Set([...familyRows, ...mentionedRows])];
 }
 
 // Deterministic label-safety line for the forced-fallback safety answer, built
@@ -703,36 +751,13 @@ function catalogRowMentionsQuestion(row = {}, question = '') {
 // Applicator PPE is deliberately excluded — it is what the technician wears,
 // and in a customer answer it reads as customer instructions.
 function labelSafetyFactsFromSupport(context = {}, question = '') {
-  const verified = supportRows(context)
-    .filter((row) => row.source === 'admin_product_catalog' && row.labelVerified);
-  if (!verified.length) return '';
-  // Scope targeted questions to the product(s) they target — the support
-  // context is built from ALL estimate services, so on a multi-service
-  // estimate the lawn herbicide's facts must not answer a mosquito question.
-  // A question can target products two ways, and both count (union):
-  //   - by service family ("mosquito spray", "the lawn and mosquito
-  //     treatments") — EVERY named family, matched against the serviceKeys
-  //     each row carries from the service library's default_products linkage;
-  //   - by explicit name ("is bifenthrin safe?") — ingredient/category
-  //     mention, which needs no family word at all.
-  // A question that targets nothing ("is it pet safe?") keeps every row, and
-  // a single-family estimate asked about only that same family needs no
-  // attribution. No survivors = say nothing (fail closed to the generic
-  // label-directions copy) rather than quote the wrong treatment's label.
-  const questionFamilies = serviceFamiliesFromText(question);
-  const estimateFamilies = serviceKeysFromContext(context, '');
-  const soleFamilyMatchesQuestion = questionFamilies.length > 0
-    && estimateFamilies.length === 1
-    && questionFamilies.every((family) => family === estimateFamilies[0]);
-  const mentionedRows = verified.filter((row) => catalogRowMentionsQuestion(row, question));
-  let scoped = verified;
-  if (!soleFamilyMatchesQuestion && (questionFamilies.length || mentionedRows.length)) {
-    const familyRows = questionFamilies.length
-      ? verified.filter((row) => Array.isArray(row.serviceKeys)
-        && row.serviceKeys.some((key) => questionFamilies.includes(key)))
-      : [];
-    scoped = [...new Set([...familyRows, ...mentionedRows])];
-  }
+  // Scope over ALL catalog rows first, then keep only verified survivors —
+  // if the question names a product whose row is unverified, the answer must
+  // carry NO label facts, not another (verified) product's facts.
+  const catalogRows = supportRows(context)
+    .filter((row) => row.source === 'admin_product_catalog');
+  const scoped = scopeCatalogRowsToQuestion(catalogRows, context, question)
+    .filter((row) => row.labelVerified);
   if (!scoped.length) return '';
   const reentries = [...new Set(scoped.map((row) => cleanText(row.reentry || '')).filter(Boolean))];
   const signalWords = [...new Set(scoped.map((row) => cleanText(row.signalWord || '')).filter(Boolean))];
@@ -934,11 +959,12 @@ function answerEstimateQuestionFallback(question, context = {}) {
     ].filter(Boolean).join(' ');
   }
 
-  // water/irrigat/sprinkl: watering questions are force-routed here whenever
-  // they mention the lawn/application, and the label watering guidance lives
-  // in labelSafetyFacts — so they must land in this branch, not the generic
-  // lawn one.
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water\w*|irrigat\w*|sprinkl\w*)\b/.test(q)) {
+  // water/irrigat/sprinkl/rain/treatment: watering and rainfast questions are
+  // force-routed to this fallback, and the label watering guidance + rainfast
+  // window live in labelSafetyFacts — so they must land in this branch, not
+  // the generic lawn one. treatments? is deliberately not treat\w*: "how do
+  // you treat roaches?" belongs to the pest/roach branches below.
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water\w*|irrigat\w*|sprinkl\w*|rain\w*|treatments?)\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
     const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';
