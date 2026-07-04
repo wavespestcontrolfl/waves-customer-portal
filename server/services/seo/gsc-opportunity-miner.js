@@ -499,7 +499,12 @@ class GscOpportunityMiner {
   async _loadOccupiedLinkBoostKeys() {
     const rows = await db('opportunity_queue')
       .where('bucket', 'link_boost')
-      .whereIn('status', ['claimed', 'done', 'pending_review'])
+      // 'skipped' counts as occupied too: the upsert keeps an operator
+      // skip sticky, so re-deriving a skipped key just burns one of the
+      // LINK_BOOST_MAX_PER_RUN slots on a row persistAll re-freezes as
+      // skipped — enough skipped top pages would starve the cap and no
+      // new link-boost work would ever derive.
+      .whereIn('status', ['claimed', 'done', 'pending_review', 'skipped'])
       .select('dedupe_key');
     return new Set(rows.map((r) => r.dedupe_key));
   }

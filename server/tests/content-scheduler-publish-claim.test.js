@@ -69,6 +69,7 @@ jest.mock('../models/db', () => {
     };
     return q;
   });
+  dbFn.raw = jest.fn((sql) => ({ __raw: sql }));
   return dbFn;
 });
 
@@ -270,6 +271,12 @@ describe('atomic publishing claim', () => {
       && u.filters.some(([col, val]) => col === 'id' && val === 7)
       && u.filters.some(([col, val]) => col === 'publish_status' && val === 'publishing'));
     expect(parkedFailed).toBeDefined();
+    // The park clears publishAstro's pre-PR 'publish_failed' stamp (Codex
+    // round 4): scheduleBlogPost only sets publish_status, and the pending
+    // query excludes publish_failed — without the clear, a fixed-and-
+    // rescheduled post was never picked up again. Marker-guarded so a
+    // publish_failed row with an opened PR keeps its state.
+    expect(String(parkedFailed.updates.astro_status.__raw)).toMatch(/astro_pr_number IS NULL THEN NULL/);
     // (id-scoped: the tick's stale-publishing SWEEP also writes a 'pending'
     // retry update, but with the cutoff filter and no id — that one is fine)
     const retried = mockState.updates.find((u) =>

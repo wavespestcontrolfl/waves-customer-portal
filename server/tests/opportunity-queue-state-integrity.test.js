@@ -98,7 +98,7 @@ describe('claimNext lifetime attempt budget', () => {
     expect(bindings[1]).toBe(3);
   });
 
-  test('sweepExhaustedAttempts converts exhausted pendings to visible skipped/attempts_exhausted', async () => {
+  test('sweepExhaustedAttempts parks exhausted pendings at REQUEUEABLE pending_review/attempts_exhausted (Codex round 4 — skipped was permanent)', async () => {
     const q = chain({ updateResult: 2 });
     db.mockImplementation(() => q);
 
@@ -109,8 +109,11 @@ describe('claimNext lifetime attempt budget', () => {
       ['status', 'pending'],
       ['attempt_count', '>=', 5],
     ]));
+    // pending_review, NOT skipped: the review queue only offers requeue
+    // (the attempt_count reset) on pending_review rows, and the miner
+    // keeps skipped sticky — swept-to-skipped rows were dead forever.
     expect(q.update).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'skipped',
+      status: 'pending_review',
       skip_reason: 'attempts_exhausted',
     }));
   });
@@ -262,6 +265,16 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
       const src = fs.readFileSync(require.resolve(mod), 'utf8');
       expect(src).toMatch(/status IN \('claimed', 'done', 'pending_review', 'skipped'\)/);
     }
+  });
+
+  test('refresh-audit in-flight check does not early-return on exhausted pending rows (Codex round 4 — the reset was unreachable)', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/refresh-audit'), 'utf8');
+    // The duplicate check returned { queued: false } for ANY pending row
+    // for the page, so the exhausted-count reset in the upsert never ran —
+    // the admin saw the stale state and the row stayed unclaimable until
+    // the daily sweep. Exhausted pendings must fall through to the upsert.
+    expect(src).toMatch(/where\('status', '<>', 'pending'\)\.orWhere\('attempt_count', '<', maxClaimAttempts\(\)\)/);
   });
 
   test('peek applies the same attempt budget as claimNext (catch-up/preview parity)', async () => {

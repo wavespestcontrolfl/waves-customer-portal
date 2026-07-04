@@ -1741,6 +1741,27 @@ describe('publishAstro catch persists an already-opened PR marker (Codex round 3
     expect(parked.astro_pr_number).toBeUndefined();
     expect(gh.createPr).not.toHaveBeenCalled();
   });
+
+  test('admin retry of publish_failed WITH a persisted marker cleans up the stale PR first (Codex round 4)', async () => {
+    // The marker exists exactly because a PR opened before the failure —
+    // without the same close+delete the build_failed retry gets, the
+    // republish opened a SECOND PR and overwrote the marker, orphaning
+    // the first.
+    const post = validPost({
+      astro_status: 'publish_failed',
+      astro_pr_number: 99,
+      astro_branch_name: 'content/blog-ant-trails-bradenton-old1',
+    });
+    const q = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => q);
+    gh.getPr.mockResolvedValue({ number: 99, state: 'open', merged: false });
+
+    await AstroPublisher.publishAstro('post-1');
+
+    expect(gh.closePr).toHaveBeenCalledWith(99);
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails-bradenton-old1');
+    expect(gh.createPr).toHaveBeenCalled();
+  });
 });
 
 describe('Pages poll auto-merge per-tick cap', () => {

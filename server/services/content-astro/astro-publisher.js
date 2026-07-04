@@ -663,15 +663,24 @@ async function publishAstro(postId) {
   //     DELETE them before opening the replacement — that both unblocks the
   //     retry and prevents an orphan. Best-effort: cleanup failure is logged
   //     but doesn't block the republish.
-  // live/merged/draft/publish_failed have no open PR to orphan (the existing-
-  // file SHA path handles in-place updates), so they fall through.
+  //   - publish_failed WITH a PR marker → the catch below persists the
+  //     PR/branch when the failure landed after gh.createPr (e.g. the
+  //     pr_open stamp itself died), so the admin Retry on publish_failed
+  //     gets the same close+delete — without it the retry opened a SECOND
+  //     PR and overwrote the marker, orphaning the first.
+  // live/merged/draft and marker-less publish_failed have no open PR to
+  // orphan (the existing-file SHA path handles in-place updates), so they
+  // fall through.
   if (post.astro_status === 'pr_open' || post.astro_status === 'unpublish_pending') {
     throw new Error(
       `cannot publish post ${postId}: an Astro PR is already in flight (status "${post.astro_status}"`
       + `${post.astro_pr_number ? `, PR #${post.astro_pr_number}` : ''}); merge or unpublish it before republishing`,
     );
   }
-  if (post.astro_status === 'build_failed' && (post.astro_pr_number || post.astro_branch_name)) {
+  if (
+    (post.astro_status === 'build_failed' || post.astro_status === 'publish_failed')
+    && (post.astro_pr_number || post.astro_branch_name)
+  ) {
     await cleanupStaleAstroPr(post);
   }
 

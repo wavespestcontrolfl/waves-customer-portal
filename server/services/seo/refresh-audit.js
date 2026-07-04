@@ -348,9 +348,17 @@ class RefreshAudit {
     // under ANOTHER bucket's dedupe_key (e.g. the GSC miner's decay_refresh), and
     // our refresh-audit key won't collide with it. claimNext only acts on one
     // pending row, so a second pending refresh for the same target is wasted work.
+    // A pending row with an EXHAUSTED attempt budget is NOT in flight, though:
+    // claimNext/peek refuse it, so early-returning here would report its state
+    // while leaving the page unrunnable — fall through to the upsert, which
+    // resets our own key's budget (same-key row) or seeds a claimable row (a
+    // foreign-bucket key; the daily sweep parks the exhausted one for review).
     const inflight = await db('opportunity_queue')
       .where('action_type', 'refresh_existing_page')
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
+      .where(function () {
+        this.where('status', '<>', 'pending').orWhere('attempt_count', '<', maxClaimAttempts());
+      })
       .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
       .whereRaw(`${hostRegistrableSql('page_url')} = ?`, [targetDomain])
       .first();

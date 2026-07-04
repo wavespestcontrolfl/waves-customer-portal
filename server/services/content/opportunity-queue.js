@@ -308,12 +308,18 @@ class OpportunityQueue {
   }
 
   /**
-   * Convert pending rows that have used up their lifetime claim budget to
-   * a VISIBLE skipped/attempts_exhausted. claimNext already refuses them,
-   * but without this sweep they'd sit pending forever as invisible
-   * zombies — never claimable, never surfaced. skipped is sticky in the
-   * miner upsert, so the next mine can't resurrect them; an operator
-   * requeue (which resets attempt_count) is the deliberate way back in.
+   * Park pending rows that have used up their lifetime claim budget at a
+   * VISIBLE pending_review/attempts_exhausted. claimNext already refuses
+   * them, but without this sweep they'd sit pending forever as invisible
+   * zombies — never claimable, never surfaced.
+   *
+   * pending_review, NOT skipped: the review queue only offers requeue
+   * (which resets attempt_count — the deliberate way back in) on
+   * pending_review rows, and the miner upsert keeps skipped sticky, so an
+   * exhausted row swept to skipped was PERMANENT short of a DB edit or an
+   * operator seeder path. pending_review is equally mine-proof (the
+   * upsert's status CASE preserves it) while keeping the operator flow
+   * alive; skipped stays the shape of an operator DISMISSAL.
    * Janitor cron task, paired with expireStale().
    */
   async sweepExhaustedAttempts() {
@@ -321,12 +327,12 @@ class OpportunityQueue {
       .where('status', 'pending')
       .where('attempt_count', '>=', maxClaimAttempts())
       .update({
-        status: 'skipped',
+        status: 'pending_review',
         skip_reason: 'attempts_exhausted',
         completed_at: new Date(),
         updated_at: new Date(),
       });
-    if (result > 0) logger.warn(`[opportunity-queue] swept ${result} opportunit${result === 1 ? 'y' : 'ies'} to skipped/attempts_exhausted (claimed ${maxClaimAttempts()}+ times without completing)`);
+    if (result > 0) logger.warn(`[opportunity-queue] parked ${result} opportunit${result === 1 ? 'y' : 'ies'} at pending_review/attempts_exhausted (claimed ${maxClaimAttempts()}+ times without completing; operator requeue resets the budget)`);
     return result;
   }
 

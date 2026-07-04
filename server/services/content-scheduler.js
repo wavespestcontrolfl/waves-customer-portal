@@ -588,7 +588,18 @@ const ContentScheduler = {
         if (claimed) {
           if (terminalFailure || DETERMINISTIC_PUBLISH_CODES.has(err.code)) {
             await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing')
-              .update({ publish_status: 'failed', updated_at: new Date() }).catch(() => {});
+              .update({
+                publish_status: 'failed',
+                // publishAstro already stamped astro_status='publish_failed'
+                // (deterministic codes all throw pre-PR, so no PR marker) —
+                // clear it, or the fixed post re-scheduled via
+                // scheduleBlogPost (which only sets publish_status) is never
+                // re-selected: the pending query excludes publish_failed.
+                // Guarded on the marker so a publish_failed row that DOES
+                // carry an opened PR keeps its state for the retry cleanup.
+                astro_status: db.raw("CASE WHEN astro_status = 'publish_failed' AND astro_pr_number IS NULL THEN NULL ELSE astro_status END"),
+                updated_at: new Date(),
+              }).catch(() => {});
           } else {
             // Same fork as resetStalePublishingBlogs: where the row goes
             // depends on whether Astro made external progress (publishAstro
