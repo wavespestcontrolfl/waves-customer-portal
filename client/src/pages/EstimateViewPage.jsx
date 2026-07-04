@@ -979,9 +979,13 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
 export function getServiceLabel(frequency, estimate, pricing) {
   if (estimate?.isOneTimeOnly) {
     // Every billable line belongs in the eyebrow, not just the first —
-    // mirrors the SSR page's quotedOneTimeNames.join(' + ').
-    const names = (pricing?.oneTimeBreakdown?.items || [])
-      .filter((item) => item && item.kind !== 'discount')
+    // mirrors the SSR page's quotedOneTimeNames.join(' + '). Fee/review rows
+    // (inspections, $0 credits, WaveGuard setup) aren't quoted services, but
+    // if nothing billable remains they're better than "One-time service".
+    const rows = (pricing?.oneTimeBreakdown?.items || [])
+      .filter((item) => item && item.kind !== 'discount');
+    const billable = rows.filter((item) => !isNonBillableBreakdownRow(item));
+    const names = (billable.length ? billable : rows)
       .map((item) => String(item.label || '').trim())
       .filter(Boolean);
     const unique = [...new Set(names)];
@@ -2897,6 +2901,10 @@ export default function EstimateViewPage() {
   // service), so an excluded section (palm/rodent) never shows it even alongside
   // an eligible service, and an eligible single service / bundle always can.
   const waveGuardTier = pricing.combinedRecurring?.waveGuardTierLabel || pricing.waveGuardTier || null;
+  // The whole-plan tier badge and combined summary show the tier only if any
+  // section in the bundle is eligible, so an excluded-only bundle (e.g.
+  // palm + rodent) stays badge-free.
+  const combinedTierEligible = services.some((s) => s?.waveGuardTierEligible === true);
   // Combined card total reflects EVERY service's chosen cadence: when a combo
   // matches the per-section selections, use its authoritative total; otherwise
   // fall back to the pest-cadence entry (single-cadence / legacy bundles).
@@ -2937,7 +2945,7 @@ export default function EstimateViewPage() {
         <>
           {/* Multi-service plans show the WaveGuard tier ONCE, above the
               boxes on the left — not repeated in every card. */}
-          {services.length > 1 && waveGuardTier ? (
+          {services.length > 1 && waveGuardTier && combinedTierEligible ? (
             <div style={{ marginBottom: 12 }}>
               <span style={{
                 display: 'inline-block', padding: '5px 11px',
@@ -2988,6 +2996,19 @@ export default function EstimateViewPage() {
             );
           })}
           </div>
+
+          {/* The combined recurring total is the number the invoice/payment
+              copy uses — the customer has to see it before approving, so it
+              stays even though the per-service boxes each show a price. */}
+          {services.length > 1 && renderFlags.showRecurringSummary ? (
+            <CombinedRecurringPriceCard
+              combined={pricing.combinedRecurring}
+              selectedFrequency={combinedFrequency}
+              // Tier pill already renders ONCE above the service boxes
+              // (owner directive: single WaveGuard pill per bundle).
+              waveGuardTier={null}
+            />
+          ) : null}
 
           {/* Bundle save lines render once, BELOW all service boxes. */}
           {services.length > 1 ? services.map((section) => {
@@ -3067,7 +3088,11 @@ export default function EstimateViewPage() {
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
-        <Header {...headerContactProps} headline={headline} />
+        <Header
+          {...headerContactProps}
+          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
+          headline={headline}
+        />
         <MembershipCard membership={estimate.membership} />
         <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar ? (
@@ -3103,7 +3128,11 @@ export default function EstimateViewPage() {
   if (ctaPhase === 'success') {
     return (
       <Page>
-        <Header {...headerContactProps} headline={headline} />
+        <Header
+          {...headerContactProps}
+          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
+          headline={headline}
+        />
         <SuccessCard acceptResult={acceptResult} />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
@@ -3340,7 +3369,9 @@ export default function EstimateViewPage() {
         </>
       )}
 
-      <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
+      {/* During slot review the booking section isn't rendered, so the app
+          card's "Book today!" would scroll nowhere — drop it for that phase. */}
+      <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
       <CustomerReviews />
       <QuestionsEscapeHatch estimateSlug={estimate.slug} />
       <GuaranteeStrip licenseNumber={estimate.licenseNumber} />

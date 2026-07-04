@@ -427,6 +427,27 @@ describe('getServiceLabel', () => {
       },
     )).toBe('Seasonal Mosquito Control or One-Time Mosquito Control');
   });
+
+  it('excludes fee/review rows from the one-time eyebrow', () => {
+    expect(getServiceLabel(null, { isOneTimeOnly: true }, {
+      oneTimeBreakdown: {
+        items: [
+          { label: 'German Roach Cleanout', amount: 350 },
+          { label: 'WDO Inspection', amount: 150 },
+          { label: 'WaveGuard Setup', amount: 99 },
+          { label: 'Prepay credit', amount: 0 },
+        ],
+      },
+    })).toBe('German Roach Cleanout');
+  });
+
+  it('falls back to non-billable row labels when nothing billable remains', () => {
+    expect(getServiceLabel(null, { isOneTimeOnly: true }, {
+      oneTimeBreakdown: {
+        items: [{ label: 'WDO Inspection', amount: 150 }],
+      },
+    })).toBe('WDO Inspection');
+  });
 });
 
 describe('CombinedRecurringPriceCard — low-confidence range tracks the SELECTED cadence', () => {
