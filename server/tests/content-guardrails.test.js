@@ -746,3 +746,22 @@ describe('CRLF in non-recipient mailto headers (Codex round 14)', () => {
     expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 });
+
+describe('JSX spread attributes fail closed (Codex round 16)', () => {
+  test('spread-delivered href has no literal href= token — any "{..." is P0', () => {
+    for (const body of [
+      '<a {...{href:"javascript:alert(1)"}}>x</a>',
+      '<a { ...linkProps }>book now</a>',
+      '<img {...imgProps} alt="lawn" />',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+  test('spread-free drafts with normal links, braces, and prose ellipses still pass', () => {
+    const r = guardrails.evaluate({
+      body: 'Chinch bugs damage lawns fast... and quietly. See our [treatment plans](/services/lawn-care) or <a href="/contact">contact us</a> today.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});

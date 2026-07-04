@@ -287,6 +287,27 @@ describe('lowercase transcripts (regression — the heuristics were capitalizati
     expect(brown.findings.some((f) => f.type === 'name')).toBe(true);
     expect(brown.text).not.toContain('James Brown');
   });
+  test('short lowercase self-intro snippets can never report high confidence (Codex round 16)', () => {
+    // 26 letters, zero caps — under the old 40-letter floor this reported
+    // 'high' with zero findings, so the name published.
+    expect(redact('this is john smith ants are back').confidence).toBe('low');
+    // The autocapped variant: 1 cap defeats a zero-caps rule, but the
+    // lowercase intro signal ("this is" + lowercase name) still marks the
+    // heuristics blind.
+    expect(redact('This is john smith ants are back').confidence).toBe('low');
+    // Properly-cased short furniture keeps its confidence — a blanket
+    // low-caps rule at this length would swallow it.
+    expect(redact('Email info@wavespestcontrol.com to book.').confidence).toBe('high');
+    expect(redact('ok thanks').confidence).toBe('high');
+  });
+  test('phones with attached extensions still redact (Codex round 16 — x99 blocked the trailing boundary)', () => {
+    const attached = redact('call me back at 212-555-1234x99 tomorrow');
+    expect(attached.findings.some((f) => f.type === 'phone')).toBe(true);
+    expect(attached.text).not.toContain('555-1234');
+    const spaced = redact('The office line is (941) 555-8899 ext. 4 for scheduling.');
+    expect(spaced.text).toContain('[phone]');
+    expect(spaced.text).not.toContain('8899');
+  });
   test('lowercase name signal ignores non-name continuations and allowlisted tokens', () => {
     expect(redact('my name is not on the account but my husband handles it').text).not.toContain('[name]');
     // staff/owner names stay (allowlist, case-insensitive)

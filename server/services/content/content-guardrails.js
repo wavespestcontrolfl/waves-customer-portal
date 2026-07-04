@@ -261,6 +261,16 @@ const ATTR_SCHEME_RE = /\b(?:href|src)\s*=\s*\{?\s*["'`]?\s*([a-z][a-z0-9+.-]*):
 // also fails the literal test — closed either way).
 const ATTR_EXPR_PROP_RE = /\b(?:href|src)\s*=\s*\{([^}]*)\}/gi;
 const PLAIN_STRING_LITERAL_RE = /^\s*(?:"[^"]*"|'[^']*'|`[^`$]*`)\s*$/;
+// A JSX SPREAD attribute (<a {...{href:'javascript:...'}}>) delivers props
+// without a literal `href=` token, so EVERY href/src scanner above and
+// below is blind to it while React renders whatever destination it
+// smuggles. Generated drafts have no legitimate use for spread syntax —
+// the writer emits markdown links and plain-prop JSX — so ANY `{...` in
+// publishable text fails closed rather than trying to statically evaluate
+// the spread expression. Not anchored to a detectable tag context: a `>`
+// inside a quoted prop defeats "inside a tag" matching, and a stray
+// `{...` in prose costs only a parked draft.
+const JSX_SPREAD_RE = /\{\s*\.\.\./;
 const AUTOLINK_SCHEME_RE = /<([a-z][a-z0-9+.-]*):(\/\/)?[^>\s]*>/gi;
 // Reference-style Markdown definitions — `[bad]: javascript:alert(1)` on
 // its own line becomes the destination of every `[click][bad]` use, and
@@ -360,6 +370,9 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   if (!body) return null;
   if (DEST_CONTROL_RE.test(body)) {
     return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a link destination with embedded control characters (tab/newline) — browsers strip these while parsing, which can smuggle an executable scheme. Remove them.');
+  }
+  if (JSX_SPREAD_RE.test(body)) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a JSX spread attribute ("{...") — spread props deliver link destinations no href/src scanner can see and cannot be statically validated. Write explicit literal props.');
   }
   const exprPropRe = new RegExp(ATTR_EXPR_PROP_RE.source, ATTR_EXPR_PROP_RE.flags);
   let ep;

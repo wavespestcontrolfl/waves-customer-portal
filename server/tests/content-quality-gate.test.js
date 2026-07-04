@@ -250,6 +250,64 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('unredacted_name_in_body');
   });
+  test('redaction: short lowercase self-intro snippets hard-fail on confidence (Codex round 16)', () => {
+    // Under 40 letters the old backstop never ran, so this exact shape
+    // returned zero findings + high confidence and published a real name.
+    const r = checkRedactionPassed({ body: 'this is john smith ants are back' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('pii_confidence_low');
+  });
+  test('redaction: attached-extension customer phones are caught (Codex round 16)', () => {
+    const r = checkRedactionPassed({ body: 'Call the customer directly on 212-555-1234x99 to reschedule the visit.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('non_business_phone_number_in_body:2125551234');
+    // Waves' own line with an extension: the CORE number drives the
+    // allowlist compare, so extension digits don't poison the last-10.
+    expect(checkRedactionPassed({
+      body: 'Call (941) 297-2606 ext 2 to reach the Sarasota office today.',
+    }).ok).toBe(true);
+  });
+  test('redaction: SEO fields (title/meta) are scanned like the page they publish on (Codex round 16)', () => {
+    const clean = {
+      body: 'Chinch bugs thrive in dry Bradenton lawns. Call (941) 297-2606 for a free inspection.',
+      title: 'Chinch Bug Control in Bradenton',
+      meta_description: 'Serving Sarasota and Manatee County with same-day chinch bug treatment.',
+    };
+    expect(checkRedactionPassed(clean).ok).toBe(true);
+    const nameTitle = checkRedactionPassed({ ...clean, title: 'How John Smith Fixed His Lawn' });
+    expect(nameTitle.ok).toBe(false);
+    expect(nameTitle.reason).toBe('unredacted_name_in_title');
+    const phoneMeta = checkRedactionPassed({ ...clean, meta_description: 'Call John at 212-555-1234 for pest help.' });
+    expect(phoneMeta.ok).toBe(false);
+    expect(phoneMeta.reason).toBe('non_business_phone_number_in_meta_description:2125551234');
+    const emailMeta = checkRedactionPassed({ ...clean, meta_description: 'Email karen@gmail.com for a quote today.' });
+    expect(emailMeta.ok).toBe(false);
+    expect(emailMeta.reason).toBe('email_in_meta_description');
+    // frontmatter-shaped drafts get the same coverage
+    const fmTitle = checkRedactionPassed({ body: clean.body, frontmatter: { title: 'How John Smith Fixed His Lawn' } });
+    expect(fmTitle.ok).toBe(false);
+    expect(fmTitle.reason).toBe('unredacted_name_in_title');
+  });
+  test('redaction: surname-shaped domain words stay pair-scoped in headings (Codex round 16)', () => {
+    // 'Brown' as a structural SINGLE waved "## James Brown" through; the
+    // pair allowlist clears "Brown Patch" without clearing the surname.
+    const james = checkRedactionPassed({ body: '## James Brown\n\nOur treatment schedule is weekly.' });
+    expect(james.ok).toBe(false);
+    expect(james.reason).toBe('unredacted_name_in_heading');
+    // Body prose is normally cased and multi-sentence: after heading
+    // stripping, a single 40+-letter sentence has 1 cap and trips the
+    // (accepted, fail-closed) low-caps confidence arm — not this test's
+    // subject.
+    expect(checkRedactionPassed({
+      body: '## Brown Patch Treatment in Bradenton\n\nFungicide applications work best preventively. Apply them in Bradenton before the summer rains arrive.',
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: '## Wood Destroying Organisms Explained\n\nWDO inspections cover termites and fungi.',
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: '## Late Summer Lawn Care\n\nFertilize before the rains taper off.',
+    }).ok).toBe(true);
+  });
   test('redaction: compact E.164 customer phones are caught (Codex round 8 — 11-digit runs had no interior boundary to match)', () => {
     const r = checkRedactionPassed({ body: 'Call our Sarasota line at (941) 297-2606 or the customer at +19415551234.' });
     expect(r.ok).toBe(false);

@@ -35,7 +35,10 @@
 
 const PATTERNS = [
   // Phone numbers — US, generous match: +1 / parens / dots / dashes / spaces.
-  { type: 'phone', token: '[phone]', re: /\b\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g },
+  // Optional attached extension (`x99`, `ext. 4`): without it the trailing
+  // \b cannot sit between the last digit and an `x` (both word chars), so
+  // `212-555-1234x99` — a common transcript form — matched nothing at all.
+  { type: 'phone', token: '[phone]', re: /\b\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?\b/gi },
 
   // Emails.
   { type: 'email', token: '[email]', re: /[\w.+-]+@[\w-]+\.[A-Za-z]{2,}/g },
@@ -179,6 +182,19 @@ const DOMAIN_TERM_PAIRS = new Set([
   'formosan subterranean', 'eastern subterranean', 'asian subterranean',
   'augustine grass', 'empire zoysia', 'dollar weed', 'fruit fly',
   'fruit flies', 'drain fly', 'drain flies',
+  // Pair-scoped clearances for words that are BOTH domain vocabulary and
+  // real surnames/first names (Brown, Carpenter, Wood, Day, Bond, Love,
+  // Summer, Winter). These must never be single-word allowlisted anywhere
+  // — the heading structural set deliberately excludes them so
+  // "## James Brown" blocks — which makes their domain PAIR forms load-
+  // bearing here.
+  'brown patches', 'brown spot', 'brown spots', 'brown widow',
+  'brown widows', 'brown anole', 'brown anoles', 'carpenter bee',
+  'carpenter bees', 'wood rot', 'dry rot', 'wood destroying',
+  'destroying organisms', 'destroying insects', 'late summer',
+  'early summer', 'late spring', 'early spring', 'late fall', 'early fall',
+  'late winter', 'early winter', 'winter dormancy', 'winter weeds',
+  'summer patch', 'summer heat',
 ]);
 
 function looksLikeFalsePositiveName(first, last) {
@@ -290,17 +306,36 @@ function redact(text) {
 // True when the text is long enough to carry PII but has (almost) no
 // uppercase letters — i.e. the capitalized-name/address heuristics cannot be
 // trusted to have seen anything. Short fragments ("ok thanks") stay 'high'.
-// Two arms, both required: the RATIO catches long lowercase transcripts, and
-// the ABSOLUTE cap catches short ones where a single incidental capital
+// Arms: the RATIO catches long lowercase transcripts; the ABSOLUTE cap
+// catches 40+-letter texts where a single incidental capital
 // (autocapitalized "This is john smith and i had ants…" — 1 cap over 40+
 // letters is just over a 2% ratio) would otherwise report high confidence
 // on text the name heuristics were blind to. One or two caps across 40+
 // letters is a lowercase text with sentence-initial autocaps, not
 // properly-cased prose.
+// SHORT texts (15–39 letters) get ONE narrower arm — a blanket zero/low-caps
+// rule there would swallow legitimate short furniture ("Email
+// info@wavespestcontrol.com to book.", "this is great, thanks"): a lowercase
+// SELF-INTRO followed by a plausible lowercase name PAIR ("this is john
+// smith…", covering weak signals like "this is" that the lowercase NAME
+// pass deliberately excludes as too ambiguous to redact on). The pair
+// requirement is what separates an intro from an idiom — "this is great,
+// thanks" has no second adjacent word token (the comma breaks adjacency)
+// and "this is spot on" dies on the continuation stopwords, while "this is
+// john smith ants are back" matches. Reuses the NAME_SIGNAL_LOWERCASE
+// stopword lookaheads; ≤2 caps tolerates the autocapped "This is john
+// smith…". Length-bounded, so generated draft bodies (always 40+ letters)
+// never reach this arm — and a single lowercase first name after a STRONG
+// signal ("my name is john") is already REDACTED by NAME_SIGNAL_LOWERCASE,
+// so this arm only needs the first+last shape.
+const LOWERCASE_INTRO_PAIR = /(?:^|[^a-z])(?:this is|my name is|name:|it'?s|i'?m|i am)\s+(?!(?:not|no|the|a|an|on|in|at|to|so|very|really|actually|probably|still|already|also|just|spelled|pronounced|misspelled|wrong|correct|different)\b)[a-z][a-z'-]{1,15}\s+(?!(?:and|but|i|we|you|calling|speaking|here|from|with|at|on|in|by|not|is|was)\b)[a-z][a-z'-]{1,20}\b/i;
 function effectivelyLowercase(text) {
   const letters = String(text).match(/[a-zA-Z]/g) || [];
-  if (letters.length < 40) return false;
+  if (letters.length < 15) return false;
   const upper = letters.reduce((n, c) => n + (c >= 'A' && c <= 'Z' ? 1 : 0), 0);
+  if (letters.length < 40) {
+    return upper <= 2 && LOWERCASE_INTRO_PAIR.test(String(text));
+  }
   return upper <= 2 || upper / letters.length < 0.02;
 }
 

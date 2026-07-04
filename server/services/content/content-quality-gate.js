@@ -555,30 +555,37 @@ function stripWavesOfficeAddresses(text) {
 // ("## Why Choose Waves Pest Control" reads as a name pair otherwise).
 // Fail-closed bias: an unlisted vocabulary word in a heading pair parks the
 // draft for human review — cheap next to a published customer name.
+// NO surname-shaped singles: a word that is both domain vocabulary and a
+// real surname ('Brown', 'Carpenter', 'Wood', 'Day', 'Bond', 'Love',
+// 'Summer', 'Winter') must NOT be listed here — the pair scan skips a pair
+// when EITHER token is structural, so a structural 'Brown' waves
+// "## James Brown" through. Those words are cleared pair-scoped instead,
+// via the redactor's DOMAIN_TERM_PAIRS ("Brown Patch" clears, "James
+// Brown" blocks) inside looksLikeFalsePositiveName.
 const STRUCTURAL_HEADING_WORDS = new Set([
   'Why', 'Choose', 'Choosing', 'Our', 'Your', 'The', 'How', 'What', 'When',
   'Where', 'Which', 'Who', 'Guide', 'Complete', 'Ultimate', 'Process',
   'Tips', 'Signs', 'Cost', 'Costs', 'Pricing', 'Price', 'Service',
   'Services', 'Serving', 'Treatment', 'Treatments', 'Prevention', 'Prevent',
   'Preventing', 'Benefits', 'Common', 'Questions', 'Question', 'Frequently',
-  'Asked', 'Near', 'Best', 'Top', 'Versus', 'Plan', 'Plans', 'Options',
+  'Asked', 'Near', 'Best', 'Top', 'Versus', 'Vs', 'Plan', 'Plans', 'Options',
   'Option', 'Works', 'Safe', 'Safety', 'Kids', 'Pets', 'Home', 'Homes',
   'House', 'Yard', 'Garden', 'Free', 'Get', 'Getting', 'Avoid', 'Identify',
   'Identifying', 'Remove', 'Removing', 'Removal', 'Stop', 'Keep', 'Keeping',
   'Protect', 'Protecting', 'About', 'Contact', 'Visit', 'Areas', 'Area',
   'Local', 'Professional', 'Expert', 'Experts', 'Year', 'Round', 'Season',
-  'Seasonal', 'Summer', 'Winter', 'Spring', 'Fall', 'Every', 'Homeowner',
+  'Seasonal', 'Spring', 'Fall', 'Every', 'Homeowner',
   'Homeowners', 'Need', 'Needs', 'Know', 'Should', 'Right', 'Now', 'Today',
-  'Emergency', 'Same', 'Day', 'Inspection', 'Inspections', 'Estimate',
+  'Emergency', 'Same', 'Inspection', 'Inspections', 'Estimate',
   'Estimates', 'Quote', 'Quotes', 'Schedule', 'Book', 'Booking', 'Call',
   'Bed', 'Bug', 'Bugs', 'Heat', 'Damage', 'Repair', 'Explained',
   'Checklist', 'Myths', 'Facts', 'Natural', 'Chemical', 'Baits', 'Traps',
   'Spray', 'Spraying', 'Granules', 'Fertilizer', 'Weed', 'Weeds', 'Grass',
-  'Sod', 'Turf', 'Soil', 'Brown', 'Patch', 'Grub', 'Grubs', 'Chinch',
-  'Fire', 'Ghost', 'Sugar', 'Carpenter', 'Flea', 'Fleas', 'Tick', 'Ticks',
+  'Sod', 'Turf', 'Soil', 'Patch', 'Grub', 'Grubs', 'Chinch',
+  'Fire', 'Ghost', 'Sugar', 'Flea', 'Fleas', 'Tick', 'Ticks',
   'Silverfish', 'Earwig', 'Earwigs', 'Millipede', 'Millipedes', 'Fly',
   'Flies', 'Gnat', 'Gnats', 'Mole', 'Cricket', 'Crickets', 'Sentricon',
-  'Warranty', 'Bond', 'Coverage', 'Covered', 'Included', 'Includes',
+  'Warranty', 'Coverage', 'Covered', 'Included', 'Includes',
   // Function words + common heading vocabulary — needed because the pair
   // scan runs on CASE-NORMALIZED heading text (see below), which promotes
   // every lowercase word to a pair candidate ("in", "to", "ants").
@@ -597,7 +604,7 @@ const STRUCTURAL_HEADING_WORDS = new Set([
   'Kitchen', 'Bathroom', 'Bedroom', 'Garage', 'Attic', 'Cabinets',
   'Walls', 'Windows', 'Doors', 'Baseboards', 'Lanai', 'Pool', 'Patio',
   'Deck', 'Fence', 'Roof', 'Eaves', 'Soffit', 'Foundation', 'Slab',
-  'Mulch', 'Wood', 'Trees', 'Shrubs', 'Plants', 'Love', 'Hate', 'Hide',
+  'Mulch', 'Trees', 'Shrubs', 'Plants', 'Hate', 'Hide',
   'Hiding', 'Bite', 'Bites', 'Biting', 'Sting', 'Stings', 'Swarm',
   'Swarming', 'Swarmers', 'Nest', 'Nesting', 'Nests', 'Eat', 'Eating',
   'Come', 'Coming', 'Back', 'Return', 'Returning', 'Live', 'Living',
@@ -649,18 +656,29 @@ function checkRedactionPassed(draft) {
   // word boundary), so a customer number pasted in E.164 form sailed
   // through. The digit lookbehind keeps mid-run starts out, so long
   // numeric IDs still don't false-match.
-  const phoneRe = /(?<!\d)\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
-  const phoneMatches = body.match(phoneRe) || [];
-  for (const raw of phoneMatches) {
-    const digits = raw.replace(/\D/g, '');
-    const last10 = digits.length >= 10 ? digits.slice(-10) : null;
-    if (!last10) return { ok: false, reason: 'malformed_phone_number_in_body' };
-    // isWavesPhone, not the core-office set: spoke/refresh copy legitimately
-    // carries domain/GBP tracking lines, which are Waves' own numbers too.
-    if (!isWavesPhone(last10)) {
-      return { ok: false, reason: `non_business_phone_number_in_body:${last10}` };
+  // The CORE number is captured separately from an optional attached
+  // extension (`x99`, `ext. 4`): the trailing \b cannot sit between a digit
+  // and an `x` (both word chars), so `212-555-1234x99` previously matched
+  // nothing at all — and extension digits must not pollute the last-10
+  // comparison against the Waves allowlist.
+  const phoneRe = /(?<!\d)(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?\b/gi;
+  const scanPhones = (text, where) => {
+    const re = new RegExp(phoneRe.source, phoneRe.flags);
+    let pm;
+    while ((pm = re.exec(text)) !== null) {
+      const digits = pm[1].replace(/\D/g, '');
+      const last10 = digits.length >= 10 ? digits.slice(-10) : null;
+      if (!last10) return { ok: false, reason: `malformed_phone_number_in_${where}` };
+      // isWavesPhone, not the core-office set: spoke/refresh copy legitimately
+      // carries domain/GBP tracking lines, which are Waves' own numbers too.
+      if (!isWavesPhone(last10)) {
+        return { ok: false, reason: `non_business_phone_number_in_${where}:${last10}` };
+      }
     }
-  }
+    return null;
+  };
+  const bodyPhoneHit = scanPhones(body, 'body');
+  if (bodyPhoneHit) return bodyPhoneHit;
   // Waves' own addresses are legitimate page furniture (city-service NAP
   // blocks carry info@wavespestcontrol.com); every other email is customer
   // PII. The previous any-email hard fail false-positived the business's
@@ -728,6 +746,38 @@ function checkRedactionPassed(draft) {
     // capitalized markdown and never trip this.
     if (scanned.confidence === 'low') {
       return { ok: false, reason: 'pii_confidence_low' };
+    }
+    // SEO FIELDS — the publisher writes title + meta_description to the
+    // public page too, so a clean body with "John Smith" or a customer
+    // phone in the frontmatter still published PII. Same checks, same
+    // allowlists. Name semantics differ BY FIELD SHAPE: titles are Title
+    // Case furniture, so they get the heading-pair check (the raw name
+    // scan reads "Chinch Bug Control" as a person) — while metas are
+    // sentence-cased prose like the body, so they get the body-style raw
+    // name scan (the heading check would case-promote every meta word and
+    // flag any unlisted adjacent pair, e.g. "straight antennae"). Objective
+    // PII (address/ssn/card, phone, email) blocks outright in both.
+    const seoFields = [
+      ['title', String(draft.title || (draft.frontmatter && draft.frontmatter.title) || '')],
+      ['meta_description', String(draft.meta_description || (draft.frontmatter && draft.frontmatter.meta_description) || '')],
+    ];
+    for (const [where, raw] of seoFields) {
+      if (!raw.trim()) continue;
+      const phoneHit = scanPhones(raw, where);
+      if (phoneHit) return phoneHit;
+      const fieldEmails = raw.match(/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/g) || [];
+      if (fieldEmails.some((e) => !e.toLowerCase().endsWith('@wavespestcontrol.com'))) {
+        return { ok: false, reason: `email_in_${where}` };
+      }
+      const stripped = stripWavesOfficeAddresses(raw);
+      const fieldScan = redact(stripped);
+      const titleCased = where === 'title';
+      const fieldHit = (fieldScan.findings || [])
+        .find((f) => BLOCKING_PII_TYPES.has(f.type) && (titleCased ? f.type !== 'name' : true));
+      if (fieldHit) return { ok: false, reason: `unredacted_${fieldHit.type}_in_${where}` };
+      if (titleCased && headingCustomerNamePair(stripped)) {
+        return { ok: false, reason: `unredacted_name_in_${where}` };
+      }
     }
   } catch (err) {
     // Redactor unavailable = we cannot prove the body is clean — this is a
