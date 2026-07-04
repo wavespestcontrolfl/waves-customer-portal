@@ -89,6 +89,30 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
     expect(screen.getByText('$1,200')).toBeInTheDocument();
   });
 
+  it('never derives a cadence-key visit count over multiple treatment rows', () => {
+    render(
+      <PriceCard
+        frequency={{
+          key: 'monthly',
+          monthly: 400,
+          perServiceTreatments: [
+            { service: 'lawn', label: 'Turf application', displayPrice: 120, visitsPerYear: 8 },
+            { service: 'mosquito', label: 'Mosquito treatment', displayPrice: 60, visitsPerYear: 12 },
+          ],
+        }}
+      />,
+    );
+
+    // Rows differ (8 vs 12) — no single "N applications per year" line.
+    expect(screen.queryByText(/applications per year included/i)).toBeNull();
+  });
+
+  it('keeps the cadence-key visit count when there are no treatment rows', () => {
+    render(<PriceCard frequency={{ key: 'quarterly', monthly: 50 }} />);
+
+    expect(screen.getByText(/4 applications per year included/i)).toBeInTheDocument();
+  });
+
   it('renders the exact price (no range) when the marker is absent', () => {
     render(<PriceCard frequency={{ key: 'monthly', monthly: 400, annual: 4800 }} />);
 
@@ -106,5 +130,39 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
 
     expect(screen.getByText('Quote required')).toBeInTheDocument();
     expect(screen.queryByText(/confirm your exact price/i)).toBeNull();
+  });
+});
+
+describe('PriceCard — WaveGuard savings display', () => {
+  it('suppresses a rounding-noise "savings" on a 0%-discount tier (Bronze quarterly)', () => {
+    // $94/visit quarterly stored as $31.33/mo → cadence 93.99 vs anchor 94:
+    // the $0.01 delta is monthly-rounding noise, not a member discount.
+    render(
+      <PriceCard
+        frequency={{ key: 'quarterly', monthly: 31.33, annual: 375.96, perVisit: 94 }}
+        waveGuardTier="Bronze"
+      />,
+    );
+
+    expect(screen.queryByText(/You save/)).toBeNull();
+    // No strike-through anchor either — just the billed price.
+    expect(screen.queryByText('$94/quarter')).toBeNull();
+    expect(screen.getByText('$93.99')).toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Bronze')).toBeInTheDocument();
+    // No annual figure on a standard exact price (owner directive).
+    expect(screen.queryByText(/\/ year/)).toBeNull();
+  });
+
+  it('still shows a real tier discount as savings', () => {
+    // Anchor $100/visit, member pays $90/quarter (10% Silver).
+    render(
+      <PriceCard
+        frequency={{ key: 'quarterly', monthly: 30, annual: 360, perVisit: 100 }}
+        waveGuardTier="Silver"
+      />,
+    );
+
+    expect(screen.getByText(/You save/)).toHaveTextContent('You save $10/quarter with WaveGuard Silver');
+    expect(screen.getByText('$100/quarter')).toBeInTheDocument();
   });
 });

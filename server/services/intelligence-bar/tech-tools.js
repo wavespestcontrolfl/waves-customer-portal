@@ -317,7 +317,11 @@ async function getProductInfo(productName) {
     signal_word: product.signal_word || undefined,
     ppe: product.ppe_text || undefined,
     reentry: product.reentry_text || product.reentry_summary || undefined,
-    rei_hours: product.rei_hours != null ? product.rei_hours : undefined,
+    // Only surface a positive REI as a number. rei_hours = 0 is the residential
+    // "until sprays have dried" value, NOT "0 hours" — exposing the bare 0 to the
+    // model would read as an immediate re-entry. The until-dry meaning is carried
+    // by `reentry` text instead.
+    rei_hours: product.rei_hours > 0 ? product.rei_hours : undefined,
     rainfast_minutes: product.rainfast_minutes != null ? product.rainfast_minutes : undefined,
     // irrigation_required records only whether watering-in is REQUIRED. A false
     // value means "not required" — NOT "prohibited" (many liquid fertilizers are

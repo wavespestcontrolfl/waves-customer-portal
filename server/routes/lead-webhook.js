@@ -26,6 +26,8 @@ const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
+const { verifyTurnstileToken } = require('../utils/turnstile');
+const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -140,10 +142,49 @@ const leadWebhookPhoneLimiter = rateLimit({
   skip: (req) => process.env.NODE_ENV !== 'production' || !leadSubmittedPhoneKey(req),
 });
 
+
 // POST /api/webhooks/lead — website lead-form submission webhook
 router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res) => {
   try {
     const body = req.body;
+
+    // --- Abuse guards, BEFORE any DB write / draft estimate / owner SMS ---
+    // Every accepted POST fans out to real-money side effects (customer +
+    // draft estimate + a text to the owner's cell), so bot submissions are
+    // stopped here, before the fan-out.
+    //
+    // 1) Honeypot (always on). 200-OK — not 4xx — so the bot believes it
+    //    succeeded and doesn't adapt, but nothing is created. Old cached pages
+    //    omit the field (undefined → passes), so this is safe unconditionally.
+    if (isHoneypotTripped(body)) {
+      logger.info('[lead-webhook] honeypot tripped — silently dropping submission');
+      return res.status(200).json({ success: true });
+    }
+
+    // 2) Cloudflare Turnstile (gated behind GATE_LEAD_TURNSTILE). Verified
+    //    server-side. While the gate is OFF we still verify-and-log (shadow) so
+    //    we can see how many real submissions WOULD be blocked before flipping,
+    //    but never block. Enforcement (403) begins only once the owner sets the
+    //    secret AND the Astro widget has propagated AND the gate is flipped on.
+    //    Misconfiguration / Cloudflare errors fail OPEN (see utils/turnstile).
+    // Accept both our explicit field and the stock Turnstile field name the
+    // widget posts (cf-turnstile-response), so a form that renders the widget
+    // without remapping still verifies instead of 403-ing after rollout (codex P1).
+    const turnstileToken = body && (body.turnstile_token || body['cf-turnstile-response']);
+    // resolveSubmitHost lets verify() select the token's OWNING widget secret and
+    // call siteverify exactly once — tokens are single-use, so probing other
+    // widgets' secrets would spend it (codex P1). See utils/lead-abuse.
+    const turnstile = await verifyTurnstileToken(turnstileToken, req.ip, resolveSubmitHost(req));
+    if (!turnstile.ok) {
+      logger.info(
+        `[lead-webhook] turnstile ${turnstile.reason} ` +
+          `(enforced=${turnstile.enforced}, gate=${isEnabled('leadTurnstile')})`
+      );
+      if (isEnabled('leadTurnstile') && turnstile.enforced) {
+        return res.status(403).json({ error: 'Verification failed. Please try again.' });
+      }
+    }
+
     const intake = buildLeadWebhookIntake(body);
     const {
       email,
@@ -1400,4 +1441,5 @@ module.exports._test = {
   shouldRunLeadAcquisition,
   applyLeadEstimateAutomationGate,
   determineLeadSource,
+  isHoneypotTripped,
 };

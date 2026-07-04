@@ -29,8 +29,9 @@ export default function GuaranteeStrip({ licenseNumber }) {
     }}>
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-        gap: 16,
+        // Always three across — including phones (owner directive).
+        gridTemplateColumns: 'repeat(3, 1fr)',
+        gap: 12,
       }}>
         {items.map((it) => (
           <div key={it.label} style={{ textAlign: 'center' }}>

@@ -99,6 +99,8 @@ describe('EstimateViewPage staff draft preview', () => {
     });
     // Fidelity: the preview is the real customer page, price included.
     expect(screen.getAllByText('$2,210').length).toBeGreaterThan(0);
+    // Universal hero headline — service specifics live in the eyebrow line.
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Hello Dana, your estimate is ready!');
   });
 
   it('sends the adminPreview param + staff Bearer token when opened with ?adminPreview=1', async () => {

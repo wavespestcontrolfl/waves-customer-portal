@@ -10,7 +10,7 @@ const { verifyStaffBearer } = require('../middleware/admin-auth');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, formatETDate } = require('../utils/datetime-et');
-const { formatSmsTimeRange } = require('../utils/sms-time-format');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -3234,7 +3234,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const hasOnlyBoraCareServices = hasOnlyBoraCareServiceMix(recurring, boraCareOneTimeRows);
   const pageCopy = hasOnlyLawnCareServices
     ? {
-        heroSuffix: "here's your lawn care estimate.",
         recurringAssurance: 'Your plan includes scheduled turf applications, visit notes, and treatment timing matched to Southwest Florida conditions.',
         aggregateDayLabel: 'lawn care',
         billingHeading: 'Choose how you want to pay',
@@ -3260,7 +3259,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       }
     : (hasOnlyMosquitoServices
       ? {
-          heroSuffix: "here's your mosquito control estimate.",
           recurringAssurance: 'Your plan targets shaded resting zones, lanai edges, and breeding-source pressure around your property.',
           aggregateDayLabel: 'mosquito control',
           billingHeading: 'Choose how you want to pay',
@@ -3286,7 +3284,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         }
       : (hasOnlyTreeShrubServices
         ? {
-          heroSuffix: "here's your tree & shrub estimate.",
           recurringAssurance: 'Your plan includes scheduled ornamental treatments, visit notes, and treatment timing matched to Southwest Florida conditions.',
           aggregateDayLabel: 'tree & shrub care',
           billingHeading: 'Choose how you want to pay',
@@ -3312,7 +3309,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         }
       : (hasOnlyTermiteBaitServices
         ? {
-            heroSuffix: "here's your termite protection estimate.",
             recurringAssurance: 'Your plan includes termite station service and treatment timing matched to your home perimeter.',
             aggregateDayLabel: 'termite protection',
             billingHeading: 'Choose how you want to pay',
@@ -3338,7 +3334,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           }
         : (hasOnlyTermiteTrenchingServices
           ? {
-              heroSuffix: "here's your termite trenching quote.",
               recurringAssurance: 'This trenching quote is based on the measured treatment path and office review.',
               aggregateDayLabel: 'termite trenching',
               billingHeading: 'Choose how you want to pay',
@@ -3364,7 +3359,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
             }
           : (hasOnlyBoraCareServices
             ? {
-                heroSuffix: "here's your Bora-Care wood treatment quote.",
                 recurringAssurance: 'This quote is based on the measured attic and surface wood areas treated with Bora-Care.',
                 aggregateDayLabel: 'Bora-Care wood treatment',
                 billingHeading: 'Choose how you want to pay',
@@ -3389,7 +3383,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 finalBody: 'No payment today.',
               }
             : {
-              heroSuffix: "here's your custom quote.",
               recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
               aggregateDayLabel: 'complete home protection',
               billingHeading: 'Choose how you want to pay',
@@ -4561,7 +4554,7 @@ ${shellTopBar()}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
-    <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : escapeHtml(pageCopy.heroSuffix)}</h1>
+    <h1>Hello ${firstName}, your estimate is ready!</h1>
     ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
     ${customerEmail ? `<div class="hero-contact">${customerEmail}</div>` : ''}
@@ -7722,9 +7715,11 @@ router.put('/:token/accept', async (req, res, next) => {
             const serviceDate = scheduledDate
               ? formatETDate(new Date(`${scheduledDate}T12:00:00Z`))
               : 'your selected date';
-            const start = hhmm(confirmedAppointmentRow?.window_start);
-            const end = hhmm(confirmedAppointmentRow?.window_end);
-            const timeWindow = start && end ? formatSmsTimeRange(`${start}-${end}`) : 'your selected window';
+            // {time} quotes the 2-hour arrival promise from the window start.
+            // window_end is the job-duration block that sizes scheduling —
+            // never the customer-facing window (see sms-time-format).
+            const arrivalRange = arrivalWindowRange(confirmedAppointmentRow?.window_start);
+            const timeWindow = arrivalRange ? formatSmsTimeRange(arrivalRange) : 'your selected window';
             // appointment_confirmation renders {reschedule_line}, and
             // getTemplate suppresses the whole SMS on an unresolved
             // placeholder — every render site must pass the clause ('' when

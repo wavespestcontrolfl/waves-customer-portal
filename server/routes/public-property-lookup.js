@@ -8,6 +8,9 @@ const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
+const { verifyTurnstileToken } = require('../utils/turnstile');
+const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
+const { isEnabled } = require('../config/feature-gates');
 
 // Aggressive rate limit — each lookup spends real AI + Google Maps dollars.
 // 5 per IP per hour is enough for a real lead to iterate on
@@ -204,6 +207,26 @@ router.post('/lead-prefill', prefillLimiter, async (req, res) => {
 
 router.post('/property-lookup', lookupLimiter, async (req, res) => {
   try {
+    // --- Abuse guards, BEFORE the paid satellite + AI lookup ---
+    // Honeypot (always on): a bot that filled the hidden field gets a benign
+    // 200 with no lead + no lookup spend. Old cached pages omit it → passes.
+    if (isHoneypotTripped(req.body)) {
+      logger.info('[property-lookup] honeypot tripped — dropping before paid lookup');
+      return res.status(200).json({ lead_id: null, enriched: null });
+    }
+    // Cloudflare Turnstile (gated behind GATE_LEAD_TURNSTILE). Same verify as the
+    // lead webhook: fail OPEN on misconfig/CF error, block (403) only when the
+    // gate is on AND the owning-widget secret gives a definitive rejection. While
+    // the gate is off it verify-and-logs (shadow) but never blocks.
+    const turnstileToken = req.body && (req.body.turnstile_token || req.body['cf-turnstile-response']);
+    const turnstile = await verifyTurnstileToken(turnstileToken, req.ip, resolveSubmitHost(req));
+    if (!turnstile.ok) {
+      logger.info(`[property-lookup] turnstile ${turnstile.reason} (enforced=${turnstile.enforced}, gate=${isEnabled('leadTurnstile')})`);
+      if (isEnabled('leadTurnstile') && turnstile.enforced) {
+        return res.status(403).json({ error: 'Verification failed. Please try again.' });
+      }
+    }
+
     const { firstName, lastName, email, phone, address, attribution } = req.body || {};
     const normalizedAddress = normalizeLeadAddress({
       raw: address,

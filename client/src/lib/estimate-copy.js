@@ -94,9 +94,25 @@ export const SERVICE_COPY = {
     aiBody: 'We measured the trenching path and linear footage used for this quote.',
     askChips: [
       'How long does the barrier last?',
+      'Do you drill the concrete or driveway?',
       'What product is used?',
       "What's covered?",
       'Do you renew it?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this quote.",
+    },
+  },
+  pre_slab_termiticide: {
+    headline: "Hey {first}, here's your pre-slab termite treatment quote.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed the slab area before pricing this estimate',
+    aiBody: 'We priced the pre-slab soil treatment from the measured slab area, selected product, and warranty option.',
+    askChips: [
+      'What product is used?',
+      'Do I get documentation?',
+      'What warranty is selected?',
+      'When should this be done?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for this quote.",
