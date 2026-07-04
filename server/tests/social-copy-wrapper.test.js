@@ -34,6 +34,19 @@ describe('stripModelWrapper', () => {
       .toBe('Sarasota mosquito pressure is at a 5. Standing water is the driver. Act now.');
   });
 
+  test('strips a trailing "Note: … characters — want me to trim?" meta line (LinkedIn, 06-30)', () => {
+    const raw = '**Sarasota\'s afternoon storms are recharging every mosquito breeding site in your yard.**\n\n' +
+      '---\n\n*Note: This is 196 characters — right at your limit. Want me to trim or adjust the tone?*';
+    expect(stripModelWrapper(raw)).toBe(
+      "Sarasota's afternoon storms are recharging every mosquito breeding site in your yard."
+    );
+  });
+
+  test('keeps a legit content line that starts with "Note:"', () => {
+    const copy = 'Fungus treatment applied today.\n\nNote: keep pets off the lawn for 2 hours.';
+    expect(stripModelWrapper(copy)).toBe(copy);
+  });
+
   test('strips a count note enclosed inside the --- fences', () => {
     const raw = '---\nSarasota mosquito pressure is at a 5 right now. Standing water is the driver.\n*(Character count: ~240)*\n---';
     expect(stripModelWrapper(raw)).toBe('Sarasota mosquito pressure is at a 5 right now. Standing water is the driver.');

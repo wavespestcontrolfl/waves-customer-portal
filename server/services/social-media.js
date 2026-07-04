@@ -400,6 +400,11 @@ function stripModelWrapper(raw) {
   text = stripFences(text);
   // Trailing count notes: "*197 characters*", "*(Character count: ~240)*", "(197 characters)"
   text = text.replace(/[\s*_]*\(?\s*(?:character count:?\s*~?\d+|~?\d+\s*characters?)\s*\)?[\s*_.]*$/i, '');
+  // Trailing "Note: …" meta line, only when it talks about the character
+  // limit (live example, LinkedIn 06-30: "*Note: This is 196 characters —
+  // right at your limit. Want me to trim or adjust the tone?*"). A content
+  // note like "Note: keep pets off the lawn for 2 hours." survives.
+  text = text.replace(/\n[\s*_(]*note:[^\n]*(?:\bcharacters?\b|\blimit\b|character count)[^\n]*$/i, '');
   text = stripFences(text);
   // Markdown bold — readers would see the literal **
   text = text.replace(/\*\*([^*\n][^*]*)\*\*/g, '$1');
