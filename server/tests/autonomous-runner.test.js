@@ -2390,3 +2390,29 @@ describe('gate module-load failures fail CLOSED (regression — these silently s
     expect(queue.pendingReview).toHaveBeenCalledWith('opp_claims_unavail', 'claims_ledger_unavailable', { claimToken: claimedAt });
   });
 });
+
+describe('operator brief text for the comparison gate includes sourcing fields (Codex round 14)', () => {
+  const { operatorBriefTextForComparisonGate, OPERATOR_INTERCEPT_BUCKET } = require('../services/content/autonomous-runner')._internals;
+
+  test('required_sources URLs and source_notes authorize the competitor they name', () => {
+    // A required https://www.orkin.com/... citation must authorize "orkin"
+    // exactly like naming it in the title/outline — otherwise the binding
+    // citation itself reads as an unauthorized mention and the run
+    // hard-blocks at comparison_table_failed instead of the review path.
+    const text = operatorBriefTextForComparisonGate(
+      { bucket: OPERATOR_INTERCEPT_BUCKET },
+      { voice_constraints: { operator_brief: {
+        working_title: 'Cancellation fees explained',
+        primary_kw: 'pest control cancellation fee',
+        required_sources: ['https://www.orkin.com/plans/cancellation'],
+        source_notes: ['Terminix publishes its bond terms in the FAQ'],
+      } } }
+    );
+    expect(text).toContain('orkin.com');
+    expect(text).toContain('Terminix');
+  });
+
+  test('non-intercept buckets still produce empty text', () => {
+    expect(operatorBriefTextForComparisonGate({ bucket: 'mined' }, { voice_constraints: { operator_brief: { required_sources: ['https://www.orkin.com/x'] } } })).toBe('');
+  });
+});

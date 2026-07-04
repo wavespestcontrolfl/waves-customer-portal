@@ -685,3 +685,27 @@ describe('redaction: customer names in headings (Codex round 13)', () => {
     }
   });
 });
+
+describe('redaction: LOWERCASE customer names in headings (Codex round 14)', () => {
+  const filler = 'Ant control matters in every season across Sarasota and Bradenton. Our team in Venice applies targeted treatments so infestations never return.';
+
+  test('lowercase transcript-style name headings hard-fail (case-normalized, overlapping pair scan)', () => {
+    for (const heading of ['## john smith', '## about john smith and his lawn']) {
+      const r = checkRedactionPassed({ body: `${heading}\n\n${filler}` });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('unredacted_name_in_heading');
+    }
+  });
+
+  test('lowercase structural/prose headings stay clean after normalization', () => {
+    for (const heading of [
+      '## why choose waves pest control',
+      '## how it works',
+      '## what to expect',
+      '## ants in your kitchen',
+      '## roaches love damp cabinets',
+    ]) {
+      expect(checkRedactionPassed({ body: `${heading}\n\n${filler}` }).ok).toBe(true);
+    }
+  });
+});

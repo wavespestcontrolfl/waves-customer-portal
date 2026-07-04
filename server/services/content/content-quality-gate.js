@@ -579,12 +579,44 @@ const STRUCTURAL_HEADING_WORDS = new Set([
   'Silverfish', 'Earwig', 'Earwigs', 'Millipede', 'Millipedes', 'Fly',
   'Flies', 'Gnat', 'Gnats', 'Mole', 'Cricket', 'Crickets', 'Sentricon',
   'Warranty', 'Bond', 'Coverage', 'Covered', 'Included', 'Includes',
+  // Function words + common heading vocabulary — needed because the pair
+  // scan runs on CASE-NORMALIZED heading text (see below), which promotes
+  // every lowercase word to a pair candidate ("in", "to", "ants").
+  'In', 'On', 'At', 'To', 'Of', 'For', 'And', 'Or', 'But', 'It', 'Is',
+  'Are', 'Be', 'Do', 'Does', 'Did', 'Can', 'Could', 'Will', 'Would',
+  'May', 'Might', 'You', 'We', 'They', 'My', 'Me', 'Us', 'This', 'That',
+  'These', 'Those', 'There', 'Here', 'With', 'Without', 'From', 'Into',
+  'Over', 'Under', 'After', 'Before', 'During', 'Between', 'Against',
+  'More', 'Most', 'Less', 'Very', 'Much', 'Many', 'Few', 'Some', 'Any',
+  'All', 'No', 'Not', 'So', 'Than', 'Then', 'If', 'As', 'By', 'Up',
+  'Down', 'Out', 'Off', 'New', 'Old', 'Long', 'Short', 'High', 'Low',
+  'Good', 'Bad', 'Easy', 'Hard', 'Fast', 'Slow', 'First', 'Last', 'Next',
+  'Ants', 'Roaches', 'Cockroach', 'Cockroaches', 'Spiders', 'Termites',
+  'Rodents', 'Mosquitoes', 'Wasps', 'Bees', 'Rats', 'Mice', 'Rat',
+  'Mouse', 'Snakes', 'Snake', 'Lizards', 'Lizard', 'Beetles', 'Beetle',
+  'Kitchen', 'Bathroom', 'Bedroom', 'Garage', 'Attic', 'Cabinets',
+  'Walls', 'Windows', 'Doors', 'Baseboards', 'Lanai', 'Pool', 'Patio',
+  'Deck', 'Fence', 'Roof', 'Eaves', 'Soffit', 'Foundation', 'Slab',
+  'Mulch', 'Wood', 'Trees', 'Shrubs', 'Plants', 'Love', 'Hate', 'Hide',
+  'Hiding', 'Bite', 'Bites', 'Biting', 'Sting', 'Stings', 'Swarm',
+  'Swarming', 'Swarmers', 'Nest', 'Nesting', 'Nests', 'Eat', 'Eating',
+  'Come', 'Coming', 'Back', 'Return', 'Returning', 'Live', 'Living',
+  'Look', 'Looks', 'Like', 'Mean', 'Means', 'Work', 'Working', 'Find',
+  'Finding', 'See', 'Seeing', 'Smell', 'Smells', 'Sound', 'Sounds',
+  'Cause', 'Causes', 'Causing', 'Damp', 'Wet', 'Dry', 'Dark', 'Warm',
+  'Cold', 'Rain', 'Rainy', 'Storm', 'Storms', 'Water', 'Food', 'Trash',
 ]);
 
 // The one heading-scan exception the redactor's name heuristic needs: find a
-// capitalized First+Last-shaped pair that survives BOTH the structural
-// vocabulary above and the redactor's own false-positive filters. Returns
-// the offending pair or null.
+// First+Last-shaped pair that survives BOTH the structural vocabulary above
+// and the redactor's own false-positive filters. Case-NORMALIZED first —
+// customer-derived headings from SMS/voice transcripts are frequently
+// lowercase ("## john smith"), and a Title-Case-only pair scan was blind to
+// exactly the text the transcripts produce. Normalizing every word to
+// Title Case makes lowercase words pair candidates too; the expanded
+// structural vocabulary + allowlists absorb ordinary heading prose, and an
+// unlisted pair parks the draft for review (fail-closed by design).
+// Returns the offending pair or null.
 function headingCustomerNamePair(headingText) {
   let looksLikeFalsePositiveName;
   try {
@@ -593,10 +625,15 @@ function headingCustomerNamePair(headingText) {
     // Redactor unavailable — caller's outer try/catch fails the gate closed.
     throw new Error('pii-redactor unavailable for heading name scan');
   }
+  const normalized = String(headingText || '').replace(/\b[a-z]/g, (ch) => ch.toUpperCase());
   const pairRe = /\b([A-Z][a-z]{1,15})\s+([A-Z][a-z]{1,20})\b/g;
   let m;
-  while ((m = pairRe.exec(String(headingText || ''))) !== null) {
+  while ((m = pairRe.exec(normalized)) !== null) {
     const [, first, last] = m;
+    // OVERLAPPING scan: resume from after the FIRST token, not after the
+    // whole match — a non-overlapping pass consumes "About John" and never
+    // evaluates "John Smith" ("## about john smith…" sailed through).
+    pairRe.lastIndex = m.index + first.length;
     if (STRUCTURAL_HEADING_WORDS.has(first) || STRUCTURAL_HEADING_WORDS.has(last)) continue;
     if (looksLikeFalsePositiveName(first, last)) continue;
     return `${first} ${last}`;

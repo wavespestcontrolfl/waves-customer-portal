@@ -731,3 +731,18 @@ describe('named control entities + literal-vs-entity unquoted controls (Codex ro
     expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
   });
 });
+
+describe('CRLF in non-recipient mailto headers (Codex round 14)', () => {
+  test('decoded CR/LF in subject/body headers is P0 — header separators smuggle recipients', () => {
+    // ?subject=Hi%0Abcc:attacker@… — the old order skipped non-recipient
+    // keys BEFORE decoding, so the injected line break never got checked.
+    const subj = guardrails.evaluate({ body: 'Email [x](mailto:info@wavespestcontrol.com?subject=Hi%0Abcc:attacker@gmail.com).' }, {});
+    expect(subj.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    const bodyHdr = guardrails.evaluate({ body: 'Email [x](mailto:info@wavespestcontrol.com?body=Hello%0Dbcc:attacker@gmail.com).' }, {});
+    expect(bodyHdr.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+  test('control-clean non-recipient headers still pass', () => {
+    const r = guardrails.evaluate({ body: 'Email [us](mailto:info@wavespestcontrol.com?subject=Service%20question).' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});

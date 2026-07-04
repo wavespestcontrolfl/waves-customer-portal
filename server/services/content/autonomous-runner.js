@@ -88,14 +88,14 @@ const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-see
 const OPERATOR_INTERCEPT_BUCKET = 'operator_intercept';
 
 // The operator-authored text of an intercept brief (title/keywords/thesis/
-// outline), for the comparison gate's operator-authorized-competitor
-// exception: a recognized competitor the OPERATOR named there (e.g. the
-// Aptive cancellation brief) routes the draft to the approvable named-
-// competitor review path instead of a hard UNKNOWN_COMPETITOR block. Only
-// operator_intercept opportunities produce text — mined briefs get '', so
-// nothing changes for them. Both gate call sites (runNext and the approval
-// re-check) MUST derive this identically, or a draft parked as approvable
-// would fail its own approval re-evaluation.
+// outline/sourcing), for the comparison gate's operator-authorized-
+// competitor exception: a recognized competitor the OPERATOR named there
+// (e.g. the Aptive cancellation brief) routes the draft to the approvable
+// named-competitor review path instead of a hard UNKNOWN_COMPETITOR block.
+// Only operator_intercept opportunities produce text — mined briefs get '',
+// so nothing changes for them. Both gate call sites (runNext and the
+// approval re-check) MUST derive this identically, or a draft parked as
+// approvable would fail its own approval re-evaluation.
 function operatorBriefTextForComparisonGate(opp, brief) {
   if (!opp || opp.bucket !== OPERATOR_INTERCEPT_BUCKET) return '';
   const ob = brief?.voice_constraints?.operator_brief || null;
@@ -106,6 +106,15 @@ function operatorBriefTextForComparisonGate(opp, brief) {
     ob.thesis,
     ...(Array.isArray(ob.secondary_kws) ? ob.secondary_kws : []),
     ...(Array.isArray(ob.outline) ? ob.outline : []),
+    // Sourcing fields are operator-authored too: a REQUIRED competitor
+    // citation (required_sources URL like https://www.orkin.com/...) or a
+    // source note naming the competitor authorizes that name exactly like
+    // the title/outline do. Without these, the binding citation URL itself
+    // read as an unauthorized mention in the draft and hard-blocked the
+    // run at comparison_table_failed instead of the review path the
+    // operator's own brief was steering it to.
+    ...(Array.isArray(ob.required_sources) ? ob.required_sources : []),
+    ...(Array.isArray(ob.source_notes) ? ob.source_notes : []),
   ].filter(Boolean).join('\n');
 }
 
@@ -2967,4 +2976,5 @@ module.exports._internals = {
   startOfEtDay,
   startOfEtWeek,
   gbpLocationIdForCity,
+  operatorBriefTextForComparisonGate,
 };

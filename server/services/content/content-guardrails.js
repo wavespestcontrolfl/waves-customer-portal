@@ -455,14 +455,18 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable query header ("${key.slice(0, 40)}") — remove it.`);
       }
       key = key.trim().toLowerCase();
-      if (key !== 'to' && key !== 'cc' && key !== 'bcc') continue; // subject/body etc. carry no recipients
       let value = eq === -1 ? '' : kv.slice(eq + 1);
       try { value = decodeURIComponent(value); } catch {
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable "${key}" header — remove it.`);
       }
+      // EVERY header value is decoded and control-checked BEFORE the
+      // recipient-key filter below: mail clients can treat decoded CR/LF
+      // as header separators, so ?subject=Hi%0Abcc:attacker@... smuggles a
+      // recipient through a "harmless" field the old order never decoded.
       if (/[\u0000-\u001F]/.test(value)) {
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link whose "${key}" header decodes to control characters — remove it.`);
       }
+      if (key !== 'to' && key !== 'cc' && key !== 'bcc') continue; // subject/body etc. add no recipients (control-clean ones are fine)
       const extra = value.split(/[,;]/).map((r) => r.trim().toLowerCase()).filter(Boolean);
       if (extra.length === 0 || extra.some((r) => !r.endsWith('@wavespestcontrol.com'))) {
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link whose "${key}" header adds a non-Waves recipient — only @wavespestcontrol.com addresses are allowed.`);
