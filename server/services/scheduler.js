@@ -786,6 +786,22 @@ function initScheduledJobs() {
   cron.schedule('30 7 * * *', async () => {
     if (!isEnabled('autonomousContentEngine')) return;
     logger.info('Running: Autonomous Content Opportunity Miner');
+    // Queue janitors run BEFORE the mine (each fail-soft so a janitor error
+    // never blocks mining):
+    //   - expireStale: age out unclaimed pendings past expires_at. Ordering
+    //     matters — the mine that follows immediately re-pends any signal
+    //     that is still live (with a fresh expires_at), so 'expired' only
+    //     sticks for signals that stopped being mined.
+    //   - sweepExhaustedAttempts: pending rows over the lifetime claim
+    //     budget become visible skipped/attempts_exhausted rows (claimNext
+    //     already refuses them; without the sweep they'd sit as invisible
+    //     zombies). skipped is sticky in the mine's upsert, so they stay
+    //     swept until an operator requeues (which resets the counter).
+    try {
+      const queue = require('./content/opportunity-queue');
+      await queue.expireStale();
+      await queue.sweepExhaustedAttempts();
+    } catch (err) { logger.warn(`Opportunity-queue janitor failed (mining continues): ${err.message}`); }
     try {
       await runAutonomousOpportunityMining();
     } catch (err) { logger.error(`Autonomous opportunity miner failed: ${err.message}`); }
@@ -1352,6 +1368,16 @@ function initScheduledJobs() {
     try {
       await runExclusive('autonomous-pr-poll', async () => {
         const AutonomousPrPoller = require('./content/autonomous-pr-poller');
+        // Janitor first: a crash mid named-competitor approval strands the
+        // run at 'publishing_named_competitor' with no other reader — park
+        // it (and its claimed opportunity) for human reconciliation before
+        // polling. Fail-soft so a janitor error never blocks the poll.
+        try {
+          const AutonomousRunner = require('./content/autonomous-runner');
+          await AutonomousRunner.recoverStuckNamedCompetitorPublishes();
+        } catch (janitorErr) {
+          logger.warn(`Named-competitor publish janitor failed (poll continues): ${janitorErr.message}`);
+        }
         await AutonomousPrPoller.pollPending();
       });
     } catch (err) {
@@ -2126,21 +2152,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 15 MIN — Process scheduled content (blog + social auto-publish)
+  // EVERY 15 MIN — Process scheduled content (blog + social auto-publish).
+  // runExclusive: the tick drives external side effects (publishToAll to
+  // every social platform, Astro publish PRs), and while the row claims are
+  // now compare-and-set, the stale-'publishing' sweeps at the top of
+  // processScheduledPosts are only provably safe when no sibling tick can
+  // have a publish in flight — the advisory lock guarantees that (deploy
+  // overlap and slow prior ticks alike).
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {
     try {
-      const ContentScheduler = require('./content-scheduler');
-      const result = await ContentScheduler.processScheduledPosts();
-      if (result.blogCount > 0 || result.socialCount > 0) {
-        logger.info(`Content scheduler: ${result.blogCount} blog(s), ${result.socialCount} social post(s) published`);
-      }
-      if (result.socialSkipped) {
-        // social portion was skipped by feature flag — don't log noise
-      }
-      // Re-drive newsletter social shares stranded by a crash between
-      // send-completion and the fire-and-forget share in sendCampaign.
-      await ContentScheduler.retryStrandedNewsletterShares();
+      await runExclusive('content-scheduler-tick', async () => {
+        const ContentScheduler = require('./content-scheduler');
+        const result = await ContentScheduler.processScheduledPosts();
+        if (result.blogCount > 0 || result.socialCount > 0) {
+          logger.info(`Content scheduler: ${result.blogCount} blog(s), ${result.socialCount} social post(s) published`);
+        }
+        if (result.socialSkipped) {
+          // social portion was skipped by feature flag — don't log noise
+        }
+        // Re-drive newsletter social shares stranded by a crash between
+        // send-completion and the fire-and-forget share in sendCampaign.
+        await ContentScheduler.retryStrandedNewsletterShares();
+      });
     } catch (err) {
       logger.error(`Content scheduler failed: ${err.message}`);
     }

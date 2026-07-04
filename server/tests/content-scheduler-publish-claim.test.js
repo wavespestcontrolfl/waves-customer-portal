@@ -9,12 +9,18 @@
  *     astro_status='live', so it would strand those rows permanently), and
  *     back to 'pending_review' when Astro state exists. Either way the sweep
  *     disarms pages-poll's pr_open+publishing auto-merge branch.
+ *
+ * Social rows get the same two protections (audit P1-11): a CAS claim so
+ * overlapping ticks can't double-drive publishToAll (duplicate posts on
+ * every platform), and a stale-'publishing' sweep to 'failed' — never a
+ * retry, since the crash may have landed after some platforms posted.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/social-media', () => ({
   SOCIAL_FLAGS: { automationEnabled: false, scheduledPosts: false, newsletterAutoshare: false },
   isPausedByAdmin: jest.fn().mockResolvedValue(false),
+  publishToAll: jest.fn(),
 }));
 jest.mock('../services/content-astro/astro-publisher', () => ({
   publishAstro: jest.fn(),
@@ -54,12 +60,16 @@ jest.mock('../models/db', () => {
         mockState.updates.push({ table, filters: q._filters.slice(), updates });
         return Promise.resolve(mockState.updateResult(table, q._filters, updates));
       }),
-      // The pending-blogs query is awaited directly (no .select()), so the
-      // builder itself must be thenable.
-      then: (resolve, reject) => Promise.resolve(mockState.pendingBlogs).then(resolve, reject),
+      // The pending queries are awaited directly (no .select()), so the
+      // builder itself must be thenable — table-aware so the blog and
+      // social loops each see their own rows.
+      then: (resolve, reject) => Promise.resolve(
+        table === 'social_media_posts' ? mockState.pendingSocials : mockState.pendingBlogs
+      ).then(resolve, reject),
     };
     return q;
   });
+  dbFn.raw = jest.fn((sql) => ({ __raw: sql }));
   return dbFn;
 });
 
@@ -79,10 +89,15 @@ function isStaleSweepUpdate(u) {
 beforeEach(() => {
   mockState = {
     pendingBlogs: [],
+    pendingSocials: [],
     updates: [],
     updateResult: () => 1,
   };
   jest.clearAllMocks();
+  const SocialMedia = require('../services/social-media');
+  SocialMedia.SOCIAL_FLAGS.automationEnabled = false;
+  SocialMedia.SOCIAL_FLAGS.scheduledPosts = false;
+  SocialMedia.isPausedByAdmin.mockResolvedValue(false);
 });
 
 describe('stale-publishing sweep', () => {
@@ -136,6 +151,18 @@ describe('stale-publishing sweep', () => {
     await ContentScheduler.processScheduledPosts();
     expect(mockState.updates.some(isStaleSweepUpdate)).toBe(true);
   });
+
+  test('the sweep retries publish_failed rows with no opened PR too (Codex round 2)', async () => {
+    await ContentScheduler.resetStalePublishingBlogs();
+    const sweeps = mockState.updates.filter(isStaleSweepUpdate);
+    const retry = sweeps.find((u) => u.updates.publish_status === 'pending');
+    expect(retry.filters).toEqual(expect.arrayContaining([
+      ['whereNull', 'astro_status'],
+      ['astro_status', 'publish_failed'],
+      ['whereNull', 'astro_pr_number'],
+    ]));
+    expect(retry.updates.astro_status).toBeNull();
+  });
 });
 
 describe('atomic publishing claim', () => {
@@ -180,17 +207,233 @@ describe('atomic publishing claim', () => {
     expect(stomps).toHaveLength(0);
   });
 
-  test('publish failure after a successful claim releases the row to pending_review', async () => {
+  test('publish failure with NO Astro state releases the row to PENDING for retry (Codex/audit: pending_review + null astro_status is never re-selected)', async () => {
     mockState.pendingBlogs = [blog];
     AstroPublisher.publishAstro.mockRejectedValue(new Error('GitHub down'));
 
     const result = await ContentScheduler.processScheduledPosts();
 
     expect(result.errors).toBe(1);
-    const release = mockState.updates.find((u) =>
+    // The release re-checks astro_status LIVE (whereNull guard on the same
+    // update), releasing to 'pending' so the next tick retries a transient
+    // GitHub blip — parking at pending_review would strand it permanently.
+    const retry = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'pending'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7)
+      && u.filters.some(([col, val]) => col === 'publish_status' && val === 'publishing')
+      && u.filters.some(([kind, col]) => kind === 'whereNull' && col === 'astro_status'));
+    expect(retry).toBeDefined();
+  });
+
+  test('publish failure where publishAstro stamped publish_failed pre-PR still retries (Codex round 2 — the whereNull-only branch was dead)', async () => {
+    mockState.pendingBlogs = [blog];
+    AstroPublisher.publishAstro.mockRejectedValue(new Error('GitHub down'));
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(result.errors).toBe(1);
+    const retry = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'pending'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7));
+    expect(retry).toBeDefined();
+    // publishAstro's own catch stamps astro_status='publish_failed' on
+    // EVERY pre-PR throw before this handler sees the row, so the
+    // retryable set must be (astro_status IS NULL) OR (publish_failed with
+    // NO opened PR) — astro_pr_number is the opened-PR marker, and a row
+    // with a PR out is never blind-retried (duplicate PR).
+    expect(retry.filters).toEqual(expect.arrayContaining([
+      ['whereNull', 'astro_status'],
+      ['astro_status', 'publish_failed'],
+      ['whereNull', 'astro_pr_number'],
+    ]));
+    // the failed marker is cleared so the pending query re-selects the row
+    expect(retry.updates.astro_status).toBeNull();
+  });
+
+  test('a deterministic content-policy failure parks the post as failed instead of hot-looping the retry (Codex round 3)', async () => {
+    mockState.pendingBlogs = [blog];
+    const gateErr = new Error('content guardrails failed: P0 HARDCODED_PRICE');
+    gateErr.code = 'BLOG_GUARDRAILS_FAILED';
+    AstroPublisher.publishAstro.mockRejectedValue(gateErr);
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(result.errors).toBe(1);
+    // Content-property failures repeat identically every run — the 15-min
+    // retry loop would re-burn the gates (fact check is an LLM call)
+    // forever. Parked 'failed' like the no-content terminal case, claim-
+    // guarded like every other branch.
+    const parkedFailed = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'failed'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7)
+      && u.filters.some(([col, val]) => col === 'publish_status' && val === 'publishing'));
+    expect(parkedFailed).toBeDefined();
+    // The park clears publishAstro's pre-PR 'publish_failed' stamp (Codex
+    // round 4): scheduleBlogPost only sets publish_status, and the pending
+    // query excludes publish_failed — without the clear, a fixed-and-
+    // rescheduled post was never picked up again. Marker-guarded so a
+    // publish_failed row with an opened PR keeps its state.
+    expect(String(parkedFailed.updates.astro_status.__raw)).toMatch(/astro_pr_number IS NULL AND astro_branch_name IS NULL THEN NULL/);
+  });
+
+  test('a permanently bad hero URL (BLOG_HERO_MEDIA_FAILED) parks like the other deterministic codes (Codex round 6)', async () => {
+    mockState.pendingBlogs = [blog];
+    const mediaErr = new Error('featured image could not be fetched for Astro publish: 404 not found');
+    mediaErr.code = 'BLOG_HERO_MEDIA_FAILED';
+    AstroPublisher.publishAstro.mockRejectedValue(mediaErr);
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(result.errors).toBe(1);
+    const parkedFailed = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'failed'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7));
+    expect(parkedFailed).toBeDefined();
+    // (id-scoped: the tick's stale-publishing SWEEP also writes a 'pending'
+    // retry update, but with the cutoff filter and no id — that one is fine)
+    const retried = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'pending'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7));
+    expect(retried).toBeUndefined();
+  });
+
+  test('publish failure WITH Astro state parks the row at pending_review (claim-guarded)', async () => {
+    mockState.pendingBlogs = [blog];
+    AstroPublisher.publishAstro.mockRejectedValue(new Error('boom after PR opened'));
+    // Simulate publishAstro having set astro_status before throwing: the
+    // whereNull-guarded pending release matches 0 rows, forcing the
+    // pending_review fallback.
+    mockState.updateResult = (table, filters, updates) =>
+      (updates.publish_status === 'pending'
+        && filters.some(([kind, col]) => kind === 'whereNull' && col === 'astro_status') ? 0 : 1);
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(result.errors).toBe(1);
+    const park = mockState.updates.find((u) =>
       u.table === 'blog_posts'
       && u.updates.publish_status === 'pending_review'
-      && u.filters.some(([col, val]) => col === 'id' && val === 7));
-    expect(release).toBeDefined();
+      && u.filters.some(([col, val]) => col === 'id' && val === 7)
+      && u.filters.some(([col, val]) => col === 'publish_status' && val === 'publishing'));
+    expect(park).toBeDefined();
+  });
+});
+
+// ── social posts: CAS claim + stale sweep (audit P1-11) ─────────────────
+
+describe('atomic SOCIAL publishing claim', () => {
+  const social = {
+    id: 'soc-1',
+    title: 'Scheduled Social',
+    description: 'd',
+    source_url: 'https://wavespestcontrol.com/blog/x/',
+    source_guid: 'g1',
+    publish_status: 'pending',
+    custom_content: null,
+  };
+
+  function enableSocial() {
+    const SocialMedia = require('../services/social-media');
+    SocialMedia.SOCIAL_FLAGS.automationEnabled = true;
+    SocialMedia.SOCIAL_FLAGS.scheduledPosts = true;
+    return SocialMedia;
+  }
+
+  test('claims with a compare-and-set guarded on the selected publish_status', async () => {
+    const SocialMedia = enableSocial();
+    SocialMedia.publishToAll.mockResolvedValue({ ok: true });
+    mockState.pendingSocials = [social];
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    const claim = mockState.updates.find((u) =>
+      u.table === 'social_media_posts' && u.updates.publish_status === 'publishing');
+    expect(claim).toBeDefined();
+    expect(claim.filters).toEqual(expect.arrayContaining([
+      ['id', 'soc-1'],
+      ['publish_status', 'pending'],
+    ]));
+    expect(SocialMedia.publishToAll).toHaveBeenCalledTimes(1);
+    expect(result.socialCount).toBe(1);
+  });
+
+  test('skips the post when another instance claimed it first — no duplicate publishToAll', async () => {
+    const SocialMedia = enableSocial();
+    mockState.pendingSocials = [social];
+    mockState.updateResult = (table, filters, updates) =>
+      (table === 'social_media_posts' && updates.publish_status === 'publishing' ? 0 : 1);
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(SocialMedia.publishToAll).not.toHaveBeenCalled();
+    expect(result.socialCount).toBe(0);
+    expect(result.errors).toBe(0);
+    // the loser must not write ANY state for the contested row (the only
+    // other social write this tick is the id-less stale sweep)
+    const writes = mockState.updates.filter((u) =>
+      u.table === 'social_media_posts'
+      && u.updates.publish_status !== 'publishing'
+      && u.filters.some(([col, val]) => col === 'id' && val === 'soc-1'));
+    expect(writes).toHaveLength(0);
+  });
+
+  test('publishToAll failure marks failed only under the claim we hold', async () => {
+    const SocialMedia = enableSocial();
+    SocialMedia.publishToAll.mockRejectedValue(new Error('FB API down'));
+    mockState.pendingSocials = [social];
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(result.errors).toBe(1);
+    // scope to the row-level error write — the tick-start stale sweep also
+    // writes 'failed' but carries no id filter
+    const failed = mockState.updates.find((u) =>
+      u.table === 'social_media_posts'
+      && u.updates.publish_status === 'failed'
+      && u.filters.some(([col, val]) => col === 'id' && val === 'soc-1'));
+    expect(failed).toBeDefined();
+    expect(failed.filters).toEqual(expect.arrayContaining([
+      ['id', 'soc-1'],
+      ['publish_status', 'publishing'],
+    ]));
+  });
+});
+
+describe('stale SOCIAL publishing sweep', () => {
+  test('stranded publishing rows are marked failed — never retried (platforms may have partially posted)', async () => {
+    const reset = await ContentScheduler.resetStalePublishingSocials();
+
+    expect(reset).toBe(1);
+    const sweep = mockState.updates.find((u) =>
+      u.table === 'social_media_posts' && u.updates.publish_status === 'failed');
+    expect(sweep).toBeDefined();
+    expect(sweep.updates.status).toBe('failed');
+    expect(sweep.filters).toEqual(expect.arrayContaining([
+      ['publish_status', 'publishing'],
+      ['scheduled_for', '<', expect.any(Date)],
+    ]));
+    // staleness keys on scheduled_for (the table has no updated_at) with a
+    // ~30 min margin
+    const cutoff = sweep.filters.find(([col]) => col === 'scheduled_for')[2];
+    const ageMinutes = (Date.now() - cutoff.getTime()) / 60000;
+    expect(ageMinutes).toBeGreaterThanOrEqual(29);
+    expect(ageMinutes).toBeLessThanOrEqual(31);
+    // and it must never write a retriable state
+    expect(mockState.updates.some((u) =>
+      u.table === 'social_media_posts' && ['pending', 'dry_run'].includes(u.updates.publish_status))).toBe(false);
+  });
+
+  test('processScheduledPosts runs the social sweep every tick, even with social flags off', async () => {
+    await ContentScheduler.processScheduledPosts();
+    const sweep = mockState.updates.find((u) =>
+      u.table === 'social_media_posts'
+      && u.updates.publish_status === 'failed'
+      && u.filters.some(([col]) => col === 'scheduled_for'));
+    expect(sweep).toBeDefined();
   });
 });

@@ -153,6 +153,11 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
         claimed_at: null,
         completed_at: null,
         skip_reason: null,
+        // A requeue is a fresh explicit operator signal — reset the
+        // lifetime claim budget so attempts spent before the operator
+        // intervened don't leave the row unclaimable (or immediately
+        // re-swept to skipped/attempts_exhausted).
+        attempt_count: 0,
         updated_at: new Date(),
       });
       if (run?.id) {
