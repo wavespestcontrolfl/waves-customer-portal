@@ -176,7 +176,7 @@ const READ_ONLY = [
   'cancel_and_reschedule_far_out',
   'get_kpi_snapshot', 'compare_periods', 'get_mrr_trend', 'get_revenue_breakdown',
   'get_estimate_funnel', 'get_churn_analysis', 'get_service_mix', 'get_customer_acquisition',
-  'get_outstanding_balances', 'get_today_briefing',
+  'get_outstanding_balances', 'get_today_briefing', 'get_payer_ar_aging',
   'query_gsc_performance', 'query_top_queries', 'query_top_pages', 'query_seo_rankings',
   'check_site_health', 'query_blog_performance', 'get_content_pipeline', 'get_backlink_overview',
   'compare_domains', 'get_content_decay_alerts', 'get_semantic_concept_map',
