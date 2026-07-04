@@ -172,6 +172,14 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       leadSource,
     } = intake;
 
+    // Inline street unit and dedicated unit field disagree — ambiguous. Fail
+    // closed BEFORE any lead/customer mutation (same guard as
+    // /public/quote/calculate and /property-lookup) rather than capture the
+    // lead on the wrong unit.
+    if (normalizedAddress.unitConflict) {
+      return res.status(400).json({ error: 'The street address and unit number disagree — please re-enter your address.' });
+    }
+
     // City fallback. Forms only capture a structured city when the visitor
     // picks a Google Places suggestion; free-text submissions arrive with no
     // city (e.g. "87th Street East, FL 34219"). Recover it from the ZIP so a

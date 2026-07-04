@@ -478,7 +478,9 @@ export default function QuotePage({ serviceSlug = '' }) {
 
   function applyAddressParts(parts) {
     const formatted = parts.formatted || parts.line1 || intake.address;
-    setIntakeField('address', formatted);
+    // Match /book: with a subpremise the street field DISPLAYS the street
+    // only — the unit lives in its own box, where it can be edited/cleared.
+    setIntakeField('address', parts.line2 ? (parts.line1 || formatted) : formatted);
     setAddress({
       formatted,
       line1: parts.line1 || formatted,
@@ -520,7 +522,7 @@ export default function QuotePage({ serviceSlug = '' }) {
         state: parts.state || 'FL',
         zip: parts.zip || '',
       };
-      setIntakeField('address', next.formatted);
+      setIntakeField('address', next.line2 ? (next.line1 || next.formatted) : next.formatted);
       setAddress(next);
       return next;
     } catch {
@@ -598,10 +600,11 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
-          // When a subpremise exists, formatted still carries it inline — send
-          // the street-only line1 (+ components) so the server keeps the unit
-          // in line2 and feeds the parcel lookup a clean street address.
-          ...(resolvedAddress.line2 ? {
+          // Whenever we have PARSED parts (Places pick or geocode — city/zip
+          // present), send the street-only line1 + components so the unit
+          // rides ONLY in address_line2. Gating this on line2 would let a
+          // CLEARED unit box resurrect the old unit still inline in formatted.
+          ...((resolvedAddress.city || resolvedAddress.zip) ? {
             address_line1: resolvedAddress.line1 || undefined,
             city: resolvedAddress.city || undefined,
             state: resolvedAddress.state || undefined,
@@ -668,7 +671,9 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
-          ...(resolvedAddress.line2 ? {
+          // Same parsed-parts gate as the property-lookup submit — a cleared
+          // unit box must not resurrect the unit still inline in formatted.
+          ...((resolvedAddress.city || resolvedAddress.zip) ? {
             address_line1: resolvedAddress.line1 || undefined,
             city: resolvedAddress.city || undefined,
             state: resolvedAddress.state || undefined,
@@ -715,7 +720,9 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
-          ...(resolvedAddress.line2 ? {
+          // Same parsed-parts gate as the property-lookup submit — a cleared
+          // unit box must not resurrect the unit still inline in formatted.
+          ...((resolvedAddress.city || resolvedAddress.zip) ? {
             address_line1: resolvedAddress.line1 || undefined,
             city: resolvedAddress.city || undefined,
             state: resolvedAddress.state || undefined,
