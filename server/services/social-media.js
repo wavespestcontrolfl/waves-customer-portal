@@ -379,7 +379,52 @@ async function withRetry(fn, { maxAttempts = 3, label = '' } = {}) {
 
 // ── AI Content Generation ──
 
-const BRAND_PREAMBLE = `You are writing social media content for Waves Pest Control, a family-owned pest control and lawn care company in Southwest Florida (Manatee, Sarasota, and Charlotte counties). 12 years in SWFL.
+// The model occasionally wraps its answer in assistant chatter — a leading
+// "Here's a LinkedIn post within your limits:" line, ----fenced copy, a
+// trailing "*197 characters*" note — and validateContent doesn't catch any of
+// it, so it publishes verbatim (live examples on GBP + LinkedIn, 2026-06-27
+// through 07-03). Markdown bold also renders as literal asterisks on every
+// platform we post to. Strip the wrapper, keep the post. Legit hooks like
+// "Here's what we're seeing in Venice:" survive: the prefix match requires
+// the line to name the artifact (post/caption/copy/draft).
+function stripModelWrapper(raw) {
+  let text = String(raw || '').replace(/\r\n?/g, '\n').trim();
+  // Markdown bold — readers would see the literal **. Unwrap FIRST so a bolded
+  // wrapper heading ("**Here's a LinkedIn post:**") is bare text before the
+  // preamble match below; running it last would let that heading publish.
+  text = text.replace(/\*\*([^*\n][^*]*)\*\*/g, '$1');
+  // ---- fences can wrap the whole answer ("---\nHere's a post:\n…\n---") — a
+  // leading fence would hide the preamble from the anchored match below, so
+  // strip fences BEFORE the preamble pass, again after it (a preamble can also
+  // precede a fence), and once more after the count/Note passes; each pass
+  // exposes the next one's target.
+  const stripFences = (s) => s.replace(/^\s*-{3,}\s*/, '').replace(/\s*-{3,}\s*$/, '');
+  text = stripFences(text);
+  // Leading meta line: "Here's a <platform> post …:" / "Sure — here is your caption:".
+  // The acknowledgement separator takes comma/period/bang or a dash/colon ("Sure —").
+  // (?!-) keeps hyphenated adjectives ("Here's a post-storm mosquito tip:"), and the
+  // tail after the artifact noun must open with wrapper phrasing (for/that/within/…)
+  // so unhyphenated adjective hooks ("Here's a post storm mosquito tip:",
+  // "Here's a post treatment reminder:") survive too — there "post" is followed by
+  // another content word, which real meta lines never do.
+  text = text.replace(/^(?:(?:sure(?: thing)?|certainly|of course|absolutely|definitely|gladly|no problem|got it|you got it|happy to help|okay|ok|great|perfect|done|here you go)(?:\s*[,!.:—–-]\s*|\s+))?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b(?!-)(?:[,—–-]?\s+(?:for|that|which|you|your|ready|based|within|under|below|about|in|on|to|at)\b[^:\n]{0,60})?:\s*/i, '');
+  text = stripFences(text);
+  // Trailing count notes: "*197 characters*", "*(Character count: ~240)*", "(197 characters)".
+  // The lookbehind keeps this pass from biting the tail off a "*Note: … 196
+  // characters*" line — that would strand "*Note: This is" and hide the count
+  // words from the Note pass below, which strips those lines whole.
+  text = text.replace(/(?<!\bnote:[^\n]*)[\s*_]*\(?\s*(?:character count:?\s*~?\d+|~?\d+\s*characters?)\s*\)?[\s*_.]*$/i, '');
+  // Trailing "Note: …" meta line, only when it talks in character-count terms
+  // (live example, LinkedIn 06-30: "*Note: This is 196 characters — right at
+  // your limit. Want me to trim or adjust the tone?*"). Bare "limit" is NOT
+  // enough — care notes like "Note: limit irrigation after treatment." and
+  // "Note: keep pets off the lawn for 2 hours." survive.
+  text = text.replace(/\n[\s*_(]*note:[^\n]*(?:\bchar(?:acter)?s?\b|\blength limits?\b)[^\n]*$/i, '');
+  text = stripFences(text);
+  return text.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+const BRAND_PREAMBLE = `You are writing social media content for Waves Pest Control, a family-owned pest control and lawn care company in Southwest Florida (Manatee, Sarasota, and Charlotte counties).
 
 Voice: Knowledgeable neighbor, not corporate. You're talking to a homeowner over the fence. Casual, specific, occasionally funny. Never salesy or generic.
 
@@ -397,6 +442,13 @@ Rules:
 - Never use: "Your trusted pest control provider", "Contact us today for all your pest control needs", "We are pleased to announce", "Dear valued customer"
 - Be specific: "Southern chinch bugs feed at the blade base" beats "chinch bugs damage lawns"
 - Reference SWFL naturally: Florida humidity, gulf coast weather, lanais, St. Augustine grass, local neighborhoods`;
+
+// Output contract for the social-post prompts below. Deliberately NOT part of
+// BRAND_PREAMBLE: tech-social-caption.js reuses BRAND_PREAMBLE as the system
+// prompt for a JSON-returning endpoint, and a "post text only" rule there
+// would tell the model to drop the JSON envelope.
+const POST_PREAMBLE = `${BRAND_PREAMBLE}
+- Output ONLY the post text itself — no preamble ("Here's a post…"), no character counts, no --- separators, no markdown formatting like **bold** (platforms render the asterisks literally)`;
 
 const HOOK_BANK = [
   "Here's what we're seeing in {location} after the rain…",
@@ -428,7 +480,7 @@ async function generateContent(platform, { title, description, link, locationNam
   const hooks = getHookSample();
 
   const prompts = {
-    facebook: `${BRAND_PREAMBLE}
+    facebook: `${POST_PREAMBLE}
 
 Write a Facebook post based on this blog article.
 
@@ -452,7 +504,7 @@ BAD example (do NOT write like this):
 Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
 
-    instagram: `${BRAND_PREAMBLE}
+    instagram: `${POST_PREAMBLE}
 
 Write an Instagram caption based on this blog article.
 
@@ -482,7 +534,7 @@ What's your lawn doing this week? 👇
 Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
 
-    linkedin: `${BRAND_PREAMBLE}
+    linkedin: `${POST_PREAMBLE}
 
 Write a professional LinkedIn post based on this blog article.
 Professional but approachable tone. 100-200 characters. Do NOT include the URL.
@@ -490,7 +542,7 @@ Professional but approachable tone. 100-200 characters. Do NOT include the URL.
 Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
 
-    gbp: `${BRAND_PREAMBLE}
+    gbp: `${POST_PREAMBLE}
 
 Write a Google Business Profile post for Waves Pest Control ${safeLocation}.
 
@@ -521,7 +573,7 @@ Article summary: ${safeDesc}`,
     messages: [{ role: 'user', content: prompt }],
   });
 
-  return response.content[0]?.text?.trim() || '';
+  return stripModelWrapper(response.content[0]?.text);
 }
 
 // ── AI copy for the Social Content Studio (campaign-framed, context-grounded) ──
@@ -545,7 +597,7 @@ Facts:
 ${safeFacts}`;
 
   const prompts = {
-    facebook: `${BRAND_PREAMBLE}
+    facebook: `${POST_PREAMBLE}
 
 Write a Facebook post for a LOCAL ${safeService} campaign in ${safeCity} about: ${safeTopic}.
 ${grounding}
@@ -558,7 +610,7 @@ Format:
 - 200-400 characters total
 - Do NOT include any URL`,
 
-    instagram: `${BRAND_PREAMBLE}
+    instagram: `${POST_PREAMBLE}
 
 Write an Instagram caption for a LOCAL ${safeService} campaign in ${safeCity} about: ${safeTopic}.
 ${grounding}
@@ -571,7 +623,7 @@ Format:
 - Then a blank line and 3-5 hashtags: always #wavespestcontrol, 1-2 local (e.g. #swfl), 1-2 topical. Never more than 5.
 - Do NOT include any URL`,
 
-    gbp: `${BRAND_PREAMBLE}
+    gbp: `${POST_PREAMBLE}
 
 Write a Google Business Profile post for Waves Pest Control ${safeCity} about: ${safeTopic}.
 ${grounding}
@@ -583,7 +635,7 @@ Format:
 - 150-250 characters total
 - Do NOT include any URL, phone number, or hashtags`,
 
-    linkedin: `${BRAND_PREAMBLE}
+    linkedin: `${POST_PREAMBLE}
 
 Write a short professional LinkedIn post for a ${safeService} campaign in ${safeCity} about: ${safeTopic}. 100-200 characters. Do NOT include any URL.
 ${grounding}`,
@@ -595,7 +647,7 @@ ${grounding}`,
     max_tokens: 600,
     messages: [{ role: 'user', content: prompts[platform] || prompts.facebook }],
   });
-  return response.content[0]?.text?.trim() || '';
+  return stripModelWrapper(response.content[0]?.text);
 }
 
 // Generate brand-voice copy for the requested channels. Returns a partial map
@@ -1649,6 +1701,7 @@ module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
 module.exports.isPausedByAdmin = isPausedByAdmin;
 module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
 module.exports.validateContent = validateContent;
+module.exports.stripModelWrapper = stripModelWrapper;
 module.exports.normalizeUrl = normalizeUrl;
 module.exports.uploadImageToS3 = uploadImageToS3;
 module.exports.uploadVideoToS3 = uploadVideoToS3;

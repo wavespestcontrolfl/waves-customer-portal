@@ -326,20 +326,69 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     }
 
     // ── LinkedIn ──
+    // OAuth model (services/linkedin.js): app creds in env, page token stored in
+    // the DB by the Settings → Integrations connect flow. The legacy
+    // LINKEDIN_ACCESS_TOKEN env path is retired — reading it here would report a
+    // false failure after the OAuth connection succeeds. Mirrors token-health.js.
     try {
-      const token = process.env.LINKEDIN_ACCESS_TOKEN;
-      const credential = { platform: 'linkedin', credential_type: 'oauth-token', env_var_name: 'LINKEDIN_ACCESS_TOKEN' };
-      if (!token) {
-        results.push({ ...credential, status: 'error', error: 'Not configured' });
+      const credential = { platform: 'linkedin', credential_type: 'oauth-token', env_var_name: 'LINKEDIN_CLIENT_ID' };
+      const linkedin = require('./linkedin');
+      if (!linkedin.configured) {
+        results.push({ ...credential, status: 'error', error: 'LINKEDIN_CLIENT_ID/SECRET not set' });
       } else {
-        const res = await fetch('https://api.linkedin.com/v2/me', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        results.push({
-          ...credential,
-          status: res.ok ? 'healthy' : 'expired',
-          error: res.ok ? null : `HTTP ${res.status}`,
-        });
+        const status = await linkedin.getStatus();
+        if (!status.connected) {
+          results.push({ ...credential, status: 'error', error: 'Not connected — authorize via Admin Settings → Integrations' });
+        } else if (!status.companyId) {
+          // Creds + OAuth present but no org to post to — createPost() throws
+          // "LINKEDIN_COMPANY_ID not configured", so don't report a health the
+          // publish path can't honor (same guard as token-health.js).
+          results.push({ ...credential, status: 'error', error: 'LINKEDIN_COMPANY_ID not set' });
+        } else {
+          const expiresAt = status.tokenExpiresAt ? new Date(status.tokenExpiresAt) : null;
+          if (expiresAt && expiresAt.getTime() <= Date.now()) {
+            // Expired by stored metadata: run the refresh exchange (as
+            // token-health does) so a refreshable grant reads healthy and a
+            // revoked one surfaces here instead of at the next publish.
+            const refresh = await linkedin.tryRefresh();
+            results.push(refresh.ok
+              ? { ...credential, status: 'healthy', expires_at: refresh.expiresAt ? new Date(refresh.expiresAt) : expiresAt }
+              : { ...credential, status: 'expired', error: `Re-authorize — ${refresh.error}`, expires_at: refresh.expiresAt ? new Date(refresh.expiresAt) : expiresAt });
+          } else {
+            // Stored expiry alone can't catch a revoked grant — getStatus()
+            // only reads system_settings. Send the token to LinkedIn
+            // (organizationAcls, the same call the connect flow soft-verifies
+            // with) before persisting a green status; otherwise createPost()
+            // is the first thing to discover the 401.
+            const okStatus = expiresAt && expiresAt < new Date(Date.now() + 7 * 86400000) ? 'expiring-soon' : 'healthy';
+            try {
+              const { adminedOrganizations } = await linkedin.verifyOrgAccess();
+              // Same comparison as _recordOrgVerification(): numeric org id,
+              // EQUALITY not substring. An authorized user removed from the
+              // page after connecting would otherwise read green until
+              // createPost() hits the page-permission 403.
+              const target = String(status.companyId).trim();
+              const orgId = (o) => String(o).trim().replace(/^urn:li:organization:/, '');
+              const adminsTarget = (adminedOrganizations || []).some((o) => orgId(o) === target);
+              results.push(adminsTarget
+                ? { ...credential, status: okStatus, expires_at: expiresAt }
+                : { ...credential, status: 'error', error: `Authorized account does not administer org ${target} — reconnect with a page admin`, expires_at: expiresAt });
+            } catch (verifyErr) {
+              if (/\b401\b/.test(verifyErr.message)) {
+                results.push({ ...credential, status: 'expired', error: `Re-authorize — ${verifyErr.message}`, expires_at: expiresAt });
+              } else if (/\b403\b/.test(verifyErr.message)) {
+                // Expected under the default scopes: /organizationAcls needs an
+                // org-admin READ scope we deliberately don't request
+                // (linkedin.js SCOPES note), and the connect flow records this
+                // same 403 as "verification skipped" — never a false negative.
+                // The token can still publish, so keep the green status.
+                results.push({ ...credential, status: okStatus, expires_at: expiresAt });
+              } else {
+                results.push({ ...credential, status: 'error', error: verifyErr.message, expires_at: expiresAt });
+              }
+            }
+          }
+        }
       }
     } catch (err) {
       results.push({ platform: 'linkedin', credential_type: 'oauth-token', status: 'error', error: err.message });
@@ -377,15 +426,26 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     // ── Persist results ──
     for (const r of results) {
       try {
+        // platform is the table's unique key (migration 079). token-health.js
+        // creates rows without credential_type, so matching on it misses those
+        // rows and the fallback insert trips the unique constraint (swallowed
+        // below) — the row would never receive this check's result.
         const existing = await db('token_credentials')
-          .where({ platform: r.platform, credential_type: r.credential_type }).first();
+          .where({ platform: r.platform }).first();
         const data = {
+          credential_type: r.credential_type || null,
           status: r.status,
           last_verified_at: new Date(),
           last_error: r.error || null,
           expires_at: r.expires_at || null,
           updated_at: new Date(),
         };
+        // Keep the stored env var pointer current on updates too — the LinkedIn
+        // check's source var changed (LINKEDIN_ACCESS_TOKEN → LINKEDIN_CLIENT_ID)
+        // and a pre-existing row would otherwise keep showing the retired var.
+        // Only when the result carries one: the catch-path results don't, and a
+        // transient failure must not null out a good pointer.
+        if (r.env_var_name) data.env_var_name = r.env_var_name;
         if (existing) {
           await db('token_credentials').where({ id: existing.id }).update(data);
         } else {
