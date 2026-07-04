@@ -294,6 +294,47 @@ export function leadFunnelVerdict(data) {
   return { happened, action: "Every attributed lead is progressing — keep the cadence.", tone: "good", sampleN: t.leads };
 }
 
+// Churn Pareto — /admin/dashboard/churn-reasons payload. Actions map the top
+// CLASSIFIED reason to its lever; a mostly-unclassified window says so
+// instead of pretending to know.
+const CHURN_ACTIONS = {
+  price: "Price-led churn — check the win/loss pricing bands before defending rate on renewals.",
+  moving: "Move-led churn — not winnable; ask for referrals to the new owners instead.",
+  service_quality: "Service-quality churn — review missed/late visits and callbacks; this one is fixable in ops.",
+  results: "Results-led churn — audit protocols on the affected properties; retreat guarantees may save the next ones.",
+  competitor: "Competitor-led churn — find out who and what they offered; match or differentiate deliberately.",
+  seasonal_pause: "Seasonal pauses — offer a hold/skip plan so snowbirds pause instead of cancel.",
+  financial: "Hardship churn — a downgrade path (smaller plan) can keep some of these accounts.",
+  no_longer_needed: "Problem-solved churn — a maintenance-tier pitch at cancellation could retain a slice.",
+  other: "Mixed reasons — read the details on the churned accounts; no single lever.",
+};
+
+export function churnParetoVerdict(data) {
+  const t = data?.totals;
+  if (!t || !(t.customers > 0)) return null;
+  const { tier } = confidenceTier(t.customers);
+  const classified = (data.reasons || []).filter((r) => r.code !== "unclassified" && r.customers > 0);
+  const top = classified[0] || null;
+  const happened = top
+    ? `${usd(t.mrr)} recurring lost across ${t.customers} account${t.customers === 1 ? "" : "s"} — ${top.label.toLowerCase()} leads at ${usd(top.mrr)} (${top.mrrShare}%).`
+    : `${usd(t.mrr)} recurring lost across ${t.customers} account${t.customers === 1 ? "" : "s"} — no classified reasons yet.`;
+  if (data.unclassifiedShare >= 50) {
+    return {
+      happened,
+      action: `${data.unclassifiedShare}% of churned accounts have no classified reason — run the churn backfill (dry-run first) before drawing conclusions.`,
+      tone: "neutral",
+      sampleN: t.customers,
+    };
+  }
+  if (tier !== "ok") {
+    return { happened, action: "Too few churned accounts to rank reasons — watch the trend, don't reorganize around it.", tone: "neutral", sampleN: t.customers };
+  }
+  if (top) {
+    return { happened, action: CHURN_ACTIONS[top.code] || CHURN_ACTIONS.other, tone: "warn", sampleN: t.customers };
+  }
+  return { happened, action: "Classify the recent churns to see what is driving the loss.", tone: "neutral", sampleN: t.customers };
+}
+
 // AR aging — /admin/dashboard/aging payload.
 export function agingVerdict(data) {
   const a = data?.aging;

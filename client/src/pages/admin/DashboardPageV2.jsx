@@ -99,6 +99,7 @@ export default function DashboardPageV2() {
   const [ebitda, setEbitda] = useState(null); // /admin/dashboard/ebitda-bridge (wave4)
   const [mrrBridge, setMrrBridge] = useState(null); // /admin/dashboard/mrr-bridge (wave5)
   const [revenueOverview, setRevenueOverview] = useState(null); // /admin/revenue/overview (wave6 — margin by line)
+  const [churnReasons, setChurnReasons] = useState(null); // /admin/dashboard/churn-reasons (wave7)
   // Mobile scorecard: below md the five sections render ONE at a time behind
   // the jump-nav pills (real tabs), so a phone isn't scrolling five sections
   // of charts. Desktop keeps the one-page scroll + IntersectionObserver nav.
@@ -305,6 +306,14 @@ export default function DashboardPageV2() {
     if (!mountedRef.current) { inFlightRef.current = false; return; }
     const [ro] = wave6;
     setRevenueOverview((prev) => ro ?? prev);
+
+    // Wave 7 — churn Pareto. Same one-fetch-per-new-wave rule; fails soft.
+    const wave7 = await Promise.all([
+      track("/churn-reasons", adminFetch("/admin/dashboard/churn-reasons?months=12")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [cr] = wave7;
+    setChurnReasons((prev) => cr ?? prev);
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -635,6 +644,7 @@ export default function DashboardPageV2() {
         <RetentionSection
           mrrTrend={mrrTrend}
           mrrBridge={mrrBridge}
+          churnReasons={churnReasons}
           cohort={cohort}
           reviewTrend={reviewTrend}
           isMobile={isMobile}

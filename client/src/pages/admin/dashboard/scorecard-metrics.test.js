@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MIN_CONFIDENT_N,
+  churnParetoVerdict,
   leadFunnelVerdict,
   mrrBridgeVerdict,
   agingVerdict,
@@ -300,5 +301,42 @@ describe("leadFunnelVerdict", () => {
   it("null on empty periods", () => {
     expect(leadFunnelVerdict(data({ leads: 0 }))).toBeNull();
     expect(leadFunnelVerdict(null)).toBeNull();
+  });
+});
+
+describe("churnParetoVerdict", () => {
+  const data = (over = {}) => ({
+    reasons: [
+      { code: "price", label: "Price", customers: 4, mrr: 380, mrrShare: 54.3, cumulativePct: 54.3 },
+      { code: "moving", label: "Moving away", customers: 2, mrr: 200, mrrShare: 28.6, cumulativePct: 82.9 },
+      { code: "unclassified", label: "Unclassified", customers: 1, mrr: 120, mrrShare: 17.1, cumulativePct: 100 },
+    ],
+    totals: { customers: 7, mrr: 700 },
+    unclassifiedShare: 14.3,
+    ...over,
+  });
+
+  it("names the top classified reason and maps it to its lever", () => {
+    const v = churnParetoVerdict(data());
+    expect(v.happened).toContain("price leads");
+    expect(v.action).toContain("win/loss pricing");
+    expect(v.tone).toBe("warn");
+  });
+
+  it("a mostly-unclassified window says so instead of pretending to know", () => {
+    const v = churnParetoVerdict(data({ unclassifiedShare: 71.4 }));
+    expect(v.tone).toBe("neutral");
+    expect(v.action).toContain("backfill");
+  });
+
+  it("small samples refuse reorganization advice", () => {
+    const v = churnParetoVerdict(data({ totals: { customers: 3, mrr: 300 }, unclassifiedShare: 0 }));
+    expect(v.tone).toBe("neutral");
+    expect(v.action).toContain("trend");
+  });
+
+  it("null on empty windows", () => {
+    expect(churnParetoVerdict({ totals: { customers: 0, mrr: 0 } })).toBeNull();
+    expect(churnParetoVerdict(null)).toBeNull();
   });
 });

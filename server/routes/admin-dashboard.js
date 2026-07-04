@@ -1675,6 +1675,38 @@ function resolveAttributionWindow(period, range) {
 //
 // Joins call_log (where direction='inbound') against lead_sources on the
 // dialed number. Calls landing on numbers we haven't catalogued show up
+// GET /api/admin/dashboard/churn-reasons?months=12
+// Churn Pareto: churned customers in the trailing window grouped by
+// churn_reason_code (NULL → 'unclassified'), dollars = churn_mrr (the rate
+// snapshotted AT churn; pre-taxonomy rows fall back to current monthly_rate).
+// Shaping in services/churn-pareto.js; codes recorded from Jul 2026, earlier
+// rows stay unclassified until the owner-authorized backfill runs.
+router.get('/churn-reasons', dashboardCache, async (req, res, next) => {
+  try {
+    const { buildChurnPareto } = require('../services/churn-pareto');
+    const months = Math.max(3, Math.min(24, parseInt(req.query.months || 12, 10) || 12));
+    const from = etMonthStart(new Date(), -(months - 1));
+    const qb = db('customers')
+      .whereNotNull('churned_at')
+      .where('churned_at', '>=', from)
+      .whereIn('pipeline_stage', ['churned', 'dormant']);
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      qb.whereNotIn(
+        db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
+        INTERNAL_TEST_CUSTOMERS,
+      );
+    }
+    const rows = await qb
+      .groupBy(db.raw("COALESCE(churn_reason_code, 'unclassified')"))
+      .select(
+        db.raw("COALESCE(churn_reason_code, 'unclassified') as code"),
+        db.raw('COUNT(*) as customers'),
+        db.raw('SUM(COALESCE(churn_mrr, monthly_rate, 0)) as mrr'),
+      );
+    res.json({ period: { from, months }, ...buildChurnPareto(rows) });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dashboard/lead-funnel?period=mtd[&from=YYYY-MM-DD]
 // Per-source stage progression (lead → contacted → estimate → booked →
 // completed, + lost) from ad_service_attribution, same period selector as the
