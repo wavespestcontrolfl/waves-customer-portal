@@ -210,6 +210,62 @@ describe('estimate AI support context', () => {
     expect(result.productCatalogTruncated).toBe(true);
   });
 
+  test('a named product ranked past 24 broad matches is still fetched', async () => {
+    // WHERE-aware fake: applies the recorded ilike patterns so the broad
+    // query and the dedicated named-product query return different rows —
+    // the shared fakeDb ignores predicates and cannot reproduce this case.
+    const filteringDb = (tables = {}) => (table) => {
+      const likes = [];
+      return {
+        where(arg) {
+          if (typeof arg === 'function') arg.call(this);
+          return this;
+        },
+        whereNull() { return this; },
+        orWhere(column, _op, pattern) {
+          if (typeof pattern === 'string') likes.push({ column, needle: pattern.replace(/%/g, '').toLowerCase() });
+          return this;
+        },
+        orWhereNull() { return this; },
+        orWhereRaw() { return this; },
+        select() { return this; },
+        limit(count) {
+          const rows = (tables[table] || []).filter((row) => !likes.length
+            || likes.some(({ column, needle }) => String(row[column] || '').toLowerCase().includes(needle)));
+          return Promise.resolve(rows.slice(0, count));
+        },
+      };
+    };
+    const fillers = Array.from({ length: 30 }, (_, i) => ({
+      name: `Lawn Filler ${i}`,
+      category: 'herbicide',
+      active_ingredient: `Filler Ingredient ${i}`,
+      active: true,
+      label_verified_by: 'waves-admin',
+    }));
+    const result = await loadEstimateAiSupportContext({
+      db: filteringDb({
+        products_catalog: [...fillers, {
+          // 31st row — the broad query's limit(24) fills up on fillers and
+          // never returns it; only the dedicated named-product query can.
+          name: 'ZetaGuard 9000',
+          category: 'insecticide',
+          active_ingredient: 'Zeta-cypermethrin',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is ZetaGuard 9000 safe for pets?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    });
+    const named = result.productCatalog.find((r) => r.activeIngredient === 'Zeta-cypermethrin');
+    expect(named).toBeDefined();
+    expect(named.questionNameMatch).toBe(true);
+    // Question-word matches rank ahead of broad matches in the working set.
+    expect(result.productCatalog[0].activeIngredient).toBe('Zeta-cypermethrin');
+    expect(result.productCatalogTruncated).toBe(true);
+  });
+
   test('a single short common word never counts as naming a product', async () => {
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({

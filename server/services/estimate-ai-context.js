@@ -465,6 +465,9 @@ function questionNamesProduct(name, questionWords) {
 // cap, meaning more matching products exist than were loaded — completeness
 // claims ("every product is rainfast within N minutes") must not be made
 // from a truncated slice.
+const PRODUCT_CATALOG_COLUMNS = ['name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified_by', 'label_verified_at', 'label_version',
+  'signal_word', 'ppe_text', 'rei_hours', 'rainfast_minutes', 'reentry_summary', 'reentry_text', 'irrigation_notes'];
+
 async function searchProductCatalog(db, terms, productNames = [], productFamiliesByName = {}, question = '') {
   const lookupTerms = unique([...terms, ...productNames]).slice(0, 20);
   if (!db || !lookupTerms.length) return { rows: [], truncated: false };
@@ -473,6 +476,8 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
     .split(/\s+/)
     .map((word) => word.replace(/[^a-z0-9]+/g, ''))
     .filter(Boolean);
+  const distinctiveQuestionWords = questionWords
+    .filter((word) => (word.length >= 5 || /\d/.test(word)) && !GENERIC_NAME_TOKENS.has(word));
   // Attribute a catalog row to service families via the service library's
   // default_products linkage (real data, not a guessed category map), so the
   // assistant can scope family-specific safety questions to the right product.
@@ -502,7 +507,7 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
       .flatMap(([, families]) => families));
   };
   try {
-    const rows = await db('products_catalog')
+    const broadRows = await db('products_catalog')
       .where(function activeProducts() {
         this.where({ active: true }).orWhereNull('active');
       })
@@ -515,16 +520,40 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
             .orWhere('moa_group', 'ilike', like);
         }
       })
-      .select('name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified_by', 'label_verified_at', 'label_version',
-        'signal_word', 'ppe_text', 'rei_hours', 'rainfast_minutes', 'reentry_summary', 'reentry_text', 'irrigation_notes')
+      .select(...PRODUCT_CATALOG_COLUMNS)
       .limit(24);
 
-    // A product the customer NAMED must survive the row cap — otherwise the
-    // off-estimate fail-close never sees it and the fallback answers from
-    // the estimate's own facts. Pull question-word matches to the front
-    // before slicing down to the working set of 8.
-    const distinctiveQuestionWords = questionWords
-      .filter((word) => (word.length >= 5 || /\d/.test(word)) && !GENERIC_NAME_TOKENS.has(word));
+    // A product the customer NAMED must be fetched no matter how many rows
+    // the broad service terms match — otherwise the off-estimate fail-close
+    // never sees it and the fallback answers from the estimate's own facts.
+    // This dedicated query runs BEFORE any cap can displace it.
+    const namedRows = distinctiveQuestionWords.length
+      ? await db('products_catalog')
+        .where(function activeProducts() {
+          this.where({ active: true }).orWhereNull('active');
+        })
+        .where(function namedProducts() {
+          for (const word of distinctiveQuestionWords.slice(0, 6)) {
+            const like = `%${word}%`;
+            this.orWhere('name', 'ilike', like)
+              .orWhere('active_ingredient', 'ilike', like);
+          }
+        })
+        .select(...PRODUCT_CATALOG_COLUMNS)
+        .limit(8)
+      : [];
+
+    const seenNames = new Set();
+    const rows = [...namedRows, ...broadRows].filter((row) => {
+      const key = cleanText(row.name || '').toLowerCase()
+        || cleanText(`${row.active_ingredient || ''}|${row.category || ''}`).toLowerCase();
+      if (seenNames.has(key)) return false;
+      seenNames.add(key);
+      return true;
+    });
+
+    // Pull question-word matches to the front before slicing down to the
+    // working set of 8.
     const matchesQuestionWord = (row) => distinctiveQuestionWords.some((word) => (
       cleanText(row.name || '').toLowerCase().includes(word)
       || cleanText(row.active_ingredient || '').toLowerCase().includes(word)
@@ -586,9 +615,11 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         snippet: trimSnippet(parts.join(' - ')),
       };
     }).filter((row) => row.snippet || row.title);
-    // Truncated when rows were actually dropped (raw > working set) — the
-    // wider fetch makes exactly-8 result sets provably complete now.
-    return { rows: shaped, truncated: rows.length > 8 };
+    // Truncated when rows were actually dropped (raw > working set), OR when
+    // the named-product query filled its own cap — an exactly-8 merge built
+    // from a capped named fetch is not provably complete, and completeness
+    // claims must not be made from it.
+    return { rows: shaped, truncated: rows.length > 8 || namedRows.length >= 8 };
   } catch (err) {
     logger.warn(`[estimate-ai-context] products_catalog lookup skipped: ${err.message}`);
     return { rows: [], truncated: false };
