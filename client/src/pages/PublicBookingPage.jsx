@@ -72,6 +72,11 @@ export default function PublicBookingPage() {
   const source = searchParams.get('source') || 'direct';
   const serviceParam = searchParams.get('service') || 'pest_control';
   const quotedServiceLabel = (searchParams.get('service_label') || '').trim().slice(0, 120);
+  // Quote→book handoff: the estimate this booking came from + its server-trusted
+  // token. Passed through to /booking/confirm, which verifies the token before
+  // pricing the visit from that exact estimate (pay-at-visit).
+  const estimateIdParam = (searchParams.get('estimate_id') || '').trim() || null;
+  const estimateTokenParam = (searchParams.get('estimate_token') || '').trim() || null;
   const initialService = SERVICES.find(s => s.id === serviceParam) || SERVICES[0];
   const isEmbedded = window !== window.parent;
 
@@ -275,6 +280,11 @@ export default function PublicBookingPage() {
           capture_token: captureTokenRef.current,
           session_id: sessionIdRef.current,
           capture_client_ts: Date.now(),
+          // Quote→book handoff — persisted (HMAC-verified server-side) on the
+          // intent so the recovery link re-carries it and a booking recovered
+          // from the SMS/email still prices from this quote (pay-at-visit).
+          pricing_estimate_id: estimateIdParam || undefined,
+          estimate_token: estimateTokenParam || undefined,
           source,
           service_id: service.id,
           service_type: quotedServiceLabel || service.label,
@@ -322,6 +332,10 @@ export default function PublicBookingPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           customer_id: existingCustomerId || null,
+          // Quote→book handoff — priced from this exact estimate (token-verified),
+          // as pricing_estimate_id so it never influences identity resolution.
+          pricing_estimate_id: estimateIdParam || undefined,
+          estimate_token: estimateTokenParam || undefined,
           slot_date: selectedDate,
           slot_start: selectedSlot.start_time,
           slot_end: selectedSlot.end_time,

@@ -338,11 +338,55 @@ finding and warns on P1. Reviewers must return JSON matching
   parcel lookup for the estimator — no auth, no token, 5 req/hour rate limit.
   REQUIRES and stores customer PII — first name, last name, email, phone, and
   address — into `leads`, and returns county parcel facts. Treat as a
-  PII-accepting public endpoint: scope any change to what it stores or logs).
+  PII-accepting public endpoint: scope any change to what it stores or logs.
+  Also accepts an OPTIONAL `prefill_lead_id` + `prefill_token` pair — the
+  lead-prefill HMAC below — which, when valid, makes the lead capture UPDATE
+  that existing open call-pipeline lead instead of inserting a new row; the
+  same pair is accepted by `/api/lead-webhook` with identical semantics).
+  `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
+  swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
+  lead's own contact fields — first/last name, email, phone, address, city,
+  zip, service_interest — so the /estimate quote wizard arrives prefilled.
+  Token is minted ONLY by the voicemail-lead SMS
+  (`utils/lead-prefill-token.js`):
+  `<expEpochSec>.<base64url(HMAC-SHA256("lead-prefill:<leadId>:<exp>"))>`,
+  14-day TTL, keyed on `LEAD_PREFILL_SECRET` (falls back to `JWT_SECRET`),
+  constant-time compare, fail-closed when no secret is configured. The token
+  is a bearer credential and stays OUT of URLs end-to-end: the SMS link
+  carries it in the /estimate URL FRAGMENT (never sent to the server, never
+  in Referer), the client scrubs it from the address bar at mount and strips
+  it from attribution landing_url, and the exchange is a POST body — never a
+  query string — so it can't land in morgan/Railway request logs. UUID
+  format gate on lead_id, 30 req/hour rate limit, privacy headers
+  `no-store`/`noindex`/`no-referrer`, and a generic 404 for invalid, expired,
+  mismatched, or unknown ids — indistinguishable on purpose (no oracle).
+  PREFILL/attach authority ONLY: it returns the contact data we already
+  texted the link-holder about, and is never accepted as identity or pricing
+  authority on any money path).
   `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
   instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
   limit. Persists a quote/lead and may text the quote via a Twilio short-link;
   returns pricing only).
+  `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
+  marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
+  (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on
+  /message + a 120 req/day per-IP cap at the mount scoped to plausible POST
+  /message bodies only (paid-LLM surface, same rationale as
+  paidEstimatorDailyLimiter; GET /status, non-POST probes, gate-off probes,
+  and empty/oversized bodies are all LLM-free — they 503/400 without spending
+  the cap, so shared-IP noise can't lock out real chat turns). PII contract:
+  requires NO PII and
+  asks for none — visitor free-text + client-echoed history (both length- and
+  turn-clamped, roles allowlisted) is sent to the LLM and logged best-effort to
+  agent_sessions/agent_messages (channel `ask_waves`); treat message content as
+  untrusted input, never as identity. HARD INVARIANT: this surface can never
+  emit a price — prompt rule + PRICE_TALK_RE post-scrub + no pricing endpoint;
+  the chat's quote step posts to the existing `/api/public/quote/calculate`
+  above, which owns the four-field contact gate, lead minting, and attribution.
+  All deterministic guards (price scrub, emergency + account-support fallback
+  when both LLM providers miss) read English AND Spanish — the prompt answers
+  Spanish visitors in Spanish. NOT CORS-open — credentialed allowlist origins
+  only (hub site)).
   `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
   token, public `Cache-Control`. Consumed by the Astro build and the admin blog
   UI; no PII).
@@ -366,6 +410,20 @@ finding and warns on P1. Reviewers must return JSON matching
   `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
   to the report / receipt / rate surfaces. Treat the track token and any change
   to its payload, in any state, as security-critical).
+  `/api/public/reschedule/:token` (GET + POST; customer self-serve single-visit
+  reschedule linked from appointment confirmation/72h/24h texts + reminder
+  emails. `scheduled_services.reschedule_token` (64-hex, `TOKEN_RE` format gate)
+  is the ONLY gate, plus 60 req/min router limit and 10 req/min on the POST.
+  GET returns the appointment summary (customer first name, service type,
+  current date/window, recurring flag) + live open slots from the /book
+  availability engine. POST is a WRITE: it moves the single visit — never the
+  recurring series, never live/terminal visits (409) — and only to a slot the
+  availability engine still offers for that day (route feasibility, lunch
+  reserve, self-book day caps re-checked server-side); the commit goes through
+  `SmartRebooker.reschedule` (advisory lock + tech-route overlap conflict
+  check + `reschedule_log` audit as `customer_self_serve` + escalation
+  flagging). Generic 404 for bad/unknown tokens. Treat the reschedule token
+  and any change to this route's payload or commit path as security-critical).
   `/api/reviews/featured` (read-only public featured Google reviews for the
   marketing site — no auth, no token, location filter + limit; reads
   `google_reviews` only).

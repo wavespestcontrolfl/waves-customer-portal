@@ -238,3 +238,32 @@ describe('normalizeContactRecord — canonical write-path formatting', () => {
     expect(applyContactNormalization(null)).toEqual({});
   });
 });
+
+describe('normalizeCallExtraction — URL-shaped transcript email garble', () => {
+  const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
+
+  test('detects URL-fragment local parts', () => {
+    expect(looksGarbledTranscriptEmail('www.cw63@gmail.com')).toBe(true);
+    expect(looksGarbledTranscriptEmail('http.jane@gmail.com')).toBe(true);
+    expect(looksGarbledTranscriptEmail('jane.com@gmail.com')).toBe(true);
+  });
+
+  test('does not flag ordinary emails', () => {
+    expect(looksGarbledTranscriptEmail('wcw63@gmail.com')).toBe(false);
+    expect(looksGarbledTranscriptEmail('jane.smith@example.com')).toBe(false);
+    expect(looksGarbledTranscriptEmail('wwcw63@gmail.com')).toBe(false);
+    expect(looksGarbledTranscriptEmail(null)).toBe(false);
+  });
+
+  test('garbled capture is demoted to email_raw, never stored as email', () => {
+    const out = normalizeCallExtraction({ email: 'www.cw63@gmail.com' });
+    expect(out.email).toBeNull();
+    expect(out.email_raw).toBe('www.cw63@gmail.com');
+  });
+
+  test('clean capture is unaffected', () => {
+    const out = normalizeCallExtraction({ email: 'WCW63@Gmail.com' });
+    expect(out.email).toBe('wcw63@gmail.com');
+    expect(out.email_raw).toBeNull();
+  });
+});

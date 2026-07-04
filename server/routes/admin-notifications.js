@@ -55,7 +55,7 @@ async function liveAlertNotifications(adminUserId) {
   let dismissals = [];
   try {
     dismissals = await db.raw(
-      `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_at
+      `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_members, dismissed_at
        FROM dashboard_alert_dismissed
        WHERE admin_user_id = ?
          AND dismissed_at > NOW() - (INTERVAL '1 hour' * ?)
@@ -63,19 +63,54 @@ async function liveAlertNotifications(adminUserId) {
       [adminUserId, DISMISS_WINDOW_HOURS],
     ).then((r) => r.rows || []);
   } catch (err) {
-    // Table may not exist yet on a freshly-deployed instance before
-    // migration runs. Don't break the bell.
-    logger.warn(`[admin-notifications] dismissals query failed: ${err.message}`);
+    if (/dismissed_members/i.test(String(err.message))) {
+      // Pre-migration tolerance, matching the insert retry in
+      // dismissLiveAlerts: before 20260702000001 adds dismissed_members,
+      // retry the legacy projection so count-based dismissals still hide
+      // alerts — a write-side fallback alone would record rows this read
+      // then fails to load, and the bell badge would bounce back anyway.
+      try {
+        dismissals = await db.raw(
+          `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_at
+           FROM dashboard_alert_dismissed
+           WHERE admin_user_id = ?
+             AND dismissed_at > NOW() - (INTERVAL '1 hour' * ?)
+           ORDER BY alert_id, dismissed_at DESC`,
+          [adminUserId, DISMISS_WINDOW_HOURS],
+        ).then((r) => r.rows || []);
+      } catch (retryErr) {
+        logger.warn(`[admin-notifications] dismissals query failed (legacy retry): ${retryErr.message}`);
+      }
+    } else {
+      // Table may not exist yet on a freshly-deployed instance before
+      // migration runs. Don't break the bell.
+      logger.warn(`[admin-notifications] dismissals query failed: ${err.message}`);
+    }
   }
 
   const dismissedByAlert = new Map(
-    dismissals.map((d) => [d.alert_id, parseInt(d.dismissed_at_count || 0, 10)]),
+    dismissals.map((d) => [d.alert_id, {
+      count: parseInt(d.dismissed_at_count || 0, 10),
+      members: d.dismissed_members
+        ? new Set(String(d.dismissed_members).split(',').filter(Boolean))
+        : null,
+    }]),
   );
 
   const visible = alerts.filter((a) => {
-    const dismissedAtCount = dismissedByAlert.get(a.id);
-    if (dismissedAtCount == null) return true; // never dismissed
-    return a.count > dismissedAtCount; // escalation re-shows
+    const dismissed = dismissedByAlert.get(a.id);
+    if (dismissed == null) return true; // never dismissed
+    if (a.count > dismissed.count) return true; // escalation re-shows
+    // Membership-aware re-show for queue alerts: a member the dismissal did
+    // NOT cover (a different lead crossing the SLA, a new expiring estimate)
+    // is new work even at an unchanged or lower count — but a queue that
+    // merely shrank to a subset of what was dismissed stays hidden. Needs
+    // members on BOTH sides; aggregate alerts and pre-migration dismissal
+    // rows keep the count-only behavior.
+    if (Array.isArray(a.members) && a.members.length && dismissed.members) {
+      return a.members.some((id) => !dismissed.members.has(String(id)));
+    }
+    return false;
   });
 
   return { live: toNotifications(visible), liveKeys };
@@ -201,24 +236,46 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
   if (!adminUserId) return 0;
   let alerts;
   try {
-    const result = await computeDashboardAlerts();
+    // fresh: dismissals persist dismissed_at_count, so they must record the
+    // CURRENT count — the read-path memo could be up to 30s stale.
+    const result = await computeDashboardAlerts({ fresh: true });
     alerts = result.alerts || [];
   } catch {
     return 0;
   }
   const targets = alertIdFilter ? alerts.filter((a) => a.id === alertIdFilter) : alerts;
   if (targets.length === 0) return 0;
+  const dismissalRows = targets.map((a) => ({
+    admin_user_id: adminUserId,
+    alert_id: a.id,
+    dismissed_at_count: a.count,
+    // Queue alerts carry their member ids — record them so the bell can
+    // re-show when a NEW member enters, not just on count growth.
+    dismissed_members: Array.isArray(a.members) && a.members.length
+      ? a.members.join(',')
+      : null,
+  }));
   try {
-    await db('dashboard_alert_dismissed').insert(
-      targets.map((a) => ({
-        admin_user_id: adminUserId,
-        alert_id: a.id,
-        dismissed_at_count: a.count,
-      })),
-    );
+    await db('dashboard_alert_dismissed').insert(dismissalRows);
   } catch (err) {
-    logger.warn(`[admin-notifications] dismiss insert failed: ${err.message}`);
-    return 0;
+    // Pre-migration tolerance (mirrors the read path above): before
+    // 20260702000001 adds dismissed_members, Postgres rejects the column —
+    // retry the legacy shape so dismissals keep working (count-only
+    // semantics, the documented fallback) instead of the bell badge
+    // bouncing straight back until the migration lands.
+    if (/dismissed_members/i.test(String(err.message))) {
+      try {
+        await db('dashboard_alert_dismissed').insert(
+          dismissalRows.map(({ dismissed_members, ...legacy }) => legacy),
+        );
+      } catch (retryErr) {
+        logger.warn(`[admin-notifications] dismiss insert failed (legacy retry): ${retryErr.message}`);
+        return 0;
+      }
+    } else {
+      logger.warn(`[admin-notifications] dismiss insert failed: ${err.message}`);
+      return 0;
+    }
   }
   // Best-effort: mark the corresponding persisted bell rows read so the
   // unread-count doesn't double-count after the live alert clears. Read

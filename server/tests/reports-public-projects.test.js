@@ -110,6 +110,10 @@ describe('public project reports', () => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'activity_log') return activityInsert;
       if (table === 'project_photos') return photosRead;
+      // The router.param('token') suppression gate checks every 32-hex token
+      // against service_records (report_view_token) — no row means "not a
+      // service report", and the request falls through to the project route.
+      if (table === 'service_records') return chain();
       throw new Error(`Unexpected table query: ${table}`);
     });
 

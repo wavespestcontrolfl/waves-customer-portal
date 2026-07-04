@@ -164,6 +164,7 @@ class PricingIntelligence {
     // Check if there's an existing ad attribution (from lead sources)
     const lead = await db('leads')
       .where('customer_id', customerId)
+      .whereNull('deleted_at')
       .first()
       .catch(() => null);
 
@@ -316,7 +317,7 @@ class PricingIntelligence {
   async getMoneyModel() {
     // Stage 1: Attraction — lead gen & first service
     const totalCustomers = await db('customers').where('active', true).count('id as cnt').first();
-    const totalLeads = await db('leads').count('id as cnt').first().catch(() => ({ cnt: 0 }));
+    const totalLeads = await db('leads').whereNull('deleted_at').count('id as cnt').first().catch(() => ({ cnt: 0 }));
     const totalEstimates = await db('estimates').count('id as cnt').first();
     const acceptedEstimates = await db('estimates').where('status', 'accepted').count('id as cnt').first();
 

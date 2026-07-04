@@ -41,7 +41,9 @@ class ContextAggregator {
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
-      db('estimates').where({ customer_id: customer.id }).whereIn('status', ['sent', 'viewed']).orderBy('created_at', 'desc').first(),
+      // whereNull(archived_at): an archived sent/viewed row is a courtship
+      // that already closed some other way — not a pending estimate.
+      db('estimates').where({ customer_id: customer.id }).whereIn('status', ['sent', 'viewed']).whereNull('archived_at').orderBy('created_at', 'desc').first(),
       db('sms_sequences').where({ customer_id: customer.id, sequence_type: 'cancellation_save', status: 'active' }).first(),
       this.getCompliance(customer.id),
     ]);

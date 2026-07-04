@@ -178,9 +178,31 @@ function getCallBackFromNumber(call, fallbackFrom) {
   return knownNumbers.find((number) => samePhone(number, preferred)) || fallbackFrom;
 }
 
-function getCallRouteLabel(call) {
+// Human-readable party line ("You (waveslawncare.com) → Scott Currens")
+// instead of two raw E.164 numbers. Direction matters here: an outbound
+// call that lands in a customer's carrier voicemail shows up in the
+// voicemail queue, and raw numbers made it read like an inbound
+// voicemail to Waves.
+function getCallPartyLine(call) {
   if (!call) return "";
-  return [call.from_phone, call.to_phone].filter(Boolean).join(" → ");
+  const isOutbound = call.direction === "outbound";
+  const wavesNumber = isOutbound ? call.from_phone : call.to_phone;
+  const wavesLabel = NUMBER_LABEL_MAP[wavesNumber] || wavesNumber || "Waves";
+  const other = getCallDisplayName(call);
+  return isOutbound
+    ? `You (${wavesLabel}) → ${other}`
+    : `${other} → You (${wavesLabel})`;
+}
+
+// Stored transcripts label the far end "Caller:" even on outbound calls —
+// a deliberate pipeline convention (see call-recording-processor.js), so
+// storage is left untouched. For display on outbound calls, relabel to
+// "Customer:" so e.g. their carrier-voicemail greeting can't be mistaken
+// for the Waves voicemail.
+function displayTranscript(call) {
+  const text = call?.transcription || "";
+  if (!text || call?.direction !== "outbound") return text;
+  return text.replace(/(^|\n)(\s*)caller(\s*):/gi, "$1$2Customer$3:");
 }
 
 function routeActionLabel(value) {
@@ -550,6 +572,10 @@ export default function CallLogTabV2() {
   });
   const sourceNumberCounts = {};
   thisMonthCalls.forEach((c) => {
+    // Source = the Waves tracking line an inbound call arrived on. An
+    // outbound call has no source, and its to_phone is the customer —
+    // counting it here surfaced raw customer numbers as "sources".
+    if (c.direction === "outbound") return;
     const num = c.to_phone || "Unknown";
     const label = NUMBER_LABEL_MAP[num] || num;
     sourceNumberCounts[label] = (sourceNumberCounts[label] || 0) + 1;
@@ -639,10 +665,11 @@ export default function CallLogTabV2() {
             <div className="divide-y divide-zinc-200">
               {recentVoicemails.map((c) => {
                 const target = getCallBackTarget(c);
-                const transcriptPreview = c.transcription
-                  ? c.transcription.length > 180
-                    ? c.transcription.slice(0, 180).trim() + "…"
-                    : c.transcription
+                const transcriptText = displayTranscript(c);
+                const transcriptPreview = transcriptText
+                  ? transcriptText.length > 180
+                    ? transcriptText.slice(0, 180).trim() + "…"
+                    : transcriptText
                   : "";
                 const isProcessing =
                   autoProcessingSid === c.twilio_call_sid ||
@@ -652,11 +679,18 @@ export default function CallLogTabV2() {
                   <div key={`voicemail-${c.id}`} className="py-3 first:pt-0 last:pb-0">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <div className="text-14 text-ink-primary font-medium truncate">
-                          {getCallDisplayName(c)}
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="text-14 text-ink-primary font-medium truncate">
+                            {getCallDisplayName(c)}
+                          </span>
+                          <Badge
+                            tone={c.direction === "outbound" ? "strong" : "neutral"}
+                          >
+                            {c.direction === "outbound" ? "Outbound" : "Inbound"}
+                          </Badge>
                         </div>
                         <div className="text-12 text-ink-tertiary">
-                          {getCallRouteLabel(c)} · {timeAgo(c.created_at)}
+                          {getCallPartyLine(c)} · {timeAgo(c.created_at)}
                         </div>
                       </div>
                       {target && (
@@ -983,7 +1017,9 @@ export default function CallLogTabV2() {
                     : c.answered_by === "ai_agent"
                       ? "AI"
                       : c.answered_by === "voicemail"
-                        ? "Voicemail"
+                        ? c.direction === "outbound"
+                          ? "Their voicemail"
+                          : "Voicemail"
                         : conversed
                           ? "Discussion"
                           : "Missed";
@@ -1033,8 +1069,7 @@ export default function CallLogTabV2() {
                           </span>{" "}
                         </div>{" "}
                         <div className="break-words text-13 text-ink-tertiary [overflow-wrap:anywhere] md:text-11">
-                          {c.from_phone}
-                          {c.to_phone ? ` → ${c.to_phone}` : ""} · {dur}
+                          {getCallPartyLine(c)} · {dur}
                           {c.caller_city
                             ? ` · ${c.caller_city}, ${c.caller_state}`
                             : ""}
@@ -1271,10 +1306,11 @@ export default function CallLogTabV2() {
                     {c.transcription &&
                       (() => {
                         const open = expandedTranscripts.has(c.id);
+                        const shown = displayTranscript(c);
                         const preview =
-                          c.transcription.length > 120
-                            ? c.transcription.slice(0, 120).trim() + "…"
-                            : c.transcription;
+                          shown.length > 120
+                            ? shown.slice(0, 120).trim() + "…"
+                            : shown;
                         return (
                           <div className="mt-1.5 ml-8 bg-zinc-50 border-hairline rounded-md">
                             {" "}
@@ -1287,8 +1323,8 @@ export default function CallLogTabV2() {
                               {" "}
                               <span className="text-13 md:text-11 text-ink-tertiary font-medium">
                                 Transcription
-                                {c.transcription.length > 120
-                                  ? ` · ${c.transcription.length} chars`
+                                {shown.length > 120
+                                  ? ` · ${shown.length} chars`
                                   : ""}
                               </span>{" "}
                               <span
@@ -1299,7 +1335,7 @@ export default function CallLogTabV2() {
                               </span>{" "}
                             </button>{" "}
                             <div className="px-2 pb-2 text-14 md:text-12 text-ink-secondary italic leading-relaxed">
-                              "{open ? c.transcription : preview}"
+                              "{open ? shown : preview}"
                             </div>{" "}
                           </div>
                         );

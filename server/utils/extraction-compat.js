@@ -39,9 +39,13 @@ function flatView(extraction) {
 
     requested_service: svc.primary_service_category || null,
     matched_service: mapServiceCategoryToLegacy(svc.primary_service_category),
+    specific_service_name: svc.specific_service_name || null,
+    quoted_price: typeof svc.quoted_price_usd === 'number' ? svc.quoted_price_usd : null,
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
+    follow_up_visit_mentioned: sched.follow_up_mentioned === true,
+    follow_up_date_time: sched.follow_up_start_at || null,
 
     is_voicemail: meta.is_voicemail || false,
     is_spam: meta.is_spam || false,

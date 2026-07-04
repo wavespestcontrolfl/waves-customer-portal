@@ -87,6 +87,7 @@ jest.mock('../services/property-lookup/ai-property-lookup', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+const { etDateString } = require('../utils/datetime-et');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const ProjectEmail = require('../services/project-email');
 const projectsRouter = require('../routes/admin-projects');
@@ -1113,6 +1114,15 @@ describe('admin projects routes', () => {
         project_type: 'wdo_inspection',
         project_date: null,
         findings: { wdo_finding: 'No visible signs of WDO observed' },
+        // A signed WDO project: the hard licensee-signature gate fires before
+        // the overridable readiness check, so this fixture must carry a
+        // signature to reach the gate under test. A legacy (unhashed, not
+        // stale) signature is honored by wdoSignatureFreshness; the signature
+        // gate itself is covered in wdo-signature-binding.test.js.
+        wdo_signature: JSON.stringify({
+          image: 'data:image/png;base64,AAAA',
+          signer_name: 'Adam Benetti',
+        }),
         recommendations: null,
         report_token: null,
         sent_at: null,
@@ -1221,6 +1231,51 @@ describe('admin projects routes', () => {
         action: 'project_photo_deleted',
         metadata: expect.objectContaining({ photo_id: 'photo-1' }),
       }));
+    });
+  });
+
+  test('applicators endpoint withholds expired license numbers and only defaults a tech to themselves', async () => {
+    const technicianRows = [
+      // Printed name set: certificates get the full legal name while the
+      // casual display name rides along as legacyName for old-draft matching.
+      { id: 'tech-1', name: 'Adam', applicator_printed_name: 'Adam Benetti', fl_applicator_license: 'JF111111', license_expiry: '2099-01-01' },
+      { id: 'tech-2', name: 'Jose Alvarado', fl_applicator_license: 'JF222222', license_expiry: '2020-01-01' },
+      { id: 'tech-3', name: 'Jacob Heaton', fl_applicator_license: 'JF333333', license_expiry: null },
+      { id: 'tech-4', name: 'Sam Rivera', fl_applicator_license: '', license_expiry: null },
+      // Expires today (ET): still valid through the end of the expiry day —
+      // the date-only comparison must not flip early at UTC midnight.
+      { id: 'tech-5', name: 'Dana Ortiz', fl_applicator_license: 'JF555555', license_expiry: etDateString() },
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return chain({ select: jest.fn().mockResolvedValue(technicianRows) });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/applicators`, {
+        headers: { Authorization: 'Bearer tech-1' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.applicators).toEqual([
+        // Printed name wins for the certificate; legacyName carries the old
+        // display name so drafts saved as "Adam" still match and upgrade.
+        { id: 'tech-1', name: 'Adam Benetti', legacyName: 'Adam', fdacsId: 'JF111111' },
+        // Expired license: the tech stays pickable, the number is withheld.
+        { id: 'tech-2', name: 'Jose Alvarado', legacyName: 'Jose Alvarado', fdacsId: null },
+        // No expiry on file counts as active (same as admin-compliance-v2).
+        { id: 'tech-3', name: 'Jacob Heaton', legacyName: 'Jacob Heaton', fdacsId: 'JF333333' },
+        { id: 'tech-4', name: 'Sam Rivera', legacyName: 'Sam Rivera', fdacsId: null },
+        { id: 'tech-5', name: 'Dana Ortiz', legacyName: 'Dana Ortiz', fdacsId: 'JF555555' },
+      ]);
+      expect(body.defaultTechnicianId).toBe('tech-1');
+
+      const adminRes = await fetch(`${baseUrl}/admin/projects/applicators`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const adminBody = await adminRes.json();
+      expect(adminRes.status).toBe(200);
+      expect(adminBody.defaultTechnicianId).toBe(null);
     });
   });
 });

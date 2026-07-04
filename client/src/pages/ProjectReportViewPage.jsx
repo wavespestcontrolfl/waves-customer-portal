@@ -4,7 +4,6 @@ import {
   COLORS as B,
   FONTS,
 } from '../theme-brand';
-import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
@@ -227,7 +226,9 @@ const FIELD_LABELS = {
   concentration_pct: 'Concentration (%)',
   square_footage: 'Square footage treated',
   linear_feet: 'Linear feet treated',
+  trench_depth_ft: 'Trench / rod depth (ft)',
   gallons_applied: 'Gallons applied',
+  additional_applications: 'Additional applications',
   applicator_name: "Applicator's printed name",
   applicator_fdacs_id: 'Applicator FDACS ID #',
   applicator_attestation: 'Applicator attestation',
@@ -270,157 +271,10 @@ function includesAny(text, words) {
   return words.some(word => value.includes(word));
 }
 
-function getProjectKind(projectType) {
-  if (projectType === 'wdo_inspection') return 'wdo';
-  if (projectType === 'termite_inspection' || projectType === 'termite_treatment') return 'termite';
-  if (projectType === 'rodent_exclusion' || projectType === 'rodent_trapping') return 'rodent';
-  if (projectType === 'wildlife_trapping') return 'wildlife';
-  if (projectType === 'bed_bug') return 'bed_bug';
-  if (projectType === 'flea') return 'flea';
-  if (projectType === 'pest_inspection' || projectType === 'one_time_pest_treatment' || projectType === 'cockroach') return 'pest';
-  if (projectType === 'pre_treatment_termite_certificate') return 'pre_treat_cert';
-  return 'general';
-}
-
-function getRiskInsight(kind, allText) {
-  if (kind === 'rodent') {
-    if (includesAny(allText, ['roof rat'])) {
-      return 'Roof rats are strong climbers, so soffits, roof returns, vents, utility gaps, and overhanging vegetation can become repeat access routes. Once inside, they may contaminate insulation, gnaw wiring or AC lines, and keep returning until openings are sealed.';
-    }
-    if (includesAny(allText, ['norway rat'])) {
-      return 'Norway rats usually work from ground-level burrows, wall gaps, garage seals, and utility penetrations. Activity can expand quickly when food, water, and shelter stay available, so exclusion and sanitation matter as much as trap placement.';
-    }
-    if (includesAny(allText, ['mouse', 'mice'])) {
-      return 'Mice can fit through very small openings and often use garage seals, pipe gaps, and stored materials as cover. A small opening can keep producing activity until the access route is corrected.';
-    }
-    return 'Rodents do more than create noise or droppings. They can contaminate stored items and insulation, chew wiring and soft building materials, and keep cycling through the same access points until exclusion work closes the routes.';
-  }
-  if (kind === 'wildlife') {
-    return 'Wildlife activity is usually driven by access, shelter, or food sources around the property. Trapping works best when the active animal, travel pattern, and follow-up check plan are documented together.';
-  }
-  if (kind === 'termite') {
-    return 'Termites can damage wood framing and trim from concealed areas before the surface looks severe. Early treatment and moisture correction help limit repair costs and reduce the chance of activity spreading.';
-  }
-  if (kind === 'wdo') {
-    return 'Wood-destroying organisms and moisture conditions can affect structural materials over time. Correcting the source early helps protect the property and keeps inspection findings from becoming larger repair issues.';
-  }
-  if (kind === 'bed_bug') {
-    return 'Bed bugs spread through resting areas, furniture, luggage, and personal items, and missed preparation can make follow-up activity harder to control. A complete treatment plan and the scheduled recheck are what keep the problem contained.';
-  }
-  if (kind === 'flea') {
-    return 'Fleas can continue emerging from eggs and pupae after the first service, especially around pet resting areas, rugs, furniture edges, shaded yard areas, and wildlife travel zones. Vacuuming, pet flea prevention, and follow-up timing are what keep the cycle from restarting.';
-  }
-  if (kind === 'pest') {
-    return 'General pest pressure is usually strongest where food, water, shelter, or entry gaps line up. Treating the current activity while correcting those conditions helps prevent the same issue from returning.';
-  }
-  return 'Targeted service works best when the finding, source condition, and follow-up plan all match the specific issue documented in the report.';
-}
-
-function buildClientSnapshot({ projectType, findings, recommendations }) {
-  const kind = getProjectKind(projectType);
-  // Certificate of Compliance is a delivered legal document, not a sales/triage
-  // snapshot — the document itself communicates "next step" via warranty terms.
-  if (kind === 'pre_treat_cert') return null;
-
-  const allText = [
-    projectType,
-    recommendations,
-    ...Object.values(findings || {}),
-  ].filter(Boolean).join(' ').toLowerCase();
-
-  const hasAction = shouldShowBookingCta(recommendations);
-  const hasMoisture = includesAny(allText, ['moisture', 'wood rot', 'rot ', 'leak', 'eave', 'attic']);
-  const hasWdo = includesAny(allText, ['termite', 'wdo', 'wood-destroying', 'shelter tube', 'frass', 'boracare', 'bora care']);
-  const hasRodent = includesAny(allText, ['rodent', 'rat', 'mouse', 'entry point', 'exclusion', 'trap']);
-  const clean = includesAny(allText, ['no visible signs', 'no activity', 'none observed', 'not observed']) && !hasAction;
-
-  if (clean) {
-    return {
-      priority: 'Monitor',
-      meaning: kind === 'rodent'
-        ? 'No active rodent pressure was documented at the time of inspection.'
-        : 'No visible active issue was documented at the time of inspection.',
-      insight: getRiskInsight(kind, allText),
-      next: kind === 'rodent'
-        ? 'Keep exterior access points monitored and contact Waves if scratching, droppings, odors, or new entry signs appear.'
-        : 'Keep routine service and address new activity, moisture, or access issues if they appear.',
-    };
-  }
-  if (kind === 'rodent' || (kind === 'general' && hasRodent)) {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Rodent activity usually continues until entry points, travel routes, and nesting conditions are corrected together.',
-      insight: getRiskInsight('rodent', allText),
-      next: hasAction ? 'Schedule the recommended exclusion, trapping, or follow-up plan.' : 'Review the mapped areas and contact Waves with any activity changes.',
-    };
-  }
-  if (kind === 'wildlife') {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Wildlife trapping depends on safe trap placement, documented activity, and timely follow-up checks.',
-      insight: getRiskInsight('wildlife', allText),
-      next: hasAction ? 'Follow the recommended trapping, access-control, or follow-up plan.' : 'Review the documented activity and contact Waves if animal movement changes.',
-    };
-  }
-  if (kind === 'termite') {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Termite activity or conditions that support termites can affect wood members and may worsen if the source is not corrected.',
-      insight: getRiskInsight('termite', allText),
-      next: hasAction ? 'Review the recommendation and schedule the listed termite treatment or follow-up.' : 'Review the findings and contact Waves if you want help prioritizing treatment options.',
-    };
-  }
-  if (kind === 'wdo' || (kind === 'general' && (hasWdo || hasMoisture))) {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Moisture, wood damage, or WDO evidence can affect structural materials and may worsen if the source is not corrected.',
-      insight: getRiskInsight('wdo', allText),
-      next: hasAction ? 'Review the recommendation and schedule the listed treatment or follow-up.' : 'Review the findings and contact Waves if you want help prioritizing repairs or treatment.',
-    };
-  }
-  if (kind === 'bed_bug') {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Bed bug work depends on treatment coverage, customer preparation, and a timely follow-up check.',
-      insight: getRiskInsight('bed_bug', allText),
-      next: hasAction ? 'Complete the listed preparation steps and keep the recommended follow-up on schedule.' : 'Review the treated rooms and contact Waves if activity is seen before the follow-up window.',
-    };
-  }
-  if (kind === 'flea') {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Flea work depends on treating the active areas while breaking the egg, larva, pupa, and adult cycle.',
-      insight: getRiskInsight('flea', allText),
-      next: hasAction ? 'Complete the prep steps, keep vacuuming on schedule, and follow the listed treatment or follow-up plan.' : 'Review the inspected areas and contact Waves if bites or pet activity continue.',
-    };
-  }
-  if (kind === 'pest') {
-    return {
-      priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'The report documents pest pressure or conducive conditions that can keep activity returning if they are not addressed.',
-      insight: getRiskInsight('pest', allText),
-      next: hasAction ? 'Use the recommendation below to book the correct pest service.' : 'Review the findings and contact Waves if the activity changes or spreads.',
-    };
-  }
-  if (hasAction) {
-    return {
-      priority: 'Action recommended',
-      meaning: 'The inspection found conditions that benefit from a targeted service or follow-up.',
-      insight: getRiskInsight(kind, allText),
-      next: 'Use the recommendation below to book the correct next visit.',
-    };
-  }
-  return null;
-}
-
-function buildAtAGlance({ data, reportTitle, clientSnapshot }) {
+function buildAtAGlance({ data, reportTitle }) {
   const rows = [
     ['Service type', reportTitle],
   ];
-  if (clientSnapshot) {
-    rows.push(['Next step', clientSnapshot.priority]);
-    rows.push(['Recommended action', clientSnapshot.next]);
-  }
   if (data.upcomingAppointment) {
     rows.push(['Follow-up', formatAppointmentWindow(data.upcomingAppointment)]);
   } else if (data.followupCompletedAt) {
@@ -490,31 +344,37 @@ export default function ProjectReportViewPage() {
   const primaryPhotos = (data.photos || []).filter(p => p.visit === 'primary');
   const followupPhotos = (data.photos || []).filter(p => p.visit === 'followup');
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
-  const sentDateLabel = data.sentAt ? formatReportDate(data.sentAt) : '';
-  const showSentDate = sentDateLabel && reportDateKey(data.sentAt) !== reportDateKey(data.projectDate);
-  const reportMetaStyle = { fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45 };
   const isCertificate = data.projectType === 'pre_treatment_termite_certificate';
-  const contactDateLabel = isCertificate
-    ? (projectDateLabel ? `Treatment date: ${projectDateLabel}${data.technicianName ? ` · Applicator: ${data.technicianName}` : ''}` : '')
-    : (projectDateLabel ? `Inspection date: ${projectDateLabel}${data.technicianName ? ` · ${data.technicianName}` : ''}` : '');
-  const contactRows = [
-    contactDateLabel,
-    showSentDate ? `Report sent: ${sentDateLabel}` : '',
-    data.customerAddress || '',
-    data.customerEmail ? `Email: ${data.customerEmail}` : '',
-    data.customerPhone ? `Phone: ${data.customerPhone}` : '',
-  ].filter(Boolean);
-  const clientSnapshot = buildClientSnapshot({
-    projectType: data.projectType,
-    findings,
-    recommendations: data.recommendations,
-  });
-  const atAGlanceRows = buildAtAGlance({ data, reportTitle, clientSnapshot });
+  // The structured findings feed the AI writer, so when the report carries
+  // the sectioned narrative (Customer Concern / What We Inspected / …) the
+  // raw findings list would repeat the same content — the narrative is the
+  // customer-facing rendering of it. Raw findings still show on reports
+  // without a drafted narrative, otherwise they'd have no body at all.
+  // WDO exception: a legacy/pre-archive WDO report has no filled FDACS PDF
+  // to link, so its structured findings (FDACS finding, live WDO, damage,
+  // inaccessible areas…) are the only formal record on the page — never
+  // suppress those unless the archived filled form is available.
+  const aiNarrativeSections = data.recommendations ? parseSections(String(data.recommendations)) : null;
+  const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
+    && (data.projectType !== 'wdo_inspection' || Boolean(data.fdacsPdfAvailable));
+  const atAGlanceRows = buildAtAGlance({ data, reportTitle });
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   const headline = isCertificate
     ? `Hey ${firstName}, here's your Certificate of Compliance.`
     : `Hey ${firstName}, here's your ${typeLabel.toLowerCase()} report.`;
-  const subhead = data.customerAddress || data.cityState || '';
+  // Mirrors the customer estimate hero: the full service address under the
+  // headline, not just "City, FL". Document types use the REPORT's own
+  // recorded address, never the live customer row: a certificate's treatment
+  // address (a pre-construction lot may differ from billing — with only a
+  // lot/block recorded, fall to City, FL rather than print the billing
+  // street), and a WDO's inspected property (the findings are the archived
+  // as-sent snapshot, so this can't drift from the filed FDACS PDF even if
+  // the customer row later changes).
+  const subhead = isCertificate
+    ? (String(findings.treatment_address || '').trim() || data.cityState || '')
+    : data.projectType === 'wdo_inspection'
+      ? (String(findings.property_address || '').trim() || data.customerAddress || data.cityState || '')
+      : (data.customerAddress || data.cityState || '');
 
   return (
     <div style={{
@@ -525,11 +385,15 @@ export default function ProjectReportViewPage() {
       display: 'flex',
       flexDirection: 'column',
     }}>
+      {/* Mirrors the pest/lawn service-report top bar (.sr-top): phone left,
+          logo right, same 62px bar on the shared 960px grid. */}
       <header style={{ background: B.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
           maxWidth: 960,
           margin: '0 auto',
+          minHeight: 62,
           padding: '16px 24px',
+          boxSizing: 'border-box',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -568,48 +432,20 @@ export default function ProjectReportViewPage() {
           ) : null}
         </div>
 
-        {/* Summary card */}
+        {/* Summary card — no "Report details" block (owner directive
+            2026-07-03): the hero already carries the address, the At-a-glance
+            carries the follow-up, and the certificate document carries its
+            own date/applicator. Certificates skip the card entirely (every
+            section inside is non-cert), so no empty white card renders above
+            the document. */}
+        {!isCertificate && (
         <div style={cardStyle}>
-          {contactRows.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div style={{ ...eyebrowStyle, marginBottom: 4 }}>Report details</div>
-              {contactRows.map(row => (
-                <div key={row} style={{ ...reportMetaStyle, whiteSpace: 'pre-wrap' }}>{row}</div>
-              ))}
-            </div>
-          )}
+          {atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
 
-          {!isCertificate && atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
-
-          {clientSnapshot && (
-            <div style={{
-              marginTop: 16,
-              padding: 18,
-              borderRadius: 12,
-              background: 'linear-gradient(180deg, #F5F1E6 0%, #FFFFFF 100%)',
-              border: `1px solid ${ESTIMATE_BORDER}`,
-            }}>
-              <div style={{ ...eyebrowStyle, color: ESTIMATE_MUTED }}>
-                Next step: {clientSnapshot.priority}
-              </div>
-              <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
-                {clientSnapshot.meaning}
-              </div>
-              {clientSnapshot.insight && (
-                <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 6 }}>
-                  {clientSnapshot.insight}
-                </div>
-              )}
-              <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 6 }}>
-                {clientSnapshot.next}
-              </div>
-            </div>
-          )}
-
-          {/* Findings — suppressed on the Certificate of Compliance because
-              the Certificate block below renders the same data in its
-              branded, FBC-compliant document layout. */}
-          {!isCertificate && findingsEntries.length > 0 && (
+          {/* Findings — suppressed whenever the AI-drafted sectioned
+              narrative is present (the narrative IS the customer rendering
+              of these fields — showing both reads twice). */}
+          {!suppressFindingsForNarrative && findingsEntries.length > 0 && (
             <div style={{ marginTop: 16 }}>
               <div style={{ ...eyebrowStyle, marginBottom: 10 }}>
                 Findings
@@ -657,8 +493,9 @@ export default function ProjectReportViewPage() {
           {/* Recommendations — if the text is the three-section AI-drafted
                format, render each section with its own heading. Otherwise
                fall back to the single "Recommendations" block. */}
-          {!isCertificate && data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} />}
+          {data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} />}
         </div>
+        )}
 
         {data.projectType === 'wdo_inspection' && (
           <div style={{ ...cardStyle, marginTop: 16 }}>
@@ -689,7 +526,6 @@ export default function ProjectReportViewPage() {
           <CertificateOfCompliance
             findings={findings}
             customerName={data.customerName}
-            customerAddress={data.customerAddress}
             technicianName={data.technicianName}
             projectDateLabel={projectDateLabel}
           />
@@ -742,40 +578,10 @@ export default function ProjectReportViewPage() {
           </div>
         </div>
 
-        <ReportTrustStrip />
+        {/* No trust strip / newsletter / brand-footer tail on project
+            reports (owner directive 2026-07-03) — the page ends with the
+            report content and contact CTA, like a delivered document. */}
       </main>
-      <BrandFooter />
-    </div>
-  );
-}
-
-function ReportTrustStrip() {
-  const items = [
-    { label: 'Licensed & insured', detail: `FDACS LIC. ${WAVES_FDACS_LICENSE_NUMBER}` },
-    { label: 'Questions welcome', detail: 'call or text the Waves team' },
-    { label: 'Local service', detail: 'Southwest Florida pest specialists' },
-  ];
-
-  return (
-    <div style={{
-      marginTop: 32,
-      padding: '24px 16px',
-      background: B.offWhite,
-      borderTop: `1px solid ${ESTIMATE_BORDER}`,
-      borderRadius: 12,
-    }}>
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-        gap: 16,
-      }}>
-        {items.map((item) => (
-          <div key={item.label} style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT }}>{item.label}</div>
-            <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2 }}>{item.detail}</div>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
@@ -810,31 +616,112 @@ function AtAGlance({ rows }) {
  * concentration, sq ft, gallons, FDACS ID, warranty) satisfy FDACS Rule
  * 5E-14.106 treatment-record requirements simultaneously.
  */
-function CertificateOfCompliance({ findings, customerName, customerAddress, technicianName, projectDateLabel }) {
-  const f = findings || {};
-  const method = f.treatment_method === 'Other' && f.treatment_method_other
-    ? f.treatment_method_other
-    : f.treatment_method;
-  const product = f.product_name === 'Other' && f.product_name_other
-    ? f.product_name_other
-    : f.product_name;
-  const productLine = [product, f.epa_registration ? `EPA Reg. ${f.epa_registration}` : '']
+// Per-application display lines (method / product / A.I. / coverage) —
+// computed identically for the flat primary-application keys and for each
+// additional_applications row.
+function certificateApplicationLines(app = {}) {
+  const method = app.treatment_method === 'Other' && app.treatment_method_other
+    ? app.treatment_method_other
+    : app.treatment_method;
+  const product = app.product_name === 'Other' && app.product_name_other
+    ? app.product_name_other
+    : app.product_name;
+  const productLine = [product, app.epa_registration ? `EPA Reg. ${app.epa_registration}` : '']
     .filter(Boolean)
     .join(' · ');
   const aiLine = [
-    f.active_ingredient,
-    f.concentration_pct ? `${String(f.concentration_pct).replace(/%$/, '')}%` : '',
+    app.active_ingredient,
+    app.concentration_pct ? `${String(app.concentration_pct).replace(/%$/, '')}%` : '',
   ].filter(Boolean).join(' — ');
+  const trenchDepthRaw = String(app.trench_depth_ft || '').trim();
+  const trenchDepthLine = !trenchDepthRaw
+    ? ''
+    : /depth/i.test(trenchDepthRaw)
+      ? trenchDepthRaw
+      // Inch notation ("6 in", 6", "6in.") counts as already-united — the
+      // create form accepts it, so appending ft would print "6 in ft depth".
+      : `${valueWithUnit(trenchDepthRaw, 'ft', /("|\b(ft|foot|feet|inch|inches)\b|\din\b|\bin\b)/i)} depth`;
   const coverageLine = [
-    valueWithUnit(f.square_footage, 'sq ft', /\b(sq\.?\s*ft|square\s*feet|sf)\b/i),
-    valueWithUnit(f.linear_feet, 'linear ft', /\b(linear\s*ft|lineal\s*ft|lf)\b/i),
-    gallonsApplied(f.gallons_applied),
+    valueWithUnit(app.square_footage, 'sq ft', /\b(sq\.?\s*ft|square\s*feet|sf)\b/i),
+    valueWithUnit(app.linear_feet, 'linear ft', /\b(linear\s*ft|lineal\s*ft|lf)\b/i),
+    trenchDepthLine,
+    gallonsApplied(app.gallons_applied),
   ].filter(Boolean).join(' · ');
+  return { method, productLine, aiLine, coverageLine };
+}
+
+// Additional per-product applications recorded on the certificate. Rows the
+// tech added but never filled in are dropped (matching the send gate).
+function certificateAdditionalApplications(findings = {}) {
+  const rows = Array.isArray(findings.additional_applications) ? findings.additional_applications : [];
+  return rows.filter((row) => row && typeof row === 'object' && !Array.isArray(row)
+    && Object.values(row).some((value) => String(value ?? '').trim() !== ''));
+}
+
+function CertificateFieldGrid({ fields, compact }) {
+  return (
+    <div style={{
+      padding: compact ? 0 : '16px 24px 8px',
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+      rowGap: 14,
+      columnGap: 18,
+    }}>
+      {fields.map(([label, value]) => (
+        <div key={label}>
+          <div style={{
+            fontFamily: FONT_BODY,
+            fontSize: 12,
+            fontWeight: 700,
+            textTransform: 'uppercase',
+            letterSpacing: 0,
+            color: ESTIMATE_MUTED,
+            marginBottom: 5,
+          }}>
+            {label}
+          </div>
+          <div style={{
+            fontFamily: FONT_BODY,
+            fontSize: 14,
+            fontWeight: 700,
+            color: ESTIMATE_TEXT,
+            minHeight: 20,
+            borderBottom: `1px solid ${ESTIMATE_BORDER}`,
+            paddingBottom: 4,
+            wordBreak: 'break-word',
+          }}>
+            {value || '—'}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CertificateOfCompliance({ findings, customerName, technicianName, projectDateLabel }) {
+  const f = findings || {};
+  const applications = [
+    certificateApplicationLines(f),
+    ...certificateAdditionalApplications(f).map(certificateApplicationLines),
+  ];
+  const multiApplication = applications.length > 1;
+  const { method, productLine, aiLine, coverageLine } = applications[0];
+  // FBC 1816.1.7's "method of treatment" line lists every method on a
+  // combined job (e.g. "Soil barrier (chemical) + Wood treatment (borate)");
+  // the per-application blocks below carry each product's own record.
+  const methodValue = multiApplication
+    ? applications.map((app) => app.method).filter(Boolean).join(' + ')
+    : method;
   const treatmentDateValue = [
     f.treatment_date ? formatReportDate(f.treatment_date) : projectDateLabel || '',
     formatAppointmentTime(f.treatment_time),
   ].filter(Boolean).join(' · ');
-  const addressValue = f.treatment_address || customerAddress || '';
+  // The Treatment address line prints ONLY the recorded treatment address:
+  // the send gate allows lot/block-only certificates (pre-construction lots
+  // often have no street yet), and back-filling the customer's billing
+  // street here would fabricate a compliance field. The Lot/Block line
+  // below carries those certificates.
+  const addressValue = f.treatment_address || '';
   const lotLine = [f.lot_block, f.subdivision].filter(Boolean).join(' · ');
   const applicatorLine = [
     f.applicator_name || technicianName || '',
@@ -845,17 +732,22 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
     f.renewal_due ? `Renewal due ${f.renewal_due}` : '',
   ].filter(Boolean).join(' · ');
 
+  // Single-application certificates keep the original one-grid layout; a
+  // combined job moves the per-product lines into the Application blocks
+  // below so each product prints its own chemistry and coverage.
   const fields = [
     ['Treatment address', addressValue],
     ['Lot / Block / Subdivision', lotLine],
     ['Building permit #', f.permit_number],
     ['Builder / General contractor', f.builder_contractor],
     ['Date & time of treatment', treatmentDateValue],
-    ['Method of treatment', method],
+    ['Method of treatment', methodValue],
     ['Wood-destroying organism treated for', f.wdo_target],
-    ['Product used', productLine],
-    ['Active ingredient & concentration', aiLine],
-    ['Coverage', coverageLine],
+    ...(multiApplication ? [] : [
+      ['Product used', productLine],
+      ['Active ingredient & concentration', aiLine],
+      ['Coverage', coverageLine],
+    ]),
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', warrantyLine],
   ];
@@ -918,41 +810,39 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
       </div>
 
       {/* Field grid */}
-      <div style={{
-        padding: '16px 24px 8px',
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-        rowGap: 14,
-        columnGap: 18,
-      }}>
-        {fields.map(([label, value]) => (
-          <div key={label}>
-            <div style={{
-              fontFamily: FONT_BODY,
-              fontSize: 12,
-              fontWeight: 700,
-              textTransform: 'uppercase',
-              letterSpacing: 0,
-              color: ESTIMATE_MUTED,
-              marginBottom: 5,
-            }}>
-              {label}
+      <CertificateFieldGrid fields={fields} />
+
+      {/* Per-application product records (FDACS 5E-14.106) — one block per
+          product when the job combined methods (e.g. soil barrier + wood
+          treatment). Single-product certificates keep these lines in the
+          main grid above. */}
+      {multiApplication && (
+        <div style={{ padding: '8px 24px 8px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {applications.map((app, index) => (
+            <div
+              key={index}
+              style={{
+                border: `1px solid ${ESTIMATE_BORDER}`,
+                borderRadius: 12,
+                padding: '14px 16px',
+              }}
+            >
+              <div style={{ ...eyebrowStyle, marginBottom: 12 }}>
+                Application {index + 1}{app.method ? ` — ${app.method}` : ''}
+              </div>
+              <CertificateFieldGrid
+                compact
+                fields={[
+                  ['Method of treatment', app.method],
+                  ['Product used', app.productLine],
+                  ['Active ingredient & concentration', app.aiLine],
+                  ['Coverage', app.coverageLine],
+                ]}
+              />
             </div>
-            <div style={{
-              fontFamily: FONT_BODY,
-              fontSize: 14,
-              fontWeight: 700,
-              color: ESTIMATE_TEXT,
-              minHeight: 20,
-              borderBottom: `1px solid ${ESTIMATE_BORDER}`,
-              paddingBottom: 4,
-              wordBreak: 'break-word',
-            }}>
-              {value || '—'}
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* FBC required compliance statement (exact wording per 1816.1.7) */}
       <div style={{ padding: '16px 24px 4px' }}>
@@ -1184,7 +1074,9 @@ function PhotoGrid({ title, photos, noCard }) {
 const REQUIRED_SECTION_HEADINGS = ['WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE RECOMMEND'];
 const SECTION_HEADINGS = ['CUSTOMER CONCERN', 'WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE DID', 'WHAT WE RECOMMEND'];
 
-function parseSections(text) {
+// Exported for the admin ProjectsPage customer-report preview, which must
+// apply the same findings-suppression rule as this page (preview == final).
+export function parseSections(text) {
   const hasAll = REQUIRED_SECTION_HEADINGS.every(h => text.includes(h));
   if (!hasAll) return null;
   const sections = [];

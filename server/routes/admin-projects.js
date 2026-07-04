@@ -31,6 +31,7 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const ProjectEmail = require('../services/project-email');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('../services/project-report-links');
+const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const {
   buildProjectCloseoutPreview,
   completeProjectBackedService,
@@ -48,7 +49,6 @@ const { publicPortalUrl } = require('../utils/portal-url');
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
-const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024 },
@@ -459,6 +459,56 @@ const WDO_AUTOFILL_ADMIN_KEYS = new Set([
   'structures_inspected',
 ]);
 
+// Additional per-product applications on the pre-treatment certificate
+// (findings.additional_applications). Rows the tech added but never filled
+// in are ignored — they don't render and don't block the send.
+function certAdditionalApplications(findings) {
+  const rows = Array.isArray(findings?.additional_applications) ? findings.additional_applications : [];
+  return rows.filter((row) => row && typeof row === 'object' && !Array.isArray(row)
+    && Object.values(row).some(hasMeaningfulValue));
+}
+
+// Per-application completeness checks for the pre-treatment certificate.
+// Runs once over the flat primary-application keys (the original cert_*
+// keys/labels) and once per additional application row.
+function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
+  const productName = app.product_name === 'Other' ? app.product_name_other : app.product_name;
+  const rawMethod = app.treatment_method;
+  const method = rawMethod === 'Other' ? app.treatment_method_other : rawMethod;
+  // Coverage requirements vary by application method. Liquid soil barriers
+  // (chemical) are sized by gallons of finished solution applied across a
+  // measured area. Wood treatments (borate) are measured by treated area
+  // but volume varies by saturation. Bait systems install discrete stations
+  // around a perimeter — there is no "gallons applied." Gate the gallons
+  // check accordingly so the send flow doesn't 422 on bait-system jobs.
+  const isBaitSystem = rawMethod === 'Bait system';
+  const isWoodTreatment = rawMethod === 'Wood treatment (borate)';
+  const needsGallons = !isBaitSystem && !isWoodTreatment;
+  // A finished-solution concentration only exists for liquid soil barriers.
+  // Bait stations and direct wood treatments have no dilution to record —
+  // the create form deliberately leaves concentration_pct blank for them,
+  // so requiring it here would dead-end those certificates at send.
+  const needsConcentration = needsGallons;
+  const hasArea = hasMeaningfulValue(app.square_footage) || hasMeaningfulValue(app.linear_feet);
+  const coverageOk = needsGallons
+    ? hasArea && hasMeaningfulValue(app.gallons_applied)
+    : hasArea;
+  const coverageLabel = needsGallons
+    ? 'Coverage (sq ft or linear ft + gallons applied)'
+    : 'Coverage (sq ft or linear ft)';
+  return [
+    { key: `${keyPrefix}treatment_method`, label: `${labelPrefix}Method of treatment`, ok: hasMeaningfulValue(method) },
+    { key: `${keyPrefix}product`, label: `${labelPrefix}Product used`, ok: hasMeaningfulValue(productName) },
+    {
+      key: `${keyPrefix}active_ingredient`,
+      label: `${labelPrefix}${needsConcentration ? 'Active ingredient + concentration' : 'Active ingredient'}`,
+      ok: hasMeaningfulValue(app.active_ingredient)
+        && (!needsConcentration || hasMeaningfulValue(app.concentration_pct)),
+    },
+    { key: `${keyPrefix}coverage`, label: `${labelPrefix}${coverageLabel}`, ok: coverageOk },
+  ];
+}
+
 function evaluateProjectSendReadiness({ project, customer }) {
   const typeCfg = getProjectType(project?.project_type);
   const findings = normalizeFindings(project?.findings);
@@ -491,32 +541,17 @@ function evaluateProjectSendReadiness({ project, customer }) {
   }
 
   if (project?.project_type === 'pre_treatment_termite_certificate') {
-    const productName = findings.product_name === 'Other' ? findings.product_name_other : findings.product_name;
-    const rawMethod = findings.treatment_method;
-    const method = rawMethod === 'Other' ? findings.treatment_method_other : rawMethod;
-    // Coverage requirements vary by application method. Liquid soil barriers
-    // (chemical) are sized by gallons of finished solution applied across a
-    // measured area. Wood treatments (borate) are measured by treated area
-    // but volume varies by saturation. Bait systems install discrete stations
-    // around a perimeter — there is no "gallons applied." Gate the gallons
-    // check accordingly so the send flow doesn't 422 on bait-system jobs.
-    const isBaitSystem = rawMethod === 'Bait system';
-    const isWoodTreatment = rawMethod === 'Wood treatment (borate)';
-    const needsGallons = !isBaitSystem && !isWoodTreatment;
-    const hasArea = hasMeaningfulValue(findings.square_footage) || hasMeaningfulValue(findings.linear_feet);
-    const coverageOk = needsGallons
-      ? hasArea && hasMeaningfulValue(findings.gallons_applied)
-      : hasArea;
-    const coverageLabel = needsGallons
-      ? 'Coverage (sq ft or linear ft + gallons applied)'
-      : 'Coverage (sq ft or linear ft)';
     required.push(
       { key: 'cert_treatment_address', label: 'Treatment address (or lot/block)', ok: hasMeaningfulValue(findings.treatment_address) || hasMeaningfulValue(findings.lot_block) },
       { key: 'cert_treatment_date', label: 'Date of treatment', ok: hasMeaningfulValue(findings.treatment_date) || hasMeaningfulValue(project?.project_date) },
-      { key: 'cert_treatment_method', label: 'Method of treatment', ok: hasMeaningfulValue(method) },
-      { key: 'cert_product', label: 'Product used', ok: hasMeaningfulValue(productName) },
-      { key: 'cert_active_ingredient', label: 'Active ingredient + concentration', ok: hasMeaningfulValue(findings.active_ingredient) && hasMeaningfulValue(findings.concentration_pct) },
-      { key: 'cert_coverage', label: coverageLabel, ok: coverageOk },
+      ...certApplicationChecks(findings, { keyPrefix: 'cert_', labelPrefix: '' }),
+      // A combined job (e.g. soil barrier + wood treatment) records each
+      // extra product as its own application row — every row with content
+      // must be as complete as the primary before the certificate can send.
+      ...certAdditionalApplications(findings).flatMap((row, index) => certApplicationChecks(row, {
+        keyPrefix: `cert_app${index + 2}_`,
+        labelPrefix: `Application ${index + 2}: `,
+      })),
       { key: 'cert_applicator_name', label: "Applicator's printed name", ok: hasMeaningfulValue(findings.applicator_name) },
       { key: 'cert_applicator_fdacs_id', label: 'Applicator FDACS ID #', ok: hasMeaningfulValue(findings.applicator_fdacs_id) },
       // Applicator attestation satisfies FBC 1816.1.7 authorized-signature
@@ -757,10 +792,29 @@ async function getCustomerCommunicationContext(customerId) {
     .join('\n');
 }
 
+// Array findings (certificate application rows) flatten to readable
+// "key: value" rows — String() on an object would feed the writer
+// "[object Object]".
+function formatFindingForPrompt(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (item && typeof item === 'object'
+        ? Object.entries(item)
+          .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
+          .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`)
+          .join(', ')
+        : String(item ?? '')))
+      .filter((line) => line.trim() !== '')
+      .join(' | ');
+  }
+  return String(value ?? '');
+}
+
 function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines, communicationContext }) {
   const labelMap = Object.fromEntries((typeCfg.findingsFields || []).map(f => [f.key, f.label]));
   const findingsLines = Object.entries(findings || {})
-    .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
+    .map(([k, v]) => [k, formatFindingForPrompt(v)])
+    .filter(([, v]) => v.trim() !== '')
     .map(([k, v]) => `${labelMap[k] || k.replace(/_/g, ' ')}: ${v}`)
     .join('\n') || '[no structured findings captured]';
 
@@ -991,6 +1045,51 @@ router.get('/service-search', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/admin/projects/applicators — licensed-applicator picker for the
+// pre-treatment certificate. Tech-reachable (the timetracking tech route
+// sanitizes license fields away, so the create form needs its own source).
+// License numbers print on the public certificate, so exposing them to a
+// logged-in tech is not a data leak.
+// ---------------------------------------------------------------------------
+router.get('/applicators', async (req, res, next) => {
+  try {
+    const techs = await db('technicians')
+      .where({ active: true })
+      .orderBy('name')
+      .select('id', 'name', 'applicator_printed_name', 'fl_applicator_license', 'license_expiry');
+    const todayEt = etDateString();
+    res.json({
+      applicators: techs.map((t) => {
+        // Same expiry rule as admin-compliance-v2 (past = expired, no expiry
+        // on file = active), but compared as ET calendar dates: the license
+        // is good through the end of its expiry day, and a date-only column
+        // must not flip early because UTC midnight lands at 8pm ET. An
+        // expired number is withheld (never auto-filled onto a state
+        // compliance certificate) — the tech stays pickable by name and
+        // types their renewed number.
+        const expiryDate = normalizeDateOnly(t.license_expiry);
+        const expired = Boolean(expiryDate && expiryDate < todayEt);
+        return {
+          id: t.id,
+          // Certificates print the applicator's FULL legal name — the
+          // dedicated printed-name column wins over the casual display name
+          // used across customer comms.
+          name: String(t.applicator_printed_name || '').trim() || t.name,
+          // The display name certificates saved BEFORE the printed-name
+          // column existed — the create form matches stored drafts against
+          // it and upgrades them to the printed name.
+          legacyName: t.name,
+          fdacsId: expired ? null : (String(t.fl_applicator_license || '').trim() || null),
+        };
+      }),
+      // Admins create certificates on behalf of the treating tech, so only a
+      // tech's own session defaults the applicator to themselves.
+      defaultTechnicianId: isAdmin(req) ? null : req.technicianId || null,
+    });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/projects — list (admin dashboard)
 // ---------------------------------------------------------------------------
 router.get('/', async (req, res, next) => {
@@ -1083,22 +1182,14 @@ router.get('/:id', async (req, res, next) => {
       .where({ project_id: project.id })
       .orderBy(['visit', 'sort_order', 'created_at']);
 
-    let upcomingAppointment = null;
-    if (project.scheduled_service_id) {
-      upcomingAppointment = await db('scheduled_services as s')
-        .where({ 's.id': project.scheduled_service_id, 's.customer_id': project.customer_id })
-        .where('s.scheduled_date', '>=', etDateString())
-        .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
-        .leftJoin('technicians as st', 's.technician_id', 'st.id')
-        .select(
-          's.service_type',
-          's.scheduled_date',
-          's.window_start',
-          's.window_end',
-          'st.name as technician_name',
-        )
-        .first();
-    }
+    // Same follow-up scoping as the public report page (shared helper) so
+    // the staff preview can never show a different "Follow-up" than the
+    // customer's copy — the old linked-visit-only lookup printed the just-
+    // treated visit itself as its own follow-up on the service day.
+    const upcomingAppointment = await findReportFollowupAppointment({
+      customerId: project.customer_id,
+      scheduledServiceId: project.scheduled_service_id,
+    });
 
     const closeoutPreview = isAdmin(req)
       ? await buildProjectCloseoutPreview(project.id).catch((err) => {
@@ -1152,6 +1243,14 @@ router.get('/:id', async (req, res, next) => {
         // lists filings via GET /:id/wdo-filings instead.
         wdo_sent_filings: undefined,
         wdo_sent_filings_count: loadWdoFilings(project).length,
+        // Same computation as the public report page's fdacsPdfAvailable —
+        // the customer-preview needs it to mirror the page's WDO findings
+        // suppression rule (the raw archive index is stripped above).
+        fdacs_pdf_available: (() => {
+          const filings = loadWdoFilings(project);
+          const lastFiling = filings.length ? filings[filings.length - 1] : null;
+          return Boolean(lastFiling?.s3_key && config.s3?.bucket);
+        })(),
         property_profile: propertyProfile,
         wdo_history: wdoHistory,
         wdo_applicator: wdoApplicator,
@@ -1562,6 +1661,23 @@ router.post('/wdo-history', async (req, res, next) => {
   }
 });
 
+// Legacy certificate drafts (created before the findings-level treatment_date
+// field was removed from the registry) still carry findings.treatment_date,
+// which the certificate renderer prefers over the project date. The forms now
+// edit ONLY the project date, so once an editor actually CHANGES it, the
+// hidden legacy value must not keep printing a stale date — drop it so the
+// date the editor saw becomes the single source. An untouched legacy draft
+// keeps rendering its original attested findings date. Mutates `updates`.
+function dropStaleCertTreatmentDate(project, updates) {
+  if (project?.project_type !== 'pre_treatment_termite_certificate') return;
+  if (!hasMeaningfulValue(updates.project_date)) return;
+  if (updates.project_date === normalizeDateOnly(project.project_date)) return;
+  const findings = normalizeFindings(updates.findings !== undefined ? updates.findings : project.findings);
+  if (!hasMeaningfulValue(findings.treatment_date)) return;
+  const { treatment_date: _stale, ...rest } = findings;
+  updates.findings = rest;
+}
+
 // ---------------------------------------------------------------------------
 // PUT /api/admin/projects/:id — update findings / recommendations / title
 // ---------------------------------------------------------------------------
@@ -1574,6 +1690,7 @@ router.put('/:id', async (req, res, next) => {
     const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
+    dropStaleCertTreatmentDate(project, updates);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
     await db('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
@@ -3874,6 +3991,7 @@ router._private = {
   logProjectActivity,
   evaluateProjectSendReadiness,
   completeProjectBackedService,
+  dropStaleCertTreatmentDate,
 };
 
 module.exports = router;

@@ -398,7 +398,7 @@ async function findLeadForCall(callLog) {
   const plan = leadMatchPlan(callLog);
   if (!plan) return null;
 
-  let query = db('leads').select('id', 'customer_id');
+  let query = db('leads').select('id', 'customer_id').whereNull('deleted_at');
   if (plan.strategy === 'customer_id') {
     query = query.where({ customer_id: plan.customerId });
   } else {
@@ -448,12 +448,27 @@ async function previewBridge(options = {}) {
   const configured = googleAds.isConfigured();
   const target = mainLine();
   const crmCalls = await fetchCrmCalls(days);
-  const googleRows = configured ? await googleAds.fetchCallViews(days, limit) : [];
+  // strict fetch: an API failure must surface as scanFailed, not as an empty
+  // call list — the cron's unclaimed→organic fallback treats "bridge saw
+  // nothing to claim" as license to attribute, which is only true when the
+  // scan actually ran. Unconfigured stays a plain empty scan (configured:false
+  // already tells that story).
+  let scanFailed = false;
+  let googleRows = [];
+  if (configured) {
+    try {
+      googleRows = await googleAds.fetchCallViews(days, limit, { strict: true });
+    } catch (err) {
+      scanFailed = true;
+      logger.error(`[google-call-bridge] Google call-report scan FAILED — no matches this run: ${err.message}`);
+    }
+  }
   const googleCalls = googleRows.map(normalizeGoogleCallRow).filter((row) => row.resourceName);
   const matches = buildMatches(googleCalls, crmCalls, target.number);
 
   return {
     configured,
+    scanFailed,
     period: { days },
     targetNumber: target,
     sourceName: GOOGLE_ADS_BRIDGE_SOURCE_NAME,

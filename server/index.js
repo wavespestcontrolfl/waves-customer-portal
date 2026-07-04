@@ -18,8 +18,6 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
-const jwt = require('jsonwebtoken');
-const { isIP } = require('node:net');
 const path = require('path');
 
 const config = require('./config');
@@ -27,6 +25,41 @@ const logger = require('./services/logger');
 const { errorHandler, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
+
+// Fail closed on missing critical secrets in production. A missing JWT_SECRET
+// would otherwise let the app boot and then break auth at runtime — jwt.sign
+// throws on every request — instead of refusing to start. DATABASE_URL gets the
+// same treatment so a misconfigured deploy fails loudly at boot, not on the
+// first query. Non-production only warns so local dev/tests run without a full
+// .env.
+function assertRequiredSecrets() {
+  // knexfile resolves Railway's alternate DB env shapes (DATABASE_PRIVATE_URL,
+  // DATABASE_PUBLIC_URL, POSTGRES_URL, PG* vars) and backfills
+  // process.env.DATABASE_URL as a require-time side effect — models/db pulls
+  // it in moments later anyway. Trigger that resolution BEFORE deciding the
+  // URL is missing, and check the post-resolution env var rather than the
+  // config snapshot (which may have been cached before the backfill).
+  require('./knexfile');
+  const required = {
+    JWT_SECRET: config.jwt.secret,
+    DATABASE_URL: process.env.DATABASE_URL,
+  };
+  const missing = Object.entries(required)
+    .filter(([, value]) => !value || !String(value).trim())
+    .map(([name]) => name);
+  if (!missing.length) return;
+  const message = `Missing required environment variable(s): ${missing.join(', ')}`;
+  if (config.nodeEnv === 'production') {
+    // The global uncaughtException handler above deliberately never exits, so
+    // a top-level throw here would be swallowed — leaving a zombie process
+    // that logs once and never binds the port. Exit explicitly instead.
+    console.error(`[startup] ${message} — refusing to start.`);
+    logger.error(`[startup] ${message} — refusing to start.`);
+    process.exit(1);
+  }
+  logger.warn(`[startup] ${message} — continuing (non-production).`);
+}
+assertRequiredSecrets();
 
 // Route imports
 const authRoutes = require('./routes/auth');
@@ -109,12 +142,12 @@ const cspDirectives = {
   // PostHog (*.posthog.com) is loaded only on the public funnel pages
   // (/book, /estimate, /pay) and only after consent — see the client's
   // PublicFunnelTracking. Listing the host here is harmless when no key is set.
-  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com"],
+  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com", "https://challenges.cloudflare.com"],
   styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
   fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
   imgSrc: ["'self'", "https:", "data:", "blob:"],
   connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com"],
-  frameSrc: ["'self'", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com"],
+  frameSrc: ["'self'", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
   mediaSrc: ["'self'", "https:"],
   // PostHog session replay records via a web worker created from a blob URL.
   workerSrc: ["'self'", "blob:"],
@@ -160,43 +193,9 @@ app.use(cors({
   credentials: true,
 }));
 
-// Rate limiting
-// Key authenticated requests by JWT subject so each admin/tech/customer gets
-// their own bucket. Falls back to a /64-collapsed client IP for
-// unauthenticated traffic — keying by raw req.ip would let an IPv6 client
-// rotate addresses within their subnet to evade the limit. Without per-user
-// keying, a single busy admin session (dispatch page + grid + per-action
-// refreshes) can exhaust the per-IP allowance and lock everyone behind the
-// same NAT out of the API.
-function ipFallbackKey(ip) {
-  if (!ip) return ip;
-  const v = ip.startsWith('::ffff:') && isIP(ip.slice(7)) === 4 ? ip.slice(7) : ip;
-  if (isIP(v) !== 6) return v;
-  // Canonicalize before slicing the /64 — equivalent textual forms
-  // (uppercase, leading zeros, "::" placement) must yield the same bucket
-  // key, otherwise a single client could rotate notation to evade the limit.
-  const lower = v.toLowerCase();
-  const [head, tail] = lower.split('::');
-  const headParts = head ? head.split(':') : [];
-  const tailParts = tail !== undefined ? (tail ? tail.split(':') : []) : [];
-  const missing = lower.includes('::') ? Math.max(0, 8 - headParts.length - tailParts.length) : 0;
-  const fillers = Array(missing).fill('0');
-  const groups = lower.includes('::') ? [...headParts, ...fillers, ...tailParts] : lower.split(':');
-  const prefix = groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':');
-  return `${prefix}::/64`;
-}
-
-function rateLimitKey(req) {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ') && config.jwt.secret) {
-    try {
-      const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
-      if (decoded.technicianId) return `tech:${decoded.technicianId}`;
-      if (decoded.customerId) return `cust:${decoded.customerId}`;
-    } catch (_err) { /* fall through to IP */ }
-  }
-  return ipFallbackKey(req.ip);
-}
+// Rate limiting — key generator shared with route-level limiters (JWT subject
+// when authenticated, /64-collapsed IP otherwise; full rationale in the module).
+const { rateLimitKey } = require('./middleware/rate-limit-key');
 
 const limiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
@@ -228,6 +227,49 @@ const authLimiter = rateLimit({
 app.use('/api/auth/send-code', authLimiter);
 app.use('/api/auth/verify-code', authLimiter);
 app.use('/api/admin/auth/login', authLimiter);
+
+// Public, unauthenticated surfaces that hit paid third-party APIs get tight
+// per-IP caps on top of the global limiter so a bot flood can't run up spend.
+// Lead intake fires Twilio SMS (new-lead alerts + customer confirmations); the
+// estimators call Google Maps + AI per lookup. Keyed like the global limiter
+// (IP fallback for no-auth traffic) and skipped outside production so local
+// dev and tests aren't throttled.
+const leadIntakeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 15,
+  message: { error: 'Too many submissions, please try again later.' },
+  keyGenerator: rateLimitKey,
+  skip: () => process.env.NODE_ENV !== 'production',
+});
+const paidEstimatorDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 60,
+  message: { error: 'Daily limit reached, please try again tomorrow.' },
+  keyGenerator: rateLimitKey,
+  skip: () => process.env.NODE_ENV !== 'production',
+});
+// Ask Waves chat: every accepted /message turn is a paid LLM call (OpenAI,
+// then Anthropic fallback), so the 30/15min in-route limiter gets a daily
+// ceiling on top — same spend rationale as paidEstimatorDailyLimiter, higher
+// cap because a real quote conversation is many turns while an estimator
+// session is one lookup. Counts ONLY requests that can actually reach the
+// model: a plausible POST /message body with the gate on. GET /status
+// (page-view gate check), non-POST scanner probes, dark-launch probes while
+// GATE_ASK_WAVES is off, and empty/oversized bodies (the route 400s them
+// before any model call — shared isPlausibleMessageBody check) all resolve
+// without an LLM call, so none of them may burn the paid budget for a
+// shared/NAT'd IP and 429 later real turns.
+const askWavesDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 120,
+  message: { error: 'Daily limit reached — call (941) 297-5749 and a real person will help right away.' },
+  keyGenerator: rateLimitKey,
+  skip: (req) => process.env.NODE_ENV !== 'production'
+    || req.method !== 'POST'
+    || !/^\/message\/?$/.test(req.path)
+    || !require('./config/feature-gates').isEnabled('askWaves')
+    || !require('./routes/public-ai-intake').isPlausibleMessageBody(req.body),
+});
 
 // Body parsing
 // Stripe webhook must use raw body for signature verification — mount BEFORE json parser
@@ -292,6 +334,7 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/dashboard', adminDashboardRoutes);
+app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
 app.use('/api/admin/command-center', require('./routes/admin-command-center'));
 app.use('/api/admin/feature-flags', require('./routes/admin-feature-flags'));
 app.use('/api/admin/turf-height', require('./routes/admin-turf-height'));
@@ -309,8 +352,8 @@ app.get('/estimate/:token', (req, res, next) => {
   if (SERVICE_ESTIMATE_SLUGS.has(slug)) return next();
   return estimatePublicRoutes.handleEstimateView(req, res, next);
 });
-app.use('/api/public/quote', publicQuoteRoutes);
-app.use('/api/public/estimator', publicPropertyLookupRoutes);
+app.use('/api/public/quote', paidEstimatorDailyLimiter, publicQuoteRoutes);
+app.use('/api/public/estimator', paidEstimatorDailyLimiter, publicPropertyLookupRoutes);
 app.use('/api/admin/reviews', adminReviewRoutes);
 app.use('/api/admin/settings', adminSettingsRoutes);
 app.use('/api/admin/backlink-agent', adminBacklinkAgentRoutes);
@@ -336,11 +379,13 @@ app.use('/api/public/automation-preview', require('./routes/public-automation-pr
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
 app.use('/api/public/track', require('./routes/track-public'));
+app.use('/api/public/reschedule', require('./routes/reschedule-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
+app.use('/api/public/ai-intake', askWavesDailyLimiter, require('./routes/public-ai-intake'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
 // Twilio webhook signature validation. Runs before BOTH Twilio routers
@@ -357,8 +402,8 @@ const { validateTwilioSignature } = require('./middleware/twilio-signature');
 // twilio-webhook.js handles /sms + /status; twilio-voice-webhook.js handles /voice, /call-complete,
 // /recording-status, /transcription, /outbound-admin-prompt — no path conflicts under same mount.
 app.use('/api/webhooks/twilio', validateTwilioSignature, twilioWebhookRoutes);
-app.use('/api/webhooks/lead', require('./routes/lead-webhook'));
-app.use('/api/leads', require('./routes/lead-webhook'));
+app.use('/api/webhooks/lead', leadIntakeLimiter, require('./routes/lead-webhook'));
+app.use('/api/leads', leadIntakeLimiter, require('./routes/lead-webhook'));
 // Bilingual AI voice agent posts captured leads here (fail-closed shared-secret
 // auth inside the route). JSON body — mounted after express.json above.
 app.use('/api/webhooks/voice-agent', require('./routes/webhooks-voice-agent'));

@@ -11,7 +11,7 @@ const {
   commercialLowConfidenceRange,
   commercialLowConfidenceRequiresSiteQuote,
 } = require('../services/estimate-delivery-options');
-const { resolveEstimateQuoteRequirement, renderPage } = require('../routes/estimate-public');
+const { resolveEstimateQuoteRequirement, renderPage, attachPublicPricingContract, buildAcceptSuccessPayload, buildEstimateAcceptanceContract, commercialAcceptDepositExempt } = require('../routes/estimate-public');
 const { generateEstimate } = require('../services/pricing-engine');
 
 const recurring = (services) => ({ result: { recurring: { services } } });
@@ -20,9 +20,10 @@ const MED = (annual) => ({ service: 'commercial_pest', pricingConfidence: 'MEDIU
 
 describe('commercialLowConfidenceRange', () => {
   test('narrow LOW line → ±20% range, not forced to a site quote', () => {
-    // $400/mo → 320–480, swing 160 (< 300)
+    // $400/mo → 320–480, swing 160 (< 300); all-LOW so low share == exact total
     expect(commercialLowConfidenceRange(recurring([LOW(4800)]))).toEqual({
-      hasLowConfidence: true, rangeLowMonthly: 320, rangeHighMonthly: 480, monthlySwing: 160, forceSiteQuote: false,
+      hasLowConfidence: true, rangeLowMonthly: 320, rangeHighMonthly: 480, monthlySwing: 160,
+      lowConfidenceMonthly: 400, exactMonthly: 400, forceSiteQuote: false,
     });
   });
   test('wide LOW line → force site quote', () => {
@@ -31,9 +32,11 @@ describe('commercialLowConfidenceRange', () => {
     expect(commercialLowConfidenceRequiresSiteQuote(recurring([LOW(12000)]))).toBe(true);
   });
   test('MEDIUM lines are exact; only LOW lines get the band', () => {
-    // LOW $400 (320–480) + MEDIUM $500 (exact) → 820–980, swing 160
+    // LOW $400 (320–480) + MEDIUM $500 (exact) → 820–980, swing 160. Only the
+    // $400 LOW share carries the band; exact total is the full $900.
     expect(commercialLowConfidenceRange(recurring([LOW(4800), MED(6000)]))).toMatchObject({
       rangeLowMonthly: 820, rangeHighMonthly: 980, monthlySwing: 160,
+      lowConfidenceMonthly: 400, exactMonthly: 900,
     });
   });
   test('engineResult.lineItems shape (public-quote mirror) is detected', () => {
@@ -97,6 +100,172 @@ describe('resolveEstimateQuoteRequirement — low-confidence backstop', () => {
   test('wide low-confidence → quote-required, reason commercial_low_confidence_site_confirmation', () => {
     expect(resolveEstimateQuoteRequirement(null, recurring([LOW(12000)])))
       .toEqual(expect.objectContaining({ quoteRequired: true, reason: 'commercial_low_confidence_site_confirmation' }));
+  });
+});
+
+describe('attachPublicPricingContract — narrow low-confidence range marker (React price cards)', () => {
+  // A NARROW low-confidence commercial line stays self-serve approvable but its
+  // frequencies get lowConfidenceRangePct so PriceCard shows a "$X–$Y/mo" band.
+  const estData = (annual) => ({
+    result: { recurring: { services: [
+      { service: 'commercial_lawn', name: 'Commercial Turf Treatment Program', pricingConfidence: 'LOW', mo: annual / 12, annual, estimatedPricing: true },
+    ] } },
+  });
+  const payload = (annual) => ({ frequencies: [{ key: 'monthly', label: 'Commercial Turf Treatment Program', monthly: annual / 12, annual }] });
+  const firstFreq = (contract) => contract.services?.[0]?.frequencies?.[0] || {};
+
+  test('narrow LOW commercial → frequencies carry lowConfidenceRangePct 0.20 + full LOW fraction', () => {
+    // $400/mo → swing $160 (< $300) → narrow, approvable, ranged. Single all-LOW
+    // line → fraction 1 (whole price is low-confidence).
+    const contract = attachPublicPricingContract(payload(4800), {}, estData(4800));
+    expect(firstFreq(contract).lowConfidenceRangePct).toBe(0.2);
+    expect(firstFreq(contract).lowConfidenceFraction).toBe(1);
+    expect(contract.quoteRequired).not.toBe(true);
+  });
+
+  test('wide LOW commercial → NO range marker (force-manual handled upstream)', () => {
+    // $1000/mo → swing $400 (> $300) → forceSiteQuote, no self-serve range
+    const contract = attachPublicPricingContract(payload(12000), {}, estData(12000));
+    expect(firstFreq(contract).lowConfidenceRangePct).toBeUndefined();
+  });
+
+  test('non-commercial LOW line → no range marker', () => {
+    const resiData = { result: { recurring: { services: [{ service: 'lawn_care', pricingConfidence: 'LOW', mo: 50, annual: 600 }] } } };
+    const contract = attachPublicPricingContract({ frequencies: [{ key: 'monthly', monthly: 50, annual: 600 }] }, {}, resiData);
+    expect(firstFreq(contract).lowConfidenceRangePct).toBeUndefined();
+  });
+
+  test('multi-service commercial → each recurring card + combined carry their own LOW share', () => {
+    // commercial_lawn LOW $400/mo + commercial_tree_shrub MEDIUM $250/mo. Commercial
+    // services have no per-service selectable ladder → one bundle card covering both.
+    // The bundle bands only the LOW share: fraction = 400 / (400 + 250) ≈ 0.615.
+    const mixed = { result: { recurring: { services: [
+      { service: 'commercial_lawn', name: 'Commercial Turf Treatment Program', pricingConfidence: 'LOW', mo: 400, annual: 4800 },
+      { service: 'commercial_tree_shrub', name: 'Commercial Tree & Shrub', pricingConfidence: 'MEDIUM', mo: 250, annual: 3000 },
+    ] } } };
+    const contract = attachPublicPricingContract({ frequencies: [{ key: 'monthly', monthly: 650, annual: 7800 }] }, {}, mixed);
+    const section = contract.services.find((s) => s.isRecurring);
+    expect(section.frequencies[0].lowConfidenceRangePct).toBe(0.2);
+    expect(section.frequencies[0].lowConfidenceFraction).toBeCloseTo(400 / 650, 5);
+    // The combined "Recurring total" card ranges on the same aggregate share —
+    // AND ships the raw LOW dollars so the client can recompute the fraction
+    // against whichever combined cadence the customer selects (the uncertain
+    // dollars are fixed; the exact part moves with the selection).
+    expect(contract.combinedRecurring.lowConfidenceRangePct).toBe(0.2);
+    expect(contract.combinedRecurring.lowConfidenceFraction).toBeCloseTo(400 / 650, 5);
+    expect(contract.combinedRecurring.lowConfidenceMonthly).toBe(400);
+  });
+
+  test('exact non-commercial add-on stays OUT of the band (denominator = displayed total)', () => {
+    // commercial_lawn LOW $400 + foam_recurring exact $100 → displayed $500. Only
+    // the $400 LOW carries the band: fraction 0.8 (not 1.0), so foam isn't ranged.
+    const withAddOn = { result: { recurring: { services: [
+      { service: 'commercial_lawn', name: 'Commercial Turf Treatment Program', pricingConfidence: 'LOW', mo: 400, annual: 4800 },
+      { service: 'foam_recurring', name: 'Termite Foam', pricingConfidence: 'HIGH', mo: 100, annual: 1200 },
+    ] } } };
+    const contract = attachPublicPricingContract({ frequencies: [{ key: 'monthly', monthly: 500, annual: 6000 }] }, {}, withAddOn);
+    const section = contract.services.find((s) => s.isRecurring);
+    expect(section.frequencies[0].lowConfidenceFraction).toBeCloseTo(0.8, 5);
+    expect(contract.combinedRecurring.lowConfidenceFraction).toBeCloseTo(0.8, 5);
+  });
+
+  test('fraction is per-frequency (low ÷ that cadence monthly) → same dollar band at every cadence', () => {
+    // Single commercial_lawn LOW $400. Two cadences with different displayed
+    // monthly totals get DIFFERENT fractions but the same ±$80 dollar band, so a
+    // selectable bundle never over/under-states the band when the cadence flips.
+    const est = { result: { recurring: { services: [
+      { service: 'commercial_lawn', name: 'Commercial Turf Treatment Program', pricingConfidence: 'LOW', mo: 400, annual: 4800 },
+    ] } } };
+    const contract = attachPublicPricingContract(
+      { frequencies: [{ key: 'monthly', monthly: 400 }, { key: 'plus_addon', monthly: 500 }] },
+      {},
+      est,
+    );
+    const freqs = contract.services.find((s) => s.isRecurring).frequencies;
+    const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
+    expect(byKey.monthly.lowConfidenceFraction).toBeCloseTo(1, 5);       // 400/400
+    expect(byKey.plus_addon.lowConfidenceFraction).toBeCloseTo(0.8, 5);  // 400/500
+    // band = monthly × fraction × pct → $80 at BOTH cadences (only the LOW $400).
+    expect(byKey.monthly.monthly * byKey.monthly.lowConfidenceFraction * 0.2).toBeCloseTo(80, 5);
+    expect(byKey.plus_addon.monthly * byKey.plus_addon.lowConfidenceFraction * 0.2).toBeCloseTo(80, 5);
+  });
+
+  test('MEDIUM-only commercial multi-service → no range marker anywhere', () => {
+    const med = { result: { recurring: { services: [
+      { service: 'commercial_lawn', pricingConfidence: 'MEDIUM', mo: 400, annual: 4800 },
+      { service: 'commercial_tree_shrub', pricingConfidence: 'MEDIUM', mo: 250, annual: 3000 },
+    ] } } };
+    const contract = attachPublicPricingContract({ frequencies: [{ key: 'monthly', monthly: 650, annual: 7800 }] }, {}, med);
+    const section = contract.services.find((s) => s.isRecurring);
+    expect(section.frequencies[0].lowConfidenceRangePct).toBeUndefined();
+    expect(contract.combinedRecurring.lowConfidenceRangePct).toBeUndefined();
+  });
+});
+
+describe('buildEstimateAcceptanceContract — ranged narrow-LOW estimates accept without a slot', () => {
+  // The slots endpoints return an empty commercial-manual list for every
+  // commercial auto estimate (invoice mode or not), so a slot-pick acceptance
+  // mode would leave the customer with a visible range but no way to approve
+  // it. commercialNoSlotAccept covers the whole ranged narrow-LOW recurring
+  // population; invoice-only payment behavior stays on siteConfirmationHold.
+  test('narrow-LOW commercial + no linked appointment → no-slot accept mode', () => {
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: { quoteRequired: false }, commercialNoSlotAccept: true }))
+      .toMatchObject({ mode: 'commercial_site_confirmation' });
+  });
+  test('an existing linked appointment still wins (its flow already accepts)', () => {
+    const appt = { id: 'ss1', scheduled_date: '2026-07-10', status: 'pending' };
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: {}, existingAppointment: appt, commercialNoSlotAccept: true }).mode)
+      .toBe('existing_appointment');
+  });
+  test('quote-required still wins (not self-serve at all)', () => {
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: { quoteRequired: true, reason: 'x' }, commercialNoSlotAccept: true }).mode)
+      .toBe('quote_required');
+  });
+  test('not narrow-LOW → standard slot pick (unchanged)', () => {
+    expect(buildEstimateAcceptanceContract({ quoteRequirement: {} }).mode).toBe('standard_slot_pick');
+  });
+});
+
+describe('commercialAcceptDepositExempt — the accept gate must agree with /data + /deposit-intent', () => {
+  // The exemption covers accepts that mint nothing at accept time. A one-time
+  // INVOICE-MODE accept mints its invoice in the accept transaction (deposit
+  // credits it), so it keeps the standard gate — the deposit the UI collected
+  // via requiredForOneTime + /deposit-intent is enforced, not silently waived.
+  test('recurring commercial accept stays exempt', () => {
+    expect(commercialAcceptDepositExempt({ isCommercialAccept: true, billByInvoice: true })).toBe(true);
+  });
+  test('held recurring accept stays exempt (shape the commercial detector misses)', () => {
+    expect(commercialAcceptDepositExempt({ siteConfirmationHold: true, billByInvoice: true })).toBe(true);
+  });
+  test('one-time INVOICE-MODE commercial accept is NOT exempt (invoice minted at accept)', () => {
+    expect(commercialAcceptDepositExempt({ isCommercialAccept: true, treatAsOneTime: true, billByInvoice: true })).toBe(false);
+  });
+  test('one-time UNinvoiced commercial accept stays exempt (nothing to credit — no self-serve booking)', () => {
+    expect(commercialAcceptDepositExempt({ isCommercialAccept: true, treatAsOneTime: true, billByInvoice: false })).toBe(true);
+  });
+  test('non-commercial accepts are never exempted here', () => {
+    expect(commercialAcceptDepositExempt({ treatAsOneTime: true, billByInvoice: true })).toBe(false);
+    expect(commercialAcceptDepositExempt({})).toBe(false);
+  });
+});
+
+describe('buildAcceptSuccessPayload — low-confidence site-confirmation hold', () => {
+  test('siteConfirmationHold → site_confirmation outcome, no invoice/pay step', () => {
+    const out = buildAcceptSuccessPayload({ siteConfirmationHold: true });
+    expect(out.nextStep).toBe('site_confirmation');
+    expect(out.invoiceMode).toBe(false);
+    expect(out.invoiceId).toBeNull();
+  });
+
+  test('site-confirmation hold wins even if an invoice somehow leaks through', () => {
+    // Defense-in-depth: the hold suppresses the mint, but the outcome must never
+    // fall back to a pay step for a held estimate.
+    const out = buildAcceptSuccessPayload({ siteConfirmationHold: true, invoiceMode: true, invoiceId: 'inv_1', invoicePayUrl: '/pay/x' });
+    expect(out.nextStep).toBe('site_confirmation');
+  });
+
+  test('without the hold, a normal invoice-mode accept still routes to pay_invoice', () => {
+    expect(buildAcceptSuccessPayload({ invoiceMode: true, invoiceId: 'inv_1', invoicePayUrl: '/pay/x' }).nextStep).toBe('pay_invoice');
   });
 });
 

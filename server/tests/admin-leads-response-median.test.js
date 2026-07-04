@@ -156,5 +156,7 @@ describe('GET /admin/leads/analytics/overview — response-time headline', () =>
       if (prev === undefined) delete process.env.SPEED_TO_LEAD_FRESH_START;
       else process.env.SPEED_TO_LEAD_FRESH_START = prev;
     }
-  });
+    // isolateModules recompiles the full admin-leads route graph, which can
+    // exceed jest's 5s default under coverage + parallel workers.
+  }, 30000);
 });

@@ -21,6 +21,7 @@ const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
 const {
   isNewRecurringSignupCandidate,
   sendNewRecurringWelcome,
@@ -1249,7 +1250,7 @@ router.get('/', async (req, res, next) => {
         leadScore: s.lead_score, lawnType: s.lawn_type,
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
-        estimatedDuration: s.estimated_duration_minutes || estimateDuration(normalizedType, s.property_sqft, s.lot_sqft),
+        estimatedDuration: s.estimated_duration_minutes || 60,
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
@@ -1720,7 +1721,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
     const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
     const zone = getZone(customer?.city, customer?.zip);
-    let duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
+    // Owner directive (2026-07-03): every service call defaults to 60 minutes;
+    // the service-record default or an explicit tech-entered duration wins below.
+    let duration = 60;
 
     // Look up service from services table for duration/pricing
     let serviceRecord = null;
@@ -2194,20 +2197,62 @@ router.post('/', requireAdmin, async (req, res, next) => {
           }
         }
 
-        // Booking a recurring service (e.g. a quarterly WaveGuard membership) is
-        // the deal closing — convert the originating lead to won now rather than
-        // waiting for the first visit to complete. enforceOriginating keeps the
-        // fuzzy contact fallback from winning a LATER unlinked add-on lead that
-        // happens to share the customer's phone/email (e.g. an established
-        // customer booking an add-on): only a lead first contacted on/before the
-        // customer signed up converts. Single unambiguous open lead only,
-        // idempotent. Best-effort; never blocks the booking.
-        if (isRecurring) {
+        // Booking a service is the deal closing — convert the originating lead
+        // to won now rather than waiting for the first visit to complete.
+        // Recurring bookings keep their dedicated trigger source; one-time
+        // bookings use appointment_booked (previously they didn't convert
+        // until completion/invoice, stranding phone-sold one-time jobs as
+        // open leads whenever the completion trigger's matching tiers missed).
+        // enforceOriginating keeps the fuzzy contact fallback from winning a
+        // LATER unlinked add-on lead that happens to share the customer's
+        // phone/email (e.g. an established customer booking an add-on): only
+        // a lead first contacted on/before the customer signed up converts.
+        // Single unambiguous open lead only, idempotent. Best-effort; never
+        // blocks the booking.
+        //
+        // Gated on the quote's fate: when the booking came from a sent/viewed
+        // estimate whose auto-accept was REFUSED (manager approval,
+        // invoice-mode, converter guards — the warning path above), the deal
+        // did not close, so recording the lead as won here would contradict
+        // the quote we deliberately left unaccepted. No linked estimate or an
+        // already-/newly-accepted one converts as before.
+        const estimateRefusedAcceptance = !!(linkedEstimate
+          && linkedEstimate.status !== 'accepted'
+          && !estimateAutoAccepted);
+        if (!estimateRefusedAcceptance) {
           try {
             const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-            await convertLeadFromEvent({ source: 'recurring_service_booked', customerId, enforceOriginating: true });
+            const conversion = await convertLeadFromEvent({
+              source: isRecurring ? 'recurring_service_booked' : 'appointment_booked',
+              // The estimate this booking rode in on: passing it lets the
+              // authoritative estimate-link tier (leads.estimate_id) resolve
+              // the exact FK-linked lead before the customer/contact
+              // fallback — so an add-on lead linked to the source estimate
+              // of an established customer converts even though
+              // enforceOriginating would reject it by timing. Never after a
+              // lost attach race: the quote (and its linked lead) belongs to
+              // another customer.
+              estimateId: (linkedEstimate && !estimateAttachRaceLost) ? linkedEstimateId : null,
+              customerId,
+              enforceOriginating: true,
+            });
+            // A closed deal owes the customer row the same promotion every
+            // other booking path applies (stage → won, member_since,
+            // reactivation); markConverted only touches the leads row.
+            // Promote when THIS trigger converted — or when the deal closed
+            // through the estimate path: markEstimateManuallyAccepted (or the
+            // earlier acceptance of an already-accepted quote) converts the
+            // linked lead itself, so convertLeadFromEvent finds no open lead
+            // and reports converted:false, yet a one-time acceptance never
+            // promotes the customer row (only the recurring converter does).
+            const estimateClosedDeal = !!(linkedEstimate && !estimateAttachRaceLost
+              && (estimateAutoAccepted || linkedEstimate.status === 'accepted'));
+            if (conversion?.converted || estimateClosedDeal) {
+              const { promoteCustomerOnBooking } = require('../services/customer-stages');
+              await promoteCustomerOnBooking(db, customerId);
+            }
           } catch (e) {
-            logger.warn(`[lead-trigger] recurring-booking conversion failed for customer=${customerId}: ${e.message}`);
+            logger.warn(`[lead-trigger] booking conversion failed for customer=${customerId}: ${e.message}`);
           }
         }
 
@@ -2419,6 +2464,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           case 'reschedule': {
             if (!payload?.scheduledDate) throw Object.assign(new Error('scheduledDate required'), { isValidation: true });
             let reminderSyncTime = null;
+            let callFollowUpShiftFrom = null;
             await db.transaction(async (trx) => {
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
@@ -2426,6 +2472,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (payload?.windowStart) updates.window_start = payload.windowStart;
               if (payload?.windowEnd) updates.window_end = payload.windowEnd;
               await trx('scheduled_services').where({ id }).update(updates);
+              callFollowUpShiftFrom = svc.scheduled_date;
               const prevDate = svc.scheduled_date instanceof Date
                 ? svc.scheduled_date.toISOString().split('T')[0]
                 : normalizeDateOnly(svc.scheduled_date);
@@ -2457,6 +2504,23 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 }
               } catch {}
             }
+            // Keep a call-created follow-up (visit 2) spaced from its parent —
+            // shared with the rebooker path; best-effort outside the trx (a
+            // failed shift leaves the child where it was; the helper no-ops
+            // when the date didn't actually change).
+            try {
+              const shifted = await shiftCallFollowUpsForParentMove({
+                conn: db,
+                parentServiceId: id,
+                fromDate: callFollowUpShiftFrom,
+                toDate: payload.scheduledDate,
+              });
+              if (shifted > 0) {
+                logger.info(`[admin-schedule] bulk reschedule shifted ${shifted} call-created follow-up visit(s) with parent ${id}`);
+              }
+            } catch (e) {
+              logger.error(`[admin-schedule] bulk reschedule call follow-up shift failed for ${id}: ${e.message}`);
+            }
             break;
           }
           case 'cancel': {
@@ -2477,6 +2541,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               const AppointmentReminders = require('../services/appointment-reminders');
               await AppointmentReminders.handleCancellation(id);
             } catch {}
+            // Cancelling a call-booked primary pulls its pending follow-up
+            // (visit 2) off the schedule too — shared with the track-
+            // transitions cancel path; best-effort after the parent commit.
+            try {
+              const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: id });
+              if (cancelled > 0) {
+                logger.info(`[admin-schedule] bulk cancel cascaded to ${cancelled} call-created follow-up visit(s) of ${id}`);
+              }
+            } catch (e) {
+              logger.error(`[admin-schedule] bulk-cancel call follow-up cascade failed for ${id}: ${e.message}`);
+            }
             // Void any still-open invoice pre-minted for this visit so
             // dunning doesn't chase a cancelled job. Paid/processing stay put.
             await voidOpenInvoicesForCancelledService(id);
@@ -2918,6 +2993,9 @@ router.put('/:id/update-details', async (req, res, next) => {
     // them AFTER commit (mirrors the POST create path) so the 72h/24h cron
     // never reads a row whose visit could still roll back.
     const spawnedRecurringChildren = [];
+    // Prior scheduled_date, captured inside the trx when the edit moves the
+    // visit — drives the call-created follow-up shift after commit.
+    let callFollowUpShiftFrom = null;
 
     await db.transaction(async (trx) => {
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
@@ -2946,6 +3024,9 @@ router.put('/:id/update-details', async (req, res, next) => {
           ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
           : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        if (updates.scheduled_date !== undefined && reminderBefore) {
+          callFollowUpShiftFrom = reminderBefore.scheduled_date;
+        }
         // Third-party Bill-To: a payer/PO change on a recurring PARENT must reach
         // the already-spawned pending child visits, INDEPENDENT of any date/
         // cadence rewrite (that path is separately gated by
@@ -3407,6 +3488,26 @@ router.put('/:id/update-details', async (req, res, next) => {
         }
       }
     });
+
+    // Keep a call-created follow-up (visit 2) spaced from its parent when the
+    // edit modal moves the primary — shared with the rebooker path; best-effort
+    // outside the trx (a failed shift leaves the child where it was; the
+    // helper no-ops when the date didn't actually change).
+    if (callFollowUpShiftFrom != null && updates.scheduled_date !== undefined) {
+      try {
+        const shifted = await shiftCallFollowUpsForParentMove({
+          conn: db,
+          parentServiceId: req.params.id,
+          fromDate: callFollowUpShiftFrom,
+          toDate: updates.scheduled_date,
+        });
+        if (shifted > 0) {
+          logger.info(`[schedule/update-details] shifted ${shifted} call-created follow-up visit(s) with parent ${req.params.id}`);
+        }
+      } catch (e) {
+        logger.error(`[schedule/update-details] call follow-up shift failed for ${req.params.id}: ${e.message}`);
+      }
+    }
 
     // Register reminder rows for the children spawned above — without this
     // the spawned visits never enter appointment_reminders, so they get no
@@ -4359,6 +4460,15 @@ router.put('/:id/status', async (req, res, next) => {
         const AppointmentReminders = require('../services/appointment-reminders');
         await AppointmentReminders.handleCancellation(req.params.id);
       } catch (e) { logger.error(`Appointment cancellation handler failed: ${e.message}`); }
+      // Cancelling a call-booked primary pulls its pending follow-up
+      // (visit 2) off the schedule too — shared with the track-transitions
+      // cancel path; best-effort after the parent commit.
+      try {
+        const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: svc.id });
+        if (cancelled > 0) {
+          logger.info(`[admin-schedule] status cancel cascaded to ${cancelled} call-created follow-up visit(s) of ${svc.id}`);
+        }
+      } catch (e) { logger.error(`[admin-schedule] status-cancel call follow-up cascade failed for ${svc.id}: ${e.message}`); }
       // Void any still-open invoice pre-minted for this visit ("Charge now")
       // so dunning doesn't chase a cancelled job. Paid/processing stay put.
       await voidOpenInvoicesForCancelledService(svc.id);
@@ -4617,8 +4727,24 @@ router.put('/:id/status', async (req, res, next) => {
                 if (!existingDates.has(candidate)) { nextStr = candidate; break; }
                 attempt++;
               }
+              // Re-check the ongoing flag immediately before inserting: it was
+              // read once at the top of this block, and a cancellation (the
+              // portal auto-processor or an admin churn) can stop the series
+              // while the slower candidate/add-on math above runs. Without
+              // this, the insert would put a fresh visit — with
+              // recurring_ongoing=true, so it keeps regenerating — on a
+              // customer who just cancelled.
+              let stillOngoing = true;
+              if (nextStr && cols.recurring_ongoing) {
+                const freshParent = await db('scheduled_services')
+                  .where({ id: parentId })
+                  .first('recurring_ongoing');
+                stillOngoing = !!(freshParent && freshParent.recurring_ongoing);
+              }
               if (!nextStr) {
                 logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — every candidate within 12 cadence steps already booked`);
+              } else if (!stillOngoing) {
+                logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
               } else {
                 const nextData = {
                   customer_id: parent.customer_id,
@@ -4645,11 +4771,34 @@ router.put('/:id/status', async (req, res, next) => {
                 const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr);
                 applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons);
                 const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
+                // Post-insert re-check closes the remaining race: a
+                // cancellation can stop the series between the pre-insert
+                // read above and this insert. The row hasn't been mirrored,
+                // broadcast, or given a reminder yet, so compensating is a
+                // plain delete — guarded on status='pending' so if the
+                // cancellation sweep already flipped it, the cancelled row
+                // (and its history) is left intact. Either way the add-on
+                // mirror + reminder registration below are skipped, so a
+                // stale reminder can't be minted after the sweep's
+                // reminder-cancel step already ran.
+                let autoExtLive = true;
+                if (cols.recurring_ongoing && autoExtRow?.id) {
+                  const parentNow = await db('scheduled_services')
+                    .where({ id: parentId })
+                    .first('recurring_ongoing');
+                  if (!parentNow || !parentNow.recurring_ongoing) {
+                    autoExtLive = false;
+                    const removed = await db('scheduled_services')
+                      .where({ id: autoExtRow.id, status: 'pending' })
+                      .del();
+                    logger.info(`[recurring] Auto-extend ${removed ? 'rolled back' : 'left to the cancellation sweep'} for parent=${parentId} — series stopped during completion processing`);
+                  }
+                }
                 // Mirror parent's add-on lines onto the auto-extended visit
                 // so a multi-service ongoing series keeps its full scope
                 // (and billing) past the seeded 4-visit window.
                 try {
-                  if (parentAddons.length > 0 && autoExtRow?.id) {
+                  if (autoExtLive && parentAddons.length > 0 && autoExtRow?.id) {
                     const addonCols = await db('scheduled_service_addons').columnInfo();
                     for (const addon of dueAddons) {
                       const addonData = {
@@ -4675,15 +4824,17 @@ router.put('/:id/status', async (req, res, next) => {
                 // visit never enters appointment_reminders, so the customer
                 // gets no 72h/24h texts for it (the cron reads only that
                 // table). No confirmation SMS, matching spawned children.
-                await registerSpawnedVisitReminder({
-                  scheduledServiceId: autoExtRow?.id,
-                  customerId: parent.customer_id,
-                  scheduledDate: nextStr,
-                  windowStart: parent.window_start,
-                  serviceType: parent.service_type,
-                  source: 'recurring_auto_extend',
-                });
-                logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
+                if (autoExtLive) {
+                  await registerSpawnedVisitReminder({
+                    scheduledServiceId: autoExtRow?.id,
+                    customerId: parent.customer_id,
+                    scheduledDate: nextStr,
+                    windowStart: parent.window_start,
+                    serviceType: parent.service_type,
+                    source: 'recurring_auto_extend',
+                  });
+                  logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
+                }
               }
             }
           } else if (!isOngoing && pendingCount === 0) {
@@ -4927,18 +5078,6 @@ function fmtTime(t) {
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
 }
 
-function estimateDuration(serviceType, propertySqft, lotSqft) {
-  const s = (serviceType || '').toLowerCase();
-  if (s.includes('lawn') || s.includes('turf')) return Math.round(8 + (lotSqft || 5000) / 1000 * 1.75);
-  if (s.includes('pest') && s.includes('interior')) return Math.round(20 + (propertySqft || 1800) / 1000 * 5);
-  if (s.includes('pest')) return Math.round(25 + (propertySqft || 1800) / 1000 * 3);
-  if (s.includes('mosquito')) return Math.round(15 + (lotSqft || 5000) / 1000 * 2);
-  if (s.includes('tree') || s.includes('shrub')) return Math.round(25 + (lotSqft || 5000) / 1000 * 2);
-  if (s.includes('termite')) return 20;
-  if (s.includes('rodent')) return 25;
-  return 30;
-}
-
 function haversine(lat1, lng1, lat2, lng2) {
   const R = 3959;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -4986,6 +5125,14 @@ router.get('/:id/estimate-source', async (req, res, next) => {
         useLinkedFallback: false,
       });
     } catch { deposit = null; }
+    // Exact payment posture (annual prepay paid/pending, setup-fee invoice) so
+    // the appointment card answers "what has this customer actually paid"
+    // without anyone re-opening the estimate. Fail-soft like the deposit read.
+    let payment = null;
+    try {
+      const { buildEstimatePaymentContext } = require('../services/estimate-payment-context');
+      payment = await buildEstimatePaymentContext(est, { scheduledServiceId: req.params.id });
+    } catch { payment = null; }
     res.json({
       linked: true,
       estimateId: est.id,
@@ -4997,6 +5144,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       estimateStatus: est.status,
       createdAt: est.created_at,
       deposit,
+      payment,
     });
   } catch (err) { next(err); }
 });
@@ -6064,6 +6212,31 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     await refreshAnnualPrepayTermsForCustomer(parent.customer_id);
 
     res.json({ success: true, action, created });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/next-visit?customerId=X — the customer's next upcoming
+// visit, used by the completion panel's "Next scheduled visit" card. Returns the
+// soonest FUTURE scheduled service (after today, ET) that is still on the books
+// (not cancelled/rescheduled/completed/skipped/no-show). Returns { nextVisit: null }
+// when there's nothing scheduled ahead.
+router.get('/next-visit', async (req, res, next) => {
+  try {
+    const customerId = req.query.customerId;
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    const today = etDateString();
+    const row = await db('scheduled_services')
+      .where({ customer_id: customerId })
+      .andWhere('scheduled_date', '>', today)
+      .whereNotIn('status', ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'])
+      .orderBy('scheduled_date', 'asc')
+      .first(
+        'id',
+        db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as date"),
+        'service_type as serviceType',
+      );
+    if (!row) return res.json({ nextVisit: null });
+    res.json({ nextVisit: { id: row.id, date: row.date, serviceType: row.serviceType } });
   } catch (err) { next(err); }
 });
 

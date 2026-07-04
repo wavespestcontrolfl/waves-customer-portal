@@ -267,20 +267,26 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(legacyAdminSource).toContain('commercialRiskType: formIsCommercial');
     expect(adminToolViewSource).toContain('commercialRiskType: formIsCommercial');
     // Changing the business type must invalidate a generated estimate on BOTH
-    // forms (else Save persists stale pest/rodent totals) — it's in the reset set.
+    // forms (else Save persists stale pest/rodent totals). Legacy keeps the
+    // per-field reset set; V2 dropped it — SelectV2 routes through set(),
+    // which invalidates on every pricing-field change unconditionally.
     expect(legacyAdminSource).toContain('"commercialRiskType",');
-    expect(adminToolViewSource).toContain('"commercialRiskType",');
+    expect(adminToolViewSource).toContain('k="commercialRiskType"');
   });
 
   test('commercial multipliers ride in BOTH admin payloads + reset set (Phase 2)', () => {
     // T&S density + mosquito pressure must forward + invalidate on both forms so
     // the priced multiplier can never diverge between the two admin surfaces.
+    // Legacy invalidates via its per-field reset set; V2 dropped the set —
+    // these are SelectV2 fields, and set() invalidates unconditionally.
     for (const src of [legacyAdminSource, adminToolViewSource]) {
       expect(src).toContain('treeShrubDensity: formIsCommercial');
       expect(src).toContain('mosquitoPressure: formIsCommercial');
-      expect(src).toContain('"treeShrubDensity",');
-      expect(src).toContain('"mosquitoPressure",');
     }
+    expect(legacyAdminSource).toContain('"treeShrubDensity",');
+    expect(legacyAdminSource).toContain('"mosquitoPressure",');
+    expect(adminToolViewSource).toContain('k="treeShrubDensity"');
+    expect(adminToolViewSource).toContain('k="mosquitoPressure"');
   });
 
   test('commercial termite scope rides in BOTH admin payloads (liability gate stays in sync)', () => {
@@ -567,7 +573,11 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(legacyAdminSource).toContain('DETHATCHING_ESTIMATE_RESET_FIELDS');
     expect(legacyAdminSource).toContain('Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.');
     expect(adminToolViewSource).toContain('dethatchingCleanupLevel');
-    expect(adminToolViewSource).toContain('DETHATCHING_ESTIMATE_RESET_FIELDS');
+    // V2 no longer keeps a per-field reset allowlist: toggle() invalidates the
+    // generated estimate on EVERY checkbox flip (the allowlist let pricing
+    // flags like rodentTrappingEmergency ship stale prices). Pin the invariant.
+    expect(adminToolViewSource).toContain('Every CheckboxV2 key is a pricing input or pricing gate');
+    expect(adminToolViewSource).not.toContain('DETHATCHING_ESTIMATE_RESET_FIELDS');
     expect(adminToolViewSource).toContain('Base price does not include bagging or debris hauling.');
     expect(adminToolViewSource).toContain('Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.');
   });

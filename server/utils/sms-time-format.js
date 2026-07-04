@@ -1,3 +1,9 @@
+// The arrival window quoted to customers is ALWAYS 2 hours from the window
+// start (owner directive). scheduled_services.window_end (and slot end times)
+// is the job-duration block that drives scheduling/overlap — never quote it
+// to a customer as the arrival window.
+const ARRIVAL_WINDOW_MINUTES = 120;
+
 function parseHHMM(value) {
   const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
   if (!match) return null;
@@ -24,6 +30,17 @@ function formatSmsTimeRange(value) {
   return `${formatSmsTime(match[1])} - ${formatSmsTime(match[2])}`;
 }
 
+// '09:00' / '09:00:00' → '09:00-11:00' — the customer-facing arrival range
+// for a visit starting at `start`, ready for formatSmsTimeRange. Returns
+// null when the start time is missing or malformed.
+function arrivalWindowRange(start) {
+  const parsed = parseHHMM(String(start || '').slice(0, 5));
+  if (!parsed) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  const endTotal = (parsed.hour * 60 + parsed.minute + ARRIVAL_WINDOW_MINUTES) % (24 * 60);
+  return `${pad(parsed.hour)}:${pad(parsed.minute)}-${pad(Math.floor(endTotal / 60))}:${pad(endTotal % 60)}`;
+}
+
 function formatSmsTimeValue(value) {
   if (typeof value !== 'string') return value;
   if (parseHHMM(value)) return formatSmsTime(value);
@@ -37,6 +54,8 @@ function formatSmsTemplateVars(vars = {}) {
 }
 
 module.exports = {
+  ARRIVAL_WINDOW_MINUTES,
+  arrivalWindowRange,
   formatSmsTime,
   formatSmsTimeRange,
   formatSmsTimeValue,

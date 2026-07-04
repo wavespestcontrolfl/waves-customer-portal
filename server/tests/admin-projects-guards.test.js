@@ -19,6 +19,7 @@ const {
   detectedImageMime,
   validateUploadedImage,
   evaluateProjectSendReadiness,
+  dropStaleCertTreatmentDate,
 } = projectsRouter._private;
 
 describe('admin project route guards', () => {
@@ -162,5 +163,155 @@ describe('admin project route guards', () => {
       expect(readiness.required.map((item) => item.key)).not.toContain('photos');
       expect(readiness.required.map((item) => item.key)).not.toContain('recommendations');
     }
+  });
+
+  test('certificate send readiness requires a finished-solution concentration only for liquid soil barriers', () => {
+    const baseCertFindings = {
+      treatment_address: '123 Main St, Bradenton, FL 34202',
+      applicator_name: 'Adam Benetti',
+      applicator_fdacs_id: 'JF123456',
+      applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).',
+    };
+    const evaluate = (findings) => evaluateProjectSendReadiness({
+      project: {
+        id: 'project-cert',
+        customer_id: 'customer-1',
+        project_date: '2026-05-18',
+        project_type: 'pre_treatment_termite_certificate',
+        findings,
+      },
+      customer: { id: 'customer-1' },
+    });
+
+    // Bait system: no finished solution exists — neither concentration nor
+    // gallons may block the send (the create form leaves both blank).
+    const bait = evaluate({
+      ...baseCertFindings,
+      treatment_method: 'Bait system',
+      product_name: 'Trelona ATBB',
+      active_ingredient: 'novaluron',
+      linear_feet: '180',
+    });
+    expect(bait.missing).toEqual([]);
+
+    // Wood treatment: same — measured by treated area only.
+    const wood = evaluate({
+      ...baseCertFindings,
+      treatment_method: 'Wood treatment (borate)',
+      product_name: 'Bora-Care',
+      active_ingredient: 'disodium octaborate tetrahydrate',
+      square_footage: '2200',
+    });
+    expect(wood.missing).toEqual([]);
+
+    // Liquid soil barrier still requires the dilution.
+    const soil = evaluate({
+      ...baseCertFindings,
+      treatment_method: 'Soil barrier (chemical)',
+      product_name: 'Termidor SC',
+      active_ingredient: 'fipronil',
+      square_footage: '1800',
+      gallons_applied: '180',
+    });
+    expect(soil.missing.map((item) => item.key)).toContain('cert_active_ingredient');
+  });
+
+  test('certificate send readiness validates each additional application like the primary', () => {
+    const completePrimary = {
+      treatment_address: '123 Main St, Bradenton, FL 34202',
+      treatment_method: 'Soil barrier (chemical)',
+      product_name: 'Termidor SC',
+      active_ingredient: 'fipronil',
+      concentration_pct: '0.060',
+      square_footage: '1800',
+      gallons_applied: '180',
+      applicator_name: 'Adam Benetti',
+      applicator_fdacs_id: 'JF123456',
+      applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).',
+    };
+    const evaluate = (findings) => evaluateProjectSendReadiness({
+      project: {
+        id: 'project-cert-multi',
+        customer_id: 'customer-1',
+        project_date: '2026-05-18',
+        project_type: 'pre_treatment_termite_certificate',
+        findings,
+      },
+      customer: { id: 'customer-1' },
+    });
+
+    // Combined job: complete soil-barrier primary + complete wood-treatment
+    // row sends clean. Wood treatments need area but no concentration/gallons.
+    const combined = evaluate({
+      ...completePrimary,
+      additional_applications: [{
+        treatment_method: 'Wood treatment (borate)',
+        product_name: 'Bora-Care',
+        epa_registration: '64405-1',
+        active_ingredient: 'disodium octaborate tetrahydrate',
+        square_footage: '2200',
+      }],
+    });
+    expect(combined.missing).toEqual([]);
+
+    // A row with content must be as complete as the primary — missing pieces
+    // block the send under Application-2 keys.
+    const incomplete = evaluate({
+      ...completePrimary,
+      additional_applications: [{ treatment_method: 'Soil barrier (chemical)' }],
+    });
+    expect(incomplete.missing.map((item) => item.key)).toEqual(expect.arrayContaining([
+      'cert_app2_product',
+      'cert_app2_active_ingredient',
+      'cert_app2_coverage',
+    ]));
+
+    // Rows added but never touched (accidental "Add") are ignored, and
+    // non-array garbage can't crash the gate.
+    expect(evaluate({ ...completePrimary, additional_applications: [{}] }).missing).toEqual([]);
+    expect(evaluate({ ...completePrimary, additional_applications: 'oops' }).missing).toEqual([]);
+  });
+
+  test('editing a certificate project date drops the stale legacy findings treatment_date', () => {
+    const legacyProject = {
+      project_type: 'pre_treatment_termite_certificate',
+      project_date: '2026-06-18',
+      findings: { treatment_date: '2026-06-20', treatment_method: 'Soil barrier (chemical)' },
+    };
+
+    // Date actually changed → the hidden legacy key is dropped so the date
+    // the editor saw is what prints (findings echoed back by the client).
+    const changed = {
+      project_date: '2026-06-25',
+      findings: { treatment_date: '2026-06-20', treatment_method: 'Soil barrier (chemical)' },
+    };
+    dropStaleCertTreatmentDate(legacyProject, changed);
+    expect(changed.findings.treatment_date).toBeUndefined();
+    expect(changed.findings.treatment_method).toBe('Soil barrier (chemical)');
+
+    // Date changed on a findings-less update → legacy key stripped from the
+    // STORED findings so the edit still takes effect on the certificate.
+    const dateOnly = { project_date: '2026-06-25' };
+    dropStaleCertTreatmentDate(legacyProject, dateOnly);
+    expect(dateOnly.findings.treatment_date).toBeUndefined();
+    expect(dateOnly.findings.treatment_method).toBe('Soil barrier (chemical)');
+
+    // Untouched date → the attested legacy findings date keeps rendering.
+    const unchanged = {
+      project_date: '2026-06-18',
+      findings: { treatment_date: '2026-06-20' },
+    };
+    dropStaleCertTreatmentDate(legacyProject, unchanged);
+    expect(unchanged.findings.treatment_date).toBe('2026-06-20');
+
+    // Date cleared → never drop the only date the certificate has left.
+    const cleared = { project_date: null, findings: { treatment_date: '2026-06-20' } };
+    dropStaleCertTreatmentDate(legacyProject, cleared);
+    expect(cleared.findings.treatment_date).toBe('2026-06-20');
+
+    // Non-certificate projects are never touched.
+    const wdo = { project_date: '2026-06-25', findings: { treatment_date: '2026-06-20' } };
+    dropStaleCertTreatmentDate({ ...legacyProject, project_type: 'wdo_inspection' }, wdo);
+    expect(wdo.findings.treatment_date).toBe('2026-06-20');
   });
 });

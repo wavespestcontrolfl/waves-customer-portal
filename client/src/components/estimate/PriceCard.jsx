@@ -96,7 +96,23 @@ const DEFAULT_WORDING = {
   guaranteeLine: 'Try us risk-free — 90-day money-back guarantee.',
 };
 
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING }) {
+// Savings + period for a frequency entry — shared with the bundle layout,
+// which renders the "You save …" lines BELOW all service boxes instead of
+// inside each card. Mirrors the in-card math exactly (incl. the
+// rounding-noise floor).
+export function priceCardSavingsInfo(frequency = {}) {
+  if (frequency.quoteRequired === true || frequency.monthly == null) return null;
+  const billingKey = billingKeyForFrequency(frequency);
+  const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
+  const periodLabel = billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo';
+  const cadencePrice = Math.round(Number(frequency.monthly) * intervalMonths * 100) / 100;
+  const anchorPrice = Number(frequency.perVisit || 0);
+  const raw = anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
+  const savings = raw >= 0.05 ? raw : 0;
+  return savings > 0 ? { savings, periodLabel } : null;
+}
+
+export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true }) {
   if (!frequency) return null;
 
   const monthly = frequency.monthly;
@@ -107,12 +123,51 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
   const periodLabel = wording?.periodLabelByKey?.[billingKey]
     || (billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo');
-  const serviceCadenceLabel = isSeparateServiceCadence(frequency) ? frequency.label : null;
   const cadencePrice = quoteRequired || monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
   const anchorPrice = Number(frequency.perVisit || 0);
-  const savings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
+  // cadencePrice round-trips through the rounded monthly figure (e.g. a $94
+  // quarterly visit → $31.33/mo → $93.99/quarter), so a 0%-discount tier
+  // (WaveGuard Bronze) can land a phantom cent or two under the per-visit
+  // anchor. Anything below this threshold is rounding noise, not a member
+  // discount — show no anchor strike-through and no save line for it.
+  const SAVINGS_ROUNDING_NOISE = 0.05;
+  const rawSavings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
+  const savings = rawSavings >= SAVINGS_ROUNDING_NOISE ? rawSavings : 0;
   // True daily rate: annual cost / 365 (monthly * 12 / 365).
   const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;
+  // Applications-per-year highlight — only when the count is unambiguous.
+  const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
+  const treatmentVisitRows = Array.isArray(frequency.perServiceTreatments)
+    ? frequency.perServiceTreatments.filter((row) => Number(row?.visitsPerYear) > 0)
+    : [];
+  // The cadence-key fallback only applies when there are NO per-service
+  // treatment rows: an unsplit combined frequency with several rows of
+  // differing counts must not advertise one number for all of them.
+  const visitsPerYear = Number(frequency.visitsPerYear) > 0
+    ? Number(frequency.visitsPerYear)
+    : (treatmentVisitRows.length === 1
+      ? Number(treatmentVisitRows[0].visitsPerYear)
+      : (treatmentVisitRows.length === 0 ? (CADENCE_VISITS[frequency.key] || null) : null));
+  const showVisitsLine = !quoteRequired && Number.isFinite(visitsPerYear) && visitsPerYear > 0;
+  // A narrow low-confidence commercial line prices as a ±pct RANGE tied to the
+  // displayed cadence price ("$X–$Y/mo, confirmed on site"). The server flags the
+  // frequency with lowConfidenceRangePct; the WIDE case is already quote-required
+  // upstream (site-confirmation), so this only fires for the self-serve narrow band.
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const lowConfidenceRangePct = quoteRequired ? 0 : Number(frequency.lowConfidenceRangePct) || 0;
+  // Band only the LOW-confidence SHARE of the price. fraction is 1 for a single
+  // all-LOW commercial line and < 1 when the card mixes LOW + exact MEDIUM lines,
+  // so a mixed card never overstates the range (e.g. LOW $400 + MED $500 → ±$80,
+  // not ±$180). Defaults to 1 if the server didn't send a fraction.
+  const rawFraction = Number(frequency.lowConfidenceFraction);
+  const lowConfidenceFraction = Number.isFinite(rawFraction) && rawFraction > 0 ? Math.min(rawFraction, 1) : 1;
+  const showLowConfidenceRange = lowConfidenceRangePct > 0 && cadencePrice != null && cadencePrice > 0;
+  const monthlyBand = showLowConfidenceRange ? cadencePrice * lowConfidenceFraction * lowConfidenceRangePct : 0;
+  const rangeLow = showLowConfidenceRange ? round2(cadencePrice - monthlyBand) : null;
+  const rangeHigh = showLowConfidenceRange ? round2(cadencePrice + monthlyBand) : null;
+  const annualBand = showLowConfidenceRange && annual ? Number(annual) * lowConfidenceFraction * lowConfidenceRangePct : 0;
+  const annualRangeLow = showLowConfidenceRange && annual ? round2(Number(annual) - annualBand) : null;
+  const annualRangeHigh = showLowConfidenceRange && annual ? round2(Number(annual) + annualBand) : null;
   const manualDiscount = frequency.manualDiscount && Number(frequency.manualDiscount.amount) > 0
     ? frequency.manualDiscount
     : null;
@@ -124,7 +179,9 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const manualDiscountInterval = manualDiscountRecurringAnnual > 0
     ? Math.round((manualDiscountRecurringAnnual / 12) * intervalMonths * 100) / 100
     : 0;
-  const treatmentRows = Array.isArray(frequency.perServiceTreatments)
+  // Per-application treatment rows expose EXACT per-visit prices, which would
+  // contradict the "confirmed on site" range — so drop them while ranging.
+  const treatmentRows = !showLowConfidenceRange && Array.isArray(frequency.perServiceTreatments)
     ? frequency.perServiceTreatments
       .map((row) => ({ ...row, displayPrice: Number(row.displayPrice ?? row.perTreatment) }))
       .filter((row) => Number.isFinite(row.displayPrice) && row.displayPrice > 0)
@@ -135,11 +192,11 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       padding: '8px 0 14px',
       marginBottom: 6,
     }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginTop: 8 }}>
-        {savings > 0 ? (
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+        {showSavings && savings > 0 && !showLowConfidenceRange ? (
           <span style={{
             fontFamily: "'Source Serif 4', Georgia, serif",
-            fontSize: 26,
+            fontSize: 14,
             color: '#9CA3AF',
             textDecoration: 'line-through',
             lineHeight: 1,
@@ -149,15 +206,19 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         ) : null}
         <span style={{
           fontFamily: "'Source Serif 4', Georgia, serif",
-          fontSize: quoteRequired ? 42 : 58,
+          fontSize: quoteRequired ? 26 : showLowConfidenceRange ? 24 : 26,
           fontWeight: 500,
           color: W.blueDeeper,
           lineHeight: 1,
         }}>
-        {quoteRequired ? 'Quote required' : fmtMoney(cadencePrice)}
+        {quoteRequired
+          ? 'Quote required'
+          : showLowConfidenceRange
+          ? `${fmtMoney(rangeLow)}–${fmtMoney(rangeHigh)}`
+          : fmtMoney(cadencePrice)}
         </span>
         {!quoteRequired ? (
-          <span style={{ fontSize: 24, fontWeight: 500, color: '#6B7280' }}>{periodLabel}</span>
+          <span style={{ fontSize: 14, fontWeight: 500, color: '#6B7280', whiteSpace: 'nowrap' }}>{periodLabel}</span>
         ) : null}
         {waveGuardTier ? (
           <span style={{
@@ -175,27 +236,38 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         ) : null}
       </div>
 
-      {savings > 0 && waveGuardTier ? (
+      {showVisitsLine ? (
+        <div style={{ marginTop: 10, color: W.blueDeeper, fontSize: 15, fontWeight: 700 }}>
+          <span aria-hidden="true" style={{ color: W.green, marginRight: 6 }}>&#10003;</span>
+          {visitsPerYear} application{visitsPerYear === 1 ? '' : 's'} per year included
+        </div>
+      ) : null}
+
+      {showSavings && savings > 0 && waveGuardTier && !showLowConfidenceRange ? (
         <div style={{ marginTop: 12, color: W.green, fontSize: 16, fontWeight: 800 }}>
           You save {fmtMoney(savings)}{periodLabel} with WaveGuard {waveGuardTier}
         </div>
       ) : null}
 
-      {!quoteRequired && annual ? (
+      {/* Standard exact prices show no annual figure (owner directive
+          2026-07-03) — only the site-confirmation commercial range keeps
+          its annual band, since the ranged /mo figure alone understates
+          the commitment being confirmed on site. */}
+      {!quoteRequired && annual && showLowConfidenceRange ? (
         <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8 }}>
-          {fmtMoney(annual)} / year
+          {`${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`}
+        </div>
+      ) : null}
+
+      {showLowConfidenceRange ? (
+        <div style={{ fontSize: 14, color: '#475569', marginTop: 10, lineHeight: 1.5, fontWeight: 600 }}>
+          Estimated range — we confirm your exact price with a quick site visit before your first service.
         </div>
       ) : null}
 
       {quoteRequired && quoteReason ? (
         <div style={{ fontSize: 15, color: '#92400E', marginTop: 10, lineHeight: 1.45, fontWeight: 700 }}>
           {quoteReason}
-        </div>
-      ) : null}
-
-      {serviceCadenceLabel ? (
-        <div style={{ fontSize: 14, color: '#475569', marginTop: 8, fontWeight: 700 }}>
-          Service visits: {serviceCadenceLabel}
         </div>
       ) : null}
 
@@ -220,15 +292,17 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </div>
       ) : null}
 
-      {dayPrice ? (
+      {dayPrice && !showLowConfidenceRange ? (
         <div style={{ fontSize: 15, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
           {(wording?.dayLine || DEFAULT_WORDING.dayLine).replace('{amount}', fmtMoney(dayPrice))}
         </div>
       ) : null}
 
-      <div style={{ fontSize: 16, color: W.blueDeeper, marginTop: 14, lineHeight: 1.5 }}>
-        {wording?.guaranteeLine || DEFAULT_WORDING.guaranteeLine}
-      </div>
+      {showGuarantee ? (
+        <div style={{ fontSize: 15, color: W.blueDeeper, marginTop: 12, lineHeight: 1.5 }}>
+          {wording?.guaranteeLine || DEFAULT_WORDING.guaranteeLine}
+        </div>
+      ) : null}
 
       {treatmentRows.length ? (
         <div style={{ display: 'grid', gap: 12, marginTop: 18 }}>

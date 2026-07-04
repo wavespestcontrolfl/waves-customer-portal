@@ -1,10 +1,32 @@
 const express = require('express');
+const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
 const logger = require('../services/logger');
+
+// Format/length validation for manual lead creation. Permissive by design — it
+// validates shape (email/phone format, string caps, types) without changing
+// which leads are accepted; the handler already whitelists fields by
+// destructuring, so this is defense-in-depth against malformed/oversized input.
+const createLeadSchema = Joi.object({
+  first_name: Joi.string().trim().max(120).allow('', null),
+  last_name: Joi.string().trim().max(120).allow('', null),
+  phone: Joi.string().trim().max(40).allow('', null),
+  email: Joi.string().trim().email({ tlds: false }).max(255).allow('', null),
+  address: Joi.string().trim().max(255).allow('', null),
+  city: Joi.string().trim().max(120).allow('', null),
+  zip: Joi.string().trim().max(20).allow('', null),
+  lead_source_id: Joi.alternatives(Joi.number().integer(), Joi.string().trim().max(40)).allow('', null),
+  lead_type: Joi.string().trim().max(60).allow('', null),
+  service_interest: Joi.string().trim().max(255).allow('', null),
+  urgency: Joi.string().trim().max(40).allow('', null),
+  is_residential: Joi.boolean(),
+  is_commercial: Joi.boolean(),
+  notes: Joi.string().trim().max(5000).allow('', null),
+}).unknown(true);
 const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
@@ -32,24 +54,12 @@ function parseInclusiveStart(startDate) {
   return new Date(startDate);
 }
 
-// Speed-to-Lead fresh-start baseline (owner directive 2026-06-30: "fresh start
-// tomorrow"). The live backlog gauge (Avg Speed to Lead + the "waiting" count)
-// only counts leads first contacted on/after this ET date, so a one-time reset
-// isn't dragged down forever by the pre-reset backlog of never-answered leads.
-// Env-overridable (SPEED_TO_LEAD_FRESH_START=YYYY-MM-DD) for a future reset; set
-// it empty to disable the floor. Invalid values fail open (no floor).
-const SPEED_TO_LEAD_FRESH_START = (() => {
-  const raw = process.env.SPEED_TO_LEAD_FRESH_START ?? '2026-07-01';
-  if (!raw) return null;
-  const d = parseInclusiveStart(raw);
-  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return null;
-  // parseETDateTime builds the cutoff with Date.UTC(), which silently rolls a
-  // non-existent calendar date over (2026-02-30 -> Mar 2) instead of failing.
-  // Round-trip a date-only value through ET and reject any mismatch, so a
-  // typoed reset env falls open to "no floor" rather than a wrong cutoff.
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw) && etDateString(d) !== raw) return null;
-  return d;
-})();
+// Speed-to-Lead fresh-start baseline — the live backlog gauge (Avg Speed to
+// Lead + the "waiting" count) only counts leads first contacted on/after this
+// ET date. Resolution (env override, fail-open validation, rolled-over-date
+// rejection) lives in the shared module, which the dashboard Action Inbox
+// also uses so the two "still waiting" definitions can't drift.
+const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
 const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 
@@ -79,6 +89,10 @@ const LEAD_STATUSES = [
 ];
 const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
 const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate_viewed', 'won']);
+// "Open" pipeline statuses — everything still being worked (not won/lost/
+// unresponsive/disqualified/duplicate). The list route expands the virtual
+// `status=open` filter (the Pipeline table's default) to this set.
+const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
 
 // Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
@@ -110,6 +124,7 @@ async function ensureLeadsTables(db) {
       waveguard_tier varchar(255), lost_reason varchar(255), lost_to_competitor varchar(255), lost_notes text,
       next_follow_up_at timestamptz, follow_up_count integer DEFAULT 0,
       last_follow_up_at timestamptz, response_time_minutes integer,
+      deleted_at timestamptz, deleted_by uuid,
       created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
     )` },
     { name: 'lead_activities', sql: `CREATE TABLE IF NOT EXISTS lead_activities (
@@ -143,6 +158,7 @@ async function ensureLeadsTables(db) {
     'CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email)',
     'CREATE INDEX IF NOT EXISTS idx_leads_customer_id ON leads(customer_id)',
     'CREATE INDEX IF NOT EXISTS idx_leads_first_contact_at ON leads(first_contact_at)',
+    'CREATE INDEX IF NOT EXISTS idx_leads_deleted_at ON leads(deleted_at) WHERE deleted_at IS NOT NULL',
     'CREATE INDEX IF NOT EXISTS idx_lead_sources_is_active ON lead_sources(is_active)',
   ];
   for (const idx of indexes) {
@@ -174,13 +190,16 @@ router.get('/analytics/overview', async (req, res, next) => {
     const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
     const leads = await db('leads')
+      .whereNull('deleted_at')
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end);
 
     const total = leads.length;
     const won = leads.filter(l => l.status === 'won').length;
     const lost = leads.filter(l => l.status === 'lost').length;
-    const active = leads.filter(l => !['won', 'lost', 'disqualified', 'duplicate'].includes(l.status)).length;
+    // unresponsive included: the daily staleness sweep assigns it at scale,
+    // and an auto-closed lead must leave the active count immediately.
+    const active = leads.filter(l => !['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'].includes(l.status)).length;
     const conversionRate = total > 0 ? Math.round(won / total * 1000) / 10 : 0;
 
     // Response time headline is the MEDIAN, not the mean: a handful of multi-day
@@ -208,6 +227,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     // first response has happened. response_time_minutes IS NULL is kept as a
     // belt-and-suspenders guard against status/timestamp drift.
     const openLeadsQuery = db('leads')
+      .whereNull('deleted_at')
       .where('status', 'new')
       .whereNull('response_time_minutes')
       .whereNotNull('first_contact_at');
@@ -232,6 +252,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     // still counts — the whole point of a "recent performance" gauge. Independent of
     // the page's date filter.
     const recentResponded = await db('leads')
+      .whereNull('deleted_at')
       .whereNotNull('response_time_minutes')
       .whereNotNull('first_contact_at')
       .whereRaw(
@@ -330,6 +351,7 @@ router.get('/analytics/funnel', async (req, res, next) => {
     const stages = await db('leads')
       .select('status')
       .count('* as count')
+      .whereNull('deleted_at')
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)
       .groupBy('status');
@@ -363,6 +385,7 @@ router.get('/analytics/response', async (req, res, next) => {
     const end = end_date ? new Date(end_date) : new Date();
 
     const leads = await db('leads')
+      .whereNull('deleted_at')
       .whereNotNull('response_time_minutes')
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end);
@@ -413,6 +436,7 @@ router.get('/analytics/lost', async (req, res, next) => {
     const reasons = await db('leads')
       .select('lost_reason')
       .count('* as count')
+      .whereNull('deleted_at')
       .where('status', 'lost')
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)
@@ -422,6 +446,7 @@ router.get('/analytics/lost', async (req, res, next) => {
     const competitors = await db('leads')
       .select('lost_to_competitor')
       .count('* as count')
+      .whereNull('deleted_at')
       .where('status', 'lost')
       .whereNotNull('lost_to_competitor')
       .where('first_contact_at', '>=', start)
@@ -452,10 +477,10 @@ router.get('/sources', async (req, res, next) => {
     const sources = await db('lead_sources')
       .select(
         'lead_sources.*',
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.first_contact_at >= ?) as month_leads`, [monthStart]),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.status = 'won' AND leads.first_contact_at >= ?) as month_conversions`, [monthStart]),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id) as total_leads`),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.status = 'won') as total_conversions`),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND leads.first_contact_at >= ?) as month_leads`, [monthStart]),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND leads.status = 'won' AND leads.first_contact_at >= ?) as month_conversions`, [monthStart]),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL) as total_leads`),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND leads.status = 'won') as total_conversions`),
       )
       .orderBy('name');
 
@@ -476,6 +501,7 @@ router.get('/sources/:id', async (req, res, next) => {
 
     const recentLeads = await db('leads')
       .where('lead_source_id', req.params.id)
+      .whereNull('deleted_at')
       .orderBy('first_contact_at', 'desc')
       .limit(20);
 
@@ -562,6 +588,7 @@ router.get('/campaigns', async (req, res, next) => {
     for (const c of campaigns) {
       if (c.lead_source_id && c.start_date) {
         const q = db('leads').where('lead_source_id', c.lead_source_id)
+          .whereNull('deleted_at')
           .where('first_contact_at', '>=', c.start_date);
         if (c.end_date) q.where('first_contact_at', '<=', c.end_date);
         const counts = await q.clone().select(
@@ -641,9 +668,13 @@ router.get('/', async (req, res, next) => {
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
         db.raw("technicians.name as assigned_name"),
-      );
+      )
+      .whereNull('leads.deleted_at');
 
-    if (status) query = query.where('leads.status', status);
+    // Virtual `open` filter (the Pipeline table's default view): every status
+    // still being worked. Individual status values pass through unchanged.
+    if (status === 'open') query = query.whereIn('leads.status', OPEN_LEAD_STATUSES);
+    else if (status) query = query.where('leads.status', status);
     if (source) query = query.where('leads.lead_source_id', source);
     // Drill-down from the dashboard's Marketing Attribution panel, which groups by
     // lead_sources.name — so we filter by the exact display name to match that
@@ -682,8 +713,10 @@ router.get('/', async (req, res, next) => {
     const lim = Math.min(parseInt(limit, 10) || 50, 200);
 
     const countQuery = db('leads')
-      .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id');
-    if (status) countQuery.where('leads.status', status);
+      .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
+      .whereNull('leads.deleted_at');
+    if (status === 'open') countQuery.whereIn('leads.status', OPEN_LEAD_STATUSES);
+    else if (status) countQuery.where('leads.status', status);
     if (source) countQuery.where('leads.lead_source_id', source);
     if (source_name) countQuery.where('lead_sources.name', source_name);
     if (channel) countQuery.where('lead_sources.channel', channel);
@@ -726,11 +759,17 @@ router.get('/', async (req, res, next) => {
 // POST /api/admin/leads — create lead manually
 router.post('/', async (req, res, next) => {
   try {
+    let validated;
+    try {
+      validated = await createLeadSchema.validateAsync(req.body);
+    } catch (validationErr) {
+      return res.status(400).json({ error: 'Invalid lead data' });
+    }
     const {
       first_name, last_name, phone, email, address, city, zip,
       lead_source_id, lead_type, service_interest, urgency,
       is_residential, is_commercial, notes,
-    } = req.body;
+    } = validated;
 
     const [lead] = await db('leads').insert({
       first_name, last_name,
@@ -772,6 +811,7 @@ router.get('/:id', async (req, res, next) => {
         db.raw("technicians.name as assigned_name"),
       )
       .where('leads.id', req.params.id)
+      .whereNull('leads.deleted_at')
       .first();
 
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
@@ -795,7 +835,7 @@ router.put('/:id', async (req, res, next) => {
       'monthly_value', 'initial_service_value', 'waveguard_tier',
       'next_follow_up_at', 'notes',
     ];
-    const existingLead = await db('leads').where('id', req.params.id).first();
+    const existingLead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!existingLead) return res.status(404).json({ error: 'Lead not found' });
 
     const updates = {};
@@ -834,27 +874,42 @@ router.put('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/admin/leads/:id - remove a lead from the pipeline.
-// Lead activity rows are operational notes, so they are removed with the
-// lead. Agent response history is retained but detached to satisfy its FK.
+// DELETE /api/admin/leads/:id - remove a lead from the pipeline (SOFT delete).
+// The row is stamped deleted_at/deleted_by and every live-lead query excludes
+// it, so the lead disappears from the pipeline/analytics/matchers while the
+// row and its lead_activities audit trail stay recoverable by an admin.
+// Agent response history keeps its lead_id FK — the row still exists.
+// Idempotent: deleting an already-deleted lead is a no-op success.
 router.delete('/:id', async (req, res, next) => {
   try {
     const lead = await db('leads').where('id', req.params.id).first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    if (lead.deleted_at) return res.json({ success: true, deleted: true, alreadyDeleted: true });
 
+    const performedBy = req.technician.first_name + ' ' + (req.technician.last_name || '');
     await db.transaction(async (trx) => {
-      const hasAgentResponses = await trx.schema.hasTable('lead_agent_responses').catch(() => false);
-      if (hasAgentResponses) {
-        await trx('lead_agent_responses')
-          .where({ lead_id: req.params.id })
-          .update({ lead_id: null });
+      // Scoped to deleted_at IS NULL so a concurrent delete can't double-stamp
+      // or double-log; 0 rows means the other request already handled it.
+      const stamped = await trx('leads')
+        .where({ id: req.params.id })
+        .whereNull('deleted_at')
+        .update({
+          deleted_at: new Date(),
+          deleted_by: req.technicianId || null,
+          updated_at: new Date(),
+        });
+      if (stamped) {
+        await trx('lead_activities').insert({
+          lead_id: req.params.id,
+          activity_type: 'deleted',
+          description: `Lead removed from pipeline by ${performedBy}`,
+          performed_by: performedBy,
+          metadata: JSON.stringify({ deleted_by: req.technicianId || null }),
+        });
       }
-
-      await trx('lead_activities').where({ lead_id: req.params.id }).del();
-      await trx('leads').where({ id: req.params.id }).del();
     });
 
-    logger.info(`[leads] Deleted lead ${req.params.id}`);
+    logger.info(`[leads] Soft-deleted lead ${req.params.id}`);
     res.json({ success: true, deleted: true });
   } catch (err) { next(err); }
 });
@@ -863,6 +918,8 @@ router.delete('/:id', async (req, res, next) => {
 router.post('/:id/activity', async (req, res, next) => {
   try {
     const { activity_type, description, metadata } = req.body;
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
     const [activity] = await db('lead_activities').insert({
       lead_id: req.params.id,
       activity_type: activity_type || 'note',
@@ -883,7 +940,7 @@ router.post('/:id/convert', async (req, res, next) => {
       return res.status(400).json({ error: 'customer_id is required to convert a lead' });
     }
 
-    const lead = await db('leads').where('id', req.params.id).first();
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
     const customer = await db('customers').where('id', customerId).first();
@@ -904,6 +961,8 @@ router.post('/:id/convert', async (req, res, next) => {
 router.post('/:id/lost', async (req, res, next) => {
   try {
     const { reason, competitor, notes } = req.body;
+    const existing = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
+    if (!existing) return res.status(404).json({ error: 'Lead not found' });
     await leadAttribution.markLost(req.params.id, { reason, competitor, notes });
     const lead = await db('leads').where('id', req.params.id).first();
     res.json({ lead });
@@ -914,7 +973,7 @@ router.post('/:id/lost', async (req, res, next) => {
 router.post('/:id/assign', async (req, res, next) => {
   try {
     const { technician_id } = req.body;
-    const [lead] = await db('leads').where('id', req.params.id).update({
+    const [lead] = await db('leads').where('id', req.params.id).whereNull('deleted_at').update({
       assigned_to: technician_id,
       updated_at: new Date(),
     }).returning('*');
@@ -939,7 +998,7 @@ router.post('/:id/send-sms', async (req, res, next) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ error: 'Message is required' });
 
-    const lead = await db('leads').where('id', req.params.id).first();
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     if (!lead.phone) return res.status(400).json({ error: 'Lead has no phone number' });
 
@@ -991,7 +1050,7 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
     const { date, time, notes } = req.body;
     if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
 
-    const lead = await db('leads').where('id', req.params.id).first();
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
     const callbackAt = new Date(`${date}T${time}`);
@@ -1024,7 +1083,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     const svcType = typeof serviceType === 'string' ? serviceType.trim() : '';
     if (!svcType) return res.status(400).json({ error: 'Service type is required' });
 
-    const lead = await db('leads').where('id', req.params.id).first();
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
     // Resolve appointment duration: explicit override → service default → 60 min.
@@ -1153,13 +1212,21 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
 
       // Mark the lead converted (mirrors leadAttribution.markConverted, but on the
       // same transaction so the conversion can't commit without the appointment).
-      await trx('leads').where('id', req.params.id).update({
+      // Re-gated on deleted_at inside the transaction: the pre-transaction read
+      // can race a concurrent soft delete, and a deleted lead must not book —
+      // 0 rows updated rolls the whole booking back.
+      const converted = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update({
         status: 'won',
         customer_id: customerId,
         converted_at: new Date(),
         is_qualified: true,
         updated_at: new Date(),
       });
+      if (!converted) {
+        const gone = new Error('Lead was deleted while booking — appointment not created');
+        gone.status = 409;
+        throw gone;
+      }
       // Attach the lead's quote to this customer (same txn) so it becomes a
       // customer estimate visible in the New Appointment "Estimate source".
       // Best-effort — a backfill miss must not fail the booking.
@@ -1245,7 +1312,7 @@ router.post('/agent/test', async (req, res, next) => {
     const { lead_id } = req.body;
     if (!lead_id) return res.status(400).json({ error: 'lead_id required' });
 
-    const lead = await db('leads').where('id', lead_id).first();
+    const lead = await db('leads').where('id', lead_id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
     const customer = lead.customer_id

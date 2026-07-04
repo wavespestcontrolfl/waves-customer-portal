@@ -3,12 +3,13 @@ const router = express.Router();
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, authenticateAllowInactive } = require('../middleware/auth');
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
+const { processCancellationRequest } = require('../services/cancellation-processor');
 
 const VALID_CATEGORIES = ['pest_issue', 'lawn_concern', 'add_service', 'schedule_change', 'billing', 'cancellation', 'pause', 'upgrade', 'other'];
 const VALID_URGENCIES = ['routine', 'urgent'];
@@ -62,12 +63,21 @@ function validatePhoto(p) {
 // =========================================================================
 // POST /api/requests — Create a new service request
 // =========================================================================
-router.post('/', authenticate, createLimiter, async (req, res, next) => {
+// authenticateAllowInactive (NOT authenticate): the cancellation auto-processor
+// churns the account (active=false) mid-flight, so a client retry after a lost
+// response would otherwise 401 before reaching the dedupe/repair sweep below.
+// The gate right after validation keeps every OTHER category blocked for
+// inactive accounts, matching the strict middleware's behavior.
+router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next) => {
   try {
     const { value, error } = createSchema.validate(req.body, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
 
     const { category, subject, description, urgency, locationOnProperty, photos } = value;
+
+    if (req.customerInactive && category !== 'cancellation') {
+      return res.status(401).json({ error: 'Customer not found or inactive' });
+    }
     const validUrgency = urgency || 'routine';
     const validLocation = locationOnProperty || null;
 
@@ -86,6 +96,28 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
       .where('created_at', '>=', dupeWindow)
       .first();
     if (dupe) {
+      // A deduped CANCELLATION retry must still re-run the processor: the
+      // first submit's best-effort processing may have partially failed, and
+      // returning "success" here without re-running would leave visits/billing
+      // in the failed state until staff intervene. The processor is idempotent
+      // (already-cancelled visits and an already-churned account are no-ops),
+      // so a clean first run makes this a cheap sweep. No new admin alert —
+      // the original request's alert already carries the review flag.
+      if (category === 'cancellation') {
+        try {
+          const retry = await processCancellationRequest({
+            customerId: req.customer.id,
+            reason: `Portal cancellation request ${dupe.id}`,
+            requestId: dupe.id,
+          });
+          logger.info(
+            `Re-ran cancellation processing for deduped request ${dupe.id}: ok=${retry.ok}` +
+              (retry.ok ? '' : ` (errors: ${retry.errors.join(', ')})`)
+          );
+        } catch (retryErr) {
+          logger.error(`Deduped cancellation re-processing failed for ${dupe.id}: ${retryErr.message}`);
+        }
+      }
       return res.status(200).json({
         success: true,
         deduped: true,
@@ -99,6 +131,52 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
           status: dupe.status,
           photoCount: 0,
           createdAt: dupe.created_at,
+        },
+      });
+    }
+
+    // An INACTIVE account never creates a fresh request: the allow-inactive
+    // auth exists solely so a churned customer's retry can reach the
+    // idempotent repair, and an unexpired portal JWT must not keep minting
+    // service_requests rows / admin alerts / SMS for days after churn.
+    // Outside the 60s dedupe window, re-run the repair against their most
+    // recent cancellation request and answer with that row; with no prior
+    // cancellation request on file there is nothing to repair — reject like
+    // the strict middleware would have.
+    if (req.customerInactive) {
+      const priorCancellation = await db('service_requests')
+        .where({ customer_id: req.customer.id, category: 'cancellation' })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (!priorCancellation) {
+        return res.status(401).json({ error: 'Customer not found or inactive' });
+      }
+      try {
+        const retry = await processCancellationRequest({
+          customerId: req.customer.id,
+          reason: `Portal cancellation request ${priorCancellation.id}`,
+          requestId: priorCancellation.id,
+        });
+        logger.info(
+          `Re-ran cancellation processing for inactive-account retry ${priorCancellation.id}: ok=${retry.ok}` +
+            (retry.ok ? '' : ` (errors: ${retry.errors.join(', ')})`)
+        );
+      } catch (retryErr) {
+        logger.error(`Inactive-account cancellation re-processing failed for ${priorCancellation.id}: ${retryErr.message}`);
+      }
+      return res.status(200).json({
+        success: true,
+        deduped: true,
+        request: {
+          id: priorCancellation.id,
+          category: priorCancellation.category,
+          subject: priorCancellation.subject,
+          description: priorCancellation.description,
+          urgency: priorCancellation.urgency,
+          locationOnProperty: priorCancellation.location_on_property,
+          status: priorCancellation.status,
+          photoCount: 0,
+          createdAt: priorCancellation.created_at,
         },
       });
     }
@@ -122,6 +200,25 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     const categoryLabel = category.replace(/_/g, ' ');
     const photoCount = photoData.length;
     const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
+    const isCancellation = category === 'cancellation';
+
+    // A cancellation request is auto-processed: pull the customer's upcoming
+    // visits off the calendar, stop any recurring series, and mark the account
+    // churned. Best-effort — run it before the admin alert so the notification
+    // can report what happened. The durable service_requests row and the alert
+    // itself remain even if this fails.
+    let cancellationResult = null;
+    if (isCancellation) {
+      try {
+        cancellationResult = await processCancellationRequest({
+          customerId: req.customer.id,
+          reason: `Portal cancellation request ${request.id}`,
+          requestId: request.id,
+        });
+      } catch (cancelErr) {
+        logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
+      }
+    }
 
     // Internal admin alert only. Service requests should surface in the admin
     // notification feed, not text the office number. The notification is now
@@ -130,16 +227,29 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     // the create-request validation above.
     try {
       const urgencyTag = validUrgency === 'urgent' ? '🚨 URGENT ' : '';
+      const title = isCancellation
+        ? `⚠️ ${urgencyTag}Cancellation request from ${customerName}`
+        : `${urgencyTag}New service request from ${customerName}`;
+      const cancellationSummary = isCancellation
+        ? (cancellationResult && cancellationResult.ok
+            ? `\n\nAuto-processed: ${cancellationResult.cancelledCount} upcoming visit(s) pulled, ` +
+              'recurrence stopped, account churned + billing stopped.'
+            : '\n\n⚠️ Auto-processing did not fully complete — review the calendar/account manually.' +
+              (cancellationResult && cancellationResult.errors && cancellationResult.errors.length
+                ? ` (failed: ${cancellationResult.errors.join(', ')})`
+                : ''))
+        : '';
       const notif = await NotificationService.notifyAdmin(
         'service',
-        `${urgencyTag}New service request from ${customerName}`,
+        title,
         `Category: ${categoryLabel}\n` +
           `Subject: ${cleanSubject}` +
           (locationLabel ? `\nLocation: ${locationLabel}` : '') +
           (photoCount > 0 ? `\n${photoCount} photo(s) attached` : '') +
-          (cleanDescription ? `\n\n"${cleanDescription}"` : ''),
+          (cleanDescription ? `\n\n"${cleanDescription}"` : '') +
+          cancellationSummary,
         {
-          icon: validUrgency === 'urgent' ? '🚨' : '🏠',
+          icon: isCancellation ? '⚠️' : (validUrgency === 'urgent' ? '🚨' : '🏠'),
           link: `/admin/customers?customerId=${encodeURIComponent(req.customer.id)}`,
           metadata: {
             requestId: request.id,
@@ -147,6 +257,14 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
             category,
             urgency: validUrgency,
             photoCount,
+            ...(isCancellation
+              ? {
+                  autoProcessed: !!(cancellationResult && cancellationResult.ok),
+                  visitsPulled: cancellationResult ? cancellationResult.cancelledCount : 0,
+                  churned: cancellationResult ? cancellationResult.churned : false,
+                  processingErrors: cancellationResult ? cancellationResult.errors : ['processor_threw'],
+                }
+              : {}),
           },
         }
       );
@@ -168,15 +286,24 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
       logger.error(`Failed to create admin notification for request ${request.id}: ${notifErr.message}`);
     }
 
-    // Send customer confirmation SMS
+    // Send customer confirmation SMS. A cancellation is auto-processed, so it
+    // gets a dedicated template — the generic copy ("we'll text you when it has
+    // been assigned to a technician") is wrong for a cancellation.
     const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
+    let confirmationSmsSent = false;
     try {
-      const body = await renderRequiredSmsTemplate('service_request_confirmation', {
-        first_name: req.customer.first_name || 'there',
-        category: categoryLabel,
-        response_time: responseTime,
-      }, {
-        workflow: 'service_request_confirmation',
+      const smsTemplateKey = isCancellation
+        ? 'service_cancellation_confirmation'
+        : 'service_request_confirmation';
+      const smsVars = isCancellation
+        ? { first_name: req.customer.first_name || 'there' }
+        : {
+            first_name: req.customer.first_name || 'there',
+            category: categoryLabel,
+            response_time: responseTime,
+          };
+      const body = await renderRequiredSmsTemplate(smsTemplateKey, smsVars, {
+        workflow: smsTemplateKey,
         entity_type: 'service_request',
         entity_id: request.id,
       });
@@ -190,11 +317,12 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
         identityTrustLevel: 'authenticated_portal',
         entryPoint: 'customer_service_request',
         metadata: {
-          original_message_type: 'service_request_confirmation',
+          original_message_type: smsTemplateKey,
           service_request_id: request.id,
           urgency: validUrgency,
         },
       });
+      confirmationSmsSent = !!smsResult.sent;
       if (!smsResult.sent) {
         logger.warn(`Request confirmation SMS blocked/failed for customer ${req.customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       }
@@ -202,13 +330,30 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
       logger.error(`Failed to send confirmation SMS for request ${request.id}: ${smsErr.message}`);
     }
 
-    void AccountMembershipEmail.sendRequestReceived({
-      customerId: req.customer.id,
-      request,
-      responseTime,
-    }).catch((emailErr) => {
-      logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
-    });
+    // No generic "request received" email for a cancellation: the account was
+    // just churned (active=false) and that template's CTAs link into the
+    // authenticated portal, which an inactive customer can no longer open
+    // (portal auth requires active=true). The dedicated cancellation SMS above
+    // is the confirmation — but if it couldn't be delivered (no phone,
+    // landline, opted out), the customer would otherwise get NO confirmation
+    // at all and can't see the request in the portal either, so fall back to
+    // the cancellation-safe email (no portal CTAs).
+    if (!isCancellation) {
+      void AccountMembershipEmail.sendRequestReceived({
+        customerId: req.customer.id,
+        request,
+        responseTime,
+      }).catch((emailErr) => {
+        logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
+      });
+    } else if (!confirmationSmsSent) {
+      void AccountMembershipEmail.sendCancellationReceived({
+        customerId: req.customer.id,
+        request,
+      }).catch((emailErr) => {
+        logger.warn(`Failed to send cancellation confirmation email for request ${request.id}: ${emailErr.message}`);
+      });
+    }
 
     res.status(201).json({
       success: true,

@@ -9,9 +9,25 @@ jest.mock('../services/email-template-library', () => ({
     message: { provider_message_id: 'sg-123', status: 'sent', sent_at: '2026-05-20T12:00:00.000Z' },
   })),
 }));
+// sendPrepGuide mints a public /prep/:token via ensurePrepToken (projects
+// select + prep_template_key update) — stub the db so the token resolves
+// without a live connection.
+jest.mock('../models/db', () => jest.fn());
 
+const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
 const ProjectEmail = require('../services/project-email');
+
+function dbChain(firstResult) {
+  const q = {};
+  ['select', 'where', 'whereNull', 'update', 'insert'].forEach((method) => {
+    q[method] = jest.fn(() => q);
+  });
+  q.first = jest.fn(async () => firstResult);
+  q.returning = jest.fn(async () => []);
+  q.then = (resolve, reject) => Promise.resolve(undefined).then(resolve, reject);
+  return q;
+}
 
 function customer(overrides = {}) {
   return {
@@ -44,6 +60,9 @@ function project(overrides = {}) {
 describe('project email service', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Project already carries a prep_token, so ensurePrepToken's select
+    // returns it and no mint/update path runs.
+    db.mockImplementation(() => dbChain({ prep_token: 'preptok123' }));
   });
 
   test('sends project report ready through the template library', async () => {
@@ -84,7 +103,8 @@ describe('project email service', () => {
       idempotencyKey: 'project.prep:test',
       payload: expect.objectContaining({
         service_date: 'May 20, 2026',
-        prep_url: 'https://portal.wavespestcontrol.com/?tab=visits',
+        // Public prep-guide page link (#1199) — tokenized, not the portal tab.
+        prep_url: 'https://portal.wavespestcontrol.com/prep/preptok123',
       }),
     }));
   });
@@ -100,8 +120,10 @@ describe('project email service', () => {
   });
 
   test('skips prep guide when no template is mapped for the project type', async () => {
+    // bed_bug gained a prep template (prep.bed_bug); WDO inspections have no
+    // prep guide, so they exercise the unsupported path now.
     const result = await ProjectEmail.sendPrepGuide({
-      project: project({ project_type: 'bed_bug' }),
+      project: project({ project_type: 'wdo_inspection' }),
       customer: customer(),
     });
 

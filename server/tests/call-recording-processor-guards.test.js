@@ -1285,3 +1285,59 @@ describe('processing_error triage routing (buildTriageItem)', () => {
     expect(item.summary).toMatch(/boom/);
   });
 });
+
+describe('findExistingCallAppointment (primary-appointment idempotency)', () => {
+  const { findExistingCallAppointment } = CallRecordingProcessor._test;
+
+  // Chain-recording fake: each trx('scheduled_services') call gets its own
+  // log of chained clauses and resolves .first() to the next canned row.
+  function fakeScheduledServicesConn(rowsByCall, calls) {
+    let callIndex = -1;
+    return () => {
+      callIndex += 1;
+      const rowForCall = rowsByCall[callIndex] ?? null;
+      const log = [];
+      calls.push(log);
+      const chain = {};
+      for (const method of ['where', 'whereNull', 'whereNotIn', 'whereRaw', 'orderBy']) {
+        chain[method] = (...args) => {
+          log.push([method, ...args]);
+          return chain;
+        };
+      }
+      chain.first = () => Promise.resolve(rowForCall);
+      return chain;
+    };
+  }
+
+  test('both lookups exclude linked follow-up child rows (parent_service_id IS NULL)', async () => {
+    const calls = [];
+    const result = await findExistingCallAppointment({
+      customerId: 'cust-1',
+      call: { twilio_call_sid: 'CA123', created_at: '2026-07-01T12:00:00Z' },
+      scheduledDate: '2026-07-02',
+      windowStart: '08:00',
+      serviceType: 'Cockroach Control Service',
+      trx: fakeScheduledServicesConn([null, null], calls),
+    });
+    expect(result ?? null).toBeNull();
+    // Marker lookup + date/window fallback both ran, and each one filters out
+    // child rows — a pending visit-2 carries the same Call SID marker and
+    // booking_source, and must never be adopted as the primary appointment.
+    expect(calls).toHaveLength(2);
+    for (const log of calls) {
+      expect(log).toContainEqual(['whereNull', 'parent_service_id']);
+    }
+  });
+
+  test('marker lookup still returns a matched primary appointment', async () => {
+    const primary = { id: 'svc-1', parent_service_id: null };
+    const calls = [];
+    await expect(findExistingCallAppointment({
+      customerId: 'cust-1',
+      call: { twilio_call_sid: 'CA123' },
+      trx: fakeScheduledServicesConn([primary], calls),
+    })).resolves.toBe(primary);
+    expect(calls).toHaveLength(1);
+  });
+});

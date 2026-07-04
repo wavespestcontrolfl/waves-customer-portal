@@ -3,7 +3,13 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 
 const PROMPT_VERSION = 'v1';
 
-function buildExtractionPrompt(transcription, callerPhone, callDateET) {
+function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}) {
+  const bookableServiceNames = Array.isArray(opts.bookableServiceNames)
+    ? opts.bookableServiceNames.filter(Boolean)
+    : [];
+  const bookableCatalogBlock = bookableServiceNames.length
+    ? `\nBOOKABLE SERVICE CATALOG — service_request.specific_service_name must be one of these names VERBATIM, or null:\n${bookableServiceNames.map((n) => `- ${n}`).join('\n')}\n`
+    : '';
   return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, and Charlotte counties).
 
 Analyze this phone call transcript and extract structured data matching the JSON schema provided via response_schema. Every field must conform to the schema's type and enum constraints.
@@ -28,6 +34,8 @@ SCHEDULING STATUS — This is the most important field for downstream routing:
 - Do NOT set status to "confirmed" for unrelated business advice, SEO, marketing, construction advice, or non-Waves services.
 - DO set status to "confirmed" when a builder explicitly books a Waves pre-slab/preconstruction termite or soil-treatment field-service appointment with a specific date and time.
 - Do NOT set status to "confirmed" for admin calls about invoices, payments, receipts, compliance reports, stickers, certificates, W-9s, or paperwork — unless the caller ALSO books a new field-service visit.
+- follow_up_mentioned: true ONLY when the agent and caller specifically discussed a SECOND/follow-up treatment visit as part of this booking (e.g. "our standard protocol is two treatments", "we'll come back in two weeks for the follow-up"). A generic "call us if it comes back" is NOT a follow-up visit.
+- follow_up_start_at: ISO 8601 Eastern Time datetime ONLY when a specific follow-up date (and time) was explicitly agreed. Most calls: null — the office schedules the follow-up at the standard interval.
 
 CALLER NAME:
 - Set first_name and last_name separately when the caller clearly states both.
@@ -39,6 +47,8 @@ CALLER NAME:
 SPELLED-OUT INPUT IS AUTHORITATIVE (names + emails):
 - When the caller spells a name or email letter-by-letter, or with phonetic markers ("B as in boy", "V as in Victor", "N as in Nancy"), the SPELLED letters are the source of truth — use them, not the word as it was transcribed phonetically. Callers spell precisely because the spoken form is easy to mishear (e.g. caller says "Smyth" but spells S-M-I-T-H -> use "Smith", and the email is jane.smith@example.com, NOT smyth). These are illustrative only — never copy this example name or email into the output.
 - When an email is described relative to the name ("first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
+- Transcription often CONCATENATES a phonetic spelling into nonsense tokens: "blikenboy, vlikenvictor" is "B like in boy, V like in Victor" — decode each such token to its letter (B, V). A run of these tokens ending in digits is a spelled email local part ("blikenboy vlikenvictor 42 at gmail.com" -> bv42@gmail.com). Decode the letters even when the words are jammed together.
+- The decoded spelled letters ALSO beat the caller's own read-back of the finished email as transcribed — the read-back is one more chance for the transcriber to mishear. When you had to decode garbled tokens, lower caller_identity confidence to 0.6 or below.
 
 PHONE:
 - phone_e164: Set to the callback number the caller states, in E.164 format (+1XXXXXXXXXX).
@@ -49,10 +59,12 @@ PHONE:
 EMAIL:
 - Only extract when the caller clearly says or spells the complete email address.
 - Uncertain, partial, or malformed emails must be null.
+- A transcribed local part that looks like a URL fragment ("www.", "http") is a mis-hearing, never a real mailbox: reconstruct it from the spelled letters, and if you cannot reconstruct it confidently, set null.
 
 ADDRESS:
 - raw_text: Verbatim address as spoken by caller.
 - Parse into street_line_1, city, state, postal_code when clearly stated.
+- If the transcribed street name is not a plausible street name (real words or a proper name — "C Phone Trail" is not), it is likely a phonetic mis-transcription: still parse it as heard (the server re-validates and recovers), but lower service_address confidence to 0.6 or below.
 - state must be "FL" or null. Do not set for non-Florida addresses.
 - county: Set if clearly identifiable from city/address. Manatee, Sarasota, Charlotte, or DeSoto only.
 - normalization_status: Always set to "not_attempted" (server handles normalization).
@@ -63,6 +75,8 @@ PROPERTY:
 
 SERVICE REQUEST:
 - primary_service_category: Map caller's request to the best enum value.
+- specific_service_name: When the request maps to one specific bookable service from the BOOKABLE SERVICE CATALOG below, set it to that catalog name VERBATIM (e.g. a German/kitchen cockroach infestation cleanout -> "Cockroach Control Service"). If no single catalog entry clearly fits, null. Never invent a name that is not in the catalog list.
+- quoted_price_usd: The total price in US dollars that the agent quoted AND the caller accepted for the service being booked (e.g. agent says "that runs around 350 total" and the caller agrees -> 350). Use the TOTAL package price when quoted as a total across multiple treatments. null when no price was quoted, the caller did not accept, or the amount is uncertain/a range. Never estimate or invent a price.
 - If caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, or treatment before a concrete pour: use "termite" as primary_service_category.
 - pests_observed_status: "observed" when caller mentions seeing specific pests, "not_observed_preventative" when they want prevention without active pests, "not_observed_inquiry" for quote/info calls, "not_discussed" for non-pest topics (billing, cancellation).
 - waveguard_tier_mentioned: Only set if the caller explicitly names a WaveGuard tier they saw on the site or an ad. Do NOT infer.
@@ -111,7 +125,8 @@ TRIAGE FLAGS — Set flags for situations requiring human review:
 - ambiguous_scheduling: Scheduling was discussed but outcome is unclear.
 - reschedule_or_cancel: Caller wants to reschedule or cancel.
 
-Waves services: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, Palm Injection, Exclusion. Calls about unrelated work (SEO, marketing, advertising, construction advice) are not Waves services.`;
+Waves services: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, Palm Injection, Exclusion. Calls about unrelated work (SEO, marketing, advertising, construction advice) are not Waves services.
+${bookableCatalogBlock}`;
 }
 
 // Hash the FULL output contract — base prompt AND the JSON schema that
@@ -126,8 +141,28 @@ const _contractHash = crypto.createHash('sha256')
 
 const PROMPT_HASH = `${PROMPT_VERSION}-${_contractHash}`;
 
+// The rendered catalog block changes the exact prompt, so the persisted
+// version must change with it — otherwise shadow rows produced under
+// different catalogs share one ai_extraction_prompt_version and the
+// promotion-readiness gate mixes incompatible cohorts under one hash.
+// Order-sensitive by design: a reordered catalog renders a different
+// prompt and must version as a different cohort. No catalog → bare
+// PROMPT_HASH, so pre-catalog rows keep their existing version.
+function extractionPromptVersion(bookableServiceNames) {
+  const names = Array.isArray(bookableServiceNames)
+    ? bookableServiceNames.filter(Boolean)
+    : [];
+  if (!names.length) return PROMPT_HASH;
+  const catalogHash = crypto.createHash('sha256')
+    .update(names.join('\n'))
+    .digest('hex')
+    .slice(0, 8);
+  return `${PROMPT_HASH}-cat.${catalogHash}`;
+}
+
 module.exports = {
   buildExtractionPrompt,
+  extractionPromptVersion,
   PROMPT_VERSION,
   PROMPT_HASH,
 };

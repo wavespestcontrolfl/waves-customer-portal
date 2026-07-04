@@ -1514,6 +1514,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         quotedTotal={linkedEstimate.quotedTotal}
                         currentPrice={netSubtotal}
                         deposit={linkedEstimate.deposit}
+                        payment={linkedEstimate.payment}
                         style={{ marginTop: 10 }}
                       />
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginTop: 8, fontSize: 12, color: D.muted }}>

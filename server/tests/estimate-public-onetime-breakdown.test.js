@@ -46,6 +46,7 @@ const {
   resolveRecurringMonthlyParts,
   resolveEstimateDeclineGuard,
   resolveEstimateQuoteRequirement,
+  estimateTrenchingReviewRequired,
   resolveRecurringFirstVisitAmount,
   resolveRecurringFirstVisitAmountFromFrequency,
   shouldApplyFirstViewSideEffects,
@@ -1404,50 +1405,28 @@ describe('public estimate one-time breakdown', () => {
     expect(profile.serviceLabel).toContain('Bora-Care');
   });
 
-  test('one-time slot is sized for the add-on: pest visit + Bora-Care reserves a longer slot', () => {
-    const base = {
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [] } } },
-    };
-    // Pest visit alone keeps the 60-minute one-time length.
-    const pestOnly = estimateSlotAvailability.resolveEstimateSlotProfile(base, { serviceMode: 'one_time' });
-    expect(pestOnly.durationMinutes).toBe(60);
-
-    // Pest visit (60) + Bora-Care wood treatment (90) → a 150-minute slot.
-    const withBora = estimateSlotAvailability.resolveEstimateSlotProfile({
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] } } },
-    }, { serviceMode: 'one_time' });
-    expect(withBora.durationMinutes).toBe(150);
-  });
-
-  test('one-time slot duration uses the raw service key, the termite key, and a 60-min default', () => {
+  test('one-time slots book the flat 60-minute default regardless of the service mix', () => {
+    // Owner directive (2026-07-03): every service call defaults to 60 minutes;
+    // techs adjust individual appointments afterward. Add-ons still surface in
+    // the label (previous test) but no longer stretch the reserved slot.
     const mk = (estimate) => estimateSlotAvailability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
 
-    // Pest visit (60) + a German-roach cleanout specialty priced by its raw key (75,
-    // not the broad pest 60) = 135.
+    // Pest visit alone.
     expect(mk({
       show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 500 }] } } },
-    }).durationMinutes).toBe(135);
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [] } } },
+    }).durationMinutes).toBe(60);
 
-    // A standalone Termite Inspection (service 'termite') reserves 90, not the default.
+    // Pest visit + Bora-Care wood treatment: still 60.
+    expect(mk({
+      show_one_time_option: true,
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] } } },
+    }).durationMinutes).toBe(60);
+
+    // Standalone termite inspection: still 60.
     expect(mk({
       estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite', name: 'Termite Inspection', price: 175 }] } } },
-    }).durationMinutes).toBe(90);
-
-    // A termite-install alias (termite_bait_installation, not in the table) classifies
-    // as termite_bait and falls back to the category's 90, not the generic default.
-    expect(mk({
-      estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite_bait_installation', name: 'Termite Bait Installation', price: 1200 }] } } },
-    }).durationMinutes).toBe(90);
-
-    // An unknown/residual row (positive "Other one-time services" adjustment) keeps
-    // the 60-minute default rather than being under-reserved: pest 60 + adjustment 60.
-    expect(mk({
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 400, items: [] } } },
-    }).durationMinutes).toBe(120);
+    }).durationMinutes).toBe(60);
   });
 
   test('phase 0 mosquito recurring contract uses mosquito copy without pest gates', async () => {
@@ -2539,6 +2518,286 @@ describe('public estimate one-time breakdown', () => {
     // Trenching is a liquid barrier, not a bait system — the chip matches the method.
     expect(html).toContain('data-estimate-ask-prompt="How long does the barrier last?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+    // Second trenching-specific chip (drilling is a top question for slab/driveway jobs).
+    expect(html).toContain('data-estimate-ask-prompt="Do you drill the concrete or driveway?"');
+  });
+
+  test('server-rendered priced termite trenching quote gates self-booking behind Waves review', () => {
+    const html = renderPage('termite-trenching-priced-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2210,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    // Price stays visible (NOT quoteRequired) — this is a review-before-booking gate,
+    // not a "quote required" hide-the-price hold.
+    expect(html).toContain('$2,210');
+    expect(html).not.toContain('Quote Required');
+    // Review card renders in place of the self-book slot picker.
+    expect(html).toContain('id="trenching-review-card"');
+    expect(html).toContain('Review your termite trenching quote with Waves');
+    // No self-book affordances: no slot-picker booking card, no "Pick a time and book".
+    expect(html).not.toContain('id="booking-card"');
+    expect(html).not.toContain('class="cta pick-time-cta"');
+    // Honest copy — the old over-promise ("before a normal service slot is reserved
+    // online") is gone; scheduling happens after Waves review.
+    expect(html).not.toContain('before a normal service slot is reserved online');
+    expect(html).toContain('Waves will confirm &amp; schedule your trenching');
+  });
+
+  test('discounted trenching-only quote (with a discount line) still gets the review gate', () => {
+    const html = renderPage('termite-trenching-discounted-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2100,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          // Trenching + a negative discount row must NOT defeat the trenching-only
+          // classification (a non-billable row is ignored, like the Bora-Care path).
+          items: [
+            { service: 'trenching', name: 'Termite Trenching', price: 2210 },
+            { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -110 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('id="trenching-review-card"');
+    expect(html).not.toContain('id="booking-card"');
+    expect(html).not.toContain('class="cta pick-time-cta"');
+  });
+
+  test('estimateTrenchingReviewRequired is the shared gate for every trenching booking/money path', () => {
+    const trenchingOnly = { result: { recurring: { services: [] }, oneTime: {
+      items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }], specItems: [] } } };
+    const trenchingDiscounted = { result: { recurring: { services: [] }, oneTime: {
+      items: [
+        { service: 'trenching', name: 'Termite Trenching', price: 2210 },
+        { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -110 },
+      ], specItems: [] } } };
+    const trenchingPlusOtherCharge = { result: { recurring: { services: [] }, oneTime: {
+      items: [
+        { service: 'trenching', name: 'Termite Trenching', price: 2210 },
+        { service: 'pre_slab_termiticide', name: 'Pre-Slab', price: 500 },
+      ], specItems: [] } } };
+    const pestOnly = { result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control' }] }, oneTime: { items: [], specItems: [] } } };
+
+    expect(estimateTrenchingReviewRequired(trenchingOnly)).toBe(true);
+    expect(estimateTrenchingReviewRequired(trenchingDiscounted)).toBe(true); // discount row ignored
+    expect(estimateTrenchingReviewRequired(trenchingPlusOtherCharge)).toBe(false); // positive non-trenching charge
+    expect(estimateTrenchingReviewRequired(pestOnly)).toBe(false);
+    expect(estimateTrenchingReviewRequired({})).toBe(false);
+  });
+
+  test('engineInputs-only trenching quote (inputs replayed at view/accept) is review-gated', () => {
+    // buildPricingBundle replays engineInputs into a priced trenching row for
+    // inputs-only estimates (no stored result/engineResult rows). The shared gate
+    // must replay too — otherwise the /data CTA, /accept, /reserve and the Stripe
+    // intent endpoints all see "no rows" and let the trenching quote self-book.
+    const inputsOnlyTrenching = {
+      engineInputs: {
+        homeSqFt: 2400,
+        stories: 1,
+        lotSqFt: 9000,
+        propertyType: 'single_family',
+        services: { trenching: { measurements: { perimeterLF: 240, concreteLF: 0 } } },
+      },
+    };
+    // Mixed inputs stay self-bookable: the replayed rows include a recurring pest
+    // line, which defeats the trenching-only classification like any stored row.
+    const inputsTrenchingPlusPest = {
+      engineInputs: {
+        homeSqFt: 2400,
+        stories: 1,
+        lotSqFt: 9000,
+        propertyType: 'single_family',
+        services: {
+          pest: { frequency: 'quarterly' },
+          trenching: { measurements: { perimeterLF: 240, concreteLF: 0 } },
+        },
+      },
+    };
+
+    expect(estimateTrenchingReviewRequired(inputsOnlyTrenching)).toBe(true);
+    expect(estimateTrenchingReviewRequired(inputsTrenchingPlusPest)).toBe(false);
+  });
+
+  test('termite foam is never trenching: foam-only quotes stay self-bookable, foam add-ons keep the gate', () => {
+    // The engine's one-time foam row (service-pricing.js calculateFoamPrice) reads
+    // "termite_foam / Termidor Foam Spot Treatment" — it matches the trenching
+    // category mapper AND the raw termite+termidor/treatment heuristic, so without
+    // the foam exclusion a foam-only quote would be review-gated off self-booking.
+    const foamOnly = { result: { recurring: { services: [] }, oneTime: {
+      items: [{ service: 'termite_foam', name: 'Termidor Foam Spot Treatment', price: 180 }], specItems: [] } } };
+    // A foam spot add-on bundled onto the liquid treatment is still a trenching
+    // job — it must NOT un-gate the review requirement.
+    const trenchingWithFoamAddOn = { result: { recurring: { services: [] }, oneTime: {
+      items: [
+        { service: 'trenching', name: 'Termite Trenching', price: 2210 },
+        { service: 'termite_foam', name: 'Termidor Foam Spot Treatment', price: 180 },
+      ], specItems: [] } } };
+
+    expect(estimateTrenchingReviewRequired(foamOnly)).toBe(false);
+    expect(estimateTrenchingReviewRequired(trenchingWithFoamAddOn)).toBe(true);
+  });
+
+  test('server-rendered foam-only quote keeps the normal booking card (no trenching review gate)', () => {
+    const html = renderPage('termite-foam-only-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 180,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          items: [{ service: 'termite_foam', name: 'Termidor Foam Spot Treatment', price: 180 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).not.toContain('id="trenching-review-card"');
+    expect(html).toContain('id="booking-card"');
+  });
+
+  test('a positive charge hidden in oneTime.total (normalized one_time_adjustment) blocks the trenching gate', () => {
+    // oneTime.total is $500 above the listed rows — normalizeOneTimeBreakdown emits
+    // that difference as a synthetic positive `one_time_adjustment` row. It is a
+    // real charge for something other than trenching, so it must block the
+    // trenching-only classification exactly like a listed positive row would (the
+    // raw acceptanceServiceLists rows alone can't see it).
+    const trenchingWithUnlistedCharge = { result: { recurring: { services: [] }, oneTime: {
+      total: 2710,
+      items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }], specItems: [] } } };
+    // A NET total that reconciles against a listed discount row nets a zero
+    // difference — no synthetic charge, gate stays on.
+    const trenchingDiscountedNetTotal = { result: { recurring: { services: [] }, oneTime: {
+      total: 2100,
+      items: [
+        { service: 'trenching', name: 'Termite Trenching', price: 2210 },
+        { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -110 },
+      ], specItems: [] } } };
+
+    expect(estimateTrenchingReviewRequired(trenchingWithUnlistedCharge)).toBe(false);
+    expect(estimateTrenchingReviewRequired(trenchingDiscountedNetTotal)).toBe(true);
+  });
+
+  test('engine-backed trenching quote (engineResult.lineItems only) classifies as review-before-booking', () => {
+    // Quote-wizard / engine-invocation estimates persist the priced trenching line
+    // under estData.engineResult with no v1-mapped result.oneTime.items — the
+    // shared predicate must classify these identically (acceptanceServiceLists
+    // falls back to the normalized breakdown, which reads engineResult.lineItems).
+    const engineBackedTrenching = { engineResult: { lineItems: [
+      { service: 'termite_trenching', label: 'Termite Trenching', price: 2210 },
+    ] } };
+    expect(estimateTrenchingReviewRequired(engineBackedTrenching)).toBe(true);
+  });
+
+  test('server-rendered engine-backed trenching quote gets the review card, not a dead booking card', () => {
+    // The SSR gate must use the SHARED predicate: an engine-backed trenching
+    // estimate has no result.oneTime.items, and a raw-rows-only check would render
+    // the normal booking card whose slot endpoints return nothing — a dead
+    // self-book flow instead of the review/call CTA.
+    const html = renderPage('termite-trenching-engine-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2210,
+      tier: 'Bronze',
+    }, {
+      engineResult: {
+        lineItems: [
+          { service: 'termite_trenching', label: 'Termite Trenching', price: 2210 },
+        ],
+      },
+    });
+
+    expect(html).toContain('id="trenching-review-card"');
+    expect(html).not.toContain('id="booking-card"');
+    expect(html).not.toContain('class="cta pick-time-cta"');
+  });
+
+  test('commercial-flagged trenching-only quote shows the review card, not the commercial approve CTA', () => {
+    // /accept 409s a trenching-only quote with NO commercial exception, so the
+    // commercial manual-accept card's approval buttons could only end in a 409.
+    // The trenching review gate deliberately outranks the commercial card.
+    const html = renderPage('termite-trenching-commercial-token', {
+      status: 'sent',
+      customerName: 'Terry Business',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2210,
+      tier: 'Bronze',
+    }, {
+      commercialEstimatedPricing: true,
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('id="trenching-review-card"');
+    expect(html).not.toContain('id="commercial-accept-card"');
+    expect(html).not.toContain('Approve estimate');
+  });
+
+  test('trenching pricing contract (React path) offers the drilling Ask-Waves chip', async () => {
+    // React estimates render chips from pricing.askChips (attachPublicPricingContract
+    // ← SERVICE_COPY.termite_trenching.askChips) — the drilling chip must live there
+    // too, not just in the server-rendered prompt bar.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-trenching-askchips-test',
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 2210,
+            items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }],
+          },
+          recurring: { services: [] },
+        },
+      },
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 2210,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.askChips).toContain('How long does the barrier last?');
+    expect(payload.askChips).toContain('Do you drill the concrete or driveway?');
+    expect(payload.askChips.length).toBeLessThanOrEqual(6);
   });
 
   test('server-rendered pre-slab estimate uses pre-slab ask prompt and never duplicates its copy', () => {
@@ -2609,7 +2868,7 @@ describe('public estimate one-time breakdown', () => {
 
     // Hero + Waves AI card are Bora-Care-specific, not the generic/pest fallback.
     // (The hero apostrophe is HTML-escaped, so match without it.)
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
     expect(html).toContain('the Bora-Care application rate to price this treatment.');
     expect(html).not.toContain('choose your pest control option');
@@ -2716,7 +2975,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
     expect(html).not.toContain('30-day callback period if pests return');
     expect(html).not.toContain('class="mini-guarantee"');
@@ -2770,7 +3029,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
     // Hero treatment name comes from the normalized rows too, so the nested shape
@@ -3230,7 +3489,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).not.toContain('your termite trenching quote.');
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
   });
@@ -3489,7 +3748,7 @@ describe('public estimate one-time breakdown', () => {
       oneTimeChoicePrice: pricing.anchorOneTimePrice,
     }, estimateData);
 
-    expect(html).toContain('Hey Dana, choose your pest control option.');
+    expect(html).toContain('Hello Dana, your estimate is ready!');
     expect(html).toContain('<span class="num" id="onetime-display">$202</span>');
     expect(html).toContain('One-Time Pest Control');
     expect(html).not.toContain('One-time items (billed separately)');
@@ -5097,7 +5356,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your lawn care estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your lawn before pricing this estimate');
     expect(html).toContain('Grass type');
     expect(html).toContain('St. Augustine');
@@ -5249,7 +5508,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5309,7 +5568,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5375,7 +5634,7 @@ describe('public estimate one-time breakdown', () => {
       satelliteUrl: 'https://maps.example/mosquito-onetime.png',
     }, estimateData);
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5449,7 +5708,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('termite protection estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your termite perimeter before pricing this estimate');
     expect(html).toContain('Termite perimeter');
     expect(html).toContain('185 linear ft');

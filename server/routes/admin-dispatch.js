@@ -7,7 +7,7 @@ const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
-const { formatSmsTimeRange } = require('../utils/sms-time-format');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
@@ -584,6 +584,29 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
     }
   }
   return blocks;
+}
+
+// Manufacturer re-entry interval (REI) for the products applied this visit, in
+// minutes — the most restrictive (max) across products. Returns null when no
+// applied product carries an REI so the caller keeps the service-line default.
+// Used to make the "Exterior ready in …" countdown reflect the product label
+// instead of a flat default.
+async function maxProductReentryMinutes(knex, submittedProducts = []) {
+  const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
+  if (!productIds.length) return null;
+  const rows = await knex('products_catalog')
+    .whereIn('id', productIds)
+    .select('rei_hours')
+    .catch(() => []);
+  let maxMinutes = null;
+  for (const row of rows) {
+    const hours = Number(row.rei_hours);
+    if (Number.isFinite(hours) && hours >= 0) {
+      const minutes = Math.round(hours * 60);
+      if (maxMinutes == null || minutes > maxMinutes) maxMinutes = minutes;
+    }
+  }
+  return maxMinutes;
 }
 
 async function actualProductInventoryBlocks(submittedProducts = []) {
@@ -3083,8 +3106,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // its re-entry window even when only exterior areas were chipped.
             // This is the gate: the advisory is persisted here and the report
             // build can only zero it further, never restore it.
+            // Exterior re-entry ("Ready in …") reflects the manufacturer REI of
+            // the products actually applied — the most restrictive wins — falling
+            // back to the service-line default when no product carries an REI. Kept
+            // no lower than the default so a 0-hr / "until dry" product still shows
+            // a sensible dry-down window.
+            const productReentryMin = await maxProductReentryMinutes(trx, products || []);
+            const advisoryDefaultsForVisit = productReentryMin != null
+              ? {
+                ...reportConfig.advisoryDefaults,
+                exterior_reentry_min: Math.max(
+                  Number(reportConfig.advisoryDefaults?.exterior_reentry_min) || 0,
+                  productReentryMin,
+                ),
+              }
+              : reportConfig.advisoryDefaults;
             const advisoryNormalized = buildCompletionAdvisory({
-              advisoryDefaults: reportConfig.advisoryDefaults,
+              advisoryDefaults: advisoryDefaultsForVisit,
               completionAreas,
               protocolActionScopes: reportProtocolActionScopes,
               applications: products || [],
@@ -4371,24 +4409,45 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       else invoiceCreated = true;
     }
 
-    // A live annual-prepay-COVERED visit must never carry a collectible invoice: the
-    // work is already paid on the annual prepay invoice. The suppression gate stops
-    // NEW invoices, but a pre-existing / pre-minted invoice would otherwise be
-    // attached here as AR (a duplicate bill). Void it (voidInvoice cancels any open
-    // PaymentIntent and refuses to void a paid/in-flight one) and treat the visit as
-    // settled. Only suppress if the void succeeds, so a genuinely paid invoice stays
-    // handled normally. Full non-cash settlement / add-on split-billing is deferred.
+    // A live annual-prepay-COVERED visit must never carry a collectible invoice for
+    // the covered work: it's already paid on the annual prepay invoice. The
+    // suppression gate stops NEW invoices; a pre-existing / pre-minted invoice with NO
+    // add-ons is SETTLED here as non-cash annual-prepay coverage → 'prepaid'
+    // (non-collectible, no pay link, books no payments row → no revenue double-count).
+    // An invoice WITH add-ons (or applied account credit) is VOIDED for now — same as
+    // before this PR, money-safe (no double-bill), but it drops the add-on AR until
+    // the base-covered / add-ons-collectible SPLIT ships as the fast-follow. Fails
+    // closed: a cash-paid / in-flight invoice is left for normal handling.
     if (annualPrepayCovered && invoice?.id
       && !['paid', 'prepaid', 'void'].includes(String(invoice.status || '').toLowerCase())) {
       try {
         const InvoiceService = require('../services/invoice');
-        await InvoiceService.voidInvoice(invoice.id);
-        invoice = null;
-        invoiceCreated = false;
-        payUrl = null;
-        alreadyPaid = true;
-      } catch (voidErr) {
-        logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: could not void pre-existing invoice ${invoice.id}: ${voidErr.message}`);
+        // Named settleRes, NOT res — `res` here would shadow the Express response
+        // for the rest of this block (the isOutboundCall TDZ-shadow failure class).
+        const settleRes = await InvoiceService.settleInvoiceAsAnnualPrepayCovered(
+          invoice.id, svc.annual_prepay_term_id, { recordedBy: 'system:annual_prepay_completion' },
+        );
+        if (settleRes.settled) {
+          // Fully covered → settled non-cash 'prepaid' (invoice + service record kept,
+          // no revenue double-count) — non-collectible, no pay link.
+          invoice = settleRes.invoice;
+          invoiceCreated = false;
+          payUrl = null;
+          alreadyPaid = true;
+        } else if (['has_add_ons', 'has_applied_credit', 'has_deposit_credit'].includes(settleRes.reason)) {
+          // Covered visit whose invoice can't be plain-settled here (positive extras, or
+          // applied account/deposit credit that voidInvoice must restore): fall back to
+          // the pre-split void (money-safe — voidInvoice restores any credit + cancels
+          // the PI; the extras-collectible split is the fast-follow). No double-bill.
+          await InvoiceService.voidInvoice(invoice.id);
+          invoice = null;
+          invoiceCreated = false;
+          payUrl = null;
+          alreadyPaid = true;
+        }
+        // else (payer_billed / already_settled / processing): leave for normal handling.
+      } catch (settleErr) {
+        logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: could not settle pre-existing invoice ${invoice.id}: ${settleErr.message}`);
       }
     }
 
@@ -6090,7 +6149,11 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
             .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
           const win = parseRescheduleWindow(newWindow);
-          const windowText = win.start && win.end ? `, ${formatSmsTimeRange(`${win.start}-${win.end}`)}` : '';
+          // window_text quotes the 2-hour arrival promise from the new start.
+          // win.end is the job-duration block the dispatcher sized the visits
+          // with — never the customer-facing window (see sms-time-format).
+          const arrivalRange = arrivalWindowRange(win.start);
+          const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
           try {
             const body = await renderRequiredTemplate('appointment_series_rescheduled', {
               first_name: svc.first_name || 'there',

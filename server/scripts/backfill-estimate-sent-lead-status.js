@@ -55,11 +55,14 @@ const LIMIT = Math.max(1, parseInt(argValue('limit') || '5000', 10));
 const shortId = (id) => String(id || '').slice(0, 8);
 
 async function main() {
-  // Candidate estimates: actually sent or viewed, with NO FK-linked lead. The
-  // FK-linked ones already advanced on their original send/view — only the
-  // standalone (unlinked) estimates need a nudge.
+  // Candidate estimates: actually sent or viewed, un-archived (an archived
+  // row keeps its status but that courtship already closed — advancing a
+  // lead to estimate_sent off it would be stale), with NO FK-linked lead.
+  // The FK-linked ones already advanced on their original send/view — only
+  // the standalone (unlinked) estimates need a nudge.
   const candidates = await db('estimates')
     .whereIn('status', ['sent', 'viewed'])
+    .whereNull('archived_at')
     .whereNotExists(function whereNoFkLinkedLead() {
       this.select(db.raw('1')).from('leads').whereRaw('leads.estimate_id = estimates.id');
     })

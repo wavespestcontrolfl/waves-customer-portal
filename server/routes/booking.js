@@ -9,6 +9,7 @@ const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
@@ -453,13 +454,17 @@ async function loadBookingConfig() {
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [] }) {
   const result = await findAvailableSlots({
     lat,
     lng,
     durationMinutes: duration,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
+    // Relocating an existing visit (public self-reschedule): drop its own row
+    // from the occupied-route set so it doesn't block the slot it's moving
+    // out of. Default [] = identical behavior for every other caller.
+    excludeServiceIds,
     dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
     dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
     // The default best-4 window is narrow, so 200 ranked candidates is ample.
@@ -748,7 +753,7 @@ router.post('/find-slots', async (req, res, next) => {
 // { ok:true, body } | { ok:false, status, error }; throws on unexpected errors.
 async function createSelfBooking(payload = {}) {
     const {
-      estimate_id, customer_id, lead_id,
+      estimate_id, estimate_share_token, pricing_estimate_id, estimate_token, customer_id, lead_id,
       slot_date, slot_start, slot_end,
       technician_id,
       service_type,
@@ -791,7 +796,26 @@ async function createSelfBooking(payload = {}) {
     let estimate = null;
     if (estimate_id) {
       estimate = await db('estimates').where('id', estimate_id).first();
-      if (!custId) custId = estimate?.customer_id;
+      // Do NOT resolve identity from an unverified quote-wizard / handoff draft
+      // (linked to a customer by unverified phone/email) — trusting it would let
+      // anyone who quotes with a victim's contact then POST estimate_id here to
+      // book under that customer. Only verified estimates (admin/accepted,
+      // source !== 'quote_wizard') resolve identity; quote handoffs are used for
+      // PRICING only, via pricing_estimate_id.
+      if (!custId && estimate && estimate.source !== 'quote_wizard') custId = estimate.customer_id;
+      // A quote-wizard estimate still resolves identity when the caller proves
+      // possession of its SHARE token (the legacy /book/:estimateToken page
+      // posts the token it loaded the estimate with). Share tokens are
+      // staff/system-issued to the estimate's own contact and are NEVER exposed
+      // by the public quote flow — unlike the raw id, which /public/quote/calculate
+      // returns to whoever ran the quote — so this keeps the legacy linked-booking
+      // path working for promoted wizard estimates without re-opening the
+      // forged-estimate_id identity hole.
+      if (!custId && estimate && estimate.source === 'quote_wizard'
+          && estimate.token && estimate_share_token
+          && String(estimate.token) === String(estimate_share_token)) {
+        custId = estimate.customer_id;
+      }
     }
     // NB: ?lead=<lead_id> is NOT trusted for identity. A lead_id is mintable
     // from a known phone/email via the public quote flow, so using it to resolve
@@ -930,15 +954,56 @@ async function createSelfBooking(payload = {}) {
           && RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern) === 'quarterly'
           && bookedServiceKey === 'pest_control';
         const bookingVisits = willSeedQuarterlyPestSeries ? 4 : null;
-        // Price ONLY from the estimate this booking is explicitly linked to.
-        // (The common quote-wizard booking carries no estimate_id today; lighting
-        // that up safely is a follow-up that passes a server-trusted estimate
-        // reference from the quote flow — inferring the source quote from the
-        // customer's recent drafts proved unsafe/ineffective with the real,
-        // address-prelinked /book UI that sends no phone to verify identity.)
-        const priced = estimate
-          ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey, bookingVisits })
+        // Pay-at-visit prices from the quote→book handoff estimate
+        // (pricing_estimate_id) — deliberately SEPARATE from the identity
+        // `estimate_id`. A quote-wizard draft is linked to a customer by
+        // UNVERIFIED phone/email, so trusting it for identity would let anyone
+        // who knows a phone book + price under that customer. Identity is
+        // resolved by the normal verified path above; here we price ONLY when
+        // the handoff token is valid AND the handoff estimate belongs to the
+        // resolved customer — so a forged/borrowed id can't price a booking from
+        // someone else's quote.
+        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+        // Verify the HMAC BEFORE touching the DB: pricing_estimate_id is a raw
+        // public-URL value, and the token is bound to the exact id string, so a
+        // forged/malformed id (which would otherwise throw a Postgres uuid cast
+        // error from the lookup) fails the cheap constant-time check first and
+        // never reaches a query.
+        const handoffTokenValid = !!pricing_estimate_id
+          && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token);
+        const pricingEstimate = handoffTokenValid
+          ? await db('estimates').where('id', pricing_estimate_id).first()
           : null;
+        // Re-check the CURRENT estimate is still handoff-eligible: a wizard draft
+        // is refreshed IN PLACE on re-runs, so a token minted while the quote was
+        // residential/recurring must not price a snapshot that has since become
+        // commercial or manual-quote (both excluded from the exposure gate).
+        // status must still be 'draft': tokens are minted only for refreshable
+        // wizard drafts, so once staff promote the same estimate (sent/accepted/
+        // declined) a not-yet-expired token must not stamp pricing from a quote
+        // that is no longer the live self-serve draft.
+        const pricingEstData = pricingEstimate?.estimate_data || {};
+        const pricingEstimateEligible = !!pricingEstimate
+          && pricingEstimate.source === 'quote_wizard'
+          && pricingEstimate.status === 'draft'
+          && !pricingEstData.commercialEstimatedPricing
+          && !pricingEstData.quoteRequired;
+        const pricingTrusted = handoffTokenValid
+          && pricingEstimateEligible
+          && String(pricingEstimate.customer_id) === String(custId);
+        // The verified LINKED-estimate path (/book/:estimateToken posts
+        // estimate_id) still prices as it did before the handoff landed: that
+        // estimate resolved identity above (non-quote_wizard only), so pricing
+        // it is the same trust — customer-matched so a crafted estimate_id +
+        // customer_id pair can't stamp another customer's price.
+        const linkedEstimatePriceable = !!estimate
+          && estimate.source !== 'quote_wizard'
+          && String(estimate.customer_id) === String(custId);
+        const priced = pricingTrusted
+          ? resolveBookingVisitPrice({ estimate: pricingEstimate, serviceKey: bookedServiceKey, bookingVisits })
+          : (linkedEstimatePriceable
+            ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey, bookingVisits })
+            : null);
         if (priced) {
           visitPrice = priced.amount;
           paymentPref = 'pay_at_visit';
@@ -1142,6 +1207,15 @@ async function createSelfBooking(payload = {}) {
     const { booking, serviceRow } = txResult;
     // (new-booking intents already converted in the transaction above)
 
+    // Appointment-type automations (tagging, prep guide emails) — same hook
+    // the admin scheduling path runs. Post-commit and fire-and-forget so the
+    // booking response never waits on it.
+    {
+      const AppointmentTagger = require('../services/appointment-tagger');
+      void AppointmentTagger.onServiceScheduled(serviceRow.id)
+        .catch((e) => logger.error(`[booking:confirm] appointment automations failed (non-blocking) for ${serviceRow.id}: ${e.message}`));
+    }
+
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
     const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
     let followUpRows = [];
@@ -1218,8 +1292,11 @@ async function createSelfBooking(payload = {}) {
         weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
       });
       const startLabel = minToTime12(timeToMin(slot_start));
-      const endLabel = minToTime12(endMin);
-      const timeLabel = `${startLabel} - ${endLabel}`;
+      // {time} quotes the 2-hour arrival promise. endMin is the job-duration
+      // block that sized the scheduled_services window above — never the
+      // customer-facing window (see sms-time-format).
+      const arrivalEndLabel = minToTime12((timeToMin(slot_start) + ARRIVAL_WINDOW_MINUTES) % (24 * 60));
+      const timeLabel = `${startLabel} - ${arrivalEndLabel}`;
       const addressLabel = `${customer.address_line1}, ${customer.city}`;
       const smsBody = await renderSmsTemplate(
         'self_booking_confirmation',
@@ -1412,7 +1489,20 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // Client capture time — used to reject a stale (out-of-order / slow keepalive)
     // capture from overwriting a newer one for the same session.
     const clientTs = Number.isFinite(Number(b.capture_client_ts)) ? Math.floor(Number(b.capture_client_ts)) : null;
+    // Quote→book handoff: persist the pricing estimate reference so the recovery
+    // /book link re-carries it and a recovered booking still prices from that
+    // exact quote (pay-at-visit). VERIFY the HMAC before storing — this is a
+    // public endpoint and recovery re-sends whatever is stored here, so never
+    // persist an id the caller couldn't prove was minted by us. Absent or
+    // unverified → nulls, so a fresh capture without the params clears a stale
+    // handoff instead of letting it ride along with a newer non-quote intent.
+    const { verifyEstimateHandoffToken: verifyHandoff } = require('../utils/estimate-handoff-token');
+    const handoffId = str(b.pricing_estimate_id, 80);
+    const handoffToken = str(b.estimate_token, 200);
+    const handoffVerified = !!(handoffId && handoffToken && verifyHandoff(handoffId, handoffToken));
     const row = {
+      pricing_estimate_id: handoffVerified ? handoffId : null,
+      pricing_estimate_token: handoffVerified ? handoffToken : null,
       session_id: sessionId,
       capture_client_ts: clientTs,
       phone: phoneDigits,

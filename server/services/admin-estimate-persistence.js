@@ -508,7 +508,7 @@ async function createOrReuseAdminEstimate({
     let canReplaceLinkedEstimate = false;
 
     if (linkedLeadId) {
-      const lead = await firstForUpdate(trx('leads').where({ id: linkedLeadId }));
+      const lead = await firstForUpdate(trx('leads').where({ id: linkedLeadId }).whereNull('deleted_at'));
       if (!lead) throw errorWithStatus('Lead not found', 404);
 
       if (lead.estimate_id) {

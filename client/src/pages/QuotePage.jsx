@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import AddressAutocomplete from '../components/AddressAutocomplete';
+import TurnstileWidget from '../components/TurnstileWidget';
+import { useTurnstile } from '../lib/useTurnstile';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import { COLORS, FONTS, SHADOWS } from '../theme-brand';
@@ -233,7 +235,15 @@ function captureAttribution() {
     const fbc = readCookie('_fbc');
     const fbp = readCookie('_fbp');
     const referrer = document.referrer || null;
-    const landing_url = window.location.href || null;
+    // Strip a voicemail-prefill fragment (#vlead=…&vt=…) before persisting —
+    // the token is a bearer credential and landing_url is stored on the lead.
+    let landing_url = window.location.href || null;
+    if (landing_url) {
+      const hashIdx = landing_url.indexOf('#');
+      if (hashIdx !== -1 && /(^|[#&])vt=/.test(landing_url.slice(hashIdx))) {
+        landing_url = landing_url.slice(0, hashIdx);
+      }
+    }
     // Keep _fbp too: it's a Conversions API match key even when it's the only
     // signal (view-through / direct return with no fbclid/_fbc/UTM/referrer).
     if (!hasUtm && !gclid && !wbraid && !gbraid && !fbclid && !fbc && !fbp && !referrer) return null;
@@ -355,8 +365,43 @@ export default function QuotePage({ serviceSlug = '' }) {
     catch { return false; }
   });
 
+  // Voicemail text-back prefill — /estimate#vlead=<leadId>&vt=<token>, minted
+  // ONLY by the voicemail quote-link SMS. The pair rides the URL FRAGMENT (a
+  // bearer credential must never hit server request logs or Referer headers),
+  // is locked at mount, then scrubbed from the address bar so a copied/shared
+  // URL doesn't carry it. It is exchanged (POST) for that lead's own contact
+  // fields so the form arrives prefilled, and rides every submit path so the
+  // wizard's lead capture UPDATES the same call-pipeline lead instead of
+  // minting a duplicate. Any failure (expired token, network) degrades to the
+  // normal blank wizard.
+  const [prefillAuth] = useState(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const p = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+      const vlead = p.get('vlead');
+      const vt = p.get('vt');
+      if (!vlead || !vt) return null;
+      try {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      } catch { /* scrub is best-effort */ }
+      return { leadId: vlead, token: vt };
+    } catch { return null; }
+  });
+
   const inputRef = useRef(null);
   const submitInFlightRef = useRef(false);
+  // Bot-spam guard for the /api/leads submits (submitOther / submitOneTime):
+  // a Turnstile token + an off-screen honeypot, mirroring the marketing forms.
+  // The hook awaits the async token before posting (so a fast click doesn't send
+  // an empty token) and remounts the widget on a failed submit for a fresh
+  // single-use token. It never blocks — server verification fails open while the
+  // gate is off, so a slow/blocked widget can't trap a real lead.
+  const honeypotRef = useRef(null);
+  // The honeypot input lives in the intake stage and unmounts before the
+  // confirm/calculate step, so submitIntake snapshots its value here for the
+  // later /public/quote/calculate POST.
+  const honeypotSnapshotRef = useRef('');
+  const turnstile = useTurnstile();
 
   useEffect(() => {
     setStage('intake');
@@ -373,6 +418,51 @@ export default function QuotePage({ serviceSlug = '' }) {
     setNewsletterOptIn(false);
     setSubscribeStatus('idle');
   }, [normalizedServiceSlug]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Exchange the prefill pair for the lead's contact fields. Fill-blank-only:
+  // never clobber anything the visitor already typed. A voicemail lead often
+  // has just a first name + phone — partial prefill is the expected case.
+  useEffect(() => {
+    if (!prefillAuth) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        // POST body, not query string — the token must stay out of URL logs.
+        const r = await fetch(`${API_BASE}/public/estimator/lead-prefill`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lead_id: prefillAuth.leadId, token: prefillAuth.token }),
+        });
+        if (!r.ok) return;
+        const d = await r.json();
+        if (cancelled || !d) return;
+        const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
+        const phoneDigits = String(d.phone || '').replace(/\D/g, '').slice(-10);
+        // Compose street + city + ZIP: the call processor stores the extracted
+        // STREET line in `address` with city/ZIP as separate columns, and a
+        // bare street line accepted as-is can geocode the wrong property at
+        // /property-lookup. Containment guards because some lead rows carry a
+        // full formatted address already (never double-append). No street
+        // line → no prefill; city/ZIP alone aren't an address.
+        const street = String(d.address || '').trim();
+        const cityPart = String(d.city || '').trim();
+        const zipPart = String(d.zip || '').trim();
+        const locality = [
+          cityPart && !street.toLowerCase().includes(cityPart.toLowerCase()) ? cityPart : '',
+          zipPart && !street.includes(zipPart) ? zipPart : '',
+        ].filter(Boolean).join(' ');
+        const prefillAddress = street ? [street, locality].filter(Boolean).join(', ') : '';
+        setIntake(prev => ({
+          ...prev,
+          ...(name && !prev.name ? { name } : {}),
+          ...(d.email && !prev.email ? { email: d.email } : {}),
+          ...(phoneDigits.length === 10 && !prev.phone ? { phone: phoneDigits } : {}),
+          ...(prefillAddress && !prev.address ? { address: prefillAddress } : {}),
+        }));
+      } catch { /* prefill is best-effort */ }
+    })();
+    return () => { cancelled = true; };
+  }, [prefillAuth]);
 
   useEffect(() => {
     if (!serviceConfig) {
@@ -504,6 +594,11 @@ export default function QuotePage({ serviceSlug = '' }) {
     const phoneDigits = intake.phone.replace(/\D/g, '');
     try {
       const resolvedAddress = await resolveAddressForSubmit();
+      // Read the honeypot + token BEFORE the stage switch — 'lookup' unmounts
+      // both inputs, and the single-use token must be solved while the widget
+      // is still on screen (same ordering bug as the astro EstimateForm fix).
+      honeypotSnapshotRef.current = honeypotRef.current?.value || '';
+      const turnstileToken = await turnstile.getToken();
 
       setStage('lookup');
       setLookupStatus('Measuring your property');
@@ -521,6 +616,9 @@ export default function QuotePage({ serviceSlug = '' }) {
           frequency: intake.frequency,
           service_interest: selectedServiceInterest(intake),
           attribution: attribution || undefined,
+          ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
+          fax_number: honeypotSnapshotRef.current,
+          turnstile_token: turnstileToken || undefined,
         }),
       });
       const d = await r.json();
@@ -548,6 +646,8 @@ export default function QuotePage({ serviceSlug = '' }) {
       setError(e.message || 'Lookup failed.');
       setStage('intake');
       setIntakeIdx(INTAKE_STEPS.length - 1);
+      // The attempt consumed the single-use token; remount for a fresh solve.
+      turnstile.reset();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -566,6 +666,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       const phoneDigits = intake.phone.replace(/\D/g, '');
       const otherLabel = OTHER_OPTIONS.find(o => o.value === intake.otherService)?.label || intake.otherService;
       const resolvedAddress = await resolveAddressForSubmit();
+      const turnstileToken = await turnstile.getToken();
       const res = await fetch(`${API_BASE}/leads`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -581,12 +682,16 @@ export default function QuotePage({ serviceSlug = '' }) {
           service_interest: otherLabel,
           source: normalizedServiceSlug ? `quote-page-${normalizedServiceSlug}` : 'quote-page-divert',
           attribution: attribution || undefined,
+          ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
+          fax_number: honeypotRef.current?.value || '',
+          turnstile_token: turnstileToken || undefined,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStage('result-other');
     } catch (e) {
       setError(e?.message || 'Could not send your request. Please call us.');
+      turnstile.reset();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -605,6 +710,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       const { firstName, lastName } = splitName(intake.name);
       const phoneDigits = intake.phone.replace(/\D/g, '');
       const resolvedAddress = await resolveAddressForSubmit();
+      const turnstileToken = await turnstile.getToken();
       const res = await fetch(`${API_BASE}/leads`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -620,12 +726,16 @@ export default function QuotePage({ serviceSlug = '' }) {
           service_interest: selectedServiceInterest(intake),
           source: `quote-page-${intake.frequency}`,
           attribution: attribution || undefined,
+          ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
+          fax_number: honeypotRef.current?.value || '',
+          turnstile_token: turnstileToken || undefined,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStage('result-other');
     } catch (e) {
       setError(e?.message || 'Could not send your request. Please call us.');
+      turnstile.reset();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -692,6 +802,9 @@ export default function QuotePage({ serviceSlug = '' }) {
           },
           attribution: attribution || undefined,
           newsletter_opt_in: newsletterOptIn,
+          // No turnstile_token here — the single-use token was spent on
+          // property-lookup (step 1); this step rides the verified leadId.
+          fax_number: honeypotRef.current?.value || honeypotSnapshotRef.current || '',
         }),
       });
       const d = await r.json();
@@ -1010,6 +1123,30 @@ export default function QuotePage({ serviceSlug = '' }) {
                 )}
 
                 {error && <div style={sError}>{error}</div>}
+
+                {/* Off-screen honeypot: bots that fill every field trip the
+                    server-side fax_number drop on /api/leads; real users never
+                    see it. */}
+                <input
+                  ref={honeypotRef}
+                  name="fax_number"
+                  type="text"
+                  tabIndex={-1}
+                  autoComplete="off"
+                  aria-hidden="true"
+                  style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, opacity: 0 }}
+                />
+
+                {/* Turnstile on the final intake step of EVERY flow: Other /
+                    one-time / not-sure POST to /api/leads, and the ongoing path
+                    POSTs to /public/estimator/property-lookup — both endpoints
+                    verify the token (gated). Renders nothing until
+                    VITE_TURNSTILE_SITE_KEY is set. */}
+                {intakeIdx === INTAKE_STEPS.length - 1 && (
+                  <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center' }}>
+                    <TurnstileWidget key={`ts-${turnstile.nonce}`} onToken={turnstile.onToken} />
+                  </div>
+                )}
 
                 <div style={{
                   marginTop: 24,

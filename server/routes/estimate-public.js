@@ -6,10 +6,11 @@ const config = require('../config');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
+const { verifyStaffBearer } = require('../middleware/admin-auth');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, formatETDate } = require('../utils/datetime-et');
-const { formatSmsTimeRange } = require('../utils/sms-time-format');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -57,7 +58,10 @@ const {
 const {
   estimateDataHasUnresolvedManagerApproval,
   commercialRiskTypeReviewNeeded,
+  commercialLowConfidenceRange,
+  commercialLowConfidenceServiceLines,
   commercialLowConfidenceRequiresSiteQuote,
+  COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT,
 } = require('../services/estimate-delivery-options');
 const {
   createEstimateAddServiceRequest,
@@ -958,6 +962,10 @@ const SERVICE_COPY = {
     aiBody: 'We measured the trenching path and linear footage used for this quote.',
     askChips: [
       'How long does the barrier last?',
+      // Second trenching chip (top slab/driveway question) — kept in the shared
+      // SERVICE_COPY list so the React contract (pricing.askChips via
+      // attachPublicPricingContract) offers it too, not just the SSR prompt bar.
+      'Do you drill the concrete or driveway?',
       'What product is used?',
       "What's covered?",
       'Do you renew it?',
@@ -1219,6 +1227,7 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
       servicePrompts.push('How does pre-slab treatment work?');
     } else if (termiteOneTimeCategories.includes('termite_trenching')) {
       servicePrompts.push('How long does the barrier last?');
+      servicePrompts.push('Do you drill the concrete or driveway?');
     } else {
       servicePrompts.push('How does the bait work?');
     }
@@ -2085,11 +2094,28 @@ function hasOnlyTermiteBaitServiceMix(recurring = [], oneTimeItems = []) {
     && oneTimeRows.every(isTermiteBaitOneTimeItem);
 }
 
+// Termidor FOAM spot treatments (engine `termite_foam`, "Termidor Foam Spot
+// Treatment") are a localized injection, never the liquid trench/barrier. A
+// trenching row never mentions foam, so a plain substring match is safe.
+function isTermiteFoamOneTimeItem(item = {}) {
+  if (String(item?.service || '').toLowerCase() === 'termite_foam') return true;
+  const raw = [item.service, item.name, item.label]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('foam');
+}
+
 function isTermiteTrenchingOneTimeItem(item = {}) {
   // Bora-Care is a borate wood treatment, never a liquid trench/barrier. Exclude
   // it up front so a label like "Termite Bora-Care Treatment" can't match the raw
   // "termite … treatment" heuristic below and steal the trenching copy/branch.
   if (isBoraCareOneTimeItem(item)) return false;
+  // Same for Termidor foam: "termite foam … Termidor … Treatment" matches BOTH
+  // the category mapper and the raw heuristic below, and a misclassified foam
+  // row would review-gate a foam-only quote off self-booking entirely.
+  if (isTermiteFoamOneTimeItem(item)) return false;
   const category = serviceCategoryForOneTimeItem(item);
   if (category === 'termite_trenching') return true;
   const raw = [item.service, item.name, item.label]
@@ -2098,6 +2124,17 @@ function isTermiteTrenchingOneTimeItem(item = {}) {
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
   return raw.includes('termite') && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(raw);
+}
+
+// A row that may accompany a genuine trenching line without breaking the
+// trenching-only classification: the trenching rows themselves, a Termidor foam
+// spot add-on (the engine bundles foam onto the liquid treatment — the job is
+// still a trenching job, so the review gate must hold), and non-billable rows
+// (inspections, discounts, setup). Any other positive charge blocks it.
+function isTrenchingReviewMixRow(item = {}) {
+  return isTermiteTrenchingOneTimeItem(item)
+    || isTermiteFoamOneTimeItem(item)
+    || isNonBillableOneTimeRow(item);
 }
 
 function isInspectionReviewOneTimeItem(item = {}) {
@@ -2112,10 +2149,59 @@ function isInspectionReviewOneTimeItem(item = {}) {
 function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  // Ignore non-billable rows (inspection/review lines, WaveGuard setup, and any
+  // discount/credit/zero row) so a discounted trenching-only quote — e.g.
+  // trenching + a negative one_time_adjustment — still classifies as trenching-only
+  // and keeps the review gate on both the render path and the accept 409. Mirrors
+  // hasOnlyBoraCareServiceMix. A Termidor foam spot add-on rides along (the job is
+  // still a trenching job); any OTHER positive charge still blocks it. Requires at
+  // least one genuine trenching row — foam-only never qualifies.
   return recurringRows.length === 0
     && oneTimeRows.length > 0
     && oneTimeRows.some(isTermiteTrenchingOneTimeItem)
-    && oneTimeRows.every((item) => isTermiteTrenchingOneTimeItem(item) || isInspectionReviewOneTimeItem(item));
+    && oneTimeRows.every(isTrenchingReviewMixRow);
+}
+
+// Shared termite-trenching review-before-booking predicate. A priced trenching-only
+// estimate must not be self-booked or self-charged online — a Waves specialist
+// confirms the treatment path and schedules the visit. Applied identically at every
+// booking/money touchpoint (SSR view + accept, and the React /data contract +
+// reserve/deposit/card-hold intents) so a slot hold or Stripe intent can never be
+// created for a quote that /accept would reject (AGENTS.md money-gate mirroring).
+function estimateTrenchingReviewRequired(estData) {
+  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+  if (recurringSvcList.length === 0 && oneTimeList.length === 0) {
+    // EngineInputs-only estimates (no stored result/engineResult rows) are a
+    // supported path — buildPricingBundle replays the inputs into priced rows at
+    // view/accept time, so this gate must replay too or an inputs-only trenching
+    // quote walks straight past every mirrored money gate (/data CTA, accept,
+    // reserve, deposit/card-hold intents) and self-books. Mirrors the
+    // recurring-side replay in withSupplementedRecurringServices.
+    const engineInputs = extractEngineInputs(estData);
+    if (!engineInputs) return false;
+    try {
+      // Classify the REPLAYED rows with this same predicate so the
+      // foam-companion / discount / positive-charge semantics live in one place.
+      // The wrapper carries no inputs, so this cannot recurse a second time.
+      return estimateTrenchingReviewRequired({ engineResult: generateEstimate(engineInputs) });
+    } catch (err) {
+      logger.error(`[estimate-public] trenching review gate engine replay failed: ${err.message}`);
+      // Liability gate: a trenching-flagged quote that can't be classified must
+      // fail CLOSED (review/call-to-confirm) rather than self-book.
+      return !!(engineInputs.services?.trenching || engineInputs.svcTrenching);
+    }
+  }
+  if (!hasOnlyTermiteTrenchingServiceMix(recurringSvcList, oneTimeList)) return false;
+  // acceptanceServiceLists returns the RAW one-time rows whenever any exist, so a
+  // positive charge that exists only as the normalized difference between
+  // oneTime.total and the listed rows (the synthetic `one_time_adjustment` row
+  // normalizeOneTimeBreakdown emits) would be invisible above. That difference is
+  // a real charge for something other than trenching, so it must block the
+  // trenching-only classification exactly like a listed positive row does —
+  // re-check against the normalized rows too (empty normalization keeps the raw
+  // verdict; discount rows still net out and stay ignorable).
+  const normalizedRows = normalizeOneTimeBreakdown(estData).items;
+  return normalizedRows.every(isTrenchingReviewMixRow);
 }
 
 // True for one-time rows that carry no billable service of their own, so they
@@ -3138,11 +3224,16 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const hasOnlyMosquitoServices = hasOnlyMosquitoServiceMix(recurring, oneTimeItems);
   const hasOnlyTreeShrubServices = hasOnlyTreeShrubServiceMix(recurring, oneTimeItems);
   const hasOnlyTermiteBaitServices = hasOnlyTermiteBaitServiceMix(recurring, oneTimeItems);
-  const hasOnlyTermiteTrenchingServices = hasOnlyTermiteTrenchingServiceMix(recurring, oneTimeItems);
+  // Trenching detection uses the SHARED review-gate predicate (not the raw
+  // result.oneTime.items) so the server-rendered copy + review card classify
+  // exactly like /accept and the slot/money endpoints — engine-backed estimates
+  // that persist trenching only under engineResult.lineItems would otherwise
+  // render the normal booking card whose slot endpoints return nothing (a dead
+  // self-book flow instead of the review/call CTA).
+  const hasOnlyTermiteTrenchingServices = estimateTrenchingReviewRequired(estData);
   const hasOnlyBoraCareServices = hasOnlyBoraCareServiceMix(recurring, boraCareOneTimeRows);
   const pageCopy = hasOnlyLawnCareServices
     ? {
-        heroSuffix: "here's your lawn care estimate.",
         recurringAssurance: 'Your plan includes scheduled turf applications, visit notes, and treatment timing matched to Southwest Florida conditions.',
         aggregateDayLabel: 'lawn care',
         billingHeading: 'Choose how you want to pay',
@@ -3168,7 +3259,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       }
     : (hasOnlyMosquitoServices
       ? {
-          heroSuffix: "here's your mosquito control estimate.",
           recurringAssurance: 'Your plan targets shaded resting zones, lanai edges, and breeding-source pressure around your property.',
           aggregateDayLabel: 'mosquito control',
           billingHeading: 'Choose how you want to pay',
@@ -3194,7 +3284,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         }
       : (hasOnlyTreeShrubServices
         ? {
-          heroSuffix: "here's your tree & shrub estimate.",
           recurringAssurance: 'Your plan includes scheduled ornamental treatments, visit notes, and treatment timing matched to Southwest Florida conditions.',
           aggregateDayLabel: 'tree & shrub care',
           billingHeading: 'Choose how you want to pay',
@@ -3220,7 +3309,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         }
       : (hasOnlyTermiteBaitServices
         ? {
-            heroSuffix: "here's your termite protection estimate.",
             recurringAssurance: 'Your plan includes termite station service and treatment timing matched to your home perimeter.',
             aggregateDayLabel: 'termite protection',
             billingHeading: 'Choose how you want to pay',
@@ -3246,16 +3334,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           }
         : (hasOnlyTermiteTrenchingServices
           ? {
-              heroSuffix: "here's your termite trenching quote.",
               recurringAssurance: 'This trenching quote is based on the measured treatment path and office review.',
               aggregateDayLabel: 'termite trenching',
               billingHeading: 'Choose how you want to pay',
               billingLede: null,
               payAfterTitle: 'Pay per application',
               payAfterBody: 'Approve now; after you confirm, we send the invoice so you can pay before service.',
-              noPaymentCopy: 'No payment is charged on this page. Waves will finish the inspection review before pricing is finalized.',
+              noPaymentCopy: 'No payment is charged on this page. You pay on service day; no card or deposit now.',
               bookingTitle: 'Review your termite trenching quote with Waves',
-              bookingSubhead: 'Waves will confirm the treatment path before a normal service slot is reserved online.',
+              bookingSubhead: 'Waves confirms your treatment path — access, exact footage, product, and warranty — then schedules your visit. You pay on service day; no card or deposit now.',
               payPrefHeading: 'Choose how you want to pay',
               payPrefCardTitle: 'Pay per application',
               payPrefCardSub: 'Invoice is sent automatically after confirmation.',
@@ -3272,7 +3359,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
             }
           : (hasOnlyBoraCareServices
             ? {
-                heroSuffix: "here's your Bora-Care wood treatment quote.",
                 recurringAssurance: 'This quote is based on the measured attic and surface wood areas treated with Bora-Care.',
                 aggregateDayLabel: 'Bora-Care wood treatment',
                 billingHeading: 'Choose how you want to pay',
@@ -3297,7 +3383,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 finalBody: 'No payment today.',
               }
             : {
-              heroSuffix: "here's your custom quote.",
               recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
               aggregateDayLabel: 'complete home protection',
               billingHeading: 'Choose how you want to pay',
@@ -3393,6 +3478,18 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest') || k.includes('commercial_mosquito') || k.includes('commercial_termite') || k.includes('commercial_rodent');
     })
   );
+
+  // Termite trenching review gate: a trenching job is a high-liability structural
+  // service (concrete drilling, a chemical soil barrier, and a warranty/retreat
+  // obligation), so Waves confirms the treatment path — access, exact footage,
+  // product, warranty — before a crew is dispatched. A priced trenching-only
+  // estimate is therefore review-before-booking: the PRICE stays visible (this is
+  // NOT quoteRequired, so the number and the Ask-Waves AI both stay live), but the
+  // online slot picker / self-book is suppressed and Waves schedules after review.
+  // This deliberately OUTRANKS the commercial manual-accept card: /accept 409s a
+  // trenching-only quote with no commercial exception, so rendering the commercial
+  // approval buttons here would present a CTA that can only end in a 409.
+  const trenchingReviewBeforeBooking = !locked && hasOnlyTermiteTrenchingServices;
 
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeDiscounts) * 100) / 100);
   // Per-day figure is a true daily rate: annual cost / 365 (monthly * 12 / 365).
@@ -4457,7 +4554,7 @@ ${shellTopBar()}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
-    <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : escapeHtml(pageCopy.heroSuffix)}</h1>
+    <h1>Hello ${firstName}, your estimate is ready!</h1>
     ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
     ${customerEmail ? `<div class="hero-contact">${customerEmail}</div>` : ''}
@@ -4514,7 +4611,15 @@ ${shellTopBar()}
     <span id="upsell-request-status-copy">Got it. We are reviewing this service for your property and will follow up with a revised estimate shortly.</span>
   </div>` : ''}
 
-  ${locked ? '' : commercialManualAccept ? `
+  ${locked ? '' : trenchingReviewBeforeBooking ? `
+  <section class="card booking-card" id="trenching-review-card">
+    <h2 id="booking-title">${escapeHtml(pageCopy.bookingTitle)}</h2>
+    <p class="card-sub">${escapeHtml(pageCopy.bookingSubhead)}</p>
+    <p class="card-sub" style="font-style:italic">This price is set from the measured treatment path. Because trenching drills concrete, lays a chemical soil barrier, and carries a retreat warranty, a Waves specialist confirms the plan with you before your visit is scheduled &mdash; so it can't be self-booked online.</p>
+    <a href="tel:${COMPANY.phoneRaw}" class="cta" style="max-width:360px;margin:16px auto 0;display:block;text-align:center;text-decoration:none">Call Waves to confirm &mdash; ${escapeHtml(COMPANY.phone)}</a>
+    <p class="card-sub" style="margin-top:12px">Prefer we reach out? We'll follow up to confirm your treatment path and schedule your visit. You pay on service day.</p>
+  </section>
+  ` : commercialManualAccept ? `
   <section class="card booking-card" id="commercial-accept-card">
     <h2 id="booking-title">Approve your commercial service</h2>
     <p class="card-sub">This is a commercial service plan. Approve your estimate and a Waves account manager will schedule your visits and send your invoice &mdash; no card or deposit needed now.</p>
@@ -4653,12 +4758,20 @@ ${shellTopBar()}
     </div>
   </div>
 
-  ${quoteRequired && est.status !== 'accepted' ? (commercialProposal ? `
+  ${(quoteRequired || trenchingReviewBeforeBooking) && est.status !== 'accepted' ? (commercialProposal ? `
   <div class="final">
     <h2>Your commercial proposal is ready</h2>
     <p>${proposalPdfEmailed
       ? 'We’ve emailed your formal proposal as a PDF.'
       : 'Your Waves account manager has your formal proposal and will send the PDF to you directly.'} There’s no online checkout for a commercial bid — your account manager will follow up to answer questions and finalize the agreement.</p>
+    <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
+    <div style="margin-top:20px;font-size:14px">
+      Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
+    </div>
+  </div>` : trenchingReviewBeforeBooking ? `
+  <div class="final">
+    <h2>Waves will confirm &amp; schedule your trenching</h2>
+    <p>Your price is set from the measured treatment path. Before we dispatch a crew, a Waves specialist confirms access, exact footage, product, and warranty &mdash; then schedules your visit and sends your invoice. You pay on service day; no card or deposit now.</p>
     <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
@@ -5065,9 +5178,12 @@ ${shellQuestionsBar()}
   }
 
   function ensureBookingCardVisible() {
-    // Commercial estimates render an approval card (no slots) in place of the
-    // booking card — fall back to it so the hero CTA still scrolls somewhere.
-    const target = document.getElementById('booking-card') || document.getElementById('commercial-accept-card');
+    // Commercial estimates render an approval card, and priced termite trenching
+    // renders a review-before-booking card, in place of the slot-picker booking
+    // card — fall back to either so the hero CTA still scrolls somewhere.
+    const target = document.getElementById('booking-card')
+      || document.getElementById('commercial-accept-card')
+      || document.getElementById('trenching-review-card');
     if (!target) return null;
     target.style.display = '';
     if (target.id === 'booking-card' && target.dataset.slotsLoaded !== 'true') {
@@ -6220,18 +6336,33 @@ async function handleEstimateView(req, res, next) {
     // card hold can be captured — otherwise the legacy server-HTML page would
     // accept without a hold and the server would reject with CARD_HOLD_REQUIRED.
     // Dark by default: isCardHoldEnabled() is false until ONE_TIME_CARD_HOLD.
+    // Effective invoice mode (admin bill_by_invoice OR derived guarantee-only
+    // renewal) always routes to React — the payment-only accept UI (no slot
+    // picker) only exists there; the legacy server-HTML page would demand a
+    // booking the server no longer requires.
+    const effectiveInvoiceMode = resolveEstimateInvoiceMode(estimate, estData);
     const cardHoldForcesReactView = CardHolds.isCardHoldEnabled()
-      && estimate.bill_by_invoice !== true
+      && !effectiveInvoiceMode
       && (estimate.show_one_time_option === true || isStructuralOneTimeOnlyEstimate(estData, estimate));
+    // Staff can request the REAL React renderer for an unpublished row via
+    // ?adminPreview=1 (the estimate tool's "Customer View" + the estimates
+    // list's Preview). The param is NOT authorization — this route only
+    // serves the SPA shell; GET /:token/data does the staff-JWT check and
+    // still 404s the draft for anyone else, so a non-staff hit on the URL
+    // renders the React "link isn't valid" screen (strictly less exposure
+    // than the SSR draft page below).
+    const adminPreviewRequested = req.query.adminPreview === '1';
     const shouldUseReactEstimateView = (estimate.use_v2_view === true
-      || estimate.bill_by_invoice === true
+      || effectiveInvoiceMode
       || cardHoldForcesReactView)
       // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
       // renderer so office staff can still preview a draft via /estimate/<token>
-      // before it's sent. The React `/:token/data` gate 404s drafts (security),
-      // so routing them to React would break draft preview; the default flip
-      // only takes effect once the estimate is actually published.
-      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+      // before it's sent — UNLESS the staff preview param asks for the React
+      // page (the renderer the customer actually gets once it's sent; the
+      // /:token/data staff gate makes that path draft-safe). The use_v2_view
+      // default flip otherwise only takes effect once the estimate is
+      // actually published.
+      && (!UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status) || adminPreviewRequested);
     if (shouldUseReactEstimateView && req.path.startsWith('/estimate/')) {
       return next();
     }
@@ -6323,14 +6454,15 @@ async function handleEstimateView(req, res, next) {
       paymentMethodPreference: null,
       membership,
       oneTime: depositStructuralOneTime,
-      oneTimeUninvoiced: depositStructuralOneTime && estimate.bill_by_invoice !== true,
+      oneTimeUninvoiced: depositStructuralOneTime && !effectiveInvoiceMode,
+      noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
     });
     // Card-hold policy "as if one-time" — surfaced so the page can require a
     // card when the customer books a single visit (enforced client-side only
     // in one_time mode).
     const cardHoldOneTimePolicyForView = CardHolds.resolveCardHoldPolicy({
       treatAsOneTime: true,
-      billByInvoice: estimate.bill_by_invoice === true,
+      billByInvoice: effectiveInvoiceMode,
       paymentMethodPreference: null,
     });
 
@@ -6422,6 +6554,20 @@ function isCommercialAutoAcceptEstimate(estimate = {}) {
   return recurringRows.some(isCommercialSvc);
 }
 
+// The commercial deposit exemption covers accepts that mint NOTHING at accept
+// time: the recurring commercial program is manually invoiced after on-site
+// confirmation (held or not), and an UNinvoiced one-time commercial accept's
+// deposit could never credit — commercial has no self-servable booking for the
+// completed-visit roll-forward. A one-time INVOICE-MODE accept is different:
+// its invoice is minted right in the accept transaction (with depositCredit),
+// so it keeps the standard one-time deposit gate — agreeing with /data's
+// requiredForOneTime and /deposit-intent, which collect that deposit. Without
+// this carve-out a crafted accept could skip the deposit the UI just required.
+function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirmationHold = false, treatAsOneTime = false, billByInvoice = false } = {}) {
+  if (treatAsOneTime && billByInvoice) return false;
+  return isCommercialAccept === true || siteConfirmationHold === true;
+}
+
 // PUT /api/estimates/:token/accept — customer accepts
 // Body (backward compatible — both optional):
 //   { slotId?: string, paymentMethodPreference?: 'card_on_file' | 'deposit_now' | 'pay_at_visit' | 'prepay_annual' }
@@ -6482,10 +6628,11 @@ router.put('/:token/accept', async (req, res, next) => {
       const raw = req.body?.selectedFrequency;
       return typeof raw === 'string' ? raw.trim() : '';
     })();
-    // Invoice-mode: admin opted the estimate into legacy auto-invoicing.
-    // Standard recurring accepts now also use invoice payment links, while
-    // this flag keeps the older bill-by-invoice amount rules in place.
-    const billByInvoice = !!estimate.bill_by_invoice;
+    // Invoice-mode: admin opted the estimate into legacy auto-invoicing, OR
+    // the estimate is a guarantee-only renewal (derived — see
+    // resolveEstimateInvoiceMode): no visit to book, so accept creates the
+    // invoice directly with no slot, no card hold, no booking SMS.
+    const billByInvoice = resolveEstimateInvoiceMode(estimate);
     if (annualPrepaySelected && billByInvoice) {
       return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
     }
@@ -6525,6 +6672,15 @@ router.put('/:token/accept', async (req, res, next) => {
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
     const rawEstData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
     const estData = withSupplementedRecurringServices(rawEstData) || rawEstData || {};
+    // A guarantee-only renewal has NO visit: its invoice-mode accept never
+    // books, and /reserve rejects it — so a slotId here can only come from a
+    // crafted/stale client holding a pre-gate reservation. Reject rather than
+    // commit a phantom Rodent Control appointment alongside the warranty
+    // invoice. An existing LINKED appointment keeps precedence (the acceptance
+    // contract yields to it), so existingAppointmentId stays accepted.
+    if (slotId && isRodentGuaranteeOnlyEstimate(estimate, estData)) {
+      return res.status(409).json({ error: 'No appointment is needed for this renewal — accept without selecting a slot.' });
+    }
     const existingAppointmentRow = existingAppointmentId
       ? await findLinkedUpcomingAppointment(estimate, estData, { appointmentId: existingAppointmentId })
       : null;
@@ -6563,6 +6719,20 @@ router.put('/:token/accept', async (req, res, next) => {
     }
 
     let { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+    // Termite trenching review gate (fail-closed): a priced trenching-only estimate
+    // can't be self-booked or self-accepted online — a Waves specialist confirms the
+    // treatment path (access, exact footage, product, warranty) and schedules the
+    // visit before a crew is dispatched. The public view mirrors this (price visible,
+    // no slot picker, "Waves will confirm & schedule" copy); this blocks a crafted
+    // accept from committing a slot behind that UI. Priced only — a trenching estimate
+    // that is genuinely quoteRequired already 409'd above with its own reason.
+    if (estimateTrenchingReviewRequired(estData)) {
+      return res.status(409).json({
+        error: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit — this quote can’t be booked online.',
+        reviewBeforeBooking: true,
+        reason: 'termite_trenching_review',
+      });
+    }
     if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
       recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
     }
@@ -6578,6 +6748,29 @@ router.put('/:token/accept', async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+
+    // A NARROW low-confidence commercial RECURRING estimate accepts online
+    // (self-serve), but its exact price is confirmed on site — so NO money moves
+    // at accept, whatever the billing mode: invoice-mode skips the first-invoice
+    // mint (the account manager issues it after the on-site confirmation), and
+    // non-invoice pay-per-application simply bills after the confirmed visit.
+    // Matches the "$X–$Y/mo, confirmed on site" range the customer approved.
+    // The WIDE case never reaches here (the quote gate above rejects it 409).
+    // Computed AFTER treatAsOneTime so a one-time accept keeps its own
+    // booking/invoice outcome (the hold is about the recurring program only).
+    const lowConfidenceAccept = commercialLowConfidenceRange(estData);
+    const holdFirstInvoiceForSiteConfirmation = !treatAsOneTime
+      && lowConfidenceAccept.hasLowConfidence
+      && !lowConfidenceAccept.forceSiteQuote;
+    // The one non-invoice path that WOULD collect exact money at accept is
+    // annual prepay (its conversion mints the exact 12-month invoice) — a price
+    // shown as a range must never be prepaid before the site confirmation.
+    // Fail closed; the client also hides the prepay option for these.
+    if (holdFirstInvoiceForSiteConfirmation && annualPrepaySelected) {
+      return res.status(400).json({
+        error: 'Annual prepay opens after we confirm your exact price on a quick site visit — choose pay per application to approve now.',
+      });
+    }
 
     // One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). Read straight
     // from the raw body so the normalized payment preference + existing
@@ -6621,23 +6814,43 @@ router.put('/:token/accept', async (req, res, next) => {
     // (legacy customer-linked estimates have no membershipSnapshot) and
     // oneTimeUninvoiced forces a booking on one-time pay-at-visit accepts —
     // without an appointment there is no source_estimate_id for the
-    // roll-forward to credit the deposit against.
+    // roll-forward to credit the deposit against. Keyed off the RESOLVED
+    // invoice mode (not the raw column): a guarantee-only renewal mints its
+    // invoice right here at accept, so its deposit has an invoice to credit
+    // with no booking. The raw column would re-grow APPOINTMENT_REQUIRED on
+    // the payment-only UI (which has no slot picker) — AFTER /deposit-intent
+    // (already resolved-mode-aware) collected the deposit.
     const depositPolicy = await resolveDepositPolicyForEstimate({
       estimate,
       paymentMethodPreference,
       membership: acceptMembership,
       oneTime: treatAsOneTime,
-      oneTimeUninvoiced: treatAsOneTime && estimate.bill_by_invoice !== true,
+      oneTimeUninvoiced: treatAsOneTime && !billByInvoice,
+      // Guarantee-only renewal: no appointment exists to book, so the plan-
+      // customer booking commitment gate must not 400 the no-slot accept —
+      // the renewal's audience IS a plan customer.
+      noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
       scheduledServiceId: acceptLinkedSsId,
       // Scope already resolved above to the accepted appointment — don't let the
       // resolver re-derive an unrelated linked appointment when this is null.
       useLinkedFallback: false,
     });
-    if (isCommercialAccept) {
+    if (commercialAcceptDepositExempt({
+      isCommercialAccept,
+      siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
+      treatAsOneTime,
+      billByInvoice,
+    })) {
       // Commercial bills by manual invoice after on-site confirmation, not a
       // booking deposit/card — and nothing is auto-scheduled, so there is no
       // first-visit invoice to credit a deposit against. Exempt the commitment
       // deposit (and its slot requirement) so the customer can approve online.
+      // The hold predicate is included so a held estimate is deposit-exempt even
+      // in a line shape commercialLowConfidenceRange sees but the isCommercial
+      // Accept detector doesn't (result.lineItems / top-level lineItems).
+      // NOT exempt: a one-time INVOICE-MODE commercial accept — its invoice is
+      // minted below and the deposit credits it (see commercialAcceptDeposit
+      // Exempt), matching /data requiredForOneTime + /deposit-intent.
       depositPolicy.required = false;
       depositPolicy.slotRequired = false;
       depositPolicy.exemptReason = 'commercial_manual_billing';
@@ -7239,7 +7452,10 @@ router.put('/:token/accept', async (req, res, next) => {
       let invoiceServiceLabelResult = acceptedOneTimeServiceLabel || null;
       let invoiceKindResult = null;
       let annualPrepayConversionResult = null;
-      if (billByInvoice) {
+      // Narrow low-confidence commercial: skip the exact first-invoice mint so the
+      // team invoices after on-site price confirmation (see holdFirstInvoiceFor
+      // SiteConfirmation above). Acceptance still commits + books the program.
+      if (billByInvoice && !holdFirstInvoiceForSiteConfirmation) {
         if (!customerId) {
           throw estimateAcceptError('invoice-mode acceptance requires a customer record before creating the invoice');
         }
@@ -7399,6 +7615,12 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) {
         logger.error(`[estimate-accept] Appointment reminder registration failed for ${appointment.id}: ${e.message}`);
       }
+      // Appointment-type automations (tagging, prep guide emails) — same hook
+      // the admin scheduling path runs. Post-commit and fire-and-forget so the
+      // accept response never waits on it.
+      const AppointmentTagger = require('../services/appointment-tagger');
+      void AppointmentTagger.onServiceScheduled(appointment.id)
+        .catch((e) => logger.error(`[estimate-accept] appointment automations failed (non-blocking) for ${appointment.id}: ${e.message}`));
     }
     const deferredFollowUpReminderRows = Array.isArray(annualPrepayConversion?.deferredFollowUpReminderRows)
       ? annualPrepayConversion.deferredFollowUpReminderRows
@@ -7493,9 +7715,19 @@ router.put('/:token/accept', async (req, res, next) => {
             const serviceDate = scheduledDate
               ? formatETDate(new Date(`${scheduledDate}T12:00:00Z`))
               : 'your selected date';
-            const start = hhmm(confirmedAppointmentRow?.window_start);
-            const end = hhmm(confirmedAppointmentRow?.window_end);
-            const timeWindow = start && end ? formatSmsTimeRange(`${start}-${end}`) : 'your selected window';
+            // {time} quotes the 2-hour arrival promise from the window start.
+            // window_end is the job-duration block that sizes scheduling —
+            // never the customer-facing window (see sms-time-format).
+            const arrivalRange = arrivalWindowRange(confirmedAppointmentRow?.window_start);
+            const timeWindow = arrivalRange ? formatSmsTimeRange(arrivalRange) : 'your selected window';
+            // appointment_confirmation renders {reschedule_line}, and
+            // getTemplate suppresses the whole SMS on an unresolved
+            // placeholder — every render site must pass the clause ('' when
+            // no link could be minted).
+            const { buildRescheduleLink } = require('../services/reschedule-link');
+            const reschedule = confirmedAppointmentRow?.id
+              ? await buildRescheduleLink(confirmedAppointmentRow.id, { customerId: customerId || null })
+              : { url: null, line: '' };
             const customerBody = await renderTemplate(
               'appointment_confirmation',
               {
@@ -7503,6 +7735,7 @@ router.put('/:token/accept', async (req, res, next) => {
                 service_type: confirmedServiceLabel,
                 date: serviceDate,
                 time: timeWindow,
+                reschedule_line: reschedule.line,
               },
               undefined,
               { workflow: 'estimate_accept_onetime_confirmed', entity_type: 'scheduled_service', entity_id: confirmedAppointmentRow?.id || estimate.id },
@@ -7621,16 +7854,21 @@ router.put('/:token/accept', async (req, res, next) => {
           // auto-schedule a wrong-length visit and never auto-create/send an
           // invoice before the on-site scope confirmation.
           skipSetupInvoice: billByInvoice || isCommercialAccept,
-          skipAutoSchedule: isCommercialAccept,
+          // A narrow low-confidence commercial estimate is held for on-site price
+          // confirmation, so it bills manually just like any commercial accept —
+          // never auto-schedule or auto-create/send an invoice here either. (Hold
+          // implies commercial, but fold it in explicitly so the no-invoice
+          // invariant can't depend on the isCommercialAccept detector shape.)
+          skipAutoSchedule: isCommercialAccept || holdFirstInvoiceForSiteConfirmation,
           prepayInvoiceAmount: annualPrepayInvoiceAmount,
           // Commercial (standard) bills manually — create NO auto first-
           // application invoice (which would also mis-tax a mixed plan); the team
           // invoices after on-site confirmation. The commercial customer is
           // marked property_type='commercial' by the converter so that manual
           // invoice taxes the taxable services (pest) correctly.
-          firstApplicationAmount: isCommercialAccept ? null : firstApplicationInvoiceAmount,
+          firstApplicationAmount: (isCommercialAccept || holdFirstInvoiceForSiteConfirmation) ? null : firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
-          autoSendInvoice: !isCommercialAccept,
+          autoSendInvoice: !(isCommercialAccept || holdFirstInvoiceForSiteConfirmation),
         });
         if (conversion?.draftInvoiceId) {
           invoiceMode = true;
@@ -7823,6 +8061,7 @@ router.put('/:token/accept', async (req, res, next) => {
       bookingUrl,
       treatAsOneTime,
       reservationCommitted,
+      siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
     }));
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
@@ -9047,6 +9286,41 @@ function isStructuralOneTimeOnlyEstimate(estData, estimate = {}) {
     && Number(oneTimeBreakdown.total || 0) > 0;
 }
 
+// The annual rodent guarantee ($199/$249/$299, 12-month re-entry warranty) is
+// sold AFTER trapping/exclusion/sanitation are complete — a guarantee-only
+// estimate is a warranty RENEWAL with no service visit to perform. The
+// booking-path machinery (slot picker, APPOINTMENT_REQUIRED, one-time card
+// hold) would force the customer to reserve a Rodent Control visit just to
+// buy the warranty, so these estimates accept through the invoice-mode
+// payment-only path instead. Strict single-service match on the
+// rodent_guarantee key: rodent_guarantee_combo carries real exclusion work,
+// and any mixed one-time estimate keeps the normal booking path. Discount
+// rows (a manual discount's one-time slice etc.) are ignored — a discounted
+// renewal is still a renewal, and a discount is not a service needing a
+// visit; every remaining row must be the guarantee (fail-closed to booking).
+function isRodentGuaranteeOnlyEstimate(estimate = {}, estData = null) {
+  let data = estData;
+  if (data == null) {
+    data = estimate.estimate_data;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
+    data = data || {};
+  }
+  if (!isStructuralOneTimeOnlyEstimate(data, estimate)) return false;
+  const rows = (normalizeOneTimeBreakdown(data).items || []).filter((row) => row?.kind !== 'discount');
+  return rows.length > 0 && rows.every((row) => row?.service === 'rodent_guarantee');
+}
+
+// Effective invoice mode: the admin's bill_by_invoice opt-in OR the derived
+// guarantee-only renewal above. Derived (not persisted) so every estimate
+// creation path gets it, and every public money surface — view routing,
+// accept, /:token/data, deposit-intent, card-hold-intent — must read THIS
+// rather than the raw column: a surface that reads estimate.bill_by_invoice
+// directly re-grows the forced-booking path for guarantee-only accepts.
+function resolveEstimateInvoiceMode(estimate = {}, estData = null) {
+  if (estimate?.bill_by_invoice === true) return true;
+  return isRodentGuaranteeOnlyEstimate(estimate, estData);
+}
+
 function defaultServiceModeForEstimate(estData, estimate = {}) {
   return isStructuralOneTimeOnlyEstimate(estData, estimate) ? 'one_time' : 'recurring';
 }
@@ -9249,6 +9523,20 @@ function assertExistingAppointmentUpdateApplied(updatedCount) {
 // they are intentionally NOT here.
 const UNPUBLISHED_ESTIMATE_STATUSES = ['draft', 'scheduled'];
 
+// Whether a /:token/data request MAY be upgraded to a staff draft preview —
+// the only bypass of isEstimateCustomerViewable, and deliberately narrow:
+// unpublished (draft/scheduled), non-archived rows only, and only when the
+// caller explicitly asked (?adminPreview=1). Expired/send_failed/archived
+// stay 404 even for staff. This predicate is the cheap half; the caller must
+// ALSO verify a staff Bearer JWT (verifyStaffBearer) before honoring it —
+// the `waves_admin` marker cookie is a view-count signal, never authorization.
+function adminDraftPreviewEligible(estimate, adminPreviewParam) {
+  return adminPreviewParam === '1'
+    && !!estimate
+    && !estimate.archived_at
+    && UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+}
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
@@ -9311,11 +9599,17 @@ function buildAcceptSuccessPayload({
   bookingUrl = null,
   treatAsOneTime = false,
   reservationCommitted = false,
+  siteConfirmationHold = false,
 } = {}) {
   let nextStep = 'confirmed';
+  // A narrow low-confidence commercial estimate is approved online but its first
+  // invoice is intentionally held for on-site price confirmation (no invoice was
+  // minted) — so it gets its own "we'll confirm on site, then invoice" outcome
+  // rather than the generic "you're booked" confirmed copy.
+  if (siteConfirmationHold) nextStep = 'site_confirmation';
   // Third-party Bill-To: a payer-billed invoice is the payer's to pay — the
   // homeowner has no pay-invoice step (the invoice went to the payer AP inbox).
-  if (!payerBilled && (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl))) nextStep = 'pay_invoice';
+  else if (!payerBilled && (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl))) nextStep = 'pay_invoice';
   else if (treatAsOneTime && !reservationCommitted) nextStep = 'book_one_time';
   // A payer-billed annual-prepay accept also has no homeowner step — the prepay
   // invoice went to the payer AP inbox, so don't surface prepay follow-up copy.
@@ -11420,12 +11714,91 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
   };
 }
 
+// The section's LOW-confidence monthly dollars — the sum of its LOW commercial
+// member lines. This is a FIXED amount (the uncertain dollars); the ±20% band is
+// taken against it, not the whole total, so exact lines/add-ons aren't banded.
+function sectionLowConfidenceMonthly(section, lines) {
+  const memberKeys = new Set(
+    Array.isArray(section?.memberKeys) && section.memberKeys.length ? section.memberKeys : [section?.key]
+  );
+  let low = 0;
+  for (const line of lines) {
+    if (!memberKeys.has(recurringServiceKey({ service: line.service }))) continue;
+    if (line.isLow) low += line.monthly;
+  }
+  return low;
+}
+
+// A NARROW low-confidence commercial estimate (LOW pricing confidence, ±20% band
+// ≤ $300/mo swing) stays self-serve approvable, but the customer sees the price
+// as a "$X–$Y/mo, confirmed on site" range instead of a false-precision number.
+// The band applies to the section's OWN low-confidence dollars. The fraction is
+// computed PER FREQUENCY (low ÷ that cadence's displayed monthly) so a selectable
+// bundle — where the exact/non-LOW part changes by cadence — always bands only
+// the fixed uncertain dollars: PriceCard's cadencePrice × fraction × pct reduces
+// to low × interval × pct at every cadence. fraction 1 = a single all-LOW line.
+function stampLowConfidenceRangeOnServices(services, lines) {
+  if (!Array.isArray(services) || !lines.length) return services;
+  return services.map((section) => {
+    if (!section?.isRecurring) return section;
+    const low = sectionLowConfidenceMonthly(section, lines);
+    if (!(low > 0)) return section;
+    return {
+      ...section,
+      frequencies: (Array.isArray(section.frequencies) ? section.frequencies : []).map((frequency) => {
+        if (!frequency || frequency.quoteRequired === true) return frequency;
+        const monthly = Number(frequency.monthly) || 0;
+        if (monthly <= 0) return frequency;
+        return {
+          ...frequency,
+          lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT,
+          lowConfidenceFraction: Math.min(1, low / monthly),
+        };
+      }),
+    };
+  });
+}
+
+// The combined "Recurring total" card (shown when >1 recurring service) ranges
+// on the AGGREGATE low-confidence share across all its services. Denominator is
+// the full displayed recurring subtotal (which may include exact non-commercial
+// add-ons), so only the LOW commercial dollars carry the band. The card is
+// cadence-SELECTABLE, and the uncertain dollars are FIXED while the exact part
+// moves with the selection — so ship the raw LOW monthly (lowConfidenceMonthly)
+// and let the client recompute the fraction against whichever combined cadence
+// the customer selects; the default-subtotal fraction stays as a fallback.
+function withCombinedLowConfidenceRange(combined, range) {
+  if (!combined || !range || !range.hasLowConfidence || range.forceSiteQuote) return combined;
+  const lowMonthly = Math.round((Number(range.lowConfidenceMonthly) || 0) * 100) / 100;
+  const displayedMonthly = Number(combined.monthlySubtotal) || 0;
+  const fraction = displayedMonthly > 0 ? Math.min(1, lowMonthly / displayedMonthly) : 1;
+  if (!(fraction > 0)) return combined;
+  return {
+    ...combined,
+    lowConfidenceRangePct: COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT,
+    lowConfidenceFraction: fraction,
+    lowConfidenceMonthly: lowMonthly,
+  };
+}
+
 function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) {
   const contractPayload = Array.isArray(payload.frequencies)
     ? { ...payload, frequencies: payload.frequencies.map(normalizePricingFrequencyTotals) }
     : payload;
-  const services = buildPricingServices(contractPayload, estimate, estData);
-  const combinedRecurring = buildCombinedRecurring(contractPayload, estimate, estData, services);
+  // The WIDE case is force-converted to a site-confirmation quote upstream
+  // (resolveEstimateQuoteRequirement), so gate the range on !forceSiteQuote.
+  const lowConfidenceRange = commercialLowConfidenceRange(estData);
+  const lowConfidenceLines = lowConfidenceRange.hasLowConfidence && !lowConfidenceRange.forceSiteQuote
+    ? commercialLowConfidenceServiceLines(estData)
+    : [];
+  const services = stampLowConfidenceRangeOnServices(
+    buildPricingServices(contractPayload, estimate, estData),
+    lowConfidenceLines,
+  );
+  const combinedRecurring = withCombinedLowConfidenceRange(
+    buildCombinedRecurring(contractPayload, estimate, estData, services),
+    lowConfidenceRange,
+  );
   const serviceCategories = services.map((section) => (
     section.key === 'bundle' ? 'bundle' : (categoryForRecurringServiceKey(section.key) || section.key)
   ));
@@ -11495,7 +11868,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   };
 }
 
-function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null } = {}) {
+function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false } = {}) {
   if (quoteRequirement.quoteRequired) {
     return {
       mode: 'quote_required',
@@ -11509,6 +11882,41 @@ function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppoin
       ctaLabel: 'Confirm invoice option',
       reason: null,
       appointment: shapeLinkedAppointment(existingAppointment),
+    };
+  }
+  // Payment-only accept (guarantee-only renewal): nothing to schedule, so the
+  // view offers accept directly and the server bills by invoice.
+  if (invoiceOnly) {
+    return {
+      mode: 'invoice_only',
+      ctaLabel: 'Accept estimate',
+      reason: null,
+    };
+  }
+  // A guarantee-only renewal with NO linked customer and NO customer phone
+  // can't accept online: accept and deposit-intent both reject an invoice-mode
+  // estimate they can't bill/deliver. Don't advertise an "Accept + send
+  // invoice" the server will refuse — route the customer to the office
+  // (there's still no visit, so a slot pick would be an equal dead end).
+  if (invoiceOnlyContactRequired) {
+    return {
+      mode: 'contact_office',
+      ctaLabel: 'Call Waves',
+      reason: 'invoice_contact_required',
+    };
+  }
+  // A ranged narrow low-confidence commercial estimate has no self-servable
+  // slots — the slots endpoints return an empty commercial-manual list for all
+  // commercial autos, whatever the billing mode — so a slot-pick acceptance
+  // would show the price range with no way to approve it. Accept WITHOUT a
+  // slot: the team schedules the visit after approval (the accept handler
+  // already supports slotless accepts; the converter skips auto-scheduling for
+  // commercial). Invoice-specific payment copy stays on siteConfirmationHold.
+  if (commercialNoSlotAccept) {
+    return {
+      mode: 'commercial_site_confirmation',
+      ctaLabel: 'Approve estimate',
+      reason: null,
     };
   }
   return {
@@ -11957,12 +12365,22 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // server-HTML page short-circuited these to the expired/not-found shell
     // before building any payload; the data endpoint owns that guard for the
     // React path. Non-viewable → 404 (the SPA renders its "this link may have
-    // expired or isn't valid" screen). No admin bypass: this fetch carries no
-    // current-session credential (the public page sends no admin Bearer token),
-    // and the `waves_admin` marker cookie is a 2-year, logout-persistent
-    // view-count signal — not authorization — so previewing a draft/expired
-    // estimate goes through an authenticated admin surface, never this endpoint.
-    if (!isEstimateCustomerViewable(estimate)) {
+    // expired or isn't valid" screen).
+    //
+    // ONE bypass: the staff draft preview. When the page URL carries
+    // ?adminPreview=1 the SPA attaches the staff session's Bearer token, and
+    // an UNPUBLISHED row is served to a VERIFIED staff JWT only
+    // (verifyStaffBearer — same checks as adminAuthenticate+requireTechOrAdmin;
+    // the `waves_admin` marker cookie is a 2-year logout-persistent view-count
+    // signal, never authorization, and still grants nothing here). This is
+    // what lets "Customer View" show a draft through the RENDERER the customer
+    // actually gets, instead of the diverging legacy SSR page. Expired /
+    // send_failed / archived rows stay 404 even for staff, and every view
+    // side effect below is skipped — a preview must not count views or flip
+    // a draft's status.
+    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
+      && Boolean(await verifyStaffBearer(req));
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
@@ -11977,7 +12395,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
     // suppress the very first "viewed" count + admin notification.
     const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
-    if (!isInternalRefresh && shouldCountView(req, ip, estimate)) {
+    if (!adminDraftPreview && !isInternalRefresh && shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
           view_count: db.raw('COALESCE(view_count, 0) + 1'),
@@ -11999,7 +12417,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // First-view transition — keep admin preview clicks from making the
     // estimate look customer-opened. Internal React refreshes (?refresh=1) are
     // never the first view, so they must not flip status or notify admin twice.
-    if (!isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    // The staff draft preview is hard-excluded above IP/UA heuristics: the
+    // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
+    // effect) if a staff preview ever slipped through shouldApplyFirstView.
+    if (!adminDraftPreview && !isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
@@ -12036,7 +12457,23 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const pricingBundle = await buildPricingBundle(estimate);
     const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+    const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
+      && estimateTrenchingReviewRequired(estimateDataForIntelligence);
     const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence);
+    // Narrow low-confidence commercial recurring estimate (the population whose
+    // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
+    // its accept, whatever the billing mode — invoice-mode holds the first-
+    // invoice mint, non-invoice bills per application after the confirmed visit,
+    // and annual prepay is rejected/hidden until the price is confirmed. Drives
+    // the payment copy + deposit overrides below AND the no-slot accept mode
+    // (slots return the empty commercial-manual list for every commercial auto
+    // estimate). Matches the accept-handler hold predicate.
+    const siteConfirmationHold = defaultServiceMode !== 'one_time'
+      && (() => {
+        const lc = commercialLowConfidenceRange(estimateDataForIntelligence);
+        return lc.hasLowConfidence && !lc.forceSiteQuote;
+      })();
+    const commercialNoSlotAccept = siteConfirmationHold;
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
@@ -12045,7 +12482,24 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       recurringServicesForIntelligence,
       pricingBundle?.oneTimeBreakdown?.items || []
     );
-    const acceptance = buildEstimateAcceptanceContract({ quoteRequirement, existingAppointment: linkedAppointment });
+    // Guarantee-only renewals accept with NO appointment: the acceptance
+    // contract tells the React view to skip the slot picker and offer the
+    // payment-only (invoice) accept. An existing linked appointment keeps
+    // precedence inside the contract — accepting against it works as-is.
+    const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estimateDataForIntelligence);
+    const effectiveInvoiceMode = estimate.bill_by_invoice === true || guaranteeOnlyAccept;
+    // Accept + deposit-intent reject an invoice-mode estimate with no linked
+    // customer and no customer phone (nothing to bill / deliver the invoice
+    // to) — an email-only renewal must not advertise an accept the server
+    // refuses. Contact-required renewals get the call-office contract.
+    const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
+    const acceptance = buildEstimateAcceptanceContract({
+      quoteRequirement,
+      existingAppointment: linkedAppointment,
+      invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
+      invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
+      commercialNoSlotAccept,
+    });
     const intelligence = buildWaveGuardIntelligencePayload(
       {
         ...estimate,
@@ -12099,16 +12553,38 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       paymentMethodPreference: null,
       membership,
       oneTime: depositStructuralOneTime,
-      oneTimeUninvoiced: depositStructuralOneTime && estimate.bill_by_invoice !== true,
+      oneTimeUninvoiced: depositStructuralOneTime && !effectiveInvoiceMode,
+      noVisit: guaranteeOnlyAccept,
     });
     // One-time card-on-file hold policy ("as if one-time") for the React
     // capture UI — the page only enforces it once serviceMode is one_time.
     // Inert ({enforced:false}) while ONE_TIME_CARD_HOLD is off.
     const cardHoldOneTimePolicyForData = CardHolds.resolveCardHoldPolicy({
       treatAsOneTime: true,
-      billByInvoice: estimate.bill_by_invoice === true,
+      billByInvoice: effectiveInvoiceMode,
       paymentMethodPreference: null,
     });
+
+    // A held estimate collects NO money at accept (the invoice comes after the
+    // on-site confirmation), so the confirm flow must not require/mint a deposit
+    // either — matches the accept-handler + /deposit-intent exemptions. Overriding
+    // here keeps the "No payment now" CTA honest. The hold only covers the
+    // RECURRING accept path (the hold predicate and both server exemptions are
+    // !oneTime), so preserve the pre-override requirement as requiredForOneTime —
+    // but only for INVOICE-MODE estimates, where a one-time accept mints its
+    // invoice in the accept transaction and the deposit credits it (the accept
+    // gate enforces exactly that shape; an uninvoiced one-time commercial deposit
+    // has nothing to credit and stays exempt). The client keeps consulting
+    // /deposit-intent for the one-time switch (it re-resolves per mode) rather
+    // than skipping straight to an accept that 402s with no modal path.
+    // `required` is mode-independent in the resolver (oneTime only picks the
+    // amount class), so the pre-override value IS the one-time requirement.
+    if (siteConfirmationHold) {
+      depositPolicy.requiredForOneTime = estimate.bill_by_invoice === true ? depositPolicy.required : false;
+      depositPolicy.required = false;
+      depositPolicy.slotRequired = false;
+      depositPolicy.exemptReason = depositPolicy.exemptReason || 'commercial_manual_billing';
+    }
 
     // "Show your work" trust payload for the React estimate view. The key
     // only exists while the estimateShowYourWork gate is on, so gate-off
@@ -12119,10 +12595,18 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       : null;
 
     res.json({
+      // Only present on a verified staff draft preview — the React page keys
+      // its "draft preview, not sent" banner + accept guards off this. Absent
+      // (not false) otherwise so customer responses stay byte-identical.
+      ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,
         required: depositPolicy.required,
+        // Site-confirmation hold only: the recurring path owes nothing, but a
+        // one-time mode switch still owes its deposit class (see the override
+        // above). Absent/false everywhere else.
+        requiredForOneTime: depositPolicy.requiredForOneTime === true,
         slotRequired: depositPolicy.slotRequired,
         exemptReason: depositPolicy.exemptReason || null,
         amount: depositPolicy.amount || null,
@@ -12163,7 +12647,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // derived mode/frequency when null.
         acceptedServiceMode: estimate.accepted_service_mode || null,
         acceptedFrequencyKey: estimate.accepted_frequency_key || null,
-        billByInvoice: !!estimate.bill_by_invoice,
+        // Effective (incl. derived guarantee-only) — the React view's accept
+        // copy and payment buttons key off this, and accept resolves the same
+        // derived value server-side.
+        billByInvoice: effectiveInvoiceMode,
+        siteConfirmationHold,
         serviceCategory,
         acceptance,
         membership,
@@ -12173,10 +12661,18 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
       cta: {
-        canAccept: terminalState === null && !quoteRequirement.quoteRequired,
+        // Priced termite trenching is review-before-booking: the price stays visible
+        // (NOT quoteRequired) but self-accept/self-book is suppressed on the React
+        // path too, mirroring the SSR view + the reserve/deposit/card-hold gates so
+        // no slot or Stripe intent is ever created for a quote /accept would reject.
+        // A terminal estimate (accepted/declined/expired) never advertises the
+        // review state — the terminal card always wins on the client.
+        canAccept: terminalState === null && !quoteRequirement.quoteRequired && !trenchingReviewBeforeBooking,
         terminalState: ctaTerminalState,
         quoteRequired: quoteRequirement.quoteRequired,
         quoteRequiredReason: quoteRequirement.reason || null,
+        reviewBeforeBooking: terminalState === null && trenchingReviewBeforeBooking,
+        reviewReason: terminalState === null && trenchingReviewBeforeBooking ? 'termite_trenching_review' : null,
         // Proposal-aware fields so the React view renders the formal-proposal
         // state (PDF + account-manager follow-up), not the generic
         // "inspection required" quote-required copy — and is channel-aware
@@ -12282,8 +12778,11 @@ module.exports.germanRoachVisitPhrase = germanRoachVisitPhrase;
 module.exports.buildEstimateAskPrompts = buildEstimateAskPrompts;
 module.exports.resolveAnnualPrepayInvoiceAmount = resolveAnnualPrepayInvoiceAmount;
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
+module.exports.estimateTrenchingReviewRequired = estimateTrenchingReviewRequired;
 module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
+module.exports.isRodentGuaranteeOnlyEstimate = isRodentGuaranteeOnlyEstimate;
+module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
@@ -12310,6 +12809,7 @@ module.exports.estimateInvoicePayUrlParams = estimateInvoicePayUrlParams;
 module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVisits;
 module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
+module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.foamFrequenciesFromEngineResult = foamFrequenciesFromEngineResult;
@@ -12347,3 +12847,4 @@ module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTierDiscount;
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
+module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;

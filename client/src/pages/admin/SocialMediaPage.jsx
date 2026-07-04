@@ -815,11 +815,22 @@ function AutonomousStudioPanel({ showToast, onRan }) {
 }
 
 function runStatusColor(status) {
-  if (status === "published" || status === "draft_created") return D.green;
+  if (status === "published") return D.green;
+  if (status === "draft_created") return D.amber; // pending approval — needs a human
   if (status === "dry_run") return D.teal;
   if (status === "failed") return D.red;
   if (status === "skipped") return D.amber;
-  return D.muted;
+  return D.muted; // incl. rejected
+}
+
+// Publishable variants for a draft run: creative-engine runs carry an array in
+// preview.visual.variants; legacy single-card drafts collapse to one entry so
+// the same approval UI serves both. Mirrors the server's runVariants().
+function draftRunVariants(run) {
+  const visual = run?.preview?.visual || {};
+  if (Array.isArray(visual.variants) && visual.variants.length) return visual.variants;
+  if (visual.imageUrl || run?.imageUrl) return [{ imageUrl: visual.imageUrl || run.imageUrl }];
+  return [];
 }
 
 function formatRunDate(value) {
@@ -844,6 +855,8 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
   const [data, setData] = useState({ runs: [] });
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState("");
+  const [variantChoice, setVariantChoice] = useState({}); // runId → selected variant index
+  const [acting, setActing] = useState(""); // "approve-<id>" | "reject-<id>" while in flight
 
   const load = useCallback(() => {
     setLoading(true);
@@ -876,8 +889,45 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
     }
   };
 
+  const approveRun = async (run) => {
+    setActing(`approve-${run.id}`);
+    try {
+      const result = await adminFetch(`/admin/social-media/autonomous/runs/${run.id}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ variantIndex: variantChoice[run.id] ?? 0 }),
+      });
+      if (result.published) showToast("Draft approved and published");
+      else if (result.dryRun) showToast("Approve ran in dry-run mode — not published");
+      else showToast("Approve attempted — publish did not succeed, draft kept");
+      load();
+      onRan?.();
+    } catch (e) {
+      showToast(`Approve failed: ${e.message}`);
+    } finally {
+      setActing("");
+    }
+  };
+
+  const rejectRun = async (run) => {
+    setActing(`reject-${run.id}`);
+    try {
+      await adminFetch(`/admin/social-media/autonomous/runs/${run.id}/reject`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      showToast("Draft rejected");
+      load();
+      onRan?.();
+    } catch (e) {
+      showToast(`Reject failed: ${e.message}`);
+    } finally {
+      setActing("");
+    }
+  };
+
   const runs = data.runs || [];
   const failed = runs.filter((run) => run.status === "failed").length;
+  const pending = runs.filter((run) => run.status === "draft_created").length;
   const completed = runs.filter((run) => ["published", "draft_created", "dry_run"].includes(run.status)).length;
   const lastRun = runs[0];
 
@@ -917,6 +967,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
       <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
         {[
           { label: "Runs", value: runs.length, color: D.heading },
+          { label: "Pending Approval", value: pending, color: pending ? D.amber : D.muted },
           { label: "Completed", value: completed, color: D.green },
           { label: "Failed", value: failed, color: failed ? D.red : D.muted },
           { label: "With Images", value: runs.filter((run) => run.imageUrl).length, color: D.teal },
@@ -944,6 +995,19 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
             const color = runStatusColor(run.status);
             const platformResults = run.platformResults || [];
             const channels = run.channels?.length ? run.channels : parseMaybeJson(run.preview?.inputs?.channels, []);
+            const isPendingDraft = run.status === "draft_created";
+            const variants = isPendingDraft ? draftRunVariants(run) : [];
+            const chosenIdx = Math.min(variantChoice[run.id] ?? 0, Math.max(0, variants.length - 1));
+            const chosenVariant = isPendingDraft && variants.length ? variants[chosenIdx] : null;
+            // A published run that shipped a Reel records preview.visual.videoUrl —
+            // show the actual video in the audit row, not just the fallback still.
+            const publishedVideoUrl = !isPendingDraft ? safeHttpHref(run.preview?.visual?.videoUrl) : null;
+            const chosenIsVideo = chosenVariant ? chosenVariant.type === "video" : !!publishedVideoUrl;
+            const displayImage = chosenVariant
+              ? (chosenIsVideo ? chosenVariant.videoUrl : chosenVariant.imageUrl)
+              : (publishedVideoUrl || run.imageUrl);
+            const drafts = run.preview?.drafts || {};
+            const busy = acting === `approve-${run.id}` || acting === `reject-${run.id}`;
             return (
               <div
                 key={run.id}
@@ -952,7 +1016,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                   marginBottom: 0,
                   borderLeft: `4px solid ${color}`,
                   display: "grid",
-                  gridTemplateColumns: isMobile || !run.imageUrl ? "1fr" : "1fr 150px",
+                  gridTemplateColumns: isMobile || !displayImage ? "1fr" : "1fr 150px",
                   gap: 16,
                 }}
               >
@@ -983,6 +1047,124 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                   {run.skipReason && (
                     <div style={{ marginTop: 10, fontSize: 12, color: D.red }}>
                       {run.skipReason}
+                    </div>
+                  )}
+
+                  {isPendingDraft && (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: 12,
+                        border: `1px solid ${D.amber}55`,
+                        borderRadius: 10,
+                        background: `${D.amber}0A`,
+                      }}
+                    >
+                      <div style={{ fontSize: 11, fontWeight: 700, color: D.amber, textTransform: "uppercase", letterSpacing: 1 }}>
+                        Pending approval
+                      </div>
+
+                      {variants.length > 1 && (
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                          {variants.map((v, idx) => {
+                            const isVideo = v?.type === "video";
+                            const src = safeHttpHref(isVideo ? v?.videoUrl : v?.imageUrl);
+                            if (!src) return null;
+                            const selected = idx === chosenIdx;
+                            return (
+                              <button
+                                key={`${run.id}-variant-${idx}`}
+                                type="button"
+                                onClick={() => setVariantChoice((prev) => ({ ...prev, [run.id]: idx }))}
+                                title={v?.conceptKey || `Variant ${idx + 1}`}
+                                style={{
+                                  padding: 0,
+                                  border: selected ? `2px solid ${D.heading}` : `1px solid ${D.border}`,
+                                  borderRadius: 8,
+                                  cursor: "pointer",
+                                  background: "none",
+                                  lineHeight: 0,
+                                  opacity: selected ? 1 : 0.75,
+                                  position: "relative",
+                                }}
+                              >
+                                {isVideo ? (
+                                  <video
+                                    src={src}
+                                    muted
+                                    playsInline
+                                    style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, pointerEvents: "none" }}
+                                  />
+                                ) : (
+                                  <img
+                                    src={src}
+                                    alt={v?.conceptKey || `Variant ${idx + 1}`}
+                                    style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6 }}
+                                  />
+                                )}
+                                {isVideo && (
+                                  <span
+                                    style={{
+                                      position: "absolute",
+                                      bottom: 4,
+                                      left: 4,
+                                      ...sBadge(`${D.heading}E6`, D.white),
+                                      lineHeight: "14px",
+                                    }}
+                                  >
+                                    ▶ REEL
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {Object.keys(drafts).length > 0 && (
+                        <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
+                          {Object.entries(drafts).map(([platform, text]) => (
+                            <div
+                              key={`${run.id}-draft-${platform}`}
+                              style={{
+                                border: `1px solid ${D.border}`,
+                                borderRadius: 8,
+                                padding: "8px 10px",
+                                background: D.card,
+                              }}
+                            >
+                              <div style={{ fontSize: 10, fontWeight: 700, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>
+                                {platform === "gbp" ? "GBP" : platform}
+                              </div>
+                              <div style={{ fontSize: 12, color: D.text, whiteSpace: "pre-wrap", maxHeight: 110, overflowY: "auto" }}>
+                                {String(text || "")}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                        <button
+                          onClick={() => approveRun(run)}
+                          disabled={busy || !variants.length}
+                          style={{ ...sBtn(D.green, D.white), opacity: busy || !variants.length ? 0.5 : 1 }}
+                        >
+                          {acting === `approve-${run.id}` ? "Publishing..." : "Approve & Publish"}
+                        </button>
+                        <button
+                          onClick={() => rejectRun(run)}
+                          disabled={busy}
+                          style={{ ...sBtn(D.card, D.red), border: `1px solid ${D.red}`, opacity: busy ? 0.5 : 1 }}
+                        >
+                          {acting === `reject-${run.id}` ? "Rejecting..." : "Reject"}
+                        </button>
+                        {run.preview?.visual?.creative?.conceptKey && (
+                          <span style={{ fontSize: 11, color: D.muted, alignSelf: "center" }}>
+                            scene: {variants[chosenIdx]?.conceptKey || run.preview.visual.creative.conceptKey}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   )}
 
@@ -1034,21 +1216,38 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                   </div>
                 </div>
 
-                {safeHttpHref(run.imageUrl) && (
-                  <a href={safeHttpHref(run.imageUrl)} target="_blank" rel="noopener noreferrer" style={{ display: "block" }}>
-                    <img
-                      src={safeHttpHref(run.imageUrl)}
-                      alt=""
+                {safeHttpHref(displayImage) && (
+                  chosenIsVideo ? (
+                    <video
+                      src={safeHttpHref(displayImage)}
+                      controls
+                      muted
+                      playsInline
                       style={{
                         width: "100%",
-                        aspectRatio: "1 / 1",
+                        aspectRatio: "9 / 16",
                         objectFit: "cover",
                         borderRadius: 8,
                         border: `1px solid ${D.border}`,
                         background: "#FAFAFA",
                       }}
                     />
-                  </a>
+                  ) : (
+                    <a href={safeHttpHref(displayImage)} target="_blank" rel="noopener noreferrer" style={{ display: "block" }}>
+                      <img
+                        src={safeHttpHref(displayImage)}
+                        alt=""
+                        style={{
+                          width: "100%",
+                          aspectRatio: "1 / 1",
+                          objectFit: "cover",
+                          borderRadius: 8,
+                          border: `1px solid ${D.border}`,
+                          background: "#FAFAFA",
+                        }}
+                      />
+                    </a>
+                  )
                 )}
               </div>
             );

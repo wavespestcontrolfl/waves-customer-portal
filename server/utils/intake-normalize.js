@@ -32,6 +32,19 @@ function cleanValidEmailOrNull(value) {
   return EMAIL_RE.test(email) ? email : null;
 }
 
+// A syntactically-valid email whose local part reads like a URL fragment is a
+// transcription artifact, not a mailbox — a caller spelling "W, C-as-in-
+// Charlie, W, 63" gets transcribed as "www.cw63 at gmail.com" and the literal
+// "www.cw63@gmail.com" may be a real stranger's mailbox. Transcript captures
+// matching this are demoted to email_raw (below) so no write path stores them
+// and no first-touch email fires. Transcript-specific by design: a TYPED
+// web-form email is the user's own claim and never runs through this.
+const GARBLED_TRANSCRIPT_EMAIL_RE = /^(?:www\.|https?[:.]|[^@]*\.(?:com|net|org)@)/i;
+function looksGarbledTranscriptEmail(value) {
+  const email = cleanEmail(value);
+  return !!email && GARBLED_TRANSCRIPT_EMAIL_RE.test(email);
+}
+
 function normalizeNanpPhone(value) {
   const raw = cleanText(value);
   if (!raw) return null;
@@ -140,17 +153,45 @@ function normalizeCallPhone(extractedPhone, callerPhone) {
   return normalizeE164Phone(extractedPhone) || normalizeE164Phone(callerPhone);
 }
 
+// Model-emitted quoted price: a finite positive number, or a string holding
+// EXACTLY ONE numeric amount ("$350", "1,350.50"). Strings with multiple
+// amounts ("50 to 60") are ranges, which the prompt requires to be null —
+// naive digit-stripping would inflate them into 5060. Range plausibility
+// bounds are enforced at booking time by the call-booking catalog's sanitizer.
+function normalizeQuotedPrice(value) {
+  if (value === null || value === undefined || value === '') return null;
+  let n;
+  if (typeof value === 'number') {
+    n = value;
+  } else {
+    const tokens = String(value).replace(/,/g, '').match(/\d+(?:\.\d+)?/g) || [];
+    if (tokens.length !== 1) return null;
+    n = Number(tokens[0]);
+  }
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
   const source = extracted && typeof extracted === 'object' && !Array.isArray(extracted)
     ? extracted
     : {};
   const normalizedPhone = normalizeCallPhone(source.phone, callerPhone);
+  const validEmail = cleanValidEmailOrNull(source.email);
+  // Regex-valid but URL-shaped ("www.cw63@gmail.com") = transcription garble;
+  // demote to email_raw with the rest of the rejects.
+  const usableEmail = validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null;
 
   return {
     ...source,
     first_name: cleanNullableText(source.first_name),
     last_name: cleanNullableText(source.last_name),
-    email: cleanValidEmailOrNull(source.email),
+    email: usableEmail,
+    // The raw model email survives normalization when the regex (or the
+    // transcript-garble guard) rejects it — the call-review bridge needs it to
+    // flag email_invalid (and to attempt a missing-dot domain fix) for
+    // read-back on the callback; `email` stays the only value any write path
+    // stores.
+    email_raw: usableEmail ? null : (cleanNullableText(source.email) || null),
     phone: normalizedPhone || null,
     address_line1: normalizeNullableStreetLine(source.address_line1),
     city: cleanNullableText(source.city),
@@ -163,6 +204,10 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     call_summary: cleanNullableText(source.call_summary),
     lead_quality: cleanNullableText(source.lead_quality),
     matched_service: cleanNullableText(source.matched_service),
+    specific_service_name: cleanNullableText(source.specific_service_name),
+    quoted_price: normalizeQuotedPrice(source.quoted_price),
+    follow_up_visit_mentioned: source.follow_up_visit_mentioned === true,
+    follow_up_date_time: cleanNullableText(source.follow_up_date_time),
     is_lead: normalizeIsLead(source.is_lead),
     call_type: normalizeCallType(source.call_type),
   };
@@ -250,6 +295,7 @@ module.exports = {
   cleanNullableText,
   cleanEmail,
   cleanValidEmailOrNull,
+  looksGarbledTranscriptEmail,
   normalizeNanpPhone,
   normalizePhoneForStorage,
   normalizeWebsiteQuoteContact,

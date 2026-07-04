@@ -60,7 +60,51 @@ const REASON_LABELS = {
   not_confirmed: "Time not confirmed",
   confirmed_without_start_time: "Confirmed, no start time",
   low_confidence: "Low confidence",
+  address_recovered: "Address recovered — read back",
+  email_unverified: "Email spelled — read back",
+  email_invalid: "Email couldn't be captured",
 };
+
+// Correction evidence the call processor attaches to address/email review
+// items (as-heard value, recovered/candidate values, and the exact question
+// to ask on the callback). payload is jsonb — object from pg, string if a
+// route ever serializes it.
+function parsePayload(payload) {
+  if (!payload) return null;
+  if (typeof payload === "object") return payload;
+  try { return JSON.parse(payload); } catch { return null; }
+}
+
+function ConfirmEvidence({ payload }) {
+  const p = parsePayload(payload);
+  if (!p) return null;
+  const emailCandidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
+  const addressCandidates = Array.isArray(p.address_candidates) ? p.address_candidates : [];
+  const rows = [
+    p.address_as_heard && { label: "Heard", value: p.address_as_heard },
+    p.address_recovered && { label: "Matched to", value: p.address_recovered },
+    !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },
+    p.email_as_heard && { label: "Heard", value: p.email_as_heard },
+    emailCandidates.length > 0 && {
+      label: emailCandidates.length === 1 ? "Likely" : "Candidates",
+      value: emailCandidates.map((c) => `${c.value}${typeof c.confidence === "number" ? ` (${Math.round(c.confidence * 100)}%)` : ""}`).join(" · "),
+    },
+  ].filter(Boolean);
+  if (!rows.length && !p.confirmation_question) return null;
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
+      <div className="text-11 text-ink-tertiary font-medium mb-1">Confirm before dispatch</div>
+      {rows.map((r) => (
+        <div key={`${r.label}-${r.value}`} className="text-12 text-ink-secondary">
+          <span className="text-ink-tertiary">{r.label}:</span> {r.value}
+        </div>
+      ))}
+      {p.confirmation_question && (
+        <div className="text-12 text-zinc-900 mt-1">Ask: “{p.confirmation_question}”</div>
+      )}
+    </div>
+  );
+}
 
 function reasonLabel(code) {
   if (!code) return "Needs review";
@@ -353,6 +397,8 @@ export default function TriageInboxTabV2() {
                     </div>
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
+
+                    {isTriage && <ConfirmEvidence payload={item.payload} />}
 
                     {item.resolution_note && (
                       <div className="text-12 text-ink-tertiary mt-2 italic">Note: {item.resolution_note}</div>

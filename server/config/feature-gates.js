@@ -22,6 +22,7 @@
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
+ *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
@@ -76,6 +77,14 @@ const gates = {
 
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
+
+  // Ask Waves — public conversational intake on the marketing site (hub). The
+  // brain answers pest questions and steers visitors to the instant quote; it
+  // can NEVER state a price (pricing only comes from the existing contact-gated
+  // /api/public/quote/calculate path). Replies only when a visitor asks — not
+  // an auto-send — so dev is open like aiAssistantAutoReply; prod ships dark
+  // until Adam sets GATE_ASK_WAVES=true.
+  askWaves: isProd ? process.env.GATE_ASK_WAVES === 'true' : true,
 
   // Legacy SMS AI Drafts — creates message_drafts rows and owner "Approve"
   // alerts from inbound customer SMS. Off by default in prod until the
@@ -218,6 +227,18 @@ const gates = {
   // after a delay. Requires leadEstimateAutomation in the scheduler too.
   leadEstimateAutoSend: process.env.GATE_LEAD_ESTIMATE_AUTO_SEND === 'true',
 
+  // Lead Webhook Turnstile — enforce Cloudflare Turnstile on the public,
+  // unauthenticated lead webhook (POST /api/leads). Closes the direct-POST spam
+  // vector: without it any bot can mint a lead + customer + draft estimate and
+  // page the owner's cell. Explicit opt-in in EVERY environment (off in dev/test
+  // too) so the Jest suite + local forms that issue no token keep working, and so
+  // prod stays on today's behavior until (a) TURNSTILE_SECRET_KEY is set on
+  // Railway and (b) the Astro forms shipping the widget have fully propagated on
+  // Cloudflare Pages. While OFF, tokens are still verified-and-logged (shadow)
+  // but never block; a missing secret or a Cloudflare error always fails OPEN so
+  // real leads never break. Flip GATE_LEAD_TURNSTILE=true to begin blocking.
+  leadTurnstile: process.env.GATE_LEAD_TURNSTILE === 'true',
+
   // AutoPay Customer SMS — customer-facing autopay/pre-charge/payment-retry
   // texts are opt-in everywhere until the WaveGuard autopay rollout is
   // verified. This does not affect internal admin alerts.
@@ -266,6 +287,15 @@ const gates = {
   // phone_line_types (one lookup per number, ever) and detected landlines also
   // get a non_mobile suppression row.
   proactiveLineTypeLookup: process.env.GATE_PROACTIVE_LINETYPE_LOOKUP === 'true',
+
+  // Voicemail lead text-back — when a NEW prospect's voicemail produces a
+  // workable lead, text them a prefilled quote-wizard link ("got your message
+  // about X — get your quote: …"). A customer-facing auto-send, so it FAILS
+  // CLOSED (explicit opt-in in EVERY environment) per the house rule — a
+  // preview/dev env with real Twilio creds must NOT auto-text prospects.
+  // Owner sets GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the
+  // voicemail still becomes a Needs-Review lead; only the SMS is skipped.
+  voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
 
   // Email Template Automations — executes trigger-mapped template sends from
   // the email template automation catalog. Off by default in prod until each
@@ -386,6 +416,15 @@ const gates = {
   // follow-up sweeps send a verification re-nudge on the same cadence. Changes
   // customer-facing messaging, so off by default in prod until verified.
   divertMicrodepositDunning: isProd ? process.env.GATE_MICRODEPOSIT_DUNNING_DIVERSION === 'true' : true,
+
+  // Weekly Irrigation Recommendation Email — Monday-morning "cut back / add
+  // water" email to lawn-care customers who entered weekly irrigation inches
+  // in the portal, based on last week's rainfall at their coordinates vs. the
+  // seasonal target. Customer-facing auto-send, so explicit opt-in in EVERY
+  // environment (off in dev/preview too) — a preview env with real SendGrid
+  // creds + cronJobs on must NOT email real customers. Until the gate is on,
+  // the Monday sweep only shadow-logs candidate counts and never sends.
+  irrigationWeeklyEmail: process.env.GATE_IRRIGATION_WEEKLY_EMAIL === 'true',
 
   // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
   // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"

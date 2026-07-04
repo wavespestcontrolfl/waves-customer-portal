@@ -1676,6 +1676,19 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
           linked ? { scheduledServiceId: linked.id, useLinkedFallback: false } : {},
         );
       } catch { deposit = null; }
+      // Exact payment posture (annual prepay paid/pending, setup-fee invoice)
+      // for the same provenance card — fail-soft like the deposit read.
+      // Deliberately NOT scoped to the linked appointment: this payload feeds
+      // the New Appointment modal, which books a NEW visit — visit-level
+      // coverage from an OLD linked visit must not transfer ("do not collect"
+      // would be wrong for a new booking completion billing will invoice).
+      // With no visit in scope, coversThisVisit stays null and the card makes
+      // no collection claim.
+      let payment = null;
+      try {
+        const { buildEstimatePaymentContext } = require('../services/estimate-payment-context');
+        payment = await buildEstimatePaymentContext(estimate, {});
+      } catch { payment = null; }
       return {
         id: estimate.id,
         token: estimate.token,
@@ -1690,6 +1703,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         waveguardTier: estimate.waveguard_tier,
         lines,
         deposit,
+        payment,
         linkedAppointment: linked ? {
           id: linked.id,
           scheduledDate: linked.scheduled_date,
@@ -2275,7 +2289,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'payer_id'];
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
       const after = { ...before, ...updates };
-      const addressChanged = changed.some((f) => ['address_line1', 'address_line2', 'city', 'state', 'zip'].includes(f));
+      // PRESENCE-triggered, not diff-triggered — matching the IB update path
+      // (and the geocode block below): resaving an unchanged address must
+      // still self-heal a primary-property mirror or lead/estimate snapshot
+      // left stale by a pre-fix edit; both sync helpers are idempotent.
+      const addressChanged = ['address_line1', 'address_line2', 'city', 'state', 'zip']
+        .some((f) => updates[f] !== undefined);
       // Phase 1 multi-property: an admin address edit must reach the primary
       // customer_properties row too — ATOMICALLY, so a unique address-index
       // collision rolls back the customer edit (and surfaces a 409) instead of
@@ -2285,9 +2304,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // row exists.
       try {
         await db.transaction(async (trx) => {
+          // Serialize overlapping address edits on the same customer: the row
+          // lock makes a second editor WAIT, and before/after are re-derived
+          // from the locked row — a pre-transaction 'before' from the losing
+          // editor would no longer match snapshots the first edit already
+          // moved, stranding them.
+          const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
+          const lockedAfter = { ...lockedBefore, ...updates };
           await trx('customers').where({ id: req.params.id }).update(updates);
           if (addressChanged) {
-            await require('../services/customer-properties').syncPrimaryAddress(after, trx);
+            await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);
+            // Open leads/estimates snapshot the address at creation and never
+            // re-read customers.* — sync the copies that still match the old
+            // address (matching rules in the fan-out service header).
+            await require('../services/customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedAfter }, trx);
           }
         });
       } catch (e) {

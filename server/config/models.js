@@ -76,6 +76,22 @@ const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMIN
 const OPENAI_BEST        = process.env.MODEL_OPENAI_BEST   || 'gpt-5.5';
 const GEMINI_VISION_BEST = process.env.MODEL_GEMINI_VISION || 'gemini-3.5-flash';
 
+// Gemini image-GENERATION models (the "Nano Banana" line) — consumed by
+// content/image-generator.js MODEL_MAP for the social creative engine's scene
+// backgrounds. BEST is the newest image model; STABLE is the GA fallback the
+// chain drops to if the newer ID 404s (preview IDs get retired), so an ID
+// retirement degrades quality, never availability.
+const GEMINI_IMAGE_BEST   = process.env.MODEL_GEMINI_IMAGE        || 'gemini-3.1-flash-image-preview';
+const GEMINI_IMAGE_STABLE = process.env.MODEL_GEMINI_IMAGE_STABLE || 'gemini-2.5-flash-image';
+
+// Gemini video-GENERATION models (Veo line) — consumed by
+// content/video-generator.js for the social creative engine's Reels clips.
+// FAST is the default (≈$0.15/s vs $0.40/s, generates in under a minute);
+// QUALITY is the full model the chain can step up to via env. Both are
+// env-overridable so a retired preview ID is a config change, not a deploy.
+const GEMINI_VIDEO_FAST    = process.env.MODEL_GEMINI_VIDEO         || 'veo-3.1-fast-generate-preview';
+const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || 'veo-3.1-generate-preview';
+
 // Per-feature routes: { provider, model }. services/llm/call.js#dispatch switches
 // on .provider. These are the LIVE provider for each feature; each call site falls
 // back to Claude (Anthropic) on any miss, so a provider issue never causes a gap.
@@ -86,6 +102,7 @@ const ROUTES = Object.freeze({
   leadClassify:      Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // lead-triage.js — live, Claude fallback
   knowledgeAnswer:   Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // knowledge-bridge.js — live, Claude fallback
   estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // estimate-assistant.js — live, Claude fallback
+  askWaves:          Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // ask-waves-intake.js — live, Claude fallback
 });
 
 module.exports = {
@@ -100,6 +117,10 @@ module.exports = {
   ROUTES,
   OPENAI_BEST,
   GEMINI_VISION_BEST,
+  GEMINI_IMAGE_BEST,
+  GEMINI_IMAGE_STABLE,
+  GEMINI_VIDEO_FAST,
+  GEMINI_VIDEO_QUALITY,
   // Backwards-compatible default export for quick imports
   DEFAULT: FLAGSHIP,
 };
