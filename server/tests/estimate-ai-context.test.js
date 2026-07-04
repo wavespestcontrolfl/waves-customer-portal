@@ -39,17 +39,24 @@ function filteringDb(tables = {}) {
       whereNull() { return this; },
       orWhere(column, _op, pattern) {
         if (typeof column === 'function') {
-          // Grouped token-alias clause (linked-product query): every
-          // \m<token>\M word-boundary regex in the group must match the name.
-          const tokens = [];
+          // Grouped alias clause (linked-product query): each token clause
+          // is a \m<token>\M word-boundary regex against name/formulation/
+          // category, each normalized clause a regexp_replace containment
+          // against name/active_ingredient — ALL clauses must match the row.
+          const clauses = [];
           column.call({
             andWhereRaw(sql, bindings = []) {
               const value = Array.isArray(bindings) ? bindings[0] : bindings;
-              if (typeof value === 'string') tokens.push(value.replace(/\\m|\\M/g, '').toLowerCase());
+              if (typeof value !== 'string') return this;
+              if (String(sql).includes('regexp_replace')) {
+                clauses.push({ kind: 'normalized', needle: value.replace(/%/g, '').toLowerCase(), columns: ['name', 'active_ingredient'] });
+              } else {
+                clauses.push({ kind: 'token', token: value.replace(/\\m|\\M/g, '').toLowerCase(), columns: ['name', 'formulation', 'category'] });
+              }
               return this;
             },
           });
-          if (tokens.length) likes.push({ column: 'name', tokens });
+          if (clauses.length) likes.push({ clauses });
           return this;
         }
         if (typeof pattern === 'string') likes.push({ column, needle: pattern.replace(/%/g, '').toLowerCase() });
@@ -68,8 +75,12 @@ function filteringDb(tables = {}) {
       select() { return this; },
       limit(count) {
         const rows = (tables[table] || []).filter((row) => !likes.length
-          || likes.some(({ column, needle, normalized, tokens }) => {
-            if (tokens) return tokens.every((token) => new RegExp(`\\b${token}\\b`, 'i').test(String(row[column] || '')));
+          || likes.some(({ column, needle, normalized, clauses }) => {
+            if (clauses) {
+              return clauses.every((clause) => (clause.kind === 'normalized'
+                ? clause.columns.some((col) => normalize(row[col]).includes(clause.needle))
+                : clause.columns.some((col) => new RegExp(`\\b${clause.token}\\b`, 'i').test(String(row[col] || '')))));
+            }
             return normalized
               ? normalize(row[column]).includes(needle)
               : String(row[column] || '').toLowerCase().includes(needle);
@@ -115,6 +126,10 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Is the mosquito spray safe for the lawn?')).toEqual(['mosquito']);
     // ...including coordinated recipient lists.
     expect(serviceFamiliesFromText('Is the mosquito spray safe for lawns and shrubs?')).toEqual(['mosquito']);
+    // "palm tree" is ONE recipient noun — the trailing "tree" must not
+    // survive the strip and read as a tree/shrub target.
+    expect(serviceFamiliesFromText('Will the mosquito spray harm my palm tree?')).toEqual(['mosquito']);
+    expect(serviceFamiliesFromText('Can I water the palm trees after treatment?')).toEqual([]);
     // A recipient list that STARTS with people/pets keeps its trailing area
     // nouns as recipients too — the list has no treatment-target reading.
     expect(serviceFamiliesFromText('Is the mosquito spray safe for my dog and lawn?')).toEqual(['mosquito']);
@@ -626,6 +641,39 @@ describe('estimate AI support context', () => {
     const linked = result.productCatalog.find((r) => r.activeIngredient === 'Indoxacarb');
     expect(linked).toBeDefined();
     expect(linked.serviceKeys).toEqual(['pest_control']);
+  });
+
+  test('a descriptor alias matches across name, formulation, and digit words', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: filteringDb({
+        services: [{
+          service_key: 'lawn_care_quarterly',
+          name: 'Lawn Care',
+          description: 'Quarterly program',
+          category: 'lawn_care',
+          is_active: true,
+          default_products: ['0-0-7 Granular'],
+        }],
+        products_catalog: [{
+          // Live prod shape: the alias's descriptor ("Granular") lives in
+          // the formulation column, and its analysis word ("0-0-7") shreds
+          // to single characters under token splitting — only descriptor-
+          // column tokens + normalized digit containment can fetch and
+          // attribute it.
+          name: 'LESCO Stonewall 0-0-7',
+          category: 'pre-emergent',
+          formulation: 'Granular',
+          active_ingredient: 'Prodiamine',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is it safe for pets?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Quarterly program' }] },
+    });
+    const linked = result.productCatalog.find((r) => r.activeIngredient === 'Prodiamine');
+    expect(linked).toBeDefined();
+    expect(linked.serviceKeys).toEqual(['lawn_care']);
   });
 
   test('question-derived service keys use the whole-word matcher for support loading', () => {

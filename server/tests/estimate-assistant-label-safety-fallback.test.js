@@ -187,6 +187,63 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('irrigation');
   });
 
+  test('an auxiliary "be safe" ask about an off-catalog product fails closed', () => {
+    // "will <name> be safe" keeps the product in ask position — the subject
+    // anchor must accept the auxiliary link, or the question falls through
+    // to the estimate's own facts as though they covered Roundup.
+    const answer = answerEstimateQuestionFallback('Will Roundup be safe for pets?', verifiedContext);
+    expect(answer).not.toContain('Label re-entry guidance');
+    expect(answer).not.toContain('Keep people and pets off treated areas until dry');
+    expect(answer).not.toContain('Carfentrazone');
+    expect(answer).toContain('follow the product label directions');
+    // The same auxiliary shape with a RESOLVED on-estimate product keeps
+    // its facts flowing.
+    const resolved = answerEstimateQuestionFallback('Will 2,4-D be safe for pets?', verifiedContext);
+    expect(resolved).toContain('Keep people and pets off treated areas until dry');
+  });
+
+  test('a palm-tree recipient does not pull ornamental facts into a mosquito answer', () => {
+    const answer = answerEstimateQuestionFallback('Will the mosquito spray harm my palm tree?', {
+      serviceMode: 'recurring',
+      services: [
+        { label: 'Tree & Shrub Care', detail: 'Ornamental program', summary: 'Tree & Shrub — ornamental' },
+        { label: 'Mosquito Control', detail: 'Barrier treatment', summary: 'Mosquito Control — barrier' },
+      ],
+      supportContext: {
+        productCatalog: [
+          {
+            source: 'admin_product_catalog',
+            title: 'insecticide active ingredient',
+            category: 'insecticide',
+            activeIngredient: 'Acephate',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Ornamental re-entry line.',
+            rainfastMinutes: 60,
+            irrigationNotes: null,
+            serviceKeys: ['tree_shrub'],
+          },
+          {
+            source: 'admin_product_catalog',
+            title: 'adulticide active ingredient',
+            category: 'adulticide',
+            activeIngredient: 'Deltamethrin',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Stay out of the treated area until sprays have dried.',
+            rainfastMinutes: 30,
+            irrigationNotes: null,
+            serviceKeys: ['mosquito'],
+          },
+        ],
+      },
+    });
+    // The palm tree is the recipient being protected, not a tree/shrub ask.
+    expect(answer).toContain('Stay out of the treated area until sprays have dried');
+    expect(answer).not.toContain('Ornamental re-entry line');
+    expect(answer).not.toContain('Acephate');
+  });
+
   test('a pet + area recipient list stays scoped to the asked family', () => {
     // "for my dog and lawn" is recipients all the way through — the trailing
     // lawn noun must not pull the herbicide's facts into a mosquito answer.

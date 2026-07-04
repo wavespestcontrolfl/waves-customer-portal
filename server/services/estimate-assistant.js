@@ -915,7 +915,10 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
     const normalizedQuestion = ` ${questionWordList.join(' ')} `;
     for (const word of new Set(questionWordList)) {
       if (!looksLikeUnresolvedProduct(word)) continue;
-      const askSubject = new RegExp(`\\b(?:is|are|was|were|will)\\s+(?:the\\s+|my\\s+|our\\s+|a\\s+|an\\s+)?${word}\\s+(?:safe|ok|okay|toxic|dangerous|harmful|poisonous)\\b`, 'i');
+      // Auxiliary shapes keep the product in ask position: "will Roundup BE
+      // safe?", "would Roundup be safe?" — the optional be/being/stay/remain
+      // link covers them without loosening the safety-adjective anchor.
+      const askSubject = new RegExp(`\\b(?:is|are|was|were|will|would|can|could|should|might|do|does)\\s+(?:the\\s+|my\\s+|our\\s+|a\\s+|an\\s+|any\\s+)?${word}\\s+(?:be\\s+|being\\s+|stay\\s+|remain\\s+)?(?:safe|ok|okay|toxic|dangerous|harmful|poisonous)\\b`, 'i');
       const askUsage = new RegExp(`\\b(?:use|uses|used|using|sprayed|spraying|applied|applying)\\s+(?:the\\s+|any\\s+)?${word}\\b`, 'i');
       // Passive/product-subject usage puts the product BEFORE the verb:
       // "will Roundup be used on my lawn?", "is Roundup being sprayed?",

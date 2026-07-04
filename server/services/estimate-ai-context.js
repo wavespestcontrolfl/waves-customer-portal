@@ -166,13 +166,15 @@ const PEST_PERIMETER_LOCATION_PATTERN = /\b(?:spray\w*|treat\w*|apply\w*|service
 // The repeat group consumes COORDINATED recipient lists ("for lawns and
 // shrubs", "near the trees or palms") so a later area noun can't survive the
 // strip and read as a target family.
-const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plant(?:ing)?s?|palms?)(?:\s*(?:,|and|or|&)\s*(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plant(?:ing)?s?|palms?))*\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
+// palms?(?:\s+trees?)?: "palm tree" is ONE recipient noun — matching only
+// "palm" would leave "tree" behind to read as a tree/shrub target.
+const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plant(?:ing)?s?|palms?(?:\s+trees?)?)(?:\s*(?:,|and|or|&)\s*(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plant(?:ing)?s?|palms?(?:\s+trees?)?))*\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
 
 // "Water the lawn", "re-enter the lawn", "mow the grass": the area is the
 // recipient of the customer's ACTIVITY, not the treatment family being asked
 // about — on a pest-only estimate these must not scope to lawn_care and
 // starve the pest product's reviewed guidance.
-const RECIPIENT_ACTIVITY_PATTERN = /\b(?:water(?:ing|ed|s)?|irrigat\w*|mow\w*|walk\w*|play\w*|re-?enter\w*|enter\w*)\s+(?:on\s+|onto\s+|in\s+)?(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plant(?:ing)?s?|palms?)\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
+const RECIPIENT_ACTIVITY_PATTERN = /\b(?:water(?:ing|ed|s)?|irrigat\w*|mow\w*|walk\w*|play\w*|re-?enter\w*|enter\w*)\s+(?:on\s+|onto\s+|in\s+)?(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plant(?:ing)?s?|palms?(?:\s+trees?)?)\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
 
 // A recipient list that STARTS with people/pets ("safe for my dog and
 // lawn?", "will it hurt the kids or the shrubs?") is recipients all the way
@@ -188,7 +190,7 @@ const LIVING_RECIPIENT_LIST_PATTERN = new RegExp(
   '\\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\\s+(?:the\\s+|my\\s+|our\\s+)?'
   + LIVING_RECIPIENT_NOUNS
   + '(?:\\s*(?:,|and|or|&)\\s*(?:the\\s+|my\\s+|our\\s+)?'
-  + `(?:${LIVING_RECIPIENT_NOUNS}|lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\\s+)?plant(?:ing)?s?|palms?))*`
+  + `(?:${LIVING_RECIPIENT_NOUNS}|lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\\s+)?plant(?:ing)?s?|palms?(?:\\s+trees?)?))*`
   + '\\b(?!\\s+(?:treat\\w*|appl\\w*|spray\\w*|service|care|program|plan))',
   'gi',
 );
@@ -563,7 +565,7 @@ function questionNamesProduct(name, questionWords) {
 // cap, meaning more matching products exist than were loaded — completeness
 // claims ("every product is rainfast within N minutes") must not be made
 // from a truncated slice.
-const PRODUCT_CATALOG_COLUMNS = ['name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified_by', 'label_verified_at', 'label_version',
+const PRODUCT_CATALOG_COLUMNS = ['name', 'category', 'formulation', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified_by', 'label_verified_at', 'label_version',
   'signal_word', 'ppe_text', 'rei_hours', 'rainfast_minutes', 'reentry_summary', 'reentry_text', 'irrigation_notes'];
 
 async function searchProductCatalog(db, terms, productNames = [], productFamiliesByName = {}, question = '') {
@@ -588,25 +590,48 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
   // Besides whole-string containment, aliases match TOKEN-WISE: the service
   // library may list "Advion Gel" while the catalog row is "Advion Cockroach
   // Gel" — an alias whose distinctive tokens all appear in the name still
-  // attributes.
+  // attributes. Alias descriptors can live OUTSIDE the name: "0-0-7
+  // Granular" names "LESCO Stonewall 0-0-7" whose granular form is in the
+  // formulation column, so tokens also match formulation/category, and a
+  // word whose characters are all punctuation-split singles ("0-0-7") is
+  // compared by normalized containment ("007") like the named-product query.
   const tokensOf = (value) => cleanText(value || '')
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((token) => token.length >= 2);
+  const normalizedAlnum = (value) => cleanText(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const aliasMatchPlan = (alias) => {
+    const words = cleanText(alias || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const tokens = [];
+    const normalizedWords = [];
+    for (const word of words) {
+      const subTokens = word.split(/[^a-z0-9]+/).filter((token) => token.length >= 2);
+      if (subTokens.length) {
+        tokens.push(...subTokens);
+      } else {
+        const normalized = word.replace(/[^a-z0-9]/g, '');
+        // Only digit-bearing residues ("007") are distinctive enough to
+        // compare by containment; alpha shards would over-match.
+        if (normalized.length >= 2 && /\d/.test(normalized)) normalizedWords.push(normalized);
+      }
+    }
+    const anchored = tokens.some((token) => token.length >= 4 || /\d/.test(token)) || normalizedWords.length > 0;
+    return { tokens, normalizedWords, anchored };
+  };
   const familyEntries = Object.entries(productFamiliesByName)
     .filter(([name]) => name.length >= 4);
-  const familiesForProduct = (name) => {
-    const key = cleanText(name || '').toLowerCase();
+  const familiesForProduct = (row) => {
+    const key = cleanText(row.name || '').toLowerCase();
     if (!key) return [];
-    const nameTokens = new Set(tokensOf(key));
+    const rowTokens = new Set(tokensOf([row.name, row.formulation, row.category].filter(Boolean).join(' ')));
+    const rowNormalized = [row.name, row.active_ingredient].map(normalizedAlnum).filter(Boolean);
     return unique(familyEntries
       .filter(([productName]) => {
         if (key.includes(productName) || productName.includes(key)) return true;
-        const aliasTokens = tokensOf(productName);
-        if (!aliasTokens.length || !aliasTokens.some((token) => token.length >= 4 || /\d/.test(token))) {
-          return false;
-        }
-        return aliasTokens.every((token) => nameTokens.has(token));
+        const plan = aliasMatchPlan(productName);
+        if (!plan.anchored || (!plan.tokens.length && !plan.normalizedWords.length)) return false;
+        return plan.tokens.every((token) => rowTokens.has(token))
+          && plan.normalizedWords.every((word) => rowNormalized.some((value) => value.includes(word)));
       })
       .flatMap(([, families]) => families));
   };
@@ -670,15 +695,23 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
             // familiesForProduct attributes those token-wise, so the fetch
             // must match the same way — a contiguous ilike never loads the
             // row and the linked product silently drops out of the working
-            // set. Word-boundary regexes mirror familiesForProduct's
-            // whole-token equality, under the same distinctive-token anchor
-            // so two everyday short tokens can't fetch by themselves.
-            const aliasTokens = tokensOf(name);
-            if (aliasTokens.length
-              && aliasTokens.some((token) => token.length >= 4 || /\d/.test(token))) {
+            // set. Each token may live in the name OR a descriptor column
+            // ("0-0-7 Granular" → formulation 'granular'), digit-bearing
+            // punctuation-only words compare by normalized containment
+            // ("0-0-7" → '007' in 'LESCO Stonewall 0-0-7'), and the same
+            // distinctive-token anchor keeps everyday short tokens from
+            // fetching by themselves — all mirrored by aliasMatchPlan for
+            // attribution.
+            const plan = aliasMatchPlan(name);
+            if (plan.anchored && (plan.tokens.length || plan.normalizedWords.length)) {
               this.orWhere(function tokenAliasProducts() {
-                for (const token of aliasTokens) {
-                  this.andWhereRaw('name ~* ?', [`\\m${token}\\M`]);
+                for (const token of plan.tokens) {
+                  const bound = `\\m${token}\\M`;
+                  this.andWhereRaw("(name ~* ? OR coalesce(formulation, '') ~* ? OR coalesce(category, '') ~* ?)", [bound, bound, bound]);
+                }
+                for (const word of plan.normalizedWords) {
+                  const like = `%${word}%`;
+                  this.andWhereRaw("(regexp_replace(lower(coalesce(name, '')), '[^a-z0-9]', '', 'g') like ? OR regexp_replace(lower(coalesce(active_ingredient, '')), '[^a-z0-9]', '', 'g') like ?)", [like, like]);
                 }
               });
             }
@@ -700,7 +733,6 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
     // Pull question-word matches to the front before slicing down to the
     // working set of 8. Same normalization as the named query — "2,4-D"
     // must rank up for the question word "24d".
-    const normalizedAlnum = (value) => cleanText(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const matchesQuestionWord = (row) => distinctiveQuestionWords.some((word) => (
       normalizedAlnum(row.name).includes(word)
       || normalizedAlnum(row.active_ingredient).includes(word)
@@ -757,7 +789,7 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         reentry: reentryText || null,
         rainfastMinutes: labelVerified && Number(row.rainfast_minutes) > 0 ? Number(row.rainfast_minutes) : null,
         irrigationNotes: labelVerified ? (trimSnippet(row.irrigation_notes || '') || null) : null,
-        serviceKeys: familiesForProduct(row.name),
+        serviceKeys: familiesForProduct(row),
         questionNameMatch: questionNamesProduct(row.name, questionWords),
         // The matched tokens are the customer's own question words — safe to
         // carry, and they let scoping tell distinct naming signals apart.
