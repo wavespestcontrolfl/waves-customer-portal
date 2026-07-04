@@ -137,18 +137,19 @@ describe('rain-out service', () => {
       expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=34202');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
 
-      // Reply options span the FULL 2-hour promised window (start on the hour,
-      // end = arrival-window end), not the 1-hour internal slot — so a customer
-      // replying anywhere inside the quoted window re-books cleanly instead of
-      // tripping the rebooker's same-day elapsed check. `display` matches.
+      // Reply options carry the tight 1-hour internal slot in start/end (a reply
+      // re-books or confirms exactly that — never widened), while `display` is
+      // the customer-facing 2-hour arrival window. A late reply inside the quoted
+      // window is kept valid by reschedule-sms's confirm-in-place path, not by
+      // widening the stored booking window.
       const notes = JSON.parse(logUpdate.update.mock.calls[0][0].notes);
       expect(notes.option1).toEqual({
         date: '2026-06-11',
-        window: { start: '13:00', end: '15:00', display: '1:00 PM - 3:00 PM' },
+        window: { start: '13:00', end: '14:00', display: '1:00 PM - 3:00 PM' },
       });
       expect(notes.option2).toEqual({
         date: '2026-06-12',
-        window: { start: '08:00', end: '10:00', display: '8:00 AM - 10:00 AM' },
+        window: { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' },
       });
     });
 

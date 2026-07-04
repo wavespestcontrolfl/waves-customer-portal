@@ -150,7 +150,29 @@ class RescheduleSMS {
       sms_responded_at: db.fn.now(),
     });
 
+    // Confirm-in-place: a rain-out already MOVED the appointment to option 1
+    // before texting the customer, so "1 to confirm" (or a "2" that lands on the
+    // same slot) is a pure confirmation — the visit is already booked there.
+    // Re-running SmartRebooker.reschedule would re-validate it and, for a
+    // same-day slot whose 1-hour internal window ticked past while the customer
+    // was deciding, wrongly reject it as elapsed even though the reply arrived
+    // inside the 2-hour window we quoted. Skip the re-book when the selection
+    // already matches the live booking. The general reschedule flow offers only
+    // FUTURE candidate dates the appointment isn't on yet, so this never short-
+    // circuits a genuine move.
+    let alreadyOnSlot = false;
     if (selectedOption) {
+      const svc = await db('scheduled_services')
+        .where({ id: pending.scheduled_service_id })
+        .first('scheduled_date', 'window_start', 'status');
+      const normTime = (t) => (t == null ? null : String(t).slice(0, 5));
+      alreadyOnSlot = !!svc
+        && String(svc.scheduled_date).slice(0, 10) === String(selectedOption.date).slice(0, 10)
+        && normTime(svc.window_start) === normTime(selectedOption.window?.start)
+        && !['completed', 'cancelled'].includes(svc.status);
+    }
+
+    if (selectedOption && !alreadyOnSlot) {
       try {
         await SmartRebooker.reschedule(
           pending.scheduled_service_id, selectedOption.date,
