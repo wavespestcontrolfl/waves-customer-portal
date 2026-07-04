@@ -684,7 +684,12 @@ function activeIngredientsFromSupport(context = {}, question = '') {
 // vocabulary — "what if it rains after treatment?" is a label question, but
 // "will you still come if it rains after 2pm?" is scheduling and must stay
 // on the normal path.
-const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:\w+\s+)?off\b|\brains?\s+(?:right\s+)?after\s+(?:the\s+|my\s+|a\s+|an\s+|you\s+|we\s+)?(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
+// "water" alternates are irrigation-anchored: watering-context wording
+// ("water the lawn", "how soon can I water") routes here, but "standing
+// water" (mosquito breeding) and "keep mosquitoes off" (efficacy) are
+// service questions and stay on the normal path. keep-off is restricted to
+// people/pets — that's re-entry wording.
+const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:the\s+|my\s+|a\s+|an\s+|you\s+|we\s+)?(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
 
 // Generic treatment vocabulary says nothing about WHICH product a question
 // targets, so it never counts as naming one.
@@ -789,9 +794,14 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
     ? attributedTo(row, estimateFamilies)
     : (Array.isArray(row.serviceKeys) && row.serviceKeys.length > 0));
   const questionFamilies = serviceFamiliesFromText(question);
-  const productMentions = rows.filter((row) => catalogRowNamesProduct(row, question) && onEstimate(row));
+  // Named rows are tracked BEFORE the on-estimate filter: a customer naming
+  // an off-estimate product ("is glyphosate safe?" on a Quinclorac lawn
+  // plan) must fail closed to generic copy, not fall through to the
+  // estimate's own products' facts.
+  const namedRows = rows.filter((row) => catalogRowNamesProduct(row, question));
+  const productMentions = namedRows.filter(onEstimate);
   const categoryMentions = rows.filter((row) => catalogRowMentionsCategory(row, question) && onEstimate(row));
-  if (productMentions.length || categoryMentions.length) {
+  if (namedRows.length || categoryMentions.length) {
     // Broad category mentions ("the lawn insecticide") can match every
     // on-estimate row of that category — when the question also names
     // families, they must stay inside them.
@@ -800,11 +810,13 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
       : categoryMentions;
     // A COORDINATED question ("is Bifenthrin AND the lawn treatment safe?")
     // asks about both the named product and the named family — union them.
-    // Without coordination the family word is adjectival ("the 2,4-D lawn
-    // spray") and the explicit product stays the narrower, correct scope.
-    const coordinatedFamilyRows = (productMentions.length
-      && questionFamilies.length
-      && /\b(?:and|plus|both|along with|as well as)\b|&/i.test(cleanText(question)))
+    // The conjunction must actually join onto family/treatment wording:
+    // "safe for kids and pets" is not a product+family coordination, and
+    // without one the family word is adjectival ("the 2,4-D lawn spray") so
+    // the explicit product stays the narrower, correct scope.
+    const coordinatesOntoFamily = /\b(?:and|plus|&|along with|as well as)\s+(?:the\s+|my\s+|our\s+)?(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service)\b/i
+      .test(cleanText(question));
+    const coordinatedFamilyRows = (productMentions.length && questionFamilies.length && coordinatesOntoFamily)
       ? rows.filter((row) => attributedTo(row, questionFamilies) && onEstimate(row))
       : [];
     return [...new Set([...productMentions, ...scopedCategory, ...coordinatedFamilyRows])];
@@ -1055,12 +1067,11 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // must land in this branch. Bare "rain"/"treatment" deliberately do NOT
   // match: "will you still come if it rains?" (scheduling) and "how long
   // does the treatment last?" (duration) belong to the branches below.
-  // "water bugs" is a pest, not a watering question — the lookahead sends
-  // it to the pest branch. Rain-after alternates are treatment-anchored so
-  // "if it rains after 2pm" scheduling wording stays out of safety copy.
-  // re-enter/re-entry/keep-off/dry wording lands here too — the reviewed
-  // re-entry guidance lives in labelSafetyFacts, not the lawn branch.
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:\w+\s+)?off\b|\brains?\s+(?:right\s+)?after\s+(?:the\s+|my\s+|a\s+|an\s+|you\s+|we\s+)?(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
+  // Same intent anchoring as the force gate: irrigation-context "water",
+  // people/pet "keep off", treatment-anchored rain-after, re-entry/dry
+  // wording. "water bugs"/"standing water"/"keep mosquitoes off" are
+  // service questions and belong to the branches below.
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:the\s+|my\s+|a\s+|an\s+|you\s+|we\s+)?(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
     const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';

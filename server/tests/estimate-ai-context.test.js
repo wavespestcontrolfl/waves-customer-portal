@@ -56,6 +56,8 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Are the lawn and bug spray safe for pets?')).toEqual(['lawn_care', 'pest_control']);
     // "the lawn" as the RECIPIENT of a treatment is not a target family...
     expect(serviceFamiliesFromText('Is the mosquito spray safe for the lawn?')).toEqual(['mosquito']);
+    // ...including coordinated recipient lists.
+    expect(serviceFamiliesFromText('Is the mosquito spray safe for lawns and shrubs?')).toEqual(['mosquito']);
     // ...but "for the lawn treatment" TARGETS the lawn family.
     expect(serviceFamiliesFromText('What product is used for the lawn treatment?')).toEqual(['lawn_care']);
     expect(serviceFamiliesFromText('Will the pest treatment hurt my shrubs?')).toEqual(['pest_control']);
@@ -90,6 +92,36 @@ describe('estimate AI support context', () => {
     });
     const row = result.productCatalog.find((r) => r.activeIngredient === 'Indoxacarb');
     expect(row.serviceKeys).toEqual(['pest_control']);
+    // Family nouns inside product names ("Cockroach") are not distinctive —
+    // a family question must not stamp whichever product carries the word.
+    expect(row.questionNameMatch).toBe(false);
+  });
+
+  test('rodent-bait services attribute as rodent_bait, not termite_bait', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        services: [{
+          // The loose label matcher's bare "bait" alternate would classify
+          // this as termite_bait; the service_key prefix must win.
+          service_key: 'rodent_bait_quarterly',
+          name: 'Rodent Bait Stations',
+          category: 'rodent',
+          description: 'Exterior rodent bait station program.',
+          default_products: ['Contrac Blox'],
+        }],
+        products_catalog: [{
+          name: 'Contrac Blox',
+          category: 'rodenticide',
+          active_ingredient: 'Bromadiolone',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is the rodent bait safe for pets?',
+      context: { services: [{ label: 'Rodent Bait Stations', detail: 'Quarterly exterior program' }] },
+    });
+    const row = result.productCatalog.find((r) => r.activeIngredient === 'Bromadiolone');
+    expect(row.serviceKeys).toEqual(['rodent_bait']);
   });
 
   test('question naming a product stamps questionNameMatch without leaking the name', async () => {

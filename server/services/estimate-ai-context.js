@@ -154,7 +154,33 @@ const PEST_PERIMETER_CONTEXT_PATTERN = /\b(?:interiors?|exteriors?|inside|outsid
 // the lawn?" scopes to mosquito, not mosquito + lawn. The trailing negative
 // lookahead protects TARGET phrasing: "for the lawn treatment/care/program"
 // qualifies the treatment being asked about and must keep its family.
-const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?)\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
+// The repeat group consumes COORDINATED recipient lists ("for lawns and
+// shrubs", "near the trees or palms") so a later area noun can't survive the
+// strip and read as a target family.
+const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?)(?:\s*(?:,|and|or|&)\s*(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?))*\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
+
+// Canonical service_key prefixes → family, checked BEFORE the loose label
+// matcher: "rodent_bait_quarterly" must classify as rodent_bait, not hit the
+// termite pattern's bare "bait" alternate. Order matters — the specific
+// compound keys (pest_rodent, pest_termite) come before the bare pest rule.
+const SERVICE_KEY_FAMILY_PREFIXES = [
+  ['rodent_bait', /^(?:rodent|pest_rodent)/],
+  ['termite_bait', /^(?:termite|pest_termite)/],
+  ['palm_injection', /^palm/],
+  ['mosquito', /^(?:mosquito|one_time_mosquito)/],
+  ['tree_shrub', /^(?:tree|shrub)/],
+  ['lawn_care', /^(?:lawn|one_time_lawn)/],
+  ['pest_control', /^(?:pest|cockroach|bed_bug|fire_ant|flea_tick|one_time_pest)/],
+];
+
+function serviceFamilyFromKey(serviceKey) {
+  const key = cleanText(serviceKey || '').toLowerCase();
+  if (!key) return null;
+  for (const [family, pattern] of SERVICE_KEY_FAMILY_PREFIXES) {
+    if (pattern.test(key)) return family;
+  }
+  return null;
+}
 
 // ALL families a question names, not just the first — a bundle question like
 // "are the lawn and mosquito treatments safe?" targets two families and the
@@ -374,6 +400,12 @@ const GENERIC_NAME_TOKENS = new Set([
   'lawn', 'turf', 'weed', 'pest', 'mosquito', 'insect', 'herbicide', 'insecticide',
   'fungicide', 'fertilizer', 'granular', 'liquid', 'control', 'spray', 'concentrate',
   'professional', 'select', 'ultra', 'super', 'plus', 'max', 'pro',
+  // Service-family nouns that appear inside product names ("Advion COCKROACH
+  // Gel"): a family question ("is the cockroach treatment safe?") must stay
+  // family-scoped, not stamp whichever product carries the family word.
+  'cockroach', 'cockroaches', 'roach', 'roaches', 'termite', 'termites',
+  'rodent', 'rodents', 'spider', 'spiders', 'shrub', 'shrubs', 'tree', 'trees',
+  'palm', 'palms', 'grass', 'yard', 'bait', 'station', 'stations',
 ]);
 
 // Does the question name this product? Compared as normalized whole tokens
@@ -611,7 +643,10 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
   // shared label patterns) so catalog rows can carry serviceKeys attribution.
   const productFamiliesByName = {};
   for (const row of serviceLibrary) {
-    const family = serviceKeyFromText([row.path, row.title, row.category].filter(Boolean).join(' '));
+    // Exact service_key prefixes win over the loose text matcher — see
+    // SERVICE_KEY_FAMILY_PREFIXES (rodent_bait vs the termite "bait" trap).
+    const family = serviceFamilyFromKey(row.path)
+      || serviceKeyFromText([row.path, row.title, row.category].filter(Boolean).join(' '));
     if (!family) continue;
     for (const name of row._productNames || []) {
       const key = cleanText(name).toLowerCase();

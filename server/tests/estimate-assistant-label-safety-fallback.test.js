@@ -269,12 +269,17 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains after treatment?')).toBe(true);
     // Rain-after phrasing counts only when tied to the treatment.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains right after you treat?')).toBe(true);
+    // Bare "when can I water?" is irrigation intent even without context.
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('When can I water?')).toBe(true);
     // Non-safety questions still reach the live models — bare "rain" and
     // "treatment" are scheduling/duration vocabulary, not safety intent.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What time will the technician arrive?')).toBe(false);
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Will you still come if it rains?')).toBe(false);
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Will you still come if it rains after 2pm?')).toBe(false);
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How long does the mosquito treatment last?')).toBe(false);
+    // "standing water" and "keep <pest> off" are service/efficacy wording.
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Do you treat standing water?')).toBe(false);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Will the treatment keep mosquitoes off my patio?')).toBe(false);
   });
 
   test('rain-timing scheduling questions never get label copy from the fallback', () => {
@@ -541,6 +546,48 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).toContain('Label re-entry guidance by product:');
     expect(answer).toContain('Keep people and pets off treated areas until dry');
     expect(answer).toContain('Re-enter once sprays have dried');
+  });
+
+  test('naming an off-estimate product fails closed, not through to the estimate\'s facts', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    // Loaded from the question term, but not a product on this estimate.
+    context.supportContext.productCatalog.push({
+      source: 'admin_product_catalog',
+      category: 'herbicide',
+      activeIngredient: 'Glyphosate',
+      labelVerified: true,
+      signalWord: 'Warning',
+      reentry: 'Foreign product re-entry claim.',
+      rainfastMinutes: 240,
+      irrigationNotes: null,
+      serviceKeys: [],
+    });
+    const answer = answerEstimateQuestionFallback('Is glyphosate safe for pets?', context);
+    expect(answer).not.toContain('Label re-entry guidance');
+    expect(answer).not.toContain('Foreign product re-entry claim');
+    expect(answer).not.toContain('Carfentrazone');
+    expect(answer).toContain('follow the product label directions');
+  });
+
+  test('unrelated "and" does not widen a product question to the whole family', () => {
+    const context = JSON.parse(JSON.stringify(lawnPestContext));
+    context.supportContext.productCatalog.push({
+      source: 'admin_product_catalog',
+      title: 'insect growth regulator active ingredient',
+      category: 'insect growth regulator',
+      activeIngredient: 'Hydroprene',
+      labelVerified: true,
+      signalWord: 'Caution',
+      reentry: 'Ventilate treated rooms briefly.',
+      rainfastMinutes: null,
+      irrigationNotes: null,
+      serviceKeys: ['pest_control'],
+    });
+    // "kids and pets" is not a product+family coordination.
+    const answer = answerEstimateQuestionFallback('Is the Bifenthrin pest spray safe for kids and pets?', context);
+    expect(answer).toContain('Re-enter once sprays have dried');
+    expect(answer).not.toContain('Hydroprene');
+    expect(answer).not.toContain('Ventilate treated rooms');
   });
 
   test('a coordinated product + family question unions both scopes', () => {
