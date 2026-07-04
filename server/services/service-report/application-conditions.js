@@ -310,8 +310,13 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     const value = {
       rainInches,
       // ET₀ stays the property-cell value — it's a smooth field, not prone to the
-      // single-cell convective spikes the rain guard targets.
-      et0Inches: et0SumToInches(sumPrecipInches(property.et0), property.et0Unit),
+      // single-cell convective spikes the rain guard targets. Require the FULL window
+      // (like the old sumIfFull guard): sumPrecipInches only rejects gaps, not a short
+      // array, so a truncated et0 series would otherwise understate ET₀ and drag the
+      // water target down for that week. Short/missing → null → grass×season fallback.
+      et0Inches: (Array.isArray(property.et0) && property.et0.length === expectedDays)
+        ? et0SumToInches(sumPrecipInches(property.et0), property.et0Unit)
+        : null,
       // Per-day rainfall (inches) over the trusted window. On a normal week this is the
       // property cell; on a spiked week it's the city-collective (median) series, so the
       // 7-day chart and the weekly total always reconcile and never show a phantom spike.
