@@ -11,6 +11,7 @@
 const {
   addressMatchesCustomer, unitsConflict, stripInlineUnitFromLine, narrowCandidatesByUnit,
 } = require('../routes/booking')._internals;
+const { splitStreetLineUnit } = require('../utils/address-normalizer');
 
 describe('unitsConflict', () => {
   test('no conflict when either side is blank', () => {
@@ -112,6 +113,17 @@ describe('legacy inline units in address_line1 (pre-capture records)', () => {
     const commaLegacy = { address_line1: '123 Main St, Apt B', address_line2: null, zip: '34231' };
     expect(addressMatchesCustomer(commaLegacy, '123 Main St', '34231', 'Apt B')).toBe(true);
     expect(addressMatchesCustomer(commaLegacy, '123 Main St', '34231', 'Apt A')).toBe(false);
+  });
+
+  test('comma-separated MULTI-PART legacy units match their split submission (codex rd7)', () => {
+    const legacy = { address_line1: '123 Main St, Bldg 2, Apt 4', address_line2: null, zip: '34231' };
+    expect(addressMatchesCustomer(legacy, '123 Main St', '34231', 'Bldg 2 Apt 4')).toBe(true);
+    expect(addressMatchesCustomer(legacy, '123 Main St', '34231', 'Bldg 2 Apt 9')).toBe(false);
+  });
+
+  test('a one-line FL address (state+ZIP tail) does not manufacture a unit conflict (codex rd7)', () => {
+    expect(splitStreetLineUnit('123 Main St Sarasota FL 34236').unit).toBe('');
+    expect(unitsConflict(splitStreetLineUnit('123 Main St Sarasota FL 34236').unit, 'Apt A')).toBe(false);
   });
 
   test('two disagreeing units in one submission is ambiguous → no match (codex rd5)', () => {

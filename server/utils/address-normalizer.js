@@ -4,6 +4,12 @@ const UNIT_DESIGNATORS = new Set([
   'apt', 'apartment', 'bldg', 'building', 'fl', 'floor', 'lot', 'spc',
   'space', 'ste', 'suite', 'unit',
 ]);
+// 'fl' the floor designator collides with FL the state — a ZIP-shaped value
+// after 'fl' means "FL 34236" (state+ZIP tail), never a floor number.
+const ZIP_SHAPED = /^\d{5}(-\d{4})?$/;
+function isStateZipPair(designator, value) {
+  return designator === 'fl' && ZIP_SHAPED.test(value);
+}
 const STREET_SUFFIX_ALIASES = {
   street: 'ST',
   st: 'ST',
@@ -338,14 +344,18 @@ function unitLineValueKey(normalizedUnitLine) {
 function splitStreetLineUnit(value) {
   const segments = cleanString(value).split(',').map((s) => s.trim()).filter(Boolean);
   let line = segments[0] || '';
-  // Legacy values often carry the unit as its own comma segment
-  // ("123 Main St, Apt B, Sarasota") — pull that segment back into the line
-  // so the peel below sees it instead of treating the record as street-only.
-  if (segments[1]) {
-    const firstTok = segments[1].split(' ')[0].replace(/\./g, '').toLowerCase();
-    if (firstTok.startsWith('#') || UNIT_DESIGNATORS.has(firstTok)) {
-      line = `${line} ${segments[1]}`;
-    }
+  // Legacy values often carry the unit as its own comma segment — possibly
+  // several ("123 Main St, Bldg 2, Apt 4, Sarasota") — pull consecutive
+  // unit-leading segments back into the line so the peel below sees them
+  // instead of treating the record as street-only. A "FL <zip>" segment is a
+  // state tail, not a floor.
+  for (let i = 1; i < segments.length; i += 1) {
+    const segTokens = segments[i].split(' ').filter(Boolean);
+    const firstTok = (segTokens[0] || '').replace(/\./g, '').toLowerCase();
+    const isUnitSegment = (firstTok.startsWith('#') || UNIT_DESIGNATORS.has(firstTok))
+      && !isStateZipPair(firstTok, (segTokens[1] || '').replace(/[.,]/g, ''));
+    if (!isUnitSegment) break;
+    line = `${line} ${segments[i]}`;
   }
   let tokens = line.split(' ').filter(Boolean);
   const unitParts = [];
@@ -364,6 +374,7 @@ function splitStreetLineUnit(value) {
       continue;
     }
     if (tokens.length >= 3 && UNIT_DESIGNATORS.has(secondLast)
+        && !isStateZipPair(secondLast, last)
         && /^#?[A-Za-z]?\d+[A-Za-z]?$|^[A-Za-z]$/.test(last)) {
       unitParts.unshift(`${tokens[tokens.length - 2]} ${last}`);
       tokens = tokens.slice(0, -2);

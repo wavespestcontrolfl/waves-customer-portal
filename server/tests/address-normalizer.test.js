@@ -387,6 +387,22 @@ describe('splitStreetLineUnit', () => {
     expect(splitStreetLineUnit('123 Main St Apt #4')).toEqual({ street: '123 Main St', unit: 'Apt #4' });
     expect(splitStreetLineUnit('123 Main St Suite #210')).toEqual({ street: '123 Main St', unit: 'Suite #210' });
   });
+
+  test('a FL state+ZIP tail is not a floor unit (codex rd7)', () => {
+    expect(splitStreetLineUnit('123 Main St Sarasota FL 34236'))
+      .toEqual({ street: '123 Main St Sarasota FL 34236', unit: '' });
+    expect(splitStreetLineUnit('123 Main St, FL 34236')).toEqual({ street: '123 Main St', unit: '' });
+    expect(splitStreetLineUnit('123 Main St Sarasota FL 34236-1234').unit).toBe('');
+    // A real floor still peels.
+    expect(splitStreetLineUnit('123 Main St Fl 2')).toEqual({ street: '123 Main St', unit: 'Fl 2' });
+  });
+
+  test('consecutive comma-separated unit segments all join the unit (codex rd7)', () => {
+    expect(splitStreetLineUnit('123 Main St, Bldg 2, Apt 4'))
+      .toEqual({ street: '123 Main St', unit: 'Bldg 2 Apt 4' });
+    expect(splitStreetLineUnit('123 Main St, Bldg 2, Apt 4, Sarasota, FL'))
+      .toEqual({ street: '123 Main St', unit: 'Bldg 2 Apt 4' });
+  });
 });
 
 describe('formatAddress', () => {
