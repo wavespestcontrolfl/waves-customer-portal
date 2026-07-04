@@ -27,6 +27,7 @@
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
+ *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -259,6 +260,18 @@ const gates = {
   // GATE_BOOKING_ABANDON_RECOVERY=true on prod at merge to go live (effectively
   // "live on merge", one env flip). Off → the cron only shadow-logs candidates.
   bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY === 'true',
+
+  // Ads Budget Live Push — allow the 2-hourly capacity-based budget cron
+  // (BudgetManager.adjustBudgets) to push its budget changes to the Google
+  // Ads API. Off until the owner verifies campaign links + base budgets in
+  // /admin/ads: with it off the cron records intended budgets locally only
+  // (dashboard/advisor state, no real spend change). Manual budget/mode
+  // controls in /admin/ads push live regardless of this gate — it covers
+  // only the autonomous loop. Controls real ad spend, so like the auto-send
+  // gates it FAILS CLOSED (explicit opt-in in EVERY environment): a dev or
+  // preview env with copied Google Ads creds + cronJobs open must never
+  // mutate live campaign budgets by default.
+  adsBudgetLivePush: process.env.GATE_ADS_BUDGET_LIVE_PUSH === 'true',
 
   // Booking "pay per application" — LINKED-ESTIMATE, PEST-ONLY BY DESIGN: prices
   // ONLY a booking explicitly linked to an estimate (estimate_id), and only for

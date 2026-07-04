@@ -72,7 +72,8 @@ router.put('/campaigns/:id', async (req, res, next) => {
 router.post('/campaigns/:id/mode', async (req, res, next) => {
   try {
     const { mode, reason } = req.body;
-    // Mode rewrites budget_mode + daily_budget_current locally; refuse Meta
+    // Mode rewrites budget_mode + daily_budget_current and pushes the new
+    // budget to Google Ads when the campaign is linked; refuse Meta
     // (read-only) so the dashboard can't drift from Ads Manager.
     const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });

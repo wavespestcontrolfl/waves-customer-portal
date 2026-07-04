@@ -96,6 +96,78 @@ describe('Google Ads campaign sync', () => {
     expect(mockInsert.mock.calls[0][0]).not.toHaveProperty('daily_budget');
   });
 
+  test('preserves daily_budget_base while the local row is throttled', async () => {
+    // A pushed capacity throttle (stop = 1% of base) read back from Google
+    // must not become the new canonical base — a later green-capacity run
+    // could never restore full spend.
+    mockQueryFirst.mockResolvedValue({
+      id: 'row-1',
+      platform_campaign_id: '22594274874',
+      budget_mode: 'stop',
+      daily_budget_base: 40,
+    });
+    mockUpdate.mockResolvedValue(1);
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: '22594274874', name: 'Sarasota Pest', status: 2, advertising_channel_type: 'SEARCH' },
+      campaign_budget: { amount_micros: 400_000 },
+    }]);
+
+    const results = await GoogleAds.syncCampaigns();
+
+    const updateArg = mockUpdate.mock.calls[0][0];
+    expect(updateArg).not.toHaveProperty('daily_budget_base');
+    expect(updateArg.daily_budget_current).toBe(0.4);
+    expect(results[0].daily_budget_base).toBe(40);
+  });
+
+  test('preserves stored base in base mode too — a failed restore leaves the throttle live', async () => {
+    // setMode back to 'base' commits mode='base' locally even when the push
+    // fails, so Google can still be running the old $0.40 throttle at the
+    // next sync. Trusting that live amount as the new base would leave the
+    // campaign permanently throttled (reconcile would "enforce" $0.40); a
+    // legitimate Ads-Manager edit is indistinguishable from this state, so
+    // base only ever changes through /admin/ads setBudget.
+    mockQueryFirst.mockResolvedValue({
+      id: 'row-1',
+      platform_campaign_id: '22594274874',
+      budget_mode: 'base',
+      daily_budget_base: 40,
+    });
+    mockUpdate.mockResolvedValue(1);
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: '22594274874', name: 'Sarasota Pest', status: 2, advertising_channel_type: 'SEARCH' },
+      campaign_budget: { amount_micros: 400_000 },
+    }]);
+
+    const results = await GoogleAds.syncCampaigns();
+
+    const updateArg = mockUpdate.mock.calls[0][0];
+    expect(updateArg).not.toHaveProperty('daily_budget_base');
+    expect(updateArg.daily_budget_current).toBe(0.4);
+    expect(results[0].daily_budget_base).toBe(40);
+  });
+
+  test('backfills base from live only when the stored base is null', async () => {
+    mockQueryFirst.mockResolvedValue({
+      id: 'row-1',
+      platform_campaign_id: '22594274874',
+      budget_mode: null,
+      daily_budget_base: null,
+    });
+    mockUpdate.mockResolvedValue(1);
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: '22594274874', name: 'Sarasota Pest', status: 2, advertising_channel_type: 'SEARCH' },
+      campaign_budget: { amount_micros: 45_000_000 },
+    }]);
+
+    await GoogleAds.syncCampaigns();
+
+    expect(mockUpdate.mock.calls[0][0]).toEqual(expect.objectContaining({
+      daily_budget_base: 45,
+      daily_budget_current: 45,
+    }));
+  });
+
   test('enables campaigns using the current mutateResources update format', async () => {
     mockMutateResources.mockResolvedValue({});
 
@@ -160,6 +232,25 @@ describe('Google Ads campaign sync', () => {
         amount_micros: 5000000,
       },
     }]);
+  });
+
+  test('refuses to update a SHARED campaign budget', async () => {
+    // A shared budget backs multiple campaigns — one row's capacity push
+    // would throttle every campaign on it.
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: {
+        id: '22594274874',
+        campaign_budget: 'customers/3393936713/campaignBudgets/987654321',
+      },
+      campaign_budget: {
+        explicitly_shared: true,
+      },
+    }]);
+
+    const result = await GoogleAds.updateBudget('22594274874', 5);
+
+    expect(result).toBeNull();
+    expect(mockMutateResources).not.toHaveBeenCalled();
   });
 
   test('gaqlDateRange returns a finite, dashed YYYY-MM-DD range', () => {

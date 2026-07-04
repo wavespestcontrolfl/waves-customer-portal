@@ -1,6 +1,12 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
+const { isEnabled } = require('../../config/feature-gates');
+
+// Lazy so requiring budget-manager (e.g. from the scheduler at boot) doesn't
+// load the google-ads-api client until a push is actually attempted.
+let _googleAds;
+function getGoogleAds() { return _googleAds || (_googleAds = require('./google-ads')); }
 
 class BudgetManager {
   /**
@@ -8,6 +14,13 @@ class BudgetManager {
    *
    * Sunday algorithm: always check Monday's capacity, full power.
    * Weekday <2PM: check today.  Weekday >=2PM: check tomorrow.
+   *
+   * With the adsBudgetLivePush gate on, each mode change is pushed to the
+   * Google Ads API before being committed locally; with it off, changes are
+   * DB-only intent tracking (dashboard/advisor state, no real spend change).
+   * Gate-on runs with no mode transition also reconcile drift — a recorded
+   * mode whose budget never reached Google (shadow-written while the gate
+   * was off, or a failed manual push) is re-pushed.
    */
   async adjustBudgets() {
     const now = new Date();
@@ -63,6 +76,25 @@ class BudgetManager {
         if (newMode !== campaign.budget_mode) {
           const newBudget = this.calculateBudget(campaign, newMode);
 
+          // Push to Google FIRST, then commit locally — daily_budget_current
+          // must never record a budget Google isn't actually running. On a
+          // failed push we skip the local write entirely so the next 2-hour
+          // run retries the same transition. Gate off / unlinked campaign /
+          // missing API creds keep the legacy DB-only intent tracking — as
+          // does a NULL daily_budget_base: calculateBudget falls back to $20
+          // there, and an invented fallback must never become a real Google
+          // budget. Once sync backfills (or the owner sets) the base, the
+          // reconcile branch below converges Google onto the recorded mode.
+          let pushedLive = false;
+          if (isEnabled('adsBudgetLivePush') && campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
+            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
+            if (!pushed) {
+              logger.error(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} NOT applied — Google Ads push failed; will retry next run`);
+              continue;
+            }
+            pushedLive = true;
+          }
+
           await db('ad_campaigns').where({ id: campaign.id }).update({
             budget_mode: newMode,
             daily_budget_current: newBudget,
@@ -75,13 +107,57 @@ class BudgetManager {
             new_mode: newMode,
             previous_budget: campaign.daily_budget_current,
             new_budget: newBudget,
-            reason: `Capacity ${pct.toFixed(0)}% for ${area} on ${checkDate}`,
+            reason: `Capacity ${pct.toFixed(0)}% for ${area} on ${checkDate}${pushedLive ? ' — pushed to Google Ads' : ''}`,
             trigger: 'auto',
             capacity_pct: pct,
             check_date: checkDate,
           });
 
-          logger.info(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} (capacity ${pct.toFixed(0)}%)`);
+          logger.info(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} (capacity ${pct.toFixed(0)}%${pushedLive ? ', pushed to Google Ads' : ', local only'})`);
+        } else if (isEnabled('adsBudgetLivePush') && campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
+          // No transition this run, but the recorded mode may never have
+          // reached Google: modes shadow-written before the gate was enabled
+          // (or committed by a manual setMode whose push failed) leave
+          // budget_mode at e.g. 'stop' while Google runs the old budget — and
+          // since the mode already matches, the transition branch above never
+          // fires to correct it. The daily sync writes Google's live amount
+          // back into daily_budget_current, so a mismatch between that and
+          // the mode's calculated budget is exactly this drift. Push the
+          // mode's budget to reconcile. 'spent' is freeze-at-current by
+          // definition, so it can never trigger this.
+          // Compare in integer cents: daily_budget_current is decimal(10,2),
+          // so a sub-cent expected value (pre-rounding stop budgets) or float
+          // representation would otherwise read as permanent drift and
+          // re-push the same budget every run. NULL current (never synced,
+          // never set) is skipped — the daily sync populates it within a day.
+          const expectedBudget = this.calculateBudget(campaign, campaign.budget_mode);
+          const currentCents = Math.round(parseFloat(campaign.daily_budget_current) * 100);
+          if (Number.isFinite(currentCents) && currentCents !== Math.round(expectedBudget * 100)) {
+            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, expectedBudget);
+            if (!pushed) {
+              logger.error(`Budget: ${campaign.campaign_name} reconcile of ${campaign.budget_mode} budget NOT applied — Google Ads push failed; will retry next run`);
+              continue;
+            }
+
+            await db('ad_campaigns').where({ id: campaign.id }).update({
+              daily_budget_current: expectedBudget,
+            });
+
+            await db('ad_budget_log').insert({
+              campaign_id: campaign.id,
+              campaign_name: campaign.campaign_name,
+              previous_mode: campaign.budget_mode,
+              new_mode: campaign.budget_mode,
+              previous_budget: campaign.daily_budget_current,
+              new_budget: expectedBudget,
+              reason: `Reconcile: local ${campaign.budget_mode} budget was not live on Google — pushed to Google Ads`,
+              trigger: 'auto',
+              capacity_pct: pct,
+              check_date: checkDate,
+            });
+
+            logger.info(`Budget: ${campaign.campaign_name} reconciled ${campaign.budget_mode} budget to ${expectedBudget} (pushed to Google Ads)`);
+          }
         }
       } catch (err) {
         logger.error(`Budget adjust failed for ${campaign.campaign_name}: ${err.message}`);
@@ -94,7 +170,11 @@ class BudgetManager {
     switch (mode) {
       case 'base': return base;
       case 'spent': return parseFloat(campaign.daily_budget_current || base); // freeze at current
-      case 'stop': return Math.max(0.01, base * 0.01); // 1% — never zero
+      // 1% of base — never zero (pausing kills Quality Score). Cent-rounded
+      // because ad_campaigns budget columns are decimal(10,2): a half-cent
+      // value (base 30.50 → 0.305) would store as 0.31 and read back as
+      // drift against the unrounded calculation forever.
+      case 'stop': return Math.max(0.01, Math.round(base) / 100);
       default: return base;
     }
   }
@@ -257,6 +337,14 @@ class BudgetManager {
    * Manually set a campaign's budget mode (from advisor "Apply" button).
    */
   async setMode(campaignId, mode, reason = 'manual') {
+    // Now that setMode can mutate real Google Ads spend, an unknown mode
+    // must be rejected up front — calculateBudget's default case would
+    // silently price a typo as the full base budget AND persist the invalid
+    // mode, which the capacity cron could then never match or reconcile.
+    if (!['base', 'spent', 'stop'].includes(mode)) {
+      throw new Error(`Invalid budget mode "${mode}" — must be base, spent, or stop`);
+    }
+
     const campaign = await db('ad_campaigns').where({ id: campaignId }).first();
     if (!campaign) throw new Error('Campaign not found');
     // Source-level guard so EVERY caller (incl. /advisor/apply) is covered: only
@@ -284,7 +372,19 @@ class BudgetManager {
       trigger: 'manual',
     });
 
-    return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget };
+    // Mirror the manual /campaigns/:id/budget route: DB first, then
+    // best-effort live push, outcome reported so the caller can tell whether
+    // Google actually took the new budget. Human-initiated, so not gated by
+    // adsBudgetLivePush — that gate covers only the autonomous cron. NULL
+    // daily_budget_base skips the push like the cron does: calculateBudget's
+    // $20 fallback must never reach a real campaign.
+    let googleAdsUpdated = false;
+    if (campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
+      const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
+      googleAdsUpdated = !!pushed;
+    }
+
+    return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated };
   }
 
   /**
