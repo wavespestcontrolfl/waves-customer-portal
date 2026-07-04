@@ -396,7 +396,7 @@ function stripModelWrapper(raw) {
   // so unhyphenated adjective hooks ("Here's a post storm mosquito tip:",
   // "Here's a post treatment reminder:") survive too — there "post" is followed by
   // another content word, which real meta lines never do.
-  text = text.replace(/^(?:(?:sure|certainly|of course)(?:\s*[,!.:—–-]\s*|\s+))?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b(?!-)(?:[,—–-]?\s+(?:for|that|which|you|your|ready|within|under|below|about|in|on|to|at)\b[^:\n]{0,60})?:\s*/i, '');
+  text = text.replace(/^(?:(?:sure|certainly|of course)(?:\s*[,!.:—–-]\s*|\s+))?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b(?!-)(?:[,—–-]?\s+(?:for|that|which|you|your|ready|based|within|under|below|about|in|on|to|at)\b[^:\n]{0,60})?:\s*/i, '');
   // Fences → count note → fences again: the count can sit inside the fences
   // ("---\ncopy\n*(Character count: ~240)*\n---") or a fence can sit between
   // the copy and the count — each pass exposes the other's target.

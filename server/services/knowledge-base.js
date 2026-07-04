@@ -326,20 +326,37 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     }
 
     // ── LinkedIn ──
+    // OAuth model (services/linkedin.js): app creds in env, page token stored in
+    // the DB by the Settings → Integrations connect flow. The legacy
+    // LINKEDIN_ACCESS_TOKEN env path is retired — reading it here would report a
+    // false failure after the OAuth connection succeeds. Mirrors token-health.js.
     try {
-      const token = process.env.LINKEDIN_ACCESS_TOKEN;
-      const credential = { platform: 'linkedin', credential_type: 'oauth-token', env_var_name: 'LINKEDIN_ACCESS_TOKEN' };
-      if (!token) {
-        results.push({ ...credential, status: 'error', error: 'Not configured' });
+      const credential = { platform: 'linkedin', credential_type: 'oauth-token', env_var_name: 'LINKEDIN_CLIENT_ID' };
+      const linkedin = require('./linkedin');
+      if (!linkedin.configured) {
+        results.push({ ...credential, status: 'error', error: 'LINKEDIN_CLIENT_ID/SECRET not set' });
       } else {
-        const res = await fetch('https://api.linkedin.com/v2/me', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        results.push({
-          ...credential,
-          status: res.ok ? 'healthy' : 'expired',
-          error: res.ok ? null : `HTTP ${res.status}`,
-        });
+        const status = await linkedin.getStatus();
+        if (!status.connected) {
+          results.push({ ...credential, status: 'error', error: 'Not connected — authorize via Admin Settings → Integrations' });
+        } else {
+          const expiresAt = status.tokenExpiresAt ? new Date(status.tokenExpiresAt) : null;
+          if (expiresAt && expiresAt.getTime() <= Date.now()) {
+            // Expired by stored metadata: run the refresh exchange (as
+            // token-health does) so a refreshable grant reads healthy and a
+            // revoked one surfaces here instead of at the next publish.
+            const refresh = await linkedin.tryRefresh();
+            results.push(refresh.ok
+              ? { ...credential, status: 'healthy', expires_at: refresh.expiresAt ? new Date(refresh.expiresAt) : expiresAt }
+              : { ...credential, status: 'expired', error: `Re-authorize — ${refresh.error}`, expires_at: refresh.expiresAt ? new Date(refresh.expiresAt) : expiresAt });
+          } else {
+            results.push({
+              ...credential,
+              status: expiresAt && expiresAt < new Date(Date.now() + 7 * 86400000) ? 'expiring-soon' : 'healthy',
+              expires_at: expiresAt,
+            });
+          }
+        }
       }
     } catch (err) {
       results.push({ platform: 'linkedin', credential_type: 'oauth-token', status: 'error', error: err.message });

@@ -61,6 +61,13 @@ describe('stripModelWrapper', () => {
     expect(stripModelWrapper(hyphen)).toBe('Brown patch or chinch bugs? The blade base tells you.');
   });
 
+  test('strips a prompt-echo preamble ("…post based on this blog article:")', () => {
+    const echo = "Here's a professional LinkedIn post based on this blog article: Venice pest pressure is peaking. Stay ahead of it.";
+    expect(stripModelWrapper(echo)).toBe('Venice pest pressure is peaking. Stay ahead of it.');
+    const echo2 = 'Here is an Instagram caption based on the article:\n\nParrish lawns are showing fungus after the rain.';
+    expect(stripModelWrapper(echo2)).toBe('Parrish lawns are showing fungus after the rain.');
+  });
+
   test('strips a character-count "Note:" line atomically (count pass must not bite its tail first)', () => {
     const raw = "Venice mosquito pressure is climbing after this week's rain.\n\n*Note: This is 196 characters*";
     expect(stripModelWrapper(raw)).toBe("Venice mosquito pressure is climbing after this week's rain.");
