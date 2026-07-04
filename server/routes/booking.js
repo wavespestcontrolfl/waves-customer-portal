@@ -224,15 +224,24 @@ function unitsConflict(customerLine2, submittedUnit) {
 // unit "Apt 4"). When the inline unit value-matches the dedicated one, strip
 // it from the street line so line1+line2 displays never repeat it. A
 // DIFFERENT inline unit is left untouched — addressMatchesCustomer treats
-// that as a conflict, never silent data loss. Only the first comma segment
-// is inspected; any trailing city/state text is preserved.
+// that as a conflict, never silent data loss. The duplicate may sit in the
+// first comma segment OR ride as its own segment ("123 Main St, Apt B,
+// Sarasota"); any trailing city/state text is preserved either way.
 function stripInlineUnitFromLine(line, submittedUnit) {
   const submittedKey = unitValueKey(submittedUnit);
   if (!submittedKey) return line;
   const [first, ...rest] = String(line || '').split(',');
   const split = splitStreetLineUnit(first);
-  if (!split.unit || unitValueKey(split.unit) !== submittedKey) return line;
-  return [split.street, ...rest].join(',');
+  if (split.unit && unitValueKey(split.unit) === submittedKey) {
+    return [split.street, ...rest].join(',');
+  }
+  if (rest.length) {
+    const twoSegment = splitStreetLineUnit(`${first},${rest[0]}`);
+    if (twoSegment.unit && unitValueKey(twoSegment.unit) === submittedKey) {
+      return [twoSegment.street, ...rest.slice(1)].join(',');
+    }
+  }
+  return line;
 }
 
 // The unit a customer record carries: the dedicated column, or a legacy
@@ -854,6 +863,14 @@ async function createSelfBooking(payload = {}) {
       if (timeToMin(slot_start) <= nowEt.hour * 60 + nowEt.minute) {
         return { ok: false, status: 409, error: 'That time has already passed today — please pick another slot.' };
       }
+    }
+
+    // A new_customer payload whose street line carries a DIFFERENT inline
+    // unit than the dedicated field points at two doors at once — fail closed
+    // like the matching paths, instead of minting (or backfilling from) a
+    // self-contradictory address.
+    if (new_customer && unitsConflict(splitStreetLineUnit(new_customer.address_line1 || '').unit, new_customer.address_line2)) {
+      return { ok: false, status: 400, error: 'The street address and unit number disagree — please re-enter your address.' };
     }
 
     // Resolve customer

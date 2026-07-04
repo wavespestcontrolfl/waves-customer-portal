@@ -264,13 +264,13 @@ describe('address normalizer', () => {
     }).line2).toBe('Unit 12');
   });
 
-  test('does not duplicate a unit already inline in the street line', () => {
+  test('a unit in both the street line and the dedicated field lands in line2, street-only line1 (codex rd6)', () => {
     expect(normalizeLeadAddress({
       raw: '123 Main St Apt 4 Sarasota FL 34236', line2: 'Apt 4',
     })).toMatchObject({
-      line1: '123 Main St Apt 4',
-      line2: '',
-      fullAddress: '123 Main St Apt 4, Sarasota, FL 34236',
+      line1: '123 Main St',
+      line2: 'Apt 4',
+      fullAddress: '123 Main St, Apt 4, Sarasota, FL 34236',
     });
   });
 
@@ -278,9 +278,9 @@ describe('address normalizer', () => {
     expect(normalizeLeadAddress({
       raw: '123 Main St Apt 4 Sarasota FL 34236', line2: '#4',
     })).toMatchObject({
-      line1: '123 Main St Apt 4',
-      line2: '',
-      fullAddress: '123 Main St Apt 4, Sarasota, FL 34236',
+      line1: '123 Main St',
+      line2: 'Unit 4',
+      fullAddress: '123 Main St, Unit 4, Sarasota, FL 34236',
     });
   });
 

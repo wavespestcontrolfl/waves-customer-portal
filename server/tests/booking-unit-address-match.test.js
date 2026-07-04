@@ -163,4 +163,11 @@ describe('stripInlineUnitFromLine (double-entry dedup at insert)', () => {
     expect(stripInlineUnitFromLine('123 Main St Apt 4', '')).toBe('123 Main St Apt 4');
     expect(stripInlineUnitFromLine('123 Main St', 'Apt 4')).toBe('123 Main St');
   });
+
+  test('strips a comma-separated inline unit segment (codex rd6)', () => {
+    expect(stripInlineUnitFromLine('123 Main St, Apt B', 'Apt B')).toBe('123 Main St');
+    expect(stripInlineUnitFromLine('123 Main St, Apt B, Sarasota', '#B')).toBe('123 Main St, Sarasota');
+    // A non-unit second segment (city) stays put.
+    expect(stripInlineUnitFromLine('123 Main St, Sarasota', 'Apt B')).toBe('123 Main St, Sarasota');
+  });
 });

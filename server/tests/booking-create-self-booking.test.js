@@ -28,4 +28,13 @@ describe('createSelfBooking — validation contract (no DB)', () => {
     expect(await createSelfBooking({ slot_date: '2020-01-01', slot_start: '09:00' }))
       .toEqual({ ok: false, status: 400, error: expect.stringMatching(/already passed/i) });
   });
+
+  test('new_customer with disagreeing inline + dedicated units → 400, fails closed (codex rd6)', async () => {
+    const result = await createSelfBooking({
+      slot_date: '2099-01-01',
+      slot_start: '09:00',
+      new_customer: { first_name: 'Ada', address_line1: '123 Main St Apt A', address_line2: 'Apt B', zip: '34231' },
+    });
+    expect(result).toEqual({ ok: false, status: 400, error: expect.stringMatching(/unit number disagree/i) });
+  });
 });

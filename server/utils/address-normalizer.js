@@ -473,18 +473,25 @@ function normalizeLeadAddress(input = {}) {
   const raw = cleanString(input.raw || input.address || components.formatted);
   const parsed = parseRawAddress(raw);
 
-  const line1 = normalizeStreetLine(input.line1 || input.addressLine1 || input.address_line1 || components.line1 || parsed.line1);
+  let line1 = normalizeStreetLine(input.line1 || input.addressLine1 || input.address_line1 || components.line1 || parsed.line1);
   const rawLine2 = normalizeUnitLine(
     input.line2 || input.addressLine2 || input.address_line2 || input.unit || components.line2 || components.unit
   );
   // A raw/fallback submission can carry the unit inline in line1 AND in the
-  // dedicated field — don't render it twice. Compare by unit VALUE, not
-  // display text: "Apt 4" inline and a "#4" field are the same unit.
-  const inlineUnit = splitStreetLineUnit(line1).unit;
-  const line2 = rawLine2 && (
-    line1.toLowerCase().includes(rawLine2.toLowerCase())
-    || (inlineUnit && unitLineValueKey(normalizeUnitLine(inlineUnit)) === unitLineValueKey(rawLine2))
-  ) ? '' : rawLine2;
+  // dedicated field. Keep the DEDICATED field and strip the inline copy —
+  // downstream consumers (parcel lookup, customer creation) need a street-only
+  // line1 with the unit in line2, not the reverse. Compare by unit VALUE, not
+  // display text: "Apt 4" inline and a "#4" field are the same unit. An
+  // inline duplicate that can't be cleanly peeled falls back to dropping
+  // line2 so the rendered address still never repeats it.
+  const inlineSplit = splitStreetLineUnit(line1);
+  let line2 = rawLine2;
+  if (rawLine2 && inlineSplit.unit
+      && unitLineValueKey(normalizeUnitLine(inlineSplit.unit)) === unitLineValueKey(rawLine2)) {
+    line1 = inlineSplit.street;
+  } else if (rawLine2 && line1.toLowerCase().includes(rawLine2.toLowerCase())) {
+    line2 = '';
+  }
   const city = titleCaseWords(input.city || components.city || parsed.city);
   const state = normalizeState(input.state || components.state || parsed.state || 'FL') || 'FL';
   const zip = normalizeZip(input.zip || components.zip || parsed.zip);
