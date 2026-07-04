@@ -110,7 +110,17 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
   const isCustom = selectedKey === CUSTOM_KEY;
   const customWindow = isCustom ? hourWindow(customStart) : null;
-  const customOption = (isCustom && customWindow && customDate)
+  // A same-day custom start must be a FUTURE hour. Only the date field carries a
+  // min, so without this a dispatcher could pick an already-started hour; on a
+  // route move the rebooker then rejects the elapsed anchor while its siblings
+  // still shift, stranding the selected visit. Earliest allowed = next top of
+  // the hour after now (ET).
+  const nowEtMin = hhmmToMin(new Date().toLocaleTimeString('en-GB', { timeZone: TIMEZONE, hour12: false }));
+  const minTodayStartMin = (Math.floor((nowEtMin ?? 0) / 60) + 1) * 60;
+  const minTodayStart = minToHHMM(Math.min(minTodayStartMin, 23 * 60));
+  const customElapsed = !!(isCustom && customWindow && customDate === todayStr
+    && hhmmToMin(customWindow.start) < minTodayStartMin);
+  const customOption = (isCustom && customWindow && customDate && !customElapsed)
     ? {
         kind: 'custom',
         date: customDate,
@@ -121,10 +131,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const selected = isCustom
     ? customOption
     : (allOptions.find((opt) => keyOf(opt) === selectedKey) || null);
-  // The SMS offers the best *other-day* option as the reply-2 alternate. A
-  // custom selection never matches a preset key, so it falls through to the
-  // first available day option.
-  const alt = selected ? (options?.days || []).find((opt) => keyOf(opt) !== selectedKey) || null : null;
+  // The SMS offers the best *other-day* option as the reply-2 alternate. Match
+  // by date+start rather than the selection key so a custom time that coincides
+  // with a day preset isn't offered as an alternate to itself.
+  const alt = selected
+    ? (options?.days || []).find((opt) => !(opt.date === selected.date && opt.window.start === selected.window.start)) || null
+    : null;
   const routeCount = options?.remainingRouteCount || 0;
 
   // Seed the custom date AND start from whatever preset was highlighted (or the
@@ -328,6 +340,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                     type="time"
                     step="3600"
                     value={customStart}
+                    min={customDate === todayStr ? minTodayStart : undefined}
                     onChange={(e) => {
                       // Snap to the hour on input (a manually-typed off-hour value
                       // like 15:59 would otherwise floor to 15:00 only at book
@@ -338,10 +351,16 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                     }}
                     style={{
                       width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 600,
-                      border: '1px solid #D4D4D8', background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit',
+                      border: `1px solid ${customElapsed ? '#DC2626' : '#D4D4D8'}`, background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit',
                     }}
                   />
                 </div>
+              </div>
+            )}
+
+            {customElapsed && (
+              <div style={{ fontSize: 12, color: '#B91C1C', marginTop: -8, marginBottom: 18 }}>
+                That hour has already started today — pick {fmtTime(minTodayStart)} or later.
               </div>
             )}
 

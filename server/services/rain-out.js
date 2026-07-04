@@ -311,11 +311,17 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId 
 // reply 1 re-confirms) and option2 (the alternate) into its notes so
 // the existing handleRescheduleReply webhook flow can act on 1/2.
 // Windows carry `display` because the reply confirmation SMS renders
-// selectedOption.window.display for its {time} variable. start/end stay the
-// internal 1-hour slot (they re-book the appointment on reply); display is the
-// customer-facing 2-hour arrival window, same as the moved SMS.
+// selectedOption.window.display for its {time} variable. The reply window spans
+// the full 2-hour arrival window the customer was quoted — start on the hour,
+// end at the arrival-window end — NOT the tighter internal slot. If it stored
+// the 1-hour end, a customer replying "1" during the back half of the promised
+// window would be rejected by the rebooker's same-day elapsed check (cutoff =
+// window end) and dropped to office follow-up, despite replying inside the
+// window we texted them.
 function replyWindow(window) {
-  return { start: window.start, end: window.end, display: customerArrivalLabel(window) };
+  const arrival = arrivalWindowRange(window?.start);
+  const end = (arrival && arrival.split('-')[1]) || window.end;
+  return { start: window.start, end, display: customerArrivalLabel(window) };
 }
 
 async function attachReplyOptions(serviceJobId, chosen, alt) {
