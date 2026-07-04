@@ -29,6 +29,7 @@ import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import FrequencySlider from '../components/estimate/FrequencySlider';
 import PriceCard, { priceCardSavingsInfo } from '../components/estimate/PriceCard';
+import IncludedChecklist from '../components/estimate/IncludedChecklist';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
@@ -976,7 +977,11 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   );
 }
 
-export function getServiceLabel(frequency, estimate, pricing) {
+// `acceptedMode` pins the label to the mode the customer actually accepted
+// ('one_time' | 'recurring'): a terminal/success header must not re-offer the
+// "X or One-Time X" choice, and an accepted one-time booking on a mixed
+// estimate reads "One-Time X", not the default recurring cadence.
+export function getServiceLabel(frequency, estimate, pricing, acceptedMode = null) {
   if (estimate?.isOneTimeOnly) {
     // Every billable line belongs in the eyebrow, not just the first —
     // mirrors the SSR page's quotedOneTimeNames.join(' + '). Fee/review rows
@@ -1001,7 +1006,10 @@ export function getServiceLabel(frequency, estimate, pricing) {
   const category = frequencyServiceCategory(frequency, pricing);
   const service = recurringServiceForEstimate(pricing);
   const serviceLabel = displayServiceLabel(service?.label) || serviceLabelForKey(category);
-  if (estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
+  if (acceptedMode === 'one_time') {
+    return `One-Time ${serviceLabel}`;
+  }
+  if (!acceptedMode && estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
     const recurringLabel = frequency?.label
       ? (labelAlreadyIncludesService(frequency.label, serviceLabel) ? frequency.label : `${frequency.label} ${serviceLabel}`)
       : serviceLabel;
@@ -2185,6 +2193,14 @@ export function ServiceSection({
     && renderFlags.showPestRecurringAddOns === true
     && Array.isArray(current?.addOns)
     && current.addOns.length > 0;
+  // A one-line checklist that just re-states the quoted service name tells
+  // the customer nothing ("What's included ✓ Pest Control") — only render
+  // when the list actually adds information (lawn/tree/mosquito programs
+  // describe their applications here and nowhere else). Bundle boxes stay
+  // checklist-free (owner directive), so single-service layouts only.
+  const includedItems = Array.isArray(current?.included) ? current.included : [];
+  const showIncludedChecklist = servicesLength === 1
+    && (includedItems.length > 1 || includedItems.some((item) => item?.detail));
 
   return (
     <section>
@@ -2226,6 +2242,8 @@ export function ServiceSection({
       </div>
 
       {afterPrice}
+
+      {showIncludedChecklist ? <IncludedChecklist included={includedItems} /> : null}
 
       {showAddOns ? (
         <AddOnsBlock
@@ -3090,7 +3108,12 @@ export default function EstimateViewPage() {
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
         <Header
           {...headerContactProps}
-          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
+          serviceLabel={getServiceLabel(
+            currentFrequency,
+            estimate,
+            pricing,
+            cta.terminalState === 'accepted' ? estimate.acceptedServiceMode || null : null,
+          )}
           headline={headline}
         />
         <MembershipCard membership={estimate.membership} />
@@ -3130,7 +3153,7 @@ export default function EstimateViewPage() {
       <Page>
         <Header
           {...headerContactProps}
-          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
+          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, serviceMode)}
           headline={headline}
         />
         <SuccessCard acceptResult={acceptResult} />

@@ -23,25 +23,29 @@ const W = {
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-function formatSlotDate(date, windowStart, windowEnd) {
+// The arrival window promised to the customer is 2 HOURS from the slot start
+// (owner directive; matches the window_start + 2h promise the late detector
+// enforces). slot.windowEnd is the JOB block that sizes scheduling/overlap —
+// never show it as the arrival window.
+const ARRIVAL_WINDOW_MINUTES = 120;
+
+function formatSlotDate(date, windowStart) {
   try {
     const d = new Date(date + 'T' + (windowStart || '00:00') + ':00');
     const day = d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
-    const fmtT = (t) => {
-      if (!t) return '';
-      const [h, m] = String(t).split(':').map(Number);
-      const dt = new Date();
-      dt.setHours(h, m, 0, 0);
-      return dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-    };
-    return { day, window: `${fmtT(windowStart)}–${fmtT(windowEnd)}` };
+    const [h, m] = String(windowStart || '0:00').split(':').map(Number);
+    const startDt = new Date();
+    startDt.setHours(h, m, 0, 0);
+    const endDt = new Date(startDt.getTime() + ARRIVAL_WINDOW_MINUTES * 60000);
+    const fmtT = (dt) => dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    return { day, window: `${fmtT(startDt)}–${fmtT(endDt)}` };
   } catch {
-    return { day: date, window: `${windowStart}–${windowEnd}` };
+    return { day: date, window: String(windowStart || '') };
   }
 }
 
 function SlotCard({ slot, isSelected, onSelect }) {
-  const { day, window } = formatSlotDate(slot.date, slot.windowStart, slot.windowEnd);
+  const { day, window } = formatSlotDate(slot.date, slot.windowStart);
   const startTime = String(window || '').split('–')[0] || window;
 
   return (

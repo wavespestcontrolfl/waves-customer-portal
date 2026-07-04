@@ -89,6 +89,30 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
     expect(screen.getByText('$1,200')).toBeInTheDocument();
   });
 
+  it('never derives a cadence-key visit count over multiple treatment rows', () => {
+    render(
+      <PriceCard
+        frequency={{
+          key: 'monthly',
+          monthly: 400,
+          perServiceTreatments: [
+            { service: 'lawn', label: 'Turf application', displayPrice: 120, visitsPerYear: 8 },
+            { service: 'mosquito', label: 'Mosquito treatment', displayPrice: 60, visitsPerYear: 12 },
+          ],
+        }}
+      />,
+    );
+
+    // Rows differ (8 vs 12) — no single "N applications per year" line.
+    expect(screen.queryByText(/applications per year included/i)).toBeNull();
+  });
+
+  it('keeps the cadence-key visit count when there are no treatment rows', () => {
+    render(<PriceCard frequency={{ key: 'quarterly', monthly: 50 }} />);
+
+    expect(screen.getByText(/4 applications per year included/i)).toBeInTheDocument();
+  });
+
   it('renders the exact price (no range) when the marker is absent', () => {
     render(<PriceCard frequency={{ key: 'monthly', monthly: 400, annual: 4800 }} />);
 

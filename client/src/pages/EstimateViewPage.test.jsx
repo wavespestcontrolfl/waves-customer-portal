@@ -428,6 +428,30 @@ describe('getServiceLabel', () => {
     )).toBe('Seasonal Mosquito Control or One-Time Mosquito Control');
   });
 
+  it('pins the label to an accepted one-time booking on a mixed estimate', () => {
+    expect(getServiceLabel(
+      { key: 'quarterly', label: 'Quarterly' },
+      { showOneTimeOption: true },
+      {
+        anchorOneTimePrice: 202,
+        services: [{ key: 'pest_control', label: 'Pest Control', isRecurring: true }],
+      },
+      'one_time',
+    )).toBe('One-Time Pest Control');
+  });
+
+  it('drops the one-time choice suffix once a recurring plan is accepted', () => {
+    expect(getServiceLabel(
+      { key: 'quarterly', label: 'Quarterly' },
+      { showOneTimeOption: true },
+      {
+        anchorOneTimePrice: 202,
+        services: [{ key: 'pest_control', label: 'Pest Control', isRecurring: true }],
+      },
+      'recurring',
+    )).toBe('Quarterly Pest Control');
+  });
+
   it('excludes fee/review rows from the one-time eyebrow', () => {
     expect(getServiceLabel(null, { isOneTimeOnly: true }, {
       oneTimeBreakdown: {

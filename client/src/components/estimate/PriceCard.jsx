@@ -140,11 +140,14 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const treatmentVisitRows = Array.isArray(frequency.perServiceTreatments)
     ? frequency.perServiceTreatments.filter((row) => Number(row?.visitsPerYear) > 0)
     : [];
+  // The cadence-key fallback only applies when there are NO per-service
+  // treatment rows: an unsplit combined frequency with several rows of
+  // differing counts must not advertise one number for all of them.
   const visitsPerYear = Number(frequency.visitsPerYear) > 0
     ? Number(frequency.visitsPerYear)
     : (treatmentVisitRows.length === 1
       ? Number(treatmentVisitRows[0].visitsPerYear)
-      : (CADENCE_VISITS[frequency.key] || null));
+      : (treatmentVisitRows.length === 0 ? (CADENCE_VISITS[frequency.key] || null) : null));
   const showVisitsLine = !quoteRequired && Number.isFinite(visitsPerYear) && visitsPerYear > 0;
   // A narrow low-confidence commercial line prices as a ±pct RANGE tied to the
   // displayed cadence price ("$X–$Y/mo, confirmed on site"). The server flags the
