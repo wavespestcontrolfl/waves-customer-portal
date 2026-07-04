@@ -276,7 +276,23 @@ describe('atomic publishing claim', () => {
     // query excludes publish_failed — without the clear, a fixed-and-
     // rescheduled post was never picked up again. Marker-guarded so a
     // publish_failed row with an opened PR keeps its state.
-    expect(String(parkedFailed.updates.astro_status.__raw)).toMatch(/astro_pr_number IS NULL THEN NULL/);
+    expect(String(parkedFailed.updates.astro_status.__raw)).toMatch(/astro_pr_number IS NULL AND astro_branch_name IS NULL THEN NULL/);
+  });
+
+  test('a permanently bad hero URL (BLOG_HERO_MEDIA_FAILED) parks like the other deterministic codes (Codex round 6)', async () => {
+    mockState.pendingBlogs = [blog];
+    const mediaErr = new Error('featured image could not be fetched for Astro publish: 404 not found');
+    mediaErr.code = 'BLOG_HERO_MEDIA_FAILED';
+    AstroPublisher.publishAstro.mockRejectedValue(mediaErr);
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(result.errors).toBe(1);
+    const parkedFailed = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'failed'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7));
+    expect(parkedFailed).toBeDefined();
     // (id-scoped: the tick's stale-publishing SWEEP also writes a 'pending'
     // retry update, but with the cutoff filter and no id — that one is fine)
     const retried = mockState.updates.find((u) =>

@@ -580,6 +580,9 @@ const ContentScheduler = {
           'BLOG_COMPARISON_GATE_FAILED',
           'BLOG_FACTCHECK_FAILED',
           'BLOG_MDX_TOKEN_LEAK',
+          // Curated hero URL that 404s / isn't an image — fails identically
+          // every attempt (AI hero GENERATION failures stay untagged/transient).
+          'BLOG_HERO_MEDIA_FAILED',
         ]);
         // Only release a claim WE hold — if the claim update itself failed
         // (or another instance holds it), writing here would stomp the
@@ -595,9 +598,10 @@ const ContentScheduler = {
                 // clear it, or the fixed post re-scheduled via
                 // scheduleBlogPost (which only sets publish_status) is never
                 // re-selected: the pending query excludes publish_failed.
-                // Guarded on the marker so a publish_failed row that DOES
-                // carry an opened PR keeps its state for the retry cleanup.
-                astro_status: db.raw("CASE WHEN astro_status = 'publish_failed' AND astro_pr_number IS NULL THEN NULL ELSE astro_status END"),
+                // Guarded on BOTH markers so a publish_failed row that DOES
+                // carry an opened PR or a surviving branch keeps its state
+                // for the retry cleanup.
+                astro_status: db.raw("CASE WHEN astro_status = 'publish_failed' AND astro_pr_number IS NULL AND astro_branch_name IS NULL THEN NULL ELSE astro_status END"),
                 updated_at: new Date(),
               }).catch(() => {});
           } else {
@@ -615,15 +619,17 @@ const ContentScheduler = {
             //     pending_review rows when astro_status='live', and
             //     pages-poll only watches pr_open/build_failed/merged).
             //     astro_publish_error is kept for the audit trail.
-            //   - anything else (PR opened / build failed / live —
-            //     astro_pr_number marks an opened PR even when a later
-            //     step stamped publish_failed over pr_open): 'pending_review';
-            //     blind-retrying those could open a duplicate PR.
+            //   - anything else (PR opened / surviving branch / build
+            //     failed / live — astro_pr_number marks an opened PR, and
+            //     astro_branch_name alone marks a branch the publisher
+            //     could not prove PR-less or could not delete):
+            //     'pending_review'; blind-retrying those could open a
+            //     duplicate PR.
             const retried = await db('blog_posts').where('id', blog.id)
               .where('publish_status', 'publishing')
               .where(function () {
                 this.whereNull('astro_status').orWhere(function () {
-                  this.where('astro_status', 'publish_failed').whereNull('astro_pr_number');
+                  this.where('astro_status', 'publish_failed').whereNull('astro_pr_number').whereNull('astro_branch_name');
                 });
               })
               .update({ publish_status: 'pending', astro_status: null, updated_at: new Date() }).catch(() => 0);
@@ -739,15 +745,17 @@ const ContentScheduler = {
   async resetStalePublishingBlogs({ staleMinutes = 30 } = {}) {
     const cutoff = new Date(Date.now() - staleMinutes * 60000);
     // Retryable = crashed with no Astro progress: either no astro state at
-    // all, or publishAstro's catch stamped 'publish_failed' before the PR
-    // opened (astro_pr_number is the opened-PR marker — with a PR out,
-    // blind-retrying could open a duplicate, so those park below instead).
+    // all, or publishAstro's catch stamped 'publish_failed' with NEITHER
+    // marker (astro_pr_number = an opened PR; astro_branch_name alone = a
+    // branch the publisher could not prove PR-less or could not delete —
+    // with either out there, blind-retrying could open a duplicate, so
+    // those park below instead).
     const retried = await db('blog_posts')
       .where('publish_status', 'publishing')
       .where('updated_at', '<', cutoff)
       .where(function () {
         this.whereNull('astro_status').orWhere(function () {
-          this.where('astro_status', 'publish_failed').whereNull('astro_pr_number');
+          this.where('astro_status', 'publish_failed').whereNull('astro_pr_number').whereNull('astro_branch_name');
         });
       })
       .update({ publish_status: 'pending', astro_status: null, updated_at: new Date() });

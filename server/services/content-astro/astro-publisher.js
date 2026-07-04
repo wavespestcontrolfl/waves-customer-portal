@@ -698,6 +698,11 @@ async function publishAstro(postId) {
   // one orphan branch (with its hero commit) per 15-minute tick that no
   // later cleanup can locate.
   let branchCreated = false;
+  // Whether gh.createPr was CALLED: a call that threw may still have
+  // created the PR on GitHub's side (ghFetch retries POSTs on 5xx, and a
+  // timeout can land after creation) — the catch must look the branch up
+  // before deleting it, or it deletes a live PR's head.
+  let prCreateAttempted = false;
 
   try {
     // 1. Hero image (required by the Astro schema). Fetch before branch
@@ -715,8 +720,26 @@ async function publishAstro(postId) {
     //     prior merged publish; reference it as-is, don't re-fetch.
     let heroImage = null;
     if (post.featured_image_url && !isCommittedHeroUrl(post.featured_image_url)) {
-      heroImage = await fetchImageBuffer(post.featured_image_url);
-      if (!heroImage?.buffer) throw new Error('featured image could not be fetched for Astro publish');
+      // Tagged BLOG_HERO_MEDIA_FAILED so the scheduler parks it with the
+      // other deterministic publish errors: a curated featured_image_url
+      // that 404s or isn't an image fails identically every attempt, and
+      // the transient-retry fork would re-burn the publish every 15
+      // minutes forever. (A rare network blip parking for review is the
+      // fail-safe direction; the author just reschedules.) AI hero
+      // GENERATION failures below stay untagged — provider hiccups are
+      // genuinely transient.
+      try {
+        heroImage = await fetchImageBuffer(post.featured_image_url);
+      } catch (mediaErr) {
+        const e = new Error(`featured image could not be fetched for Astro publish: ${mediaErr.message}`);
+        e.code = 'BLOG_HERO_MEDIA_FAILED';
+        throw e;
+      }
+      if (!heroImage?.buffer) {
+        const e = new Error('featured image could not be fetched for Astro publish');
+        e.code = 'BLOG_HERO_MEDIA_FAILED';
+        throw e;
+      }
     } else if (!post.featured_image_url) {
       heroImage = await generateHeroBuffer(post);
     }
@@ -853,6 +876,7 @@ async function publishAstro(postId) {
 
     // 4. PR
     const prBody = buildPrBody({ post, slug, branch, content: body });
+    prCreateAttempted = true;
     const pr = await gh.createPr({
       head: branch,
       title: `Blog: ${post.title}`.slice(0, 72),
@@ -886,27 +910,56 @@ async function publishAstro(postId) {
     };
   } catch (err) {
     logger.error(`[astro-publisher] publish failed for ${slug}: ${err.message}`);
-    // A branch cut but never attached to a PR is deleted on the way out
-    // (best-effort): the retry publishes on a fresh shortId branch, so the
-    // old one would be an unreachable orphan. With a PR open the branch
-    // STAYS — the PR references it, and the persisted marker below routes
-    // the next retry through the stale-PR close+delete path instead.
+    // Branch disposition, in order of certainty:
+    //   - a KNOWN PR (openedPr) keeps its branch — the PR references it.
+    //   - createPr was ATTEMPTED but threw: GitHub may still have opened
+    //     the PR, so look the head branch up before deleting — deleting a
+    //     live PR's head leaves an open, broken PR with no DB marker. A
+    //     found PR is recovered as this attempt's PR and persisted below.
+    //   - lookup or deletion failed: the branch SURVIVES and is recorded
+    //     as external progress (astro_branch_name below) so the scheduler
+    //     parks for review instead of retrying into a duplicate; the
+    //     stale-PR cleanup reclaims it on the next republish.
+    //   - otherwise the pre-PR branch is deleted: retries publish on a
+    //     fresh shortId branch, so an undeleted one is an orphan per tick.
+    let survivingBranch = null;
     if (branchCreated && !openedPr) {
-      try {
-        await gh.deleteRef(branch);
-      } catch (cleanupErr) {
-        logger.warn(`[astro-publisher] pre-PR branch cleanup failed for ${branch}: ${cleanupErr.message} (orphan ref; safe to delete manually)`);
+      let safeToDelete = true;
+      if (prCreateAttempted) {
+        try {
+          openedPr = await gh.findOpenPrByHead(branch) || null;
+          safeToDelete = !openedPr;
+          if (openedPr) logger.warn(`[astro-publisher] recovered PR #${openedPr.number} for ${branch} after a createPr error — persisting the marker instead of deleting the branch`);
+        } catch (lookupErr) {
+          safeToDelete = false;
+          logger.warn(`[astro-publisher] post-failure PR lookup failed for ${branch}: ${lookupErr.message}; leaving the branch in place`);
+        }
+      }
+      if (safeToDelete) {
+        try {
+          await gh.deleteRef(branch);
+        } catch (cleanupErr) {
+          survivingBranch = branch;
+          logger.warn(`[astro-publisher] pre-PR branch cleanup failed for ${branch}: ${cleanupErr.message} (branch marker persisted; the stale-PR cleanup reclaims it on republish)`);
+        }
+      } else if (!openedPr) {
+        survivingBranch = branch;
       }
     }
     await db('blog_posts').where({ id: postId }).update({
       astro_status: 'publish_failed',
       astro_publish_error: err.message.slice(0, 1000),
-      // A PR that opened before the failure keeps its marker (the pr_open
-      // stamp above may be the very thing that threw): the scheduler's
-      // retry fork only treats publish_failed as retryable when
-      // astro_pr_number is NULL, and the build_failed/republish path
-      // closes + deletes a stale PR by this number before recutting.
-      ...(openedPr ? { astro_pr_number: openedPr.number, astro_branch_name: branch } : {}),
+      // Markers record THIS attempt's true external state. A known or
+      // recovered PR persists number+branch (the scheduler treats the row
+      // as PR-backed; the stale-PR path cleans it up on republish). A
+      // surviving branch persists alone — same parking, same reclaim. A
+      // provably-clean failure NULLs both: a retried publish_failed row
+      // must not keep the PREVIOUS attempt's marker after
+      // cleanupStaleAstroPr closed that PR, or the fixed post stays
+      // parked as PR-backed forever.
+      ...(openedPr
+        ? { astro_pr_number: openedPr.number, astro_branch_name: branch }
+        : { astro_pr_number: null, astro_branch_name: survivingBranch }),
       updated_at: new Date(),
     });
     throw err;

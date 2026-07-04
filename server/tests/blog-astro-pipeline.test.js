@@ -10,6 +10,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   putBinary: jest.fn(),
   putFile: jest.fn(),
   createPr: jest.fn(),
+  findOpenPrByHead: jest.fn(),
   createIssueComment: jest.fn(),
   listIssueComments: jest.fn(),
   listPrReviews: jest.fn(),
@@ -1737,11 +1738,80 @@ describe('publishAstro catch persists an already-opened PR marker (Codex round 3
 
     // Each retry cuts a FRESH shortId branch, so an undeleted pre-PR
     // branch (with its hero commit) is an orphan per 15-minute tick that
-    // no later cleanup can locate.
+    // no later cleanup can locate. The lookup ran first (createPr was
+    // attempted, so the PR may exist despite the throw) and found none.
+    expect(gh.findOpenPrByHead).toHaveBeenCalledWith(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
     expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
     const parked = updates.find((u) => u.astro_status === 'publish_failed');
     expect(parked).toBeDefined();
-    expect(parked.astro_pr_number).toBeUndefined();
+    // Explicit NULLs, not omissions: a retried row must not keep the
+    // previous attempt's stale marker.
+    expect(parked.astro_pr_number).toBeNull();
+    expect(parked.astro_branch_name).toBeNull();
+  });
+
+  test('createPr throw with the PR actually created recovers the marker instead of deleting a live head (Codex round 6)', async () => {
+    const updates = [];
+    const q = chain({
+      first: jest.fn().mockResolvedValue(validPost()),
+      update: jest.fn((u) => { updates.push(u); return Promise.resolve(1); }),
+    });
+    db.mockImplementation(() => q);
+    // ghFetch retries POSTs on 5xx — a timeout after creation means the
+    // call throws while the PR exists. The head-branch lookup finds it.
+    gh.createPr.mockRejectedValueOnce(new Error('504 gateway timeout'));
+    gh.findOpenPrByHead.mockResolvedValueOnce({ number: 777 });
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow('504 gateway timeout');
+
+    expect(gh.deleteRef).not.toHaveBeenCalled();
+    const parked = updates.find((u) => u.astro_status === 'publish_failed');
+    expect(parked.astro_pr_number).toBe(777);
+    expect(parked.astro_branch_name).toEqual(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
+  });
+
+  test('retry of a stale-marker row that fails pre-PR again CLEARS the old marker after cleanup (Codex round 6)', async () => {
+    // Old attempt left publish_failed + marker; cleanup closes/deletes the
+    // old PR, then the new attempt dies at the guardrails (pre-branch).
+    // Keeping the old marker would make the scheduler treat this pre-PR
+    // failure as PR-backed and park the fixed post forever.
+    const post = validPost({
+      astro_status: 'publish_failed',
+      astro_pr_number: 99,
+      astro_branch_name: 'content/blog-ant-trails-bradenton-old1',
+      tag: 'Rodents',
+      content: '## Sealing entry points\n\nRats squeeze through dime-sized gaps.\n\n## Frequently Asked Questions\n\nQ: How fast can you help?',
+    });
+    const updates = [];
+    const q = chain({
+      first: jest.fn().mockResolvedValue(post),
+      update: jest.fn((u) => { updates.push(u); return Promise.resolve(1); }),
+    });
+    db.mockImplementation(() => q);
+    gh.getPr.mockResolvedValue({ number: 99, state: 'open', merged: false });
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/content guardrails failed/);
+
+    expect(gh.closePr).toHaveBeenCalledWith(99);
+    const parked = updates.find((u) => u.astro_status === 'publish_failed');
+    expect(parked.astro_pr_number).toBeNull();
+    expect(parked.astro_branch_name).toBeNull();
+  });
+
+  test('a permanently bad curated hero URL fails with BLOG_HERO_MEDIA_FAILED (Codex round 6 — parked, not hot-looped)', async () => {
+    const savedFetch = global.fetch;
+    global.fetch = jest.fn().mockRejectedValue(new Error('404 not found'));
+    try {
+      const q = chain({ first: jest.fn().mockResolvedValue(validPost({ featured_image_url: 'https://cdn.example.com/hero.jpg' })) });
+      db.mockImplementation(() => q);
+
+      await expect(AstroPublisher.publishAstro('post-1')).rejects.toMatchObject({ code: 'BLOG_HERO_MEDIA_FAILED' });
+      // Pre-branch failure: nothing external to clean up.
+      expect(gh.createBranch).not.toHaveBeenCalled();
+    } finally {
+      if (savedFetch === undefined) delete global.fetch;
+      else global.fetch = savedFetch;
+    }
   });
 
   test('a failure BEFORE PR creation stamps publish_failed with NO marker — provably retryable', async () => {
@@ -1761,7 +1831,7 @@ describe('publishAstro catch persists an already-opened PR marker (Codex round 3
 
     const parked = updates.find((u) => u.astro_status === 'publish_failed');
     expect(parked).toBeDefined();
-    expect(parked.astro_pr_number).toBeUndefined();
+    expect(parked.astro_pr_number).toBeNull();
     expect(gh.createPr).not.toHaveBeenCalled();
   });
 
