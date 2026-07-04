@@ -34,6 +34,18 @@ describe('stripModelWrapper', () => {
       .toBe('Sarasota mosquito pressure is at a 5. Standing water is the driver. Act now.');
   });
 
+  test('strips a count note enclosed inside the --- fences', () => {
+    const raw = '---\nSarasota mosquito pressure is at a 5 right now. Standing water is the driver.\n*(Character count: ~240)*\n---';
+    expect(stripModelWrapper(raw)).toBe('Sarasota mosquito pressure is at a 5 right now. Standing water is the driver.');
+  });
+
+  test('keeps hyphenated "post-" hooks — adjective, not artifact noun', () => {
+    const hook = "Here's a post-storm mosquito tip: dump standing water within 48 hours.";
+    expect(stripModelWrapper(hook)).toBe(hook);
+    const hook2 = "Here's a post-treatment reminder: keep pets off the lawn for 2 hours.";
+    expect(stripModelWrapper(hook2)).toBe(hook2);
+  });
+
   test('keeps legit "Here\'s what we\'re seeing" hooks untouched', () => {
     const hook = "Here's what we're seeing in Venice after the rain… chinch bug damage that looks like drought.";
     expect(stripModelWrapper(hook)).toBe(hook);

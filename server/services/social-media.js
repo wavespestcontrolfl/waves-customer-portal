@@ -389,12 +389,18 @@ async function withRetry(fn, { maxAttempts = 3, label = '' } = {}) {
 // the line to name the artifact (post/caption/copy/draft).
 function stripModelWrapper(raw) {
   let text = String(raw || '').replace(/\r\n?/g, '\n').trim();
-  // Leading meta line: "Here's a <platform> post …:" / "Sure, here is your caption:"
-  text = text.replace(/^(?:(?:sure|certainly|of course)[,!.]?\s+)?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b[^:\n]{0,60}:\s*/i, '');
+  // Leading meta line: "Here's a <platform> post …:" / "Sure, here is your caption:".
+  // (?!-) keeps hyphenated adjectives ("Here's a post-storm mosquito tip:") —
+  // those are real hooks, not metadata; only the artifact noun counts.
+  text = text.replace(/^(?:(?:sure|certainly|of course)[,!.]?\s+)?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b(?!-)[^:\n]{0,60}:\s*/i, '');
+  // Fences → count note → fences again: the count can sit inside the fences
+  // ("---\ncopy\n*(Character count: ~240)*\n---") or a fence can sit between
+  // the copy and the count — each pass exposes the other's target.
+  const stripFences = (s) => s.replace(/^\s*-{3,}\s*/, '').replace(/\s*-{3,}\s*$/, '');
+  text = stripFences(text);
   // Trailing count notes: "*197 characters*", "*(Character count: ~240)*", "(197 characters)"
   text = text.replace(/[\s*_]*\(?\s*(?:character count:?\s*~?\d+|~?\d+\s*characters?)\s*\)?[\s*_.]*$/i, '');
-  // --- fences left around the copy
-  text = text.replace(/^\s*-{3,}\s*/, '').replace(/\s*-{3,}\s*$/, '');
+  text = stripFences(text);
   // Markdown bold — readers would see the literal **
   text = text.replace(/\*\*([^*\n][^*]*)\*\*/g, '$1');
   return text.replace(/\n{3,}/g, '\n\n').trim();
@@ -417,7 +423,13 @@ Rules:
 - Never make safety guarantees ("100% effective", "completely safe", "risk-free")
 - Never use: "Your trusted pest control provider", "Contact us today for all your pest control needs", "We are pleased to announce", "Dear valued customer"
 - Be specific: "Southern chinch bugs feed at the blade base" beats "chinch bugs damage lawns"
-- Reference SWFL naturally: Florida humidity, gulf coast weather, lanais, St. Augustine grass, local neighborhoods
+- Reference SWFL naturally: Florida humidity, gulf coast weather, lanais, St. Augustine grass, local neighborhoods`;
+
+// Output contract for the social-post prompts below. Deliberately NOT part of
+// BRAND_PREAMBLE: tech-social-caption.js reuses BRAND_PREAMBLE as the system
+// prompt for a JSON-returning endpoint, and a "post text only" rule there
+// would tell the model to drop the JSON envelope.
+const POST_PREAMBLE = `${BRAND_PREAMBLE}
 - Output ONLY the post text itself — no preamble ("Here's a post…"), no character counts, no --- separators, no markdown formatting like **bold** (platforms render the asterisks literally)`;
 
 const HOOK_BANK = [
@@ -450,7 +462,7 @@ async function generateContent(platform, { title, description, link, locationNam
   const hooks = getHookSample();
 
   const prompts = {
-    facebook: `${BRAND_PREAMBLE}
+    facebook: `${POST_PREAMBLE}
 
 Write a Facebook post based on this blog article.
 
@@ -474,7 +486,7 @@ BAD example (do NOT write like this):
 Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
 
-    instagram: `${BRAND_PREAMBLE}
+    instagram: `${POST_PREAMBLE}
 
 Write an Instagram caption based on this blog article.
 
@@ -504,7 +516,7 @@ What's your lawn doing this week? 👇
 Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
 
-    linkedin: `${BRAND_PREAMBLE}
+    linkedin: `${POST_PREAMBLE}
 
 Write a professional LinkedIn post based on this blog article.
 Professional but approachable tone. 100-200 characters. Do NOT include the URL.
@@ -512,7 +524,7 @@ Professional but approachable tone. 100-200 characters. Do NOT include the URL.
 Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
 
-    gbp: `${BRAND_PREAMBLE}
+    gbp: `${POST_PREAMBLE}
 
 Write a Google Business Profile post for Waves Pest Control ${safeLocation}.
 
@@ -567,7 +579,7 @@ Facts:
 ${safeFacts}`;
 
   const prompts = {
-    facebook: `${BRAND_PREAMBLE}
+    facebook: `${POST_PREAMBLE}
 
 Write a Facebook post for a LOCAL ${safeService} campaign in ${safeCity} about: ${safeTopic}.
 ${grounding}
@@ -580,7 +592,7 @@ Format:
 - 200-400 characters total
 - Do NOT include any URL`,
 
-    instagram: `${BRAND_PREAMBLE}
+    instagram: `${POST_PREAMBLE}
 
 Write an Instagram caption for a LOCAL ${safeService} campaign in ${safeCity} about: ${safeTopic}.
 ${grounding}
@@ -593,7 +605,7 @@ Format:
 - Then a blank line and 3-5 hashtags: always #wavespestcontrol, 1-2 local (e.g. #swfl), 1-2 topical. Never more than 5.
 - Do NOT include any URL`,
 
-    gbp: `${BRAND_PREAMBLE}
+    gbp: `${POST_PREAMBLE}
 
 Write a Google Business Profile post for Waves Pest Control ${safeCity} about: ${safeTopic}.
 ${grounding}
@@ -605,7 +617,7 @@ Format:
 - 150-250 characters total
 - Do NOT include any URL, phone number, or hashtags`,
 
-    linkedin: `${BRAND_PREAMBLE}
+    linkedin: `${POST_PREAMBLE}
 
 Write a short professional LinkedIn post for a ${safeService} campaign in ${safeCity} about: ${safeTopic}. 100-200 characters. Do NOT include any URL.
 ${grounding}`,
