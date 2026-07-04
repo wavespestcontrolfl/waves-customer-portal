@@ -125,7 +125,7 @@ function serviceKeyFromText(value) {
 // contains "ant") — and scoping label facts into the wrong family quotes the
 // wrong product's safety guidance. These patterns require whole words.
 const SERVICE_FAMILY_QUESTION_PATTERNS = [
-  ['pest_control', /\b(?:pests?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter)\b/i],
+  ['pest_control', /\b(?:pests?|bugs?|insects?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter)\b/i],
   ['lawn_care', /\b(?:lawns?|turf|weeds?|fertil\w*|fungus|chinch|grass)\b/i],
   ['mosquito', /\b(?:mosquito(?:es)?|midges?|no[-\s]?see[-\s]?ums?)\b/i],
   ['tree_shrub', /\b(?:trees?|shrubs?|ornamentals?)\b/i],

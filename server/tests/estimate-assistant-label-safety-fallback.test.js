@@ -290,6 +290,47 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('until dry.');
   });
 
+  test('"bug spray" scopes to pest-control products on a mixed estimate', () => {
+    const context = JSON.parse(JSON.stringify(bundleContext));
+    context.services.push({ label: 'Pest Control', detail: 'Exterior perimeter plan', summary: 'Pest Control — perimeter' });
+    context.supportContext.productCatalog.push({
+      source: 'admin_product_catalog',
+      title: 'insecticide active ingredient',
+      category: 'insecticide',
+      activeIngredient: 'Bifenthrin',
+      labelVerified: true,
+      signalWord: 'Caution',
+      reentry: 'Re-enter once sprays have dried.',
+      rainfastMinutes: 45,
+      irrigationNotes: null,
+      serviceKeys: ['pest_control'],
+    });
+    const answer = answerEstimateQuestionFallback('Is the bug spray safe for pets?', context);
+    expect(answer).toContain('Bifenthrin');
+    expect(answer).toContain('Re-enter once sprays have dried');
+    expect(answer).toContain('rainfast in about 45 minutes');
+    expect(answer).not.toContain('Quinclorac');
+    expect(answer).not.toContain('Deltamethrin');
+    expect(answer).not.toContain('rainfast in about 180 minutes');
+  });
+
+  test('plant-watering questions do not get ant-control copy', () => {
+    const answer = answerEstimateQuestionFallback('Can I water my plants after treatment?', verifiedContext);
+    // "plants" must not trip the ant approach ("ants" suffix match).
+    expect(answer).not.toContain('For ants,');
+    expect(answer).toContain('follow the product label directions');
+  });
+
+  test('one product\'s rainfast window is not claimed for products without one', () => {
+    const context = JSON.parse(JSON.stringify(bundleContext));
+    // The mosquito label states no rainfast window (seed leaves it blank).
+    context.supportContext.productCatalog[1].rainfastMinutes = null;
+    const answer = answerEstimateQuestionFallback('Are the lawn and mosquito treatments safe for pets?', context);
+    expect(answer).not.toContain('Treated areas are rainfast');
+    expect(answer).toContain('Products whose labels state a rainfast window are rainfast in about 180 minutes');
+    expect(answer).toContain('the other product labels do not state one');
+  });
+
   test('naming an ingredient narrows even on a single-family estimate with several products', () => {
     const answer = answerEstimateQuestionFallback('Is the 2,4-D lawn spray safe for pets?', {
       serviceMode: 'recurring',

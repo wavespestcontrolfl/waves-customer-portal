@@ -44,6 +44,8 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Can I water my plants after treatment?')).toEqual([]);
     expect(serviceFamiliesFromText('Are the lawn and mosquito treatments safe for pets?')).toEqual(['lawn_care', 'mosquito']);
     expect(serviceFamiliesFromText('Do you treat for ants?')).toEqual(['pest_control']);
+    // Customers say "bug spray" for pest control.
+    expect(serviceFamiliesFromText('Is the bug spray safe for pets?')).toEqual(['pest_control']);
     expect(serviceFamiliesFromText('')).toEqual([]);
   });
 

@@ -775,8 +775,15 @@ function labelSafetyFactsFromSupport(context = {}, question = '') {
   if (reentries.length === 1) parts.push(`Label re-entry guidance: ${reentries[0].replace(/\.$/, '')}.`);
   else if (reentries.length > 1) parts.push(`Label re-entry guidance by product: ${reentries.map((text) => text.replace(/\.$/, '')).join('; ')}.`);
   if (signalWords.length) parts.push(`Label signal word${signalWords.length > 1 ? 's' : ''}: ${signalWords.join(', ')}.`);
-  // Multiple products: quote the longest (most conservative) rainfast window.
-  if (rainfast.length) parts.push(`Treated areas are rainfast in about ${Math.max(...rainfast)} minutes.`);
+  // Multiple products: quote the longest (most conservative) window — but as
+  // a blanket claim only when EVERY scoped product states one. The label
+  // seed intentionally leaves rainfast blank where the label doesn't state a
+  // window, and one product's window must not become a claim about the rest.
+  if (rainfast.length === scoped.length && rainfast.length) {
+    parts.push(`Treated areas are rainfast in about ${Math.max(...rainfast)} minutes.`);
+  } else if (rainfast.length) {
+    parts.push(`Products whose labels state a rainfast window are rainfast in about ${Math.max(...rainfast)} minutes; the other product labels do not state one.`);
+  }
   if (irrigation.length === 1) parts.push(`Label watering/irrigation guidance: ${irrigation[0].replace(/\.$/, '')}.`);
   else if (irrigation.length > 1) parts.push(`Label watering/irrigation guidance by product: ${irrigation.map((text) => text.replace(/\.$/, '')).join('; ')}.`);
   return parts.join(' ');
@@ -837,7 +844,10 @@ function treatmentApproachForQuestion(question = '', context = {}) {
     }
     return 'For cockroaches, treatment targets harborage areas, entry points, and food and moisture sources, with follow-up based on the activity found at your property.';
   }
-  if (/\bant|ants\b/.test(q)) {
+  // Whole-word only: `ants\b` alone would match the suffix of "plants", and
+  // watering questions ("can I water my plants after treatment?") route
+  // through here via the safety branch.
+  if (/\bants?\b/.test(q)) {
     return 'For ants, the goal is to reduce exterior entry pressure, treat trails and nesting zones when found, and support interior activity when it is included or needed.';
   }
   if (/\bbed\s*bug|bedbug\b/.test(q)) {
