@@ -334,7 +334,6 @@ export default function GrowthSection({
               data={leadFunnel}
               loading={attributionLoading}
               error={attributionError}
-              onDrillSource={onDrillSource}
             />
           </div>
         </MobileFold>
@@ -348,7 +347,6 @@ export default function GrowthSection({
               data={leadFunnel}
               loading={attributionLoading}
               error={attributionError}
-              onDrillSource={onDrillSource}
             />
           </ChartCard>
         </div>

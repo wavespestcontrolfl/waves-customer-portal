@@ -60,7 +60,24 @@ describe('buildLeadFunnel', () => {
   test('empty input yields empty sources and zeroed totals, never NaN rates', () => {
     const out = buildLeadFunnel([]);
     expect(out.sources).toEqual([]);
-    expect(out.totals).toEqual({ leads: 0, contacted: 0, estimate: 0, booked: 0, completed: 0, lost: 0, bookRate: 0 });
+    expect(out.totals).toEqual({ leads: 0, contacted: 0, estimate: 0, booked: 0, completed: 0, lost: 0, bookRate: 0, completeRate: 0 });
+    expect(out.stagesPresent).toEqual({ contacted: false, estimate: false, booked: false });
+  });
+
+  test('stagesPresent reflects only rungs that actually carry rows (lead→completed reality)', () => {
+    // Today's pipeline writes only lead + completed — the card must not
+    // render fictional 0% middle rungs.
+    const flat = buildLeadFunnel([
+      row('google_ads', 'lead', 5, null),
+      row('google_ads', 'completed', 2, null),
+    ]);
+    expect(flat.stagesPresent).toEqual({ contacted: false, estimate: false, booked: false });
+    // A row actually sitting mid-funnel lights its rung up.
+    const mid = buildLeadFunnel([
+      row('google_ads', 'estimate_viewed', 1, null),
+      row('google_ads', 'booked', 1, null),
+    ]);
+    expect(mid.stagesPresent).toEqual({ contacted: false, estimate: true, booked: true });
   });
 
   test('string counts from pg are coerced', () => {

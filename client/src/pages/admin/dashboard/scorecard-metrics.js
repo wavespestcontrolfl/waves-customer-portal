@@ -256,22 +256,39 @@ export function mrrBridgeVerdict(m) {
   return { happened, action: "All adds, zero losses — protect it by keeping service quality where it is.", tone: "good" };
 }
 
-// Lead funnel by source — /admin/dashboard/lead-funnel payload.
+// Lead funnel by source — /admin/dashboard/lead-funnel payload. Drop-off
+// advice only names stages the pipeline actually recorded (stagesPresent) —
+// today most rows move lead → won directly, and blaming a "contact" stage
+// nothing writes would be fiction.
 export function leadFunnelVerdict(data) {
   const t = data?.totals;
   if (!t || !(t.leads > 0)) return null;
   const { tier } = confidenceTier(t.leads);
-  const happened = `${t.leads} attributed lead${t.leads === 1 ? "" : "s"} → ${t.contacted} contacted → ${t.estimate} estimated → ${t.booked} booked (${t.bookRate}%).`;
+  const p = data.stagesPresent || {};
+  const hasMidStages = p.contacted || p.estimate || p.booked;
+  const happened = hasMidStages
+    ? `${t.leads} attributed lead${t.leads === 1 ? "" : "s"} → ${t.contacted} contacted → ${t.estimate} estimated → ${t.booked} booked → ${t.completed} won (${t.completeRate}%).`
+    : `${t.leads} attributed lead${t.leads === 1 ? "" : "s"} → ${t.completed} won (${t.completeRate}%)${t.lost ? ` · ${t.lost} lost` : ""}.`;
   if (tier !== "ok") {
     return { happened, action: "Too few leads this period to judge any channel's funnel — keep response speed tight on every one.", tone: "neutral", sampleN: t.leads };
   }
-  // Name the widest drop-off between adjacent stages — that's the lever.
+  if (!hasMidStages) {
+    return {
+      happened,
+      action: t.completeRate >= 40
+        ? "Win rate is strong — the open leads are the upside; work them before they go cold."
+        : "Most attributed leads haven't converted — the open ones are the pipeline; chase them before they go cold.",
+      tone: t.completeRate >= 40 ? "good" : "warn",
+      sampleN: t.leads,
+    };
+  }
+  // Name the widest drop-off between adjacent RECORDED stages — that's the lever.
   const drops = [
-    { label: "lead → contacted: tighten first-response speed", lost: t.leads - t.contacted },
-    { label: "contacted → estimate: get quotes out same-day", lost: t.contacted - t.estimate },
-    { label: "estimate → booked: follow up estimates before they expire", lost: t.estimate - t.booked },
-  ].sort((a, b) => b.lost - a.lost);
-  if (drops[0].lost > 0) {
+    p.contacted && { label: "lead → contacted: tighten first-response speed", lost: t.leads - t.contacted },
+    p.estimate && { label: "contacted → estimate: get quotes out same-day", lost: t.contacted - t.estimate },
+    p.booked && { label: "estimate → booked: follow up estimates before they expire", lost: t.estimate - t.booked },
+  ].filter(Boolean).sort((a, b) => b.lost - a.lost);
+  if (drops.length && drops[0].lost > 0) {
     return { happened, action: `Biggest drop-off is ${drops[0].label} (${drops[0].lost} lead${drops[0].lost === 1 ? "" : "s"} stalled there).`, tone: t.bookRate >= 40 ? "good" : "warn", sampleN: t.leads };
   }
   return { happened, action: "Every attributed lead is progressing — keep the cadence.", tone: "good", sampleN: t.leads };

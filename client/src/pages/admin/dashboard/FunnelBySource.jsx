@@ -5,22 +5,32 @@ import FormulaNote from "./FormulaNote";
 import { leadFunnelVerdict } from "./scorecard-metrics";
 
 // Lead funnel by source (/admin/dashboard/lead-funnel) — small-multiples for
-// the top sources: how far each channel's leads actually get (contacted →
-// estimate → booked → won). Counts and rates are ON the rows (n= everywhere,
-// low-sample pills, never tooltip-only); source names drill into the Leads
-// list via the same onDrillSource the attribution panel uses.
+// the top sources: how far each channel's leads actually get. Counts and
+// rates are ON the rows (n= everywhere, low-sample pills, never
+// tooltip-only). Source names are plain labels, not drilldowns — attribution
+// keys don't match lead_sources.name, so an exact-match drill would land on
+// an empty Leads list.
 const TOP_N = 5;
-const STAGES = [
+const ALL_STAGES = [
   { key: "contacted", label: "Contacted" },
   { key: "estimate", label: "Estimate" },
   { key: "booked", label: "Booked" },
   { key: "completed", label: "Won" },
 ];
 
-function StageBars({ s }) {
+// Only rungs the pipeline actually recorded in this window render — today
+// rows move lead → won directly (intermediate stages are schema, not data),
+// and showing "0% contacted" for contacts that were simply never written
+// would be a lie. Won always renders. stagesPresent comes from the server.
+function visibleStages(stagesPresent) {
+  const p = stagesPresent || {};
+  return ALL_STAGES.filter((st) => st.key === "completed" || p[st.key]);
+}
+
+function StageBars({ s, stages }) {
   return (
     <div className="space-y-1">
-      {STAGES.map((st) => {
+      {stages.map((st) => {
         const count = s[st.key] || 0;
         const pct = s.leads > 0 ? Math.round((count / s.leads) * 100) : 0;
         return (
@@ -42,7 +52,7 @@ function StageBars({ s }) {
   );
 }
 
-export default function FunnelBySource({ data, loading, error, onDrillSource }) {
+export default function FunnelBySource({ data, loading, error }) {
   if (loading && !data) return <EmptyState>Loading…</EmptyState>;
   if (error && !data) return <EmptyState>Failed to load the lead funnel for this period</EmptyState>;
   const sources = data?.sources || [];
@@ -51,6 +61,7 @@ export default function FunnelBySource({ data, loading, error, onDrillSource }) 
   const top = sources.slice(0, TOP_N);
   const rest = sources.length - top.length;
   const t = data.totals || {};
+  const stages = visibleStages(data.stagesPresent);
 
   return (
     <div>
@@ -59,7 +70,7 @@ export default function FunnelBySource({ data, loading, error, onDrillSource }) 
         <div>
           <span className="u-nums text-22 font-medium tracking-tight">{fmtInt(t.leads || 0)}</span>
           <span className="text-12 text-ink-secondary ml-1.5">
-            leads → {fmtInt(t.booked || 0)} booked ({t.bookRate ?? 0}%)
+            leads → {fmtInt(t.completed || 0)} won ({t.completeRate ?? 0}%)
           </span>
         </div>
         <span className="text-11 text-ink-tertiary whitespace-nowrap">
@@ -73,14 +84,13 @@ export default function FunnelBySource({ data, loading, error, onDrillSource }) 
           return (
             <div key={s.sourceKey} className={cn(lowN && "opacity-80")}>
               <div className="flex items-center gap-2 mb-1">
-                <button
-                  type="button"
-                  onClick={() => onDrillSource && onDrillSource(s.source)}
-                  className="text-13 text-ink-primary font-medium truncate underline-offset-2 hover:underline u-focus-ring"
-                  title="Open these leads"
-                >
+                {/* Plain label, deliberately NOT a drilldown: these are
+                    attribution keys, and the Leads page filters by exact
+                    lead_sources.name — the labels don't match, so a drill
+                    would land on an empty list. */}
+                <span className="text-13 text-ink-primary font-medium truncate">
                   {s.source}
-                </button>
+                </span>
                 {s.isPaid && (
                   <span className="inline-block px-1.5 py-0.5 text-[10px] uppercase tracking-label rounded-xs bg-zinc-900 text-white shrink-0">
                     paid
@@ -96,7 +106,7 @@ export default function FunnelBySource({ data, loading, error, onDrillSource }) 
                   {s.lost > 0 && <span className="ml-1.5">· {fmtInt(s.lost)} lost</span>}
                 </span>
               </div>
-              <StageBars s={s} />
+              <StageBars s={s} stages={stages} />
             </div>
           );
         })}
@@ -110,12 +120,14 @@ export default function FunnelBySource({ data, loading, error, onDrillSource }) 
       <Verdict verdict={leadFunnelVerdict(data)} />
 
       <FormulaNote>
-        Counts are attribution rows (one per lead the ad pipeline tracked), not
-        the raw leads table — totals can differ from Leads by Source above.
-        Stages are cumulative: a booked lead counts in every earlier stage.
-        Lost leads count only as leads + lost (their stage history collapses).
-        Call↔lead linkage is call-SID based. Shaping:
-        server/services/lead-funnel.js.
+        Counts are attribution rows (one per lead the ad pipeline tracked, with
+        deleted and internal leads excluded), not the raw leads table — totals
+        can differ from Leads by Source above. Stages are cumulative (a booked
+        lead counts in every earlier rung) and only rungs the pipeline actually
+        recorded render — today most rows move lead → won directly, and the
+        middle rungs light up as stage tracking starts writing them. Lost leads
+        count only as leads + lost. Call↔lead linkage is call-SID based.
+        Shaping: server/services/lead-funnel.js.
       </FormulaNote>
     </div>
   );

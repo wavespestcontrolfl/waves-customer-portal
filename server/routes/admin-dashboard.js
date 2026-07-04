@@ -1685,13 +1685,40 @@ router.get('/lead-funnel', dashboardCache, async (req, res, next) => {
   try {
     const { buildLeadFunnel } = require('../services/lead-funnel');
     const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
+    // Effective paid signal mirrors splitFacebookByPaid: a Meta click id
+    // (fbclid/_fbc) OR the explicit flag — is_paid alone is NULL on most
+    // historical rows and would misfile click-attributed paid Meta as organic.
+    const PAID_SQL = '(asa.is_paid IS TRUE OR asa.fbclid IS NOT NULL OR asa.fbc IS NOT NULL)';
     // lead_date is an ET DATE column; the window's from/to are ET date
-    // strings, so direct comparison is timezone-safe.
-    const rows = await db('ad_service_attribution')
-      .where('lead_date', '>=', win.from)
-      .where('lead_date', '<=', win.to)
-      .groupBy('lead_source', 'funnel_stage', 'is_paid')
-      .select('lead_source', 'funnel_stage', 'is_paid', db.raw('COUNT(*) as n'));
+    // strings, so direct comparison is timezone-safe. Parity with the sibling
+    // attribution panels: soft-deleted leads drop out (deleting a spam lead
+    // must clean this card too), and internal/test names are excluded via the
+    // linked lead OR customer — both joins are LEFT and the name expressions
+    // COALESCE to '', so unlinked rows are never silently dropped.
+    const qb = db('ad_service_attribution as asa')
+      .leftJoin('leads as l', 'l.id', 'asa.lead_id')
+      .leftJoin('customers as c', 'c.id', 'asa.customer_id')
+      .where('asa.lead_date', '>=', win.from)
+      .where('asa.lead_date', '<=', win.to)
+      .whereRaw('(asa.lead_id IS NULL OR l.deleted_at IS NULL)');
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      const marks = INTERNAL_TEST_CUSTOMERS.map(() => '?').join(',');
+      qb.whereRaw(
+        `LOWER(COALESCE(l.first_name, '') || ' ' || COALESCE(l.last_name, '')) NOT IN (${marks})`,
+        INTERNAL_TEST_CUSTOMERS,
+      ).whereRaw(
+        `LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) NOT IN (${marks})`,
+        INTERNAL_TEST_CUSTOMERS,
+      );
+    }
+    const rows = await qb
+      .groupBy('asa.lead_source', 'asa.funnel_stage', db.raw(PAID_SQL))
+      .select(
+        'asa.lead_source',
+        'asa.funnel_stage',
+        db.raw(`${PAID_SQL} as is_paid`),
+        db.raw('COUNT(*) as n'),
+      );
     res.json({ period: win, ...buildLeadFunnel(rows) });
   } catch (err) { next(err); }
 });

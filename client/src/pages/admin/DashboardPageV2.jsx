@@ -433,15 +433,21 @@ export default function DashboardPageV2() {
       adminFetch(`/admin/dashboard/channel-mix?${periodQS}`, {
         signal: ctrl.signal,
       }),
+      // Fails soft to null on its own — the optional funnel card must never
+      // reject the batch and take down the attribution panels beside it.
       adminFetch(`/admin/dashboard/lead-funnel?${periodQS}`, {
         signal: ctrl.signal,
+      }).catch((e) => {
+        if (e?.name !== "AbortError") console.error("[dashboard-v2] /lead-funnel", e);
+        return null;
       }),
     ])
       .then(([calls, leads, channels, funnelBySrc]) => {
         setCallsBySource(calls);
         setLeadsBySource(leads);
         setChannelMix(channels);
-        setLeadFunnel(funnelBySrc);
+        // Preserve-on-fail like the loadAll panels (blanked on period switch above).
+        setLeadFunnel((prev) => funnelBySrc ?? prev);
         setAttributionError(null);
       })
       .catch((e) => {
