@@ -583,7 +583,7 @@ function ConfidenceTag({ confidence }) {
 }
 
 // ── 4. Rain in your area — last 7 days ───────────────────────────────────────────
-export function RainLast7DaysChart({ days = [] }) {
+export function RainLast7DaysChart({ days = [], confidence = null }) {
   const mounted = useMounted();
   const [active, setActive] = useState(null);
   const data = (days || []).filter((d) => d && Number.isFinite(Number(d.in)));
@@ -614,6 +614,11 @@ export function RainLast7DaysChart({ days = [] }) {
           );
         })}
       </div>
+      {/* City-collective fallback week (a single-cell model spike was smoothed out) →
+          be honest that this is an area estimate, not a precise per-address reading. */}
+      {confidence === 'low' ? (
+        <div style={{ marginTop: 10 }}><ConfidenceTag confidence="low" /></div>
+      ) : null}
     </Card>
   );
 }

@@ -262,7 +262,7 @@ function monthFromServiceDate(serviceDate) {
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null } = {}) {
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null } = {}) {
   const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
   const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
   const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
@@ -345,6 +345,9 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     // report's 7-day chart renders from this so it matches the weekly total and
     // is property-specific. Null when no complete window is available.
     dailyRain7d: Array.isArray(completionDailyRain) ? completionDailyRain : null,
+    // 'low' when dailyRain7d is the city-collective fallback (a single-cell model spike
+    // was detected) so the report can badge the 7-day chart "Limited data this week".
+    dailyRain7dConfidence: completionRainConfidence || null,
     irrigationAdvice,
   };
 }
@@ -1811,6 +1814,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
   let completionRainfall7dInches = null;
   let completionEt0Inches = null;
   let completionDailyRain = null;
+  let completionRainConfidence = null;
   try {
     const weekWeather = await fetchServiceWeekWeather({
       latitude: service.customer_latitude ?? service.latitude ?? service.lat,
@@ -1820,6 +1824,9 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     completionRainfall7dInches = weekWeather.rainInches;
     completionEt0Inches = weekWeather.et0Inches;
     completionDailyRain = weekWeather.dailyRain;
+    // 'low' when the pinpoint week was a single-cell model spike and we fell back to
+    // the city-collective series — surfaced on the 7-day chart as "Limited data this week".
+    completionRainConfidence = weekWeather.rainConfidence;
   } catch (e) { /* non-blocking */ }
   const waterContext = buildLawnWaterContext({
     assessment,
@@ -1834,6 +1841,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     completionRainfall7dInches,
     completionEt0Inches,
     completionDailyRain,
+    completionRainConfidence,
   });
 
   return {
@@ -2411,6 +2419,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           d: new Date(`${r.date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
           in: r.inches,
         }));
+        // 'low' when the series is the city-collective fallback → chart shows "Limited
+        // data this week" instead of implying a precise per-address reading we don't have.
+        reportV2.rain7dConfidence = lawnAssessment.waterContext?.dailyRain7dConfidence || null;
       }
 
       // Next scheduled lawn visit. Honest-precision rule: a CONFIDENT date only from
