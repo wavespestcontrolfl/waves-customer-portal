@@ -119,12 +119,18 @@ async function syncCampaigns() {
         .first();
 
       if (existing) {
-        // While the capacity loop has the campaign throttled (budget_mode
-        // 'spent'/'stop'), the live amount read back here IS the throttle —
-        // writing it into daily_budget_base would make the reduced budget the
-        // new canonical base and a later green-capacity run could never
-        // restore full spend. Live amount only becomes base in 'base' mode.
-        if (existing.budget_mode && existing.budget_mode !== 'base') {
+        // daily_budget_base is CANONICAL LOCAL STATE (owner-set via
+        // /admin/ads setBudget, seeded on first discovery) — never overwrite
+        // it from the live amount. The live amount can be a capacity
+        // throttle the budget loop pushed (stop = 1% of base), including
+        // one still live after a failed restore-to-base push; trusting it
+        // as the new base would leave the campaign permanently throttled
+        // because a green-capacity run would "restore" to the tiny base.
+        // In 'base' mode we can't tell a failed restore from a legitimate
+        // Ads-Manager edit, so base only changes through /admin/ads and the
+        // reconcile loop enforces it outward. Live amount still lands in
+        // daily_budget_current below — that column IS ground truth.
+        if (existing.daily_budget_base != null) {
           delete data.daily_budget_base;
         }
         await db('ad_campaigns').where({ id: existing.id }).update(data);

@@ -120,12 +120,39 @@ describe('Google Ads campaign sync', () => {
     expect(results[0].daily_budget_base).toBe(40);
   });
 
-  test('writes live budget into base when the local row is in base mode', async () => {
+  test('preserves stored base in base mode too — a failed restore leaves the throttle live', async () => {
+    // setMode back to 'base' commits mode='base' locally even when the push
+    // fails, so Google can still be running the old $0.40 throttle at the
+    // next sync. Trusting that live amount as the new base would leave the
+    // campaign permanently throttled (reconcile would "enforce" $0.40); a
+    // legitimate Ads-Manager edit is indistinguishable from this state, so
+    // base only ever changes through /admin/ads setBudget.
     mockQueryFirst.mockResolvedValue({
       id: 'row-1',
       platform_campaign_id: '22594274874',
       budget_mode: 'base',
       daily_budget_base: 40,
+    });
+    mockUpdate.mockResolvedValue(1);
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: '22594274874', name: 'Sarasota Pest', status: 2, advertising_channel_type: 'SEARCH' },
+      campaign_budget: { amount_micros: 400_000 },
+    }]);
+
+    const results = await GoogleAds.syncCampaigns();
+
+    const updateArg = mockUpdate.mock.calls[0][0];
+    expect(updateArg).not.toHaveProperty('daily_budget_base');
+    expect(updateArg.daily_budget_current).toBe(0.4);
+    expect(results[0].daily_budget_base).toBe(40);
+  });
+
+  test('backfills base from live only when the stored base is null', async () => {
+    mockQueryFirst.mockResolvedValue({
+      id: 'row-1',
+      platform_campaign_id: '22594274874',
+      budget_mode: null,
+      daily_budget_base: null,
     });
     mockUpdate.mockResolvedValue(1);
     mockCustomerQuery.mockResolvedValue([{

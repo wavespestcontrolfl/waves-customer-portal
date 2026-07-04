@@ -221,6 +221,54 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockLogInsert).not.toHaveBeenCalled();
     });
 
+    test('failed restore-to-base heals: sync-restored throttle re-pushed up to base', async () => {
+      // setMode('base') committed mode='base' but the push failed, so Google
+      // kept running the $0.40 throttle; the 6AM sync wrote that live amount
+      // into daily_budget_current (base preserved — sync never overwrites
+      // it). Green capacity → newMode 'base' matches → reconcile restores
+      // full spend.
+      BudgetManager.getCapacityForArea.mockResolvedValue({ utilizationPct: 50, booked: 4, slots: 8, techs: 1 });
+      campaignRows = [{ ...baseCampaign(), budget_mode: 'base', daily_budget_current: '0.4' }];
+      mockIsEnabled.mockReturnValue(true);
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 40 });
+    });
+
+    test('half-cent stop budget does not thrash: cents-rounded on both sides', async () => {
+      // base 30.50 → raw 1% is 0.305, but decimal(10,2) stores 0.31. The
+      // calculation cent-rounds and the drift check compares integer cents,
+      // so an already-reconciled campaign must not re-push every run.
+      campaignRows = [{
+        ...baseCampaign(),
+        daily_budget_base: '30.50',
+        budget_mode: 'stop',
+        daily_budget_current: '0.31',
+      }];
+      mockIsEnabled.mockReturnValue(true);
+      mockIsConfigured.mockReturnValue(true);
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+    });
+
+    test('null daily_budget_current (never synced) is skipped, not treated as drift', async () => {
+      campaignRows = [{ ...baseCampaign(), budget_mode: 'stop', daily_budget_current: null }];
+      mockIsEnabled.mockReturnValue(true);
+      mockIsConfigured.mockReturnValue(true);
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+    });
+
     test("'spent' mode never reconciles — freeze-at-current is identity", async () => {
       // 80% utilization → 'spent' zone, matching the recorded mode.
       BudgetManager.getCapacityForArea.mockResolvedValue({ utilizationPct: 80, booked: 6, slots: 8, techs: 1 });

@@ -121,8 +121,14 @@ class BudgetManager {
           // the mode's calculated budget is exactly this drift. Push the
           // mode's budget to reconcile. 'spent' is freeze-at-current by
           // definition, so it can never trigger this.
+          // Compare in integer cents: daily_budget_current is decimal(10,2),
+          // so a sub-cent expected value (pre-rounding stop budgets) or float
+          // representation would otherwise read as permanent drift and
+          // re-push the same budget every run. NULL current (never synced,
+          // never set) is skipped — the daily sync populates it within a day.
           const expectedBudget = this.calculateBudget(campaign, campaign.budget_mode);
-          if (Math.abs(parseFloat(campaign.daily_budget_current) - expectedBudget) > 0.005) {
+          const currentCents = Math.round(parseFloat(campaign.daily_budget_current) * 100);
+          if (Number.isFinite(currentCents) && currentCents !== Math.round(expectedBudget * 100)) {
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, expectedBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} reconcile of ${campaign.budget_mode} budget NOT applied — Google Ads push failed; will retry next run`);
@@ -160,7 +166,11 @@ class BudgetManager {
     switch (mode) {
       case 'base': return base;
       case 'spent': return parseFloat(campaign.daily_budget_current || base); // freeze at current
-      case 'stop': return Math.max(0.01, base * 0.01); // 1% — never zero
+      // 1% of base — never zero (pausing kills Quality Score). Cent-rounded
+      // because ad_campaigns budget columns are decimal(10,2): a half-cent
+      // value (base 30.50 → 0.305) would store as 0.31 and read back as
+      // drift against the unrounded calculation forever.
+      case 'stop': return Math.max(0.01, Math.round(base) / 100);
       default: return base;
     }
   }
