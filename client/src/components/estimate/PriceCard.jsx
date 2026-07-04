@@ -111,6 +111,19 @@ function anchorPeriodPrice(frequency = {}, intervalMonths = 1) {
   return Math.round(monthlyBase * intervalMonths * 100) / 100;
 }
 
+// A frequency whose entry carries a manualDiscount has its `monthly` already
+// net of that discount (lawn/tree/mosquito single-service ladders subtract it;
+// shapeFromV1 bundle totals do too), and the card renders the manual discount
+// as its own labeled row. Subtract the manual slice from the anchor-vs-billed
+// gap so a promo is never double-reported or mislabeled as WaveGuard savings.
+function manualDiscountPerInterval(frequency = {}, intervalMonths = 1) {
+  const md = frequency.manualDiscount;
+  if (!md || !(Number(md.amount) > 0)) return 0;
+  const recurringAnnual = Number(md.recurringAmount ?? md.amount);
+  if (!(recurringAnnual > 0)) return 0;
+  return Math.round((recurringAnnual / 12) * intervalMonths * 100) / 100;
+}
+
 // Savings + period for a frequency entry — shared with the bundle layout,
 // which renders the "You save …" lines BELOW all service boxes instead of
 // inside each card. Mirrors the in-card math exactly (incl. the
@@ -122,7 +135,9 @@ export function priceCardSavingsInfo(frequency = {}) {
   const periodLabel = billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo';
   const cadencePrice = Math.round(Number(frequency.monthly) * intervalMonths * 100) / 100;
   const anchorPrice = anchorPeriodPrice(frequency, intervalMonths);
-  const raw = anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
+  const raw = anchorPrice > cadencePrice
+    ? Math.round((anchorPrice - cadencePrice - manualDiscountPerInterval(frequency, intervalMonths)) * 100) / 100
+    : 0;
   const savings = raw >= 0.05 ? raw : 0;
   return savings > 0 ? { savings, periodLabel } : null;
 }
@@ -146,7 +161,9 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   // anchor. Anything below this threshold is rounding noise, not a member
   // discount — show no anchor strike-through and no save line for it.
   const SAVINGS_ROUNDING_NOISE = 0.05;
-  const rawSavings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
+  const rawSavings = cadencePrice != null && anchorPrice > cadencePrice
+    ? Math.round((anchorPrice - cadencePrice - manualDiscountPerInterval(frequency, intervalMonths)) * 100) / 100
+    : 0;
   const savings = rawSavings >= SAVINGS_ROUNDING_NOISE ? rawSavings : 0;
   // True daily rate: annual cost / 365 (monthly * 12 / 365).
   const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;

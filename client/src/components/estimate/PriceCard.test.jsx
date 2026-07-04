@@ -210,4 +210,49 @@ describe('priceCardSavingsInfo — bundle save lines below the boxes', () => {
     expect(priceCardSavingsInfo({ key: 'monthly', monthly: 52, monthlyBase: 52 })).toBeNull();
     expect(priceCardSavingsInfo({ key: 'monthly', monthly: 52 })).toBeNull();
   });
+
+  it('never reports a manual discount as WaveGuard savings', () => {
+    // Single-service lawn ladder with a $120/yr promo: monthly is already net
+    // of the manual discount (83 - 10 = 73) and the card shows the promo as
+    // its own row — the monthlyBase gap must NOT become a "You save" line.
+    expect(priceCardSavingsInfo({
+      key: 'premium',
+      monthly: 73,
+      monthlyBase: 83,
+      manualDiscount: { amount: 120, recurringAmount: 120, label: 'Promo' },
+    })).toBeNull();
+  });
+
+  it('reports only the tier slice when manual and tier discounts stack', () => {
+    // $100/mo base, 10% tier (→90) plus a $60/yr ($5/mo) manual promo (→85).
+    const info = priceCardSavingsInfo({
+      key: 'enhanced',
+      monthly: 85,
+      monthlyBase: 100,
+      manualDiscount: { amount: 60, recurringAmount: 60, label: 'Promo' },
+    });
+    expect(info).toEqual({ savings: 10, periodLabel: '/mo' });
+  });
+});
+
+describe('PriceCard — manual discount is not double-reported in-card', () => {
+  it('shows the promo row but no anchor/savings when the gap is the manual discount alone', () => {
+    render(
+      <PriceCard
+        frequency={{
+          key: 'premium',
+          label: 'Monthly',
+          monthly: 73,
+          monthlyBase: 83,
+          visitsPerYear: 12,
+          manualDiscount: { amount: 120, recurringAmount: 120, label: 'Spring promo' },
+        }}
+        waveGuardTier="Silver"
+      />,
+    );
+
+    expect(screen.getByText('Spring promo')).toBeInTheDocument();
+    expect(screen.queryByText(/You save/)).toBeNull();
+    expect(screen.queryByText('$83/mo')).toBeNull();
+  });
 });
