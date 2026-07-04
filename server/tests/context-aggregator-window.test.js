@@ -87,6 +87,23 @@ describe('ContextAggregator.extractedCallType (misdial/spam exclusion, Codex P2 
     expect(aggregator.extractedCallType(null)).toBe('');
     expect(aggregator.extractedCallType(JSON.stringify({}))).toBe('');
   });
+
+  test('isExcludedCall fires on ANY affirmative spam/misdial signal (Codex P2 r3)', () => {
+    // the spam skip path: processing_status='spam' + is_spam, NO call_outcome,
+    // call_type possibly missing — each signal alone must exclude
+    expect(aggregator.isExcludedCall({ processing_status: 'spam', ai_extraction: null })).toBe(true);
+    expect(aggregator.isExcludedCall({ processing_status: null, ai_extraction: JSON.stringify({ is_spam: true }) })).toBe(true);
+    expect(aggregator.isExcludedCall({ ai_extraction: JSON.stringify({ call_type: 'wrong_number' }) })).toBe(true);
+    expect(aggregator.isExcludedCall({ ai_extraction: JSON.stringify({ call_type: 'spam' }) })).toBe(true);
+  });
+
+  test('isExcludedCall keeps real customer calls, including unclassified ones', () => {
+    expect(aggregator.isExcludedCall({ processing_status: 'processed', ai_extraction: JSON.stringify({ call_type: 'existing_customer_service', is_lead: false }) })).toBe(false);
+    // voicemail is a channel, not an exclusion; unknown/malformed stays eligible
+    expect(aggregator.isExcludedCall({ processing_status: 'voicemail', ai_extraction: JSON.stringify({ is_voicemail: true }) })).toBe(false);
+    expect(aggregator.isExcludedCall({ processing_status: null, ai_extraction: 'not json' })).toBe(false);
+    expect(aggregator.isExcludedCall({})).toBe(false);
+  });
 });
 
 describe('ContextAggregator.calendarDay (v8 TODAY marker)', () => {

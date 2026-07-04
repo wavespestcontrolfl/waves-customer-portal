@@ -121,12 +121,8 @@ class ContextAggregator {
         // SQL throws on any malformed row), and a filtered row must not
         // silently shrink the pick below 2 real calls.
         .limit(6)
-        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction');
-      // Codex P2 round 2: the call processor classifies misdials/spam in the
-      // extraction (call_type) WITHOUT stamping call_outcome, so outcome
-      // filtering alone still leaks them. is_lead=false is NOT a signal here —
-      // existing customers' real calls are all is_lead=false.
-      return rows.filter((r) => !EXCLUDED_CALL_TYPES.has(this.extractedCallType(r.ai_extraction))).slice(0, 2);
+        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status');
+      return rows.filter((r) => !this.isExcludedCall(r)).slice(0, 2);
     } catch (err) {
       logger.warn(`[context] recent-call lookup failed for customer ${customerId}: ${err.message}`);
       return [];
@@ -143,6 +139,21 @@ class ContextAggregator {
       const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
       return String(obj?.call_type || '').trim().toLowerCase();
     } catch { return ''; }
+  }
+
+  // A call is excluded from grounding on ANY affirmative not-a-real-
+  // conversation signal, because the processor persists them inconsistently
+  // (Codex P2 rounds 2-3): the spam skip path stamps processing_status='spam'
+  // + ai_extraction.is_spam WITHOUT call_outcome (and call_type may be
+  // missing/invalid there), while other paths only set call_type. is_lead is
+  // NOT a signal — existing customers' real calls are all is_lead=false.
+  isExcludedCall(row) {
+    if (String(row?.processing_status || '').trim().toLowerCase() === 'spam') return true;
+    if (EXCLUDED_CALL_TYPES.has(this.extractedCallType(row?.ai_extraction))) return true;
+    try {
+      const obj = typeof row?.ai_extraction === 'string' ? JSON.parse(row.ai_extraction) : row?.ai_extraction;
+      return obj?.is_spam === true;
+    } catch { return false; }
   }
 
   // Calendar day 'YYYY-MM-DD' of a Postgres DATE value. pg hands DATE columns
