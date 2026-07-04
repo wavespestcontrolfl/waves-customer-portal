@@ -287,3 +287,19 @@ describe('lowercase transcripts (regression — the heuristics were capitalizati
     expect(r.confidence).toBe('medium');
   });
 });
+
+describe('effectivelyLowercase: absolute cap on incidental capitals (Codex round 13)', () => {
+  const { redact } = require('../services/content/pii-redactor');
+
+  test('a one-cap autocapitalized transcript is LOW confidence even above the 2% ratio', () => {
+    // "This is john smith and i had ants…" — 1 cap over ~45 letters is just
+    // over 2%, but the name heuristics were blind to the lowercase name.
+    const r = redact('This is john smith and i had ants in my kitchen last week');
+    expect(r.confidence).toBe('low');
+  });
+
+  test('properly-cased prose with several capitals stays high confidence', () => {
+    const r = redact('Termite swarmers show up after rain in Bradenton and Sarasota. Check your baseboards and lanai for mud tubes.');
+    expect(r.confidence).not.toBe('low');
+  });
+});

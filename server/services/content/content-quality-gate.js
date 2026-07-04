@@ -545,6 +545,65 @@ function stripWavesOfficeAddresses(text) {
   return out;
 }
 
+// Title-case vocabulary that generated STRUCTURAL headings are built from —
+// question/marketing words plus home/lawn/treatment nouns. A capitalized
+// pair in a heading blocks as a customer name only when NEITHER token is
+// structural and the redactor's own allowlists (brand, staff, pests,
+// cities, all-caps, city bigrams via looksLikeFalsePositiveName) don't
+// clear it. This narrows the old blanket heading-name exemption ("## John
+// Smith" must block) without resurrecting the round-9 false positives
+// ("## Why Choose Waves Pest Control" reads as a name pair otherwise).
+// Fail-closed bias: an unlisted vocabulary word in a heading pair parks the
+// draft for human review — cheap next to a published customer name.
+const STRUCTURAL_HEADING_WORDS = new Set([
+  'Why', 'Choose', 'Choosing', 'Our', 'Your', 'The', 'How', 'What', 'When',
+  'Where', 'Which', 'Who', 'Guide', 'Complete', 'Ultimate', 'Process',
+  'Tips', 'Signs', 'Cost', 'Costs', 'Pricing', 'Price', 'Service',
+  'Services', 'Serving', 'Treatment', 'Treatments', 'Prevention', 'Prevent',
+  'Preventing', 'Benefits', 'Common', 'Questions', 'Question', 'Frequently',
+  'Asked', 'Near', 'Best', 'Top', 'Versus', 'Plan', 'Plans', 'Options',
+  'Option', 'Works', 'Safe', 'Safety', 'Kids', 'Pets', 'Home', 'Homes',
+  'House', 'Yard', 'Garden', 'Free', 'Get', 'Getting', 'Avoid', 'Identify',
+  'Identifying', 'Remove', 'Removing', 'Removal', 'Stop', 'Keep', 'Keeping',
+  'Protect', 'Protecting', 'About', 'Contact', 'Visit', 'Areas', 'Area',
+  'Local', 'Professional', 'Expert', 'Experts', 'Year', 'Round', 'Season',
+  'Seasonal', 'Summer', 'Winter', 'Spring', 'Fall', 'Every', 'Homeowner',
+  'Homeowners', 'Need', 'Needs', 'Know', 'Should', 'Right', 'Now', 'Today',
+  'Emergency', 'Same', 'Day', 'Inspection', 'Inspections', 'Estimate',
+  'Estimates', 'Quote', 'Quotes', 'Schedule', 'Book', 'Booking', 'Call',
+  'Bed', 'Bug', 'Bugs', 'Heat', 'Damage', 'Repair', 'Explained',
+  'Checklist', 'Myths', 'Facts', 'Natural', 'Chemical', 'Baits', 'Traps',
+  'Spray', 'Spraying', 'Granules', 'Fertilizer', 'Weed', 'Weeds', 'Grass',
+  'Sod', 'Turf', 'Soil', 'Brown', 'Patch', 'Grub', 'Grubs', 'Chinch',
+  'Fire', 'Ghost', 'Sugar', 'Carpenter', 'Flea', 'Fleas', 'Tick', 'Ticks',
+  'Silverfish', 'Earwig', 'Earwigs', 'Millipede', 'Millipedes', 'Fly',
+  'Flies', 'Gnat', 'Gnats', 'Mole', 'Cricket', 'Crickets', 'Sentricon',
+  'Warranty', 'Bond', 'Coverage', 'Covered', 'Included', 'Includes',
+]);
+
+// The one heading-scan exception the redactor's name heuristic needs: find a
+// capitalized First+Last-shaped pair that survives BOTH the structural
+// vocabulary above and the redactor's own false-positive filters. Returns
+// the offending pair or null.
+function headingCustomerNamePair(headingText) {
+  let looksLikeFalsePositiveName;
+  try {
+    ({ looksLikeFalsePositiveName } = require('./pii-redactor')._internals);
+  } catch {
+    // Redactor unavailable — caller's outer try/catch fails the gate closed.
+    throw new Error('pii-redactor unavailable for heading name scan');
+  }
+  const pairRe = /\b([A-Z][a-z]{1,15})\s+([A-Z][a-z]{1,20})\b/g;
+  let m;
+  while ((m = pairRe.exec(String(headingText || ''))) !== null) {
+    const [, first, last] = m;
+    if (STRUCTURAL_HEADING_WORDS.has(first) || STRUCTURAL_HEADING_WORDS.has(last)) continue;
+    if (looksLikeFalsePositiveName(first, last)) continue;
+    return `${first} ${last}`;
+  }
+  return null;
+}
+
 function checkRedactionPassed(draft) {
   const body = String(draft.body || '');
   // Broad phone regex covers `941-555-1234`, `(941) 555-1234`, and compact
@@ -598,22 +657,26 @@ function checkRedactionPassed(draft) {
     // Everything else — name, address, ssn, card — is customer PII with no
     // legitimate page-furniture form and hard-fails the publish gate.
     const BLOCKING_PII_TYPES = new Set(['name', 'address', 'ssn', 'card']);
-    // Markdown HEADING lines are excluded from the NAME scan: section
-    // titles like "## Our Process" / "## Why Choose Waves Pest Control"
-    // are title-case pairs the redactor's standalone name heuristic reads
-    // as customer names, and generated headings are structural furniture.
-    // Headings are NOT exempt from the objective checks, though: their
-    // text still goes through the phone/email checks above (which scan the
-    // full body) and the structured scan below — "## John Smith at 4867
-    // Maple Street" must fail on the address even though the name-pair
-    // heuristic can't be trusted on heading capitalization.
+    // Markdown HEADING lines are excluded from the redactor's raw NAME scan
+    // (title-case section headings like "## Why Choose Waves Pest Control"
+    // read as name pairs) but NOT from name detection altogether: a
+    // narrower heading-specific pair check (headingCustomerNamePair) blocks
+    // "## John Smith" while the structural vocabulary + redactor allowlists
+    // clear generated section headings. Objective checks apply in full:
+    // phone/email were scanned above on the whole body, and the structured
+    // scan here fails on address/ssn/card — "## John Smith at 4867 Maple
+    // Street" fails on the address before the name pair is even consulted.
     const headingText = (body.match(/^#{1,6}\s.*$/gm) || []).join('\n');
     if (headingText) {
-      const headingScan = redact(stripWavesOfficeAddresses(headingText));
+      const strippedHeadings = stripWavesOfficeAddresses(headingText);
+      const headingScan = redact(strippedHeadings);
       const headingHit = (headingScan.findings || [])
         .find((f) => BLOCKING_PII_TYPES.has(f.type) && f.type !== 'name');
       if (headingHit) {
         return { ok: false, reason: `unredacted_${headingHit.type}_in_heading` };
+      }
+      if (headingCustomerNamePair(strippedHeadings)) {
+        return { ok: false, reason: 'unredacted_name_in_heading' };
       }
     }
     const scanBody = body.replace(/^#{1,6}\s.*$/gm, '');

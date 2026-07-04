@@ -698,3 +698,36 @@ describe('case-insensitive control-character destination scan (Codex round 12)',
     expect(ok.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 });
+
+describe('named control entities + literal-vs-entity unquoted controls (Codex round 13)', () => {
+  test('&Tab;/&NewLine; named references decode like the numeric control forms', () => {
+    for (const body of [
+      '<a href="java&Tab;script:alert(1)">x</a>',
+      '<a href=java&NewLine;script:alert(1)>x</a>',
+      'Click [x](java&Tab;script:alert(1)) now.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('a LEADING entity control in an unquoted value fails closed too', () => {
+    // The tokenizer keeps a char-reference control at the START of an
+    // unquoted value; URL parsing then strips it, leaving javascript: live.
+    const r = guardrails.evaluate({ body: '<a href=&#9;javascript:alert(1)>x</a>' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('literal newline between unquoted props never false-fails — even with a colon in a later prop', () => {
+    // The sentinel design distinguishes what the round-11 colon heuristic
+    // could not: a literal control TERMINATES an unquoted value (plain
+    // formatting), only entity-decoded controls stay inside it.
+    const r = guardrails.evaluate({ body: '<a href=/services\n aria-label="Pest: control">book</a>' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+
+  test('entity-decoded control inside a mailto address is P0 (sentinel is a C0 control)', () => {
+    const r = guardrails.evaluate({ body: 'Email [x](mailto:attacker@gmail.com&#10;info@wavespestcontrol.com).' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+});

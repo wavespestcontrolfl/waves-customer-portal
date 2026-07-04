@@ -251,11 +251,18 @@ function redact(text) {
 // True when the text is long enough to carry PII but has (almost) no
 // uppercase letters — i.e. the capitalized-name/address heuristics cannot be
 // trusted to have seen anything. Short fragments ("ok thanks") stay 'high'.
+// Two arms, both required: the RATIO catches long lowercase transcripts, and
+// the ABSOLUTE cap catches short ones where a single incidental capital
+// (autocapitalized "This is john smith and i had ants…" — 1 cap over 40+
+// letters is just over a 2% ratio) would otherwise report high confidence
+// on text the name heuristics were blind to. One or two caps across 40+
+// letters is a lowercase text with sentence-initial autocaps, not
+// properly-cased prose.
 function effectivelyLowercase(text) {
   const letters = String(text).match(/[a-zA-Z]/g) || [];
   if (letters.length < 40) return false;
   const upper = letters.reduce((n, c) => n + (c >= 'A' && c <= 'Z' ? 1 : 0), 0);
-  return upper / letters.length < 0.02;
+  return upper <= 2 || upper / letters.length < 0.02;
 }
 
 function suspiciousUnstructured(text) {

@@ -508,7 +508,7 @@ describe('evaluate (full gate)', () => {
     // neither answers the question up front nor links anywhere internal.
     const r = evaluate(
       fullDraft({
-        body: 'Many homeowners ask about this every spring.\n\nLonger detail follows here without any links at all.',
+        body: 'Many homeowners in Bradenton and Sarasota ask about this every spring.\n\nLonger detail follows here in Venice and Palmetto without any links at all.',
       }),
       brief({ page_type: 'customer-question' }),
       { previewBuildSuccess: true, sitemapHasUrl: true }
@@ -619,7 +619,7 @@ describe('FAQ checks are neutral on FAQ-blocked topics', () => {
 describe('redaction: heading scan (Codex round 10)', () => {
   test('a street address in a visible HEADING hard-fails (headings are only exempt from the NAME heuristic)', () => {
     const r = checkRedactionPassed({
-      body: '## John Smith at 4867 Maple Street\n\nAnt control matters in every season across the region.',
+      body: '## John Smith at 4867 Maple Street\n\nAnt control matters in every season across Sarasota and Bradenton. Our team in Venice applies targeted treatments so infestations never return.',
     });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('unredacted_address_in_heading');
@@ -631,7 +631,7 @@ describe('redaction: heading scan (Codex round 10)', () => {
       '## Pest Control in Lakewood Ranch',
     ]) {
       const r = checkRedactionPassed({
-        body: `${heading}\n\nAnt control matters in every season across the region.`,
+        body: `${heading}\n\nAnt control matters in every season across Sarasota and Bradenton. Our team in Venice applies targeted treatments so infestations never return.`,
       });
       expect(r.ok).toBe(true);
     }
@@ -649,7 +649,7 @@ describe('redaction: all structured PII types block (Codex round 11)', () => {
   });
   test('headings block on structured PII too (only the NAME heuristic stays heading-exempt)', () => {
     const r = checkRedactionPassed({
-      body: '## Case 123-45-6789 Review\n\nAnt control matters in every season across the region.',
+      body: '## Case 123-45-6789 Review\n\nAnt control matters in every season across Sarasota and Bradenton. Our team in Venice applies targeted treatments so infestations never return.',
     });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('unredacted_ssn_in_heading');
@@ -658,8 +658,30 @@ describe('redaction: all structured PII types block (Codex round 11)', () => {
     // phone/email are validated ABOVE with the Waves allowlists — the
     // redactor's own phone/email findings carry no allowlist, so blocking
     // on them would hard-fail the business contact lines.
-    expect(checkRedactionPassed({ body: 'Call us at 941-318-7612 to schedule your inspection today.' }).ok).toBe(true);
-    expect(checkRedactionPassed({ body: 'Email info@wavespestcontrol.com to book your service.' }).ok).toBe(true);
-    expect(checkRedactionPassed({ body: 'We serve Venice, FL 34285 and the surrounding communities year round.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'Call us at 941-318-7612 to schedule your Bradenton or Sarasota inspection today.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'Email info@wavespestcontrol.com to book your next Waves service visit in Venice.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'We serve Venice, FL 34285 and the surrounding Sarasota and Bradenton communities year round.' }).ok).toBe(true);
+  });
+});
+
+describe('redaction: customer names in headings (Codex round 13)', () => {
+  const filler = 'Ant control matters in every season across Sarasota and Bradenton. Our team in Venice applies targeted treatments so infestations never return.';
+
+  test('a bare customer-name heading hard-fails', () => {
+    const r = checkRedactionPassed({ body: `## John Smith\n\n${filler}` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('unredacted_name_in_heading');
+  });
+
+  test('structural / brand / pest / city headings still pass the narrowed name check', () => {
+    for (const heading of [
+      '## Why Choose Waves Pest Control',
+      '## Our Process',
+      '## Bed Bug Heat Treatment Explained',
+      '## Pest Control in Lakewood Ranch',
+      '## Serving Punta Gorda and North Port',
+    ]) {
+      expect(checkRedactionPassed({ body: `${heading}\n\n${filler}` }).ok).toBe(true);
+    }
   });
 });

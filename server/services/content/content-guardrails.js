@@ -291,6 +291,13 @@ const TEL_RE = /\btel:([^\s"'<>)\]]*)/gi;
 // decoded LAST, mirroring a single browser decode — `&amp;#58;` renders as
 // literal "&#58;" text, not a colon, and must stay that way here too.
 // Scanning a decoded COPY can only find more, never less (fail-closed).
+// Sentinel standing in for an ENTITY-DECODED tab/LF/CR (see the decoder
+// below). \u0001 is itself a C0 control, so range checks like the mailto
+// recipient scan treat it exactly like the control it stands for; a
+// LITERAL \u0001 in a draft matches the same fail-closed arms, which is
+// the right direction. The regex arms below hardcode \u0001 — keep them
+// in sync with this constant.
+const CTRL_SENTINEL = '\u0001';
 function decodeEntitiesForScan(s) {
   // The `;` is OPTIONAL on the numeric forms: HTML treats a semicolonless
   // numeric character reference as a parse error but still decodes it in
@@ -298,15 +305,27 @@ function decodeEntitiesForScan(s) {
   // javascript: link and the scanner must decode it identically. Named
   // references keep the mandatory `;` (they are NOT legacy-decoded without
   // it when followed by alphanumerics).
+  // Entity-produced CONTROL characters (tab/LF/CR — the three browsers
+  // strip while parsing URLs) decode to the CTRL_SENTINEL instead of the
+  // real control. This preserves the distinction the tokenizer makes and a
+  // plain decode erases: a char-reference control is PART of an attribute
+  // value (href=java&#9;script: is a live javascript: link), while a
+  // literal control in the source TERMINATES an unquoted value (a newline
+  // between props is just formatting).
+  const ctl = (c) => (c === 9 || c === 10 || c === 13 ? CTRL_SENTINEL : String.fromCharCode(c));
   return String(s)
     .replace(/&#x([0-9a-f]{1,6});?/gi, (m0, h) => {
       const c = parseInt(h, 16);
-      return c > 0 && c < 128 ? String.fromCharCode(c) : m0;
+      return c > 0 && c < 128 ? ctl(c) : m0;
     })
     .replace(/&#(\d{1,7});?/g, (m0, d) => {
       const c = parseInt(d, 10);
-      return c > 0 && c < 128 ? String.fromCharCode(c) : m0;
+      return c > 0 && c < 128 ? ctl(c) : m0;
     })
+    // Browser-recognized NAMED control references — &Tab;/&NewLine; decode
+    // in attribute values just like the numeric forms (there is no named CR).
+    .replace(/&Tab;/gi, CTRL_SENTINEL)
+    .replace(/&NewLine;/gi, CTRL_SENTINEL)
     .replace(/&colon;/gi, ':')
     .replace(/&sol;/gi, '/')
     .replace(/&quot;/gi, '"')
@@ -314,27 +333,24 @@ function decodeEntitiesForScan(s) {
     .replace(/&amp;/gi, '&');
 }
 
-// A link DESTINATION carrying embedded tab/CR/newline (usually smuggled in
-// via entities, decoded above): browsers STRIP these while parsing hrefs,
-// so "java&#x09;script:" is a live javascript: link whose scheme no regex
-// sees contiguously. Fail closed on any control character inside an
-// href/src value (quoted, JSX-expression, or UNQUOTED — the HTML tokenizer
-// appends character-reference results to an unquoted value without
-// terminating it, so href=java&#x09;script: really does carry the tab) or
-// a markdown destination.
+// A link DESTINATION carrying embedded tab/CR/newline: browsers STRIP these
+// while parsing hrefs, so "java&#x09;script:" is a live javascript: link
+// whose scheme no regex sees contiguously. Entity-produced controls arrive
+// as CTRL_SENTINEL (see decodeEntitiesForScan); LITERAL controls typed in
+// the source only count where the tokenizer keeps them in the value —
+// inside QUOTED/template/markdown destinations. In an UNQUOTED value a
+// literal control is a terminator (plain formatting between props), so that
+// arm matches the sentinel alone: any entity-decoded control in or adjacent
+// to the value (including a LEADING one — href=&#9;javascript: keeps its
+// tab and URL parsing strips it) fails closed, while a real newline before
+// the next prop — even one whose value happens to contain a colon, like
+// aria-label="Pest: control" — never can.
 const DEST_CONTROL_RE = new RegExp([
-  /\]\(\s*<?[^)]*[\t\r\n][^)]*\)/.source,
-  /\b(?:href|src)\s*=\s*\{?\s*"[^"]*[\t\r\n][^"]*"/.source,
-  /\b(?:href|src)\s*=\s*\{?\s*'[^']*[\t\r\n][^']*'/.source,
-  /\b(?:href|src)\s*=\s*\{?\s*`[^`]*[\t\r\n][^`]*`/.source,
-  // Unquoted values: ALL of tab/CR/LF count — the tokenizer appends
-  // char-reference results (incl. &#10; → \n) to an unquoted value
-  // without terminating it. The trailing `:` requirement is what keeps
-  // this arm safe: a control-smuggled SCHEME needs its colon, while a
-  // legit unquoted internal path in multi-line JSX (href=/services +
-  // newline + the next prop) has none, so formatting whitespace between
-  // props can't false-fail the gate.
-  /\b(?:href|src)\s*=\s*[^"'\s{>`][^:>]*[\t\r\n][^:>]*:/.source,
+  /\]\(\s*<?[^)]*[\t\r\n\u0001][^)]*\)/.source,
+  /\b(?:href|src)\s*=\s*\{?\s*"[^"]*[\t\r\n\u0001][^"]*"/.source,
+  /\b(?:href|src)\s*=\s*\{?\s*'[^']*[\t\r\n\u0001][^']*'/.source,
+  /\b(?:href|src)\s*=\s*\{?\s*`[^`]*[\t\r\n\u0001][^`]*`/.source,
+  /\b(?:href|src)\s*=\s*[^\s>]*\u0001/.source,
   // 'i': browsers treat attribute names case-insensitively, so HREF=/Src=
   // must hit every arm above — the sibling scheme regexes already carry it.
 ].join('|'), 'i');
