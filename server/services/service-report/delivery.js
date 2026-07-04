@@ -184,10 +184,53 @@ function buildServiceReportV1DeliveryContext({
   };
 }
 
+// Fold a lawn assessment score (and optional tip) into an already-composed
+// completion SMS body, right below the "report is ready: <link>" lead line so
+// the customer's score rides in the SAME text as the report — instead of a
+// separate "lawn health report ready" message.
+//
+// The body handed in was already selected/truncated to a segment target, so
+// the fold must not blow past it: prefer score + tip, else drop the (longer)
+// tip for score-only, else skip the fold entirely (the full recommendations
+// still live in the linked report, so the inline tip is not material).
+//
+// Returns { body, folded, truncated }:
+//   folded=false, body=original  → nothing changed (no score, or no room)
+//   truncated=true               → a tip existed but was dropped for budget
+function foldLawnScoreIntoCompletionSms(body, scoreParts = {}, { maxSegments = 2 } = {}) {
+  const { countSegments } = require('../messaging/segment-counter');
+  const base = String(body || '');
+  const scoreLine = String(scoreParts?.scoreLine || '').trim();
+  const tipLine = String(scoreParts?.tipLine || '').trim();
+  if (!base || !scoreLine) return { body: base, folded: false, truncated: false };
+
+  // DB templates separate paragraphs with a blank line; the prebuilt V1 body
+  // uses single newlines — split on whichever this body uses so the score
+  // lands under the lead line either way.
+  const sep = base.includes('\n\n') ? '\n\n' : '\n';
+  const foldIn = (block) => {
+    const parts = base.split(sep);
+    parts.splice(1, 0, block);
+    return parts.join(sep);
+  };
+  const segs = (text) => countSegments(text).segmentCount;
+
+  if (tipLine) {
+    const withTip = foldIn(`${scoreLine}\n${tipLine}`);
+    if (segs(withTip) <= maxSegments) return { body: withTip, folded: true, truncated: false };
+  }
+  const scoreOnly = foldIn(scoreLine);
+  if (segs(scoreOnly) <= maxSegments) {
+    return { body: scoreOnly, folded: true, truncated: !!tipLine };
+  }
+  return { body: base, folded: false, truncated: false };
+}
+
 module.exports = {
   buildServiceReportV1DeliveryContext,
   buildServiceReportV1Sms,
   buildServiceReportV1SmsVars,
+  foldLawnScoreIntoCompletionSms,
   serviceReportV1SmsType,
   shouldSendServiceReportV1Delivery,
   typedProgressContext,

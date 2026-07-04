@@ -394,10 +394,16 @@ If no contradictions, return: { "contradictions": [] }`
     return { overall, delta, deltaStr, tip };
   },
 
-  // Score paragraph folded into the completion service-report SMS so the
+  // Score lines folded into the completion service-report SMS so the
   // customer's lawn health score rides in the SAME text as the report link,
   // instead of a separate "lawn health report ready" message at confirm time.
-  // Returns null when there's no confirmed assessment/score. Never throws.
+  // Returns { scoreLine, tipLine } (tipLine may be '') or null when there's no
+  // confirmed assessment/score. Split so the caller can drop the (longer) tip
+  // to stay within its SMS segment budget. Never throws.
+  // Note: recommendations.customerTip is generated asynchronously after
+  // /confirm, so tipLine can legitimately be '' when a completion races ahead
+  // of that generation — the full recommendations still live in the linked
+  // report, so an occasional missing inline tip degrades gracefully.
   async buildCompletionScoreBlock(assessmentId) {
     try {
       if (!assessmentId) return null;
@@ -407,9 +413,10 @@ If no contradictions, return: { "contradictions": [] }`
       if (!assessment) return null;
       const parts = await LawnIntelligence.computeAssessmentScoreParts(assessment);
       if (!parts || !Number.isFinite(parts.overall)) return null;
-      const lines = [`You scored ${parts.overall}/100${parts.deltaStr}.`];
-      if (parts.tip) lines.push(`Tip: ${parts.tip}`);
-      return lines.join('\n');
+      return {
+        scoreLine: `You scored ${parts.overall}/100${parts.deltaStr}.`,
+        tipLine: parts.tip ? `Tip: ${parts.tip}` : '',
+      };
     } catch (err) {
       logger.error(`[lawn-intel] buildCompletionScoreBlock failed: ${err.message}`);
       return null;

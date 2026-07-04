@@ -31,6 +31,7 @@ const TurfHeightOcr = require('../services/turf-height-ocr');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
   buildServiceReportV1DeliveryContext,
+  foldLawnScoreIntoCompletionSms,
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
@@ -4790,17 +4791,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (sentSmsBody && !isIncompleteVisit && completedLawnAssessmentId) {
           try {
             const LawnIntel = require('../services/lawn-intelligence');
-            const scoreBlock = await LawnIntel.buildCompletionScoreBlock(completedLawnAssessmentId);
-            if (scoreBlock) {
-              // Insert right after the "your report is ready: <link>" lead so the
-              // score reads as part of the report, above the invoice/re-entry
-              // lines. DB templates separate paragraphs with a blank line; the
-              // prebuilt V1 body uses single newlines — split on whichever this
-              // body uses so the score lands under the lead line either way.
-              const sep = sentSmsBody.includes('\n\n') ? '\n\n' : '\n';
-              const parts = sentSmsBody.split(sep);
-              parts.splice(1, 0, scoreBlock);
-              sentSmsBody = parts.join(sep);
+            const scoreParts = await LawnIntel.buildCompletionScoreBlock(completedLawnAssessmentId);
+            if (scoreParts?.scoreLine) {
+              const folded = foldLawnScoreIntoCompletionSms(sentSmsBody, scoreParts, { maxSegments: 2 });
+              if (folded.folded) {
+                sentSmsBody = folded.body;
+                if (folded.truncated) completionSmsWasTruncated = true;
+              } else {
+                logger.info(`[dispatch] lawn score fold-in skipped for ${record.id} (segment budget)`);
+              }
             }
           } catch (scoreErr) {
             logger.warn(`[dispatch] lawn score fold-in failed for ${record.id}: ${scoreErr.message}`);
