@@ -220,4 +220,9 @@ describe('submittedUnitConflictsWithCustomer (resolved-customer guard)', () => {
     const inline = { address_line1: '123 Main St Apt A', address_line2: null };
     expect(submittedUnitConflictsWithCustomer(inline, { address_line1: '123 Main St', address_line2: 'Apt B' })).toBe(true);
   });
+
+  test('unit submitted only INLINE in the street line still conflicts (codex rd9)', () => {
+    expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt B', address_line2: '' })).toBe(true);
+    expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt A', address_line2: '' })).toBe(false);
+  });
 });

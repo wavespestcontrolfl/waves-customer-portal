@@ -381,6 +381,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       placeId: req.body.google_place_id || req.body.googlePlaceId,
       components: req.body.address_components || req.body.addressComponents,
     });
+    // Inline street unit and dedicated unit field disagree — ambiguous, fail
+    // closed like /api/booking/confirm rather than pick a door.
+    if (normalizedAddress.unitConflict) {
+      return res.status(400).json({ error: 'The street address and unit number disagree — please re-enter your address.' });
+    }
     const quoteAddress = normalizedAddress.line1 || address;
     // Fall back to a ZIP lookup when neither the parsed address nor the client
     // supplied a city (free-text address with no Places pick). Feeds the lead,

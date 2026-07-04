@@ -281,7 +281,17 @@ describe('address normalizer', () => {
       line1: '123 Main St',
       line2: 'Unit 4',
       fullAddress: '123 Main St, Unit 4, Sarasota, FL 34236',
+      unitConflict: false,
     });
+  });
+
+  test('disagreeing inline + dedicated units raise unitConflict and never store both (codex rd9)', () => {
+    const result = normalizeLeadAddress({
+      raw: '123 Main St Apt A Sarasota FL 34236', line2: 'Apt B',
+    });
+    expect(result.unitConflict).toBe(true);
+    expect(result.line1).toBe('123 Main St Apt A');
+    expect(result.line2).toBe('');
   });
 
   test('line2 stays empty when no unit is provided (fullAddress unchanged)', () => {

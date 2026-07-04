@@ -251,14 +251,17 @@ function customerUnitOf(customer) {
 // A submitted unit that disagrees with the RESOLVED customer's on-file unit
 // is a booking against the wrong door (Apt B posted against the Apt A
 // record) — even on identity-proven paths that never ran the address match.
-// Only same-street submissions count: a different street line is not a unit
-// statement about this record.
+// The unit may arrive in the dedicated field OR inline in the street line
+// (legacy/manual clients). Only same-street submissions count: a different
+// street line is not a unit statement about this record.
 function submittedUnitConflictsWithCustomer(customer, newCustomer) {
-  if (!newCustomer?.address_line2) return false;
-  const submittedStreet = normalizeAddress(splitStreetLineUnit(newCustomer.address_line1 || '').street);
+  const submitted = splitStreetLineUnit(newCustomer?.address_line1 || '');
+  const submittedUnit = newCustomer?.address_line2 || submitted.unit;
+  if (!submittedUnit) return false;
+  const submittedStreet = normalizeAddress(submitted.street);
   const onFileStreet = normalizeAddress(splitStreetLineUnit(customer?.address_line1 || '').street);
   if (!submittedStreet || !onFileStreet || submittedStreet !== onFileStreet) return false;
-  return unitsConflict(customerUnitOf(customer), newCustomer.address_line2);
+  return unitsConflict(customerUnitOf(customer), submittedUnit);
 }
 
 function addressMatchesCustomer(customer, address, zip, unit) {
@@ -384,7 +387,15 @@ router.get('/customer-lookup', async (req, res, next) => {
       if (customer && !(address && addressMatchesCustomer(customer, address, zip, unit))) {
         customer = null;
       }
-      return res.json({ customer: customer || null });
+      // address_line2 is needed ABOVE for the unit-aware match but must not
+      // be disclosed: a blank submitted unit stays compatible by design, so
+      // phone + street knowledge would otherwise read back the apartment
+      // number. The booking UI never consumes it from this response.
+      if (customer) {
+        const { address_line2: _undisclosedUnit, ...publicCustomer } = customer;
+        return res.json({ customer: publicCustomer });
+      }
+      return res.json({ customer: null });
     }
 
     if (address) {
@@ -887,11 +898,11 @@ async function createSelfBooking(payload = {}) {
     // Resolve customer
     let custId = null;
     let estimate = null;
-    // Only identity-PROVEN paths (verified estimate token, phone-on-file
-    // match) may write a submitted unit onto an existing record. The
-    // address-verified path resolves an opaque id from a public street-address
-    // lookup — anyone who knows the address could otherwise attach an
-    // arbitrary unit to the customer.
+    // Only TOKEN-PROVEN paths (verified estimate, or a wizard estimate whose
+    // share token the caller possesses) may write a submitted unit onto an
+    // existing record. Phone-on-file and the public address lookup are
+    // knowledge, not possession — anyone who knows the phone or address could
+    // otherwise attach an arbitrary unit to the customer.
     let unitBackfillAllowed = false;
     if (estimate_id) {
       estimate = await db('estimates').where('id', estimate_id).first();
@@ -953,7 +964,10 @@ async function createSelfBooking(payload = {}) {
           return { ok: false, status: 400, error: 'Customer lookup mismatch' };
         }
         custId = existing.id;
-        unitBackfillAllowed = true;
+        // Phone + customer_id resolves the BOOKING, but is knowledge, not
+        // possession: the id comes from the public address lookup and the
+        // phone can be typed by anyone who knows it. Not enough to WRITE a
+        // unit onto the record — only token-proven estimate paths backfill.
       }
     }
 
@@ -1013,11 +1027,12 @@ async function createSelfBooking(payload = {}) {
     }
 
     // Returning booker supplying a unit their record lacks: attach it, but only
-    // on an identity-PROVEN path (unitBackfillAllowed — verified estimate or
-    // phone-on-file, never the public address-only lookup), only when the
-    // submitted street line matches the record (same rule as lead-webhook —
-    // never bolt a unit onto a different address), and never when a legacy
-    // record already carries the unit inline in address_line1 (double-store).
+    // on a TOKEN-PROVEN path (unitBackfillAllowed — verified/share-token
+    // estimate; never phone-on-file or the public address-only lookup, both of
+    // which are knowledge anyone could hold), only when the submitted street
+    // line matches the record (same rule as lead-webhook — never bolt a unit
+    // onto a different address), and never when a legacy record already
+    // carries the unit inline in address_line1 (double-store).
     // New customers already got it at insert.
     if (unitBackfillAllowed && !createdCustomerId && new_customer?.address_line2
         && !customer.address_line2 && !splitStreetLineUnit(customer.address_line1).unit) {

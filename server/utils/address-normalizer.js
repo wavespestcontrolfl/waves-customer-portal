@@ -506,9 +506,18 @@ function normalizeLeadAddress(input = {}) {
   // line2 so the rendered address still never repeats it.
   const inlineSplit = splitStreetLineUnit(line1);
   let line2 = rawLine2;
-  if (rawLine2 && inlineSplit.unit
-      && unitLineValueKey(normalizeUnitLine(inlineSplit.unit)) === unitLineValueKey(rawLine2)) {
-    line1 = inlineSplit.street;
+  let unitConflict = false;
+  if (rawLine2 && inlineSplit.unit) {
+    if (unitLineValueKey(normalizeUnitLine(inlineSplit.unit)) === unitLineValueKey(rawLine2)) {
+      line1 = inlineSplit.street;
+    } else {
+      // Inline and dedicated units DISAGREE — a contradictory service
+      // address must never be stored, so the normalized shape keeps only the
+      // inline value (line1 as submitted, line2 empty) and raises the flag
+      // for interactive callers to fail closed on.
+      unitConflict = true;
+      line2 = '';
+    }
   } else if (rawLine2 && line1.toLowerCase().includes(rawLine2.toLowerCase())) {
     line2 = '';
   }
@@ -531,6 +540,7 @@ function normalizeLeadAddress(input = {}) {
     zip,
     placeId,
     fullAddress,
+    unitConflict,
   };
 }
 
