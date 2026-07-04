@@ -12,9 +12,11 @@ import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile, signed } from "../KpiTile";
 import Verdict from "../Verdict";
 import { mrrVerdict } from "../scorecard-metrics";
+import MrrBridgeCard from "../MrrBridgeCard";
 
 // RETENTION — are customers staying? Net recurring-revenue momentum, the MRR
-// trend, signup-cohort retention, and the customer-quality signals behind it.
+// trend + the bridge decomposing WHY it moved, signup-cohort retention, and
+// the customer-quality signals behind it.
 export default function RetentionSection({
   kpis,
   kpisLoading,
@@ -22,6 +24,7 @@ export default function RetentionSection({
   kpiTargets,
   kpiHistory,
   mrrTrend,
+  mrrBridge,
   cohort,
   reviewTrend,
   isMobile,
@@ -116,19 +119,31 @@ export default function RetentionSection({
         </KpiStrip>
       </div>
 
-      {/* MRR trend */}
+      {/* MRR trend + the bridge that explains each month's move (new /
+          reactivated / expansion / contraction / churn from per-customer
+          snapshots; pre-snapshot months degrade to an approximation). */}
       {isMobile ? (
-        <MobileFold title="MRR Trend" sub={mrrTrendSub}>
-          <div className="px-1 pt-1">
-            <MrrTrendChart trend={mrrTrend?.trend || []} />
-            <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
-          </div>
-        </MobileFold>
+        <>
+          <MobileFold title="MRR Trend" sub={mrrTrendSub}>
+            <div className="px-1 pt-1">
+              <MrrTrendChart trend={mrrTrend?.trend || []} />
+              <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
+            </div>
+          </MobileFold>
+          <MobileFold title="MRR Bridge" sub="why recurring revenue moved">
+            <div className="px-1 pt-1">
+              <MrrBridgeCard bridge={mrrBridge} />
+            </div>
+          </MobileFold>
+        </>
       ) : (
-        <div className="mb-5">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
           <ChartCard title="MRR Trend" sub={mrrTrendSub}>
             <MrrTrendChart trend={mrrTrend?.trend || []} />
             <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
+          </ChartCard>
+          <ChartCard title="MRR Bridge" sub="why recurring revenue moved · month by month">
+            <MrrBridgeCard bridge={mrrBridge} />
           </ChartCard>
         </div>
       )}

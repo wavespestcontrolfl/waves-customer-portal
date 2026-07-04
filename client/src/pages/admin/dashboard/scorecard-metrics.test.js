@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MIN_CONFIDENT_N,
+  mrrBridgeVerdict,
   agingVerdict,
   capitalVerdict,
   captureVerdict,
@@ -217,5 +218,53 @@ describe("remaining card verdicts", () => {
     expect(agingVerdict({ aging: {} })).toBeNull();
     expect(captureVerdict(null)).toBeNull();
     expect(funnelVerdict({ funnel: { sent: 0 } })).toBeNull();
+  });
+});
+
+describe("mrrBridgeVerdict", () => {
+  const month = (over = {}) => ({
+    month: "2026-07-01",
+    label: "Jul \u201926",
+    degraded: false,
+    inProgress: false,
+    startMrr: 9804.69,
+    endMrr: 9749.69,
+    net: -55,
+    new: { mrr: 0, count: 0 },
+    reactivated: { mrr: 0, count: 0 },
+    expansion: { mrr: 0, count: 0 },
+    contraction: { mrr: 0, count: 0 },
+    churned: { mrr: 55, count: 1 },
+    ...over,
+  });
+
+  it("churn-led loss points at the at-risk list", () => {
+    const v = mrrBridgeVerdict(month());
+    expect(v.tone).toBe("bad");
+    expect(v.action).toContain("at-risk");
+    expect(v.happened).toContain("$9,805");
+  });
+
+  it("downgrade-led loss points at the contracted accounts", () => {
+    const v = mrrBridgeVerdict(month({ churned: { mrr: 10, count: 1 }, contraction: { mrr: 45, count: 2 }, net: -55 }));
+    expect(v.tone).toBe("bad");
+    expect(v.action).toContain("contracted accounts");
+  });
+
+  it("degraded months get directional facts, never recommendations", () => {
+    const v = mrrBridgeVerdict(month({ degraded: true, startMrr: null, endMrr: null, new: { mrr: 120, count: 2 }, churned: { mrr: 45, count: 1 }, net: 75 }));
+    expect(v.tone).toBe("neutral");
+    expect(v.happened).toContain("approximate");
+    expect(v.action).toContain("directional");
+  });
+
+  it("empty degraded month returns null (card shows its own note)", () => {
+    expect(mrrBridgeVerdict(month({ degraded: true, new: { mrr: 0, count: 0 }, churned: { mrr: 0, count: 0 }, net: 0 }))).toBeNull();
+  });
+
+  it("flat exact month is neutral", () => {
+    const v = mrrBridgeVerdict(month({ churned: { mrr: 0, count: 0 }, net: 0, endMrr: 9804.69 }));
+    expect(v.tone).toBe("neutral");
+    expect(v.happened).toContain("held flat");
   });
 });

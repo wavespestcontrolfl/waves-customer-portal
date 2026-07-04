@@ -955,6 +955,18 @@ router.get('/mrr-trend', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/mrr-bridge?months=6
+// Net-MRR bridge: each month's movement decomposed into new / reactivated /
+// expansion / contraction / churned by diffing consecutive
+// customer_mrr_snapshots months; pre-snapshot months degrade (never hide) to a
+// customers-table approximation. See services/mrr-bridge.js.
+router.get('/mrr-bridge', dashboardCache, async (req, res, next) => {
+  try {
+    const { computeMrrBridge } = require('../services/mrr-bridge');
+    res.json(await computeMrrBridge({ months: req.query.months }));
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dashboard/kpi-history?days=90
 // Per-metric daily series from kpi_snapshots (the daily cron's month-to-date
 // captures) for the KPI-tile sparklines. Series start at the first snapshot

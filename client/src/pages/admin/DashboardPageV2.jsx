@@ -96,6 +96,7 @@ export default function DashboardPageV2() {
   const [kpiTargets, setKpiTargets] = useState(null);
   const [kpiHistory, setKpiHistory] = useState(null);
   const [ebitda, setEbitda] = useState(null); // /admin/dashboard/ebitda-bridge (wave4)
+  const [mrrBridge, setMrrBridge] = useState(null); // /admin/dashboard/mrr-bridge (wave5)
   // Mobile scorecard: below md the five sections render ONE at a time behind
   // the jump-nav pills (real tabs), so a phone isn't scrolling five sections
   // of charts. Desktop keeps the one-page scroll + IntersectionObserver nav.
@@ -283,6 +284,15 @@ export default function DashboardPageV2() {
     if (!mountedRef.current) { inFlightRef.current = false; return; }
     const [eb] = wave4;
     setEbitda((prev) => eb ?? prev);
+
+    // Wave 5 — the net-MRR bridge. Same one-fetch-per-new-wave rule as wave4
+    // (rate-limiter budget); fails soft to the card's loading/empty state.
+    const wave5 = await Promise.all([
+      track("/mrr-bridge", adminFetch("/admin/dashboard/mrr-bridge?months=6")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [mb] = wave5;
+    setMrrBridge((prev) => mb ?? prev);
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -594,6 +604,7 @@ export default function DashboardPageV2() {
       {sectionVisible("retention") && (
         <RetentionSection
           mrrTrend={mrrTrend}
+          mrrBridge={mrrBridge}
           cohort={cohort}
           reviewTrend={reviewTrend}
           isMobile={isMobile}
