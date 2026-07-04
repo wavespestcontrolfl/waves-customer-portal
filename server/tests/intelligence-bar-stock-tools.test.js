@@ -127,6 +127,30 @@ describe('adjust_stock', () => {
     });
   });
 
+  test('set_total 0 on an UNTRACKED product seeds tracking at zero (Codex P2)', async () => {
+    const mutations = useDb({ products_catalog: [UNTRACKED_PRODUCT] });
+    const result = await executeProcurementTool('adjust_stock', {
+      product_name: 'Prodiamine', movement_type: 'correction', set_total: 0, unit: 'lb', confirmed: true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.success).toBe(true);
+    expect(result.stock_after).toBe(0);
+
+    const update = mutations.find(m => m.table === 'products_catalog' && m.op === 'update');
+    expect(update.args[0]).toMatchObject({ inventory_on_hand: 0, inventory_unit: 'lb' });
+    const movement = mutations.find(m => m.table === 'product_inventory_movements' && m.op === 'insert');
+    expect(movement.args[0]).toMatchObject({ movement_type: 'correction', quantity: 0, stock_before: 0, stock_after: 0 });
+  });
+
+  test('set_total equal to current stock on a TRACKED product is rejected as a no-op', async () => {
+    const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
+    const result = await executeProcurementTool('adjust_stock', {
+      product_name: 'Bifen', movement_type: 'correction', set_total: 64, confirmed: true,
+    });
+    expect(result.error).toMatch(/nothing to adjust/);
+    expect(mutations).toEqual([]);
+  });
+
   test('refuses a weight unit against a volume inventory unit', async () => {
     const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
     const result = await executeProcurementTool('adjust_stock', {
@@ -207,6 +231,22 @@ describe('update_restock_request', () => {
     });
     expect(result.error).toMatch(/already received/);
     expect(mutations).toEqual([]);
+  });
+
+  test('a concurrent receive landing between pre-check and transaction is caught by the locked re-check (Codex P1)', async () => {
+    // The rotating .first() mock serves the OPEN row to the unlocked
+    // pre-check and the RECEIVED row to the in-transaction forUpdate
+    // re-read — exactly the interleaving of two simultaneous confirms.
+    const mutations = useDb({
+      products_catalog: [TRACKED_PRODUCT],
+      product_restock_requests: [OPEN_REQUEST, { ...OPEN_REQUEST, status: 'received' }],
+    });
+    const result = await executeProcurementTool('update_restock_request', {
+      request_id: 'req-1', action: 'receive', confirmed: true,
+    });
+    expect(result.error).toMatch(/already received/);
+    expect(mutations).toEqual([]);
+    expect(adminInventoryMock.syncLawnReadinessAfterRestock).not.toHaveBeenCalled();
   });
 
   test('confirmed receive adds stock, logs a restock movement, closes the request, and runs the readiness recheck', async () => {

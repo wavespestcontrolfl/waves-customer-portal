@@ -867,7 +867,11 @@ function computeStockChange(product, { movementType, qty, setTotal, unit }) {
       totalInInventoryUnit = conv.amount;
     }
     delta = round4(totalInInventoryUnit - stockBefore);
-    if (delta === 0) return { error: `Stock is already ${stockBefore} ${inventoryUnit} — nothing to adjust` };
+    // A zero-delta count is still meaningful for an UNTRACKED product —
+    // writing on_hand (even 0) turns tracking on. Only reject true no-ops.
+    if (delta === 0 && toNumber(product.inventory_on_hand) != null) {
+      return { error: `Stock is already ${stockBefore} ${inventoryUnit} — nothing to adjust` };
+    }
   } else {
     const conv = convertMagnitude(Math.abs(qty));
     if (conv.error) return conv;
@@ -1218,6 +1222,15 @@ async function updateRestockRequest(input) {
   }
 
   const result = await db.transaction(async (trx) => {
+    // Re-check under lock: a concurrent confirm can close this request
+    // between the unlocked pre-check above and this transaction. Without
+    // the request-row lock, two receives would both add stock.
+    const lockedRequest = await trx('product_restock_requests').where('id', request.id).forUpdate().first();
+    if (!lockedRequest) return { error: 'Restock request not found' };
+    if (lockedRequest.status === 'received' || lockedRequest.status === 'cancelled') {
+      return { error: `This request is already ${lockedRequest.status} — no further actions allowed` };
+    }
+
     if (action === 'mark_ordered') {
       await trx('product_restock_requests').where('id', request.id).update({ status: 'ordered', updated_at: new Date() });
       return { success: true, request_id: request.id, product: product.name, status: 'ordered' };
