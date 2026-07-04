@@ -123,6 +123,8 @@ const NEEDS_ATTENTION = {
     { d: 'Mon', in: 0.3 }, { d: 'Tue', in: 0.6 }, { d: 'Wed', in: 0.1 }, { d: 'Thu', in: 0.4 },
     { d: 'Fri', in: 0.0 }, { d: 'Sat', in: 0.2 }, { d: 'Sun', in: 0.0 },
   ],
+  // City-collective fallback week (a single-cell model spike was smoothed out).
+  rain7dConfidence: 'low',
   mowing: {
     measuredHeightInches: 3.75, idealMinInches: 3.5, idealMaxInches: 4.0, grassType: 'st_augustine',
     status: 'ideal',
@@ -209,7 +211,7 @@ export default function LawnReportV2Preview() {
         <LawnInsightCards insights={data.insights} />
         <VisualDiagnosisCards categories={data.diagnosis} />
         <WaterIntakeBar water={data.water} />
-        <RainLast7DaysChart days={data.rain7d} />
+        <RainLast7DaysChart days={data.rain7d} confidence={data.rain7dConfidence} />
         <MowingHeightGauge mowing={data.mowing} />
         <LawnTreatmentCard treatment={data.treatment} />
         <LawnTrends trends={data.trends} />
