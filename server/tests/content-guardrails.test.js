@@ -682,3 +682,19 @@ describe('template-literal / dynamic JSX props, LF-smuggled unquoted values (Cod
     expect(formatted.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 });
+
+describe('case-insensitive control-character destination scan (Codex round 12)', () => {
+  test('uppercase HREF/SRC hit the control-char arms like lowercase (browsers are case-insensitive)', () => {
+    for (const body of [
+      '<a HREF="java&#x09;script:alert(1)">x</a>',
+      '<img SRC=java&#10;script:alert(1)>',
+      '<a Href={`java&#x0d;script:alert(1)`}>x</a>',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+    // clean uppercase attribute is not a false positive
+    const ok = guardrails.evaluate({ body: '<a HREF="/services/pest-control">x</a>' }, {});
+    expect(ok.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});

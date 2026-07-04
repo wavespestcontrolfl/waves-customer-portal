@@ -335,7 +335,9 @@ const DEST_CONTROL_RE = new RegExp([
   // newline + the next prop) has none, so formatting whitespace between
   // props can't false-fail the gate.
   /\b(?:href|src)\s*=\s*[^"'\s{>`][^:>]*[\t\r\n][^:>]*:/.source,
-].join('|'));
+  // 'i': browsers treat attribute names case-insensitively, so HREF=/Src=
+  // must hit every arm above — the sibling scheme regexes already carry it.
+].join('|'), 'i');
 
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
