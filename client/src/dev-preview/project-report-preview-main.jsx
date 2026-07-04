@@ -22,9 +22,6 @@ const BASE = {
   fdacsPdfAvailable: false,
   status: 'sent',
   title: '',
-  customerName: 'Anna Gomez',
-  cityState: 'Bradenton, FL',
-  customerAddress: '4519 Barracuda Dr, Bradenton, FL 34208',
   technicianName: 'Adam',
   projectDate: '2026-06-28',
   sentAt: '2026-06-28T18:30:00Z',
@@ -40,6 +37,11 @@ const PAYLOADS = {
   certificate: () => ({
     ...BASE,
     projectType: 'pre_treatment_termite_certificate',
+    customerName: 'Anna Gomez',
+    customerEmail: 'anna.gomez@example.com',
+    customerPhone: '9415550188',
+    cityState: 'Bradenton, FL',
+    customerAddress: '4519 Barracuda Dr, Bradenton, FL 34208',
     findings: {
       treatment_address: '4519 Barracuda Dr, Bradenton, FL 34208',
       lot_block: 'Lot 14, Block B',
@@ -65,9 +67,17 @@ const PAYLOADS = {
       applicator_attestation: 'I attest that the soil treatment described above was applied in accordance with the product label and Florida Building Code 1816.1.7.',
     },
   }),
+  // Same contact block as the estimate harness's William Carter fixture so
+  // the two previews can be mirrored side by side.
   report: () => ({
     ...BASE,
     projectType: 'pest_inspection',
+    title: 'Ant activity — garage slab edge',
+    customerName: 'William Carter',
+    customerEmail: 'william.carter@example.com',
+    customerPhone: '9415550123',
+    cityState: 'Parrish, FL',
+    customerAddress: '10225 Kalamazoo Pl, Parrish, FL 34219',
     findings: {
       areas_inspected: 'Kitchen, garage, exterior perimeter, attic access',
       activity_found: 'Ant trailing along the garage slab edge; no interior activity',

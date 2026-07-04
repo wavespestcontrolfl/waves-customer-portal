@@ -85,6 +85,16 @@ const TYPE_LABELS = {
   pre_treatment_termite_certificate: 'Certificate of Compliance — Pre-Construction Termite Treatment',
 };
 
+// Mirrors the estimate hero's phone display (EstimateViewPage helper of the
+// same name): 10-digit US numbers get the (xxx) xxx-xxxx treatment, anything
+// else renders as stored.
+function formatCustomerPhone(phone) {
+  const raw = String(phone || '').replace(/\D/g, '');
+  const digits = raw.length === 11 && raw.startsWith('1') ? raw.slice(1) : raw;
+  if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  return String(phone || '').trim();
+}
+
 function formatReportDate(value) {
   if (!value) return '';
   const raw = String(value);
@@ -272,9 +282,11 @@ function includesAny(text, words) {
   return words.some(word => value.includes(word));
 }
 
-function buildAtAGlance({ data, reportTitle }) {
+// Service type prints the bare type label — the hero kicker already carries
+// the project's title (what it's for), so repeating it here would read twice.
+function buildAtAGlance({ data, typeLabel }) {
   const rows = [
-    ['Service type', reportTitle],
+    ['Service type', typeLabel],
   ];
   if (data.upcomingAppointment) {
     rows.push(['Follow-up', formatAppointmentWindow(data.upcomingAppointment)]);
@@ -358,24 +370,32 @@ export default function ProjectReportViewPage() {
   const aiNarrativeSections = data.recommendations ? parseSections(String(data.recommendations)) : null;
   const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
     && (data.projectType !== 'wdo_inspection' || Boolean(data.fdacsPdfAvailable));
-  const atAGlanceRows = buildAtAGlance({ data, reportTitle });
+  const atAGlanceRows = buildAtAGlance({ data, typeLabel });
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   const headline = isCertificate
     ? `Hey ${firstName}, here's your Certificate of Compliance.`
     : `Hey ${firstName}, here's your ${typeLabel.toLowerCase()} report.`;
-  // Mirrors the customer estimate hero: the full service address under the
-  // headline, not just "City, FL". Document types use the REPORT's own
-  // recorded address, never the live customer row: a certificate's treatment
-  // address (a pre-construction lot may differ from billing — with only a
-  // lot/block recorded, fall to City, FL rather than print the billing
-  // street), and a WDO's inspected property (the findings are the archived
-  // as-sent snapshot, so this can't drift from the filed FDACS PDF even if
-  // the customer row later changes).
-  const subhead = isCertificate
+  // The address line of the hero contact block. Document types use the
+  // REPORT's own recorded address, never the live customer row: a
+  // certificate's treatment address (a pre-construction lot may differ from
+  // billing — with only a lot/block recorded, fall to City, FL rather than
+  // print the billing street), and a WDO's inspected property (the findings
+  // are the archived as-sent snapshot, so this can't drift from the filed
+  // FDACS PDF even if the customer row later changes).
+  const heroAddressLine = isCertificate
     ? (String(findings.treatment_address || '').trim() || data.cityState || '')
     : data.projectType === 'wdo_inspection'
       ? (String(findings.property_address || '').trim() || data.customerAddress || data.cityState || '')
       : (data.customerAddress || data.cityState || '');
+  // Mirrors the customer estimate hero (owner directive 2026-07-04): the
+  // recipient's own contact lines — name, email, phone, address — under the
+  // headline, same uppercase treatment as EstimateViewPage's Header.
+  const heroContactLines = [
+    data.customerName,
+    data.customerEmail,
+    formatCustomerPhone(data.customerPhone),
+    heroAddressLine,
+  ].map((line) => String(line || '').trim()).filter(Boolean);
 
   return (
     <div style={{
@@ -414,8 +434,12 @@ export default function ProjectReportViewPage() {
 
       <main style={{ flex: 1, padding: '32px 20px 64px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
+          {/* The kicker carries what the project is FOR (its title) when one
+              is recorded — the bare type alone reads generic; the type still
+              anchors the headline below. Mirrors the estimate's
+              "Your estimate · {service}" kicker. */}
           <div style={{ ...eyebrowStyle, marginBottom: 6 }}>
-            Project report{typeLabel ? ` · ${typeLabel}` : ''}
+            Project report{reportTitle ? ` · ${reportTitle}` : ''}
           </div>
           <h1 style={{
             fontFamily: FONTS.serif,
@@ -428,8 +452,12 @@ export default function ProjectReportViewPage() {
           }}>
             {headline}
           </h1>
-          {subhead ? (
-            <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{subhead}</div>
+          {heroContactLines.length ? (
+            <div style={{ marginTop: 14, display: 'grid', gap: 4 }}>
+              {heroContactLines.map((line) => (
+                <div key={line} style={{ ...eyebrowStyle, letterSpacing: '0.12em', lineHeight: 1.5 }}>{line}</div>
+              ))}
+            </div>
           ) : null}
         </div>
 
