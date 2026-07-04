@@ -407,7 +407,7 @@ function stripModelWrapper(raw) {
   // so unhyphenated adjective hooks ("Here's a post storm mosquito tip:",
   // "Here's a post treatment reminder:") survive too — there "post" is followed by
   // another content word, which real meta lines never do.
-  text = text.replace(/^(?:(?:sure|certainly|of course)(?:\s*[,!.:—–-]\s*|\s+))?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b(?!-)(?:[,—–-]?\s+(?:for|that|which|you|your|ready|based|within|under|below|about|in|on|to|at)\b[^:\n]{0,60})?:\s*/i, '');
+  text = text.replace(/^(?:(?:sure(?: thing)?|certainly|of course|absolutely|definitely|gladly|no problem|got it|you got it|happy to help|okay|ok|great|perfect|done|here you go)(?:\s*[,!.:—–-]\s*|\s+))?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b(?!-)(?:[,—–-]?\s+(?:for|that|which|you|your|ready|based|within|under|below|about|in|on|to|at)\b[^:\n]{0,60})?:\s*/i, '');
   text = stripFences(text);
   // Trailing count notes: "*197 characters*", "*(Character count: ~240)*", "(197 characters)".
   // The lookbehind keeps this pass from biting the tail off a "*Note: … 196

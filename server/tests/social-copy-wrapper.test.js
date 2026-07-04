@@ -61,6 +61,13 @@ describe('stripModelWrapper', () => {
     expect(stripModelWrapper(hyphen)).toBe('Brown patch or chinch bugs? The blade base tells you.');
   });
 
+  test('strips additional acknowledgement variants ("Absolutely — …", "Sure thing, …")', () => {
+    const abs = "Absolutely — here's a LinkedIn post: Venice pest pressure is peaking. Stay ahead of it.";
+    expect(stripModelWrapper(abs)).toBe('Venice pest pressure is peaking. Stay ahead of it.');
+    const st = "Sure thing, here's your caption:\n\nParrish lawns are showing fungus after the rain.";
+    expect(stripModelWrapper(st)).toBe('Parrish lawns are showing fungus after the rain.');
+  });
+
   test('strips a preamble hidden behind a leading fence ("---\\nHere\'s a LinkedIn post:")', () => {
     const raw = "---\nHere's a LinkedIn post:\n\nVenice pest pressure is peaking. Stay ahead of it.\n---";
     expect(stripModelWrapper(raw)).toBe('Venice pest pressure is peaking. Stay ahead of it.');

@@ -360,21 +360,32 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
             // (organizationAcls, the same call the connect flow soft-verifies
             // with) before persisting a green status; otherwise createPost()
             // is the first thing to discover the 401.
+            const okStatus = expiresAt && expiresAt < new Date(Date.now() + 7 * 86400000) ? 'expiring-soon' : 'healthy';
             try {
-              await linkedin.verifyOrgAccess();
-              results.push({
-                ...credential,
-                status: expiresAt && expiresAt < new Date(Date.now() + 7 * 86400000) ? 'expiring-soon' : 'healthy',
-                expires_at: expiresAt,
-              });
+              const { adminedOrganizations } = await linkedin.verifyOrgAccess();
+              // Same comparison as _recordOrgVerification(): numeric org id,
+              // EQUALITY not substring. An authorized user removed from the
+              // page after connecting would otherwise read green until
+              // createPost() hits the page-permission 403.
+              const target = String(status.companyId).trim();
+              const orgId = (o) => String(o).trim().replace(/^urn:li:organization:/, '');
+              const adminsTarget = (adminedOrganizations || []).some((o) => orgId(o) === target);
+              results.push(adminsTarget
+                ? { ...credential, status: okStatus, expires_at: expiresAt }
+                : { ...credential, status: 'error', error: `Authorized account does not administer org ${target} — reconnect with a page admin`, expires_at: expiresAt });
             } catch (verifyErr) {
-              const authFail = /\b40[13]\b/.test(verifyErr.message);
-              results.push({
-                ...credential,
-                status: authFail ? 'expired' : 'error',
-                error: authFail ? `Re-authorize — ${verifyErr.message}` : verifyErr.message,
-                expires_at: expiresAt,
-              });
+              if (/\b401\b/.test(verifyErr.message)) {
+                results.push({ ...credential, status: 'expired', error: `Re-authorize — ${verifyErr.message}`, expires_at: expiresAt });
+              } else if (/\b403\b/.test(verifyErr.message)) {
+                // Expected under the default scopes: /organizationAcls needs an
+                // org-admin READ scope we deliberately don't request
+                // (linkedin.js SCOPES note), and the connect flow records this
+                // same 403 as "verification skipped" — never a false negative.
+                // The token can still publish, so keep the green status.
+                results.push({ ...credential, status: okStatus, expires_at: expiresAt });
+              } else {
+                results.push({ ...credential, status: 'error', error: verifyErr.message, expires_at: expiresAt });
+              }
             }
           }
         }
