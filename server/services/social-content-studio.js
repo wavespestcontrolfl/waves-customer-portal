@@ -498,11 +498,34 @@ function locationForCity(city) {
 // "palmetto bugs" / "saw palmetto" / "laurel oaks" are Florida vernacular, not
 // the cities Palmetto / Laurel — scrub them before scanning.
 const KNOWN_CITY_NAMES = Object.keys(CITY_TO_LOCATION);
+// Longest name first, and each match is consumed from the haystack, so nested
+// names can't double-read: "Bradenton Beach homeowners" is one mention of
+// bradenton beach, NOT also a (foreign) mention of bradenton.
+const KNOWN_CITIES_BY_LENGTH = [...KNOWN_CITY_NAMES].sort((a, b) => b.length - a.length);
 const CITY_FALSE_POSITIVES = /\b(?:saw\s+palmetto|palmetto\s+bugs?|laurel\s+oaks?)\b/gi;
 
+// A city shows up in prose ("Sarasota") or in the hashtag forms the Instagram
+// prompt itself suggests ("#sarasotafl", "#lakewoodranch") — scan all of them.
+function cityForms(name) {
+  const compact = name.replace(/ /g, '');
+  return Array.from(new Set([name, compact, `${compact}fl`]));
+}
+
 function citiesMentioned(text) {
-  const haystack = ` ${String(text || '').toLowerCase().replace(CITY_FALSE_POSITIVES, ' ').replace(/[^a-z]+/g, ' ').trim()} `;
-  return KNOWN_CITY_NAMES.filter((name) => haystack.includes(` ${name} `));
+  let haystack = ` ${String(text || '').toLowerCase().replace(CITY_FALSE_POSITIVES, ' ').replace(/[^a-z]+/g, ' ').trim()} `;
+  const found = [];
+  for (const name of KNOWN_CITIES_BY_LENGTH) {
+    let hit = false;
+    for (const form of cityForms(name)) {
+      const needle = ` ${form} `;
+      if (haystack.includes(needle)) {
+        hit = true;
+        haystack = haystack.split(needle).join('  ');
+      }
+    }
+    if (hit) found.push(name);
+  }
+  return found;
 }
 
 function mentionsOtherCity(text, targetCity) {
@@ -510,17 +533,19 @@ function mentionsOtherCity(text, targetCity) {
   return citiesMentioned(text).some((name) => name !== target);
 }
 
-// Blog rows tagged with a different city are excluded up front: content[0]
-// feeds a draft fact AND suggestedLink, so a cross-city row means wrong-city
-// copy plus a wrong-city link. Untagged and region-wide rows ("SWFL",
-// "Southwest Florida" — not city names) stay; mentionsOtherCity() on the final
-// facts is the backstop for those.
+// Blog rows about a different city are excluded up front: content[0] feeds a
+// draft fact AND suggestedLink, so a cross-city row means wrong-city copy plus
+// a wrong-city link. A row is cross-city when its city tag names a different
+// known city, OR — for untagged/region-tagged rows ("SWFL") — when its
+// title/meta/keyword/slug text names one; the fact scrub alone can't fix
+// suggestedLink, which reads the row, not the fact.
 function contentRowMatchesCity(row, targetCity) {
-  const rowCity = String(row?.city || '').toLowerCase().trim();
-  if (!rowCity) return true;
   const target = String(targetCity || '').toLowerCase().trim();
-  if (!target || rowCity === target) return true;
-  return !KNOWN_CITY_NAMES.includes(rowCity);
+  if (!target) return true;
+  const rowCity = String(row?.city || '').toLowerCase().trim();
+  if (rowCity && rowCity !== target && KNOWN_CITY_NAMES.includes(rowCity)) return false;
+  const rowText = [row?.title, row?.meta_description, row?.keyword, row?.slug].filter(Boolean).join(' ');
+  return !mentionsOtherCity(rowText, target);
 }
 
 async function getCampaignContext({ topic, city, service }) {

@@ -45,6 +45,20 @@ describe('city grounding', () => {
     expect(Studio.mentionsOtherCity("Bradenton's rainy week is back.", 'Venice')).toBe(true);
   });
 
+  test('nested city names resolve to the longest match ("Bradenton Beach" is not foreign "Bradenton")', () => {
+    expect(Studio.mentionsOtherCity('Bradenton Beach homeowners: check under the dock lights.', 'Bradenton Beach')).toBe(false);
+    expect(Studio.mentionsOtherCity('Bradenton Beach homeowners: check under the dock lights.', 'Venice')).toBe(true);
+    // Both cities genuinely present still counts as a foreign mention.
+    expect(Studio.mentionsOtherCity('From Bradenton out to Bradenton Beach, ants are moving in.', 'Bradenton Beach')).toBe(true);
+  });
+
+  test('hashtag city forms are city mentions (#sarasotafl, #lakewoodranch)', () => {
+    expect(Studio.mentionsOtherCity('Storm week again. #sarasotafl #lawncare', 'Venice')).toBe(true);
+    expect(Studio.mentionsOtherCity('Storm week again. #lakewoodranch', 'Venice')).toBe(true);
+    expect(Studio.mentionsOtherCity('Storm week again. #venicefl #lawncare', 'Venice')).toBe(false);
+    expect(Studio.mentionsOtherCity('Dump standing water. #northport', 'North Port')).toBe(false);
+  });
+
   test('Florida vernacular is not a city mention', () => {
     expect(Studio.mentionsOtherCity('Palmetto bugs love a humid garage.', 'Venice')).toBe(false);
     expect(Studio.mentionsOtherCity('Saw palmetto and laurel oaks shade the beds.', 'Venice')).toBe(false);
@@ -58,6 +72,14 @@ describe('city grounding', () => {
     expect(Studio.contentRowMatchesCity({ city: null }, 'Venice')).toBe(true);
     expect(Studio.contentRowMatchesCity({ city: 'Southwest Florida' }, 'Venice')).toBe(true);
     expect(Studio.contentRowMatchesCity({ city: 'Sarasota' }, '')).toBe(true);
+  });
+
+  test('untagged rows whose text names another city are dropped (suggestedLink reads the row, not the fact)', () => {
+    expect(Studio.contentRowMatchesCity({ city: null, title: 'Your Sarasota lawn after the rain' }, 'Venice')).toBe(false);
+    expect(Studio.contentRowMatchesCity({ city: null, title: 'Chinch bug basics', slug: 'sarasota-lawn-fungus' }, 'Venice')).toBe(false);
+    expect(Studio.contentRowMatchesCity({ city: 'Southwest Florida', meta_description: 'Bradenton lawns brown out in July.' }, 'Venice')).toBe(false);
+    expect(Studio.contentRowMatchesCity({ city: null, title: 'Chinch bug basics for Florida lawns', slug: 'chinch-bug-basics' }, 'Venice')).toBe(true);
+    expect(Studio.contentRowMatchesCity({ city: null, title: 'Venice lawn fungus after the rain', slug: 'venice-lawn-fungus' }, 'Venice')).toBe(true);
   });
 
   test('campaign fact pack and template drafts drop cross-city facts (07-03 bug shape)', () => {
