@@ -92,3 +92,83 @@ describe('buildEbitdaBridge', () => {
     expect(b.rows.every((r) => Number.isFinite(r.amount))).toBe(true);
   });
 });
+
+describe('Phase 5 — overhead basis + COGS split', () => {
+  const BASE = {
+    revenue: 20000,
+    grossProfit: 11000,
+    marketing: { adSpend: 1500, fixedCosts: 500, referralRewards: 100 },
+    monthFraction: 1,
+  };
+
+  test('entered basis uses ovh components and labels the row as entered', () => {
+    const b = buildEbitdaBridge({
+      ...BASE,
+      overhead: {
+        basis: 'entered',
+        enteredAt: '2026-07-04T07:00:00Z',
+        components: { payroll: 3000, rent: 0, insurance: 450, software: 400, vehicle: 900, other: 250 },
+      },
+    });
+    expect(b.overheadBasis).toBe('entered');
+    expect(b.overheadEnteredAt).toBe('2026-07-04T07:00:00Z');
+    expect(b.overhead.total).toBe(5000);
+    expect(b.ebitda).toBe(3900); // 8900 contribution − 5000
+    expect(b.rows.find((r) => r.key === 'overhead').label).toContain('entered');
+  });
+
+  test('entered basis completes the waterfall even at a deliberate $0 overhead', () => {
+    const b = buildEbitdaBridge({
+      ...BASE,
+      overhead: { basis: 'entered', components: { payroll: 0, rent: 0 } },
+    });
+    expect(b.overheadEntered).toBe(true);
+    expect(b.overhead.total).toBe(0);
+    expect(b.ebitda).toBe(b.contribution);
+  });
+
+  test('pricing_defaults basis (general shape) still stops at Contribution when all-zero', () => {
+    const b = buildEbitdaBridge({
+      ...BASE,
+      overhead: { basis: 'pricing_defaults', components: { vehicle: 0, insurance: 0 } },
+    });
+    expect(b.overheadEntered).toBe(false);
+    expect(b.ebitda).toBeNull();
+  });
+
+  test('legacy shape keeps reporting pricing_defaults with the assumption label', () => {
+    const b = buildEbitdaBridge({
+      ...BASE,
+      overhead: { vehicleMonthly: 850, insuranceMonthly: 400, softwareMonthly: 350, adminMonthly: 1000 },
+    });
+    expect(b.overheadBasis).toBe('pricing_defaults');
+    expect(b.overheadEnteredAt).toBeNull();
+    expect(b.rows.find((r) => r.key === 'overhead').label).toContain('assumptions');
+  });
+
+  test('cogsSplit renders detail rows that reconcile to the headline COGS via unsplit', () => {
+    const b = buildEbitdaBridge({
+      ...BASE,
+      cogsSplit: { labor: 5200, materials: 2300, drive: 900 }, // headline COGS is 9000
+    });
+    expect(b.cogsDetail.map((d) => d.key)).toEqual(['labor', 'materials', 'drive', 'unsplit']);
+    const sum = b.cogsDetail.reduce((t, d) => t + d.amount, 0);
+    expect(sum).toBeCloseTo(b.cogs, 2); // 5200+2300+900+600 = 9000
+  });
+
+  test('exact split omits the unsplit line; empty split omits detail entirely', () => {
+    const exact = buildEbitdaBridge({ ...BASE, cogsSplit: { labor: 6000, materials: 2000, drive: 1000 } });
+    expect(exact.cogsDetail.map((d) => d.key)).toEqual(['labor', 'materials', 'drive']);
+    expect(buildEbitdaBridge({ ...BASE, cogsSplit: { labor: 0, materials: 0, drive: 0 } }).cogsDetail).toBeNull();
+    expect(buildEbitdaBridge(BASE).cogsDetail).toBeNull();
+  });
+
+  test('monthFraction prorates entered overhead like any monthly figure', () => {
+    const b = buildEbitdaBridge({
+      ...BASE,
+      monthFraction: 0.5,
+      overhead: { basis: 'entered', components: { payroll: 3000, rent: 1000 } },
+    });
+    expect(b.overhead.total).toBe(2000);
+  });
+});

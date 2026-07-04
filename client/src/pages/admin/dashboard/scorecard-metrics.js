@@ -90,12 +90,17 @@ export function capitalVerdict(capAlloc) {
 // Adjusted-EBITDA bridge — /admin/dashboard/ebitda-bridge payload.
 export function ebitdaVerdict(bridge) {
   if (!bridge || !Array.isArray(bridge.rows) || bridge.revenue == null) return null;
-  // Uncosted revenue understates GP — surface it as a visible caveat once it's
-  // a meaningful slice (>5% of revenue), not a tooltip.
-  const caveat =
-    bridge.uncostedRevenue > 0 && bridge.revenue > 0 && bridge.uncostedRevenue / bridge.revenue > 0.05
-      ? `${usd(bridge.uncostedRevenue)} of revenue isn't job-costed yet — gross profit is understated until those visits are costed.`
-      : null;
+  // Visible caveats, never tooltips: materially uncosted revenue (>5%)
+  // understates GP, and an overhead block approximated from pricing settings
+  // must not read as an entered P&L figure.
+  const caveats = [];
+  if (bridge.uncostedRevenue > 0 && bridge.revenue > 0 && bridge.uncostedRevenue / bridge.revenue > 0.05) {
+    caveats.push(`${usd(bridge.uncostedRevenue)} of revenue isn't job-costed yet — gross profit is understated until those visits are costed.`);
+  }
+  if (bridge.overheadEntered && bridge.overheadBasis === "pricing_defaults") {
+    caveats.push("Overhead is approximated from pricing settings — enter real operating costs for a true adjusted EBITDA.");
+  }
+  const caveat = caveats.length ? caveats.join(" ") : null;
 
   if (!bridge.overheadEntered) {
     return {

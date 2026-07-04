@@ -25,17 +25,10 @@ function getPeriodDates(period, dateStr) {
   return { start, end };
 }
 
-function classifyServiceLine(type) {
-  const t = (type || '').toLowerCase();
-  // "turf": commercial lawn persists as "Commercial Turf Treatment Program"
-  if (t.includes('lawn') || t.includes('turf')) return 'Lawn Care';
-  if (t.includes('mosquito')) return 'Mosquito';
-  if (t.includes('tree') || t.includes('shrub')) return 'Tree & Shrub';
-  if (t.includes('termite')) return 'Termite';
-  if (t.includes('rodent')) return 'Rodent';
-  if (t.includes('one-time') || t.includes('one time')) return 'One-Time';
-  return 'Pest Control';
-}
+// Canonical classifier now lives in services/service-line.js (shared with the
+// revenue IB tools + the dashboard margin-by-line card); still re-exported at
+// the bottom of this module for the existing turf regression tests.
+const { classifyServiceLine } = require('../services/service-line');
 
 // GET /api/admin/revenue/overview
 router.get('/overview', async (req, res, next) => {
@@ -176,20 +169,89 @@ router.get('/settings', async (req, res, next) => {
 });
 
 // PUT /api/admin/revenue/settings
+//
+// Effective-dated insert, but MERGED over the latest existing row first — the
+// old version inserted only the four fields it knew about, silently resetting
+// every other company_financials column (the vehicle/insurance/software/admin
+// pricing inputs, and now the ovh_* operating costs) to table defaults on any
+// save. buildSettingsRow is pure and exported for the regression test.
+//
+// Request fields (all optional; camelCase like the original four):
+//   pricing: loadedLaborRate, driveCostPerStop, targetGrossMarginPct, targetRpmh
+//   operating overhead (Phase 5): ovhOfficePayroll, ovhRent, ovhInsurance,
+//     ovhSoftware, ovhVehicleFixed, ovhOtherGa — finite numbers ≥ 0 (null
+//     clears one); any overhead key present stamps overhead_entered_at.
+const SETTINGS_FIELDS = {
+  loadedLaborRate: 'loaded_labor_rate',
+  driveCostPerStop: 'drive_cost_per_stop',
+  targetGrossMarginPct: 'target_gross_margin_pct',
+  targetRpmh: 'target_rpmh',
+};
+const OVH_FIELDS = {
+  ovhOfficePayroll: 'ovh_office_payroll',
+  ovhRent: 'ovh_rent',
+  ovhInsurance: 'ovh_insurance',
+  ovhSoftware: 'ovh_software',
+  ovhVehicleFixed: 'ovh_vehicle_fixed',
+  ovhOtherGa: 'ovh_other_ga',
+};
+
+// DATE cell → 'YYYY-MM-DD' via LOCAL getters (node-postgres parses DATE
+// columns to local-midnight Dates; toISOString/String() would drift or fail).
+function effectiveDateStr(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v.slice(0, 10);
+  const d = new Date(v);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function buildSettingsRow(latest, body, todayStr, now = new Date()) {
+  // Carry EVERY prior value forward (minus row identity/bookkeeping), then
+  // overlay only the fields this request explicitly sent.
+  const carried = { ...(latest || {}) };
+  delete carried.id;
+  delete carried.created_at;
+  const row = { ...carried, effective_date: todayStr };
+
+  for (const [key, col] of Object.entries(SETTINGS_FIELDS)) {
+    if (body[key] === undefined) continue;
+    const v = typeof body[key] === 'number' ? body[key] : parseFloat(body[key]);
+    if (!Number.isFinite(v) || v < 0) return { error: `${key} must be a number ≥ 0` };
+    row[col] = v;
+  }
+  let touchedOverhead = false;
+  for (const [key, col] of Object.entries(OVH_FIELDS)) {
+    if (body[key] === undefined) continue;
+    touchedOverhead = true;
+    if (body[key] === null) { row[col] = null; continue; } // deliberate clear
+    const v = typeof body[key] === 'number' ? body[key] : parseFloat(body[key]);
+    if (!Number.isFinite(v) || v < 0) return { error: `${key} must be a number ≥ 0 (or null to clear)` };
+    row[col] = v;
+  }
+  if (touchedOverhead) row.overhead_entered_at = now;
+  return { row };
+}
+
 router.put('/settings', async (req, res, next) => {
   try {
-    const { loadedLaborRate, driveCostPerStop, targetGrossMarginPct, targetRpmh } = req.body;
-    await db('company_financials').insert({
-      effective_date: etDateString(),
-      loaded_labor_rate: loadedLaborRate || 35,
-      drive_cost_per_stop: driveCostPerStop || 6,
-      target_gross_margin_pct: targetGrossMarginPct || 55,
-      target_rpmh: targetRpmh || 120,
-    });
-    res.json({ success: true });
+    const latest = await db('company_financials').orderBy('effective_date', 'desc').first();
+    const { row, error } = buildSettingsRow(latest, req.body || {}, etDateString());
+    if (error) return res.status(400).json({ error });
+    // Same-day saves update today's row in place instead of stacking
+    // duplicate effective_date rows (GET/first() would be ambiguous).
+    if (latest && effectiveDateStr(latest.effective_date) === row.effective_date) {
+      const { effective_date, ...patch } = row;
+      await db('company_financials').where({ id: latest.id }).update(patch);
+    } else {
+      await db('company_financials').insert(row);
+    }
+    const settings = await db('company_financials').orderBy('effective_date', 'desc').first();
+    res.json({ success: true, settings });
   } catch (err) { next(err); }
 });
 
 module.exports = router;
 // Exported for regression tests (turf revenue must classify as Lawn Care, not Pest).
 module.exports.classifyServiceLine = classifyServiceLine;
+// Exported for the settings-merge regression test (the old PUT reset unlisted columns).
+module.exports.buildSettingsRow = buildSettingsRow;

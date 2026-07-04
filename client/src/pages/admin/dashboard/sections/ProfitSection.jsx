@@ -8,6 +8,7 @@ import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile } from "../KpiTile";
 import EbitdaBridgeCard from "../EbitdaBridgeCard";
+import MarginByLineBars from "../MarginByLineBars";
 
 // PROFIT — what's helping or hurting margin: fully-burdened gross margin,
 // labor productivity, the adjusted-EBITDA bridge (company-level, kept in its
@@ -21,8 +22,12 @@ export default function ProfitSection({
   kpiHistory,
   mix,
   ebitda,
+  revenueOverview,
   isMobile,
 }) {
+  // Company target margin drives the tick on the by-line bars — the owner's
+  // kpi_targets store first, the seeded 55% default otherwise.
+  const targetMarginPct = Number(kpiTargets?.gross_margin?.target) || 55;
   return (
     <DashboardSection
       id="profit"
@@ -106,6 +111,31 @@ export default function ProfitSection({
           <ServiceMixDonut mix={mix?.mix || []} />
         </ChartCard>
       </div>
+
+      {/* Margin by service line — which LINES carry or drag the blended
+          gross margin (job-costed, from the revenue page's byServiceLine). */}
+      {isMobile ? (
+        <MobileFold title="Margin by Service Line" sub="job-costed · this month">
+          <div className="px-1 pt-1">
+            <MarginByLineBars
+              byServiceLine={revenueOverview?.byServiceLine}
+              targetPct={targetMarginPct}
+            />
+          </div>
+        </MobileFold>
+      ) : (
+        <div className="mb-5">
+          <ChartCard
+            title="Margin by Service Line"
+            sub={revenueOverview?.period?.label ? `job-costed · ${revenueOverview.period.label}` : "job-costed · this month"}
+          >
+            <MarginByLineBars
+              byServiceLine={revenueOverview?.byServiceLine}
+              targetPct={targetMarginPct}
+            />
+          </ChartCard>
+        </div>
+      )}
 
       {/* Tech leaderboard — bar variant */}
       {kpis?.leaderboard?.length > 0 &&
