@@ -714,19 +714,52 @@ function externalReferencesFor(serviceKeys) {
   }).slice(0, 8);
 }
 
+// The service library's default_products is not the only real product-to-
+// service linkage: the lawn operating-layer protocols carry their own product
+// list (lawn_protocol_products — e.g. SpeedZone on the Bermuda/Zoysia/Bahia
+// tracks) that the cleaned-up lawn defaults never mention. A named protocol
+// product left unattributed reads as off-estimate downstream and its reviewed
+// label facts are dropped, so those names attribute to lawn_care here.
+// Protocol names can carry tank-mix partners ("SpeedZone Southern + NIS") —
+// each "+"-separated segment registers so the base product still matches its
+// catalog row.
+async function loadProtocolProductFamilies(db) {
+  if (!db) return {};
+  try {
+    const rows = await db('lawn_protocol_products')
+      .select('product_name')
+      .limit(1000);
+    const out = {};
+    for (const row of rows) {
+      for (const segment of cleanText(row.product_name || '').split(/\s*\+\s*/)) {
+        const key = segment.toLowerCase().trim();
+        if (key.length >= 4) out[key] = ['lawn_care'];
+      }
+    }
+    return out;
+  } catch (err) {
+    logger.warn(`[estimate-ai-context] lawn_protocol_products lookup skipped: ${err.message}`);
+    return {};
+  }
+}
+
 async function loadEstimateAiSupportContext({ db, question, context } = {}) {
   const serviceKeys = serviceKeysFromContext(context, question);
   const searchTerms = searchTermsFromContext(context, question);
 
-  const [knowledgeBase, agronomicWiki, serviceLibrary] = await Promise.all([
+  const [knowledgeBase, agronomicWiki, serviceLibrary, protocolProductFamilies] = await Promise.all([
     searchKnowledgeBase(db, searchTerms),
     searchAgronomicWiki(db, searchTerms),
     searchServiceLibrary(db, searchTerms),
+    loadProtocolProductFamilies(db),
   ]);
   const serviceProductNames = serviceLibrary.flatMap((row) => row._productNames || []);
   // Map each service-library default product to the service family (via the
   // shared label patterns) so catalog rows can carry serviceKeys attribution.
   const productFamiliesByName = {};
+  for (const [name, families] of Object.entries(protocolProductFamilies)) {
+    productFamiliesByName[name] = unique([...(productFamiliesByName[name] || []), ...families]);
+  }
   for (const row of serviceLibrary) {
     // Exact service_key prefixes win over the loose text matcher — see
     // SERVICE_KEY_FAMILY_PREFIXES (rodent_bait vs the termite "bait" trap).

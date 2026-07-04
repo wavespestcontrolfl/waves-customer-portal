@@ -133,6 +133,31 @@ describe('estimate AI support context', () => {
     expect(row.serviceKeys).toEqual(['rodent_bait']);
   });
 
+  test('lawn protocol products attribute to lawn_care without a default_products entry', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        // SpeedZone lives in the operating-layer protocol product list, NOT
+        // in any service-library default_products — attribution must come
+        // from the lawn_protocol_products linkage, and the "+ NIS" tank-mix
+        // suffix must not break the catalog-name match.
+        lawn_protocol_products: [{ product_name: 'SpeedZone Southern + NIS' }],
+        products_catalog: [{
+          name: 'SpeedZone Southern EW',
+          category: 'herbicide',
+          active_ingredient: 'Carfentrazone-ethyl + 2,4-D + Mecoprop-p + Dicamba',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is SpeedZone safe for pets?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    });
+    const row = result.productCatalog.find((r) => String(r.activeIngredient || '').includes('Carfentrazone'));
+    expect(row).toBeDefined();
+    expect(row.serviceKeys).toEqual(['lawn_care']);
+    expect(row.questionNameMatch).toBe(true);
+  });
+
   test('question naming a product stamps questionNameMatch without leaking the name', async () => {
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({

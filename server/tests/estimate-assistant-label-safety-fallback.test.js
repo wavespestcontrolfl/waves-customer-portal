@@ -60,6 +60,26 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).toContain('Re-enter after about 4 hours');
   });
 
+  test('naming a product keeps sibling category rows out of the answer', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    context.supportContext.productCatalog[1].reentry = 'Re-enter after about 4 hours.';
+    // "herbicide" here is adjectival — it describes 2,4-D, not the estimate's
+    // other herbicides, so Quinclorac's label facts stay out.
+    const answer = answerEstimateQuestionFallback('Is the 2,4-D herbicide safe for pets?', context);
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).not.toContain('Re-enter after about 4 hours');
+    expect(answer).not.toContain('Quinclorac');
+  });
+
+  test('a conjunction making the category its own subject unions the category rows', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    context.supportContext.productCatalog[1].reentry = 'Re-enter after about 4 hours.';
+    const answer = answerEstimateQuestionFallback('Are 2,4-D and the herbicide products safe for pets?', context);
+    expect(answer).toContain('Label re-entry guidance by product:');
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).toContain('Re-enter after about 4 hours');
+  });
+
   test('unverified rows contribute no safety claims even if stale fields are present', () => {
     const answer = answerEstimateQuestionFallback('Is it safe for kids?', {
       ...verifiedContext,
@@ -269,6 +289,10 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains after treatment?')).toBe(true);
     // Rain-after phrasing counts only when tied to the treatment.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains right after you treat?')).toBe(true);
+    // Service-family qualifiers between the article and the service noun
+    // are still treatment-tied rain wording.
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains after my lawn service?')).toBe(true);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains after the pest control treatment?')).toBe(true);
     // Bare "when can I water?" is irrigation intent even without context.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('When can I water?')).toBe(true);
     // Non-safety questions still reach the live models — bare "rain" and
@@ -303,10 +327,19 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('Quinclorac');
     expect(answer).not.toContain('until dry.');
     expect(answer).not.toContain('rainfast in about 180 minutes');
+    // The lead approach sentence must match the scoped family too — lawn
+    // copy above mosquito label facts reads as a contradiction.
+    expect(answer).toContain('For mosquitoes');
+    expect(answer).not.toContain('For lawns');
   });
 
   test('rainfast questions land in the safety branch and quote the label window', () => {
     const answer = answerEstimateQuestionFallback('What if it rains after the treatment?', verifiedContext);
+    expect(answer).toContain('rainfast in about 180 minutes');
+  });
+
+  test('service-qualified rain questions land in the safety branch too', () => {
+    const answer = answerEstimateQuestionFallback('What if it rains after my lawn service?', verifiedContext);
     expect(answer).toContain('rainfast in about 180 minutes');
   });
 
