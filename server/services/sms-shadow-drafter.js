@@ -175,15 +175,18 @@ function buildFactsBlock(context) {
   // calls (call_log.call_summary, written by call-recording-processor).
   // Customers text "like we discussed on the phone" and the drafter used to
   // invent what was discussed. Summaries are model-generated from customer
-  // speech — collapsed to a single capped line and framed as quoted DATA so
-  // embedded text can't act as instructions (same defense as few-shot
-  // exemplars).
+  // speech — untrusted like exemplars, so they get the FULL exemplar defense
+  // (Codex P2): collapse to a single capped line, drop any summary that looks
+  // like a prompt-control attempt (a caller can speak an injection and the
+  // summarizer may preserve it), and frame the survivors as quoted DATA.
   const callDate = (d) => {
     try {
       return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
     } catch { return ''; }
   };
-  const calls = (context.recentCalls || []).filter((c) => c && typeof c.summary === 'string' && c.summary.trim());
+  const calls = (context.recentCalls || [])
+    .filter((c) => c && typeof c.summary === 'string' && c.summary.trim())
+    .filter((c) => !EXEMPLAR_INJECTION_RE.test(sanitizeSingleLine(c.summary, 400)));
   const callsBlock = calls.length
     ? calls
         .map((c) => `- ${callDate(c.date)} (${c.direction === 'outbound' ? 'we called them' : 'they called us'}${c.outcome ? `, outcome: ${c.outcome}` : ''}): "${sanitizeSingleLine(c.summary, 400)}"`)

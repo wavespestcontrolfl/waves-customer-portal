@@ -104,6 +104,13 @@ class ContextAggregator {
         .where('created_at', '>', new Date(Date.now() - 30 * 86400000))
         .whereNotNull('call_summary')
         .whereRaw("length(trim(call_summary)) > 0")
+        // The voice webhook links customer_id by caller ID BEFORE the call is
+        // classified, so spam/wrong-number calls can carry this customer's id
+        // — their summaries must never ground a reply. NULL outcome stays
+        // eligible (NOT IN is UNKNOWN on NULL and would drop real calls that
+        // simply haven't been assigned an outcome; same rule as the corpus
+        // miner's Codex P2).
+        .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
         .orderBy('created_at', 'desc')
         .limit(2)
         .select('direction', 'call_outcome', 'call_summary', 'created_at');
