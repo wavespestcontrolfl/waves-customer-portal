@@ -310,7 +310,8 @@ async function findProjectByReportSegment(segment) {
     .leftJoin('technicians as t', 'p.created_by_tech_id', 't.id')
     .select(
       'p.*',
-      'c.first_name', 'c.last_name', 'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
+      'c.first_name', 'c.last_name', 'c.email as customer_email', 'c.phone as customer_phone',
+      'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
       't.name as technician_name',
     );
   if (lookup.type === 'full') {
@@ -415,6 +416,15 @@ router.get('/project/:token/data', async (req, res, next) => {
       status: project.status,
       title: project.title,
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
+      // Customer email/phone for the hero contact lines — the report hero
+      // mirrors the customer estimate, which prints the recipient's own
+      // contact block under the headline. NEVER on a WDO: sendWdoReportCopies
+      // emails this same public link to the third parties named on the FDACS
+      // form (realtor/title company), and a link the system itself hands to
+      // outsiders must not carry the homeowner's direct contact details.
+      // Every other project type's link is sent to the customer only.
+      customerEmail: project.project_type === 'wdo_inspection' ? null : (project.customer_email || null),
+      customerPhone: project.project_type === 'wdo_inspection' ? null : (project.customer_phone || null),
       cityState: `${project.city || ''}${project.state ? ', ' + project.state : ''}`.trim().replace(/^,\s*/, ''),
       // Full service address for the hero — the report page mirrors the
       // customer estimate, which shows the street address under the headline.

@@ -1,5 +1,6 @@
 import { COLORS as B, FONTS } from '../theme-brand';
 import NewsletterSignup from './NewsletterSignup';
+import { WAVES_ADDRESS_LINE } from '../constants/business';
 
 const GBP_LOCATION_LINKS = [
   { label: 'Lakewood Ranch', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Lakewood%20Ranch&query_place_id=ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
@@ -64,13 +65,17 @@ export default function BrandFooter({ borderColor, variant }) {
             </a>
           ))}
         </div>
+        {/* nowrap per link + explicit spaces around the separators (JSX emits
+            none between elements) so narrow screens break between items,
+            never inside an email or mid-phone-number. */}
         <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10 }}>
-          <a href={`mailto:${CONTACT_EMAIL}`} style={{ color: B.navy, textDecoration: 'none', fontWeight: 500 }}>{CONTACT_EMAIL}</a>
-          <span aria-hidden="true" style={{ margin: '0 8px', color: B.grayMid }}>·</span>
-          <a href={`tel:${CONTACT_PHONE_TEL}`} style={{ color: B.navy, textDecoration: 'none', fontWeight: 500 }}>{CONTACT_PHONE_DISPLAY}</a>
-          <span aria-hidden="true" style={{ margin: '0 8px', color: B.grayMid }}>·</span>
-          <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={{ color: B.navy, textDecoration: 'none', fontWeight: 500 }}>wavespestcontrol.com</a>
+          <a href={`mailto:${CONTACT_EMAIL}`} style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>{CONTACT_EMAIL}</a>
+          {' '}<span aria-hidden="true" style={{ margin: '0 4px', color: B.grayMid }}>·</span>{' '}
+          <a href={`tel:${CONTACT_PHONE_TEL}`} style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>{CONTACT_PHONE_DISPLAY}</a>
+          {' '}<span aria-hidden="true" style={{ margin: '0 4px', color: B.grayMid }}>·</span>{' '}
+          <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>wavespestcontrol.com</a>
         </div>
+        <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10 }}>{WAVES_ADDRESS_LINE}</div>
         <div style={{ fontSize: 11, color: B.grayMid }}>© {new Date().getFullYear()} Waves Pest Control, LLC · All rights reserved</div>
       </div>
     );
