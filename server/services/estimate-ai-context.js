@@ -125,7 +125,7 @@ function serviceKeyFromText(value) {
 // contains "ant") — and scoping label facts into the wrong family quotes the
 // wrong product's safety guidance. These patterns require whole words.
 const SERVICE_FAMILY_QUESTION_PATTERNS = [
-  ['pest_control', /\b(?:pests?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter)\b/i],
+  ['pest_control', /\b(?:pests?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter|fleas?|ticks?|bees?|wasps?|hornets?|scorpions?|earwigs?|silverfish|bed\s?bugs?)\b/i],
   ['lawn_care', /\b(?:lawns?|turf|weeds?|fertil\w*|fungus|chinch|grass)\b/i],
   ['mosquito', /\b(?:mosquito(?:es)?|midges?|no[-\s]?see[-\s]?ums?)\b/i],
   ['tree_shrub', /\b(?:trees?|shrubs?|ornamentals?)\b/i],
@@ -158,6 +158,12 @@ const PEST_PERIMETER_CONTEXT_PATTERN = /\b(?:interiors?|exteriors?|inside|outsid
 // shrubs", "near the trees or palms") so a later area noun can't survive the
 // strip and read as a target family.
 const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?)(?:\s*(?:,|and|or|&)\s*(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?))*\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
+
+// "Water the lawn", "re-enter the lawn", "mow the grass": the area is the
+// recipient of the customer's ACTIVITY, not the treatment family being asked
+// about — on a pest-only estimate these must not scope to lawn_care and
+// starve the pest product's reviewed guidance.
+const RECIPIENT_ACTIVITY_PATTERN = /\b(?:water(?:ing|ed|s)?|irrigat\w*|mow\w*|walk\w*|play\w*|re-?enter\w*|enter\w*)\s+(?:on\s+|onto\s+|in\s+)?(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?)\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
 
 // Canonical service_key prefixes → family, checked BEFORE the loose label
 // matcher: "rodent_bait_quarterly" must classify as rodent_bait, not hit the
@@ -200,7 +206,7 @@ function serviceFamiliesFromText(value) {
     return /\b(?:spray\w*|appl\w*|use|used|uses|using|put|putting|treat\w*)\s+(?:(?!safe\b)\w+\s+)?$/i.test(before)
       ? match
       : ' ';
-  });
+  }).replace(RECIPIENT_ACTIVITY_PATTERN, ' ');
   const families = SERVICE_FAMILY_QUESTION_PATTERNS
     .filter(([, pattern]) => pattern.test(targeted))
     .map(([key]) => key);
@@ -423,6 +429,15 @@ const GENERIC_NAME_TOKENS = new Set([
   'palm', 'palms', 'grass', 'yard', 'bait', 'station', 'stations',
 ]);
 
+// Everyday English words that appear in product names — a single one of
+// these matching a question word is coincidence ("drive on the lawn"), not
+// the customer naming the product.
+const AMBIGUOUS_NAME_TOKENS = new Set([
+  'drive', 'power', 'green', 'clean', 'clear', 'total', 'super', 'prime', 'force',
+  'guard', 'speed', 'quick', 'rapid', 'solid', 'storm', 'magic', 'blast', 'shield',
+  'water', 'first', 'early', 'final', 'sweet', 'fresh', 'plain', 'smart', 'crown',
+]);
+
 // Does the question name this product? Compared as normalized whole tokens
 // (distinctive ones only: >=5 chars or containing a digit), so the row can
 // carry a BOOLEAN — the product name itself never enters the support
@@ -438,10 +453,12 @@ function questionNamesProduct(name, questionWords) {
       && !GENERIC_NAME_TOKENS.has(token));
   const matched = tokens.filter((token) => questionWords.includes(token));
   if (!matched.length) return false;
-  // One short common English word isn't a product mention — "Drive XLR8"
-  // must not be "named" by "is it safe to DRIVE on the lawn?". Require two
-  // matched tokens, or one that is unmistakable (long or carries a digit).
-  return matched.length >= 2 || matched.some((token) => token.length >= 6 || /\d/.test(token));
+  // A common English word isn't a product mention — "Drive XLR8" must not
+  // be "named" by "is it safe to DRIVE on the lawn?". But short DISTINCTIVE
+  // names ("Tekko") are real mentions, so the block list is the ambiguous
+  // everyday words, not a length cutoff.
+  return matched.length >= 2
+    || matched.some((token) => /\d/.test(token) || !AMBIGUOUS_NAME_TOKENS.has(token));
 }
 
 // Returns {rows, truncated}: truncated=true when the query filled the row
@@ -500,9 +517,24 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
       })
       .select('name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified_by', 'label_verified_at', 'label_version',
         'signal_word', 'ppe_text', 'rei_hours', 'rainfast_minutes', 'reentry_summary', 'reentry_text', 'irrigation_notes')
-      .limit(8);
+      .limit(24);
 
-    const shaped = rows.map((row) => {
+    // A product the customer NAMED must survive the row cap — otherwise the
+    // off-estimate fail-close never sees it and the fallback answers from
+    // the estimate's own facts. Pull question-word matches to the front
+    // before slicing down to the working set of 8.
+    const distinctiveQuestionWords = questionWords
+      .filter((word) => (word.length >= 5 || /\d/.test(word)) && !GENERIC_NAME_TOKENS.has(word));
+    const matchesQuestionWord = (row) => distinctiveQuestionWords.some((word) => (
+      cleanText(row.name || '').toLowerCase().includes(word)
+      || cleanText(row.active_ingredient || '').toLowerCase().includes(word)
+    ));
+    const prioritized = distinctiveQuestionWords.length
+      ? [...rows.filter(matchesQuestionWord), ...rows.filter((row) => !matchesQuestionWord(row))]
+      : rows;
+    const kept = prioritized.slice(0, 8);
+
+    const shaped = kept.map((row) => {
       // Label-verified safety facts (signal word, re-entry, rainfast,
       // irrigation timing) let Ask Waves answer "is it pet safe?" from the
       // product's own reviewed label instead of generic knowledge. Fail
@@ -554,7 +586,9 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         snippet: trimSnippet(parts.join(' - ')),
       };
     }).filter((row) => row.snippet || row.title);
-    return { rows: shaped, truncated: rows.length >= 8 };
+    // Truncated when rows were actually dropped (raw > working set) — the
+    // wider fetch makes exactly-8 result sets provably complete now.
+    return { rows: shaped, truncated: rows.length > 8 };
   } catch (err) {
     logger.warn(`[estimate-ai-context] products_catalog lookup skipped: ${err.message}`);
     return { rows: [], truncated: false };

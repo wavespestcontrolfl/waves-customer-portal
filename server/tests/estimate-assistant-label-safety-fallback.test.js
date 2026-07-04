@@ -631,6 +631,30 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('Bifenthrin');
   });
 
+  test('watering questions on a pest-only estimate keep the pest label facts', () => {
+    // "the lawn" is where the customer waters, not the service they bought —
+    // scoping to lawn_care here would starve the pest product's guidance.
+    const answer = answerEstimateQuestionFallback('Can I water the lawn after the treatment?', {
+      serviceMode: 'recurring',
+      services: [{ label: 'Pest Control', detail: 'Exterior perimeter plan', summary: 'Pest Control — perimeter' }],
+      supportContext: {
+        productCatalog: [{
+          source: 'admin_product_catalog',
+          title: 'insecticide active ingredient',
+          category: 'insecticide',
+          activeIngredient: 'Bifenthrin',
+          labelVerified: true,
+          signalWord: 'Caution',
+          reentry: 'Re-enter once sprays have dried.',
+          rainfastMinutes: 45,
+          irrigationNotes: null,
+          serviceKeys: ['pest_control'],
+        }],
+      },
+    });
+    expect(answer).toContain('Re-enter once sprays have dried');
+  });
+
   test('rodent-bait estimates keep their rodent label facts', () => {
     const answer = answerEstimateQuestionFallback('Is the rodent bait safe for pets?', {
       serviceMode: 'recurring',

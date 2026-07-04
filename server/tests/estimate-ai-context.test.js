@@ -60,8 +60,15 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Is the mosquito spray safe for lawns and shrubs?')).toEqual(['mosquito']);
     // ...but "for the lawn treatment" TARGETS the lawn family.
     expect(serviceFamiliesFromText('What product is used for the lawn treatment?')).toEqual(['lawn_care']);
-    // A treatment verb before the preposition makes the area the target.
+    // A treatment verb before the preposition makes the area the target...
     expect(serviceFamiliesFromText('What product do you spray on the lawn?')).toEqual(['lawn_care']);
+    // ...but the customer's own ACTIVITY on the area is recipient wording —
+    // a pest-only estimate must not lose its facts to a lawn_care scope.
+    expect(serviceFamiliesFromText('Can I water the lawn after treatment?')).toEqual([]);
+    expect(serviceFamiliesFromText('How long before we can re-enter the lawn?')).toEqual([]);
+    // Specialty pests are pest control.
+    expect(serviceFamiliesFromText('Is the flea and tick treatment safe for my dog?')).toEqual(['pest_control']);
+    expect(serviceFamiliesFromText('Is the wasp spray safe near the patio?')).toEqual(['pest_control']);
     expect(serviceFamiliesFromText('Will the pest treatment hurt my shrubs?')).toEqual(['pest_control']);
     // Plain location words are not pest scope without treatment context...
     expect(serviceFamiliesFromText('Can I water my outside plants after treatment?')).toEqual([]);
@@ -155,6 +162,52 @@ describe('estimate AI support context', () => {
     expect(other.questionNameMatch).toBe(false);
     // Boolean only — the product name itself must never enter the context.
     expect(JSON.stringify(result)).not.toContain('SpeedZone');
+  });
+
+  test('short DISTINCTIVE names still count as product mentions', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        products_catalog: [{
+          name: 'Tekko Pro IGR',
+          category: 'insect growth regulator',
+          active_ingredient: 'Pyriproxyfen + Novaluron',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is Tekko safe for pets?',
+      context: { services: [{ label: 'Pest Control', detail: 'Quarterly perimeter plan' }] },
+    });
+    const row = result.productCatalog.find((r) => String(r.activeIngredient || '').includes('Pyriproxyfen'));
+    expect(row.questionNameMatch).toBe(true);
+  });
+
+  test('a named product survives the catalog row cap', async () => {
+    const fillers = Array.from({ length: 8 }, (_, i) => ({
+      name: `Filler Product ${i}`,
+      category: 'herbicide',
+      active_ingredient: `Filler Ingredient ${i}`,
+      active: true,
+      label_verified_by: 'waves-admin',
+    }));
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        products_catalog: [...fillers, {
+          // Ninth row — would be cut by a naive first-8 slice.
+          name: 'ZetaGuard 9000',
+          category: 'insecticide',
+          active_ingredient: 'Zeta-cypermethrin',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is ZetaGuard 9000 safe for pets?',
+      context: { services: [{ label: 'Pest Control', detail: 'Quarterly perimeter plan' }] },
+    });
+    const named = result.productCatalog.find((r) => r.activeIngredient === 'Zeta-cypermethrin');
+    expect(named).toBeDefined();
+    expect(named.questionNameMatch).toBe(true);
+    expect(result.productCatalogTruncated).toBe(true);
   });
 
   test('a single short common word never counts as naming a product', async () => {
