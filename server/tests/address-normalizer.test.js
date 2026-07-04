@@ -405,6 +405,28 @@ describe('splitStreetLineUnit', () => {
   });
 });
 
+describe('parseRawAddress multi-part comma units (codex rd8)', () => {
+  test('consecutive unit segments join line1 — never the city', () => {
+    expect(parseRawAddress('123 Main St, Bldg 2, Apt 4, Sarasota, FL 34236')).toMatchObject({
+      line1: '123 Main St Bldg 2 Apt 4',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+    });
+  });
+
+  test('raw multi-part unit + dedicated field dedupes to street-only line1', () => {
+    expect(normalizeLeadAddress({
+      address: '123 Main St, Bldg 2, Apt 4, Sarasota, FL 34236', unit: 'Bldg 2 Apt 4',
+    })).toMatchObject({
+      line1: '123 Main St',
+      line2: 'Bldg 2 Apt 4',
+      city: 'Sarasota',
+      zip: '34236',
+    });
+  });
+});
+
 describe('formatAddress', () => {
   test('joins a complete address', () => {
     expect(formatAddress({ line1: '123 Main St', city: 'Sarasota', state: 'FL', zip: '34231' }))

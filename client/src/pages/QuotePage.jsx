@@ -1109,10 +1109,23 @@ export default function QuotePage({ serviceSlug = '' }) {
                       value={intake.address}
                       onChange={(v) => {
                         setIntakeField('address', v);
-                        setAddress({ formatted: v, line1: v, city: '', state: 'FL', zip: '' });
+                        // A street edit invalidates any previous unit — a fresh
+                        // selection re-fills line2 when Google knows the subpremise.
+                        setAddress({ formatted: v, line1: v, line2: '', city: '', state: 'FL', zip: '' });
                       }}
                       onSelect={applyAddressParts}
                       placeholder="Start typing your address..."
+                      style={sInput}
+                    />
+                    <label style={{ ...sLabel, marginTop: 12 }}>Apt / Unit # (optional)</label>
+                    {/* Hand-typed units flow through the same address.line2 the
+                        Google subpremise uses, so every submit keeps the street
+                        line clean and persists the unit to address_line2. */}
+                    <input
+                      value={address.line2 || ''}
+                      onChange={(e) => setAddress(a => ({ ...a, line2: e.target.value }))}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
+                      placeholder="Apt 4B"
                       style={sInput}
                     />
                   </>

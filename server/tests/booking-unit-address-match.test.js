@@ -10,6 +10,7 @@
  */
 const {
   addressMatchesCustomer, unitsConflict, stripInlineUnitFromLine, narrowCandidatesByUnit,
+  submittedUnitConflictsWithCustomer,
 } = require('../routes/booking')._internals;
 const { splitStreetLineUnit } = require('../utils/address-normalizer');
 
@@ -181,5 +182,42 @@ describe('stripInlineUnitFromLine (double-entry dedup at insert)', () => {
     expect(stripInlineUnitFromLine('123 Main St, Apt B, Sarasota', '#B')).toBe('123 Main St, Sarasota');
     // A non-unit second segment (city) stays put.
     expect(stripInlineUnitFromLine('123 Main St, Sarasota', 'Apt B')).toBe('123 Main St, Sarasota');
+  });
+
+  test('strips a multi-part unit spanning several comma segments (codex rd8)', () => {
+    expect(stripInlineUnitFromLine('123 Main St, Bldg 2, Apt 4', 'Bldg 2 Apt 4')).toBe('123 Main St');
+    expect(stripInlineUnitFromLine('123 Main St, Bldg 2, Apt 4, Sarasota', 'Bldg 2 Apt 4'))
+      .toBe('123 Main St, Sarasota');
+  });
+});
+
+describe('submittedUnitConflictsWithCustomer (resolved-customer guard)', () => {
+  const aptA = { address_line1: '123 Main St', address_line2: 'Apt A', zip: '34231' };
+
+  test('conflicting unit on the same street → conflict (codex rd8)', () => {
+    expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St', address_line2: 'Apt B' })).toBe(true);
+  });
+
+  test('agreeing unit in any notation → no conflict', () => {
+    expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St', address_line2: '#A' })).toBe(false);
+  });
+
+  test('a different street is not a unit statement about this record', () => {
+    expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '999 Other Rd', address_line2: 'Apt B' })).toBe(false);
+  });
+
+  test('blank on-file unit → no conflict (backfill path owns that case)', () => {
+    const streetOnly = { address_line1: '123 Main St', address_line2: null };
+    expect(submittedUnitConflictsWithCustomer(streetOnly, { address_line1: '123 Main St', address_line2: 'Apt B' })).toBe(false);
+  });
+
+  test('no submitted unit → no conflict', () => {
+    expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St', address_line2: '' })).toBe(false);
+    expect(submittedUnitConflictsWithCustomer(aptA, null)).toBe(false);
+  });
+
+  test('legacy inline on-file unit still conflicts', () => {
+    const inline = { address_line1: '123 Main St Apt A', address_line2: null };
+    expect(submittedUnitConflictsWithCustomer(inline, { address_line1: '123 Main St', address_line2: 'Apt B' })).toBe(true);
   });
 });

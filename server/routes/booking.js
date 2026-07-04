@@ -224,21 +224,19 @@ function unitsConflict(customerLine2, submittedUnit) {
 // unit "Apt 4"). When the inline unit value-matches the dedicated one, strip
 // it from the street line so line1+line2 displays never repeat it. A
 // DIFFERENT inline unit is left untouched — addressMatchesCustomer treats
-// that as a conflict, never silent data loss. The duplicate may sit in the
-// first comma segment OR ride as its own segment ("123 Main St, Apt B,
-// Sarasota"); any trailing city/state text is preserved either way.
+// that as a conflict, never silent data loss. The duplicate may sit inline in
+// the first comma segment or span one or more comma segments of its own
+// ("123 Main St, Bldg 2, Apt 4, Sarasota") — grow the head one segment at a
+// time and let the comma-aware splitter decide; the remaining tail
+// (city/state) is preserved either way.
 function stripInlineUnitFromLine(line, submittedUnit) {
   const submittedKey = unitValueKey(submittedUnit);
   if (!submittedKey) return line;
-  const [first, ...rest] = String(line || '').split(',');
-  const split = splitStreetLineUnit(first);
-  if (split.unit && unitValueKey(split.unit) === submittedKey) {
-    return [split.street, ...rest].join(',');
-  }
-  if (rest.length) {
-    const twoSegment = splitStreetLineUnit(`${first},${rest[0]}`);
-    if (twoSegment.unit && unitValueKey(twoSegment.unit) === submittedKey) {
-      return [twoSegment.street, ...rest.slice(1)].join(',');
+  const segments = String(line || '').split(',');
+  for (let k = 0; k < segments.length; k += 1) {
+    const split = splitStreetLineUnit(segments.slice(0, k + 1).join(','));
+    if (split.unit && unitValueKey(split.unit) === submittedKey) {
+      return [split.street, ...segments.slice(k + 1)].join(',');
     }
   }
   return line;
@@ -248,6 +246,19 @@ function stripInlineUnitFromLine(line, submittedUnit) {
 // inline unit still living in address_line1.
 function customerUnitOf(customer) {
   return customer?.address_line2 || splitStreetLineUnit(customer?.address_line1 || '').unit;
+}
+
+// A submitted unit that disagrees with the RESOLVED customer's on-file unit
+// is a booking against the wrong door (Apt B posted against the Apt A
+// record) — even on identity-proven paths that never ran the address match.
+// Only same-street submissions count: a different street line is not a unit
+// statement about this record.
+function submittedUnitConflictsWithCustomer(customer, newCustomer) {
+  if (!newCustomer?.address_line2) return false;
+  const submittedStreet = normalizeAddress(splitStreetLineUnit(newCustomer.address_line1 || '').street);
+  const onFileStreet = normalizeAddress(splitStreetLineUnit(customer?.address_line1 || '').street);
+  if (!submittedStreet || !onFileStreet || submittedStreet !== onFileStreet) return false;
+  return unitsConflict(customerUnitOf(customer), newCustomer.address_line2);
 }
 
 function addressMatchesCustomer(customer, address, zip, unit) {
@@ -992,6 +1003,14 @@ async function createSelfBooking(payload = {}) {
 
     const customer = await db('customers').where('id', custId).first();
     if (!customer) return { ok: false, status: 404, error: 'Customer not found' };
+
+    // Estimate-token and phone-resolved paths never ran the address match, so
+    // a submitted unit that disagrees with the resolved record's on-file unit
+    // must fail closed here — never schedule Apt B's request against Apt A's
+    // account. (A just-created customer already passed the payload guard.)
+    if (!createdCustomerId && submittedUnitConflictsWithCustomer(customer, new_customer)) {
+      return { ok: false, status: 400, error: 'The unit number doesn\'t match the one we have on file for this address.' };
+    }
 
     // Returning booker supplying a unit their record lacks: attach it, but only
     // on an identity-PROVEN path (unitBackfillAllowed — verified estimate or
@@ -1808,6 +1827,7 @@ module.exports._internals = {
   unitsConflict,
   stripInlineUnitFromLine,
   narrowCandidatesByUnit,
+  submittedUnitConflictsWithCustomer,
   // Read-only engine surface reused by the voice agent's quoting tools so a
   // phoned-in availability check runs the exact same route-aware slot finder as
   // the web /book funnel (no duplicated scheduling logic).

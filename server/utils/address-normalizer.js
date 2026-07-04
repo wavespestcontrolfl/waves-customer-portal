@@ -440,12 +440,21 @@ function parseRawAddress(raw) {
   let zip = '';
 
   if (parts.length >= 3) {
-    const rawPossibleUnit = parts[1].split(' ')[0].replace(/[.,]/g, '').toLowerCase();
-    const possibleUnit = rawPossibleUnit.replace(/^#/, '');
-    const hasUnitPart = rawPossibleUnit.startsWith('#') || UNIT_DESIGNATORS.has(possibleUnit);
-    line1 = hasUnitPart ? `${parts[0]} ${parts[1]}` : parts[0];
-    city = hasUnitPart ? parts[2] : parts[1];
-    const stateZip = parts.slice(hasUnitPart ? 3 : 2).join(' ');
+    // Consecutive unit segments after the street all belong to line1
+    // ("123 Main St, Bldg 2, Apt 4, Sarasota, FL 34236") — never the city.
+    // A "FL <zip>" segment is the state tail, not a floor.
+    let unitEnd = 1;
+    while (unitEnd < parts.length) {
+      const segTokens = parts[unitEnd].split(' ').filter(Boolean);
+      const firstTok = (segTokens[0] || '').replace(/[.,]/g, '').toLowerCase();
+      const isUnitSegment = (firstTok.startsWith('#') || UNIT_DESIGNATORS.has(firstTok.replace(/^#/, '')))
+        && !isStateZipPair(firstTok, (segTokens[1] || '').replace(/[.,]/g, ''));
+      if (!isUnitSegment) break;
+      unitEnd += 1;
+    }
+    line1 = parts.slice(0, unitEnd).join(' ');
+    city = parts[unitEnd] || '';
+    const stateZip = parts.slice(unitEnd + 1).join(' ');
     zip = normalizeZip(stateZip);
     state = findState(stateZip).state;
   } else if (parts.length === 2) {
