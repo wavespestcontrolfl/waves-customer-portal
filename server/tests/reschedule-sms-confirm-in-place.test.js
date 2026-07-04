@@ -1,0 +1,150 @@
+// Confirm-in-place: a rain-out already books the appointment into option 1
+// before texting the customer, so "1 to confirm" (or a "2" that lands on the
+// same slot) must NOT re-run SmartRebooker.reschedule — re-validating a slot the
+// visit already occupies would wrongly reject a same-day slot whose tight 1-hour
+// internal window ticked past while the customer was deciding, even though the
+// reply arrived inside the 2-hour window we quoted.
+//
+// The shortcut is deliberately narrow: it only fires for a LIVE booking on the
+// exact same date + full window, and only while the reply is still inside the
+// quoted 2-hour arrival window. Anything else (genuine future-day switch, a
+// widened/edited window, a skipped/terminal visit, or a reply after the quoted
+// window) falls through to the normal reschedule path.
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn().mockResolvedValue('body') }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true }),
+}));
+jest.mock('../utils/datetime-et', () => ({
+  etDateString: jest.fn(() => '2026-07-04'),
+  // Default "now" = 1:30 PM ET, inside the 1:00-3:00 PM quoted window.
+  etParts: jest.fn(() => ({ hour: 13, minute: 30 })),
+}));
+
+const db = require('../models/db');
+const SmartRebooker = require('../services/rebooker');
+const { etParts } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const RescheduleSMS = require('../services/reschedule-sms');
+
+db.fn = { now: jest.fn(() => 'NOW()') };
+
+function chain(terminal = {}) {
+  return {
+    where: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    first: jest.fn().mockResolvedValue(undefined),
+    update: jest.fn().mockResolvedValue(1),
+    ...terminal,
+  };
+}
+
+function wireDb(queues) {
+  db.mockImplementation((table) => {
+    const q = queues[table];
+    if (!q || q.length === 0) throw new Error(`Unexpected db('${table}') call`);
+    return q.shift();
+  });
+}
+
+const OPTION1 = { date: '2026-07-04', window: { start: '13:00', end: '14:00', display: '1:00 PM - 3:00 PM' } };
+const OPTION2 = { date: '2026-07-06', window: { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' } };
+
+function pendingRow() {
+  return {
+    id: 'log-1',
+    scheduled_service_id: 'svc-1',
+    reason_code: 'weather_rain',
+    sms_sent_at: '2026-07-04T17:00:00Z',
+    notes: JSON.stringify({ option1: OPTION1, option2: OPTION2 }),
+  };
+}
+
+// db call order in handleRescheduleReply: reschedule_log (fetch pending) →
+// reschedule_log (mark responded) → scheduled_services (svc) → customers →
+// reschedule_log (new_date/new_window).
+function wire(svcRow, customer = { id: 'cust-1', phone: '+19415551234' }) {
+  wireDb({
+    reschedule_log: [
+      chain({ first: jest.fn().mockResolvedValue(pendingRow()) }),
+      chain(),
+      chain(),
+    ],
+    scheduled_services: [chain({ first: jest.fn().mockResolvedValue(svcRow) })],
+    customers: [chain({ first: jest.fn().mockResolvedValue(customer) })],
+  });
+}
+
+describe('handleRescheduleReply — confirm-in-place', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    etParts.mockReturnValue({ hour: 13, minute: 30 });
+  });
+
+  test('reply "1" on the live slot, inside the quoted window, confirms WITHOUT re-booking', async () => {
+    // DB TIME is 'HH:MM:SS'; the reply option carries 'HH:MM' — both normalize equal.
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    const result = await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].body).toContain('1:00 PM - 3:00 PM');
+    expect(result).toMatchObject({ handled: true, action: 'rescheduled', newDate: '2026-07-04' });
+  });
+
+  test('scheduled_date as a JS Date still matches (no "Sat Jul 04" stringify bug)', async () => {
+    wire({ scheduled_date: new Date('2026-07-04T00:00:00Z'), window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('reply "2" switching to a different-day slot DOES re-book', async () => {
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    const result = await RescheduleSMS.handleRescheduleReply('cust-1', '2');
+
+    expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+      'svc-1', '2026-07-06', { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' },
+      'weather_rain', 'customer_sms',
+    );
+    expect(result).toMatchObject({ handled: true, action: 'rescheduled', newDate: '2026-07-06' });
+  });
+
+  test('same-day reply AFTER the quoted 2-hour window falls through to reschedule', async () => {
+    etParts.mockReturnValue({ hour: 16, minute: 0 }); // 4 PM ET, past the 1-3 PM window
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    // Not confirmed in place — the rebooker runs (and in prod would reject the
+    // elapsed slot, routing to office follow-up).
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  test('a skipped visit is not confirmed in place', async () => {
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'skipped' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  test('a widened window (same start, different end) re-books to the tight slot', async () => {
+    // Manually edited to a 2-hour block; the reply option still targets 1 hour.
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '15:00:00', status: 'confirmed' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+      'svc-1', '2026-07-04', { start: '13:00', end: '14:00', display: '1:00 PM - 3:00 PM' },
+      'weather_rain', 'customer_sms',
+    );
+  });
+});
