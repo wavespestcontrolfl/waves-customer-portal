@@ -1,5 +1,5 @@
 const db = require('../models/db');
-const { WAVES_LOCATIONS, resolveLocation } = require('../config/locations');
+const { WAVES_LOCATIONS, CITY_TO_LOCATION, resolveLocation } = require('../config/locations');
 const SocialMediaService = require('./social-media');
 const {
   SOCIAL_FLAGS,
@@ -485,6 +485,69 @@ function locationForCity(city) {
   };
 }
 
+// ── City grounding ──────────────────────────────────────────────────────────
+// Campaign copy targets ONE city, but the fact sources (blog posts matched by
+// an OR topic search, review text, service descriptions) can carry a different
+// city's name — live example 07-03: a Venice-targeted Facebook post opened
+// "around Venice" then said "Your Sarasota lawn" because a Sarasota blog post
+// won the content search. Facts naming a different service-area city are
+// dropped, and an AI draft naming one falls back to the (city-clean) template.
+// The comparison is strict per city name, not per office: "around Venice …
+// your Punta Gorda lawn" reads just as wrong to the reader even though both
+// route to the Venice office.
+// "palmetto bugs" / "saw palmetto" / "laurel oaks" are Florida vernacular, not
+// the cities Palmetto / Laurel — scrub them before scanning.
+const KNOWN_CITY_NAMES = Object.keys(CITY_TO_LOCATION);
+// Longest name first, and each match is consumed from the haystack, so nested
+// names can't double-read: "Bradenton Beach homeowners" is one mention of
+// bradenton beach, NOT also a (foreign) mention of bradenton.
+const KNOWN_CITIES_BY_LENGTH = [...KNOWN_CITY_NAMES].sort((a, b) => b.length - a.length);
+const CITY_FALSE_POSITIVES = /\b(?:saw\s+palmetto|palmetto\s+bugs?|laurel\s+oaks?)\b/gi;
+
+// A city shows up in prose ("Sarasota") or in the hashtag forms the Instagram
+// prompt itself suggests ("#sarasotafl", "#lakewoodranch") — scan all of them.
+function cityForms(name) {
+  const compact = name.replace(/ /g, '');
+  return Array.from(new Set([name, compact, `${compact}fl`]));
+}
+
+function citiesMentioned(text) {
+  let haystack = ` ${String(text || '').toLowerCase().replace(CITY_FALSE_POSITIVES, ' ').replace(/[^a-z]+/g, ' ').trim()} `;
+  const found = [];
+  for (const name of KNOWN_CITIES_BY_LENGTH) {
+    let hit = false;
+    for (const form of cityForms(name)) {
+      const needle = ` ${form} `;
+      if (haystack.includes(needle)) {
+        hit = true;
+        haystack = haystack.split(needle).join('  ');
+      }
+    }
+    if (hit) found.push(name);
+  }
+  return found;
+}
+
+function mentionsOtherCity(text, targetCity) {
+  const target = String(targetCity || '').toLowerCase().trim();
+  return citiesMentioned(text).some((name) => name !== target);
+}
+
+// Blog rows about a different city are excluded up front: content[0] feeds a
+// draft fact AND suggestedLink, so a cross-city row means wrong-city copy plus
+// a wrong-city link. A row is cross-city when its city tag names a different
+// known city, OR — for untagged/region-tagged rows ("SWFL") — when its
+// title/meta/keyword/slug text names one; the fact scrub alone can't fix
+// suggestedLink, which reads the row, not the fact.
+function contentRowMatchesCity(row, targetCity) {
+  const target = String(targetCity || '').toLowerCase().trim();
+  if (!target) return true;
+  const rowCity = String(row?.city || '').toLowerCase().trim();
+  if (rowCity && rowCity !== target && KNOWN_CITY_NAMES.includes(rowCity)) return false;
+  const rowText = [row?.title, row?.meta_description, row?.keyword, row?.slug].filter(Boolean).join(' ');
+  return !mentionsOtherCity(rowText, target);
+}
+
 async function getCampaignContext({ topic, city, service }) {
   const location = locationForCity(city);
   const context = {
@@ -545,6 +608,7 @@ async function getCampaignContext({ topic, city, service }) {
         return intentKeywords.some((kw) => text.includes(kw));
       };
       context.content = rows
+        .filter((row) => contentRowMatchesCity(row, location.city))
         .map((row, index) => ({ row, index, relevant: matchesIntent(row) }))
         .sort((a, b) => (b.relevant - a.relevant) || (a.index - b.index))
         .map((entry) => entry.row)
@@ -943,11 +1007,16 @@ function relevantServices(context = {}, input = {}) {
 }
 
 function sourceFacts(context, input = {}) {
+  const targetCity = context?.location?.city || input.city;
   const serviceFact = firstSentence(relevantServices(context, input)[0]?.description);
   const contentFact = firstSentence(context.content[0]?.meta_description || context.content[0]?.title);
   const pestPressureFact = firstSentence(context.pestPressure?.explanation);
   const reviewFact = firstSentence(context.reviews[0]?.review_text, 160);
-  return [serviceFact, contentFact, pestPressureFact, reviewFact].filter(Boolean);
+  return [serviceFact, contentFact, pestPressureFact, reviewFact]
+    .filter(Boolean)
+    // Review text and brand-wide sources can name any city regardless of the
+    // row-level filters — drop cross-city facts rather than publish them.
+    .filter((fact) => !mentionsOtherCity(fact, targetCity));
 }
 
 function buildCampaignDrafts(input, context) {
@@ -1020,12 +1089,16 @@ function buildSourcePanel(context, input = {}) {
 // from, as a short bullet list the model may use (and must not exceed/invent
 // beyond). Keeps the AI captions factual and local.
 function campaignFactPack(context, input) {
+  const targetCity = context?.location?.city || input?.city;
   const lines = [];
   const svc = relevantServices(context, input)[0];
   if (svc?.description) lines.push(svc.description);
   for (const f of (sourceFacts(context, input) || [])) lines.push(f);
   if (context?.pestPressure?.explanation) lines.push(context.pestPressure.explanation);
   return Array.from(new Set(lines.map((l) => cleanText(l, 400)).filter(Boolean)))
+    // sourceFacts is already scrubbed; this catches the two lines pushed
+    // directly (full service description, pest-pressure explanation).
+    .filter((l) => !mentionsOtherCity(l, targetCity))
     .slice(0, 6)
     .map((l) => `- ${l}`)
     .join('\n');
@@ -1052,7 +1125,12 @@ async function buildCampaignDraftsAI(input, context) {
       channels,
     });
     const out = { ...template };
-    for (const ch of channels) if (ai && ai[ch]) out[ch] = ai[ch];
+    const targetCity = context?.location?.city || input.city;
+    // Belt and suspenders: even with a city-scrubbed fact pack the model can
+    // still name a stray city. A cross-city draft falls back to the
+    // (city-clean) template for that channel instead of publishing mixed-city
+    // copy — the 07-03 live failure this grounding exists to prevent.
+    for (const ch of channels) if (ai && ai[ch] && !mentionsOtherCity(ai[ch], targetCity)) out[ch] = ai[ch];
     return out;
   } catch {
     return template;
@@ -2044,6 +2122,8 @@ module.exports = {
   httpUrlOrNull,
   normalizeChannels,
   getCampaignContext,
+  mentionsOtherCity,
+  contentRowMatchesCity,
   listCompetitorSwipeFile,
   listAutonomousRuns,
   listReviewGraphicCandidates,
