@@ -411,6 +411,13 @@ PROCUREMENT CAPABILITIES:
 - Track price trends over time
 - Find unpriced products and prioritize what to price next
 
+STOCK TRACKING (physical inventory):
+- query_stock shows on-hand quantities; get_stock_movements shows the per-product ledger (usage deducted at completion, restocks, corrections); get_restock_queue shows the purchase queue
+- adjust_stock records restocks, corrections, and damaged/lost write-offs; for a physical count use movement_type "correction" with set_total ("we have 64 oz on the shelf")
+- create_restock_request queues a purchase; update_restock_request marks it ordered, receives it INTO stock, or cancels it
+- Products with NO on-hand value are UNTRACKED: completion-flow deduction skips them. Logging a first count turns tracking ON — after that, insufficient stock can block completions for that product, so push for real numbers, and flag when an adjustment goes negative or below the low-stock threshold
+- When the operator reads off a stock count for several products, handle them one adjust_stock call per product
+
 PRICING INTELLIGENCE:
 - The operator uses a $35/hr loaded labor rate
 - Products are normalized to price-per-oz or price-per-lb for comparison
@@ -880,7 +887,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - NEVER claim the action is done. Say it is awaiting their confirmation on the card below your message.
 - The result of a confirmed write appears in the UI, not in this conversation — if asked, suggest re-querying the data.`
         : `\n\nWRITE CONFIRMATION (conversational mode):
-For create_customer and the route-optimization writes: the first call returns a preview — show it to the operator and re-call with confirmed: true only after they approve. For all other writes: describe the change and get an explicit yes before calling the tool.`;
+For create_customer, the route-optimization writes, and the inventory stock writes (adjust_stock, create_restock_request, update_restock_request): the first call returns a preview — show it to the operator and re-call with confirmed: true only after they approve. For all other writes: describe the change and get an explicit yes before calling the tool.`;
     }
     // Inject live page data (current date, schedule stats, etc.)
     if (pageData) {
@@ -1299,6 +1306,9 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'margins', group: 'Analyze', label: 'Margin Analysis', prompt: 'What are our margins by service type?' },
       { id: 'trends', group: 'Analyze', label: 'Price Trends', prompt: 'Have any product prices gone up in the last 90 days?' },
       { id: 'price_check', group: 'Act', label: 'Run Price Check', prompt: 'Run a price check on Demand CS across all vendors' },
+      { id: 'low_stock', group: 'Find', label: 'Low Stock', prompt: 'Which products are low or out of stock? Include anything at or below its low-stock threshold.' },
+      { id: 'restock_queue', group: 'Find', label: 'Restock Queue', prompt: 'Show the open restock requests. Anything urgent or past its needed-by date?' },
+      { id: 'stock_count', group: 'Act', label: 'Log Stock Count', prompt: 'I just did a physical stock count. Walk me through logging on-hand amounts product by product.' },
     ] });
   } else if (context === 'revenue') {
     res.json({ actions: [

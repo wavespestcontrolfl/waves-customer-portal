@@ -97,6 +97,9 @@ const WRITE_TWO_STEP = [
   'assign_technician',
   'move_stops_to_day',
   'swap_tech_assignments',
+  'adjust_stock',
+  'create_restock_request',
+  'update_restock_request',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -185,6 +188,7 @@ const READ_ONLY = [
   'intent_routing_report', 'seo_action_queue', 'seo_experiment_results', 'internal_link_graph',
   'query_products', 'query_vendors', 'compare_vendor_pricing', 'find_cheapest_vendor',
   'get_approval_queue', 'analyze_margins', 'get_price_trends', 'get_unpriced_summary',
+  'query_stock', 'get_stock_movements', 'get_restock_queue',
   'get_revenue_overview', 'get_service_line_pnl', 'get_ad_attribution',
   'get_tech_revenue_performance', 'compare_revenue_periods', 'get_top_revenue_customers',
   'get_my_route', 'get_stop_details', 'get_service_history', 'get_product_info', 'get_protocol',
@@ -353,11 +357,29 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       address_line1: '2 Test St', state: 'FL', zip: '34232', current_tech_name: 'Adam',
     },
   ];
+  const PRODUCTS = [
+    {
+      id: 'prod-1', name: 'Bifen XTS', category: 'insecticide', active: true,
+      inventory_on_hand: 64, inventory_unit: 'fl_oz', low_stock_threshold: 32,
+      best_vendor: 'SiteOne',
+    },
+  ];
+  const RESTOCK_REQUESTS = [
+    {
+      id: 'req-1', product_id: 'prod-1', status: 'open', priority: 'normal',
+      requested_quantity: 128, unit: 'fl_oz',
+    },
+  ];
   // create_customer's duplicate check must MISS (an existing customer would
   // legitimately stop before the gate), so `customers` stays unseeded.
   // Everything the schedule writes look up is present, so each executor
   // reaches its `confirmed !== true` branch with real work to do.
-  const SEED = { technicians: TECHS, scheduled_services: STOPS };
+  const SEED = {
+    technicians: TECHS,
+    scheduled_services: STOPS,
+    products_catalog: PRODUCTS,
+    product_restock_requests: RESTOCK_REQUESTS,
+  };
 
   // Minimal valid inputs per tool, deliberately WITHOUT confirmed.
   const UNCONFIRMED_CALLS = [
@@ -368,6 +390,9 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: [STOPS[0].id], technician_name: 'Jose' }],
     ['schedule-tools', 'executeScheduleTool', 'move_stops_to_day', { service_ids: [STOPS[0].id], new_date: '2026-06-12' }],
     ['schedule-tools', 'executeScheduleTool', 'swap_tech_assignments', { date: '2026-06-11', tech_a_name: 'Adam', tech_b_name: 'Jose' }],
+    ['procurement-tools', 'executeProcurementTool', 'adjust_stock', { product_name: 'Bifen', movement_type: 'restock', quantity: 32 }],
+    ['procurement-tools', 'executeProcurementTool', 'create_restock_request', { product_name: 'Bifen', quantity: 128, unit: 'fl_oz' }],
+    ['procurement-tools', 'executeProcurementTool', 'update_restock_request', { request_id: 'req-1', action: 'receive' }],
   ];
 
   test('harness sanity: the recording db actually records mutations', async () => {
