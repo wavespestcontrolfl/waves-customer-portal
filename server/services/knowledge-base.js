@@ -355,11 +355,27 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
               ? { ...credential, status: 'healthy', expires_at: refresh.expiresAt ? new Date(refresh.expiresAt) : expiresAt }
               : { ...credential, status: 'expired', error: `Re-authorize — ${refresh.error}`, expires_at: refresh.expiresAt ? new Date(refresh.expiresAt) : expiresAt });
           } else {
-            results.push({
-              ...credential,
-              status: expiresAt && expiresAt < new Date(Date.now() + 7 * 86400000) ? 'expiring-soon' : 'healthy',
-              expires_at: expiresAt,
-            });
+            // Stored expiry alone can't catch a revoked grant — getStatus()
+            // only reads system_settings. Send the token to LinkedIn
+            // (organizationAcls, the same call the connect flow soft-verifies
+            // with) before persisting a green status; otherwise createPost()
+            // is the first thing to discover the 401.
+            try {
+              await linkedin.verifyOrgAccess();
+              results.push({
+                ...credential,
+                status: expiresAt && expiresAt < new Date(Date.now() + 7 * 86400000) ? 'expiring-soon' : 'healthy',
+                expires_at: expiresAt,
+              });
+            } catch (verifyErr) {
+              const authFail = /\b40[13]\b/.test(verifyErr.message);
+              results.push({
+                ...credential,
+                status: authFail ? 'expired' : 'error',
+                error: authFail ? `Re-authorize — ${verifyErr.message}` : verifyErr.message,
+                expires_at: expiresAt,
+              });
+            }
           }
         }
       }
@@ -399,9 +415,14 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     // ── Persist results ──
     for (const r of results) {
       try {
+        // platform is the table's unique key (migration 079). token-health.js
+        // creates rows without credential_type, so matching on it misses those
+        // rows and the fallback insert trips the unique constraint (swallowed
+        // below) — the row would never receive this check's result.
         const existing = await db('token_credentials')
-          .where({ platform: r.platform, credential_type: r.credential_type }).first();
+          .where({ platform: r.platform }).first();
         const data = {
+          credential_type: r.credential_type || null,
           status: r.status,
           last_verified_at: new Date(),
           last_error: r.error || null,

@@ -393,6 +393,13 @@ function stripModelWrapper(raw) {
   // wrapper heading ("**Here's a LinkedIn post:**") is bare text before the
   // preamble match below; running it last would let that heading publish.
   text = text.replace(/\*\*([^*\n][^*]*)\*\*/g, '$1');
+  // ---- fences can wrap the whole answer ("---\nHere's a post:\n…\n---") — a
+  // leading fence would hide the preamble from the anchored match below, so
+  // strip fences BEFORE the preamble pass, again after it (a preamble can also
+  // precede a fence), and once more after the count/Note passes; each pass
+  // exposes the next one's target.
+  const stripFences = (s) => s.replace(/^\s*-{3,}\s*/, '').replace(/\s*-{3,}\s*$/, '');
+  text = stripFences(text);
   // Leading meta line: "Here's a <platform> post …:" / "Sure — here is your caption:".
   // The acknowledgement separator takes comma/period/bang or a dash/colon ("Sure —").
   // (?!-) keeps hyphenated adjectives ("Here's a post-storm mosquito tip:"), and the
@@ -401,10 +408,6 @@ function stripModelWrapper(raw) {
   // "Here's a post treatment reminder:") survive too — there "post" is followed by
   // another content word, which real meta lines never do.
   text = text.replace(/^(?:(?:sure|certainly|of course)(?:\s*[,!.:—–-]\s*|\s+))?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b(?!-)(?:[,—–-]?\s+(?:for|that|which|you|your|ready|based|within|under|below|about|in|on|to|at)\b[^:\n]{0,60})?:\s*/i, '');
-  // Fences → count note → fences again: the count can sit inside the fences
-  // ("---\ncopy\n*(Character count: ~240)*\n---") or a fence can sit between
-  // the copy and the count — each pass exposes the other's target.
-  const stripFences = (s) => s.replace(/^\s*-{3,}\s*/, '').replace(/\s*-{3,}\s*$/, '');
   text = stripFences(text);
   // Trailing count notes: "*197 characters*", "*(Character count: ~240)*", "(197 characters)".
   // The lookbehind keeps this pass from biting the tail off a "*Note: … 196
