@@ -439,6 +439,7 @@ export default function MobileAppointmentDetailSheet({
             currentPrice={price}
             deposit={estimateSource.deposit}
             payment={estimateSource.payment}
+            lines={estimateSource.lines}
             style={{ marginTop: 16 }}
           />
         )}

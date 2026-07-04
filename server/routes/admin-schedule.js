@@ -5109,6 +5109,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
         'id', 'customer_id', 'token', 'estimate_data',
         'monthly_total', 'annual_total', 'onetime_total',
         'bill_by_invoice', 'created_at', 'status',
+        'service_interest', 'waveguard_tier',
       );
     if (!est) return res.json({ linked: false });
     // Recurring period charge (monthly, or annual when there's no monthly) plus
@@ -5133,6 +5134,24 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       const { buildEstimatePaymentContext } = require('../services/estimate-payment-context');
       payment = await buildEstimatePaymentContext(est, { scheduledServiceId: req.params.id });
     } catch { payment = null; }
+    // Accepted service lines (name + cadence) so the provenance card can say
+    // WHAT the customer accepted — monthly lawn care, quarterly pest control —
+    // not just the totals. Same builder as the schedule-estimates /
+    // schedule-source payloads, so all three provenance surfaces agree.
+    // Fail-soft: a bad estimate_data shape must not hide the money facts.
+    let lines = [];
+    try {
+      const { indexServicesForSchedule, scheduleLinesFromEstimate } = require('./admin-customers')._private;
+      const serviceRows = await db('services')
+        .where({ is_active: true })
+        .select(
+          'id', 'service_key', 'name', 'short_name', 'category', 'billing_type',
+          'frequency', 'visits_per_year', 'default_duration_minutes',
+          'base_price', 'price_range_min', 'price_range_max',
+        )
+        .catch(() => []);
+      lines = scheduleLinesFromEstimate(est, indexServicesForSchedule(serviceRows));
+    } catch { lines = []; }
     res.json({
       linked: true,
       estimateId: est.id,
@@ -5143,6 +5162,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       onetimeTotal: Number(est.onetime_total || 0),
       estimateStatus: est.status,
       createdAt: est.created_at,
+      lines,
       deposit,
       payment,
     });

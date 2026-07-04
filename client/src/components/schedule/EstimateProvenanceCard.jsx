@@ -27,6 +27,12 @@
 //                          { billingTerm, paymentPreference, annualPrepay,
 //                            acceptanceInvoice }. Amounts are the persisted
 //                          invoice/term figures (exact), never recomputed.
+//   lines        array   — scheduleLinesFromEstimate() rows from the server
+//                          ({ name, estimateLabel, cadence, ... }) — the
+//                          service mix the customer accepted, shown as
+//                          "Lawn Care · Monthly" / "Pest Control · Quarterly"
+//                          so nobody re-opens the estimate to answer "what
+//                          did they sign up for". Optional; omitted → hidden.
 //   style        object  — optional outer wrapper style (margins, etc.)
 
 const BLUE = { bg: '#F0F9FF', border: '#BAE6FD', ink: '#0369A1' };
@@ -43,6 +49,24 @@ const EXEMPT_LABEL = {
   existing_plan_customer: 'existing plan customer',
   payer_billed: 'billed to third party',
 };
+
+// Cadence keys as produced by the server's cadenceFromEstimateLine().
+// Unknown keys fall back to the raw value with underscores humanized rather
+// than hiding the row — the service name is still worth showing.
+const CADENCE_LABEL = {
+  monthly: 'Monthly',
+  bimonthly: 'Every other month',
+  quarterly: 'Quarterly',
+  triannual: '3x per year',
+  semiannual: 'Twice a year',
+  annual: 'Annual',
+  one_time: 'One-time',
+};
+
+function cadenceLabel(cadence) {
+  if (!cadence) return '';
+  return CADENCE_LABEL[cadence] || String(cadence).replace(/_/g, ' ');
+}
 
 function money(n) {
   return `$${(Number(n) || 0).toFixed(2)}`;
@@ -257,9 +281,17 @@ function depositRow(deposit) {
   return null;
 }
 
-export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, style }) {
+export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, lines, style }) {
   const quoted = Number(quotedTotal) || 0;
   const price = currentPrice != null ? Number(currentPrice) : null;
+  // Accepted service mix — prefer the estimate's own wording (estimateLabel)
+  // over the catalog-matched name so the card reads like the quote did.
+  const serviceLines = (Array.isArray(lines) ? lines : [])
+    .map((line) => ({
+      name: String(line?.estimateLabel || line?.name || '').trim(),
+      cadence: cadenceLabel(line?.cadence),
+    }))
+    .filter((line) => line.name);
   const rows = paymentRows(payment);
   const dep = depositRow(deposit);
   if (dep) rows.push(dep);
@@ -316,6 +348,21 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
                 Do not collect payment from the customer — this visit invoices to the billing party on file.
               </div>
             </div>
+          </div>
+        )}
+
+        {serviceLines.length > 0 && (
+          <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 4 }}>
+            {serviceLines.map((line, i) => (
+              <div key={`${line.name}-${i}`} style={lineStyle}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: INK, minWidth: 0 }}>{line.name}</div>
+                {line.cadence && (
+                  <div style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, whiteSpace: 'nowrap' }}>
+                    {line.cadence}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         )}
 
