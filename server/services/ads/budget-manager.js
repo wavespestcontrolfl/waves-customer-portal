@@ -1,6 +1,12 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
+const { isEnabled } = require('../../config/feature-gates');
+
+// Lazy so requiring budget-manager (e.g. from the scheduler at boot) doesn't
+// load the google-ads-api client until a push is actually attempted.
+let _googleAds;
+function getGoogleAds() { return _googleAds || (_googleAds = require('./google-ads')); }
 
 class BudgetManager {
   /**
@@ -8,6 +14,10 @@ class BudgetManager {
    *
    * Sunday algorithm: always check Monday's capacity, full power.
    * Weekday <2PM: check today.  Weekday >=2PM: check tomorrow.
+   *
+   * With the adsBudgetLivePush gate on, each mode change is pushed to the
+   * Google Ads API before being committed locally; with it off, changes are
+   * DB-only intent tracking (dashboard/advisor state, no real spend change).
    */
   async adjustBudgets() {
     const now = new Date();
@@ -63,6 +73,21 @@ class BudgetManager {
         if (newMode !== campaign.budget_mode) {
           const newBudget = this.calculateBudget(campaign, newMode);
 
+          // Push to Google FIRST, then commit locally — daily_budget_current
+          // must never record a budget Google isn't actually running. On a
+          // failed push we skip the local write entirely so the next 2-hour
+          // run retries the same transition. Gate off / unlinked campaign /
+          // missing API creds keep the legacy DB-only intent tracking.
+          let pushedLive = false;
+          if (isEnabled('adsBudgetLivePush') && campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
+            if (!pushed) {
+              logger.error(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} NOT applied — Google Ads push failed; will retry next run`);
+              continue;
+            }
+            pushedLive = true;
+          }
+
           await db('ad_campaigns').where({ id: campaign.id }).update({
             budget_mode: newMode,
             daily_budget_current: newBudget,
@@ -75,13 +100,13 @@ class BudgetManager {
             new_mode: newMode,
             previous_budget: campaign.daily_budget_current,
             new_budget: newBudget,
-            reason: `Capacity ${pct.toFixed(0)}% for ${area} on ${checkDate}`,
+            reason: `Capacity ${pct.toFixed(0)}% for ${area} on ${checkDate}${pushedLive ? ' — pushed to Google Ads' : ''}`,
             trigger: 'auto',
             capacity_pct: pct,
             check_date: checkDate,
           });
 
-          logger.info(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} (capacity ${pct.toFixed(0)}%)`);
+          logger.info(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} (capacity ${pct.toFixed(0)}%${pushedLive ? ', pushed to Google Ads' : ', local only'})`);
         }
       } catch (err) {
         logger.error(`Budget adjust failed for ${campaign.campaign_name}: ${err.message}`);
@@ -284,7 +309,17 @@ class BudgetManager {
       trigger: 'manual',
     });
 
-    return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget };
+    // Mirror the manual /campaigns/:id/budget route: DB first, then
+    // best-effort live push, outcome reported so the caller can tell whether
+    // Google actually took the new budget. Human-initiated, so not gated by
+    // adsBudgetLivePush — that gate covers only the autonomous cron.
+    let googleAdsUpdated = false;
+    if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+      const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
+      googleAdsUpdated = !!pushed;
+    }
+
+    return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated };
   }
 
   /**
