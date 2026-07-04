@@ -6816,17 +6816,17 @@ describe('public estimate one-time breakdown', () => {
 
   test('accept copy shows the as-proposed price when the customer selected a different plan', () => {
     expect(buildAcceptOfficeFallback({
-      customerName: 'Taras Malyshev',
-      address: '2324 Starwood Ct',
+      customerName: 'Jane Doe',
+      address: '123 Main St',
       waveguardTier: 'Bronze',
       monthlyTotal: 55.3,
       proposedMonthlyTotal: 29.67,
       invoiceMode: true,
       invoicePayUrl: '/pay/setup-token',
-    })).toBe('Estimate accepted by Taras Malyshev at 2324 Starwood Ct - Bronze WaveGuard $55.30/mo (proposed at $29.67/mo). Setup + first application invoice created; optional pay link available.');
+    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard $55.30/mo (proposed at $29.67/mo). Setup + first application invoice created; optional pay link available.');
 
     const payload = buildAcceptNotificationPayload({
-      customerName: 'Taras Malyshev',
+      customerName: 'Jane Doe',
       waveguardTier: 'Bronze',
       monthlyTotal: 55.3,
       proposedMonthlyTotal: 29.67,

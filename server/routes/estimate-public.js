@@ -6410,9 +6410,18 @@ async function handleEstimateView(req, res, next) {
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at. Any other
       // non-terminal status flips to `viewed` as before.
+      // Snapshot the price the "Estimate viewed" notification quotes:
+      // tier-select and preference toggles rewrite estimates.monthly_total
+      // after this point, so accept-time copy needs the as-viewed value to
+      // reference. jsonb_set patches the one key without clobbering
+      // concurrent estimate_data writers; non-object blobs are left alone.
       await db('estimates').where({ id: estimate.id }).update({
         viewed_at: db.fn.now(),
         status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
+        estimate_data: db.raw(
+          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{viewedMonthlyTotal}', to_jsonb(?::numeric), true) ELSE estimate_data END",
+          [Number(estimate.monthly_total || 0)],
+        ),
       });
       try {
         await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
@@ -7973,6 +7982,15 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     }
 
+    // The "proposed" reference price for accept copy: prefer the amount
+    // snapshotted at first view (what the "Estimate viewed" notification
+    // quoted). Tier-select and preference toggles rewrite
+    // estimates.monthly_total between view and accept, so by accept time the
+    // live column can already equal the accepted price.
+    const proposedMonthlyForNotify = Number(rawEstData?.viewedMonthlyTotal || 0) > 0
+      ? Number(rawEstData.viewedMonthlyTotal)
+      : estimate.monthly_total;
+
     // In-app notifications for estimate accepted. Invoice-mode copy uses
     // invoiceMode, not billByInvoice, so we don't promise a pay link if
     // invoice creation/send failed or was skipped for a zero amount.
@@ -7999,9 +8017,7 @@ router.put('/:token/accept', async (req, res, next) => {
         customerName: estimate.customer_name,
         waveguardTier: acceptTierLabel,
         monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
-        // As-sent default price — the in-memory row predates the accept
-        // update, so this is what the "Estimate viewed" notification quoted.
-        proposedMonthlyTotal: estimate.monthly_total,
+        proposedMonthlyTotal: proposedMonthlyForNotify,
         serviceLabel: invoiceServiceLabel || acceptedOneTimeServiceLabel || oneTimeList[0]?.name || 'One-time service',
         treatAsOneTime,
         billByInvoice,
@@ -8038,7 +8054,7 @@ router.put('/:token/accept', async (req, res, next) => {
           address: estimate.address,
           waveguardTier: estimate.waveguard_tier || 'Bronze',
           monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
-          proposedMonthlyTotal: estimate.monthly_total,
+          proposedMonthlyTotal: proposedMonthlyForNotify,
           serviceLabel: invoiceServiceLabel || acceptedOneTimeServiceLabel || oneTimeList[0]?.name || 'One-time service',
           treatAsOneTime,
           billByInvoice,
@@ -12451,9 +12467,15 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
+      // Snapshot the as-viewed price for accept-time copy — see the matching
+      // first-view block in handleEstimateView for why jsonb_set.
       await db('estimates').where({ id: estimate.id }).update({
         viewed_at: db.fn.now(),
         status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
+        estimate_data: db.raw(
+          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{viewedMonthlyTotal}', to_jsonb(?::numeric), true) ELSE estimate_data END",
+          [Number(estimate.monthly_total || 0)],
+        ),
       }).catch((e) => logger.error(`[estimate-data] first-view flip failed: ${e.message}`));
       try {
         await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
