@@ -76,12 +76,13 @@ describe('rain-out service', () => {
   });
 
   describe('sameDayOptions', () => {
-    test('mid-morning offers +2h and +4h half-hour-rounded windows', () => {
-      // 14:10Z = 10:10 ET → +2h = 12:10 → ceil 12:30; +4h = 14:10 → 14:30
+    test('mid-morning offers +2h and +4h on-the-hour 1-hour windows', () => {
+      // 14:10Z = 10:10 ET → +2h = 12:10 → nearest hour 12:00; +4h = 14:10 → 14:00.
+      // Windows are 1 hour, on the hour (matches how appointments are booked).
       const options = RainOut._test.sameDayOptions(new Date('2026-06-11T14:10:00Z'));
       expect(options).toHaveLength(2);
-      expect(options[0].window).toEqual({ start: '12:30', end: '14:30' });
-      expect(options[1].window).toEqual({ start: '14:30', end: '16:30' });
+      expect(options[0].window).toEqual({ start: '12:00', end: '13:00' });
+      expect(options[1].window).toEqual({ start: '14:00', end: '15:00' });
       expect(options[0].date).toBe('2026-06-11');
     });
 
@@ -420,6 +421,11 @@ describe('rain-out service', () => {
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
       expect(options.days[1]).toMatchObject({ date: '2026-06-13', rainChance: 20 });
+      // Day options are booked as on-the-hour 1-hour slots, not the rebooker's
+      // wider 2-3h suggestedWindow, and the display is re-derived to match.
+      expect(options.days[0].window).toEqual({ start: '08:00', end: '09:00' });
+      expect(options.days[0].display).toBe('Fri, Jun 12, 8:00 AM-9:00 AM');
+      expect(options.days[1].window).toEqual({ start: '09:00', end: '10:00' });
       expect(options.remainingRouteCount).toBe(2);
       expect(options.service.hasPhone).toBe(true);
     });

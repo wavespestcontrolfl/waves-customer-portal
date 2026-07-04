@@ -37,11 +37,19 @@ const WEATHER_PHRASES = {
 // live-override sets; terminal rows are never touched.
 const MOVABLE_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 
-// Same-day options stop offering starts after this ET hour — a 2-hour
-// window starting later than 5 PM runs past a reasonable service day.
+// Same-day options stop offering starts after this ET hour — a slot
+// starting later than 5 PM runs past a reasonable service day.
 const LAST_SAME_DAY_START_HOUR = 17;
 const SAME_DAY_OFFSETS_MINUTES = [120, 240];
-const SAME_DAY_WINDOW_MINUTES = 120;
+
+// Reschedule slots are booked as a 1-hour, on-the-hour block — the internal
+// job-duration window, matching how normal appointments are scheduled. The
+// customer-facing 2-hour "arrival between" promise is derived separately from
+// the start time (arrivalWindowRange in admin-dispatch.js), so a tight 1-hour
+// internal block still texts the customer their usual leniency window. Rain-out
+// used to offer 2-hour windows here, which drifted from the rest of the
+// schedule; on-the-hour keeps dispatch times clean.
+const RESCHEDULE_WINDOW_MINUTES = 60;
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -88,6 +96,21 @@ function displayDate(dateStr) {
 function displayOption(dateStr, window) {
   const win = displayWindow(window);
   return win ? `${displayDate(dateStr)}, ${win}` : displayDate(dateStr);
+}
+
+// Normalize a suggested start to an on-the-hour 1-hour block. The rebooker's
+// findBestWindow returns 2-3h arrival-promise ranges shared with the SMS
+// self-reschedule flow; rain-out books the tighter internal slot here without
+// touching that shared helper. Falls back to a zero-length window if the start
+// can't be parsed (day option renders its start with no end rather than crash).
+function oneHourWindow(startHHMM) {
+  const startMin = hhmmToMinutes(startHHMM);
+  if (startMin == null) return { start: startHHMM, end: startHHMM };
+  const onHour = Math.floor(startMin / 60) * 60;
+  return {
+    start: minutesToHHMM(onHour),
+    end: minutesToHHMM(onHour + RESCHEDULE_WINDOW_MINUTES),
+  };
 }
 
 async function loadServiceWithCustomer(serviceId) {
@@ -139,8 +162,8 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
   return query;
 }
 
-// "Later today" candidates: now + 2h and now + 4h, rounded up to the
-// half hour, 2-hour windows, none starting after LAST_SAME_DAY_START_HOUR.
+// "Later today" candidates: now + 2h and now + 4h, snapped to the nearest
+// hour, 1-hour on-the-hour windows, none starting after LAST_SAME_DAY_START_HOUR.
 function sameDayOptions(now = new Date()) {
   const parts = etParts(now);
   const nowMinutes = parts.hour * 60 + parts.minute;
@@ -148,11 +171,13 @@ function sameDayOptions(now = new Date()) {
 
   const options = [];
   for (const offset of SAME_DAY_OFFSETS_MINUTES) {
-    const start = Math.ceil((nowMinutes + offset) / 30) * 30;
+    // Snap to the nearest hour so same-day slots land on the hour like the
+    // rest of the schedule; the 2h/4h offset keeps them safely in the future.
+    const start = Math.round((nowMinutes + offset) / 60) * 60;
     if (start > LAST_SAME_DAY_START_HOUR * 60) continue;
     const window = {
       start: minutesToHHMM(start),
-      end: minutesToHHMM(start + SAME_DAY_WINDOW_MINUTES),
+      end: minutesToHHMM(start + RESCHEDULE_WINDOW_MINUTES),
     };
     options.push({
       kind: 'same_day',
@@ -188,14 +213,20 @@ async function getOptions(serviceId) {
     logger.info(`[rain-out] outlook lookup failed for ${serviceId}: ${err.message}`);
   }
 
-  const days = (dayOptionsRaw || []).slice(0, 3).map((opt) => ({
-    kind: 'day',
-    date: opt.date,
-    window: { start: opt.suggestedWindow.start, end: opt.suggestedWindow.end },
-    display: `${opt.displayDate}, ${opt.suggestedWindow.display}`,
-    rainChance: outlook?.[opt.date]?.rainChance ?? null,
-    shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
-  }));
+  const days = (dayOptionsRaw || []).slice(0, 3).map((opt) => {
+    // Book the tighter on-the-hour slot, but re-derive the display string from
+    // it so the pill matches what actually gets scheduled (the rebooker's own
+    // suggestedWindow.display is the wider 2-3h arrival range).
+    const window = oneHourWindow(opt.suggestedWindow.start);
+    return {
+      kind: 'day',
+      date: opt.date,
+      window,
+      display: `${opt.displayDate}, ${displayWindow(window)}`,
+      rainChance: outlook?.[opt.date]?.rainChance ?? null,
+      shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
+    };
+  });
 
   const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service);
 
