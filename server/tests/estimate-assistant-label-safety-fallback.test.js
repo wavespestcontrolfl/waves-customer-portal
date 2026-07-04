@@ -308,6 +308,97 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('Bifenthrin');
   });
 
+  test('"service dog" is a recipient, not coordination onto the service', () => {
+    const answer = answerEstimateQuestionFallback('Is the Bifenthrin pest spray safe for kids and service dog?', {
+      serviceMode: 'recurring',
+      services: [{ label: 'Pest Control', detail: 'Quarterly perimeter plan', summary: 'Pest Control — quarterly' }],
+      supportContext: {
+        productCatalog: [
+          {
+            source: 'admin_product_catalog',
+            title: 'insecticide active ingredient',
+            category: 'insecticide',
+            activeIngredient: 'Bifenthrin',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Bifenthrin re-entry line.',
+            rainfastMinutes: 45,
+            irrigationNotes: null,
+            serviceKeys: ['pest_control'],
+          },
+          {
+            source: 'admin_product_catalog',
+            title: 'insecticide active ingredient',
+            category: 'insecticide',
+            activeIngredient: 'Fipronil',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Sibling product re-entry line.',
+            rainfastMinutes: 120,
+            irrigationNotes: null,
+            serviceKeys: ['pest_control'],
+          },
+        ],
+      },
+    });
+    // "kids and service dog" is a recipient list — it must not union every
+    // pest row into a Bifenthrin-specific answer.
+    expect(answer).toContain('Bifenthrin re-entry line.');
+    expect(answer).not.toContain('Sibling product re-entry line.');
+    expect(answer).not.toContain('Fipronil');
+  });
+
+  test('a coordinated product name with no catalog match fails the answer closed', () => {
+    // Roundup is not in the catalog at all — the dedicated named-product
+    // fetch would have loaded any match. Answering with the 2,4-D facts
+    // alone would read as though the safety answer covered both.
+    const answer = answerEstimateQuestionFallback('Are 2,4-D and Roundup safe for pets?', verifiedContext);
+    expect(answer).not.toContain('Label re-entry guidance');
+    expect(answer).not.toContain('Keep people and pets off treated areas until dry');
+    expect(answer).toContain('follow the product label directions');
+  });
+
+  test('an unqualified category on a plant area scopes to that area\'s family', () => {
+    const answer = answerEstimateQuestionFallback('Is the insecticide on landscape plants safe?', {
+      serviceMode: 'recurring',
+      services: [
+        { label: 'Tree & Shrub Care', detail: 'Ornamental program', summary: 'Tree & Shrub — ornamental' },
+        { label: 'Pest Control', detail: 'Quarterly perimeter plan', summary: 'Pest Control — quarterly' },
+      ],
+      supportContext: {
+        productCatalog: [
+          {
+            source: 'admin_product_catalog',
+            title: 'insecticide active ingredient',
+            category: 'insecticide',
+            activeIngredient: 'Acephate',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Ornamental insecticide re-entry line.',
+            rainfastMinutes: null,
+            irrigationNotes: null,
+            serviceKeys: ['tree_shrub'],
+          },
+          {
+            source: 'admin_product_catalog',
+            title: 'insecticide active ingredient',
+            category: 'insecticide',
+            activeIngredient: 'Bifenthrin',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Perimeter insecticide re-entry line.',
+            rainfastMinutes: 45,
+            irrigationNotes: null,
+            serviceKeys: ['pest_control'],
+          },
+        ],
+      },
+    });
+    expect(answer).toContain('Ornamental insecticide re-entry line.');
+    expect(answer).not.toContain('Perimeter insecticide re-entry line.');
+    expect(answer).not.toContain('Bifenthrin');
+  });
+
   test('a question naming BOTH bundle families gets both products\' label facts', () => {
     const answer = answerEstimateQuestionFallback('Are the lawn and mosquito treatments safe for pets?', bundleContext);
     expect(answer).toContain('Label re-entry guidance by product:');

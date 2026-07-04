@@ -137,6 +137,12 @@ describe('estimate AI support context', () => {
     // Insect wording aimed AT a plant area is that plant family's insects.
     expect(serviceFamiliesFromText('Is the insect treatment on landscape plants safe?')).toEqual(['tree_shrub']);
     expect(serviceFamiliesFromText('Is the bug spray on my shrubs safe for pets?')).toEqual(['tree_shrub']);
+    // An UNQUALIFIED category noun before a plant area targets it — the
+    // area is the only family signal...
+    expect(serviceFamiliesFromText('Is the insecticide on landscape plants safe?')).toEqual(['tree_shrub']);
+    // ...but a family-qualified category already names its family, so the
+    // area after it stays a recipient.
+    expect(serviceFamiliesFromText('Is the lawn insecticide on my shrubs safe?')).toEqual(['lawn_care']);
     expect(serviceFamiliesFromText('')).toEqual([]);
   });
 

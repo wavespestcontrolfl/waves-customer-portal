@@ -694,6 +694,11 @@ const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|
 
 // Generic treatment vocabulary says nothing about WHICH product a question
 // targets, so it never counts as naming one.
+// Broad product-category nouns ("the herbicide") — weaker targeting than a
+// product name; shared by category coordination, adjectival scoping, and the
+// unresolved-product guard.
+const CATEGORY_NOUNS = '(?:herbicides?|insecticides?|fungicides?|termiticides?|rodenticides?|fertilizers?|adjuvants?|baits?|igrs?|growth\\s+regulators?)';
+
 const GENERIC_QUESTION_TERMS = new Set([
   'what', 'when', 'does', 'each', 'visit', 'safe', 'kids', 'pets', 'product', 'products',
   'spray', 'sprays', 'sprayed', 'treatment', 'treatments', 'treated', 'chemical', 'chemicals',
@@ -868,6 +873,38 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
   const coveredTokens = new Set(productMentions.flatMap((row) => namingTokensByRow.get(row)));
   const namedTokens = namedRows.flatMap((row) => namingTokensByRow.get(row));
   if (namedTokens.some((token) => !coveredTokens.has(token))) return [];
+  // A product-looking word coordinated with a RESOLVED product mention that
+  // itself resolves to no loaded row means the customer named a product the
+  // catalog does not carry at all ("2,4-D and Roundup" — the dedicated
+  // named-product fetch would have loaded any catalog match). Answering from
+  // the resolved rows alone would read as covering it: fail closed. The
+  // anchor requirement (a resolved token on one side of the conjunction)
+  // keeps ordinary nouns out of this — "safe for kids and adults" names no
+  // product on either side.
+  const resolvedTokens = new Set(namedTokens.filter((token) => token !== '__name__'));
+  if (resolvedTokens.size) {
+    const normalizeWord = (word) => word.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const questionWordList = cleanText(question).replace(/&/g, ' and ').split(/\s+/).map(normalizeWord).filter(Boolean);
+    const CONJUNCTION_WORDS = new Set(['and', 'plus', 'or']);
+    const SKIPPABLE_ARTICLES = new Set(['the', 'my', 'our', 'a', 'an', 'this', 'that', 'other']);
+    const looksLikeUnresolvedProduct = (word) => Boolean(word)
+      && (word.length >= 5 || /\d/.test(word))
+      && !resolvedTokens.has(word)
+      && !GENERIC_QUESTION_TERMS.has(word)
+      && !new RegExp(`^${CATEGORY_NOUNS}$`, 'i').test(word)
+      && !/^(?:lawns?|turf|grass|weeds?|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|ornamentals?|palms?|roach\w*|cockroach\w*|ants?|spiders?|fleas?|ticks?|bees?|wasps?|treat\w*|sprays?|services?|products?|chemicals?|pesticides?)$/.test(word);
+    for (let i = 0; i < questionWordList.length; i += 1) {
+      if (!CONJUNCTION_WORDS.has(questionWordList[i])) continue;
+      const leftWord = i > 0 ? questionWordList[i - 1] : '';
+      let j = i + 1;
+      while (j < questionWordList.length && SKIPPABLE_ARTICLES.has(questionWordList[j])) j += 1;
+      const rightWord = j < questionWordList.length ? questionWordList[j] : '';
+      if ((resolvedTokens.has(leftWord) && looksLikeUnresolvedProduct(rightWord))
+        || (resolvedTokens.has(rightWord) && looksLikeUnresolvedProduct(leftWord))) {
+        return [];
+      }
+    }
+  }
   const categoryMentions = rows.filter((row) => catalogRowMentionsCategory(row, question) && onEstimate(row));
   if (namedRows.length || categoryMentions.length) {
     const questionText = cleanText(question);
@@ -878,7 +915,6 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
     // about. Category rows join a named product only when a conjunction
     // makes the category its own subject ("2,4-D and the other herbicides"),
     // in either order — mirroring the family coordination below.
-    const CATEGORY_NOUNS = '(?:herbicides?|insecticides?|fungicides?|termiticides?|rodenticides?|fertilizers?|adjuvants?|baits?|igrs?|growth\\s+regulators?)';
     const coordinatesOntoCategory = new RegExp(`\\b(?:and|plus|&|along with|as well as)\\s+(?:the\\s+|my\\s+|our\\s+|other\\s+|any\\s+)*${CATEGORY_NOUNS}\\b`, 'i').test(questionText)
       || new RegExp(`\\b${CATEGORY_NOUNS}\\s+(?:and|plus|&|along with|as well as)\\b`, 'i').test(questionText);
     // Broad category mentions ("the lawn insecticide") can match every
@@ -899,9 +935,10 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
     // family/treatment wording on EITHER side: "safe for kids and pets" is
     // not a product+family coordination, and without one the family word is
     // adjectival ("the 2,4-D lawn spray") so the explicit product stays the
-    // narrower, correct scope.
-    const coordinatesOntoFamily = /\b(?:and|plus|&|along with|as well as)\s+(?:the\s+|my\s+|our\s+)?(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service)\b/i.test(questionText)
-      || /\b(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service)\s+(?:and|plus|&|along with|as well as)\b/i.test(questionText);
+    // narrower, correct scope. service(?!\s+dog/animal): "safe for kids and
+    // service dog" is a RECIPIENT list, not coordination onto the service.
+    const coordinatesOntoFamily = /\b(?:and|plus|&|along with|as well as)\s+(?:the\s+|my\s+|our\s+)?(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service(?!\s+(?:dogs?|animals?)))\b/i.test(questionText)
+      || /\b(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service(?!\s+(?:dogs?|animals?)))\s+(?:and|plus|&|along with|as well as)\b/i.test(questionText);
     // Category mentions coordinate onto families too: "the herbicide and
     // mosquito treatment" asks about both, and without the union the
     // category branch would return no mosquito facts at all.

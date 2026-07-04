@@ -241,7 +241,17 @@ function serviceFamiliesFromText(value) {
     // are NOT family qualifiers here: "insect treatment on landscape
     // plants" targets the plants' family.
     const familyQualifiedNoun = /\b(?:mosquito(?:es)?|lawns?|turf|grass|weeds?|trees?|shrubs?|ornamentals?|palms?|termites?|rodents?|pests?|roach(?:es)?|cockroach(?:es)?|landscape\s+plant(?:ing)?s?)\s+(?:\w+\s+)?(?:spray\w*|treat\w*|appl\w*|service)\s+(?:(?!safe\b)\w+\s+)?$/i.test(before);
-    return verbContext && !familyQualifiedNoun ? match : ' ';
+    // An UNQUALIFIED category noun before the area ("the insecticide on
+    // landscape plants") also targets it — the area is the only family
+    // signal, and stripping it would let category scoping span every
+    // on-estimate row of that category. A family-qualified category ("the
+    // lawn insecticide on my shrubs") already names its family, so the area
+    // after it stays a recipient.
+    const categoryNounContext = /\b(?:herbicides?|insecticides?|fungicides?|termiticides?|rodenticides?|adjuvants?|igrs?|pgrs?)\s+(?:(?!safe\b)\w+\s+)?$/i.test(before);
+    const familyQualifiedCategory = /\b(?:mosquito(?:es)?|lawns?|turf|grass|weeds?|trees?|shrubs?|ornamentals?|palms?|termites?|rodents?|pests?|roach(?:es)?|cockroach(?:es)?|landscape\s+plant(?:ing)?s?)\s+(?:\w+\s+)?(?:herbicides?|insecticides?|fungicides?|termiticides?|rodenticides?|adjuvants?|igrs?|pgrs?)\s+(?:(?!safe\b)\w+\s+)?$/i.test(before);
+    return (verbContext && !familyQualifiedNoun) || (categoryNounContext && !familyQualifiedCategory)
+      ? match
+      : ' ';
   }).replace(RECIPIENT_ACTIVITY_PATTERN, ' ');
   const families = SERVICE_FAMILY_QUESTION_PATTERNS
     .filter(([, pattern]) => pattern.test(targeted))
