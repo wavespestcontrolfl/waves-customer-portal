@@ -6422,7 +6422,7 @@ async function handleEstimateView(req, res, next) {
 
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 ${fmtMoney(estimate.monthly_total || 0)}/mo as proposed`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
@@ -7999,6 +7999,9 @@ router.put('/:token/accept', async (req, res, next) => {
         customerName: estimate.customer_name,
         waveguardTier: acceptTierLabel,
         monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
+        // As-sent default price — the in-memory row predates the accept
+        // update, so this is what the "Estimate viewed" notification quoted.
+        proposedMonthlyTotal: estimate.monthly_total,
         serviceLabel: invoiceServiceLabel || acceptedOneTimeServiceLabel || oneTimeList[0]?.name || 'One-time service',
         treatAsOneTime,
         billByInvoice,
@@ -8035,6 +8038,7 @@ router.put('/:token/accept', async (req, res, next) => {
           address: estimate.address,
           waveguardTier: estimate.waveguard_tier || 'Bronze',
           monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
+          proposedMonthlyTotal: estimate.monthly_total,
           serviceLabel: invoiceServiceLabel || acceptedOneTimeServiceLabel || oneTimeList[0]?.name || 'One-time service',
           treatAsOneTime,
           billByInvoice,
@@ -9670,11 +9674,27 @@ function estimateInvoicePayUrlParams({ billingTerm = 'standard', saveCard = true
   return params;
 }
 
+// Accept-time price can legitimately differ from the as-sent default when the
+// customer picks a different cadence/plan on the estimate page (accept re-prices
+// from the selected frequency/cadence combo). Surface both amounts on admin and
+// office copy so a "viewed at $X/mo" → "accepted at $Y/mo" notification pair
+// reads as a plan change, not a pricing discrepancy. Customer-facing copy never
+// gets the note — customers only ever saw the price they picked.
+function acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal) {
+  const accepted = Number(monthlyTotal || 0);
+  const proposed = Number(proposedMonthlyTotal || 0);
+  const proposedNote = accepted > 0 && proposed > 0 && Math.abs(accepted - proposed) >= 0.01
+    ? ` (proposed at ${fmtMoney(proposed)}/mo)`
+    : '';
+  return { monthlyText: `${fmtMoney(accepted)}/mo`, proposedNote };
+}
+
 function buildAcceptOfficeFallback({
   customerName = '',
   address = '',
   waveguardTier = 'Bronze',
   monthlyTotal = 0,
+  proposedMonthlyTotal = null,
   serviceLabel = 'service',
   treatAsOneTime = false,
   billByInvoice = false,
@@ -9687,11 +9707,12 @@ function buildAcceptOfficeFallback({
 } = {}) {
   const safeCustomerName = String(customerName || '').trim() || 'Unknown customer';
   const safeAddress = String(address || '').trim() || 'address unavailable';
+  const { monthlyText, proposedNote } = acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal);
 
   if (billByInvoice) {
     const label = treatAsOneTime
       ? `${serviceLabel} one-time service`
-      : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
+      : `${waveguardTier} WaveGuard ${monthlyText}${proposedNote}`;
     const invoiceText = invoiceLinkDelivered
       ? 'Invoice pay link sent.'
       : (invoiceMode || invoicePayUrl ? 'Invoice created; optional pay link available.' : 'Invoice mode selected.');
@@ -9712,9 +9733,9 @@ function buildAcceptOfficeFallback({
     const invoiceText = invoiceLinkDelivered
       ? 'Setup + first application invoice pay link sent.'
       : 'Setup + first application invoice created; optional pay link available.';
-    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. ${invoiceText}`;
+    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard ${monthlyText}${proposedNote}. ${invoiceText}`;
   }
-  return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. Invoice follow-up needed.`;
+  return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard ${monthlyText}${proposedNote}. Invoice follow-up needed.`;
 }
 
 async function fireBundleQuoteRequestedNotification({ estimate, suggestedService, bundled }, triggerFn) {
@@ -9737,6 +9758,7 @@ function buildAcceptNotificationPayload({
   customerName = '',
   waveguardTier = 'Bronze',
   monthlyTotal = 0,
+  proposedMonthlyTotal = null,
   serviceLabel = 'One-time service',
   treatAsOneTime = false,
   billByInvoice = false,
@@ -9757,8 +9779,10 @@ function buildAcceptNotificationPayload({
   // here with billByInvoice unset; its invoicePayUrl is already nulled, but the
   // term branches below would still tell the homeowner to use the pay link.
   // Admin copy still reflects that the invoice was sent.
+  const { monthlyText, proposedNote } = acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal);
   if (payerBilled) {
-    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
+    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard ${monthlyText}`;
+    const adminPlanLabel = treatAsOneTime ? serviceLabel : `${planLabel}${proposedNote}`;
     // Mirror the non-payer invoice-mode paths: only claim the invoice reached the
     // billing contact when delivery actually succeeded. A payer with no usable AP
     // email fails sendViaSMSAndEmail (invoiceLinkDelivered=false) — surface that
@@ -9767,7 +9791,7 @@ function buildAcceptNotificationPayload({
     if (!invoiceLinkDelivered) {
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
-        adminBody: `${planLabel} approved. Invoice billed to a third-party payer, but automatic delivery to their AP inbox failed — office follow-up needed.`,
+        adminBody: `${adminPlanLabel} approved. Invoice billed to a third-party payer, but automatic delivery to their AP inbox failed — office follow-up needed.`,
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${planLabel} is approved. We'll coordinate billing with your billing contact — nothing is due from you.`,
         customerLink: '/?tab=billing',
@@ -9775,7 +9799,7 @@ function buildAcceptNotificationPayload({
     }
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${planLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
+      adminBody: `${adminPlanLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${planLabel} is approved. The invoice was sent to your billing contact — nothing is due from you.`,
       customerLink: '/?tab=billing',
@@ -9786,10 +9810,10 @@ function buildAcceptNotificationPayload({
   // membership — use service-plan copy instead of the "{tier} WaveGuard"
   // fallback (which would otherwise read "Bronze WaveGuard plan approved").
   if (!treatAsOneTime && String(waveguardTier || '').trim().toLowerCase() === 'commercial') {
-    const planLabel = `Commercial service plan ($${monthlyTotal}/mo)`;
+    const planLabel = `Commercial service plan (${monthlyText})`;
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${planLabel} approved.${invoicePayUrl ? ' Invoice pay link sent.' : ' Office to confirm details + schedule the recurring visits.'}`,
+      adminBody: `${planLabel}${proposedNote} approved.${invoicePayUrl ? ' Invoice pay link sent.' : ' Office to confirm details + schedule the recurring visits.'}`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${planLabel} is approved. A Waves team member will confirm the details and schedule your service.`,
       customerLink: '/?tab=billing',
@@ -9818,7 +9842,7 @@ function buildAcceptNotificationPayload({
     if (!invoiceMode || !invoiceLinkDelivered) {
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
-        adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice was not sent automatically; office follow-up needed.`,
+        adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice was not sent automatically; office follow-up needed.`,
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the invoice details.`,
         customerLink: invoicePayUrl || '/?tab=billing',
@@ -9826,7 +9850,7 @@ function buildAcceptNotificationPayload({
     }
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice pay link is being sent.`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice pay link is being sent.`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
@@ -9876,7 +9900,7 @@ function buildAcceptNotificationPayload({
     const sentText = invoiceLinkDelivered ? 'Invoice pay link sent.' : 'Invoice created; optional pay link available.';
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. ${sentText}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. ${sentText}`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
@@ -9885,7 +9909,7 @@ function buildAcceptNotificationPayload({
 
   return {
     adminTitle: `Estimate accepted: ${customerName}`,
-    adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice follow-up needed.`,
+    adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice follow-up needed.`,
     customerTitle: 'Estimate accepted',
     customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Our team will follow up with the invoice details.`,
     customerLink: '/?tab=billing',
@@ -12442,7 +12466,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         await NotificationService.notifyAdmin(
           'estimate',
           `Estimate viewed: ${estimate.customer_name}`,
-          `${estimate.address || 'no address'} — $${estimate.monthly_total || 0}/mo`,
+          `${estimate.address || 'no address'} — ${fmtMoney(estimate.monthly_total || 0)}/mo as proposed`,
           { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
         );
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
