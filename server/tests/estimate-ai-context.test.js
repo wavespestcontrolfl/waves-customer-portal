@@ -127,8 +127,16 @@ describe('estimate AI support context', () => {
     // ...but treatment-tied perimeter wording is.
     expect(serviceFamiliesFromText('Do you spray inside the house?')).toEqual(['pest_control']);
     // A treatment word already qualified by another family is NOT perimeter
-    // pest wording — the mosquito spray happening outside stays mosquito.
+    // pest wording — the mosquito spray happening outside stays mosquito,
+    // no matter how many words sit between the family and the treat word.
     expect(serviceFamiliesFromText('Is the mosquito spray outside safe for pets?')).toEqual(['mosquito']);
+    expect(serviceFamiliesFromText('Is the mosquito barrier spray outside safe for pets?')).toEqual(['mosquito']);
+    // A family-qualified treat NOUN before an area keeps the area a
+    // recipient — unlike "what do you spray on the lawn", which targets it.
+    expect(serviceFamiliesFromText('Is the mosquito spray on the lawn safe for pets?')).toEqual(['mosquito']);
+    // Insect wording aimed AT a plant area is that plant family's insects.
+    expect(serviceFamiliesFromText('Is the insect treatment on landscape plants safe?')).toEqual(['tree_shrub']);
+    expect(serviceFamiliesFromText('Is the bug spray on my shrubs safe for pets?')).toEqual(['tree_shrub']);
     expect(serviceFamiliesFromText('')).toEqual([]);
   });
 
@@ -464,6 +472,20 @@ describe('estimate AI support context', () => {
     expect(serviceKeysFromContext({
       services: [{ service: 'rodent_bait_quarterly', label: 'Rodent Bait Stations', detail: 'Quarterly exterior program' }],
     }, '')).toEqual(['rodent_bait']);
+  });
+
+  test('combo service keys keep every embedded family', () => {
+    // lawn_tree_shrub_combo is a live service-library key — collapsing it
+    // to lawn_care alone makes tree/shrub rows read as off-estimate and
+    // suppresses their label facts.
+    expect(serviceKeysFromContext({
+      services: [{ service: 'lawn_tree_shrub_combo', label: 'Lawn + Tree & Shrub Combo', detail: 'Combined program' }],
+    }, '')).toEqual(['lawn_care', 'tree_shrub']);
+    // "palmetto" jobs are roach work — the suffix scan must not hand the
+    // palmetto_knockdown suffix to the palm-injection lane.
+    expect(serviceKeysFromContext({
+      services: [{ service: 'pest_initial_palmetto_knockdown', label: 'Palmetto Bug Knockdown', detail: 'Initial cleanout' }],
+    }, '')).toEqual(['pest_control']);
   });
 
   test('question-derived service keys use the whole-word matcher for support loading', () => {

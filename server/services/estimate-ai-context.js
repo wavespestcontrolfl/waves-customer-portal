@@ -137,19 +137,25 @@ const SERVICE_FAMILY_QUESTION_PATTERNS = [
 // Customers say "bug spray" for pest control — but a bug/insect word that
 // directly follows another family's qualifier ("chinch bug", "lawn insects")
 // describes THAT family's insects, and adding pest_control there would scope
-// perimeter-pest label facts into a lawn answer. An INDEPENDENT bug mention
-// ("the lawn and bug spray") still counts as pest control.
+// perimeter-pest label facts into a lawn answer. The qualifier can also
+// FOLLOW the insect word as the treatment's target area ("insect treatment
+// on landscape plants", "bug spray on my shrubs") — those are that plant
+// family's insects too. An INDEPENDENT bug mention ("the lawn and bug
+// spray") still counts as pest control.
 const PEST_GENERIC_INSECT_PATTERN = /\b(?:bugs?|insects?)\b/i;
-const QUALIFIED_INSECT_PATTERN = /\b(?:chinch|lawn|turf|grass|trees?|shrubs?|ornamental|palms?|mosquito|landscape\s+plant(?:ing)?s?)\s+(?:bugs?|insects?)\b/gi;
+const QUALIFIED_INSECT_PATTERN = /\b(?:chinch|lawn|turf|grass|trees?|shrubs?|ornamental|palms?|mosquito|landscape\s+plant(?:ing)?s?)\s+(?:bugs?|insects?)\b|\b(?:bugs?|insects?)\s+(?:treat\w*|spray\w*|control\w*|appl\w*)?\s*(?:on|for|near|around)\s+(?:the\s+|my\s+|our\s+)?(?:trees?|shrubs?|ornamentals?|palms?|lawns?|turf|grass|landscape\s+plant(?:ing)?s?)\b/gi;
 
 // interior/exterior/inside/outside read as pest control ONLY when tied to a
 // treatment ("exterior spray", "treat the outside") — plain location words
 // ("my outside plants") say nothing about which service is being asked
 // about, and mis-scoping them starves the real family's label facts.
-// A treatment word already qualified by another family ("the MOSQUITO spray
-// outside") is that family's treatment happening outside, not a perimeter
-// pest treatment — the lookbehind keeps pest_control out of it.
-const PEST_PERIMETER_CONTEXT_PATTERN = /\b(?:interiors?|exteriors?|inside|outside)\s+(?:treat\w*|appl\w*|spray\w*|service|barrier|pest\w*)\b|(?<!\b(?:mosquito(?:es)?|lawns?|turf|grass|weeds?|trees?|shrubs?|ornamentals?|palms?|termites?|rodents?|plant(?:ing)?s?)\s)\b(?:spray\w*|treat\w*|apply\w*|service)\s+(?:the\s+|my\s+|our\s+)?(?:interiors?|exteriors?|inside|outside)\b/i;
+// Perimeter-SERVICE wording ("exterior spray", "inside treatment") names the
+// pest lane outright; treat-word-then-location wording ("spray outside")
+// only says WHERE treatment happens, so it reads as pest control only when
+// the question names no other family — "the mosquito barrier spray outside"
+// stays mosquito no matter how many words sit between family and verb.
+const PEST_PERIMETER_SERVICE_PATTERN = /\b(?:interiors?|exteriors?|inside|outside)\s+(?:treat\w*|appl\w*|spray\w*|service|barrier|pest\w*)\b/i;
+const PEST_PERIMETER_LOCATION_PATTERN = /\b(?:spray\w*|treat\w*|apply\w*|service)\s+(?:the\s+|my\s+|our\s+)?(?:interiors?|exteriors?|inside|outside)\b/i;
 
 // "Safe for the lawn" / "will it hurt my shrubs" name the RECIPIENT of a
 // treatment, not the treatment family the customer is asking about — strip
@@ -175,20 +181,42 @@ const RECIPIENT_ACTIVITY_PATTERN = /\b(?:water(?:ing|ed|s)?|irrigat\w*|mow\w*|wa
 const SERVICE_KEY_FAMILY_PREFIXES = [
   ['rodent_bait', /^(?:rodent|pest_rodent)/],
   ['termite_bait', /^(?:termite|pest_termite)/],
-  ['palm_injection', /^palm/],
+  // palm(?!etto): pest_initial_palmetto_knockdown is a ROACH job — the
+  // suffix scan below must not hand its "palmetto_knockdown" suffix to the
+  // palm-injection lane.
+  ['palm_injection', /^palm(?!etto)/],
   ['mosquito', /^(?:mosquito|one_time_mosquito)/],
   ['tree_shrub', /^(?:tree|shrub)/],
   ['lawn_care', /^(?:lawn|one_time_lawn)/],
   ['pest_control', /^(?:pest|cockroach|german_roach|bed_bug|fire_ant|flea_tick|bee_wasp|mud_dauber|one_time_pest)/],
 ];
 
-function serviceFamilyFromKey(serviceKey) {
+// Combo keys ("lawn_tree_shrub_combo" is live in the service library) embed
+// several families in one canonical key — every underscore-boundary suffix
+// is tested so each embedded family matches its anchored prefix pattern,
+// and a combo estimate keeps ALL its families for scoping instead of
+// collapsing to the first one.
+function serviceFamiliesFromKey(serviceKey) {
   const key = cleanText(serviceKey || '').toLowerCase();
-  if (!key) return null;
-  for (const [family, pattern] of SERVICE_KEY_FAMILY_PREFIXES) {
-    if (pattern.test(key)) return family;
+  if (!key) return [];
+  const suffixes = [key];
+  for (let i = 0; i < key.length; i += 1) {
+    if (key[i] === '_') suffixes.push(key.slice(i + 1));
   }
-  return null;
+  const families = [];
+  for (const suffix of suffixes) {
+    for (const [family, pattern] of SERVICE_KEY_FAMILY_PREFIXES) {
+      if (pattern.test(suffix)) {
+        if (!families.includes(family)) families.push(family);
+        break;
+      }
+    }
+  }
+  return families;
+}
+
+function serviceFamilyFromKey(serviceKey) {
+  return serviceFamiliesFromKey(serviceKey)[0] || null;
 }
 
 // ALL families a question names, not just the first — a bundle question like
@@ -205,15 +233,23 @@ function serviceFamiliesFromText(value) {
   const targeted = text.replace(AFFECTED_AREA_PATTERN, (match, offset, whole) => {
     // Harm-verb phrases ("hurt my shrubs") are ALWAYS recipients.
     if (/^(?:hurt|harms?|damage|kills?|burn|stains?)\b/i.test(match)) return ' ';
-    const before = whole.slice(Math.max(0, offset - 30), offset);
-    return /\b(?:spray\w*|appl\w*|use|used|uses|using|put|putting|treat\w*)\s+(?:(?!safe\b)\w+\s+)?$/i.test(before)
-      ? match
-      : ' ';
+    const before = whole.slice(Math.max(0, offset - 40), offset);
+    const verbContext = /\b(?:spray\w*|appl\w*|use|used|uses|using|put|putting|treat\w*)\s+(?:(?!safe\b)\w+\s+)?$/i.test(before);
+    // A treat word itself qualified by a family ("the MOSQUITO spray on the
+    // lawn") is a noun phrase, not the customer asking what gets sprayed
+    // where — the area after it is a recipient. Generic bug/insect words
+    // are NOT family qualifiers here: "insect treatment on landscape
+    // plants" targets the plants' family.
+    const familyQualifiedNoun = /\b(?:mosquito(?:es)?|lawns?|turf|grass|weeds?|trees?|shrubs?|ornamentals?|palms?|termites?|rodents?|pests?|roach(?:es)?|cockroach(?:es)?|landscape\s+plant(?:ing)?s?)\s+(?:\w+\s+)?(?:spray\w*|treat\w*|appl\w*|service)\s+(?:(?!safe\b)\w+\s+)?$/i.test(before);
+    return verbContext && !familyQualifiedNoun ? match : ' ';
   }).replace(RECIPIENT_ACTIVITY_PATTERN, ' ');
   const families = SERVICE_FAMILY_QUESTION_PATTERNS
     .filter(([, pattern]) => pattern.test(targeted))
     .map(([key]) => key);
-  if (!families.includes('pest_control') && PEST_PERIMETER_CONTEXT_PATTERN.test(targeted)) {
+  if (!families.includes('pest_control') && (
+    PEST_PERIMETER_SERVICE_PATTERN.test(targeted)
+    || (!families.length && PEST_PERIMETER_LOCATION_PATTERN.test(targeted))
+  )) {
     families.push('pest_control');
   }
   // Strip family-qualified insect phrases, so only INDEPENDENT bug/insect
@@ -237,9 +273,14 @@ function serviceKeysFromContext(context = {}, question = '') {
   for (const row of serviceRows) {
     // The canonical row.service key wins over label text — "Rodent Bait
     // Stations" would otherwise hit the loose termite pattern's bare "bait"
-    // alternate before the rodent pattern.
-    const key = serviceFamilyFromKey(row.service || row.key)
-      || serviceKeyFromText([row.label, row.detail, row.summary].filter(Boolean).join(' '));
+    // alternate before the rodent pattern. Combo keys contribute EVERY
+    // embedded family.
+    const families = serviceFamiliesFromKey(row.service || row.key);
+    if (families.length) {
+      keys.push(...families);
+      continue;
+    }
+    const key = serviceKeyFromText([row.label, row.detail, row.summary].filter(Boolean).join(' '));
     if (key) keys.push(key);
   }
 
@@ -442,11 +483,14 @@ const AMBIGUOUS_NAME_TOKENS = new Set([
 ]);
 
 // Does the question name this product? Compared as normalized whole tokens
-// (distinctive ones only: >=5 chars or containing a digit), so the row can
-// carry a BOOLEAN — the product name itself never enters the support
-// context; customer copy tells them to call for the exact product.
-function questionNamesProduct(name, questionWords) {
-  if (!questionWords.length) return false;
+// (distinctive ones only: >=5 chars or containing a digit). The row carries
+// the MATCHED tokens — every one is a word the customer already typed, so
+// the product name itself never enters the support context; customer copy
+// tells them to call for the exact product. The tokens let scoping tell
+// distinct naming signals apart ("SpeedZone and RoundUp" is two products,
+// not one), which a bare boolean cannot.
+function questionNameTokensFor(name, questionWords) {
+  if (!questionWords.length) return [];
   const tokens = cleanText(name || '')
     .toLowerCase()
     .split(/\s+/)
@@ -455,13 +499,18 @@ function questionNamesProduct(name, questionWords) {
       && token.length >= 2
       && !GENERIC_NAME_TOKENS.has(token));
   const matched = tokens.filter((token) => questionWords.includes(token));
-  if (!matched.length) return false;
+  if (!matched.length) return [];
   // A common English word isn't a product mention — "Drive XLR8" must not
   // be "named" by "is it safe to DRIVE on the lawn?". But short DISTINCTIVE
   // names ("Tekko") are real mentions, so the block list is the ambiguous
   // everyday words, not a length cutoff.
-  return matched.length >= 2
+  const names = matched.length >= 2
     || matched.some((token) => /\d/.test(token) || !AMBIGUOUS_NAME_TOKENS.has(token));
+  return names ? matched : [];
+}
+
+function questionNamesProduct(name, questionWords) {
+  return questionNameTokensFor(name, questionWords).length > 0;
 }
 
 // Returns {rows, truncated}: truncated=true when the query filled the row
@@ -626,6 +675,9 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         irrigationNotes: labelVerified ? (trimSnippet(row.irrigation_notes || '') || null) : null,
         serviceKeys: familiesForProduct(row.name),
         questionNameMatch: questionNamesProduct(row.name, questionWords),
+        // The matched tokens are the customer's own question words — safe to
+        // carry, and they let scoping tell distinct naming signals apart.
+        questionNameTokens: questionNameTokensFor(row.name, questionWords),
         snippet: trimSnippet(parts.join(' - ')),
       };
     }).filter((row) => row.snippet || row.title);
@@ -778,13 +830,17 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
   for (const row of serviceLibrary) {
     // Exact service_key prefixes win over the loose text matcher — see
     // SERVICE_KEY_FAMILY_PREFIXES (rodent_bait vs the termite "bait" trap).
-    const family = serviceFamilyFromKey(row.path)
-      || serviceKeyFromText([row.path, row.title, row.category].filter(Boolean).join(' '));
-    if (!family) continue;
+    // Combo keys attribute their products to EVERY embedded family.
+    const families = serviceFamiliesFromKey(row.path);
+    if (!families.length) {
+      const fallback = serviceKeyFromText([row.path, row.title, row.category].filter(Boolean).join(' '));
+      if (fallback) families.push(fallback);
+    }
+    if (!families.length) continue;
     for (const name of row._productNames || []) {
       const key = cleanText(name).toLowerCase();
       if (!key) continue;
-      productFamiliesByName[key] = unique([...(productFamiliesByName[key] || []), family]);
+      productFamiliesByName[key] = unique([...(productFamiliesByName[key] || []), ...families]);
     }
   }
   // Attribution alone is not enough for protocol-only products: the catalog

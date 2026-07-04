@@ -196,6 +196,118 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).toContain('follow the product label directions');
   });
 
+  test('a coordinated category + family question gets both products\' label facts', () => {
+    // "the herbicide and mosquito treatment" makes the category and the
+    // family separate subjects — intersecting herbicides with the mosquito
+    // family would empty the set and answer with no facts at all.
+    const answer = answerEstimateQuestionFallback('Are the herbicide and mosquito treatment safe for pets?', bundleContext);
+    expect(answer).toContain('Label re-entry guidance by product:');
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).toContain('Stay out of the treated area until sprays have dried');
+  });
+
+  test('combo service keys keep every embedded family for scoping', () => {
+    const answer = answerEstimateQuestionFallback('Is the tree and shrub treatment safe for pets?', {
+      serviceMode: 'recurring',
+      services: [{ service: 'lawn_tree_shrub_combo', label: 'Lawn + Tree & Shrub Combo', detail: 'Combined program', summary: 'Lawn + Tree & Shrub' }],
+      supportContext: {
+        productCatalog: [{
+          source: 'admin_product_catalog',
+          title: 'fungicide active ingredient',
+          category: 'fungicide',
+          activeIngredient: 'Azoxystrobin',
+          labelVerified: true,
+          signalWord: 'Caution',
+          reentry: 'Ornamental re-entry line.',
+          rainfastMinutes: 60,
+          irrigationNotes: null,
+          serviceKeys: ['tree_shrub'],
+        }],
+      },
+    });
+    // A combo estimate collapsed to lawn_care alone would treat this
+    // tree/shrub row as off-estimate and answer with no facts.
+    expect(answer).toContain('Ornamental re-entry line.');
+  });
+
+  test('an acronym names the expanded biological active', () => {
+    const answer = answerEstimateQuestionFallback('Is the Bti treatment safe for pets?', {
+      serviceMode: 'recurring',
+      services: [{ label: 'Mosquito Control', detail: 'Barrier treatment', summary: 'Mosquito Control — barrier' }],
+      supportContext: {
+        productCatalog: [
+          {
+            source: 'admin_product_catalog',
+            title: 'larvicide active ingredient',
+            category: 'larvicide',
+            // Stored expanded, with the taxonomy rank marker and a trailing
+            // formulation word — the customer still says "Bti".
+            activeIngredient: 'Bacillus thuringiensis subsp. israelensis solids',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Larvicide dunk re-entry line.',
+            rainfastMinutes: null,
+            irrigationNotes: null,
+            serviceKeys: ['mosquito'],
+          },
+          {
+            source: 'admin_product_catalog',
+            title: 'adulticide active ingredient',
+            category: 'adulticide',
+            activeIngredient: 'Deltamethrin',
+            labelVerified: true,
+            signalWord: 'Warning',
+            reentry: 'Adulticide re-entry line.',
+            rainfastMinutes: 30,
+            irrigationNotes: null,
+            serviceKeys: ['mosquito'],
+          },
+        ],
+      },
+    });
+    expect(answer).toContain('Larvicide dunk re-entry line.');
+    expect(answer).not.toContain('Adulticide re-entry line.');
+    expect(answer).not.toContain('Deltamethrin');
+  });
+
+  test('a short category acronym scopes to that category', () => {
+    const answer = answerEstimateQuestionFallback('Is the IGR safe for pets?', {
+      serviceMode: 'recurring',
+      services: [{ label: 'Pest Control', detail: 'Quarterly perimeter plan', summary: 'Pest Control — quarterly' }],
+      supportContext: {
+        productCatalog: [
+          {
+            source: 'admin_product_catalog',
+            title: 'IGR active ingredient',
+            category: 'IGR',
+            activeIngredient: 'Pyriproxyfen',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'IGR re-entry line.',
+            rainfastMinutes: null,
+            irrigationNotes: null,
+            serviceKeys: ['pest_control'],
+          },
+          {
+            source: 'admin_product_catalog',
+            title: 'insecticide active ingredient',
+            category: 'insecticide',
+            activeIngredient: 'Bifenthrin',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Insecticide re-entry line.',
+            rainfastMinutes: 45,
+            irrigationNotes: null,
+            serviceKeys: ['pest_control'],
+          },
+        ],
+      },
+    });
+    expect(answer).toContain('IGR re-entry line.');
+    expect(answer).not.toContain('Insecticide re-entry line.');
+    expect(answer).not.toContain('Bifenthrin');
+  });
+
   test('a question naming BOTH bundle families gets both products\' label facts', () => {
     const answer = answerEstimateQuestionFallback('Are the lawn and mosquito treatments safe for pets?', bundleContext);
     expect(answer).toContain('Label re-entry guidance by product:');
@@ -626,6 +738,28 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('Label re-entry guidance');
     expect(answer).not.toContain('Foreign product re-entry claim');
     expect(answer).not.toContain('Carfentrazone');
+    expect(answer).toContain('follow the product label directions');
+  });
+
+  test('naming an on-estimate AND an off-estimate product fails closed for both', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    context.supportContext.productCatalog.push({
+      source: 'admin_product_catalog',
+      category: 'herbicide',
+      activeIngredient: 'Glyphosate',
+      labelVerified: true,
+      signalWord: 'Warning',
+      reentry: 'Foreign product re-entry claim.',
+      rainfastMinutes: 240,
+      irrigationNotes: null,
+      serviceKeys: [],
+    });
+    // 2,4-D is on the plan, glyphosate is not — answering with the 2,4-D
+    // facts alone would read as though the safety answer covered both.
+    const answer = answerEstimateQuestionFallback('Are 2,4-D and glyphosate safe for pets?', context);
+    expect(answer).not.toContain('Label re-entry guidance');
+    expect(answer).not.toContain('Keep people and pets off treated areas until dry');
+    expect(answer).not.toContain('Foreign product re-entry claim');
     expect(answer).toContain('follow the product label directions');
   });
 

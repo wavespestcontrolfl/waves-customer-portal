@@ -714,17 +714,33 @@ function questionTermsForMatching(question = '') {
     .filter((term) => term.length >= 4 && !GENERIC_QUESTION_TERMS.has(term));
 }
 
-// True when the question names this SPECIFIC product: the product name (via
-// the questionNameMatch flag the context builder stamps, so the name itself
-// never rides along in the row) or an active ingredient. Title and snippet
-// are deliberately excluded: every catalog row's title reads "<category>
-// active ingredient", and snippet would let generic re-entry copy
-// ("...sprays have dried") match.
-function catalogRowNamesProduct(row = {}, question = '') {
-  if (row.questionNameMatch === true) return true;
+// Taxonomy rank markers inside expanded biological actives ("Bacillus
+// thuringiensis subsp. israelensis") — dropped before acronym generation so
+// "subsp." never breaks the initials customers actually use.
+const TAXONOMY_RANK_TOKENS = new Set(['subsp', 'subspecies', 'ssp', 'spp', 'var', 'strain', 'serotype', 'sp']);
+
+// Tokens with which the question names this SPECIFIC product: the product
+// name (via the builder-stamped questionNameTokens — each one is a word the
+// customer already typed, so the name itself never rides along in the row)
+// or an active ingredient. Title and snippet are deliberately excluded:
+// every catalog row's title reads "<category> active ingredient", and
+// snippet would let generic re-entry copy ("...sprays have dried") match.
+// Callers group naming signals BY TOKEN: several rows can share one active
+// ("2,4-D" appears in multiple herbicides) and one on-estimate row
+// satisfies that token, while a token whose rows are all off-estimate means
+// the customer named a product this estimate does not carry.
+function catalogRowNamingTokens(row = {}, question = '') {
+  const tokens = [];
+  if (row.questionNameMatch === true) {
+    tokens.push(...(Array.isArray(row.questionNameTokens) && row.questionNameTokens.length
+      ? row.questionNameTokens
+      : ['__name__'])); // pre-token contexts: one shared name group
+  }
   const ingredientText = cleanText(row.activeIngredient || '').toLowerCase();
-  if (!ingredientText) return false;
-  if (questionTermsForMatching(question).some((term) => ingredientText.includes(term))) return true;
+  if (!ingredientText) return [...new Set(tokens)];
+  for (const term of questionTermsForMatching(question)) {
+    if (ingredientText.includes(term)) tokens.push(term);
+  }
   // Short/punctuated active-ingredient names ("2,4-D", "Bti") never survive
   // the >=4-char term filter above — compare whole normalized question words
   // against normalized ingredient aliases by exact equality instead.
@@ -743,10 +759,29 @@ function catalogRowNamesProduct(row = {}, question = '') {
     .flatMap((segment) => segment.split(/\s+/))
     .map(normalize)
     .filter((word) => word.length >= 2 && (/\d/.test(word) || word.length >= 5));
-  const comparable = [...aliases, ...aliasWords];
-  if (!comparable.length) return false;
-  const questionWords = cleanText(question).split(/\s+/).map(normalize).filter(Boolean);
-  return comparable.some((alias) => questionWords.includes(alias));
+  // Expanded actives answer to their initials ("Bti" for Bacillus
+  // thuringiensis israelensis): every >=3-char PREFIX acronym of a
+  // segment's words counts, so trailing formulation words ("... solids")
+  // don't break the match.
+  const acronyms = aliasSegments
+    .map((segment) => segment.split(/\s+/)
+      .map(normalize)
+      .filter((word) => word.length >= 1 && !TAXONOMY_RANK_TOKENS.has(word)))
+    .filter((words) => words.length >= 3)
+    .flatMap((words) => words.slice(2).map((_, index) => words.slice(0, index + 3).map((word) => word[0]).join('')))
+    .filter((acronym) => acronym.length >= 3);
+  const comparable = [...aliases, ...aliasWords, ...acronyms];
+  if (comparable.length) {
+    const questionWords = cleanText(question).split(/\s+/).map(normalize).filter(Boolean);
+    for (const word of questionWords) {
+      if (comparable.includes(word)) tokens.push(word);
+    }
+  }
+  return [...new Set(tokens)];
+}
+
+function catalogRowNamesProduct(row = {}, question = '') {
+  return catalogRowNamingTokens(row, question).length > 0;
 }
 
 // True when the question names this row's broad CATEGORY ("the herbicide",
@@ -755,7 +790,15 @@ function catalogRowNamesProduct(row = {}, question = '') {
 function catalogRowMentionsCategory(row = {}, question = '') {
   const text = cleanText([row.category, row.path].filter(Boolean).join(' ')).toLowerCase();
   if (!text) return false;
-  return questionTermsForMatching(question).some((term) => text.includes(term));
+  if (questionTermsForMatching(question).some((term) => text.includes(term))) return true;
+  // Short category acronyms (IGR, PGR — both live catalog categories) never
+  // survive the >=4-char term filter — compare 3-char question tokens
+  // against whole category words by plural-tolerant equality instead.
+  const shortTokens = cleanText(question).toLowerCase().split(/[^a-z0-9]+/)
+    .filter((token) => token.length === 3);
+  if (!shortTokens.length) return false;
+  const categoryWords = text.split(/[^a-z0-9]+/).filter(Boolean);
+  return shortTokens.some((token) => categoryWords.includes(token) || categoryWords.includes(`${token}s`));
 }
 
 // Scope targeted questions to the product(s) they target — the support
@@ -808,13 +851,23 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
   // an off-estimate product ("is glyphosate safe?" on a Quinclorac lawn
   // plan) must fail closed to generic copy, not fall through to the
   // estimate's own products' facts.
-  const namedRows = rows.filter((row) => catalogRowNamesProduct(row, question));
+  const namingTokensByRow = new Map(rows.map((row) => [row, catalogRowNamingTokens(row, question)]));
+  const namedRows = rows.filter((row) => namingTokensByRow.get(row).length > 0);
   const productMentions = namedRows.filter(onEstimate);
   // The customer named a product and NONE of the named rows are on this
   // estimate: fail closed outright. Category words in the same breath ("is
   // glyphosate HERBICIDE safe?") describe that product — they must not fall
   // through to the estimate's own products' facts.
   if (namedRows.length && !productMentions.length) return [];
+  // EVERY named product must resolve to an on-estimate row: "are 2,4-D and
+  // glyphosate safe?" on a 2,4-D-only plan must not answer with the 2,4-D
+  // facts alone as though the answer covered both. Naming signals group by
+  // the question token that matched — several rows can share one active and
+  // one on-estimate row satisfies that token — and a token whose rows are
+  // ALL off-estimate fails the whole question closed.
+  const coveredTokens = new Set(productMentions.flatMap((row) => namingTokensByRow.get(row)));
+  const namedTokens = namedRows.flatMap((row) => namingTokensByRow.get(row));
+  if (namedTokens.some((token) => !coveredTokens.has(token))) return [];
   const categoryMentions = rows.filter((row) => catalogRowMentionsCategory(row, question) && onEstimate(row));
   if (namedRows.length || categoryMentions.length) {
     const questionText = cleanText(question);
@@ -829,11 +882,15 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
     const coordinatesOntoCategory = new RegExp(`\\b(?:and|plus|&|along with|as well as)\\s+(?:the\\s+|my\\s+|our\\s+|other\\s+|any\\s+)*${CATEGORY_NOUNS}\\b`, 'i').test(questionText)
       || new RegExp(`\\b${CATEGORY_NOUNS}\\s+(?:and|plus|&|along with|as well as)\\b`, 'i').test(questionText);
     // Broad category mentions ("the lawn insecticide") can match every
-    // on-estimate row of that category — when the question also names
-    // families, they must stay inside them.
+    // on-estimate row of that category — when a family word ADJECTIVALLY
+    // qualifies the category, they must stay inside that family. But a
+    // family that is only its own COORDINATED subject ("the herbicide and
+    // mosquito treatment") does not constrain the category: intersecting
+    // herbicides with mosquito would empty the set and starve both answers.
+    const familyAdjacentToCategory = new RegExp(`\\b(?:lawn|turf|grass|pest|mosquito|termite|rodent|tree|shrub)\\w*\\s+${CATEGORY_NOUNS}`, 'i').test(questionText);
     const scopedCategory = (namedRows.length && !coordinatesOntoCategory)
       ? []
-      : (questionFamilies.length
+      : (questionFamilies.length && (familyAdjacentToCategory || !coordinatesOntoCategory)
         ? categoryMentions.filter((row) => attributedTo(row, questionFamilies))
         : categoryMentions);
     // A COORDINATED question ("is Bifenthrin AND the lawn treatment safe?",
@@ -845,7 +902,10 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
     // narrower, correct scope.
     const coordinatesOntoFamily = /\b(?:and|plus|&|along with|as well as)\s+(?:the\s+|my\s+|our\s+)?(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service)\b/i.test(questionText)
       || /\b(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service)\s+(?:and|plus|&|along with|as well as)\b/i.test(questionText);
-    const coordinatedFamilyRows = (productMentions.length && questionFamilies.length && coordinatesOntoFamily)
+    // Category mentions coordinate onto families too: "the herbicide and
+    // mosquito treatment" asks about both, and without the union the
+    // category branch would return no mosquito facts at all.
+    const coordinatedFamilyRows = ((productMentions.length || categoryMentions.length) && questionFamilies.length && coordinatesOntoFamily)
       ? rows.filter((row) => attributedTo(row, questionFamilies) && onEstimate(row))
       : [];
     return [...new Set([...productMentions, ...scopedCategory, ...coordinatedFamilyRows])];
