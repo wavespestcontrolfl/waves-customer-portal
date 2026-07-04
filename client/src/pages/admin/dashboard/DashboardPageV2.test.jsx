@@ -199,6 +199,16 @@ const FIXTURES = {
   "/admin/dashboard/calls-by-source": { sources: [], period: { label: "Month to Date" } },
   "/admin/dashboard/leads-by-source": { sources: [], period: {} },
   "/admin/dashboard/channel-mix": { channels: [] },
+  "/admin/dashboard/lead-funnel": {
+    period: { label: "Month to Date" },
+    sources: [
+      { sourceKey: "google_ads", source: "Google Ads", isPaid: true, leads: 8, contacted: 7, estimate: 5, booked: 4, completed: 3, lost: 1, rates: { contactRate: 88, estimateRate: 63, bookRate: 50, completeRate: 38 } },
+      { sourceKey: "organic", source: "Organic", isPaid: false, leads: 3, contacted: 2, estimate: 1, booked: 1, completed: 1, lost: 0, rates: { contactRate: 67, estimateRate: 33, bookRate: 33, completeRate: 33 } },
+    ],
+    totals: { leads: 11, contacted: 9, estimate: 6, booked: 5, completed: 4, lost: 1, bookRate: 45 },
+    paid: { leads: 8, contacted: 7, estimate: 5, booked: 4, completed: 3, lost: 1, bookRate: 50 },
+    organic: { leads: 3, contacted: 2, estimate: 1, booked: 1, completed: 1, lost: 0, bookRate: 33 },
+  },
 };
 
 function mockFetchWithFixtures() {
@@ -284,6 +294,13 @@ describe("DashboardPageV2 sections", () => {
     // Estimate funnel: pending row + per-requested-service outcomes
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("Pending"),
+    );
+    // Lead funnel by source: card + a source row with visible low-sample pill
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Lead Funnel by Source"),
+    );
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Low sample · n=3"),
     );
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("What leads asked for"),

@@ -1675,6 +1675,27 @@ function resolveAttributionWindow(period, range) {
 //
 // Joins call_log (where direction='inbound') against lead_sources on the
 // dialed number. Calls landing on numbers we haven't catalogued show up
+// GET /api/admin/dashboard/lead-funnel?period=mtd[&from=YYYY-MM-DD]
+// Per-source stage progression (lead → contacted → estimate → booked →
+// completed, + lost) from ad_service_attribution, same period selector as the
+// other attribution panels. Basis caveat (the card states it): attribution
+// rows, not the raw leads table — totals differ from Leads-by-Source, and
+// call↔lead linkage is call-SID based. Shaping in services/lead-funnel.js.
+router.get('/lead-funnel', dashboardCache, async (req, res, next) => {
+  try {
+    const { buildLeadFunnel } = require('../services/lead-funnel');
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
+    // lead_date is an ET DATE column; the window's from/to are ET date
+    // strings, so direct comparison is timezone-safe.
+    const rows = await db('ad_service_attribution')
+      .where('lead_date', '>=', win.from)
+      .where('lead_date', '<=', win.to)
+      .groupBy('lead_source', 'funnel_stage', 'is_paid')
+      .select('lead_source', 'funnel_stage', 'is_paid', db.raw('COUNT(*) as n'));
+    res.json({ period: win, ...buildLeadFunnel(rows) });
+  } catch (err) { next(err); }
+});
+
 // under "Unmapped" so a missing seed row is visible, not invisible.
 router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
   try {
