@@ -131,8 +131,12 @@ const FIXTURES = {
   },
   "/admin/dashboard/core-kpis": CORE_KPIS,
   "/admin/dashboard/funnel": {
-    funnel: { sent: 4, viewed: 4, accepted: 0, declined: 0 },
-    rates: {},
+    funnel: { sent: 4, viewed: 4, accepted: 1, declined: 1, pending: 2 },
+    rates: { view_rate: 100, close_rate: 25, decline_rate: 25 },
+    by_service: [
+      { service: "Pest Control", sent: 2, won: 1, lost: 0, open: 1, wonValue: 248 },
+      { service: "Termite", sent: 2, won: 0, lost: 1, open: 1, wonValue: 0 },
+    ],
     period: { from: "2026-07-01", to: "2026-07-01" },
   },
   "/admin/dashboard/aging": {
@@ -256,6 +260,16 @@ describe("DashboardPageV2 sections", () => {
     );
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("Marketing Attribution"),
+    );
+    // Estimate funnel: pending row + per-requested-service outcomes
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Pending"),
+    );
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("What leads asked for"),
+    );
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Termite"),
     );
     // PROFIT — the adjusted-EBITDA bridge is its own card NEXT TO the margin
     // tiles (company-level vs job-level; never combined).
