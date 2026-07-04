@@ -225,6 +225,11 @@ describe('submittedUnitConflictsWithCustomer (resolved-customer guard)', () => {
     expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt B', address_line2: '' })).toBe(true);
     expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt A', address_line2: '' })).toBe(false);
   });
+
+  test('whitespace-only dedicated field cannot mask an inline unit (codex rd12)', () => {
+    expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt B', address_line2: '   ' })).toBe(true);
+    expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt A', address_line2: '   ' })).toBe(false);
+  });
 });
 
 describe('carriedVisitUnit (no-backfill unit rides on the visit, codex rd10)', () => {
@@ -247,5 +252,9 @@ describe('carriedVisitUnit (no-backfill unit rides on the visit, codex rd10)', (
     expect(carriedVisitUnit(streetOnly, { address_line1: '999 Other Rd', address_line2: 'Apt B' })).toBe('');
     expect(carriedVisitUnit(streetOnly, { address_line1: '123 Main St', address_line2: '' })).toBe('');
     expect(carriedVisitUnit(streetOnly, null)).toBe('');
+  });
+
+  test('whitespace-only dedicated field falls through to the inline unit (codex rd12)', () => {
+    expect(carriedVisitUnit(streetOnly, { address_line1: '123 Main St Apt B', address_line2: '   ' })).toBe('Apt B');
   });
 });

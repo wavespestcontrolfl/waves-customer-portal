@@ -10,7 +10,7 @@ const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { applyContactNormalization } = require('../utils/intake-normalize');
-const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit } = require('../utils/address-normalizer');
+const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, parseRawAddress } = require('../utils/address-normalizer');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
   isOneTimeBookingSource,
@@ -248,6 +248,24 @@ function customerUnitOf(customer) {
   return customer?.address_line2 || splitStreetLineUnit(customer?.address_line1 || '').unit;
 }
 
+// The inline unit of a SUBMITTED street line. splitStreetLineUnit only peels
+// trailing units; a full one-line address ("123 Main St Apt A Sarasota FL
+// 34236") hides the unit mid-line behind the city/state tail, so when the
+// direct peel finds nothing, parse the tail off and re-peel.
+function submittedInlineUnit(line) {
+  const direct = splitStreetLineUnit(line || '');
+  if (direct.unit) return direct.unit;
+  const parsedLine1 = parseRawAddress(line || '').line1 || '';
+  return parsedLine1 ? splitStreetLineUnit(parsedLine1).unit : '';
+}
+
+// The dedicated unit field of a submission — trimmed, because a whitespace-only
+// value is truthy and would otherwise mask an inline unit while normalizing to
+// "no unit" in every comparison.
+function submittedDedicatedUnit(newCustomer) {
+  return String(newCustomer?.address_line2 || '').trim();
+}
+
 // A submitted unit that disagrees with the RESOLVED customer's on-file unit
 // is a booking against the wrong door (Apt B posted against the Apt A
 // record) — even on identity-proven paths that never ran the address match.
@@ -256,7 +274,7 @@ function customerUnitOf(customer) {
 // street line is not a unit statement about this record.
 function submittedUnitConflictsWithCustomer(customer, newCustomer) {
   const submitted = splitStreetLineUnit(newCustomer?.address_line1 || '');
-  const submittedUnit = newCustomer?.address_line2 || submitted.unit;
+  const submittedUnit = submittedDedicatedUnit(newCustomer) || submitted.unit;
   if (!submittedUnit) return false;
   const submittedStreet = normalizeAddress(submitted.street);
   const onFileStreet = normalizeAddress(splitStreetLineUnit(customer?.address_line1 || '').street);
@@ -271,7 +289,7 @@ function submittedUnitConflictsWithCustomer(customer, newCustomer) {
 function carriedVisitUnit(customer, newCustomer) {
   if (!newCustomer || customerUnitOf(customer)) return '';
   const submitted = splitStreetLineUnit(newCustomer.address_line1 || '');
-  const submittedUnit = newCustomer.address_line2 || submitted.unit;
+  const submittedUnit = submittedDedicatedUnit(newCustomer) || submitted.unit;
   if (!submittedUnit) return '';
   const submittedStreet = normalizeAddress(submitted.street);
   const onFileStreet = normalizeAddress(splitStreetLineUnit(customer.address_line1 || '').street);
@@ -909,8 +927,9 @@ async function createSelfBooking(payload = {}) {
     // A new_customer payload whose street line carries a DIFFERENT inline
     // unit than the dedicated field points at two doors at once — fail closed
     // like the matching paths, instead of minting (or backfilling from) a
-    // self-contradictory address.
-    if (new_customer && unitsConflict(splitStreetLineUnit(new_customer.address_line1 || '').unit, new_customer.address_line2)) {
+    // self-contradictory address. submittedInlineUnit also finds a unit
+    // hiding mid-line in a full one-line address ("… Apt A Sarasota FL 34236").
+    if (new_customer && unitsConflict(submittedInlineUnit(new_customer.address_line1), submittedDedicatedUnit(new_customer))) {
       return { ok: false, status: 400, error: 'The street address and unit number disagree — please re-enter your address.' };
     }
 

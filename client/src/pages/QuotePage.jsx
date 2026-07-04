@@ -517,7 +517,11 @@ export default function QuotePage({ serviceSlug = '' }) {
       const next = {
         formatted: parts.formatted || typed,
         line1: parts.line1 || typed,
-        line2: parts.line2 || address.line2 || '',
+        // The unit box is the USER'S editable source — a submit-time geocode
+        // that parses a subpremise out of the typed street must not override
+        // an explicit box value (only fill it when the box is empty). A
+        // Places PICK still resets the box (applyAddressParts) by design.
+        line2: address.line2 || parts.line2 || '',
         city: parts.city || '',
         state: parts.state || 'FL',
         zip: parts.zip || '',
