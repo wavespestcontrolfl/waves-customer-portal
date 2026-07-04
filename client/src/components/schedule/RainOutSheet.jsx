@@ -127,16 +127,17 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const alt = selected ? (options?.days || []).find((opt) => keyOf(opt) !== selectedKey) || null : null;
   const routeCount = options?.remainingRouteCount || 0;
 
-  // Seed the custom start from whatever preset was highlighted (or the first
-  // slot) so switching to Custom lands on a sensible hour instead of blank.
+  // Seed the custom date AND start from whatever preset was highlighted (or the
+  // first slot) so switching to Custom lands on a sensible hour on the RIGHT
+  // day — seeding only the time would leave a future preset's hour paired with
+  // today's date and book the wrong day (or fail as an elapsed same-day window).
   const pickCustom = () => {
     setSelectedKey(CUSTOM_KEY);
     if (!customStart) {
-      const seed = allOptions.find((opt) => keyOf(opt) === selectedKey)?.window?.start
-        || allOptions[0]?.window?.start
-        || '15:00';
-      const snapped = hourWindow(seed);
+      const seedOpt = allOptions.find((opt) => keyOf(opt) === selectedKey) || allOptions[0] || null;
+      const snapped = hourWindow(seedOpt?.window?.start || '15:00');
       setCustomStart(snapped ? snapped.start : '15:00');
+      if (seedOpt?.date) setCustomDate(seedOpt.date);
     }
   };
 
@@ -327,7 +328,14 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                     type="time"
                     step="3600"
                     value={customStart}
-                    onChange={(e) => setCustomStart(e.target.value)}
+                    onChange={(e) => {
+                      // Snap to the hour on input (a manually-typed off-hour value
+                      // like 15:59 would otherwise floor to 15:00 only at book
+                      // time, leaving the field showing a time that isn't what
+                      // gets scheduled). Snapping here keeps shown == booked.
+                      const snapped = hourWindow(e.target.value);
+                      setCustomStart(snapped ? snapped.start : '');
+                    }}
                     style={{
                       width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 600,
                       border: '1px solid #D4D4D8', background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit',

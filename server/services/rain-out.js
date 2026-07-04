@@ -25,6 +25,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { getDailyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
 const { etParts, etDateString } = require('../utils/datetime-et');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 
 const WEATHER_PHRASES = {
   weather_rain: 'heavy rain',
@@ -93,9 +94,20 @@ function displayDate(dateStr) {
     .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 }
 
-function displayOption(dateStr, window) {
-  const win = displayWindow(window);
-  return win ? `${displayDate(dateStr)}, ${win}` : displayDate(dateStr);
+// Customer-facing option label. The slot is BOOKED as a tight 1-hour on-the-hour
+// block (window.start→end drives scheduling/overlap), but the customer is always
+// quoted the 2-hour arrival window from the start — the owner directive encoded
+// in arrivalWindowRange. So the moved-SMS and reply text promise the usual
+// leniency even though the internal slot is 1 hour. Falls back to the raw window
+// only if the start can't be parsed into an arrival range.
+function customerArrivalLabel(window) {
+  const range = arrivalWindowRange(window?.start);
+  return range ? formatSmsTimeRange(range) : displayWindow(window);
+}
+
+function customerArrivalOption(dateStr, window) {
+  const label = customerArrivalLabel(window);
+  return label ? `${displayDate(dateStr)}, ${label}` : displayDate(dateStr);
 }
 
 // Normalize a suggested start to an on-the-hour 1-hour block. The rebooker's
@@ -256,7 +268,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId 
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
   const altClause = alt
-    ? ` Reply 1 to confirm, or 2 to switch to ${displayOption(alt.date, alt.window)}.`
+    ? ` Reply 1 to confirm, or 2 to switch to ${customerArrivalOption(alt.date, alt.window)}.`
     : ' Reply to this message if you need a different time.';
   const forecastLink = forecastLinkForZip(customer.zip);
   const forecastClause = forecastLink ? `\n\nYour local forecast: ${forecastLink}` : '';
@@ -265,7 +277,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId 
     first_name: customer.first_name || 'there',
     weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
     service_type: (job.service_type || 'service').toLowerCase(),
-    new_option: displayOption(chosen.date, chosen.window),
+    new_option: customerArrivalOption(chosen.date, chosen.window),
     alt_clause: altClause,
     forecast_clause: forecastClause,
   }, {
@@ -299,9 +311,11 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId 
 // reply 1 re-confirms) and option2 (the alternate) into its notes so
 // the existing handleRescheduleReply webhook flow can act on 1/2.
 // Windows carry `display` because the reply confirmation SMS renders
-// selectedOption.window.display for its {time} variable.
+// selectedOption.window.display for its {time} variable. start/end stay the
+// internal 1-hour slot (they re-book the appointment on reply); display is the
+// customer-facing 2-hour arrival window, same as the moved SMS.
 function replyWindow(window) {
-  return { start: window.start, end: window.end, display: displayWindow(window) };
+  return { start: window.start, end: window.end, display: customerArrivalLabel(window) };
 }
 
 async function attachReplyOptions(serviceJobId, chosen, alt) {
@@ -372,13 +386,16 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
     ? targetStartMin - anchorStartMin
     : 0;
 
-  // Same-day forward pushes must move tail-first: the rebooker checks the
-  // anchor's new window against the not-yet-moved next stop, so moving the
-  // anchor first would SLOT_TAKEN against a sibling about to vacate that
-  // slot. Process later stops first so each target window is already clear.
-  // Day moves land on a different (empty) date — order doesn't matter, and
-  // keeping anchor-first there fires its reply-alt SMS first.
-  const orderedJobs = isSameDay ? [...jobs].reverse() : jobs;
+  // Same-day forward pushes (positive delta) must move tail-first: the rebooker
+  // checks the anchor's new window against the not-yet-moved next stop, so
+  // moving the anchor first would SLOT_TAKEN against a sibling about to vacate
+  // that slot. Process later stops first so each target window is already clear.
+  // A backward pull (custom time earlier than the anchor — negative delta) is
+  // the mirror image: process head-first (anchor first) so each stop vacates its
+  // old slot before the next, earlier-shifted stop claims it. Day moves land on
+  // a different (empty) date — order doesn't matter, and keeping anchor-first
+  // there fires its reply-alt SMS first.
+  const orderedJobs = (isSameDay && siblingDelta > 0) ? [...jobs].reverse() : jobs;
   const results = [];
   for (const job of orderedJobs) {
     let newWindow;
@@ -446,5 +463,5 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
 module.exports = {
   getOptions,
   commit,
-  _test: { sameDayOptions, displayOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES },
+  _test: { sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES },
 };
