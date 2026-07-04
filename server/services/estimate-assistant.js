@@ -668,14 +668,17 @@ function activeIngredientsFromSupport(context = {}, question = '') {
   return [...new Set(ingredients.map(cleanText).filter(Boolean))].slice(0, 8);
 }
 
-// Safety/product/treatment questions with support rows never reach the live
-// models — they force-route to the deterministic fallback so answers only
-// ever quote reviewed label facts. water/irrigat/sprinkl/rain/treatment are
+// Safety/product questions with support rows never reach the live models —
+// they force-route to the deterministic fallback so answers only ever quote
+// reviewed label facts. water/irrigat/sprinkl and the rainfast phrasings are
 // here for the same reason: the label watering guidance and rainfast window
 // live in the fallback's safety branch, so "when can I run the sprinklers?"
 // or "what if it rains after treatment?" must not go to an LLM that could
-// miss or hallucinate them.
-const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water\w*|irrigat\w*|sprinkl\w*|rain\w*|treatments?)\b/i;
+// miss or hallucinate them. Bare "rain"/"treatment" deliberately do NOT
+// trigger: "will you still come if it rains?" is a scheduling question and
+// "how long does the treatment last?" is a duration question — both belong
+// on the normal path, not in safety copy.
+const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water\w*|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\b|\bafter\s+(?:the\s+|it\s+)?rains?\b|\brain\s+wash\w*\b/i;
 
 // Generic treatment vocabulary says nothing about WHICH product a question
 // targets, so it never counts as naming one.
@@ -684,13 +687,17 @@ const GENERIC_QUESTION_TERMS = new Set([
   'spray', 'sprays', 'sprayed', 'treatment', 'treatments', 'treated', 'chemical', 'chemicals',
   'application', 'applications', 'applied', 'service', 'services', 'yard', 'home', 'house',
   'area', 'areas', 'okay', 'after', 'before', 'around', 'inside', 'outside', 'water', 'long',
+  'active', 'ingredient', 'ingredients',
 ]);
 
-// True when the question explicitly names this catalog row (active ingredient,
-// category like "herbicide", or MOA/path text) — snippet is deliberately
-// excluded so generic re-entry copy ("...sprays have dried") can't match.
+// True when the question explicitly names this catalog row (active ingredient
+// or category like "herbicide"). Row title and snippet are deliberately
+// excluded: every catalog row's title reads "<category> active ingredient",
+// so title words would make "what active ingredient is in X?" mention EVERY
+// row, and snippet would let generic re-entry copy ("...sprays have dried")
+// match.
 function catalogRowMentionsQuestion(row = {}, question = '') {
-  const text = cleanText([row.activeIngredient, row.category, row.title, row.path]
+  const text = cleanText([row.activeIngredient, row.category, row.path]
     .filter(Boolean).join(' ')).toLowerCase();
   if (!text) return false;
   const matchesTerm = cleanText(question)
@@ -717,30 +724,29 @@ function catalogRowMentionsQuestion(row = {}, question = '') {
 // Scope targeted questions to the product(s) they target — the support
 // context is built from ALL estimate services, so on a multi-service
 // estimate the lawn herbicide's facts must not answer a mosquito question.
-// A question can target products two ways, and both count (union):
-//   - by service family ("mosquito spray", "the lawn and mosquito
-//     treatments") — EVERY named family, matched against the serviceKeys
-//     each row carries from the service library's default_products linkage;
-//   - by explicit name ("is bifenthrin safe?", "is 2,4-D safe?") —
-//     ingredient/category mention, which needs no family word at all.
-// A question that targets nothing ("is it pet safe?") keeps every row, and
-// a single-family estimate asked about only that same family needs no
-// attribution. No survivors = an empty set (callers fail closed to generic
-// copy) rather than the wrong treatment's rows.
+// Targeting precedence, most specific first:
+//   1. Explicit product mention ("is bifenthrin safe?", "is the 2,4-D lawn
+//      spray safe?") — always narrows to the mentioned row(s), even on a
+//      single-family estimate with several products of that family.
+//   2. Named service families ("the lawn and mosquito treatments") — EVERY
+//      named family, matched against the serviceKeys each row carries from
+//      the service library's default_products linkage. A single-family
+//      estimate asked about only that same family needs no attribution.
+//   3. Nothing targeted ("is it pet safe?") — keep every row.
+// No survivors = an empty set (callers fail closed to generic copy) rather
+// than the wrong treatment's rows.
 function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
   if (!rows.length) return rows;
-  const questionFamilies = serviceFamiliesFromText(question);
-  const estimateFamilies = serviceKeysFromContext(context, '');
-  const soleFamilyMatchesQuestion = questionFamilies.length > 0
-    && estimateFamilies.length === 1
-    && questionFamilies.every((family) => family === estimateFamilies[0]);
   const mentionedRows = rows.filter((row) => catalogRowMentionsQuestion(row, question));
-  if (soleFamilyMatchesQuestion || (!questionFamilies.length && !mentionedRows.length)) return rows;
-  const familyRows = questionFamilies.length
-    ? rows.filter((row) => Array.isArray(row.serviceKeys)
-      && row.serviceKeys.some((key) => questionFamilies.includes(key)))
-    : [];
-  return [...new Set([...familyRows, ...mentionedRows])];
+  if (mentionedRows.length) return mentionedRows;
+  const questionFamilies = serviceFamiliesFromText(question);
+  if (!questionFamilies.length) return rows;
+  const estimateFamilies = serviceKeysFromContext(context, '');
+  if (estimateFamilies.length === 1 && questionFamilies.every((family) => family === estimateFamilies[0])) {
+    return rows;
+  }
+  return rows.filter((row) => Array.isArray(row.serviceKeys)
+    && row.serviceKeys.some((key) => questionFamilies.includes(key)));
 }
 
 // Deterministic label-safety line for the forced-fallback safety answer, built
@@ -959,12 +965,13 @@ function answerEstimateQuestionFallback(question, context = {}) {
     ].filter(Boolean).join(' ');
   }
 
-  // water/irrigat/sprinkl/rain/treatment: watering and rainfast questions are
-  // force-routed to this fallback, and the label watering guidance + rainfast
-  // window live in labelSafetyFacts — so they must land in this branch, not
-  // the generic lawn one. treatments? is deliberately not treat\w*: "how do
-  // you treat roaches?" belongs to the pest/roach branches below.
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water\w*|irrigat\w*|sprinkl\w*|rain\w*|treatments?)\b/.test(q)) {
+  // water/irrigat/sprinkl + rainfast/rain-after phrasings: watering and
+  // rainfast questions are force-routed to this fallback, and the label
+  // watering guidance + rainfast window live in labelSafetyFacts — so they
+  // must land in this branch. Bare "rain"/"treatment" deliberately do NOT
+  // match: "will you still come if it rains?" (scheduling) and "how long
+  // does the treatment last?" (duration) belong to the branches below.
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water\w*|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\b|\bafter\s+(?:the\s+|it\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
     const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';

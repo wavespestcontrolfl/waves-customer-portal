@@ -2,6 +2,7 @@ const {
   loadEstimateAiSupportContext,
   loadPublicEstimateSupportSources,
   serviceKeysFromContext,
+  serviceFamiliesFromText,
   searchTermsFromContext,
 } = require('../services/estimate-ai-context');
 
@@ -36,6 +37,14 @@ describe('estimate AI support context', () => {
       'pest_control',
       'mosquito',
     ]);
+  });
+
+  test('question-family detection requires whole words and returns every named family', () => {
+    // "plants" must not substring-match the pest pattern's "ant".
+    expect(serviceFamiliesFromText('Can I water my plants after treatment?')).toEqual([]);
+    expect(serviceFamiliesFromText('Are the lawn and mosquito treatments safe for pets?')).toEqual(['lawn_care', 'mosquito']);
+    expect(serviceFamiliesFromText('Do you treat for ants?')).toEqual(['pest_control']);
+    expect(serviceFamiliesFromText('')).toEqual([]);
   });
 
   test('builds compact search terms from services, question, tier, and location context', () => {

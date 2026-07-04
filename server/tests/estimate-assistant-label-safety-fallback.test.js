@@ -111,6 +111,7 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
       productCatalog: [
         {
           source: 'admin_product_catalog',
+          title: 'herbicide active ingredient',
           category: 'herbicide',
           activeIngredient: 'Quinclorac',
           labelVerified: true,
@@ -122,6 +123,7 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
         },
         {
           source: 'admin_product_catalog',
+          title: 'adulticide active ingredient',
           category: 'adulticide',
           activeIngredient: 'Deltamethrin',
           labelVerified: true,
@@ -265,12 +267,68 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     // Rainfast timing comes from reviewed rainfastMinutes — deterministic only.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How soon is it rainfast?')).toBe(true);
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains after treatment?')).toBe(true);
-    // Non-safety questions still reach the live models.
+    // Non-safety questions still reach the live models — bare "rain" and
+    // "treatment" are scheduling/duration vocabulary, not safety intent.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What time will the technician arrive?')).toBe(false);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Will you still come if it rains?')).toBe(false);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How long does the mosquito treatment last?')).toBe(false);
   });
 
   test('rainfast questions land in the safety branch and quote the label window', () => {
     const answer = answerEstimateQuestionFallback('What if it rains after the treatment?', verifiedContext);
     expect(answer).toContain('rainfast in about 180 minutes');
+  });
+
+  test('generic "active ingredient" wording does not bypass family scoping', () => {
+    // Every catalog row's title is "<category> active ingredient", so these
+    // words must not count as naming a specific product.
+    const answer = answerEstimateQuestionFallback('Is the active ingredient in the mosquito spray safe for pets?', bundleContext);
+    expect(answer).toContain('Deltamethrin');
+    expect(answer).toContain('Stay out of the treated area until sprays have dried');
+    expect(answer).not.toContain('Quinclorac');
+    expect(answer).not.toContain('rainfast in about 180 minutes');
+    expect(answer).not.toContain('until dry.');
+  });
+
+  test('naming an ingredient narrows even on a single-family estimate with several products', () => {
+    const answer = answerEstimateQuestionFallback('Is the 2,4-D lawn spray safe for pets?', {
+      serviceMode: 'recurring',
+      services: [{ label: 'Lawn Care', detail: 'Weed control applications', summary: 'Lawn Care — weed control' }],
+      supportContext: {
+        productCatalog: [
+          {
+            source: 'admin_product_catalog',
+            title: 'herbicide active ingredient',
+            category: 'herbicide',
+            activeIngredient: 'Carfentrazone + 2,4-D + MCPP + Dicamba',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Keep people and pets off treated areas until dry.',
+            rainfastMinutes: 180,
+            irrigationNotes: null,
+            serviceKeys: ['lawn_care'],
+          },
+          {
+            source: 'admin_product_catalog',
+            title: 'pre-emergent active ingredient',
+            category: 'pre-emergent',
+            activeIngredient: 'Prodiamine',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Re-enter after watering-in is complete.',
+            rainfastMinutes: 60,
+            irrigationNotes: null,
+            serviceKeys: ['lawn_care'],
+          },
+        ],
+      },
+    });
+    expect(answer).toContain('2,4-D');
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).toContain('rainfast in about 180 minutes');
+    // The sibling lawn product the customer did not name stays out.
+    expect(answer).not.toContain('Prodiamine');
+    expect(answer).not.toContain('watering-in');
+    expect(answer).not.toContain('rainfast in about 60 minutes');
   });
 });

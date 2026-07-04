@@ -119,13 +119,28 @@ function serviceKeyFromText(value) {
   return null;
 }
 
-// ALL families a text names, not just the first — a bundle question like
+// Family detection for free-text customer QUESTIONS. SERVICE_LABEL_PATTERNS
+// stays deliberately loose for classifying service labels, but its unanchored
+// alternates ("ant", "bait") substring-match inside question words ("plants"
+// contains "ant") — and scoping label facts into the wrong family quotes the
+// wrong product's safety guidance. These patterns require whole words.
+const SERVICE_FAMILY_QUESTION_PATTERNS = [
+  ['pest_control', /\b(?:pests?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter)\b/i],
+  ['lawn_care', /\b(?:lawns?|turf|weeds?|fertil\w*|fungus|chinch|grass)\b/i],
+  ['mosquito', /\b(?:mosquito(?:es)?|midges?|no[-\s]?see[-\s]?ums?)\b/i],
+  ['tree_shrub', /\b(?:trees?|shrubs?|ornamentals?)\b/i],
+  ['termite_bait', /\b(?:termites?|wdo)\b/i],
+  ['palm_injection', /\b(?:palms?|lethal bronzing)\b/i],
+  ['rodent_bait', /\b(?:rodents?|rats?|mice|mouse)\b/i],
+];
+
+// ALL families a question names, not just the first — a bundle question like
 // "are the lawn and mosquito treatments safe?" targets two families and the
 // assistant must scope label facts to every one of them.
 function serviceFamiliesFromText(value) {
   const text = cleanText(value);
   if (!text) return [];
-  return SERVICE_LABEL_PATTERNS
+  return SERVICE_FAMILY_QUESTION_PATTERNS
     .filter(([, pattern]) => pattern.test(text))
     .map(([key]) => key);
 }
