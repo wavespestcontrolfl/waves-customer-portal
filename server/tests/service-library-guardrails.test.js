@@ -279,6 +279,37 @@ describe('service library guardrails', () => {
       .resolves.toEqual(after);
   });
 
+  test('allows a full-form save that does not change pricing values on a legacy row', async () => {
+    // The admin forms submit every field on save, including unchanged
+    // pricing (empty inputs arrive as ''), so the guard must compare
+    // values, not payload presence.
+    const before = serviceRow({ pricing_type: 'fixed', base_price: null, price_range_min: null });
+    const after = serviceRow({ pricing_type: 'fixed', base_price: null, name: 'Renamed' });
+    mockServiceDb({ before, after });
+
+    await expect(serviceLibrary.updateService('service-1', {
+      name: 'Renamed',
+      pricing_type: 'fixed',
+      base_price: '',
+      price_range_min: '',
+      price_range_max: '',
+    })).resolves.toEqual(after);
+  });
+
+  test('still rejects when a full-form save changes pricing on an inconsistent row', async () => {
+    const before = serviceRow({ pricing_type: 'variable', base_price: null });
+    mockServiceDb({ before });
+
+    await expect(serviceLibrary.updateService('service-1', {
+      name: 'Renamed',
+      pricing_type: 'fixed',
+      base_price: '',
+    })).rejects.toMatchObject({
+      status: 400,
+      message: 'Fixed pricing requires a base price greater than zero',
+    });
+  });
+
   test('archives and audits services with no blocking references', async () => {
     const before = serviceRow();
     const after = serviceRow({ is_active: false, is_archived: true });
