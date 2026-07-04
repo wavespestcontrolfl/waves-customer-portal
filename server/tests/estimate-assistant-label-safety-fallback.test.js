@@ -1,4 +1,7 @@
-const { answerEstimateQuestionFallback } = require('../services/estimate-assistant');
+const {
+  answerEstimateQuestionFallback,
+  FORCE_FALLBACK_QUESTION_PATTERN,
+} = require('../services/estimate-assistant');
 
 // Safety questions are force-routed to the deterministic fallback whenever
 // support rows exist (answerEstimateQuestion), so the label-verified safety
@@ -152,5 +155,67 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('Label re-entry guidance');
     expect(answer).not.toContain('rainfast');
     expect(answer).toContain('follow the product label directions');
+  });
+
+  test('a question naming BOTH bundle families gets both products\' label facts', () => {
+    const answer = answerEstimateQuestionFallback('Are the lawn and mosquito treatments safe for pets?', bundleContext);
+    expect(answer).toContain('Label re-entry guidance by product:');
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).toContain('Stay out of the treated area until sprays have dried');
+    // Most conservative rainfast across every named family.
+    expect(answer).toContain('rainfast in about 180 minutes');
+    expect(answer).toContain('Label watering/irrigation guidance: Avoid irrigation for 24 hours after application.');
+  });
+
+  test('a question naming a specific ingredient narrows to that product even with no family word', () => {
+    const answer = answerEstimateQuestionFallback('Is bifenthrin safe for pets?', {
+      serviceMode: 'recurring',
+      services: [
+        { label: 'Lawn Care', detail: 'Weed control applications', summary: 'Lawn Care — weed control' },
+        { label: 'Pest Control', detail: 'Exterior perimeter plan', summary: 'Pest Control — perimeter' },
+      ],
+      supportContext: {
+        productCatalog: [
+          {
+            source: 'admin_product_catalog',
+            category: 'herbicide',
+            activeIngredient: 'Quinclorac',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Keep people and pets off treated areas until dry.',
+            rainfastMinutes: 180,
+            irrigationNotes: null,
+            serviceKeys: ['lawn_care'],
+          },
+          {
+            source: 'admin_product_catalog',
+            category: 'insecticide',
+            activeIngredient: 'Bifenthrin',
+            labelVerified: true,
+            signalWord: 'Caution',
+            reentry: 'Re-enter once sprays have dried.',
+            rainfastMinutes: 45,
+            irrigationNotes: null,
+            serviceKeys: ['pest_control'],
+          },
+        ],
+      },
+    });
+    expect(answer).toContain('Re-enter once sprays have dried');
+    expect(answer).toContain('rainfast in about 45 minutes');
+    // The lawn herbicide the customer did NOT ask about stays out.
+    expect(answer).not.toContain('rainfast in about 180 minutes');
+    expect(answer).not.toContain('until dry.');
+  });
+
+  test('the force-fallback gate routes watering questions away from the live models', () => {
+    // These must hit the deterministic fallback (where label facts live), not
+    // an LLM that could miss or hallucinate the irrigation guidance.
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Can I water after treatment?')).toBe(true);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('When can I run the sprinklers again?')).toBe(true);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How soon can I irrigate?')).toBe(true);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Is it safe for my dog?')).toBe(true);
+    // Non-safety questions still reach the live models.
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What time will the technician arrive?')).toBe(false);
   });
 });

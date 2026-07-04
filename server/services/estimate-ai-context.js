@@ -119,6 +119,17 @@ function serviceKeyFromText(value) {
   return null;
 }
 
+// ALL families a text names, not just the first — a bundle question like
+// "are the lawn and mosquito treatments safe?" targets two families and the
+// assistant must scope label facts to every one of them.
+function serviceFamiliesFromText(value) {
+  const text = cleanText(value);
+  if (!text) return [];
+  return SERVICE_LABEL_PATTERNS
+    .filter(([, pattern]) => pattern.test(text))
+    .map(([key]) => key);
+}
+
 function serviceKeysFromContext(context = {}, question = '') {
   const keys = [];
   const serviceRows = [
@@ -527,5 +538,6 @@ module.exports = {
   loadEstimateAiSupportContext,
   loadPublicEstimateSupportSources,
   serviceKeysFromContext,
+  serviceFamiliesFromText,
   searchTermsFromContext,
 };

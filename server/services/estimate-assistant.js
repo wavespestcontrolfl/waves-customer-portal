@@ -2,7 +2,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
-const { loadEstimateAiSupportContext, serviceKeysFromContext } = require('./estimate-ai-context');
+const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFromText } = require('./estimate-ai-context');
 const { dispatch } = require('./llm/call');
 
 let Anthropic;
@@ -664,6 +664,14 @@ function activeIngredientsFromSupport(context = {}, question = '') {
   return [...new Set(ingredients.map(cleanText).filter(Boolean))].slice(0, 8);
 }
 
+// Safety/product/treatment questions with support rows never reach the live
+// models — they force-route to the deterministic fallback so answers only
+// ever quote reviewed label facts. water/irrigat/sprinkl are here for the
+// same reason: label watering guidance lives in the fallback's safety
+// branch, so "when can I run the sprinklers?" must not go to an LLM that
+// could miss or hallucinate it.
+const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water\w*|irrigat\w*|sprinkl\w*)\b/i;
+
 // Generic treatment vocabulary says nothing about WHICH product a question
 // targets, so it never counts as naming one.
 const GENERIC_QUESTION_TERMS = new Set([
@@ -698,23 +706,33 @@ function labelSafetyFactsFromSupport(context = {}, question = '') {
   const verified = supportRows(context)
     .filter((row) => row.source === 'admin_product_catalog' && row.labelVerified);
   if (!verified.length) return '';
-  // Scope family-specific questions ("is the mosquito spray pet safe?") to the
-  // product(s) of that family — the support context is built from ALL estimate
-  // services, so on a multi-service estimate the lawn herbicide's facts must
-  // not answer a mosquito question. Rows carry serviceKeys from the service
-  // library's default_products linkage; rows the question explicitly names
-  // (ingredient/category) also count. A question with no family ("is it pet
-  // safe?") keeps every row, and a single-family estimate asked about that
-  // same family needs no attribution at all. No survivors = say nothing
-  // (fail closed to the generic label-directions copy) rather than quote the
-  // wrong treatment's label.
-  const questionFamily = serviceKeysFromContext({}, question)[0] || null;
+  // Scope targeted questions to the product(s) they target — the support
+  // context is built from ALL estimate services, so on a multi-service
+  // estimate the lawn herbicide's facts must not answer a mosquito question.
+  // A question can target products two ways, and both count (union):
+  //   - by service family ("mosquito spray", "the lawn and mosquito
+  //     treatments") — EVERY named family, matched against the serviceKeys
+  //     each row carries from the service library's default_products linkage;
+  //   - by explicit name ("is bifenthrin safe?") — ingredient/category
+  //     mention, which needs no family word at all.
+  // A question that targets nothing ("is it pet safe?") keeps every row, and
+  // a single-family estimate asked about only that same family needs no
+  // attribution. No survivors = say nothing (fail closed to the generic
+  // label-directions copy) rather than quote the wrong treatment's label.
+  const questionFamilies = serviceFamiliesFromText(question);
   const estimateFamilies = serviceKeysFromContext(context, '');
-  const soleFamilyMatchesQuestion = estimateFamilies.length === 1 && estimateFamilies[0] === questionFamily;
-  const scoped = (questionFamily && !soleFamilyMatchesQuestion)
-    ? verified.filter((row) => (Array.isArray(row.serviceKeys) && row.serviceKeys.includes(questionFamily))
-      || catalogRowMentionsQuestion(row, question))
-    : verified;
+  const soleFamilyMatchesQuestion = questionFamilies.length > 0
+    && estimateFamilies.length === 1
+    && questionFamilies.every((family) => family === estimateFamilies[0]);
+  const mentionedRows = verified.filter((row) => catalogRowMentionsQuestion(row, question));
+  let scoped = verified;
+  if (!soleFamilyMatchesQuestion && (questionFamilies.length || mentionedRows.length)) {
+    const familyRows = questionFamilies.length
+      ? verified.filter((row) => Array.isArray(row.serviceKeys)
+        && row.serviceKeys.some((key) => questionFamilies.includes(key)))
+      : [];
+    scoped = [...new Set([...familyRows, ...mentionedRows])];
+  }
   if (!scoped.length) return '';
   const reentries = [...new Set(scoped.map((row) => cleanText(row.reentry || '')).filter(Boolean))];
   const signalWords = [...new Set(scoped.map((row) => cleanText(row.signalWord || '')).filter(Boolean))];
@@ -1066,8 +1084,7 @@ async function answerEstimateQuestion({
     };
   }
 
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/i.test(cleanQuestion)
-      && supportRows(context).length) {
+  if (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion) && supportRows(context).length) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',
@@ -1102,4 +1119,5 @@ module.exports = {
   buildEstimateAssistantContext,
   cleanAssistantAnswer,
   selectPricingFrequency,
+  FORCE_FALLBACK_QUESTION_PATTERN,
 };
