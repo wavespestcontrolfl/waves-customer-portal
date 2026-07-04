@@ -303,9 +303,21 @@ async function searchServiceLibrary(db, terms) {
   }
 }
 
-async function searchProductCatalog(db, terms, productNames = []) {
+async function searchProductCatalog(db, terms, productNames = [], productFamiliesByName = {}) {
   const lookupTerms = unique([...terms, ...productNames]).slice(0, 20);
   if (!db || !lookupTerms.length) return [];
+  // Attribute a catalog row to service families via the service library's
+  // default_products linkage (real data, not a guessed category map), so the
+  // assistant can scope family-specific safety questions to the right product.
+  const familyEntries = Object.entries(productFamiliesByName)
+    .filter(([name]) => name.length >= 4);
+  const familiesForProduct = (name) => {
+    const key = cleanText(name || '').toLowerCase();
+    if (!key) return [];
+    return unique(familyEntries
+      .filter(([productName]) => key.includes(productName) || productName.includes(key))
+      .flatMap(([, families]) => families));
+  };
   try {
     const rows = await db('products_catalog')
       .where(function activeProducts() {
@@ -329,12 +341,15 @@ async function searchProductCatalog(db, terms, productNames = []) {
       // irrigation timing) let Ask Waves answer "is it pet safe?" from the
       // product's own reviewed label instead of generic knowledge. Fail
       // closed: only label-verified rows may drive customer safety claims.
-      // Verification is stamped inconsistently across lanes — admin review
-      // sets label_verified_by, the seeded label facts set label_verified_at
-      // and/or label_version — so any of the three counts.
+      // A real verification stamp is label_verified_by (admin review) or
+      // label_verified_at (the inventory readiness gate, admin-inventory
+      // lawnFactReadiness; also what the seeded label-facts lane stamps).
+      // label_version alone does NOT count — the inventory workflow lets it
+      // be edited independently of verification, so a source-version-only
+      // draft row must not drive customer safety claims.
       // rei_hours = 0 is the owner-confirmed residential value ("until
       // sprays have dried"), NOT a zero-hour claim; null = unknown.
-      const labelVerified = !!(row.label_verified_by || row.label_verified_at || row.label_version);
+      const labelVerified = !!(row.label_verified_by || row.label_verified_at);
       const reentryText = labelVerified
         ? trimSnippet(row.reentry_summary || row.reentry_text || '')
           || (row.rei_hours == null ? '' : (Number(row.rei_hours) === 0
@@ -367,6 +382,8 @@ async function searchProductCatalog(db, terms, productNames = []) {
         signalWord: labelVerified ? (row.signal_word || null) : null,
         reentry: reentryText || null,
         rainfastMinutes: labelVerified && Number(row.rainfast_minutes) > 0 ? Number(row.rainfast_minutes) : null,
+        irrigationNotes: labelVerified ? (trimSnippet(row.irrigation_notes || '') || null) : null,
+        serviceKeys: familiesForProduct(row.name),
         snippet: trimSnippet(parts.join(' - ')),
       };
     }).filter((row) => row.snippet || row.title);
@@ -474,7 +491,19 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
     searchServiceLibrary(db, searchTerms),
   ]);
   const serviceProductNames = serviceLibrary.flatMap((row) => row._productNames || []);
-  const productCatalog = await searchProductCatalog(db, searchTerms, serviceProductNames);
+  // Map each service-library default product to the service family (via the
+  // shared label patterns) so catalog rows can carry serviceKeys attribution.
+  const productFamiliesByName = {};
+  for (const row of serviceLibrary) {
+    const family = serviceKeyFromText([row.path, row.title, row.category].filter(Boolean).join(' '));
+    if (!family) continue;
+    for (const name of row._productNames || []) {
+      const key = cleanText(name).toLowerCase();
+      if (!key) continue;
+      productFamiliesByName[key] = unique([...(productFamiliesByName[key] || []), family]);
+    }
+  }
+  const productCatalog = await searchProductCatalog(db, searchTerms, serviceProductNames, productFamiliesByName);
   const publicServiceLibrary = serviceLibrary.map(({ _productNames, ...row }) => row);
 
   return {

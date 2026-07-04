@@ -2,7 +2,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
-const { loadEstimateAiSupportContext } = require('./estimate-ai-context');
+const { loadEstimateAiSupportContext, serviceKeysFromContext } = require('./estimate-ai-context');
 const { dispatch } = require('./llm/call');
 
 let Anthropic;
@@ -664,6 +664,29 @@ function activeIngredientsFromSupport(context = {}, question = '') {
   return [...new Set(ingredients.map(cleanText).filter(Boolean))].slice(0, 8);
 }
 
+// Generic treatment vocabulary says nothing about WHICH product a question
+// targets, so it never counts as naming one.
+const GENERIC_QUESTION_TERMS = new Set([
+  'what', 'when', 'does', 'each', 'visit', 'safe', 'kids', 'pets', 'product', 'products',
+  'spray', 'sprays', 'sprayed', 'treatment', 'treatments', 'treated', 'chemical', 'chemicals',
+  'application', 'applications', 'applied', 'service', 'services', 'yard', 'home', 'house',
+  'area', 'areas', 'okay', 'after', 'before', 'around', 'inside', 'outside', 'water', 'long',
+]);
+
+// True when the question explicitly names this catalog row (active ingredient,
+// category like "herbicide", or MOA/path text) — snippet is deliberately
+// excluded so generic re-entry copy ("...sprays have dried") can't match.
+function catalogRowMentionsQuestion(row = {}, question = '') {
+  const text = cleanText([row.activeIngredient, row.category, row.title, row.path]
+    .filter(Boolean).join(' ')).toLowerCase();
+  if (!text) return false;
+  return cleanText(question)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((term) => term.length >= 4 && !GENERIC_QUESTION_TERMS.has(term))
+    .some((term) => text.includes(term));
+}
+
 // Deterministic label-safety line for the forced-fallback safety answer, built
 // from the label-verified catalog rows estimate-ai-context attaches. Safety
 // questions never reach the live models (the force-fallback gate below), so
@@ -671,21 +694,42 @@ function activeIngredientsFromSupport(context = {}, question = '') {
 // rows estimate-ai-context marked labelVerified carry these fields at all.
 // Applicator PPE is deliberately excluded — it is what the technician wears,
 // and in a customer answer it reads as customer instructions.
-function labelSafetyFactsFromSupport(context = {}) {
+function labelSafetyFactsFromSupport(context = {}, question = '') {
   const verified = supportRows(context)
     .filter((row) => row.source === 'admin_product_catalog' && row.labelVerified);
   if (!verified.length) return '';
-  const reentries = [...new Set(verified.map((row) => cleanText(row.reentry || '')).filter(Boolean))];
-  const signalWords = [...new Set(verified.map((row) => cleanText(row.signalWord || '')).filter(Boolean))];
-  const rainfast = verified
+  // Scope family-specific questions ("is the mosquito spray pet safe?") to the
+  // product(s) of that family — the support context is built from ALL estimate
+  // services, so on a multi-service estimate the lawn herbicide's facts must
+  // not answer a mosquito question. Rows carry serviceKeys from the service
+  // library's default_products linkage; rows the question explicitly names
+  // (ingredient/category) also count. A question with no family ("is it pet
+  // safe?") keeps every row, and a single-family estimate asked about that
+  // same family needs no attribution at all. No survivors = say nothing
+  // (fail closed to the generic label-directions copy) rather than quote the
+  // wrong treatment's label.
+  const questionFamily = serviceKeysFromContext({}, question)[0] || null;
+  const estimateFamilies = serviceKeysFromContext(context, '');
+  const soleFamilyMatchesQuestion = estimateFamilies.length === 1 && estimateFamilies[0] === questionFamily;
+  const scoped = (questionFamily && !soleFamilyMatchesQuestion)
+    ? verified.filter((row) => (Array.isArray(row.serviceKeys) && row.serviceKeys.includes(questionFamily))
+      || catalogRowMentionsQuestion(row, question))
+    : verified;
+  if (!scoped.length) return '';
+  const reentries = [...new Set(scoped.map((row) => cleanText(row.reentry || '')).filter(Boolean))];
+  const signalWords = [...new Set(scoped.map((row) => cleanText(row.signalWord || '')).filter(Boolean))];
+  const rainfast = scoped
     .map((row) => Number(row.rainfastMinutes))
     .filter((minutes) => Number.isFinite(minutes) && minutes > 0);
+  const irrigation = [...new Set(scoped.map((row) => cleanText(row.irrigationNotes || '')).filter(Boolean))];
   const parts = [];
   if (reentries.length === 1) parts.push(`Label re-entry guidance: ${reentries[0].replace(/\.$/, '')}.`);
   else if (reentries.length > 1) parts.push(`Label re-entry guidance by product: ${reentries.map((text) => text.replace(/\.$/, '')).join('; ')}.`);
   if (signalWords.length) parts.push(`Label signal word${signalWords.length > 1 ? 's' : ''}: ${signalWords.join(', ')}.`);
   // Multiple products: quote the longest (most conservative) rainfast window.
   if (rainfast.length) parts.push(`Treated areas are rainfast in about ${Math.max(...rainfast)} minutes.`);
+  if (irrigation.length === 1) parts.push(`Label watering/irrigation guidance: ${irrigation[0].replace(/\.$/, '')}.`);
+  else if (irrigation.length > 1) parts.push(`Label watering/irrigation guidance by product: ${irrigation.map((text) => text.replace(/\.$/, '')).join('; ')}.`);
   return parts.join(' ');
 }
 
@@ -872,9 +916,13 @@ function answerEstimateQuestionFallback(question, context = {}) {
     ].filter(Boolean).join(' ');
   }
 
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application)\b/.test(q)) {
+  // water/irrigat/sprinkl: watering questions are force-routed here whenever
+  // they mention the lawn/application, and the label watering guidance lives
+  // in labelSafetyFacts — so they must land in this branch, not the generic
+  // lawn one.
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water\w*|irrigat\w*|sprinkl\w*)\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
-    const labelSafetyFacts = labelSafetyFactsFromSupport(context);
+    const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';
     if (activeIngredients.length) {
       return [

@@ -119,6 +119,9 @@ describe('estimate AI support context', () => {
         source: 'admin_product_catalog',
         title: 'herbicide active ingredient',
         activeIngredient: 'Thiencarbazone + Iodosulfuron + Dicamba',
+        // Attributed to lawn_care via the service library's default_products
+        // linkage — lets the assistant scope family-specific safety questions.
+        serviceKeys: ['lawn_care'],
       }),
     ]);
     expect(JSON.stringify(result)).not.toContain('Celsius WG');
@@ -154,7 +157,7 @@ describe('estimate AI support context', () => {
           },
           {
             // Seeded-lane shape (20260530000022): verified via
-            // label_verified_at/label_version, label_verified_by never set.
+            // label_verified_at, label_verified_by never set.
             name: 'Drive XLR8',
             category: 'herbicide',
             active_ingredient: 'Quinclorac',
@@ -166,6 +169,21 @@ describe('estimate AI support context', () => {
             rei_hours: 0,
             rainfast_minutes: 60,
             reentry_text: 'Keep pets off until sprays have dried.',
+          },
+          {
+            // label_version can be edited independently of verification in
+            // the inventory workflow — alone it is NOT a verification stamp.
+            name: 'Draft Import',
+            category: 'fungicide',
+            active_ingredient: 'Azoxystrobin',
+            active: true,
+            label_verified_by: null,
+            label_verified_at: null,
+            label_version: 'source page import (draft)',
+            signal_word: 'Danger',
+            rainfast_minutes: 240,
+            reentry_summary: 'Draft re-entry claim.',
+            irrigation_notes: 'Draft irrigation claim.',
           },
         ],
       }),
@@ -180,6 +198,9 @@ describe('estimate AI support context', () => {
     expect(verified.snippet).toContain('Applicator PPE');
     expect(verified.signalWord).toBe('Caution');
     expect(verified.rainfastMinutes).toBe(180);
+    // Irrigation guidance is a structured field, not just snippet text, so
+    // the deterministic fallback can quote it for watering questions.
+    expect(verified.irrigationNotes).toBe('Rainfast in 3 hours; avoid irrigation for 24 hours.');
 
     // Fail closed: an unverified row must not surface safety claims.
     const unverified = result.productCatalog.find((row) => row.activeIngredient === 'Bifenthrin');
@@ -187,14 +208,26 @@ describe('estimate AI support context', () => {
     expect(unverified.snippet).not.toContain('Unverified re-entry claim');
     expect(unverified.signalWord).toBeNull();
 
-    // Rows verified only via label_verified_at/label_version (the seeded
-    // label-facts lane never sets label_verified_by) still count as verified.
+    // Rows verified only via label_verified_at (the seeded label-facts lane
+    // never sets label_verified_by) still count as verified.
     const seedVerified = result.productCatalog.find((row) => row.activeIngredient === 'Quinclorac');
     expect(seedVerified.labelVerified).toBe(true);
     expect(seedVerified.snippet).toContain('Label verified in admin catalog');
     expect(seedVerified.snippet).toContain('Label signal word: Caution');
     expect(seedVerified.snippet).toContain('Keep pets off until sprays have dried');
     expect(seedVerified.rainfastMinutes).toBe(60);
+
+    // label_version WITHOUT an actual verification stamp must stay
+    // safety-silent — it can be set on a draft row before anyone verified.
+    const draftRow = result.productCatalog.find((row) => row.activeIngredient === 'Azoxystrobin');
+    expect(draftRow.labelVerified).toBe(false);
+    expect(draftRow.signalWord).toBeNull();
+    expect(draftRow.rainfastMinutes).toBeNull();
+    expect(draftRow.irrigationNotes).toBeNull();
+    expect(draftRow.snippet).not.toContain('Label verified');
+    expect(draftRow.snippet).not.toContain('Danger');
+    expect(draftRow.snippet).not.toContain('Draft re-entry claim');
+    expect(draftRow.snippet).not.toContain('Draft irrigation claim');
   });
 
   test('public support sources only expose external citation metadata', () => {
