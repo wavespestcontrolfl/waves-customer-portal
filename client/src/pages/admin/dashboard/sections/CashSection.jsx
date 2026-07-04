@@ -27,6 +27,7 @@ export default function CashSection({
       id="cash"
       title="Cash"
       caption="Are we collecting what we earned?"
+      about="Earned revenue isn't cash until it's collected. Collection rate shows how much billed work actually got paid, AR aging shows what's outstanding and for how long (chase the 90+ buckets first — collectability falls off a cliff), and Billing Health shows the autopay coverage that prevents AR from forming at all."
     >
       <div className="mb-4 md:mb-5">
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>

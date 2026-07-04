@@ -3,15 +3,17 @@ import { cn } from "../../../components/ui";
 
 // Point-in-time → rolling windows (inclusive of today) → calendar-to-date.
 // Server resolves each id via the shared periodStartDate (admin-dashboard.js).
+// `long` is the mobile <select> label — the abbreviations earn their keep as
+// desktop pills but read like alphabet soup in a dropdown.
 const PERIODS = [
-  { id: "today", label: "Today" },
-  { id: "last_7", label: "7D" },
-  { id: "last_30", label: "30D" },
-  { id: "last_90", label: "90D" },
-  { id: "wtd", label: "WTD" },
-  { id: "mtd", label: "MTD" },
-  { id: "qtd", label: "QTD" },
-  { id: "ytd", label: "YTD" },
+  { id: "today", label: "Today", long: "Today" },
+  { id: "last_7", label: "7D", long: "Last 7 days" },
+  { id: "last_30", label: "30D", long: "Last 30 days" },
+  { id: "last_90", label: "90D", long: "Last 90 days" },
+  { id: "wtd", label: "WTD", long: "Week to date" },
+  { id: "mtd", label: "MTD", long: "Month to date" },
+  { id: "qtd", label: "QTD", long: "Quarter to date" },
+  { id: "ytd", label: "YTD", long: "Year to date" },
 ];
 
 // Sticky section tabs + the period selector that drives the period-scoped
@@ -81,15 +83,20 @@ export default function DashboardJumpNav({
     setShowRangePicker(false);
   };
 
-  // Mobile sticky offset clears the fixed AdminLayoutV2 header (52px + safe
-  // area, z-90) — its isMobile cutoff is 768px, i.e. Tailwind's md:.
+  // Mobile sticky offset: .admin-main is the scroll container and its
+  // paddingTop is 52px + safe-area + 16px, and sticky offsets resolve from the
+  // padding edge — so top:-16px parks the bar exactly flush under the fixed
+  // 52px+safe-area AdminLayoutV2 header (a positive 52px offset doubled the
+  // header height and let content scroll through a see-through band above the
+  // pills). isMobile cutoff is 768px, i.e. Tailwind's md:.
   return (
-    <div className="sticky top-[calc(52px+env(safe-area-inset-top))] md:top-0 z-20 -mx-3 sm:-mx-6 px-3 sm:px-6 pt-2 pb-0 mb-4 bg-surface-page border-b border-hairline border-zinc-200">
-      <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-1 md:gap-3">
-        {/* Section tabs */}
+    <div className="sticky top-[-16px] md:top-0 z-20 -mx-3 sm:-mx-6 px-3 sm:px-6 pt-1.5 md:pt-2 pb-0 mb-3 md:mb-4 bg-surface-page border-b border-hairline border-zinc-200">
+      <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-1.5 md:gap-3">
+        {/* Section tabs — a full-width 5-up segmented row on mobile (every tab
+            always visible, no scroll), inline pills on desktop. */}
         <nav
           aria-label="Dashboard sections"
-          className="flex items-center gap-1 overflow-x-auto"
+          className="grid grid-cols-5 md:flex md:items-center md:gap-1 md:overflow-x-auto"
         >
           {sections.map((s) => (
             <button
@@ -98,7 +105,7 @@ export default function DashboardJumpNav({
               onClick={() => jumpTo(s.id)}
               aria-current={current === s.id ? "true" : undefined}
               className={cn(
-                "h-11 sm:h-8 px-2.5 text-12 font-medium u-focus-ring border-b-2 -mb-px transition-colors whitespace-nowrap shrink-0",
+                "h-10 md:h-8 px-0 md:px-2.5 text-12 font-medium u-focus-ring border-b-2 -mb-px transition-colors whitespace-nowrap md:shrink-0",
                 current === s.id
                   ? "border-zinc-900 text-zinc-900"
                   : "border-transparent text-ink-secondary hover:text-zinc-900",
@@ -109,14 +116,44 @@ export default function DashboardJumpNav({
           ))}
         </nav>
 
-        {/* Period selector — drives the KPI tiles + attribution panels */}
-        <div className="relative flex items-center gap-2 pb-1.5 max-md:pb-2">
+        {/* Period selector — drives the KPI tiles + attribution panels.
+            Mobile: one compact native select (the 9-pill strip overflowed a
+            390px viewport). Desktop: the original pill strip. */}
+        <div className="relative flex items-center gap-2 pb-1.5">
           {periodLabel && (
             <span className="hidden lg:inline text-12 text-ink-tertiary whitespace-nowrap">
               {periodLabel}
             </span>
           )}
-          <div className="max-w-full overflow-x-auto">
+          <select
+            aria-label="Period"
+            value={period}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "custom") {
+                // Selecting Custom… opens the date picker; the select snaps
+                // back to the current period until a date is actually applied.
+                setDraftFrom(customRange?.from || "");
+                setShowRangePicker(true);
+                return;
+              }
+              onSelectPeriod(v);
+              setShowRangePicker(false);
+            }}
+            className="md:hidden w-full h-9 text-13 border-hairline border-zinc-200 rounded-sm bg-white px-2 text-zinc-900 u-focus-ring"
+          >
+            {PERIODS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.long}
+              </option>
+            ))}
+            <option value="custom">
+              {period === "custom" && customRange
+                ? `Since ${customRange.from}`
+                : "Custom range…"}
+            </option>
+          </select>
+          <div className="hidden md:block max-w-full overflow-x-auto">
             <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
               {PERIODS.map((p) => (
                 <button
@@ -126,7 +163,7 @@ export default function DashboardJumpNav({
                     setShowRangePicker(false);
                   }}
                   className={cn(
-                    "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0",
+                    "h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0",
                     period === p.id
                       ? "bg-zinc-900 text-white"
                       : "bg-white text-ink-secondary hover:bg-zinc-50",
@@ -141,7 +178,7 @@ export default function DashboardJumpNav({
                   setShowRangePicker((v) => !v);
                 }}
                 className={cn(
-                  "h-11 sm:h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0 border-l border-hairline border-zinc-200 whitespace-nowrap",
+                  "h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0 border-l border-hairline border-zinc-200 whitespace-nowrap",
                   period === "custom"
                     ? "bg-zinc-900 text-white"
                     : "bg-white text-ink-secondary hover:bg-zinc-50",

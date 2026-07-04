@@ -133,7 +133,7 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     expect(document.getElementById("profit")).not.toBeInTheDocument();
   });
 
-  it("keeps the period selector available in every tab", async () => {
+  it("keeps the period select available in every tab, with readable labels", async () => {
     render(
       <MemoryRouter>
         <DashboardPageV2 />
@@ -142,7 +142,25 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     await screen.findAllByText(/Good (morning|afternoon|evening), Waves/);
 
     fireEvent.click(navButton("Retention"));
-    expect(screen.getByRole("button", { name: "MTD" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "QTD" })).toBeInTheDocument();
+    const select = screen.getByLabelText("Period");
+    expect(select.tagName).toBe("SELECT");
+    const labels = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
+    expect(labels).toContain("Month to date");
+    expect(labels).toContain("Quarter to date");
+    expect(labels).toContain("Custom range…");
+
+    fireEvent.change(select, { target: { value: "qtd" } });
+    expect(select.value).toBe("qtd");
+  });
+
+  it("renders the section explainer dropdown", async () => {
+    render(
+      <MemoryRouter>
+        <DashboardPageV2 />
+      </MemoryRouter>,
+    );
+    await screen.findAllByText(/Good (morning|afternoon|evening), Waves/);
+    expect(screen.getByText("What is this?")).toBeInTheDocument();
+    expect(screen.getByText(/Action Inbox ranks what to fix first/)).toBeInTheDocument();
   });
 });

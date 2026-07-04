@@ -95,7 +95,12 @@ export default function GrowthSection({
   ];
 
   return (
-    <DashboardSection id="growth" title="Growth" caption="Is the business growing?">
+    <DashboardSection
+      id="growth"
+      title="Growth"
+      caption="Is the business growing?"
+      about="Top of the funnel to closed revenue: how much estimated work you're capturing, revenue vs the same days last month, lead-to-booked conversion, and where customers actually come from. The ad-dollars card banding is 12-month gross-profit LTV against all-in acquisition cost — 3:1 is the floor; cut what's below it, feed what's far above it."
+    >
       {/* Sales Capture gauge + Revenue trend — capture rate next to the
           revenue it drives. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
@@ -256,13 +261,12 @@ export default function GrowthSection({
           title="Where to Put Ad Dollars"
           sub="gross-profit LTV : all-in CAC · 90 days"
         >
-          <ChartCard
-            title="Where to Put Ad Dollars"
-            sub="gross-profit LTV : all-in CAC · last 90 days"
-          >
+          {/* No inner ChartCard — the fold's summary already carries the
+              title/sub, and repeating them read as a rendering bug. */}
+          <div className="px-1 pt-1">
             <CapitalAllocationCard data={capAlloc} />
             <Verdict verdict={capitalVerdict(capAlloc)} />
-          </ChartCard>
+          </div>
         </MobileFold>
       ) : (
         <div className="mb-5">

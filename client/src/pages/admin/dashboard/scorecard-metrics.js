@@ -190,6 +190,14 @@ export function funnelVerdict(data) {
 // MRR momentum — core-kpis `momentum.mrr` ({ net, new, churned }).
 export function mrrVerdict(mrr) {
   if (!mrr || mrr.net == null) return null;
+  // A dead-flat period isn't "pure growth" — say so plainly.
+  if (!(mrr.new > 0) && !(mrr.churned > 0)) {
+    return {
+      happened: "No recurring-revenue movement this period — nothing new sold, nothing lost.",
+      action: "Flat MRR only compounds if you add to it — check the Growth tab for the channel to feed.",
+      tone: "neutral",
+    };
+  }
   const happened = `${usd(mrr.new || 0)} new recurring revenue vs ${usd(mrr.churned || 0)} lost — net ${mrr.net >= 0 ? "+" : "−"}${usd(Math.abs(mrr.net))}.`;
   if (mrr.net < 0) {
     return { happened, action: "Churn outran new sales this period — check the Action Inbox's at-risk MRR list before selling more.", tone: "bad" };

@@ -22,7 +22,12 @@ export default function TodaySection({
   kpiHistory,
 }) {
   return (
-    <DashboardSection id="today" title="Today" caption="What needs attention right now">
+    <DashboardSection
+      id="today"
+      title="Today"
+      caption="What needs attention right now"
+      about="Live operations for the current day: the Action Inbox ranks what to fix first (stale leads, expiring estimates, at-risk recurring revenue), Today's Completion tracks the schedule as it happens, and the tiles show service execution for the selected period. Start here each morning — clear the inbox, then check the other tabs."
+    >
       <ActionInbox alerts={alerts} stale={alertsStale} />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <ChartCard

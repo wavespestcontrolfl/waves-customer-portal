@@ -28,6 +28,7 @@ export default function ProfitSection({
       id="profit"
       title="Profit"
       caption="What's helping or hurting margin?"
+      about="Two different questions, two cards: gross margin asks whether JOBS are profitable after labor, materials, and drive time; the adjusted-EBITDA bridge asks whether the COMPANY is profitable after marketing and operating overhead. They sit side by side but never mix — a healthy gross margin with a thin EBITDA means overhead or marketing is eating the job profit."
     >
       <div className="mb-4 md:mb-5">
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
@@ -110,9 +111,9 @@ export default function ProfitSection({
       {kpis?.leaderboard?.length > 0 &&
         (isMobile ? (
           <MobileFold title="Tech Leaderboard" sub={kpis.periodLabel}>
-            <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel}>
+            <div className="px-1 pt-1">
               <TechLeaderboardBars leaderboard={kpis.leaderboard} />
-            </ChartCard>
+            </div>
           </MobileFold>
         ) : (
           <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel}>

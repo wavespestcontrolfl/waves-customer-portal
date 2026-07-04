@@ -36,6 +36,7 @@ export default function RetentionSection({
       id="retention"
       title="Retention"
       caption="Are customers staying?"
+      about="Recurring revenue is the business — this tab watches whether it compounds or leaks. Net MRR pits new recurring sales against churn, the trend shows 12 months of momentum, the cohort grid shows what % of each signup month is still active, and reviews/CSAT are the early-warning signals that predict the next churn wave."
     >
       <div className="mb-4 md:mb-5">
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
@@ -118,10 +119,10 @@ export default function RetentionSection({
       {/* MRR trend */}
       {isMobile ? (
         <MobileFold title="MRR Trend" sub={mrrTrendSub}>
-          <ChartCard title="MRR Trend" sub={mrrTrendSub}>
+          <div className="px-1 pt-1">
             <MrrTrendChart trend={mrrTrend?.trend || []} />
             <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
-          </ChartCard>
+          </div>
         </MobileFold>
       ) : (
         <div className="mb-5">
@@ -139,15 +140,12 @@ export default function RetentionSection({
           title="Retention by Cohort"
           sub="% still active by signup month"
         >
-          <ChartCard
-            title="Retention by Cohort"
-            sub="% still active by signup month"
-          >
+          <div className="px-1 pt-1">
             <RetentionCohortGrid
               cohorts={cohort?.cohorts || []}
               maxOffset={cohort?.maxOffset || 0}
             />
-          </ChartCard>
+          </div>
         </MobileFold>
       ) : (
         <div className="mb-5">

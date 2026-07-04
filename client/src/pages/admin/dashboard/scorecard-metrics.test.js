@@ -186,6 +186,12 @@ describe("remaining card verdicts", () => {
     expect(v.action).toContain("at-risk");
   });
 
+  it("mrrVerdict: a dead-flat period is neutral, not 'pure growth'", () => {
+    const v = mrrVerdict({ net: 0, new: 0, churned: 0 });
+    expect(v.tone).toBe("neutral");
+    expect(v.happened).toContain("No recurring-revenue movement");
+  });
+
   it("agingVerdict: 90+ buckets dominate the action", () => {
     const v = agingVerdict({
       aging: { current: 500, days_30: 200, days_120: 300, days_120_plus: 100 },
