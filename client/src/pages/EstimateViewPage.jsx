@@ -2194,7 +2194,7 @@ export function ServiceSection({
     && Array.isArray(current?.addOns)
     && current.addOns.length > 0;
   // A one-line checklist that just re-states the quoted service name tells
-  // the customer nothing ("What's included ✓ Pest Control") — only render
+  // the customer nothing ("What's included: Pest Control") — only render
   // when the list actually adds information (lawn/tree/mosquito programs
   // describe their applications here and nowhere else). Bundle boxes stay
   // checklist-free (owner directive), so single-service layouts only.
@@ -2968,7 +2968,7 @@ export default function EstimateViewPage() {
               <span style={{
                 display: 'inline-block', padding: '5px 11px',
                 background: '#EEF2FF', color: COLORS.blueDeeper,
-                borderRadius: 6, fontSize: 13, fontWeight: 700, letterSpacing: '0.02em',
+                borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
               }}>
                 WaveGuard {waveGuardTier}
               </span>
