@@ -439,13 +439,24 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars) {
 
     // First, get the campaign's budget resource name
     const [campaignData] = await customer.query(`
-      SELECT campaign.id, campaign.campaign_budget
+      SELECT campaign.id, campaign.campaign_budget, campaign_budget.explicitly_shared
       FROM campaign
       WHERE campaign.id = ${platformCampaignId}
     `);
 
     if (!campaignData || !campaignData.campaign.campaign_budget) {
       logger.error(`[google-ads] Campaign ${platformCampaignId} not found or has no budget`);
+      return null;
+    }
+
+    // A shared budget backs MULTIPLE campaigns — mutating it for one row
+    // would throttle (or overwrite the throttle of) every campaign on it,
+    // with each local row recording a different intended amount. Refuse at
+    // the source so every caller (cron, setMode, manual budget route) is
+    // covered; the owner must unshare the budget in Ads Manager to enable
+    // remote control.
+    if (campaignData.campaign_budget?.explicitly_shared) {
+      logger.error(`[google-ads] Campaign ${platformCampaignId} uses a SHARED budget — refusing to update (would change every campaign on it); unshare it in Ads Manager to enable remote control`);
       return null;
     }
 

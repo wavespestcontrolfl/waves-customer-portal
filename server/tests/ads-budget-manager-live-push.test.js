@@ -158,6 +158,21 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockUpdateBudget).not.toHaveBeenCalled();
       expect(mockCampaignUpdate).toHaveBeenCalled();
     });
+
+    test('gate on but NULL base: DB-only — the $20 fallback never reaches Google', async () => {
+      campaignRows = [{ ...baseCampaign(), daily_budget_base: null }];
+      mockIsEnabled.mockReturnValue(true);
+      mockIsConfigured.mockReturnValue(true);
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      // Legacy intent tracking still runs: stop = 1% of the $20 fallback.
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        budget_mode: 'stop',
+        daily_budget_current: 0.2,
+      });
+    });
   });
 
   describe('adjustBudgets reconcile (no transition, gate on)', () => {
@@ -269,6 +284,17 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).not.toHaveBeenCalled();
     });
 
+    test('NULL base: no reconcile push — fallback-derived budgets stay local', async () => {
+      campaignRows = [{ ...baseCampaign(), daily_budget_base: null, budget_mode: 'stop', daily_budget_current: '40' }];
+      mockIsEnabled.mockReturnValue(true);
+      mockIsConfigured.mockReturnValue(true);
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+    });
+
     test("'spent' mode never reconciles — freeze-at-current is identity", async () => {
       // 80% utilization → 'spent' zone, matching the recorded mode.
       BudgetManager.getCapacityForArea.mockResolvedValue({ utilizationPct: 80, booked: 6, slots: 8, techs: 1 });
@@ -318,6 +344,29 @@ describe('BudgetManager live Google Ads push', () => {
       const result = await BudgetManager.setMode('c-1', 'stop', 'test');
 
       expect(mockCampaignUpdate).toHaveBeenCalled();
+      expect(result.googleAdsUpdated).toBe(false);
+    });
+
+    test('invalid mode rejected before any write or push', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+
+      await expect(BudgetManager.setMode('c-1', 'pause', 'test'))
+        .rejects.toThrow(/Invalid budget mode/);
+
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      expect(mockLogInsert).not.toHaveBeenCalled();
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+    });
+
+    test('NULL base: DB updated but no push, googleAdsUpdated false', async () => {
+      campaignFirstRow = { ...baseCampaign(), daily_budget_base: null };
+      mockIsConfigured.mockReturnValue(true);
+
+      const result = await BudgetManager.setMode('c-1', 'stop', 'test');
+
+      expect(mockCampaignUpdate).toHaveBeenCalled();
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
       expect(result.googleAdsUpdated).toBe(false);
     });
   });

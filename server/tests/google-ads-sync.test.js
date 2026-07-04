@@ -234,6 +234,25 @@ describe('Google Ads campaign sync', () => {
     }]);
   });
 
+  test('refuses to update a SHARED campaign budget', async () => {
+    // A shared budget backs multiple campaigns — one row's capacity push
+    // would throttle every campaign on it.
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: {
+        id: '22594274874',
+        campaign_budget: 'customers/3393936713/campaignBudgets/987654321',
+      },
+      campaign_budget: {
+        explicitly_shared: true,
+      },
+    }]);
+
+    const result = await GoogleAds.updateBudget('22594274874', 5);
+
+    expect(result).toBeNull();
+    expect(mockMutateResources).not.toHaveBeenCalled();
+  });
+
   test('gaqlDateRange returns a finite, dashed YYYY-MM-DD range', () => {
     const { since, until } = GoogleAds._private.gaqlDateRange(7, new Date('2026-06-27T12:00:00Z'));
     expect(since).toBe('2026-06-20');
