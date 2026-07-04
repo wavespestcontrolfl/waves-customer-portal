@@ -151,8 +151,10 @@ const PEST_PERIMETER_CONTEXT_PATTERN = /\b(?:interiors?|exteriors?|inside|outsid
 // "Safe for the lawn" / "will it hurt my shrubs" name the RECIPIENT of a
 // treatment, not the treatment family the customer is asking about — strip
 // these phrases before family matching so "is the mosquito spray safe for
-// the lawn?" scopes to mosquito, not mosquito + lawn.
-const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?)\b/gi;
+// the lawn?" scopes to mosquito, not mosquito + lawn. The trailing negative
+// lookahead protects TARGET phrasing: "for the lawn treatment/care/program"
+// qualifies the treatment being asked about and must keep its family.
+const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?)\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
 
 // ALL families a question names, not just the first — a bundle question like
 // "are the lawn and mosquito treatments safe?" targets two families and the
@@ -405,13 +407,29 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
   // Attribute a catalog row to service families via the service library's
   // default_products linkage (real data, not a guessed category map), so the
   // assistant can scope family-specific safety questions to the right product.
+  // Besides whole-string containment, aliases match TOKEN-WISE: the service
+  // library may list "Advion Gel" while the catalog row is "Advion Cockroach
+  // Gel" — an alias whose distinctive tokens all appear in the name still
+  // attributes.
+  const tokensOf = (value) => cleanText(value || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 2);
   const familyEntries = Object.entries(productFamiliesByName)
     .filter(([name]) => name.length >= 4);
   const familiesForProduct = (name) => {
     const key = cleanText(name || '').toLowerCase();
     if (!key) return [];
+    const nameTokens = new Set(tokensOf(key));
     return unique(familyEntries
-      .filter(([productName]) => key.includes(productName) || productName.includes(key))
+      .filter(([productName]) => {
+        if (key.includes(productName) || productName.includes(key)) return true;
+        const aliasTokens = tokensOf(productName);
+        if (!aliasTokens.length || !aliasTokens.some((token) => token.length >= 4 || /\d/.test(token))) {
+          return false;
+        }
+        return aliasTokens.every((token) => nameTokens.has(token));
+      })
       .flatMap(([, families]) => families));
   };
   try {

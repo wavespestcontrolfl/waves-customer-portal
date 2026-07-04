@@ -684,7 +684,7 @@ function activeIngredientsFromSupport(context = {}, question = '') {
 // vocabulary — "what if it rains after treatment?" is a label question, but
 // "will you still come if it rains after 2pm?" is scheduling and must stay
 // on the normal path.
-const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\s+(?:the\s+|my\s+|a\s+|an\s+|you\s+|we\s+)?(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
+const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:\w+\s+)?off\b|\brains?\s+(?:right\s+)?after\s+(?:the\s+|my\s+|a\s+|an\s+|you\s+|we\s+)?(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
 
 // Generic treatment vocabulary says nothing about WHICH product a question
 // targets, so it never counts as naming one.
@@ -701,24 +701,24 @@ const GENERIC_QUESTION_TERMS = new Set([
   'bugs', 'insect', 'insects',
 ]);
 
-// True when the question explicitly names this catalog row (product name —
-// via the questionNameMatch flag the context builder stamps, so the name
-// itself never rides along in the row — active ingredient, or category like
-// "herbicide"). Row title and snippet are deliberately excluded: every
-// catalog row's title reads "<category> active ingredient", so title words
-// would make "what active ingredient is in X?" mention EVERY row, and
-// snippet would let generic re-entry copy ("...sprays have dried") match.
-function catalogRowMentionsQuestion(row = {}, question = '') {
-  if (row.questionNameMatch === true) return true;
-  const text = cleanText([row.activeIngredient, row.category, row.path]
-    .filter(Boolean).join(' ')).toLowerCase();
-  if (!text) return false;
-  const matchesTerm = cleanText(question)
+function questionTermsForMatching(question = '') {
+  return cleanText(question)
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((term) => term.length >= 4 && !GENERIC_QUESTION_TERMS.has(term))
-    .some((term) => text.includes(term));
-  if (matchesTerm) return true;
+    .filter((term) => term.length >= 4 && !GENERIC_QUESTION_TERMS.has(term));
+}
+
+// True when the question names this SPECIFIC product: the product name (via
+// the questionNameMatch flag the context builder stamps, so the name itself
+// never rides along in the row) or an active ingredient. Title and snippet
+// are deliberately excluded: every catalog row's title reads "<category>
+// active ingredient", and snippet would let generic re-entry copy
+// ("...sprays have dried") match.
+function catalogRowNamesProduct(row = {}, question = '') {
+  if (row.questionNameMatch === true) return true;
+  const ingredientText = cleanText(row.activeIngredient || '').toLowerCase();
+  if (!ingredientText) return false;
+  if (questionTermsForMatching(question).some((term) => ingredientText.includes(term))) return true;
   // Short/punctuated active-ingredient names ("2,4-D", "Bti") never survive
   // the >=4-char term filter above — compare whole normalized question words
   // against normalized ingredient aliases by exact equality instead.
@@ -732,6 +732,15 @@ function catalogRowMentionsQuestion(row = {}, question = '') {
   if (!aliases.length) return false;
   const questionWords = cleanText(question).split(/\s+/).map(normalize).filter(Boolean);
   return aliases.some((alias) => questionWords.includes(alias));
+}
+
+// True when the question names this row's broad CATEGORY ("the herbicide",
+// "the insecticide") — weaker targeting than naming the product, so callers
+// intersect these with any named families instead of trusting them alone.
+function catalogRowMentionsCategory(row = {}, question = '') {
+  const text = cleanText([row.category, row.path].filter(Boolean).join(' ')).toLowerCase();
+  if (!text) return false;
+  return questionTermsForMatching(question).some((term) => text.includes(term));
 }
 
 // Scope targeted questions to the product(s) they target — the support
@@ -780,15 +789,25 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
     ? attributedTo(row, estimateFamilies)
     : (Array.isArray(row.serviceKeys) && row.serviceKeys.length > 0));
   const questionFamilies = serviceFamiliesFromText(question);
-  const mentionedRows = rows.filter((row) => catalogRowMentionsQuestion(row, question));
-  if (mentionedRows.length) {
-    const onEstimateMentions = mentionedRows.filter(onEstimate);
-    // A broad category mention ("the lawn insecticide") can match every
+  const productMentions = rows.filter((row) => catalogRowNamesProduct(row, question) && onEstimate(row));
+  const categoryMentions = rows.filter((row) => catalogRowMentionsCategory(row, question) && onEstimate(row));
+  if (productMentions.length || categoryMentions.length) {
+    // Broad category mentions ("the lawn insecticide") can match every
     // on-estimate row of that category — when the question also names
-    // families, the mention must stay inside them.
-    return questionFamilies.length
-      ? onEstimateMentions.filter((row) => attributedTo(row, questionFamilies))
-      : onEstimateMentions;
+    // families, they must stay inside them.
+    const scopedCategory = questionFamilies.length
+      ? categoryMentions.filter((row) => attributedTo(row, questionFamilies))
+      : categoryMentions;
+    // A COORDINATED question ("is Bifenthrin AND the lawn treatment safe?")
+    // asks about both the named product and the named family — union them.
+    // Without coordination the family word is adjectival ("the 2,4-D lawn
+    // spray") and the explicit product stays the narrower, correct scope.
+    const coordinatedFamilyRows = (productMentions.length
+      && questionFamilies.length
+      && /\b(?:and|plus|both|along with|as well as)\b|&/i.test(cleanText(question)))
+      ? rows.filter((row) => attributedTo(row, questionFamilies) && onEstimate(row))
+      : [];
+    return [...new Set([...productMentions, ...scopedCategory, ...coordinatedFamilyRows])];
   }
   if (questionFamilies.length) {
     return rows.filter((row) => attributedTo(row, questionFamilies) && onEstimate(row));
@@ -1039,7 +1058,9 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // "water bugs" is a pest, not a watering question — the lookahead sends
   // it to the pest branch. Rain-after alternates are treatment-anchored so
   // "if it rains after 2pm" scheduling wording stays out of safety copy.
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\s+(?:the\s+|my\s+|a\s+|an\s+|you\s+|we\s+)?(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
+  // re-enter/re-entry/keep-off/dry wording lands here too — the reviewed
+  // re-entry guidance lives in labelSafetyFacts, not the lawn branch.
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:\w+\s+)?off\b|\brains?\s+(?:right\s+)?after\s+(?:the\s+|my\s+|a\s+|an\s+|you\s+|we\s+)?(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
     const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';

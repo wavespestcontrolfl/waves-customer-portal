@@ -543,6 +543,26 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).toContain('Re-enter once sprays have dried');
   });
 
+  test('a coordinated product + family question unions both scopes', () => {
+    const answer = answerEstimateQuestionFallback('Is Bifenthrin and the lawn treatment safe for pets?', lawnPestContext);
+    expect(answer).toContain('Label re-entry guidance by product:');
+    expect(answer).toContain('Re-enter once sprays have dried');
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+  });
+
+  test('"used for the lawn treatment" targets the lawn family, not everything', () => {
+    const answer = answerEstimateQuestionFallback('What product is used for the lawn treatment?', lawnPestContext);
+    expect(answer).toContain('Quinclorac');
+    expect(answer).not.toContain('Bifenthrin');
+  });
+
+  test('re-entry questions get the reviewed re-entry guidance', () => {
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('When can we re-enter after service?')).toBe(true);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How long until the yard is dry?')).toBe(true);
+    const answer = answerEstimateQuestionFallback('How long before we can re-enter the lawn?', verifiedContext);
+    expect(answer).toContain('Label re-entry guidance: Keep people and pets off treated areas until dry');
+  });
+
   test('"water bugs" is a pest question, not a watering question', () => {
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Do you treat water bugs?')).toBe(false);
     const answer = answerEstimateQuestionFallback('Do you treat water bugs?', {

@@ -54,14 +54,42 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Is the exterior spray safe for pets?')).toEqual(['pest_control']);
     // An INDEPENDENT bug mention alongside another family keeps both.
     expect(serviceFamiliesFromText('Are the lawn and bug spray safe for pets?')).toEqual(['lawn_care', 'pest_control']);
-    // "the lawn" as the RECIPIENT of a treatment is not a target family.
+    // "the lawn" as the RECIPIENT of a treatment is not a target family...
     expect(serviceFamiliesFromText('Is the mosquito spray safe for the lawn?')).toEqual(['mosquito']);
+    // ...but "for the lawn treatment" TARGETS the lawn family.
+    expect(serviceFamiliesFromText('What product is used for the lawn treatment?')).toEqual(['lawn_care']);
     expect(serviceFamiliesFromText('Will the pest treatment hurt my shrubs?')).toEqual(['pest_control']);
     // Plain location words are not pest scope without treatment context...
     expect(serviceFamiliesFromText('Can I water my outside plants after treatment?')).toEqual([]);
     // ...but treatment-tied perimeter wording is.
     expect(serviceFamiliesFromText('Do you spray inside the house?')).toEqual(['pest_control']);
     expect(serviceFamiliesFromText('')).toEqual([]);
+  });
+
+  test('token-subset default_products aliases still attribute the catalog row', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        services: [{
+          service_key: 'cockroach_control',
+          name: 'Cockroach Control',
+          category: 'pest_control',
+          description: 'German roach cleanout program.',
+          default_products: ['Advion Gel'],
+        }],
+        products_catalog: [{
+          // The library alias "Advion Gel" is a token subset of the real name.
+          name: 'Advion Cockroach Gel',
+          category: 'insecticide',
+          active_ingredient: 'Indoxacarb',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is the roach gel safe for pets?',
+      context: { services: [{ label: 'Cockroach Control', detail: 'Cleanout program' }] },
+    });
+    const row = result.productCatalog.find((r) => r.activeIngredient === 'Indoxacarb');
+    expect(row.serviceKeys).toEqual(['pest_control']);
   });
 
   test('question naming a product stamps questionNameMatch without leaking the name', async () => {
