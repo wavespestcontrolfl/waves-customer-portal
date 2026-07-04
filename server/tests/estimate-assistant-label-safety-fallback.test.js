@@ -469,6 +469,54 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).toContain('Where a product label states a rainfast window, treated areas are rainfast in about 180 minutes');
   });
 
+  test('one-time mode does not answer from the recurring alternative\'s products', () => {
+    // The recurring alternative still rides along in recurringServices, but
+    // the customer is looking at the selected one-time service.
+    const answer = answerEstimateQuestionFallback('Is it safe for pets?', {
+      serviceMode: 'one_time',
+      services: [{ label: 'Pest Control', detail: 'One-time treatment', summary: 'Pest Control — one-time' }],
+      recurringServices: [{ label: 'Lawn Care', detail: 'Weed control applications', summary: 'Lawn Care — weed control' }],
+      supportContext: {
+        productCatalog: JSON.parse(JSON.stringify(lawnPestContext.supportContext.productCatalog)),
+      },
+    });
+    expect(answer).toContain('Bifenthrin');
+    expect(answer).toContain('rainfast in about 45 minutes');
+    expect(answer).not.toContain('Quinclorac');
+    expect(answer).not.toContain('until dry.');
+    expect(answer).not.toContain('rainfast in about 180 minutes');
+  });
+
+  test('a broad category mention stays inside the named family', () => {
+    // "insecticide" matches the pest product, but the customer asked about a
+    // LAWN insecticide — there is none, so say nothing product-specific
+    // rather than quote the perimeter-pest label.
+    const answer = answerEstimateQuestionFallback('Is the lawn insecticide safe for pets?', lawnPestContext);
+    expect(answer).not.toContain('Bifenthrin');
+    expect(answer).not.toContain('Label re-entry guidance');
+    expect(answer).not.toContain('rainfast');
+    expect(answer).toContain('follow the product label directions');
+  });
+
+  test('naming a product narrows to it via the builder\'s questionNameMatch flag', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    // The builder stamps the flag when the question names the product —
+    // the name itself never enters the support context.
+    context.supportContext.productCatalog[0].questionNameMatch = true;
+    const answer = answerEstimateQuestionFallback('Is SpeedZone safe for pets?', context);
+    expect(answer).toContain('Carfentrazone');
+    expect(answer).toContain('rainfast in about 180 minutes');
+    expect(answer).not.toContain('Quinclorac');
+    expect(answer).not.toContain('rainfast in about 60 minutes');
+  });
+
+  test('naming a family alongside "bug spray" keeps both families\' facts', () => {
+    const answer = answerEstimateQuestionFallback('Are the lawn and bug spray safe for pets?', lawnPestContext);
+    expect(answer).toContain('Label re-entry guidance by product:');
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).toContain('Re-enter once sprays have dried');
+  });
+
   test('"water bugs" is a pest question, not a watering question', () => {
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Do you treat water bugs?')).toBe(false);
     const answer = answerEstimateQuestionFallback('Do you treat water bugs?', {

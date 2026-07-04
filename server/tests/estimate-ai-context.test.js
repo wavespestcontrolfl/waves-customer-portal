@@ -52,7 +52,40 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Is the lawn insect treatment safe?')).toEqual(['lawn_care']);
     // interior/exterior mirror the force-gate's pest wording.
     expect(serviceFamiliesFromText('Is the exterior spray safe for pets?')).toEqual(['pest_control']);
+    // An INDEPENDENT bug mention alongside another family keeps both.
+    expect(serviceFamiliesFromText('Are the lawn and bug spray safe for pets?')).toEqual(['lawn_care', 'pest_control']);
     expect(serviceFamiliesFromText('')).toEqual([]);
+  });
+
+  test('question naming a product stamps questionNameMatch without leaking the name', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        products_catalog: [
+          {
+            name: 'SpeedZone EW',
+            category: 'herbicide',
+            active_ingredient: 'Carfentrazone + 2,4-D + MCPP + Dicamba',
+            active: true,
+            label_verified_by: 'waves-admin',
+          },
+          {
+            name: 'Drive XLR8',
+            category: 'herbicide',
+            active_ingredient: 'Quinclorac',
+            active: true,
+            label_verified_by: 'waves-admin',
+          },
+        ],
+      }),
+      question: 'Is SpeedZone safe for pets?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    });
+    const named = result.productCatalog.find((row) => String(row.activeIngredient || '').includes('Carfentrazone'));
+    const other = result.productCatalog.find((row) => row.activeIngredient === 'Quinclorac');
+    expect(named.questionNameMatch).toBe(true);
+    expect(other.questionNameMatch).toBe(false);
+    // Boolean only — the product name itself must never enter the context.
+    expect(JSON.stringify(result)).not.toContain('SpeedZone');
   });
 
   test('question-derived service keys use the whole-word matcher for support loading', () => {

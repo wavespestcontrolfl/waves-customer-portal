@@ -136,11 +136,13 @@ const SERVICE_FAMILY_QUESTION_PATTERNS = [
   ['rodent_bait', /\b(?:rodents?|rats?|mice|mouse)\b/i],
 ];
 
-// Customers say "bug spray" for pest control — but ONLY when nothing more
-// specific is named: "chinch bug" / "lawn insects" describe that family's
-// insects, and adding pest_control there would scope perimeter-pest label
-// facts into a lawn answer.
+// Customers say "bug spray" for pest control — but a bug/insect word that
+// directly follows another family's qualifier ("chinch bug", "lawn insects")
+// describes THAT family's insects, and adding pest_control there would scope
+// perimeter-pest label facts into a lawn answer. An INDEPENDENT bug mention
+// ("the lawn and bug spray") still counts as pest control.
 const PEST_GENERIC_INSECT_PATTERN = /\b(?:bugs?|insects?)\b/i;
+const QUALIFIED_INSECT_PATTERN = /\b(?:chinch|lawn|turf|grass|trees?|shrubs?|ornamental|palms?|mosquito)\s+(?:bugs?|insects?)\b/gi;
 
 // ALL families a question names, not just the first — a bundle question like
 // "are the lawn and mosquito treatments safe?" targets two families and the
@@ -151,7 +153,13 @@ function serviceFamiliesFromText(value) {
   const families = SERVICE_FAMILY_QUESTION_PATTERNS
     .filter(([, pattern]) => pattern.test(text))
     .map(([key]) => key);
-  if (!families.length && PEST_GENERIC_INSECT_PATTERN.test(text)) families.push('pest_control');
+  // Strip family-qualified insect phrases first, so only INDEPENDENT
+  // bug/insect wording reads as pest control — "the lawn and bug spray"
+  // adds pest_control, "the chinch bug treatment" does not.
+  const unqualified = text.replace(QUALIFIED_INSECT_PATTERN, ' ');
+  if (!families.includes('pest_control') && PEST_GENERIC_INSECT_PATTERN.test(unqualified)) {
+    families.push('pest_control');
+  }
   return families;
 }
 
@@ -343,13 +351,42 @@ async function searchServiceLibrary(db, terms) {
   }
 }
 
+// Name tokens too generic to identify a product — a product named "Lawn
+// Fertilizer Pro" must not name-match every lawn question.
+const GENERIC_NAME_TOKENS = new Set([
+  'lawn', 'turf', 'weed', 'pest', 'mosquito', 'insect', 'herbicide', 'insecticide',
+  'fungicide', 'fertilizer', 'granular', 'liquid', 'control', 'spray', 'concentrate',
+  'professional', 'select', 'ultra', 'super', 'plus', 'max', 'pro',
+]);
+
+// Does the question name this product? Compared as normalized whole tokens
+// (distinctive ones only: >=5 chars or containing a digit), so the row can
+// carry a BOOLEAN — the product name itself never enters the support
+// context; customer copy tells them to call for the exact product.
+function questionNamesProduct(name, questionWords) {
+  if (!questionWords.length) return false;
+  const tokens = cleanText(name || '')
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => token.replace(/[^a-z0-9]+/g, ''))
+    .filter((token) => (token.length >= 5 || /\d/.test(token))
+      && token.length >= 2
+      && !GENERIC_NAME_TOKENS.has(token));
+  return tokens.some((token) => questionWords.includes(token));
+}
+
 // Returns {rows, truncated}: truncated=true when the query filled the row
 // cap, meaning more matching products exist than were loaded — completeness
 // claims ("every product is rainfast within N minutes") must not be made
 // from a truncated slice.
-async function searchProductCatalog(db, terms, productNames = [], productFamiliesByName = {}) {
+async function searchProductCatalog(db, terms, productNames = [], productFamiliesByName = {}, question = '') {
   const lookupTerms = unique([...terms, ...productNames]).slice(0, 20);
   if (!db || !lookupTerms.length) return { rows: [], truncated: false };
+  const questionWords = cleanText(question)
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word) => word.replace(/[^a-z0-9]+/g, ''))
+    .filter(Boolean);
   // Attribute a catalog row to service families via the service library's
   // default_products linkage (real data, not a guessed category map), so the
   // assistant can scope family-specific safety questions to the right product.
@@ -428,6 +465,7 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         rainfastMinutes: labelVerified && Number(row.rainfast_minutes) > 0 ? Number(row.rainfast_minutes) : null,
         irrigationNotes: labelVerified ? (trimSnippet(row.irrigation_notes || '') || null) : null,
         serviceKeys: familiesForProduct(row.name),
+        questionNameMatch: questionNamesProduct(row.name, questionWords),
         snippet: trimSnippet(parts.join(' - ')),
       };
     }).filter((row) => row.snippet || row.title);
@@ -548,7 +586,7 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
       productFamiliesByName[key] = unique([...(productFamiliesByName[key] || []), family]);
     }
   }
-  const productCatalogResult = await searchProductCatalog(db, searchTerms, serviceProductNames, productFamiliesByName);
+  const productCatalogResult = await searchProductCatalog(db, searchTerms, serviceProductNames, productFamiliesByName, question);
   const publicServiceLibrary = serviceLibrary.map(({ _productNames, ...row }) => row);
 
   return {

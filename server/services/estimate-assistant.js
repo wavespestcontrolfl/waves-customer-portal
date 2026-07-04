@@ -698,13 +698,15 @@ const GENERIC_QUESTION_TERMS = new Set([
   'bugs', 'insect', 'insects',
 ]);
 
-// True when the question explicitly names this catalog row (active ingredient
-// or category like "herbicide"). Row title and snippet are deliberately
-// excluded: every catalog row's title reads "<category> active ingredient",
-// so title words would make "what active ingredient is in X?" mention EVERY
-// row, and snippet would let generic re-entry copy ("...sprays have dried")
-// match.
+// True when the question explicitly names this catalog row (product name —
+// via the questionNameMatch flag the context builder stamps, so the name
+// itself never rides along in the row — active ingredient, or category like
+// "herbicide"). Row title and snippet are deliberately excluded: every
+// catalog row's title reads "<category> active ingredient", so title words
+// would make "what active ingredient is in X?" mention EVERY row, and
+// snippet would let generic re-entry copy ("...sprays have dried") match.
 function catalogRowMentionsQuestion(row = {}, question = '') {
+  if (row.questionNameMatch === true) return true;
   const text = cleanText([row.activeIngredient, row.category, row.path]
     .filter(Boolean).join(' ')).toLowerCase();
   if (!text) return false;
@@ -753,17 +755,38 @@ function catalogRowMentionsQuestion(row = {}, question = '') {
 //      whatever the estimate loaded).
 // No survivors = an empty set (callers fail closed to generic copy) rather
 // than the wrong treatment's rows.
+// Families of what the customer is actually LOOKING AT: in one-time mode the
+// recurring alternative still rides along in context.recurringServices, but
+// its products must not answer for the selected one-time service.
+function estimateFamiliesForScoping(context = {}) {
+  if (cleanText(context.serviceMode).toLowerCase() === 'one_time') {
+    return serviceKeysFromContext({
+      services: context.services,
+      oneTime: context.oneTime,
+    }, '');
+  }
+  return serviceKeysFromContext(context, '');
+}
+
 function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
   if (!rows.length) return rows;
-  const estimateFamilies = serviceKeysFromContext(context, '');
+  const estimateFamilies = estimateFamiliesForScoping(context);
   const attributedTo = (row, families) => Array.isArray(row.serviceKeys)
     && row.serviceKeys.some((key) => families.includes(key));
   const onEstimate = (row) => (estimateFamilies.length
     ? attributedTo(row, estimateFamilies)
     : (Array.isArray(row.serviceKeys) && row.serviceKeys.length > 0));
-  const mentionedRows = rows.filter((row) => catalogRowMentionsQuestion(row, question));
-  if (mentionedRows.length) return mentionedRows.filter(onEstimate);
   const questionFamilies = serviceFamiliesFromText(question);
+  const mentionedRows = rows.filter((row) => catalogRowMentionsQuestion(row, question));
+  if (mentionedRows.length) {
+    const onEstimateMentions = mentionedRows.filter(onEstimate);
+    // A broad category mention ("the lawn insecticide") can match every
+    // on-estimate row of that category — when the question also names
+    // families, the mention must stay inside them.
+    return questionFamilies.length
+      ? onEstimateMentions.filter((row) => attributedTo(row, questionFamilies))
+      : onEstimateMentions;
+  }
   if (questionFamilies.length) {
     return rows.filter((row) => attributedTo(row, questionFamilies) && onEstimate(row));
   }
