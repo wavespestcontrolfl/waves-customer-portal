@@ -5665,14 +5665,17 @@ router.get('/services-dropdown', async (req, res, next) => {
       const services = await db('services').where({ is_active: true }).orderBy('sort_order');
       if (services.length > 0) {
         const byCategory = {};
+        // NULL catalog prices must stay null — emitting 0 here reads as a
+        // real $0 to any `!= null` consumer (the trap #2331 avoided).
+        const toPrice = (v) => (v == null ? null : parseFloat(v));
         for (const s of services) {
           const cat = s.category || 'other';
           if (!byCategory[cat]) byCategory[cat] = { category: cat, items: [] };
           byCategory[cat].items.push({
             id: s.id, name: s.name, duration: s.default_duration_minutes,
-            priceMin: parseFloat(s.price_range_min || s.base_price || 0),
-            priceMax: parseFloat(s.price_range_max || s.base_price || 0),
-            base_price: parseFloat(s.base_price || 0),
+            priceMin: toPrice(s.price_range_min ?? s.base_price),
+            priceMax: toPrice(s.price_range_max ?? s.base_price),
+            base_price: toPrice(s.base_price),
             default_duration_minutes: s.default_duration_minutes,
           });
         }
