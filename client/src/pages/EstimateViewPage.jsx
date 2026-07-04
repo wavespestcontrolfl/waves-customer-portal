@@ -2233,7 +2233,11 @@ export function ServiceSection({
             frequency={current}
             waveGuardTier={servicesLength > 1 ? null : (section?.waveGuardTierEligible !== false ? waveGuardTier : null)}
             wording={copy.priceWording}
-            showSavings={servicesLength === 1}
+            // Bundles keep showSavings on for the struck-through pre-discount
+            // anchor next to the member price; the in-card "You save" line
+            // stays bundle-suppressed via the null waveGuardTier above, so the
+            // consolidated save lines below the boxes remain the only ones.
+            showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
             showGuarantee={servicesLength === 1}
           />
         ) : null}
