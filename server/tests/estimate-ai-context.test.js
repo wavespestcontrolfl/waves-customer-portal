@@ -60,6 +60,8 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Is the mosquito spray safe for lawns and shrubs?')).toEqual(['mosquito']);
     // ...but "for the lawn treatment" TARGETS the lawn family.
     expect(serviceFamiliesFromText('What product is used for the lawn treatment?')).toEqual(['lawn_care']);
+    // A treatment verb before the preposition makes the area the target.
+    expect(serviceFamiliesFromText('What product do you spray on the lawn?')).toEqual(['lawn_care']);
     expect(serviceFamiliesFromText('Will the pest treatment hurt my shrubs?')).toEqual(['pest_control']);
     // Plain location words are not pest scope without treatment context...
     expect(serviceFamiliesFromText('Can I water my outside plants after treatment?')).toEqual([]);
@@ -153,6 +155,33 @@ describe('estimate AI support context', () => {
     expect(other.questionNameMatch).toBe(false);
     // Boolean only — the product name itself must never enter the context.
     expect(JSON.stringify(result)).not.toContain('SpeedZone');
+  });
+
+  test('a single short common word never counts as naming a product', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        products_catalog: [{
+          name: 'Drive XLR8 Herbicide Crabgrass Killer',
+          category: 'herbicide',
+          active_ingredient: 'Quinclorac',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      // "drive" is a name token, but as an ordinary verb it must not stamp.
+      question: 'Is it safe to drive on the lawn after treatment?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    });
+    const row = result.productCatalog.find((r) => r.activeIngredient === 'Quinclorac');
+    expect(row.questionNameMatch).toBe(false);
+  });
+
+  test('estimate rows classify by canonical service key, not loose label text', () => {
+    // "Rodent Bait Stations" label text would hit the termite pattern's
+    // bare "bait" alternate; the canonical service key must win.
+    expect(serviceKeysFromContext({
+      services: [{ service: 'rodent_bait_quarterly', label: 'Rodent Bait Stations', detail: 'Quarterly exterior program' }],
+    }, '')).toEqual(['rodent_bait']);
   });
 
   test('question-derived service keys use the whole-word matcher for support loading', () => {

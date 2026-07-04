@@ -800,6 +800,11 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
   // estimate's own products' facts.
   const namedRows = rows.filter((row) => catalogRowNamesProduct(row, question));
   const productMentions = namedRows.filter(onEstimate);
+  // The customer named a product and NONE of the named rows are on this
+  // estimate: fail closed outright. Category words in the same breath ("is
+  // glyphosate HERBICIDE safe?") describe that product — they must not fall
+  // through to the estimate's own products' facts.
+  if (namedRows.length && !productMentions.length) return [];
   const categoryMentions = rows.filter((row) => catalogRowMentionsCategory(row, question) && onEstimate(row));
   if (namedRows.length || categoryMentions.length) {
     // Broad category mentions ("the lawn insecticide") can match every
@@ -808,14 +813,16 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
     const scopedCategory = questionFamilies.length
       ? categoryMentions.filter((row) => attributedTo(row, questionFamilies))
       : categoryMentions;
-    // A COORDINATED question ("is Bifenthrin AND the lawn treatment safe?")
-    // asks about both the named product and the named family — union them.
-    // The conjunction must actually join onto family/treatment wording:
-    // "safe for kids and pets" is not a product+family coordination, and
-    // without one the family word is adjectival ("the 2,4-D lawn spray") so
-    // the explicit product stays the narrower, correct scope.
-    const coordinatesOntoFamily = /\b(?:and|plus|&|along with|as well as)\s+(?:the\s+|my\s+|our\s+)?(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service)\b/i
-      .test(cleanText(question));
+    // A COORDINATED question ("is Bifenthrin AND the lawn treatment safe?",
+    // "the lawn treatment PLUS Bifenthrin") asks about both the named
+    // product and the named family — union them. The conjunction must join
+    // family/treatment wording on EITHER side: "safe for kids and pets" is
+    // not a product+family coordination, and without one the family word is
+    // adjectival ("the 2,4-D lawn spray") so the explicit product stays the
+    // narrower, correct scope.
+    const questionText = cleanText(question);
+    const coordinatesOntoFamily = /\b(?:and|plus|&|along with|as well as)\s+(?:the\s+|my\s+|our\s+)?(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service)\b/i.test(questionText)
+      || /\b(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service)\s+(?:and|plus|&|along with|as well as)\b/i.test(questionText);
     const coordinatedFamilyRows = (productMentions.length && questionFamilies.length && coordinatesOntoFamily)
       ? rows.filter((row) => attributedTo(row, questionFamilies) && onEstimate(row))
       : [];

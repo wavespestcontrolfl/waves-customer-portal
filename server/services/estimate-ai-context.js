@@ -170,7 +170,7 @@ const SERVICE_KEY_FAMILY_PREFIXES = [
   ['mosquito', /^(?:mosquito|one_time_mosquito)/],
   ['tree_shrub', /^(?:tree|shrub)/],
   ['lawn_care', /^(?:lawn|one_time_lawn)/],
-  ['pest_control', /^(?:pest|cockroach|bed_bug|fire_ant|flea_tick|one_time_pest)/],
+  ['pest_control', /^(?:pest|cockroach|german_roach|bed_bug|fire_ant|flea_tick|bee_wasp|mud_dauber|one_time_pest)/],
 ];
 
 function serviceFamilyFromKey(serviceKey) {
@@ -188,8 +188,19 @@ function serviceFamilyFromKey(serviceKey) {
 function serviceFamiliesFromText(value) {
   const text = cleanText(value);
   if (!text) return [];
-  // Affected-area phrases name recipients, not target families.
-  const targeted = text.replace(AFFECTED_AREA_PATTERN, ' ');
+  // Affected-area phrases name recipients, not target families — but a
+  // treatment VERB right before the preposition ("what do you spray on the
+  // lawn?") makes the area the treatment target, so those phrases survive.
+  // "safe" between the verb and the preposition ("the mosquito spray safe
+  // for the lawn") keeps recipient semantics.
+  const targeted = text.replace(AFFECTED_AREA_PATTERN, (match, offset, whole) => {
+    // Harm-verb phrases ("hurt my shrubs") are ALWAYS recipients.
+    if (/^(?:hurt|harms?|damage|kills?|burn|stains?)\b/i.test(match)) return ' ';
+    const before = whole.slice(Math.max(0, offset - 30), offset);
+    return /\b(?:spray\w*|appl\w*|use|used|uses|using|put|putting|treat\w*)\s+(?:(?!safe\b)\w+\s+)?$/i.test(before)
+      ? match
+      : ' ';
+  });
   const families = SERVICE_FAMILY_QUESTION_PATTERNS
     .filter(([, pattern]) => pattern.test(targeted))
     .map(([key]) => key);
@@ -215,7 +226,11 @@ function serviceKeysFromContext(context = {}, question = '') {
   ];
 
   for (const row of serviceRows) {
-    const key = serviceKeyFromText([row.label, row.detail, row.summary].filter(Boolean).join(' '));
+    // The canonical row.service key wins over label text — "Rodent Bait
+    // Stations" would otherwise hit the loose termite pattern's bare "bait"
+    // alternate before the rodent pattern.
+    const key = serviceFamilyFromKey(row.service || row.key)
+      || serviceKeyFromText([row.label, row.detail, row.summary].filter(Boolean).join(' '));
     if (key) keys.push(key);
   }
 
@@ -421,7 +436,12 @@ function questionNamesProduct(name, questionWords) {
     .filter((token) => (token.length >= 5 || /\d/.test(token))
       && token.length >= 2
       && !GENERIC_NAME_TOKENS.has(token));
-  return tokens.some((token) => questionWords.includes(token));
+  const matched = tokens.filter((token) => questionWords.includes(token));
+  if (!matched.length) return false;
+  // One short common English word isn't a product mention — "Drive XLR8"
+  // must not be "named" by "is it safe to DRIVE on the lawn?". Require two
+  // matched tokens, or one that is unmistakable (long or carries a digit).
+  return matched.length >= 2 || matched.some((token) => token.length >= 6 || /\d/.test(token));
 }
 
 // Returns {rows, truncated}: truncated=true when the query filled the row

@@ -597,6 +597,62 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).toContain('Keep people and pets off treated areas until dry');
   });
 
+  test('coordination works in the reverse order too', () => {
+    const answer = answerEstimateQuestionFallback('Is the lawn treatment plus Bifenthrin safe for pets?', lawnPestContext);
+    expect(answer).toContain('Re-enter once sprays have dried');
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+  });
+
+  test('naming an off-estimate product with a category word still fails closed', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    context.supportContext.productCatalog.push({
+      source: 'admin_product_catalog',
+      category: 'herbicide',
+      activeIngredient: 'Glyphosate',
+      labelVerified: true,
+      signalWord: 'Warning',
+      reentry: 'Foreign product re-entry claim.',
+      rainfastMinutes: 240,
+      irrigationNotes: null,
+      serviceKeys: [],
+    });
+    // "herbicide" describes the named off-estimate product — it must not
+    // fall through to the estimate's own herbicides' facts.
+    const answer = answerEstimateQuestionFallback('Is glyphosate herbicide safe for pets?', context);
+    expect(answer).not.toContain('Label re-entry guidance');
+    expect(answer).not.toContain('Carfentrazone');
+    expect(answer).not.toContain('Glyphosate');
+    expect(answer).toContain('follow the product label directions');
+  });
+
+  test('"spray on the lawn" questions scope to the lawn family', () => {
+    const answer = answerEstimateQuestionFallback('What product do you spray on the lawn?', lawnPestContext);
+    expect(answer).toContain('Quinclorac');
+    expect(answer).not.toContain('Bifenthrin');
+  });
+
+  test('rodent-bait estimates keep their rodent label facts', () => {
+    const answer = answerEstimateQuestionFallback('Is the rodent bait safe for pets?', {
+      serviceMode: 'recurring',
+      services: [{ service: 'rodent_bait_quarterly', label: 'Rodent Bait Stations', detail: 'Quarterly exterior program', summary: 'Rodent Bait Stations — quarterly' }],
+      supportContext: {
+        productCatalog: [{
+          source: 'admin_product_catalog',
+          title: 'rodenticide active ingredient',
+          category: 'rodenticide',
+          activeIngredient: 'Bromadiolone',
+          labelVerified: true,
+          signalWord: 'Caution',
+          reentry: 'Bait is secured in tamper-resistant stations.',
+          rainfastMinutes: null,
+          irrigationNotes: null,
+          serviceKeys: ['rodent_bait'],
+        }],
+      },
+    });
+    expect(answer).toContain('Bait is secured in tamper-resistant stations');
+  });
+
   test('"used for the lawn treatment" targets the lawn family, not everything', () => {
     const answer = answerEstimateQuestionFallback('What product is used for the lawn treatment?', lawnPestContext);
     expect(answer).toContain('Quinclorac');
