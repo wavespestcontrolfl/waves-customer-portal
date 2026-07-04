@@ -145,6 +145,20 @@ function periodKeyOf(v) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Replace the in-progress month's snapshot rows with LIVE customer rates.
+// The morning upsert goes stale the moment a customer is added, churned, or
+// repriced, and the other current-month surfaces (getMrrTrend, the Net MRR
+// tile) compute live — without this overlay the bridge's end/net could
+// disagree with the tile until the next cron. An empty live read keeps the
+// snapshot rows (mirrors the cron's transient-empty guard). Pure.
+function overlayLiveCurrentMonth(snapshotsByMonth, currentMonthKey, liveRows) {
+  if (!Array.isArray(liveRows) || !liveRows.length) return snapshotsByMonth;
+  const map = new Map();
+  for (const r of liveRows) map.set(r.customer_id, Number(r.monthly_rate) || 0);
+  snapshotsByMonth.set(currentMonthKey, map);
+  return snapshotsByMonth;
+}
+
 /**
  * computeMrrBridge({ months, conn }) — assemble inputs and run the pure core.
  * `months` = how many trailing ET months to report (clamped 2–12).
@@ -176,6 +190,15 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
     const [first] = await db('customer_mrr_snapshots').min({ m: 'period_month' });
     snapshotStart = first?.m ? periodKeyOf(first.m) : null;
   } catch { /* table absent (pre-migration env) — every month degrades */ }
+
+  // In-progress month: recompute from live rates via the SAME population query
+  // the snapshot cron writes from (customerRateRows — active, not-deleted,
+  // rate > 0, internal excluded), so today's adds/churns/reprices show now
+  // instead of after the next 6:05am upsert. Falls back to the snapshot rows.
+  try {
+    const { customerRateRows } = require('./mrr-snapshot');
+    overlayLiveCurrentMonth(snapshotsByMonth, currentMonthKey, await customerRateRows(db));
+  } catch { /* live read failed — keep the (possibly stale) snapshot rows */ }
 
   // Conversion months for customers ENTERING a diffable month (new vs
   // reactivated split). One query over just those ids.
@@ -273,4 +296,4 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
   };
 }
 
-module.exports = { buildBridgeMonths, computeMrrBridge, prevMonthKey, periodKeyOf, monthLabelOf };
+module.exports = { buildBridgeMonths, computeMrrBridge, overlayLiveCurrentMonth, prevMonthKey, periodKeyOf, monthLabelOf };

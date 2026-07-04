@@ -140,3 +140,46 @@ describe('buildBridgeMonths — degraded months (pre-snapshot)', () => {
     expect(m.new).toEqual({ mrr: 0, count: 0 });
   });
 });
+
+describe('overlayLiveCurrentMonth — in-progress month uses live rates', () => {
+  const { overlayLiveCurrentMonth } = require('../services/mrr-bridge');
+
+  test('replaces the stale morning snapshot with live customer rates', () => {
+    const snaps = new Map([
+      ['2026-06-01', snap({ a: 100 })],
+      ['2026-07-01', snap({ a: 100 })], // stale: a churned + b signed up since the 6:05am upsert
+    ]);
+    overlayLiveCurrentMonth(snaps, '2026-07-01', [
+      { customer_id: 'b', monthly_rate: 95 },
+    ]);
+    const [m] = buildBridgeMonths({
+      monthKeys: ['2026-07-01'],
+      snapshotsByMonth: snaps,
+      conversionMonthById: new Map([['b', '2026-07']]),
+      currentMonthKey: '2026-07-01',
+    });
+    expect(m.churned).toEqual({ mrr: 100, count: 1 }); // a's churn shows NOW
+    expect(m.new).toEqual({ mrr: 95, count: 1 }); // b shows NOW
+    expect(m.endMrr).toBe(95);
+  });
+
+  test('an empty live read keeps the snapshot rows (transient-empty guard, mirrors the cron)', () => {
+    const snaps = new Map([['2026-07-01', snap({ a: 100 })]]);
+    overlayLiveCurrentMonth(snaps, '2026-07-01', []);
+    expect(snaps.get('2026-07-01').get('a')).toBe(100);
+    overlayLiveCurrentMonth(snaps, '2026-07-01', null);
+    expect(snaps.get('2026-07-01').get('a')).toBe(100);
+  });
+
+  test('live overlay without a prior-month snapshot still degrades (no fake exact diff)', () => {
+    const snaps = new Map();
+    overlayLiveCurrentMonth(snaps, '2026-07-01', [{ customer_id: 'a', monthly_rate: 50 }]);
+    const [m] = buildBridgeMonths({
+      monthKeys: ['2026-07-01'],
+      snapshotsByMonth: snaps,
+      conversionMonthById: new Map(),
+      currentMonthKey: '2026-07-01',
+    });
+    expect(m.degraded).toBe(true);
+  });
+});
