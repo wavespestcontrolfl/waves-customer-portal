@@ -286,6 +286,7 @@ function addressPartsFromGoogleResult(result, fallback = '') {
   return {
     formatted: result?.formatted_address || fallback,
     line1,
+    line2: get('subpremise'),
     city: get('locality') || get('sublocality') || get('postal_town'),
     state: getShort('administrative_area_level_1') || 'FL',
     zip: get('postal_code'),
@@ -311,7 +312,7 @@ export default function QuotePage({ serviceSlug = '' }) {
   const [intakeIdx, setIntakeIdx] = useState(minIntakeIdx);
   const [dir, setDir] = useState('next');
   const [intake, setIntake] = useState(startingIntake);
-  const [address, setAddress] = useState({ formatted: '', line1: '', city: '', state: 'FL', zip: '' });
+  const [address, setAddress] = useState({ formatted: '', line1: '', line2: '', city: '', state: 'FL', zip: '' });
 
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -491,10 +492,15 @@ export default function QuotePage({ serviceSlug = '' }) {
 
   function applyAddressParts(parts) {
     const formatted = parts.formatted || parts.line1 || intake.address;
-    setIntakeField('address', formatted);
+    // Match /book: with a subpremise the street field DISPLAYS the street
+    // only — the unit lives in its own box, where it can be edited/cleared.
+    setIntakeField('address', parts.line2 ? (parts.line1 || formatted) : formatted);
     setAddress({
       formatted,
       line1: parts.line1 || formatted,
+      // Google subpremise (unit/apt) when the visitor typed one — carried as
+      // its own field so the street line stays clean for parcel matching.
+      line2: parts.line2 || '',
       city: parts.city || '',
       state: parts.state || 'FL',
       zip: parts.zip || '',
@@ -525,11 +531,16 @@ export default function QuotePage({ serviceSlug = '' }) {
       const next = {
         formatted: parts.formatted || typed,
         line1: parts.line1 || typed,
+        // The unit box is the USER'S editable source — a submit-time geocode
+        // that parses a subpremise out of the typed street must not override
+        // an explicit box value (only fill it when the box is empty). A
+        // Places PICK still resets the box (applyAddressParts) by design.
+        line2: address.line2 || parts.line2 || '',
         city: parts.city || '',
         state: parts.state || 'FL',
         zip: parts.zip || '',
       };
-      setIntakeField('address', next.formatted);
+      setIntakeField('address', next.line2 ? (next.line1 || next.formatted) : next.formatted);
       setAddress(next);
       return next;
     } catch {
@@ -612,6 +623,17 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          // Whenever we have PARSED parts (Places pick or geocode — city/zip
+          // present), send the street-only line1 + components so the unit
+          // rides ONLY in address_line2. Gating this on line2 would let a
+          // CLEARED unit box resurrect the old unit still inline in formatted.
+          ...((resolvedAddress.city || resolvedAddress.zip) ? {
+            address_line1: resolvedAddress.line1 || undefined,
+            city: resolvedAddress.city || undefined,
+            state: resolvedAddress.state || undefined,
+            zip: resolvedAddress.zip || undefined,
+          } : {}),
+          address_line2: resolvedAddress.line2 || undefined,
           interest: intake.interest,
           frequency: intake.frequency,
           service_interest: selectedServiceInterest(intake),
@@ -677,6 +699,15 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          // Same parsed-parts gate as the property-lookup submit — a cleared
+          // unit box must not resurrect the unit still inline in formatted.
+          ...((resolvedAddress.city || resolvedAddress.zip) ? {
+            address_line1: resolvedAddress.line1 || undefined,
+            city: resolvedAddress.city || undefined,
+            state: resolvedAddress.state || undefined,
+            zip: resolvedAddress.zip || undefined,
+          } : {}),
+          address_line2: resolvedAddress.line2 || undefined,
           interest: 'other',
           otherService: intake.otherService,
           service_interest: otherLabel,
@@ -721,6 +752,15 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          // Same parsed-parts gate as the property-lookup submit — a cleared
+          // unit box must not resurrect the unit still inline in formatted.
+          ...((resolvedAddress.city || resolvedAddress.zip) ? {
+            address_line1: resolvedAddress.line1 || undefined,
+            city: resolvedAddress.city || undefined,
+            state: resolvedAddress.state || undefined,
+            zip: resolvedAddress.zip || undefined,
+          } : {}),
+          address_line2: resolvedAddress.line2 || undefined,
           interest: intake.interest,
           frequency: intake.frequency,
           service_interest: selectedServiceInterest(intake),
@@ -787,6 +827,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email,
           phone: intake.phone.replace(/\D/g, ''),
           address: address.line1 || address.formatted || intake.address,
+          address_line2: address.line2 || undefined,
           city: address.city,
           zip: address.zip,
           homeSqFt: sq,
@@ -1113,10 +1154,23 @@ export default function QuotePage({ serviceSlug = '' }) {
                       value={intake.address}
                       onChange={(v) => {
                         setIntakeField('address', v);
-                        setAddress({ formatted: v, line1: v, city: '', state: 'FL', zip: '' });
+                        // A street edit invalidates any previous unit — a fresh
+                        // selection re-fills line2 when Google knows the subpremise.
+                        setAddress({ formatted: v, line1: v, line2: '', city: '', state: 'FL', zip: '' });
                       }}
                       onSelect={applyAddressParts}
                       placeholder="Start typing your address..."
+                      style={sInput}
+                    />
+                    <label style={{ ...sLabel, marginTop: 12 }}>Apt / Unit # (optional)</label>
+                    {/* Hand-typed units flow through the same address.line2 the
+                        Google subpremise uses, so every submit keeps the street
+                        line clean and persists the unit to address_line2. */}
+                    <input
+                      value={address.line2 || ''}
+                      onChange={(e) => setAddress(a => ({ ...a, line2: e.target.value }))}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
+                      placeholder="Apt 4B"
                       style={sInput}
                     />
                   </>

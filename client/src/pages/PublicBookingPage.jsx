@@ -95,7 +95,7 @@ export default function PublicBookingPage() {
 
   const [step, setStep] = useState(1);
   const [service, setService] = useState(initialService);
-  const [address, setAddress] = useState({ line1: '', formatted: '', city: '', state: 'FL', zip: '' });
+  const [address, setAddress] = useState({ line1: '', line2: '', formatted: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
   const [availability, setAvailability] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
@@ -212,12 +212,17 @@ export default function PublicBookingPage() {
   }, []);
 
   const checkExistingCustomerByAddress = useCallback(async (nextAddress) => {
-    const lookupAddress = nextAddress.formatted || nextAddress.line1;
+    // Always look up by the street-only line1 when we have it: formatted can
+    // still carry a subpremise inline AFTER the visitor clears the unit box,
+    // and a lookup on it would re-submit the stale unit and link the wrong
+    // apartment's account. The unit travels only as its own param.
+    const lookupAddress = nextAddress.line1 || nextAddress.formatted;
     if (!lookupAddress) return;
     try {
       const params = new URLSearchParams({ address: lookupAddress });
       if (nextAddress.city) params.set('city', nextAddress.city);
       if (nextAddress.zip) params.set('zip', nextAddress.zip);
+      if (nextAddress.line2) params.set('unit', nextAddress.line2);
       const res = await fetch(`${API_BASE}/booking/customer-lookup?${params}`);
       if (!res.ok) return;
       const data = await res.json();
@@ -251,10 +256,13 @@ export default function PublicBookingPage() {
     if (digits.length !== 10) return;
     try {
       const params = new URLSearchParams({ phone: digits });
-      const lookupAddress = address.formatted || address.line1;
+      // Same street-only preference as checkExistingCustomerByAddress — a
+      // cleared unit box must not resurrect the subpremise inside formatted.
+      const lookupAddress = address.line1 || address.formatted;
       if (lookupAddress) params.set('address', lookupAddress);
       if (address.city) params.set('city', address.city);
       if (address.zip) params.set('zip', address.zip);
+      if (address.line2) params.set('unit', address.line2);
       const res = await fetch(`${API_BASE}/booking/customer-lookup?${params}`);
       if (res.ok) {
         const data = await res.json();
@@ -299,6 +307,7 @@ export default function PublicBookingPage() {
             phone: digits,
             email: contact.email,
             address_line1: address.line1,
+            address_line2: address.line2 || undefined,
             city: address.city,
             state: address.state,
             zip: address.zip,
@@ -317,7 +326,7 @@ export default function PublicBookingPage() {
   useEffect(() => {
     if ((contact.phone || '').replace(/\D/g, '').length === 10 && selectedSlot) captureBookingIntent();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSlot?.start_time, selectedDate, service.id, address.line1]);
+  }, [selectedSlot?.start_time, selectedDate, service.id, address.line1, address.line2]);
 
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
     ? null
@@ -357,6 +366,7 @@ export default function PublicBookingPage() {
             phone: contact.phone.replace(/\D/g, ''),
             email: contact.email,
             address_line1: address.line1,
+            address_line2: address.line2 || undefined,
             city: address.city,
             state: address.state,
             zip: address.zip,
@@ -545,10 +555,19 @@ export default function PublicBookingPage() {
                 <AddressAutocomplete
                   autoFocus
                   value={address.line1}
-                  onChange={(v) => updateAddress(a => ({ ...a, line1: v, formatted: '' }))}
+                  onChange={(v) => updateAddress(a => ({ ...a, line1: v, line2: '', formatted: '' }))}
                   onSelect={(parts) => {
                     const nextAddress = {
-                      line1: parts.formatted || parts.line1 || address.line1,
+                      // When Google returns a subpremise, keep line1 street-only —
+                      // the unit lives in line2 and must not also ride inline in
+                      // the stored street line (double-persist).
+                      line1: parts.line2
+                        ? (parts.line1 || parts.formatted || address.line1)
+                        : (parts.formatted || parts.line1 || address.line1),
+                      // Never carry a previous unit across a street selection — a
+                      // stale apartment on an unrelated address would persist. A
+                      // fresh subpremise wins; otherwise the unit box resets.
+                      line2: parts.line2 || '',
                       formatted: parts.formatted || parts.line1 || address.formatted,
                       city: parts.city || address.city,
                       state: parts.state || address.state,
@@ -562,6 +581,28 @@ export default function PublicBookingPage() {
                     checkExistingCustomerByAddress(nextAddress);
                   }}
                   placeholder="Start typing your address"
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                {/* Availability/slots key off the street line, so typing here
+                    must not reset them (plain setAddress, not updateAddress).
+                    The address-matched account AND any phone-looked-up contact
+                    MUST reset though — Apt B is not Apt A's household, and the
+                    prior household's name/email must not prefill the contact
+                    step. The match re-checks on blur with the unit included. */}
+                <input
+                  type="text"
+                  value={address.line2}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setAddress(a => ({ ...a, line2: v }));
+                    setExistingCustomerId(null);
+                    setAddressMayMatchCustomer(false);
+                    setContact({ firstName: '', lastName: '', phone: '', email: '' });
+                  }}
+                  onBlur={() => { if (address.line1) checkExistingCustomerByAddress(address); }}
+                  placeholder="Apt / Unit # (optional)"
                   style={inputStyle}
                 />
               </div>
@@ -961,7 +1002,7 @@ export default function PublicBookingPage() {
                 <div><strong style={{ color: COLORS.blueDeeper }}>{service?.label}</strong></div>
                 <div>{selectedSlot?.fullDate || availability.find(d => d.date === selectedDate)?.fullDate}</div>
                 <div>{selectedSlot?.start_label} – {selectedSlot?.end_label}</div>
-                <div style={{ marginTop: 6 }}>{address.line1}, {address.city} {address.zip}</div>
+                <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
               </div>
             </div>
             <p style={{ fontSize: 12, color: COLORS.slate400 }}>

@@ -5,7 +5,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { performPropertyLookup } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
-const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { verifyTurnstileToken } = require('../utils/turnstile');
@@ -231,14 +231,32 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
       line1: req.body.address_line1 || req.body.addressLine1,
+      line2: req.body.address_line2 || req.body.addressLine2 || req.body.unit,
       city: req.body.city,
       state: req.body.state,
       zip: req.body.zip,
       placeId: req.body.google_place_id || req.body.googlePlaceId,
       components: req.body.address_components || req.body.addressComponents,
     });
+    // Inline street unit and dedicated unit field disagree — ambiguous. Fail
+    // closed BEFORE the lead insert/update below (same guard as
+    // /public/quote/calculate) so no lead is captured on the wrong unit.
+    if (normalizedAddress.unitConflict) {
+      return res.status(400).json({ error: 'The street address and unit number disagree — please re-enter your address.' });
+    }
     const lookupAddress = normalizedAddress.fullAddress || String(address || '').trim();
     const streetForValidation = normalizedAddress.line1 || String(address || '').trim();
+    // The parcel/geocode lookup gets the STREET-ONLY composition — a unit
+    // inline between street and city can degrade county-roll matching. The
+    // lead-facing fields keep the unit via fullAddress.
+    const parcelLookupAddress = normalizedAddress.line2
+      ? formatAddress({
+        line1: normalizedAddress.line1,
+        city: normalizedAddress.city,
+        state: normalizedAddress.state,
+        zip: normalizedAddress.zip,
+      })
+      : lookupAddress;
 
     if (!firstName || !lastName) return res.status(400).json({ error: 'Name required.' });
     if (!/^\S+@\S+\.\S+$/.test(email || '')) return res.status(400).json({ error: 'Valid email required.' });
@@ -353,7 +371,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       return res.status(500).json({ error: 'Property lookup failed. Please call (941) 297-5749 to speak with our team.' });
     }
 
-    const result = await performPropertyLookup(lookupAddress);
+    const result = await performPropertyLookup(parcelLookupAddress);
     const propertyRecord = publicPropertySummary(result.propertyRecord || result.rentcast);
 
     // Persist the enriched profile on the lead so a stale/abandoned row is

@@ -213,6 +213,14 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       leadSource,
     } = intake;
 
+    // Inline street unit and dedicated unit field disagree — ambiguous. Fail
+    // closed BEFORE any lead/customer mutation (same guard as
+    // /public/quote/calculate and /property-lookup) rather than capture the
+    // lead on the wrong unit.
+    if (normalizedAddress.unitConflict) {
+      return res.status(400).json({ error: 'The street address and unit number disagree — please re-enter your address.' });
+    }
+
     // City fallback. Forms only capture a structured city when the visitor
     // picks a Google Places suggestion; free-text submissions arrive with no
     // city (e.g. "87th Street East, FL 34219"). Recover it from the ZIP so a
@@ -355,7 +363,15 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       if (!existing.lead_source) updates.lead_source = leadSource.source;
       if (!existing.lead_source_detail) updates.lead_source_detail = leadSource.detail;
       if (!existing.email && email) updates.email = email;
-      if (!existing.address_line1 && address) updates.address_line1 = address;
+      if (!existing.address_line1 && address) {
+        updates.address_line1 = address;
+        if (normalizedAddress.line2) updates.address_line2 = normalizedAddress.line2;
+      }
+      // No unit backfill onto an EXISTING address here: this public webhook
+      // resolves the customer from the submitted phone alone, so a
+      // street-matching post could write an arbitrary unit onto someone's
+      // service address (dispatch corruption). The submitted unit still
+      // reaches staff via leads.address / extracted_data for review.
       if (!existing.city && (normalizedAddress.city || zipCity)) updates.city = normalizedAddress.city || zipCity;
       if (!existing.state && normalizedAddress.state) updates.state = normalizedAddress.state;
       if (!existing.zip && normalizedAddress.zip) updates.zip = normalizedAddress.zip;
@@ -380,6 +396,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         first_name: firstName, last_name: lastName,
         phone: phoneFormatted, email: email || null,
         address_line1: address || '',
+        address_line2: normalizedAddress.line2 || null,
         city: resolvedCity,
         state: normalizedAddress.state || 'FL',
         zip: normalizedAddress.zip || '',
@@ -1146,6 +1163,7 @@ function buildLeadWebhookIntake(body = {}) {
   const normalizedAddress = normalizeLeadAddress({
     raw: rawAddress,
     line1: body.address_line1 || body.addressLine1,
+    line2: body.address_line2 || body.addressLine2 || body.unit,
     city: body.city,
     state: body.state,
     zip: body.zip,
