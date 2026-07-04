@@ -1719,6 +1719,29 @@ describe('publishAstro catch persists an already-opened PR marker (Codex round 3
     expect(parked).toBeDefined();
     expect(parked.astro_pr_number).toBe(123);
     expect(parked.astro_branch_name).toEqual(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
+    // The branch is PR-attached — it must survive the failure (the marker
+    // routes the retry through the stale-PR close+delete path instead).
+    expect(gh.deleteRef).not.toHaveBeenCalled();
+  });
+
+  test('a failure between branch creation and PR creation deletes the orphan branch before rethrowing (Codex round 5)', async () => {
+    const updates = [];
+    const q = chain({
+      first: jest.fn().mockResolvedValue(validPost()),
+      update: jest.fn((u) => { updates.push(u); return Promise.resolve(1); }),
+    });
+    db.mockImplementation(() => q);
+    gh.createPr.mockRejectedValueOnce(new Error('create-PR outage'));
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow('create-PR outage');
+
+    // Each retry cuts a FRESH shortId branch, so an undeleted pre-PR
+    // branch (with its hero commit) is an orphan per 15-minute tick that
+    // no later cleanup can locate.
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
+    const parked = updates.find((u) => u.astro_status === 'publish_failed');
+    expect(parked).toBeDefined();
+    expect(parked.astro_pr_number).toBeUndefined();
   });
 
   test('a failure BEFORE PR creation stamps publish_failed with NO marker — provably retryable', async () => {

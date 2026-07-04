@@ -692,6 +692,12 @@ async function publishAstro(postId) {
   // reads as proof the failure happened BEFORE PR creation, and losing the
   // marker here would let the next tick open a duplicate PR.
   let openedPr = null;
+  // Same discipline for the branch: each attempt cuts a FRESH shortId
+  // branch, so a branch that was created but never reached a PR must be
+  // deleted on the way out — the scheduler's retry would otherwise leave
+  // one orphan branch (with its hero commit) per 15-minute tick that no
+  // later cleanup can locate.
+  let branchCreated = false;
 
   try {
     // 1. Hero image (required by the Astro schema). Fetch before branch
@@ -819,6 +825,7 @@ async function publishAstro(postId) {
     const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
 
     await gh.createBranch(branch);
+    branchCreated = true;
 
     if (heroImage?.buffer) {
       const heroPath = `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`;
@@ -879,6 +886,18 @@ async function publishAstro(postId) {
     };
   } catch (err) {
     logger.error(`[astro-publisher] publish failed for ${slug}: ${err.message}`);
+    // A branch cut but never attached to a PR is deleted on the way out
+    // (best-effort): the retry publishes on a fresh shortId branch, so the
+    // old one would be an unreachable orphan. With a PR open the branch
+    // STAYS — the PR references it, and the persisted marker below routes
+    // the next retry through the stale-PR close+delete path instead.
+    if (branchCreated && !openedPr) {
+      try {
+        await gh.deleteRef(branch);
+      } catch (cleanupErr) {
+        logger.warn(`[astro-publisher] pre-PR branch cleanup failed for ${branch}: ${cleanupErr.message} (orphan ref; safe to delete manually)`);
+      }
+    }
     await db('blog_posts').where({ id: postId }).update({
       astro_status: 'publish_failed',
       astro_publish_error: err.message.slice(0, 1000),
