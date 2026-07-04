@@ -7,9 +7,12 @@ import {
 import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile } from "../KpiTile";
+import EbitdaBridgeCard from "../EbitdaBridgeCard";
 
 // PROFIT — what's helping or hurting margin: fully-burdened gross margin,
-// labor productivity, the completed-service mix, and per-tech economics.
+// labor productivity, the adjusted-EBITDA bridge (company-level, kept in its
+// own card NEXT TO but never mixed with the job-level gross margin), the
+// completed-service mix, and per-tech economics.
 export default function ProfitSection({
   kpis,
   kpisLoading,
@@ -17,6 +20,7 @@ export default function ProfitSection({
   kpiTargets,
   kpiHistory,
   mix,
+  ebitda,
   isMobile,
 }) {
   return (
@@ -24,6 +28,7 @@ export default function ProfitSection({
       id="profit"
       title="Profit"
       caption="What's helping or hurting margin?"
+      about="Two different questions, two cards: gross margin asks whether JOBS are profitable after labor, materials, and drive time; the adjusted-EBITDA bridge asks whether the COMPANY is profitable after marketing and operating overhead. They sit side by side but never mix — a healthy gross margin with a thin EBITDA means overhead or marketing is eating the job profit."
     >
       <div className="mb-4 md:mb-5">
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
@@ -79,8 +84,21 @@ export default function ProfitSection({
         </KpiStrip>
       </div>
 
-      {/* Service mix — which services the completed revenue comes from */}
+      {/* Adjusted-EBITDA bridge + service mix. The bridge is company-level
+          profitability (after marketing + overhead) and deliberately its own
+          card — gross margin above answers "are jobs profitable after COGS?",
+          this answers "is the company profitable after operating expenses?" */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
+        <ChartCard
+          title="Adjusted EBITDA Bridge"
+          sub={
+            ebitda?.period
+              ? `month to date · ${ebitda.period.elapsedDays} of ${ebitda.period.daysInMonth} days`
+              : "month to date"
+          }
+        >
+          <EbitdaBridgeCard bridge={ebitda} />
+        </ChartCard>
         <ChartCard
           title="Service Mix"
           sub={`${mix?.total_services || 0} completed services this month`}
@@ -93,9 +111,9 @@ export default function ProfitSection({
       {kpis?.leaderboard?.length > 0 &&
         (isMobile ? (
           <MobileFold title="Tech Leaderboard" sub={kpis.periodLabel}>
-            <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel}>
+            <div className="px-1 pt-1">
               <TechLeaderboardBars leaderboard={kpis.leaderboard} />
-            </ChartCard>
+            </div>
           </MobileFold>
         ) : (
           <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel}>

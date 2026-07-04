@@ -2,6 +2,13 @@
  * Capital allocation — band channels by LTV:CAC into a "where to dump cash"
  * decision surface.
  *
+ * Basis (keep the UI label in sync — charts.jsx CapitalAllocationCard): the
+ * numerator is GROSS-PROFIT LTV (12-mo projected GP for recurring + realized GP
+ * for one-time — channel-attribution.js), never revenue. The denominator is
+ * ALL-IN marketing cost (platform ad spend + channel_fixed_costs retainers +
+ * referral rewards), not raw ad spend. There is no separate sales payroll to
+ * include (the owner sells); if one ever exists it belongs in the denominator.
+ *
  * Rule of thumb (gross-profit LTV:CAC): 3:1 is the floor; the real money is in
  * outlier channels (30:1–200:1) where you pour in as much cash as the channel
  * can absorb. Bands:
@@ -21,6 +28,17 @@
 const MIN_CONFIDENT_CUSTOMERS = 5;
 
 function round1(n) { return Math.round((Number(n) || 0) * 10) / 10; }
+
+// CAC payback in months. lifetimeValue is a 12-MONTH gross-profit figure
+// (channel-attribution's projectedLtv12moGP + realized GP), so monthly gross
+// profit ≈ lifetimeValue / 12 and payback = spend ÷ (lifetimeValue / 12) =
+// 12 ÷ (lifetimeValue / spend) — i.e. 12 over the exact LTV:CAC ratio. Null
+// when there's no spend to pay back or no gross profit coming in (a losing
+// channel with zero GP never pays back — that's the band's job to flag).
+function paybackMonthsFor(exactRatio) {
+  if (exactRatio == null || !(exactRatio > 0)) return null;
+  return round1(12 / exactRatio);
+}
 
 const BAND_META = {
   no_spend:     { label: 'No paid spend', tone: 'neutral', verdict: 'Free or untracked — no ad spend to measure.' },
@@ -64,6 +82,7 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
       bandLabel: meta.label,
       tone: meta.tone,
       verdict: meta.verdict,
+      paybackMonths: paybackMonthsFor(exactRatio),
       // small-N guard: too few customers to trust the ratio
       confidence: (s.customers || 0) >= minConfidentCustomers ? 'ok' : 'low',
     };
@@ -94,6 +113,11 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
   // the card can fade the headline exactly as it fades the per-channel rows.
   const blendedCustomers = paid.reduce((t, c) => t + (Number(c.customers) || 0), 0);
   const blendedConfidence = blendedCustomers >= minConfidentCustomers ? 'ok' : 'low';
+  // Blended CAC (all-in paid spend ÷ paid customers) + payback so the headline
+  // can say what a customer costs and how fast the spend comes back, not just
+  // the ratio. Both null-safe: no paid customers ⇒ no CAC to state.
+  const blendedCac = blendedCustomers > 0 ? Math.round(paidSpend / blendedCustomers) : null;
+  const blendedPaybackMonths = paybackMonthsFor(blendedExact);
 
   // Opportunity (the optimistic "pour cash in" call) requires CONFIDENCE — don't
   // bet on a sky-high ratio off a handful of customers. Highest-ratio scale/
@@ -124,6 +148,9 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
       blendedTone: BAND_META[blendedBand].tone,
       blendedCustomers,
       blendedConfidence,
+      blendedCac,
+      blendedPaybackMonths,
+      paidSpend: round1(paidSpend),
       topOpportunity: opp
         ? { source: opp.source, sourceKey: opp.sourceKey, ltvCac: opp.ltvCac, band: opp.band }
         : null,
@@ -138,6 +165,7 @@ function rankCapitalAllocation(attribution = {}, { minConfidentCustomers = MIN_C
 module.exports = {
   rankCapitalAllocation,
   bandFor,
+  paybackMonthsFor,
   BAND_META,
   MIN_CONFIDENT_CUSTOMERS,
 };

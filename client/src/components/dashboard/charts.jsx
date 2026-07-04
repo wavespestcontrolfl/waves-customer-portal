@@ -514,13 +514,17 @@ export function ServiceMixDonut({ mix = [], height = 220 }) {
 // Each stage shrinks proportionally to the top of the funnel (sent).
 // Pass `funnel` { sent, viewed, accepted, declined } and `rates` { view_rate,
 // close_rate, decline_rate }.
-export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue }) {
+export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue, byService }) {
   const sent = funnel.sent || 0;
+  const pending = funnel.pending || 0;
   const stages = [
     { label: 'Sent',     count: sent,                  pct: 100 },
     { label: 'Viewed',   count: funnel.viewed || 0,    pct: rates.view_rate || 0 },
     { label: 'Accepted', count: funnel.accepted || 0,  pct: rates.close_rate || 0 },
     { label: 'Declined', count: funnel.declined || 0,  pct: rates.decline_rate || 0, dim: true },
+    // Neither won nor lost yet — these are the follow-up work, so they earn a
+    // visible row instead of hiding in the sent-minus-decided arithmetic.
+    { label: 'Pending',  count: pending, pct: sent > 0 ? Math.round((pending / sent) * 100) : 0, dim: true },
   ];
   if (sent === 0) return <EmptyState>No estimates sent this period</EmptyState>;
   return (
@@ -549,6 +553,28 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue }) 
         <div className="pt-3 mt-3 flex items-baseline justify-between">
           <span className="u-label text-ink-secondary">Accepted value</span>
           <span className="u-nums text-18 font-medium">{fmtMoney(totalAcceptedValue)}</span>
+        </div>
+      )}
+
+      {/* What leads asked for — the sent cohort grouped by requested service,
+          with each row's current outcome. Won/lost colors reuse the documented
+          dashboard triage exception. */}
+      {Array.isArray(byService) && byService.length > 0 && (
+        <div className="pt-3 mt-3 border-t border-hairline border-zinc-100">
+          <div className="u-label text-ink-secondary mb-2">What leads asked for</div>
+          <div className="space-y-1.5">
+            {byService.map((s) => (
+              <div key={s.service} className="flex items-baseline justify-between gap-3 text-12">
+                <span className="text-ink-primary truncate">{s.service}</span>
+                <span className="u-nums whitespace-nowrap text-ink-tertiary">
+                  {fmtInt(s.sent)} sent
+                  <span className="ml-2" style={{ color: s.won > 0 ? '#10B981' : undefined }}>{fmtInt(s.won)} won</span>
+                  <span className="ml-2" style={{ color: s.lost > 0 ? '#C8312F' : undefined }}>{fmtInt(s.lost)} lost</span>
+                  {s.open > 0 && <span className="ml-2">{fmtInt(s.open)} open</span>}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -1066,41 +1092,63 @@ const CAP_TONE_COLOR = {
 function fmtRatio(v) {
   return v == null ? '—' : `${v}:1`;
 }
+// Payback display against the ratio's 12-month gross-profit horizon (mirrors
+// scorecard-metrics fmtPayback, kept local so charts.jsx stays page-independent).
+function fmtPaybackShort(m) {
+  if (m == null || !Number.isFinite(Number(m))) return null;
+  if (m > 12) return '>12 mo payback';
+  if (m < 1) return '<1 mo payback';
+  return `${Math.round(Number(m) * 10) / 10} mo payback`;
+}
+// Visible small-sample pill — the warning IS the badge, never a tooltip.
+function LowSamplePill({ n }) {
+  return (
+    <span className="inline-block text-11 px-1.5 py-0.5 rounded-sm border border-amber-300 bg-amber-50 text-amber-700 whitespace-nowrap shrink-0">
+      Low sample · n={fmtInt(n)}
+    </span>
+  );
+}
 
 export function CapitalAllocationCard({ data }) {
   const channels = data?.channels || [];
   if (!channels.length) return <EmptyState>No ad spend tracked yet</EmptyState>;
   const h = data.headline || {};
   const blendedColor = h.blendedLtvCac == null ? undefined : (CAP_TONE_COLOR[h.blendedTone] || CAP_TONE_COLOR.neutral);
-  // Fade the headline when too few paid customers back the blend — same small-sample
-  // convention as the per-channel rows (see legend). Keeps the biggest number on the
-  // card from reading as a confident "scale up" when it's really one customer's ratio.
+  // Small-sample blends keep the faded number AND a visible pill — the fade
+  // alone is too easy to miss, and the biggest number on the card must not
+  // read as a confident "scale up" when it's really one customer's ratio.
   const hasBlend = h.blendedLtvCac != null;
   const blendedLow = hasBlend && h.blendedConfidence === 'low';
+  const blendedPayback = fmtPaybackShort(h.blendedPaybackMonths);
   return (
     <div>
-      <div className="flex items-end justify-between gap-3" style={{ opacity: blendedLow ? 0.55 : 1 }}>
-        <div>
-          <div className="u-label text-ink-tertiary">Blended LTV:CAC</div>
+      <div className="flex items-end justify-between gap-3">
+        <div style={{ opacity: blendedLow ? 0.55 : 1 }}>
+          <div className="u-label text-ink-tertiary">Blended LTV : CAC</div>
           <div className="u-nums text-28 font-medium tracking-tight leading-none" style={{ color: blendedColor }}>
             {fmtRatio(h.blendedLtvCac)}
           </div>
-          {hasBlend && h.blendedCustomers != null && (
-            <div className="text-11 text-ink-tertiary mt-0.5">
-              {blendedLow
-                ? `n=${fmtInt(h.blendedCustomers)} — small sample`
-                : `${fmtInt(h.blendedCustomers)} paid customers`}
+          {hasBlend && (
+            <div className="text-11 text-ink-tertiary mt-1">
+              {[
+                h.blendedCac != null ? `CAC ${fmtMoney(h.blendedCac)}` : null,
+                blendedPayback,
+                h.blendedCustomers != null ? `${fmtInt(h.blendedCustomers)} paid customers` : null,
+              ].filter(Boolean).join(' · ')}
             </div>
           )}
         </div>
-        {h.blendedBandLabel && (
-          <span
-            className="text-11 px-2 py-0.5 rounded-sm shrink-0"
-            style={{ color: blendedColor || '#71717a', border: `1px solid ${blendedColor || '#d4d4d8'}` }}
-          >
-            {h.blendedBandLabel}
-          </span>
-        )}
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          {h.blendedBandLabel && (
+            <span
+              className="text-11 px-2 py-0.5 rounded-sm"
+              style={{ color: blendedColor || '#71717a', border: `1px solid ${blendedColor || '#d4d4d8'}` }}
+            >
+              {h.blendedBandLabel}
+            </span>
+          )}
+          {blendedLow && <LowSamplePill n={h.blendedCustomers} />}
+        </div>
       </div>
 
       {h.topOpportunity && (
@@ -1115,39 +1163,44 @@ export function CapitalAllocationCard({ data }) {
         </div>
       )}
 
-      <div className="mt-3 space-y-2">
+      <div className="mt-3 divide-y divide-zinc-100">
         {channels.map((c) => {
           const color = CAP_TONE_COLOR[c.tone] || CAP_TONE_COLOR.neutral;
           const spend = c.allInSpend != null ? c.allInSpend : c.adSpend;
-          const spendStr = c.fixedCost > 0
-            ? `${fmtMoney(spend)} (ad ${fmtMoney(c.adSpend)} + fixed ${fmtMoney(c.fixedCost)})`
-            : fmtMoney(spend);
-          const title = `${c.bandLabel}: ${c.verdict}\nCAC ${c.cac == null ? '—' : fmtMoney(c.cac)} · spend ${spendStr} · ${fmtInt(c.customers)} customers`;
+          const low = c.confidence === 'low';
+          // CAC, payback, spend, and customer count live ON the row (the old
+          // tooltip hid them — and hid the small-sample context with them).
+          const detail = [
+            c.cac != null && c.cac > 0 ? `CAC ${fmtMoney(c.cac)}` : null,
+            fmtPaybackShort(c.paybackMonths),
+            spend > 0 ? `${fmtMoney(spend)} spend` : null,
+            `${fmtInt(c.customers)} customer${c.customers === 1 ? '' : 's'}`,
+          ].filter(Boolean).join(' · ');
           return (
-            <div
-              key={c.sourceKey}
-              className="flex items-center gap-2"
-              style={{ opacity: c.confidence === 'low' ? 0.55 : 1 }}
-              title={title}
-            >
-              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
-              <span className="text-13 text-ink-primary truncate">{c.source}</span>
-              {c.confidence === 'low' && c.ltvCac != null && (
-                <span className="text-11 text-ink-tertiary shrink-0">n={fmtInt(c.customers)}</span>
-              )}
-              <span
-                className="ml-auto u-nums text-13 font-medium"
-                style={{ color: c.ltvCac == null ? undefined : color }}
-              >
-                {fmtRatio(c.ltvCac)}
-              </span>
+            <div key={c.sourceKey} className="py-2 first:pt-0 last:pb-0">
+              <div className="flex items-center gap-2" style={{ opacity: low ? 0.7 : 1 }}>
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
+                <span className="text-13 text-ink-primary truncate">{c.source}</span>
+                {low && c.ltvCac != null && <LowSamplePill n={c.customers} />}
+                <span
+                  className="ml-auto u-nums text-13 font-medium shrink-0"
+                  style={{ color: c.ltvCac == null ? undefined : color }}
+                >
+                  {fmtRatio(c.ltvCac)}
+                </span>
+              </div>
+              <div className="text-11 text-ink-tertiary mt-0.5 pl-4 truncate" style={{ opacity: low ? 0.85 : 1 }}>
+                {c.bandLabel} · {detail}
+              </div>
             </div>
           );
         })}
       </div>
 
-      <div className="mt-3 text-11 text-ink-tertiary">
-        Lifetime gross profit ÷ ad spend, by channel. ≥30:1 = pour cash in; under 3:1 = fix or cut. Faded = small sample.
+      <div className="mt-3 pt-2 border-t border-hairline border-zinc-100 text-11 text-ink-tertiary">
+        LTV = 12-month lifetime <span className="font-medium">gross profit</span> (not revenue). CAC = all-in
+        marketing cost — ad spend + retainers + referral rewards (no separate sales
+        payroll exists to include). ≥30:1 pour cash in; under 3:1 fix or cut.
       </div>
     </div>
   );

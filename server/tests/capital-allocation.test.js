@@ -179,3 +179,45 @@ describe('rankCapitalAllocation', () => {
     expect(out.headline.blendedBand).toBe('no_spend');
   });
 });
+
+describe('paybackMonthsFor / CAC payback', () => {
+  const { paybackMonthsFor } = require('../services/capital-allocation');
+
+  test('12-mo GP LTV basis: payback = 12 ÷ exact ratio', () => {
+    expect(paybackMonthsFor(12)).toBe(1); // 12:1 → spend back in a month
+    expect(paybackMonthsFor(3)).toBe(4); // the 3:1 floor → 4 months
+    expect(paybackMonthsFor(1)).toBe(12); // break-even over the LTV horizon
+    expect(paybackMonthsFor(0.5)).toBe(24); // losing channel → longer than the horizon
+  });
+
+  test('null-safe: no ratio, zero, or negative GP never fabricates a payback', () => {
+    expect(paybackMonthsFor(null)).toBeNull();
+    expect(paybackMonthsFor(undefined)).toBeNull();
+    expect(paybackMonthsFor(0)).toBeNull();
+    expect(paybackMonthsFor(-2)).toBeNull();
+  });
+
+  test('channels + headline carry paybackMonths and blended CAC', () => {
+    const out = rankCapitalAllocation({
+      sources: [
+        src('google_ads', 'Google Ads', 34, 500, 12, 17000), // exact 34:1
+        src('organic', 'Organic', null, 0, 20, 8000), // no spend → no payback
+      ],
+    });
+    const g = out.channels.find((c) => c.sourceKey === 'google_ads');
+    expect(g.paybackMonths).toBe(0.4); // 12/34 → 0.35… → 0.4
+    expect(out.channels.find((c) => c.sourceKey === 'organic').paybackMonths).toBeNull();
+    // Blended: paid LTV 17000 / paid spend 500 = 34 → 12/34; CAC = 500/12 ≈ 42.
+    expect(out.headline.blendedPaybackMonths).toBe(0.4);
+    expect(out.headline.blendedCac).toBe(42);
+    expect(out.headline.paidSpend).toBe(500);
+  });
+
+  test('no paid customers → blended CAC and payback stay null', () => {
+    const out = rankCapitalAllocation({
+      sources: [src('organic', 'Organic', null, 0, 20, 8000)],
+    });
+    expect(out.headline.blendedCac).toBeNull();
+    expect(out.headline.blendedPaybackMonths).toBeNull();
+  });
+});

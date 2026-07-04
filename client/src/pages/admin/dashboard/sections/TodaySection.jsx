@@ -6,6 +6,8 @@ import {
 import DashboardSection from "../DashboardSection";
 import ActionInbox from "../ActionInbox";
 import { KpiStrip, KpiTile } from "../KpiTile";
+import Verdict from "../Verdict";
+import { completionVerdict } from "../scorecard-metrics";
 
 // TODAY — what needs attention right now: the ranked Action Inbox, today's
 // schedule completion, and the period's service-execution tiles.
@@ -20,7 +22,12 @@ export default function TodaySection({
   kpiHistory,
 }) {
   return (
-    <DashboardSection id="today" title="Today" caption="What needs attention right now">
+    <DashboardSection
+      id="today"
+      title="Today"
+      caption="What needs attention right now"
+      about="Live operations for the current day: the Action Inbox ranks what to fix first (stale leads, expiring estimates, at-risk recurring revenue), Today's Completion tracks the schedule as it happens, and the tiles show service execution for the selected period. Start here each morning — clear the inbox, then check the other tabs."
+    >
       <ActionInbox alerts={alerts} stale={alertsStale} />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <ChartCard
@@ -38,23 +45,28 @@ export default function TodaySection({
           }
         >
           {today ? (
-            <CompletionGauge
-              completed={today.completed}
-              total={today.total}
-              remaining={today.remaining}
-              cancelled={today.cancelled}
-              noShow={today.noShow}
-            />
+            <>
+              <CompletionGauge
+                completed={today.completed}
+                total={today.total}
+                remaining={today.remaining}
+                cancelled={today.cancelled}
+                noShow={today.noShow}
+              />
+              <Verdict verdict={completionVerdict(today)} />
+            </>
           ) : (
             <EmptyState>Loading…</EmptyState>
           )}
         </ChartCard>
         <div className="md:col-span-2">
+          {/* 2-up even at 390px — full-width tiles for two small numbers read
+              as empty space on a phone (owner feedback). */}
           <KpiStrip
             loading={kpisLoading}
             error={kpisError}
             ready={!!kpis}
-            gridClassName="grid grid-cols-1 sm:grid-cols-2 gap-3"
+            gridClassName="grid grid-cols-2 gap-2 sm:gap-3"
           >
             {kpis && (
               <>

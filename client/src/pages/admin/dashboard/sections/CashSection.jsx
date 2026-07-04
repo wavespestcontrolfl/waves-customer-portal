@@ -7,6 +7,8 @@ import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import BillingHealthPanel from "../BillingHealthPanel";
 import { KpiStrip, KpiTile } from "../KpiTile";
+import Verdict from "../Verdict";
+import { agingVerdict } from "../scorecard-metrics";
 
 // CASH — are we collecting what we earned? Collections, AR aging, and the
 // autopay/billing machinery that turns MRR into money.
@@ -25,6 +27,7 @@ export default function CashSection({
       id="cash"
       title="Cash"
       caption="Are we collecting what we earned?"
+      about="Earned revenue isn't cash until it's collected. Collection rate shows how much billed work actually got paid, AR aging shows what's outstanding and for how long (chase the 90+ buckets first — collectability falls off a cliff), and Billing Health shows the autopay coverage that prevents AR from forming at all."
     >
       <div className="mb-4 md:mb-5">
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
@@ -97,6 +100,7 @@ export default function CashSection({
             totalOutstanding={aging?.total_outstanding}
             totalOverdue={aging?.total_overdue}
           />
+          <Verdict verdict={agingVerdict(aging)} />
         </ChartCard>
       </div>
 
