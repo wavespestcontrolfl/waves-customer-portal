@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   MIN_CONFIDENT_N,
+  churnParetoVerdict,
+  leadFunnelVerdict,
   mrrBridgeVerdict,
   agingVerdict,
   capitalVerdict,
@@ -266,5 +268,75 @@ describe("mrrBridgeVerdict", () => {
     const v = mrrBridgeVerdict(month({ churned: { mrr: 0, count: 0 }, net: 0, endMrr: 9804.69 }));
     expect(v.tone).toBe("neutral");
     expect(v.happened).toContain("held flat");
+  });
+});
+
+describe("leadFunnelVerdict", () => {
+  const data = (totals, stagesPresent) => ({ totals, stagesPresent, sources: [], paid: {}, organic: {} });
+  const ALL = { contacted: true, estimate: true, booked: true };
+
+  it("names the widest RECORDED stage drop-off as the action", () => {
+    const v = leadFunnelVerdict(data({ leads: 20, contacted: 18, estimate: 9, booked: 7, completed: 5, bookRate: 35, completeRate: 25 }, ALL));
+    expect(v.action).toContain("contacted → estimate");
+    expect(v.tone).toBe("warn");
+  });
+
+  it("lead→won-only reality gets a won-rate verdict, never advice about unrecorded stages", () => {
+    const v = leadFunnelVerdict(data(
+      { leads: 20, contacted: 6, estimate: 6, booked: 6, completed: 6, lost: 2, bookRate: 30, completeRate: 30 },
+      { contacted: false, estimate: false, booked: false },
+    ));
+    expect(v.happened).toContain("20 attributed leads → 6 won");
+    expect(v.happened).not.toContain("contacted");
+    expect(v.action).not.toContain("first-response");
+    expect(v.tone).toBe("warn");
+  });
+
+  it("small samples refuse channel judgements", () => {
+    const v = leadFunnelVerdict(data({ leads: 3, contacted: 3, estimate: 3, booked: 3, completed: 2, bookRate: 100, completeRate: 67 }, ALL));
+    expect(v.tone).toBe("neutral");
+    expect(v.sampleN).toBe(3);
+  });
+
+  it("null on empty periods", () => {
+    expect(leadFunnelVerdict(data({ leads: 0 }))).toBeNull();
+    expect(leadFunnelVerdict(null)).toBeNull();
+  });
+});
+
+describe("churnParetoVerdict", () => {
+  const data = (over = {}) => ({
+    reasons: [
+      { code: "price", label: "Price", customers: 4, mrr: 380, mrrShare: 54.3, cumulativePct: 54.3 },
+      { code: "moving", label: "Moving away", customers: 2, mrr: 200, mrrShare: 28.6, cumulativePct: 82.9 },
+      { code: "unclassified", label: "Unclassified", customers: 1, mrr: 120, mrrShare: 17.1, cumulativePct: 100 },
+    ],
+    totals: { customers: 7, mrr: 700 },
+    unclassifiedShare: 14.3,
+    ...over,
+  });
+
+  it("names the top classified reason and maps it to its lever", () => {
+    const v = churnParetoVerdict(data());
+    expect(v.happened).toContain("price leads");
+    expect(v.action).toContain("win/loss pricing");
+    expect(v.tone).toBe("warn");
+  });
+
+  it("a mostly-unclassified window says so instead of pretending to know", () => {
+    const v = churnParetoVerdict(data({ unclassifiedShare: 71.4 }));
+    expect(v.tone).toBe("neutral");
+    expect(v.action).toContain("backfill");
+  });
+
+  it("small samples refuse reorganization advice", () => {
+    const v = churnParetoVerdict(data({ totals: { customers: 3, mrr: 300 }, unclassifiedShare: 0 }));
+    expect(v.tone).toBe("neutral");
+    expect(v.action).toContain("trend");
+  });
+
+  it("null on empty windows", () => {
+    expect(churnParetoVerdict({ totals: { customers: 0, mrr: 0 } })).toBeNull();
+    expect(churnParetoVerdict(null)).toBeNull();
   });
 });

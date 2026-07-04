@@ -53,6 +53,12 @@ jest.mock('../services/appointment-reminders', () => ({
   handleCancellation: jest.fn().mockResolvedValue(null),
 }));
 
+// Churn-reason classifier (Phase 7) — mocked so tests control the outcome;
+// the default resolves unclassified (the real module's fail-closed floor).
+jest.mock('../services/churn-classifier', () => ({
+  classifyChurnReason: jest.fn().mockResolvedValue({ code: 'unclassified', source: 'none' }),
+}));
+
 jest.mock('../services/invoice', () => ({
   voidOpenInvoicesForCancelledService: jest.fn().mockResolvedValue([]),
   // Mirrors the real exported list — the processor post-checks with it.
@@ -145,6 +151,7 @@ const InvoiceService = require('../services/invoice');
 const CardHolds = require('../services/estimate-card-holds');
 const { etDateString } = require('../utils/datetime-et');
 const { processCancellationRequest, CHURN_REASON } = require('../services/cancellation-processor');
+const { classifyChurnReason } = require('../services/churn-classifier');
 
 const FUTURE = '2999-01-01';
 const PAST = '2000-01-01';
@@ -616,5 +623,46 @@ describe('processCancellationRequest', () => {
 
   test('throws when customerId is missing', async () => {
     await expect(processCancellationRequest({})).rejects.toThrow(/customerId/);
+  });
+
+  describe('churn-reason taxonomy (Phase 7)', () => {
+    test('stamps churn_mrr + detail at churn, then applies the classified code', async () => {
+      classifyChurnReason.mockResolvedValue({ code: 'price', source: 'live' });
+      db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 89.5 }];
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Too expensive, found cheaper', requestId: 'r1' });
+      const cust = db.__tables.customers[0];
+      expect(result.churned).toBe(true);
+      expect(cust.churn_mrr).toBe(89.5); // rate snapshotted AT churn
+      expect(cust.churn_reason_detail).toBe('Too expensive, found cheaper');
+      expect(cust.churn_reason_code).toBe('price');
+      expect(cust.churn_reason).toBe(CHURN_REASON); // legacy short reason still written
+      expect(classifyChurnReason).toHaveBeenCalledWith('Too expensive, found cheaper');
+    });
+
+    test('classifier failure leaves unclassified and NEVER flags the request (fail-closed, not an error)', async () => {
+      classifyChurnReason.mockRejectedValue(new Error('provider down'));
+      db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 45 }];
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'whatever', requestId: 'r1' });
+      const cust = db.__tables.customers[0];
+      expect(cust.churn_reason_code).toBe('unclassified');
+      expect(cust.churn_mrr).toBe(45); // the synchronous stamps still landed
+      expect(result.ok).toBe(true); // classification is never an operational failure
+      expect(result.errors).toEqual([]);
+    });
+
+    test('already-churned customer: taxonomy untouched, classifier not called', async () => {
+      classifyChurnReason.mockResolvedValue({ code: 'price', source: 'live' });
+      db.__tables.customers = [{
+        id: 'c1', pipeline_stage: 'churned', active: true, autopay_enabled: true,
+        monthly_rate: 60, churned_at: '2026-06-01', churn_reason: 'old',
+        churn_reason_code: 'moving', churn_reason_detail: 'original words', churn_mrr: 120,
+      }];
+      await processCancellationRequest({ customerId: 'c1', reason: 'new words', requestId: 'r2' });
+      const cust = db.__tables.customers[0];
+      expect(cust.churn_reason_code).toBe('moving'); // original classification preserved
+      expect(cust.churn_reason_detail).toBe('original words');
+      expect(cust.churn_mrr).toBe(120); // original snapshot preserved
+      expect(classifyChurnReason).not.toHaveBeenCalled();
+    });
   });
 });

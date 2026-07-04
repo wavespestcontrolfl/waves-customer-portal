@@ -80,6 +80,7 @@ export default function DashboardPageV2() {
   const [callsBySource, setCallsBySource] = useState(null);
   const [leadsBySource, setLeadsBySource] = useState(null);
   const [channelMix, setChannelMix] = useState(null);
+  const [leadFunnel, setLeadFunnel] = useState(null); // /admin/dashboard/lead-funnel (period-driven)
   const [mix, setMix] = useState(null);
   const [revenueByCity, setRevenueByCity] = useState(null);
   const [reviewTrend, setReviewTrend] = useState(null);
@@ -98,6 +99,7 @@ export default function DashboardPageV2() {
   const [ebitda, setEbitda] = useState(null); // /admin/dashboard/ebitda-bridge (wave4)
   const [mrrBridge, setMrrBridge] = useState(null); // /admin/dashboard/mrr-bridge (wave5)
   const [revenueOverview, setRevenueOverview] = useState(null); // /admin/revenue/overview (wave6 — margin by line)
+  const [churnReasons, setChurnReasons] = useState(null); // /admin/dashboard/churn-reasons (wave7)
   // Mobile scorecard: below md the five sections render ONE at a time behind
   // the jump-nav pills (real tabs), so a phone isn't scrolling five sections
   // of charts. Desktop keeps the one-page scroll + IntersectionObserver nav.
@@ -304,6 +306,14 @@ export default function DashboardPageV2() {
     if (!mountedRef.current) { inFlightRef.current = false; return; }
     const [ro] = wave6;
     setRevenueOverview((prev) => ro ?? prev);
+
+    // Wave 7 — churn Pareto. Same one-fetch-per-new-wave rule; fails soft.
+    const wave7 = await Promise.all([
+      track("/churn-reasons", adminFetch("/admin/dashboard/churn-reasons?months=12")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [cr] = wave7;
+    setChurnReasons((prev) => cr ?? prev);
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -417,6 +427,7 @@ export default function DashboardPageV2() {
       setCallsBySource(null);
       setLeadsBySource(null);
       setChannelMix(null);
+      setLeadFunnel(null);
       setAttributionError(null);
       setAttributionLoading(true);
     }
@@ -431,11 +442,21 @@ export default function DashboardPageV2() {
       adminFetch(`/admin/dashboard/channel-mix?${periodQS}`, {
         signal: ctrl.signal,
       }),
+      // Fails soft to null on its own — the optional funnel card must never
+      // reject the batch and take down the attribution panels beside it.
+      adminFetch(`/admin/dashboard/lead-funnel?${periodQS}`, {
+        signal: ctrl.signal,
+      }).catch((e) => {
+        if (e?.name !== "AbortError") console.error("[dashboard-v2] /lead-funnel", e);
+        return null;
+      }),
     ])
-      .then(([calls, leads, channels]) => {
+      .then(([calls, leads, channels, funnelBySrc]) => {
         setCallsBySource(calls);
         setLeadsBySource(leads);
         setChannelMix(channels);
+        // Preserve-on-fail like the loadAll panels (blanked on period switch above).
+        setLeadFunnel((prev) => funnelBySrc ?? prev);
         setAttributionError(null);
       })
       .catch((e) => {
@@ -600,6 +621,7 @@ export default function DashboardPageV2() {
           callsBySource={callsBySource}
           leadsBySource={leadsBySource}
           channelMix={channelMix}
+          leadFunnel={leadFunnel}
           attributionLoading={attributionLoading}
           attributionError={attributionError}
           onDrillSource={drillToSource}
@@ -622,6 +644,7 @@ export default function DashboardPageV2() {
         <RetentionSection
           mrrTrend={mrrTrend}
           mrrBridge={mrrBridge}
+          churnReasons={churnReasons}
           cohort={cohort}
           reviewTrend={reviewTrend}
           isMobile={isMobile}

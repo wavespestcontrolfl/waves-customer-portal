@@ -146,6 +146,15 @@ const FIXTURES = {
     total_overdue: 2410,
   },
   "/admin/dashboard/mrr-trend": { trend: [], avg_growth_pct: 7 },
+  "/admin/dashboard/churn-reasons": {
+    period: { from: "2025-08-01", months: 12 },
+    reasons: [
+      { code: "price", label: "Price", customers: 4, mrr: 380, mrrShare: 54.3, cumulativePct: 54.3 },
+      { code: "unclassified", label: "Unclassified", customers: 3, mrr: 320, mrrShare: 45.7, cumulativePct: 100 },
+    ],
+    totals: { customers: 7, mrr: 700 },
+    unclassifiedShare: 42.9,
+  },
   "/admin/dashboard/mrr-bridge": {
     months: [
       {
@@ -199,6 +208,17 @@ const FIXTURES = {
   "/admin/dashboard/calls-by-source": { sources: [], period: { label: "Month to Date" } },
   "/admin/dashboard/leads-by-source": { sources: [], period: {} },
   "/admin/dashboard/channel-mix": { channels: [] },
+  "/admin/dashboard/lead-funnel": {
+    period: { label: "Month to Date" },
+    sources: [
+      { sourceKey: "google_ads", source: "Google Ads", isPaid: true, leads: 8, contacted: 7, estimate: 5, booked: 4, completed: 3, lost: 1, rates: { contactRate: 88, estimateRate: 63, bookRate: 50, completeRate: 38 } },
+      { sourceKey: "organic", source: "Organic", isPaid: false, leads: 3, contacted: 2, estimate: 1, booked: 1, completed: 1, lost: 0, rates: { contactRate: 67, estimateRate: 33, bookRate: 33, completeRate: 33 } },
+    ],
+    stagesPresent: { contacted: true, estimate: true, booked: true },
+    totals: { leads: 11, contacted: 9, estimate: 6, booked: 5, completed: 4, lost: 1, bookRate: 45, completeRate: 36 },
+    paid: { leads: 8, contacted: 7, estimate: 5, booked: 4, completed: 3, lost: 1, bookRate: 50 },
+    organic: { leads: 3, contacted: 2, estimate: 1, booked: 1, completed: 1, lost: 0, bookRate: 33 },
+  },
 };
 
 function mockFetchWithFixtures() {
@@ -285,6 +305,13 @@ describe("DashboardPageV2 sections", () => {
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("Pending"),
     );
+    // Lead funnel by source: card + a source row with visible low-sample pill
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Lead Funnel by Source"),
+    );
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Low sample · n=3"),
+    );
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("What leads asked for"),
     );
@@ -309,6 +336,13 @@ describe("DashboardPageV2 sections", () => {
     // Net-MRR bridge: month strip + waterfall rows + in-progress flag
     expect(document.getElementById("retention")).toContainElement(
       screen.getByText("MRR Bridge"),
+    );
+    // Churn Pareto card + always-visible unclassified share
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("Why Customers Leave"),
+    );
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("42.9% unclassified"),
     );
     expect(document.getElementById("retention")).toContainElement(
       screen.getByText("Churned"),

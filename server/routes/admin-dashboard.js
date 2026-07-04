@@ -1675,6 +1675,86 @@ function resolveAttributionWindow(period, range) {
 //
 // Joins call_log (where direction='inbound') against lead_sources on the
 // dialed number. Calls landing on numbers we haven't catalogued show up
+// GET /api/admin/dashboard/churn-reasons?months=12
+// Churn Pareto: churned customers in the trailing window grouped by
+// churn_reason_code (NULL → 'unclassified'), dollars = churn_mrr (the rate
+// snapshotted AT churn; pre-taxonomy rows fall back to current monthly_rate).
+// Shaping in services/churn-pareto.js; codes recorded from Jul 2026, earlier
+// rows stay unclassified until the owner-authorized backfill runs.
+router.get('/churn-reasons', dashboardCache, async (req, res, next) => {
+  try {
+    const { buildChurnPareto } = require('../services/churn-pareto');
+    const months = Math.max(3, Math.min(24, parseInt(req.query.months || 12, 10) || 12));
+    const from = etMonthStart(new Date(), -(months - 1));
+    const qb = db('customers')
+      .whereNotNull('churned_at')
+      .where('churned_at', '>=', from)
+      .whereIn('pipeline_stage', ['churned', 'dormant']);
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      qb.whereNotIn(
+        db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
+        INTERNAL_TEST_CUSTOMERS,
+      );
+    }
+    const rows = await qb
+      .groupBy(db.raw("COALESCE(churn_reason_code, 'unclassified')"))
+      .select(
+        db.raw("COALESCE(churn_reason_code, 'unclassified') as code"),
+        db.raw('COUNT(*) as customers'),
+        db.raw('SUM(COALESCE(churn_mrr, monthly_rate, 0)) as mrr'),
+      );
+    res.json({ period: { from, months }, ...buildChurnPareto(rows) });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/lead-funnel?period=mtd[&from=YYYY-MM-DD]
+// Per-source stage progression (lead → contacted → estimate → booked →
+// completed, + lost) from ad_service_attribution, same period selector as the
+// other attribution panels. Basis caveat (the card states it): attribution
+// rows, not the raw leads table — totals differ from Leads-by-Source, and
+// call↔lead linkage is call-SID based. Shaping in services/lead-funnel.js.
+router.get('/lead-funnel', dashboardCache, async (req, res, next) => {
+  try {
+    const { buildLeadFunnel } = require('../services/lead-funnel');
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
+    // Effective paid signal mirrors splitFacebookByPaid: a Meta click id
+    // (fbclid/_fbc) OR the explicit flag — is_paid alone is NULL on most
+    // historical rows and would misfile click-attributed paid Meta as organic.
+    const PAID_SQL = '(asa.is_paid IS TRUE OR asa.fbclid IS NOT NULL OR asa.fbc IS NOT NULL)';
+    // lead_date is an ET DATE column; the window's from/to are ET date
+    // strings, so direct comparison is timezone-safe. Parity with the sibling
+    // attribution panels: soft-deleted leads drop out (deleting a spam lead
+    // must clean this card too), and internal/test names are excluded via the
+    // linked lead OR customer — both joins are LEFT and the name expressions
+    // COALESCE to '', so unlinked rows are never silently dropped.
+    const qb = db('ad_service_attribution as asa')
+      .leftJoin('leads as l', 'l.id', 'asa.lead_id')
+      .leftJoin('customers as c', 'c.id', 'asa.customer_id')
+      .where('asa.lead_date', '>=', win.from)
+      .where('asa.lead_date', '<=', win.to)
+      .whereRaw('(asa.lead_id IS NULL OR l.deleted_at IS NULL)');
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      const marks = INTERNAL_TEST_CUSTOMERS.map(() => '?').join(',');
+      qb.whereRaw(
+        `LOWER(COALESCE(l.first_name, '') || ' ' || COALESCE(l.last_name, '')) NOT IN (${marks})`,
+        INTERNAL_TEST_CUSTOMERS,
+      ).whereRaw(
+        `LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) NOT IN (${marks})`,
+        INTERNAL_TEST_CUSTOMERS,
+      );
+    }
+    const rows = await qb
+      .groupBy('asa.lead_source', 'asa.funnel_stage', db.raw(PAID_SQL))
+      .select(
+        'asa.lead_source',
+        'asa.funnel_stage',
+        db.raw(`${PAID_SQL} as is_paid`),
+        db.raw('COUNT(*) as n'),
+      );
+    res.json({ period: win, ...buildLeadFunnel(rows) });
+  } catch (err) { next(err); }
+});
+
 // under "Unmapped" so a missing seed row is visible, not invisible.
 router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
   try {

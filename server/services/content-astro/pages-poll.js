@@ -203,6 +203,23 @@ async function pollPost(post, { allowMerge = true } = {}) {
       // state exists yet, 'pending_review' otherwise). Keep that sweep in
       // mind before changing this condition.
       if (post.astro_status === 'pr_open' && post.publish_status === 'publishing') {
+        if (post.astro_requires_human_merge) {
+          // Named-competitor content on the UNATTENDED lane: publishAstro
+          // stamped this post as passing the comparison gate only under a
+          // human sign-off (validated <ComparisonTable> naming curated
+          // competitors). The scheduler's claim is not that sign-off — the
+          // autonomous lane parks these for approval and the admin lane's
+          // merge click provides it — so the auto-merge is withheld. Park
+          // the claim at pending_review (claim-guarded, same CAS rule as
+          // the scheduler) so this branch disarms instead of re-arming
+          // every 2-minute tick; the PR stays open for an admin to merge
+          // via merge-astro, and the merged→live transition then completes
+          // the post exactly like the admin lane.
+          await db('blog_posts').where({ id: post.id, publish_status: 'publishing' })
+            .update({ publish_status: 'pending_review', updated_at: new Date() });
+          logger.warn(`[pages-poll] auto-merge WITHHELD for ${post.slug || post.id} — post names curated competitors (astro_requires_human_merge); PR left open for admin merge`);
+          return { ok: true, url, humanMergeRequired: true };
+        }
         if (!allowMerge) {
           // Per-poll auto-merge cap reached — defer this merge to the next tick
           // so we don't squash N PRs to main at once (each merge rebuilds the
@@ -323,7 +340,7 @@ async function pollPending() {
   const pending = await db('blog_posts')
     .whereIn('astro_status', ['pr_open', 'build_failed', 'merged'])
     .whereNotNull('astro_branch_name')
-    .select('id', 'slug', 'target_sites', 'publish_status', 'astro_branch_name', 'astro_preview_url', 'astro_live_url', 'astro_status', 'astro_merged_at', 'astro_published_at', 'astro_commit_sha');
+    .select('id', 'slug', 'target_sites', 'publish_status', 'astro_branch_name', 'astro_preview_url', 'astro_live_url', 'astro_status', 'astro_merged_at', 'astro_published_at', 'astro_commit_sha', 'astro_requires_human_merge');
 
   // Cap auto-merges per tick so a batch of simultaneously-green PRs doesn't all
   // squash to main at once (each merge rebuilds the whole Cloudflare Pages

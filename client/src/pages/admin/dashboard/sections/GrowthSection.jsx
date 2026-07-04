@@ -15,6 +15,7 @@ import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile } from "../KpiTile";
 import Verdict from "../Verdict";
+import FunnelBySource from "../FunnelBySource";
 import {
   capitalVerdict,
   captureVerdict,
@@ -47,6 +48,7 @@ export default function GrowthSection({
   callsBySource,
   leadsBySource,
   channelMix,
+  leadFunnel,
   attributionLoading,
   attributionError,
   onDrillSource,
@@ -318,6 +320,36 @@ export default function GrowthSection({
             onDrillSource={onDrillSource}
           />
         </ChartCard>
+      )}
+
+      {/* Lead funnel by source — how far each channel's leads actually get
+          (attribution-row basis, stated on the card; same period selector). */}
+      {isMobile ? (
+        <MobileFold
+          title="Lead Funnel by Source"
+          sub={leadFunnel?.period?.label || kpis?.periodLabel || "Month to Date"}
+        >
+          <div className="px-1 pt-1">
+            <FunnelBySource
+              data={leadFunnel}
+              loading={attributionLoading}
+              error={attributionError}
+            />
+          </div>
+        </MobileFold>
+      ) : (
+        <div className="mt-4">
+          <ChartCard
+            title="Lead Funnel by Source"
+            sub={leadFunnel?.period?.label || kpis?.periodLabel || "Month to Date"}
+          >
+            <FunnelBySource
+              data={leadFunnel}
+              loading={attributionLoading}
+              error={attributionError}
+            />
+          </ChartCard>
+        </div>
       )}
     </DashboardSection>
   );

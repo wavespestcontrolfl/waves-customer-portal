@@ -10,6 +10,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   putBinary: jest.fn(),
   putFile: jest.fn(),
   createPr: jest.fn(),
+  findOpenPrByHead: jest.fn(),
   createIssueComment: jest.fn(),
   listIssueComments: jest.fn(),
   listPrReviews: jest.fn(),
@@ -1555,6 +1556,69 @@ describe('Astro publisher hero image republish', () => {
   });
 });
 
+describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+  afterEach(() => { jest.restoreAllMocks(); });
+
+  function plainPost() {
+    return {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
+    };
+  }
+
+  test('a competitor-free post stamps an explicit FALSE (a republish clears a stale stamp)', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+      astro_status: 'pr_open',
+      astro_requires_human_merge: false,
+    }));
+  });
+
+  test('a requiresHumanReview gate pass stamps TRUE from that exact evaluation', async () => {
+    // A validated curated-competitor table passes the gate with
+    // requiresHumanReview — pin the gate result rather than hand-building a
+    // fully sourced curated table; the stamp must mirror the evaluation the
+    // publish actually ran, and pages-poll withholds the scheduler
+    // auto-merge on it.
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
+    const read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+      astro_status: 'pr_open',
+      astro_requires_human_merge: true,
+    }));
+  });
+});
+
 describe('Astro publisher idempotency guard', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
@@ -1672,6 +1736,190 @@ describe('Astro publisher merge guard', () => {
   });
 });
 
+describe('publishAstro catch persists an already-opened PR marker (Codex round 3)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  function validPost(overrides = {}) {
+    return {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
+      ...overrides,
+    };
+  }
+
+  test('a failure AFTER PR creation keeps astro_pr_number — the scheduler must not retry into a duplicate PR', async () => {
+    const updates = [];
+    const q = chain({
+      first: jest.fn().mockResolvedValue(validPost()),
+      update: jest.fn((u) => {
+        updates.push(u);
+        // The pr_open stamp itself is the fallible step Codex flagged: the
+        // PR exists on GitHub but the DB write recording it dies.
+        if (u.astro_status === 'pr_open') return Promise.reject(new Error('db blip while stamping pr_open'));
+        return Promise.resolve(1);
+      }),
+    });
+    db.mockImplementation(() => q);
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow('db blip while stamping pr_open');
+
+    const parked = updates.find((u) => u.astro_status === 'publish_failed');
+    expect(parked).toBeDefined();
+    expect(parked.astro_pr_number).toBe(123);
+    expect(parked.astro_branch_name).toEqual(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
+    // The branch is PR-attached — it must survive the failure (the marker
+    // routes the retry through the stale-PR close+delete path instead).
+    expect(gh.deleteRef).not.toHaveBeenCalled();
+  });
+
+  test('a failure between branch creation and PR creation deletes the orphan branch before rethrowing (Codex round 5)', async () => {
+    const updates = [];
+    const q = chain({
+      first: jest.fn().mockResolvedValue(validPost()),
+      update: jest.fn((u) => { updates.push(u); return Promise.resolve(1); }),
+    });
+    db.mockImplementation(() => q);
+    gh.createPr.mockRejectedValueOnce(new Error('create-PR outage'));
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow('create-PR outage');
+
+    // Each retry cuts a FRESH shortId branch, so an undeleted pre-PR
+    // branch (with its hero commit) is an orphan per 15-minute tick that
+    // no later cleanup can locate. The lookup ran first (createPr was
+    // attempted, so the PR may exist despite the throw) and found none.
+    expect(gh.findOpenPrByHead).toHaveBeenCalledWith(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
+    const parked = updates.find((u) => u.astro_status === 'publish_failed');
+    expect(parked).toBeDefined();
+    // Explicit NULLs, not omissions: a retried row must not keep the
+    // previous attempt's stale marker.
+    expect(parked.astro_pr_number).toBeNull();
+    expect(parked.astro_branch_name).toBeNull();
+  });
+
+  test('createPr throw with the PR actually created recovers the marker instead of deleting a live head (Codex round 6)', async () => {
+    const updates = [];
+    const q = chain({
+      first: jest.fn().mockResolvedValue(validPost()),
+      update: jest.fn((u) => { updates.push(u); return Promise.resolve(1); }),
+    });
+    db.mockImplementation(() => q);
+    // ghFetch retries POSTs on 5xx — a timeout after creation means the
+    // call throws while the PR exists. The head-branch lookup finds it.
+    gh.createPr.mockRejectedValueOnce(new Error('504 gateway timeout'));
+    gh.findOpenPrByHead.mockResolvedValueOnce({ number: 777 });
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow('504 gateway timeout');
+
+    expect(gh.deleteRef).not.toHaveBeenCalled();
+    const parked = updates.find((u) => u.astro_status === 'publish_failed');
+    expect(parked.astro_pr_number).toBe(777);
+    expect(parked.astro_branch_name).toEqual(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
+  });
+
+  test('retry of a stale-marker row that fails pre-PR again CLEARS the old marker after cleanup (Codex round 6)', async () => {
+    // Old attempt left publish_failed + marker; cleanup closes/deletes the
+    // old PR, then the new attempt dies at the guardrails (pre-branch).
+    // Keeping the old marker would make the scheduler treat this pre-PR
+    // failure as PR-backed and park the fixed post forever.
+    const post = validPost({
+      astro_status: 'publish_failed',
+      astro_pr_number: 99,
+      astro_branch_name: 'content/blog-ant-trails-bradenton-old1',
+      tag: 'Rodents',
+      content: '## Sealing entry points\n\nRats squeeze through dime-sized gaps.\n\n## Frequently Asked Questions\n\nQ: How fast can you help?',
+    });
+    const updates = [];
+    const q = chain({
+      first: jest.fn().mockResolvedValue(post),
+      update: jest.fn((u) => { updates.push(u); return Promise.resolve(1); }),
+    });
+    db.mockImplementation(() => q);
+    gh.getPr.mockResolvedValue({ number: 99, state: 'open', merged: false });
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/content guardrails failed/);
+
+    expect(gh.closePr).toHaveBeenCalledWith(99);
+    const parked = updates.find((u) => u.astro_status === 'publish_failed');
+    expect(parked.astro_pr_number).toBeNull();
+    expect(parked.astro_branch_name).toBeNull();
+  });
+
+  test('a permanently bad curated hero URL fails with BLOG_HERO_MEDIA_FAILED (Codex round 6 — parked, not hot-looped)', async () => {
+    const savedFetch = global.fetch;
+    global.fetch = jest.fn().mockRejectedValue(new Error('404 not found'));
+    try {
+      const q = chain({ first: jest.fn().mockResolvedValue(validPost({ featured_image_url: 'https://cdn.example.com/hero.jpg' })) });
+      db.mockImplementation(() => q);
+
+      await expect(AstroPublisher.publishAstro('post-1')).rejects.toMatchObject({ code: 'BLOG_HERO_MEDIA_FAILED' });
+      // Pre-branch failure: nothing external to clean up.
+      expect(gh.createBranch).not.toHaveBeenCalled();
+    } finally {
+      if (savedFetch === undefined) delete global.fetch;
+      else global.fetch = savedFetch;
+    }
+  });
+
+  test('a failure BEFORE PR creation stamps publish_failed with NO marker — provably retryable', async () => {
+    // FAQ on a rodent post = a guardrails P0 thrown well before any PR.
+    const post = validPost({
+      tag: 'Rodents',
+      content: '## Sealing entry points\n\nRats squeeze through dime-sized gaps.\n\n## Frequently Asked Questions\n\nQ: How fast can you help?',
+    });
+    const updates = [];
+    const q = chain({
+      first: jest.fn().mockResolvedValue(post),
+      update: jest.fn((u) => { updates.push(u); return Promise.resolve(1); }),
+    });
+    db.mockImplementation(() => q);
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/content guardrails failed/);
+
+    const parked = updates.find((u) => u.astro_status === 'publish_failed');
+    expect(parked).toBeDefined();
+    expect(parked.astro_pr_number).toBeNull();
+    expect(gh.createPr).not.toHaveBeenCalled();
+  });
+
+  test('admin retry of publish_failed WITH a persisted marker cleans up the stale PR first (Codex round 4)', async () => {
+    // The marker exists exactly because a PR opened before the failure —
+    // without the same close+delete the build_failed retry gets, the
+    // republish opened a SECOND PR and overwrote the marker, orphaning
+    // the first.
+    const post = validPost({
+      astro_status: 'publish_failed',
+      astro_pr_number: 99,
+      astro_branch_name: 'content/blog-ant-trails-bradenton-old1',
+    });
+    const q = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => q);
+    gh.getPr.mockResolvedValue({ number: 99, state: 'open', merged: false });
+
+    await AstroPublisher.publishAstro('post-1');
+
+    expect(gh.closePr).toHaveBeenCalledWith(99);
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails-bradenton-old1');
+    expect(gh.createPr).toHaveBeenCalled();
+  });
+});
+
 describe('Pages poll auto-merge per-tick cap', () => {
   const originalEnv = {
     CF_API_TOKEN: process.env.CF_API_TOKEN,
@@ -1728,6 +1976,49 @@ describe('Pages poll auto-merge per-tick cap', () => {
     expect(result.deferred).toBe(1);
     const deferred = result.results.filter((r) => r.mergeDeferred);
     expect(deferred).toHaveLength(1);
+  });
+
+  test('a post stamped astro_requires_human_merge is parked for admin merge, never auto-merged (audit lane 4b)', async () => {
+    const posts = [
+      { id: 'post-hr', slug: 'named-competitor-post', astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: 'hr-branch', astro_requires_human_merge: true },
+      { id: 'post-ok', slug: 'plain-post', astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: 'ok-branch', astro_requires_human_merge: false },
+    ];
+    const updates = [];
+    const selects = [];
+    db.mockImplementation(() => {
+      const q = {
+        _filters: [],
+        whereIn: jest.fn().mockReturnThis(),
+        whereNotNull: jest.fn().mockReturnThis(),
+        where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+        select: jest.fn((...cols) => { selects.push(cols); return Promise.resolve(posts); }),
+        update: jest.fn((u) => { updates.push({ filters: q._filters.slice(), updates: u }); return Promise.resolve(1); }),
+      };
+      return q;
+    });
+    mockCloudflareDeploymentList(posts.map((p) => previewDeployment(p.astro_branch_name)));
+    const mergeSpy = jest.spyOn(AstroPublisher, 'mergeAstro').mockResolvedValue({ merged: true });
+
+    const result = await PagesPoll.pollPending();
+
+    // Only the unstamped post merges; the flagged one is withheld — the
+    // scheduler's claim is not the human sign-off named-competitor content
+    // publishes under (the admin's merge click is).
+    expect(mergeSpy).toHaveBeenCalledTimes(1);
+    expect(mergeSpy.mock.calls[0][0]).toBe('post-ok');
+    const withheld = result.results.find((r) => r.id === 'post-hr');
+    expect(withheld.humanMergeRequired).toBe(true);
+    // The claim is parked pending_review (claim-guarded like the scheduler's
+    // own CAS writes) so the auto-merge branch disarms instead of re-arming
+    // every tick; the PR stays open for merge-astro.
+    const park = updates.find((u) => u.updates.publish_status === 'pending_review');
+    expect(park).toBeDefined();
+    expect(park.filters).toEqual(expect.arrayContaining([
+      [{ id: 'post-hr', publish_status: 'publishing' }],
+    ]));
+    // The pending select actually carries the flag — pollPost can only see
+    // columns this query names.
+    expect(selects[0]).toEqual(expect.arrayContaining(['astro_requires_human_merge']));
   });
 });
 

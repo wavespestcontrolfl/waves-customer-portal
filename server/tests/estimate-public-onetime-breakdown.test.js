@@ -6814,6 +6814,42 @@ describe('public estimate one-time breakdown', () => {
     })).toBe('Estimate accepted by Unknown customer at address unavailable - Bronze WaveGuard $89/mo. Setup + first application invoice created; optional pay link available.');
   });
 
+  test('accept copy shows the as-proposed price when the customer selected a different plan', () => {
+    expect(buildAcceptOfficeFallback({
+      customerName: 'Jane Doe',
+      address: '123 Main St',
+      waveguardTier: 'Bronze',
+      monthlyTotal: 55.3,
+      proposedMonthlyTotal: 29.67,
+      invoiceMode: true,
+      invoicePayUrl: '/pay/setup-token',
+    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard $55.30/mo (proposed at $29.67/mo). Setup + first application invoice created; optional pay link available.');
+
+    const payload = buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      waveguardTier: 'Bronze',
+      monthlyTotal: 55.3,
+      proposedMonthlyTotal: 29.67,
+      invoiceMode: true,
+      invoiceLinkDelivered: true,
+      invoicePayUrl: '/pay/setup-token',
+    });
+    expect(payload.adminBody).toBe('Bronze WaveGuard $55.30/mo (proposed at $29.67/mo) approved. Invoice pay link sent.');
+    // Customer copy never gets the note — they only ever saw the plan they picked.
+    expect(payload.customerBody).not.toContain('proposed at');
+
+    // Unchanged price → no note, whole-dollar amounts keep the short format.
+    expect(buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      waveguardTier: 'Gold',
+      monthlyTotal: 89,
+      proposedMonthlyTotal: 89,
+      invoiceMode: true,
+      invoiceLinkDelivered: true,
+      invoicePayUrl: '/pay/gold-token',
+    }).adminBody).toBe('Gold WaveGuard $89/mo approved. Invoice pay link sent.');
+  });
+
   test('accept notification payload avoids WaveGuard onboarding copy for one-time accepts', () => {
     expect(buildAcceptNotificationPayload({
       customerName: 'Jane Doe',

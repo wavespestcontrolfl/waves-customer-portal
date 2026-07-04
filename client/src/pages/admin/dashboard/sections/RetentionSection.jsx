@@ -13,6 +13,7 @@ import { KpiStrip, KpiTile, signed } from "../KpiTile";
 import Verdict from "../Verdict";
 import { mrrVerdict } from "../scorecard-metrics";
 import MrrBridgeCard from "../MrrBridgeCard";
+import ChurnParetoCard from "../ChurnParetoCard";
 
 // RETENTION — are customers staying? Net recurring-revenue momentum, the MRR
 // trend + the bridge decomposing WHY it moved, signup-cohort retention, and
@@ -25,6 +26,7 @@ export default function RetentionSection({
   kpiHistory,
   mrrTrend,
   mrrBridge,
+  churnReasons,
   cohort,
   reviewTrend,
   isMobile,
@@ -172,6 +174,22 @@ export default function RetentionSection({
               cohorts={cohort?.cohorts || []}
               maxOffset={cohort?.maxOffset || 0}
             />
+          </ChartCard>
+        </div>
+      )}
+
+      {/* Churn Pareto — WHY customers leave, by lost MRR (codes live from
+          Jul 2026; earlier rows unclassified until the backfill runs). */}
+      {isMobile ? (
+        <MobileFold title="Why Customers Leave" sub="churn reasons · last 12 months">
+          <div className="px-1 pt-1">
+            <ChurnParetoCard data={churnReasons} />
+          </div>
+        </MobileFold>
+      ) : (
+        <div className="mb-5">
+          <ChartCard title="Why Customers Leave" sub="churn reasons by lost MRR · last 12 months">
+            <ChurnParetoCard data={churnReasons} />
           </ChartCard>
         </div>
       )}

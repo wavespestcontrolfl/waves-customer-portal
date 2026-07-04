@@ -27,6 +27,9 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 // a queued refresh derives city + service exactly the way the engine's own
 // decay_refresh rows do — instead of re-deriving them from blog_posts fields.
 const { _internals: miner } = require('./gsc-opportunity-miner');
+// Same claim-budget ceiling claimNext/peek enforce — the re-enqueue CASE below
+// resets exhausted counts against this exact number, never a private copy.
+const { _internals: { maxClaimAttempts } } = require('../content/opportunity-queue');
 
 // Astro/GSC canonical hub origin (used only for DISPLAY + a never-seeded
 // fallback — gsc_pages/decay matching below is path-keyed and domain-scoped).
@@ -345,9 +348,17 @@ class RefreshAudit {
     // under ANOTHER bucket's dedupe_key (e.g. the GSC miner's decay_refresh), and
     // our refresh-audit key won't collide with it. claimNext only acts on one
     // pending row, so a second pending refresh for the same target is wasted work.
+    // A pending row with an EXHAUSTED attempt budget is NOT in flight, though:
+    // claimNext/peek refuse it, so early-returning here would report its state
+    // while leaving the page unrunnable — fall through to the upsert, which
+    // resets our own key's budget (same-key row) or seeds a claimable row (a
+    // foreign-bucket key; the daily sweep parks the exhausted one for review).
     const inflight = await db('opportunity_queue')
       .where('action_type', 'refresh_existing_page')
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
+      .where(function () {
+        this.where('status', '<>', 'pending').orWhere('attempt_count', '<', maxClaimAttempts());
+      })
       .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
       .whereRaw(`${hostRegistrableSql('page_url')} = ?`, [targetDomain])
       .first();
@@ -443,6 +454,24 @@ class RefreshAudit {
                            THEN opportunity_queue.status
                            ELSE 'pending'
                       END,
+             -- Reviving a skipped/expired row is a fresh explicit operator
+             -- signal (this upsert only runs from the admin enqueue route) —
+             -- reset the lifetime claim budget, or a re-enqueued
+             -- attempts_exhausted row would be pending yet unclaimable
+             -- (claimNext refuses it, the janitor instantly re-skips it).
+             -- The pending-with-exhausted-count arm covers the window
+             -- between the claim that hit the budget and the daily sweep
+             -- that flips it to skipped: the row is still 'pending' there,
+             -- and without the reset this route reports queued=true for a
+             -- row claimNext/peek refuse until the sweep + a second
+             -- re-enqueue.
+             attempt_count = CASE WHEN opportunity_queue.status IN ('skipped', 'expired')
+                                  THEN 0
+                                  WHEN opportunity_queue.status = 'pending'
+                                       AND opportunity_queue.attempt_count >= ?
+                                  THEN 0
+                                  ELSE opportunity_queue.attempt_count
+                             END,
              updated_at = now()
        RETURNING id, status`,
       [
@@ -470,6 +499,7 @@ class RefreshAudit {
         'pending',
         expiresAt,
         dedupeKey,
+        maxClaimAttempts(),
       ]
     );
 

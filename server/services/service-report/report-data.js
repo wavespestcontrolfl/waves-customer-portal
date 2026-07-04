@@ -2423,8 +2423,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           const svcIso = svcRaw ? (svcRaw instanceof Date ? svcRaw.toISOString().slice(0, 10) : String(svcRaw).slice(0, 10)) : '';
           const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
           const afterIso = svcIso && svcIso > todayIso ? svcIso : todayIso;
-          const fmtDate = (iso) => new Date(`${String(iso).slice(0, 10)}T12:00:00Z`)
-            .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+          // scheduled_date comes back from pg as a Date object; normalize it the
+          // same way svcIso does above before slicing, or String(Date) yields
+          // "Wed Jul 08 2026 …" and the label renders as "Invalid Date".
+          const fmtDate = (val) => {
+            const iso = val instanceof Date ? val.toISOString().slice(0, 10) : String(val).slice(0, 10);
+            return new Date(`${iso}T12:00:00Z`)
+              .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+          };
           const nextRow = await knex('scheduled_services')
             .where('customer_id', service.customer_id)
             .andWhere('scheduled_date', '>', afterIso)
@@ -2503,8 +2509,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             const svcIso = svcRaw ? (svcRaw instanceof Date ? svcRaw.toISOString().slice(0, 10) : String(svcRaw).slice(0, 10)) : '';
             const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
             const afterIso = svcIso && svcIso > todayIso ? svcIso : todayIso;
-            const fmtDate = (iso) => new Date(`${String(iso).slice(0, 10)}T12:00:00Z`)
-              .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+            // scheduled_date comes back from pg as a Date object; normalize it the
+            // same way svcIso does above before slicing, or String(Date) yields
+            // "Wed Jul 08 2026 …" and the label renders as "Invalid Date".
+            const fmtDate = (val) => {
+              const iso = val instanceof Date ? val.toISOString().slice(0, 10) : String(val).slice(0, 10);
+              return new Date(`${iso}T12:00:00Z`)
+                .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+            };
             const nextRow = await knex('scheduled_services')
               .where('customer_id', service.customer_id)
               .andWhere('scheduled_date', '>', afterIso)

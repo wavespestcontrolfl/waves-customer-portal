@@ -164,7 +164,8 @@ function inchLabel(v) {
 export function LawnSnapshotHero({ snapshot = {} }) {
   const { overallScore, statusHeadline, scoreExplanation, rootCause, seasonalNote, todaysFocus = [], watching = [], wavesNext, customerAction, noActionNeeded, nextVisit } = snapshot;
   const status = snapshot.status || scoreStatus(overallScore);
-  const nextVisitText = nextVisit
+  const hasNextVisit = nextVisit && nextVisit.label && nextVisit.label !== 'Invalid Date';
+  const nextVisitText = hasNextVisit
     ? (nextVisit.source === 'estimated'
       ? `Expected around ${nextVisit.label}${nextVisit.cadenceWeeks ? ` (about every ${nextVisit.cadenceWeeks} weeks)` : ''}`
       : nextVisit.label)

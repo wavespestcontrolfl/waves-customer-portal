@@ -12,6 +12,7 @@
 
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { TIMEZONE } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -23,6 +24,46 @@ const RAIN_REASONS = [
   { code: 'weather_wind', label: 'Wind' },
   { code: 'weather_heat', label: 'Heat' },
 ];
+
+// Sentinel selection key for the custom-time option (distinct from the preset
+// keys, which are `${kind}:${date}:${start}`).
+const CUSTOM_KEY = 'custom';
+
+function hhmmToMin(v) {
+  const m = String(v || '').match(/^(\d{1,2}):(\d{2})/);
+  return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+}
+
+function minToHHMM(total) {
+  const c = Math.max(0, Math.min(23 * 60 + 59, total));
+  return `${String(Math.floor(c / 60)).padStart(2, '0')}:${String(c % 60).padStart(2, '0')}`;
+}
+
+// A custom start snapped to an on-the-hour 1-hour block — matches the server's
+// oneHourWindow so what the dispatcher picks is exactly what gets booked.
+function hourWindow(startHHMM) {
+  const m = hhmmToMin(startHHMM);
+  if (m == null) return null;
+  const onHour = Math.floor(m / 60) * 60;
+  return { start: minToHHMM(onHour), end: minToHHMM(onHour + 60) };
+}
+
+function fmtTime(hhmm) {
+  const m = hhmmToMin(hhmm);
+  if (m == null) return hhmm;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  const h12 = h % 12 || 12;
+  return `${h12}:${String(mm).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+function fmtDateLabel(dateStr, todayStr) {
+  if (!dateStr) return '';
+  if (dateStr === todayStr) return 'Today';
+  const d = new Date(`${dateStr}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: TIMEZONE });
+}
 
 function authHeaders() {
   return {
@@ -39,6 +80,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const [scope, setScope] = useState('job');
   const [notify, setNotify] = useState(true);
   const [busy, setBusy] = useState(false);
+  // Custom on-the-hour time — dispatcher-typed instead of a preset pill.
+  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: TIMEZONE });
+  const [customDate, setCustomDate] = useState(todayStr);
+  const [customStart, setCustomStart] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -63,10 +108,50 @@ export default function RainOutSheet({ service, onClose, onDone }) {
 
   const allOptions = options ? [...(options.sameDay || []), ...(options.days || [])] : [];
   const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
-  const selected = allOptions.find((opt) => keyOf(opt) === selectedKey) || null;
-  // The SMS offers the best *other-day* option as the reply-2 alternate.
-  const alt = selected ? (options?.days || []).find((opt) => keyOf(opt) !== selectedKey) || null : null;
+  const isCustom = selectedKey === CUSTOM_KEY;
+  const customWindow = isCustom ? hourWindow(customStart) : null;
+  // A same-day custom start must be a FUTURE hour. Only the date field carries a
+  // min, so without this a dispatcher could pick an already-started hour; on a
+  // route move the rebooker then rejects the elapsed anchor while its siblings
+  // still shift, stranding the selected visit. Earliest allowed = next top of
+  // the hour after now (ET).
+  const nowEtMin = hhmmToMin(new Date().toLocaleTimeString('en-GB', { timeZone: TIMEZONE, hour12: false }));
+  const minTodayStartMin = (Math.floor((nowEtMin ?? 0) / 60) + 1) * 60;
+  const minTodayStart = minToHHMM(Math.min(minTodayStartMin, 23 * 60));
+  const customElapsed = !!(isCustom && customWindow && customDate === todayStr
+    && hhmmToMin(customWindow.start) < minTodayStartMin);
+  const customOption = (isCustom && customWindow && customDate && !customElapsed)
+    ? {
+        kind: 'custom',
+        date: customDate,
+        window: customWindow,
+        display: `${fmtDateLabel(customDate, todayStr)}, ${fmtTime(customWindow.start)}-${fmtTime(customWindow.end)}`,
+      }
+    : null;
+  const selected = isCustom
+    ? customOption
+    : (allOptions.find((opt) => keyOf(opt) === selectedKey) || null);
+  // The SMS offers the best *other-day* option as the reply-2 alternate. Match
+  // by date+start rather than the selection key so a custom time that coincides
+  // with a day preset isn't offered as an alternate to itself.
+  const alt = selected
+    ? (options?.days || []).find((opt) => !(opt.date === selected.date && opt.window.start === selected.window.start)) || null
+    : null;
   const routeCount = options?.remainingRouteCount || 0;
+
+  // Seed the custom date AND start from whatever preset was highlighted (or the
+  // first slot) so switching to Custom lands on a sensible hour on the RIGHT
+  // day — seeding only the time would leave a future preset's hour paired with
+  // today's date and book the wrong day (or fail as an elapsed same-day window).
+  const pickCustom = () => {
+    setSelectedKey(CUSTOM_KEY);
+    if (!customStart) {
+      const seedOpt = allOptions.find((opt) => keyOf(opt) === selectedKey) || allOptions[0] || null;
+      const snapped = hourWindow(seedOpt?.window?.start || '15:00');
+      setCustomStart(snapped ? snapped.start : '15:00');
+      if (seedOpt?.date) setCustomDate(seedOpt.date);
+    }
+  };
 
   const handleCommit = async () => {
     if (!selected || busy) return;
@@ -180,7 +265,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
             <div style={sectionLabel}>MOVE TO</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 }}>
               {allOptions.length === 0 && (
-                <div style={{ fontSize: 13, color: '#71717A' }}>No slots available — reschedule manually.</div>
+                <div style={{ fontSize: 13, color: '#71717A' }}>No preset slots — pick a custom time below.</div>
               )}
               {allOptions.map((opt) => {
                 const key = keyOf(opt);
@@ -211,7 +296,73 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   </button>
                 );
               })}
+
+              {/* Custom on-the-hour time — for when none of the presets is the
+                  time the dispatcher agreed on with the customer ("let's do
+                  3 PM today"). */}
+              <button
+                type="button"
+                onClick={pickCustom}
+                style={{
+                  textAlign: 'left', padding: '11px 13px', borderRadius: 10, fontSize: 14, fontWeight: 600,
+                  border: `1px solid ${isCustom ? '#18181B' : '#D4D4D8'}`,
+                  background: isCustom ? '#F4F4F5' : '#FFFFFF', color: '#18181B',
+                  cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                }}
+              >
+                <span>🕒 Custom time</span>
+                {customOption && (
+                  <span style={{ fontSize: 12, fontWeight: 700, color: '#18181B' }}>
+                    {fmtDateLabel(customDate, todayStr)} · {fmtTime(customOption.window.start)}
+                  </span>
+                )}
+              </button>
             </div>
+
+            {isCustom && (
+              <div style={{ display: 'flex', gap: 10, marginBottom: 18 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={sectionLabel}>DATE</div>
+                  <input
+                    type="date"
+                    value={customDate}
+                    min={todayStr}
+                    onChange={(e) => setCustomDate(e.target.value)}
+                    style={{
+                      width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 600,
+                      border: '1px solid #D4D4D8', background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit',
+                    }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={sectionLabel}>START (ON THE HOUR)</div>
+                  <input
+                    type="time"
+                    step="3600"
+                    value={customStart}
+                    min={customDate === todayStr ? minTodayStart : undefined}
+                    onChange={(e) => {
+                      // Snap to the hour on input (a manually-typed off-hour value
+                      // like 15:59 would otherwise floor to 15:00 only at book
+                      // time, leaving the field showing a time that isn't what
+                      // gets scheduled). Snapping here keeps shown == booked.
+                      const snapped = hourWindow(e.target.value);
+                      setCustomStart(snapped ? snapped.start : '');
+                    }}
+                    style={{
+                      width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 600,
+                      border: `1px solid ${customElapsed ? '#DC2626' : '#D4D4D8'}`, background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit',
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {customElapsed && (
+              <div style={{ fontSize: 12, color: '#B91C1C', marginTop: -8, marginBottom: 18 }}>
+                That hour has already started today — pick {fmtTime(minTodayStart)} or later.
+              </div>
+            )}
 
             {routeCount > 0 && (
               <>

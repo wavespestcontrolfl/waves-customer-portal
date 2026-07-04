@@ -102,6 +102,7 @@ export default function SlotPicker({
   const [pickedDate, setPickedDate] = useState(null);
   const [pickedData, setPickedData] = useState(null);
   const [pickedLoading, setPickedLoading] = useState(false);
+  const [pickedDateFocused, setPickedDateFocused] = useState(false);
   const latestPickedRequestRef = useRef(0);
   const pickedDateInputId = useId();
 
@@ -134,6 +135,16 @@ export default function SlotPicker({
   const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
   const browseMin = toYmd(new Date());
   const browseMax = (() => { const d = new Date(); d.setDate(d.getDate() + 90); return toYmd(d); })();
+
+  const formatPickedDate = (ymd) => {
+    try {
+      const d = new Date(ymd + 'T12:00:00');
+      if (Number.isNaN(d.getTime())) return ymd;
+      return d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    } catch {
+      return ymd;
+    }
+  };
 
   const freqParams = () => {
     const p = new URLSearchParams();
@@ -256,19 +267,46 @@ export default function SlotPicker({
         <label htmlFor={pickedDateInputId} style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
           Can't find a date? Pick one that works for you.
         </label>
-        <input
-          id={pickedDateInputId}
-          type="date"
-          min={browseMin}
-          max={browseMax}
-          placeholder="mm/dd/yyyy"
-          value={pickedDate || ''}
-          onChange={(e) => onPickDate(e.target.value)}
-          style={{
-            width: '100%', boxSizing: 'border-box', border: `1px solid ${W.border}`, borderRadius: 10,
-            padding: '12px 14px', fontSize: 15, color: W.navy, background: W.white,
-          }}
-        />
+        {/* iOS Safari renders an empty <input type="date"> as a blank box
+            (no placeholder, unpredictable height), so the visible layer is
+            our own text and the native input sits invisibly on top to keep
+            the tap-to-open picker, label wiring, and keyboard access. */}
+        <div style={{
+          position: 'relative', display: 'flex', alignItems: 'center', gap: 10,
+          minHeight: 48, boxSizing: 'border-box', padding: '12px 14px',
+          border: `1px solid ${pickedDateFocused ? W.blueDeeper : W.border}`,
+          borderRadius: 10, background: W.white,
+        }}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={W.blueDeeper} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+            <rect x="3" y="4" width="18" height="18" rx="2" />
+            <line x1="16" y1="2" x2="16" y2="6" />
+            <line x1="8" y1="2" x2="8" y2="6" />
+            <line x1="3" y1="10" x2="21" y2="10" />
+          </svg>
+          <span style={{
+            fontSize: 15,
+            fontWeight: pickedDate ? 600 : 400,
+            color: pickedDate ? W.navy : W.textCaption,
+            lineHeight: 1.3,
+          }}>
+            {pickedDate ? formatPickedDate(pickedDate) : 'Select a date (mm/dd/yyyy)'}
+          </span>
+          <input
+            id={pickedDateInputId}
+            type="date"
+            min={browseMin}
+            max={browseMax}
+            value={pickedDate || ''}
+            onChange={(e) => onPickDate(e.target.value)}
+            onFocus={() => setPickedDateFocused(true)}
+            onBlur={() => setPickedDateFocused(false)}
+            style={{
+              position: 'absolute', inset: 0, width: '100%', height: '100%',
+              boxSizing: 'border-box', opacity: 0, border: 'none', margin: 0, padding: 0,
+              cursor: 'pointer', WebkitAppearance: 'none', appearance: 'none',
+            }}
+          />
+        </div>
         <div style={{ fontSize: 12, color: W.textCaption, marginTop: 8 }}>
           We'll check open windows up to 90 days out.
         </div>

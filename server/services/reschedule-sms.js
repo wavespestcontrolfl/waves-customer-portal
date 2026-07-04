@@ -3,7 +3,8 @@ const SmartRebooker = require('./rebooker');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts } = require('../utils/datetime-et');
+const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
 async function sendAppointmentSms({ to, body, customerId, messageType }) {
   const result = await sendCustomerMessage({
@@ -150,7 +151,52 @@ class RescheduleSMS {
       sms_responded_at: db.fn.now(),
     });
 
+    // Confirm-in-place: a rain-out already MOVED the appointment to option 1
+    // before texting the customer, so "1 to confirm" (or a "2" that lands on the
+    // same slot) is a pure confirmation — the visit is already booked there.
+    // Re-running SmartRebooker.reschedule would re-validate it and, for a
+    // same-day slot whose 1-hour internal window ticked past while the customer
+    // was deciding, wrongly reject it as elapsed even though the reply arrived
+    // inside the 2-hour window we quoted. Skip the re-book when the selection
+    // already matches the live booking. The general reschedule flow offers only
+    // FUTURE candidate dates the appointment isn't on yet, so this never short-
+    // circuits a genuine move.
+    let alreadyOnSlot = false;
     if (selectedOption) {
+      const svc = await db('scheduled_services')
+        .where({ id: pending.scheduled_service_id })
+        .first('scheduled_date', 'window_start', 'window_end', 'status');
+      // pg/Knex can return scheduled_date as a JS Date OR a 'YYYY-MM-DD' string —
+      // normalize both (mirrors track-transitions.isFutureScheduledDate) so a Date
+      // doesn't stringify to 'Sat Jul 04' and silently miss the match.
+      const toYmd = (v) => (v == null ? null : String(v instanceof Date ? v.toISOString() : v).slice(0, 10));
+      const normTime = (t) => (t == null ? null : String(t).slice(0, 5));
+      const toMin = (t) => {
+        const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
+        return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+      };
+      // Confirm in place only while the reply is still inside the 2-hour arrival
+      // window we quoted the customer. A same-day reply after that window has
+      // passed must fall through to SmartRebooker.reschedule, which rejects the
+      // elapsed slot and routes to office follow-up — the pre-shortcut behavior.
+      const optStartMin = toMin(selectedOption.window?.start);
+      const sameDay = toYmd(selectedOption.date) === etDateString();
+      const now = etParts(new Date());
+      const withinQuotedWindow = !sameDay
+        || (optStartMin != null && (now.hour * 60 + now.minute) < optStartMin + ARRIVAL_WINDOW_MINUTES);
+      // Match date + FULL window (start AND end) so a slot that was manually
+      // widened/edited off the reply option still re-books to the tight target
+      // instead of being silently confirmed as-is. Exclude every non-live status
+      // (completed/cancelled/skipped) so a reply can't "confirm" a dead visit.
+      alreadyOnSlot = !!svc
+        && toYmd(svc.scheduled_date) === toYmd(selectedOption.date)
+        && normTime(svc.window_start) === normTime(selectedOption.window?.start)
+        && normTime(svc.window_end) === normTime(selectedOption.window?.end)
+        && !['completed', 'cancelled', 'skipped'].includes(svc.status)
+        && withinQuotedWindow;
+    }
+
+    if (selectedOption && !alreadyOnSlot) {
       try {
         await SmartRebooker.reschedule(
           pending.scheduled_service_id, selectedOption.date,

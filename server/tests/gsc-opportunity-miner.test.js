@@ -438,6 +438,16 @@ describe('deriveLinkBoost', () => {
     expect(opp.action_type).toBe('add_internal_links');
   });
 
+  test('the occupied-keys loader counts sticky-SKIPPED rows too (Codex round 4 — skipped keys re-consumed cap slots every mine)', () => {
+    // With skipped sticky in the upsert, a skipped link-boost key that is
+    // not excluded gets re-derived every mine, burns one of the
+    // LINK_BOOST_MAX_PER_RUN slots, and persists right back as skipped —
+    // enough skipped top pages starve the lane entirely.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(src).toMatch(/whereIn\('status', \['claimed', 'done', 'pending_review', 'skipped'\]\)/);
+  });
+
   test('excludeKeys rotates the cap past occupied rows instead of starving lower-scoring pages', () => {
     const parents = [
       ctrParent({ page_url: '/a/', score: 95 }),

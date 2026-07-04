@@ -143,6 +143,16 @@ async function createPr({ head, base, title, body }) {
   });
 }
 
+// The open PR whose head is `branch`, or null. Used by publishAstro's
+// failure path: a createPr CALL that threw may still have created the PR
+// (ghFetch retries POSTs on 5xx, and a timeout can land after creation),
+// and the caller must not delete the head branch of a live PR.
+async function findOpenPrByHead(branch) {
+  const { owner, repo } = env();
+  const out = await ghFetch(`/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`);
+  return Array.isArray(out) && out.length ? out[0] : null;
+}
+
 async function createIssueComment(number, body) {
   const { owner, repo } = env();
   return ghFetch(`/repos/${owner}/${repo}/issues/${number}/comments`, {
@@ -231,6 +241,7 @@ module.exports = {
   getBranchSha,
   createBranch,
   createPr,
+  findOpenPrByHead,
   createIssueComment,
   ghFetchPaginated,
   listIssueComments,
