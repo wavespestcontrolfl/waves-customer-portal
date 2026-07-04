@@ -68,6 +68,8 @@ export default function BrandFooter({ borderColor, variant }) {
           <a href={`mailto:${CONTACT_EMAIL}`} style={{ color: B.navy, textDecoration: 'none', fontWeight: 500 }}>{CONTACT_EMAIL}</a>
           <span aria-hidden="true" style={{ margin: '0 8px', color: B.grayMid }}>·</span>
           <a href={`tel:${CONTACT_PHONE_TEL}`} style={{ color: B.navy, textDecoration: 'none', fontWeight: 500 }}>{CONTACT_PHONE_DISPLAY}</a>
+          <span aria-hidden="true" style={{ margin: '0 8px', color: B.grayMid }}>·</span>
+          <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={{ color: B.navy, textDecoration: 'none', fontWeight: 500 }}>wavespestcontrol.com</a>
         </div>
         <div style={{ fontSize: 11, color: B.grayMid }}>© {new Date().getFullYear()} Waves Pest Control, LLC · All rights reserved</div>
       </div>

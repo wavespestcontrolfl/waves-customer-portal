@@ -7,6 +7,7 @@
  * broken or empty.
  */
 import { useEffect, useRef, useState } from 'react';
+import { estimateCard, estimateInnerBox } from './cardStyles';
 
 const W = {
   blueDeeper: '#1B2C5B', yellow: '#FFD700',
@@ -15,7 +16,13 @@ const W = {
 };
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const PAGE_SIZE = 3;
+// 3 reviews per page on desktop, 2 on phones (owner directive) — the
+// dots pager scrolls the rest.
+const MOBILE_MAX_WIDTH = 640;
+function pageSizeForViewport() {
+  if (typeof window === 'undefined') return 3;
+  return window.innerWidth <= MOBILE_MAX_WIDTH ? 2 : 3;
+}
 const ROTATE_MS = 6000;
 
 // Same three GBP profiles the server-rendered page falls back to.
@@ -42,10 +49,7 @@ function Stars({ rating }) {
 
 function ReviewCard({ review }) {
   return (
-    <div style={{
-      background: W.white, border: `1px solid ${W.warmBorder}`, borderRadius: 10,
-      padding: 16, display: 'flex', flexDirection: 'column', minHeight: 150,
-    }}>
+    <div style={estimateInnerBox({ padding: 16, display: 'flex', flexDirection: 'column', minHeight: 150 })}>
       <Stars rating={review.starRating} />
       <p style={{
         fontSize: 13, margin: '0 0 12px', lineHeight: 1.55, color: W.textBody,
@@ -71,7 +75,20 @@ function ReviewCard({ review }) {
 export default function CustomerReviews() {
   const [reviews, setReviews] = useState(null);
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(pageSizeForViewport);
   const timerRef = useRef(null);
+
+  useEffect(() => {
+    const onResize = () => {
+      const next = pageSizeForViewport();
+      setPageSize((prev) => {
+        if (prev !== next) setPage(0);
+        return next;
+      });
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -86,7 +103,7 @@ export default function CustomerReviews() {
     return () => { cancelled = true; };
   }, []);
 
-  const pageCount = reviews ? Math.max(1, Math.ceil(reviews.length / PAGE_SIZE)) : 1;
+  const pageCount = reviews ? Math.max(1, Math.ceil(reviews.length / pageSize)) : 1;
 
   useEffect(() => {
     if (!reviews || pageCount <= 1) return undefined;
@@ -106,15 +123,18 @@ export default function CustomerReviews() {
 
   if (!reviews) return null;
 
-  const start = page * PAGE_SIZE;
-  const visibleCount = Math.min(PAGE_SIZE, reviews.length);
+  const start = page * pageSize;
+  const visibleCount = Math.min(pageSize, reviews.length);
   const visible = Array.from({ length: visibleCount }, (_, offset) => reviews[(start + offset) % reviews.length]);
 
   return (
-    <section style={{
-      background: W.white, borderRadius: 14, padding: 24,
-      border: `1px solid ${W.warmBorder}`, marginBottom: 16,
-    }}>
+    <section style={estimateCard()}>
+      <div style={{
+        fontSize: 12, fontWeight: 700, color: W.textCaption,
+        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6,
+      }}>
+        Reviews
+      </div>
       <h2 style={{
         fontFamily: "'Source Serif 4', Georgia, serif",
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,

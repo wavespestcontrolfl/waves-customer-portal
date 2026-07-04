@@ -12,6 +12,7 @@
  */
 import { useEffect, useId, useRef, useState } from 'react';
 import WavesAIScheduleSearch from '../booking/WavesAIScheduleSearch';
+import { estimateCard, ESTIMATE_INNER_SHADOW } from './cardStyles';
 
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -22,25 +23,29 @@ const W = {
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-function formatSlotDate(date, windowStart, windowEnd) {
+// The arrival window promised to the customer is 2 HOURS from the slot start
+// (owner directive; matches the window_start + 2h promise the late detector
+// enforces). slot.windowEnd is the JOB block that sizes scheduling/overlap —
+// never show it as the arrival window.
+const ARRIVAL_WINDOW_MINUTES = 120;
+
+function formatSlotDate(date, windowStart) {
   try {
     const d = new Date(date + 'T' + (windowStart || '00:00') + ':00');
     const day = d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
-    const fmtT = (t) => {
-      if (!t) return '';
-      const [h, m] = String(t).split(':').map(Number);
-      const dt = new Date();
-      dt.setHours(h, m, 0, 0);
-      return dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-    };
-    return { day, window: `${fmtT(windowStart)}–${fmtT(windowEnd)}` };
+    const [h, m] = String(windowStart || '0:00').split(':').map(Number);
+    const startDt = new Date();
+    startDt.setHours(h, m, 0, 0);
+    const endDt = new Date(startDt.getTime() + ARRIVAL_WINDOW_MINUTES * 60000);
+    const fmtT = (dt) => dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    return { day, window: `${fmtT(startDt)}–${fmtT(endDt)}` };
   } catch {
-    return { day: date, window: `${windowStart}–${windowEnd}` };
+    return { day: date, window: String(windowStart || '') };
   }
 }
 
 function SlotCard({ slot, isSelected, onSelect }) {
-  const { day, window } = formatSlotDate(slot.date, slot.windowStart, slot.windowEnd);
+  const { day, window } = formatSlotDate(slot.date, slot.windowStart);
   const startTime = String(window || '').split('–')[0] || window;
 
   return (
@@ -53,6 +58,7 @@ function SlotCard({ slot, isSelected, onSelect }) {
         color: isSelected ? W.white : W.blueDeeper,
         border: `2px solid ${isSelected ? W.blueDeeper : W.border}`,
         borderRadius: 12, padding: '14px 16px',
+        boxShadow: ESTIMATE_INNER_SHADOW,
         cursor: 'pointer', marginBottom: 10,
         display: 'flex', flexDirection: 'column', gap: 4,
         transition: 'border-color 160ms ease, background 160ms ease, color 160ms ease',
@@ -69,7 +75,7 @@ function SlotCard({ slot, isSelected, onSelect }) {
           background: isSelected ? 'rgba(255,255,255,.16)' : W.greenLight, padding: '4px 8px', borderRadius: 999,
           alignSelf: 'flex-start',
         }}>
-          Nearby day — {slot.techFirstName || 'tech'} is servicing a property close to you
+          Nearby day — a tech is servicing a property close to you
         </div>
       ) : null}
     </button>
@@ -153,6 +159,15 @@ export default function SlotPicker({
     return { summary: body.summary };
   };
 
+  const clearFinder = () => {
+    latestPickedRequestRef.current += 1;
+    setSearchData(null);
+    setPickedDate(null);
+    setPickedData(null);
+    setPickedLoading(false);
+    onSelect(null);
+  };
+
   const onPickDate = async (date) => {
     const requestId = latestPickedRequestRef.current + 1;
     latestPickedRequestRef.current = requestId;
@@ -219,10 +234,25 @@ export default function SlotPicker({
     <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
       <WavesAIScheduleSearch
         theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.border, surface: W.white, inputBg: W.offWhite }}
+        showEyebrow={false}
+        subtitle={null}
         onSearch={runAiSearch}
       />
       {searchData ? <div>{renderSlotList(searchData)}</div> : null}
-      <div style={{ border: `1px solid ${W.border}`, borderRadius: 12, padding: 14, background: W.offWhite }}>
+      {searchData || pickedData ? (
+        <button
+          type="button"
+          onClick={clearFinder}
+          style={{
+            justifySelf: 'start', background: 'transparent', border: 'none', padding: 0,
+            color: W.blueDeeper, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+            textDecoration: 'underline', textUnderlineOffset: 3,
+          }}
+        >
+          Clear search — show the soonest openings
+        </button>
+      ) : null}
+      <div style={{ border: `1px solid ${W.border}`, borderRadius: 12, padding: 14, background: W.white, boxShadow: ESTIMATE_INNER_SHADOW }}>
         <label htmlFor={pickedDateInputId} style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
           Can't find a date? Pick one that works for you.
         </label>
@@ -235,7 +265,7 @@ export default function SlotPicker({
           value={pickedDate || ''}
           onChange={(e) => onPickDate(e.target.value)}
           style={{
-            width: '100%', border: `1px solid ${W.border}`, borderRadius: 10,
+            width: '100%', boxSizing: 'border-box', border: `1px solid ${W.border}`, borderRadius: 10,
             padding: '12px 14px', fontSize: 15, color: W.navy, background: W.white,
           }}
         />
@@ -250,7 +280,7 @@ export default function SlotPicker({
 
   if (loading) {
     return (
-      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16, color: W.textCaption, fontSize: 14 }}>
+      <div style={estimateCard({ color: W.textCaption, fontSize: 14 })}>
         Loading available times…
       </div>
     );
@@ -258,7 +288,7 @@ export default function SlotPicker({
 
   if (error) {
     return (
-      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+      <div style={estimateCard()}>
         <div style={{ fontSize: 14, color: W.textBody }}>
           Couldn't load times right now. <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call (941) 297-5749</a> and we'll get you scheduled.
         </div>
@@ -276,8 +306,15 @@ export default function SlotPicker({
   const heading = (
     <>
       <div style={{
-        fontSize: 22,
-        fontWeight: 600,
+        fontSize: 12, fontWeight: 700, color: W.textCaption,
+        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6,
+      }}>
+        Schedule your visit
+      </div>
+      <div style={{
+        fontFamily: "'Source Serif 4', Georgia, serif",
+        fontSize: 24,
+        fontWeight: 500,
         color: W.blueDeeper,
         letterSpacing: 0,
         lineHeight: 1.2,
@@ -293,7 +330,7 @@ export default function SlotPicker({
 
   if (allSlots.length === 0) {
     return (
-      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+      <div style={estimateCard()}>
         {heading}
         {finder}
         <div style={{ fontSize: 14, color: W.textBody }}>
@@ -307,14 +344,14 @@ export default function SlotPicker({
   const more = allSlots.slice(INITIAL_VISIBLE, INITIAL_VISIBLE + 3);
 
   return (
-    <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+    <div style={estimateCard()}>
       {heading}
       {finder}
-      {initial.map((slot) => (
+      {searchData || pickedData || pickedLoading ? null : initial.map((slot) => (
         <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
       ))}
 
-      {more.length > 0 ? (
+      {(searchData || pickedData || pickedLoading) ? null : more.length > 0 ? (
         <>
           <button
             type="button"

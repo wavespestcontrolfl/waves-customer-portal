@@ -70,6 +70,31 @@ describe('SlotPicker', () => {
     expect(finderLabel.compareDocumentPosition(firstSlot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it('shows a 2-hour arrival window from the slot start, not the job block', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        // windowEnd is the 1-hour JOB block — the customer-facing arrival
+        // window is always start + 2h.
+        primary: [slot('initial', '2026-06-01', { windowStart: '09:00', windowEnd: '10:00' })],
+        expander: [],
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <SlotPicker
+        token="estimate-token"
+        selectedSlotId={null}
+        onSelect={vi.fn()}
+        refreshSignal={0}
+        serviceMode="recurring"
+        selectedFrequency="quarterly"
+      />,
+    );
+
+    expect(await screen.findByText(/Arrival window: 9:00 AM–11:00 AM/)).toBeInTheDocument();
+  });
+
   it('ignores stale picked-date availability responses', async () => {
     const firstDateFetch = deferred();
     const secondDateFetch = deferred();

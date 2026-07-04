@@ -2868,7 +2868,7 @@ describe('public estimate one-time breakdown', () => {
 
     // Hero + Waves AI card are Bora-Care-specific, not the generic/pest fallback.
     // (The hero apostrophe is HTML-escaped, so match without it.)
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
     expect(html).toContain('the Bora-Care application rate to price this treatment.');
     expect(html).not.toContain('choose your pest control option');
@@ -2975,7 +2975,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
     expect(html).not.toContain('30-day callback period if pests return');
     expect(html).not.toContain('class="mini-guarantee"');
@@ -3029,7 +3029,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
     // Hero treatment name comes from the normalized rows too, so the nested shape
@@ -3489,7 +3489,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).not.toContain('your termite trenching quote.');
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
   });
@@ -3748,7 +3748,7 @@ describe('public estimate one-time breakdown', () => {
       oneTimeChoicePrice: pricing.anchorOneTimePrice,
     }, estimateData);
 
-    expect(html).toContain('Hey Dana, choose your pest control option.');
+    expect(html).toContain('Hello Dana, your estimate is ready!');
     expect(html).toContain('<span class="num" id="onetime-display">$202</span>');
     expect(html).toContain('One-Time Pest Control');
     expect(html).not.toContain('One-time items (billed separately)');
@@ -5356,7 +5356,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your lawn care estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your lawn before pricing this estimate');
     expect(html).toContain('Grass type');
     expect(html).toContain('St. Augustine');
@@ -5508,7 +5508,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5568,7 +5568,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5634,7 +5634,7 @@ describe('public estimate one-time breakdown', () => {
       satelliteUrl: 'https://maps.example/mosquito-onetime.png',
     }, estimateData);
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5708,7 +5708,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('termite protection estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your termite perimeter before pricing this estimate');
     expect(html).toContain('Termite perimeter');
     expect(html).toContain('185 linear ft');

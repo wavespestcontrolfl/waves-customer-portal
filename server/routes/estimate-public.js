@@ -3234,7 +3234,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const hasOnlyBoraCareServices = hasOnlyBoraCareServiceMix(recurring, boraCareOneTimeRows);
   const pageCopy = hasOnlyLawnCareServices
     ? {
-        heroSuffix: "here's your lawn care estimate.",
         recurringAssurance: 'Your plan includes scheduled turf applications, visit notes, and treatment timing matched to Southwest Florida conditions.',
         aggregateDayLabel: 'lawn care',
         billingHeading: 'Choose how you want to pay',
@@ -3260,7 +3259,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       }
     : (hasOnlyMosquitoServices
       ? {
-          heroSuffix: "here's your mosquito control estimate.",
           recurringAssurance: 'Your plan targets shaded resting zones, lanai edges, and breeding-source pressure around your property.',
           aggregateDayLabel: 'mosquito control',
           billingHeading: 'Choose how you want to pay',
@@ -3286,7 +3284,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         }
       : (hasOnlyTreeShrubServices
         ? {
-          heroSuffix: "here's your tree & shrub estimate.",
           recurringAssurance: 'Your plan includes scheduled ornamental treatments, visit notes, and treatment timing matched to Southwest Florida conditions.',
           aggregateDayLabel: 'tree & shrub care',
           billingHeading: 'Choose how you want to pay',
@@ -3312,7 +3309,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         }
       : (hasOnlyTermiteBaitServices
         ? {
-            heroSuffix: "here's your termite protection estimate.",
             recurringAssurance: 'Your plan includes termite station service and treatment timing matched to your home perimeter.',
             aggregateDayLabel: 'termite protection',
             billingHeading: 'Choose how you want to pay',
@@ -3338,7 +3334,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           }
         : (hasOnlyTermiteTrenchingServices
           ? {
-              heroSuffix: "here's your termite trenching quote.",
               recurringAssurance: 'This trenching quote is based on the measured treatment path and office review.',
               aggregateDayLabel: 'termite trenching',
               billingHeading: 'Choose how you want to pay',
@@ -3364,7 +3359,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
             }
           : (hasOnlyBoraCareServices
             ? {
-                heroSuffix: "here's your Bora-Care wood treatment quote.",
                 recurringAssurance: 'This quote is based on the measured attic and surface wood areas treated with Bora-Care.',
                 aggregateDayLabel: 'Bora-Care wood treatment',
                 billingHeading: 'Choose how you want to pay',
@@ -3389,7 +3383,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 finalBody: 'No payment today.',
               }
             : {
-              heroSuffix: "here's your custom quote.",
               recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
               aggregateDayLabel: 'complete home protection',
               billingHeading: 'Choose how you want to pay',
@@ -4561,7 +4554,7 @@ ${shellTopBar()}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
-    <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : escapeHtml(pageCopy.heroSuffix)}</h1>
+    <h1>Hello ${firstName}, your estimate is ready!</h1>
     ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
     ${customerEmail ? `<div class="hero-contact">${customerEmail}</div>` : ''}
