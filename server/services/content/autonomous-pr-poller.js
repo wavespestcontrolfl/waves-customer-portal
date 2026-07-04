@@ -346,6 +346,28 @@ async function supersedeRun(run, queueRow) {
  *     IndexNow never pings a 404.
  */
 async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = null, mergedAt = null } = {}) {
+  // FIRST observation of the merge → persist astro_pr_merged_at before any
+  // pending return. finalize legitimately stays pending for the 30–45 min
+  // production deploy, and without a DB-visible marker the daily publish
+  // cap (which counted only completed_published) couldn't see merges in
+  // flight — a backlog could exceed the cap by one merge per tick until
+  // deploys caught up. whereNull keeps the first-observed time stable
+  // across the many pending re-polls. Covers human merges too (they also
+  // go live and consume the day's publish budget). Fail-soft: the marker
+  // is cap accounting — a write error must never block reconciliation
+  // (the cap just stays conservative-by-omission for that run, as before).
+  try {
+    const mergedAtMsRaw = mergedAt ? Date.parse(mergedAt) : NaN;
+    await db('autonomous_runs')
+      .where('id', run.id)
+      .whereNull('astro_pr_merged_at')
+      .update({
+        astro_pr_merged_at: Number.isFinite(mergedAtMsRaw) ? new Date(mergedAtMsRaw) : new Date(),
+        updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] astro_pr_merged_at stamp failed for run ${run.id}: ${err.message}`);
+  }
   // Fresh queue re-check at finalize time: the tick-start validation is
   // stale by now (GitHub lookup + live-URL gating take seconds), and an
   // operator requeue/dismiss landing in that window must win — never mark a
@@ -384,14 +406,23 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
   // closed and the next tick's PR re-fetch supplies merge_commit_sha/
   // merged_at.
   try {
-    const { latestSuccessfulProductionDeployment, deploymentCommitSha, deploymentTimestampMs } = require('../content-astro/pages-poll');
+    const { latestSuccessfulProductionDeployment, deploymentCommitSha, deploymentCreatedAtMs } = require('../content-astro/pages-poll');
     const prodDeploy = await latestSuccessfulProductionDeployment();
     const shaMatch = mergeSha && normalizeSha(deploymentCommitSha(prodDeploy)) === normalizeSha(mergeSha);
     const mergedAtMs = mergedAt ? Date.parse(mergedAt) : NaN;
-    const deployedAtMs = prodDeploy ? deploymentTimestampMs(prodDeploy) : null;
-    const CLOCK_SKEW_MS = 120000;
-    const timeMatch = Number.isFinite(mergedAtMs) && deployedAtMs != null
-      && deployedAtMs >= mergedAtMs - CLOCK_SKEW_MS;
+    // Compare the deploy's CREATION time, not its completion time: hub
+    // production builds take 30–45 min, so a deploy of a PRE-merge commit
+    // routinely FINISHES after the merge — the old completion-time window
+    // matched it and finalized the run (IndexNow + social share) on STALE
+    // content whenever two merges landed within one build window. A deploy
+    // CREATED at/after the merge necessarily clones a tree containing it
+    // (main is linear via squash merges). No negative clock-skew allowance:
+    // a deploy created moments before the merge doesn't contain it, and
+    // losing the merge's own deploy to sub-second skew only means staying
+    // parked until the next deploy (fail closed, self-heals).
+    const createdAtMs = prodDeploy ? deploymentCreatedAtMs(prodDeploy) : null;
+    const timeMatch = Number.isFinite(mergedAtMs) && createdAtMs != null
+      && createdAtMs >= mergedAtMs;
     if (!prodDeploy || (!shaMatch && !timeMatch)) {
       return { pending: true, reason: 'awaiting_production_deploy', url: target.url, autoMerged };
     }
@@ -582,6 +613,47 @@ async function maybeAutoMerge(run, pr) {
     return { pending: true, reason: 'spoke_blog_network_disabled' };
   }
 
+  // 2c. Daily publish cap — same env the runner's canary guard enforces at
+  //     PR-open time. The runner bounds how many PRs OPEN per ET day; this
+  //     bounds how many go LIVE per ET day, so a backlog of parked PRs
+  //     (older days, human-cleared Codex findings) can't all auto-merge on
+  //     the same afternoon. Capped runs stay parked for a human merge or
+  //     tomorrow's ticks; count errors fail closed (no merge this tick).
+  //     `>= 0`, matching the runner's zero-inclusive semantics: a cap of 0
+  //     is an ops freeze and must also stop the poller from draining parked
+  //     PRs (a `> 0` guard skipped the cap entirely at 0).
+  const maxPerDay = Number(process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY);
+  if (Number.isFinite(maxPerDay) && maxPerDay >= 0) {
+    const { parseETDateTime, etDateString } = require('../../utils/datetime-et');
+    const startOfEtDay = parseETDateTime(`${etDateString(new Date())}T00:00`);
+    // Two countable shapes, mutually exclusive by outcome:
+    //   - finalized publishes (completed_published stamped today), and
+    //   - merged-but-not-finalized runs: still parked at the pending
+    //     outcome but with astro_pr_merged_at stamped today by
+    //     finalizeMerged. Without these, every merge awaiting its 30–45
+    //     min production deploy was invisible to the cap and a backlog
+    //     could exceed it by one merge per 2-minute tick.
+    const row = await db('autonomous_runs')
+      .where('action_type', run.action_type)
+      .where('shadow_mode', false)
+      .where(function countable() {
+        this.where(function finalized() {
+          this.where('outcome', 'completed_published')
+            .where('completed_at', '>=', startOfEtDay);
+        }).orWhere(function mergedInFlight() {
+          this.where('outcome', PENDING_OUTCOME)
+            .whereIn('skip_reason', PENDING_SKIP_REASONS)
+            .where('astro_pr_merged_at', '>=', startOfEtDay);
+        });
+      })
+      .count('id as count')
+      .first();
+    if (Number(row?.count || 0) >= maxPerDay) {
+      logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id}: daily publish cap reached (${row.count}/${maxPerDay} ${run.action_type} today)`);
+      return { pending: true, reason: 'daily_publish_cap_reached' };
+    }
+  }
+
   // 3. Last-instant queue re-check: the gates above take seconds of network
   //    time, and the tick-start queue validation is stale by now. An
   //    operator requeue/dismiss landing in that window must block the merge
@@ -680,7 +752,15 @@ async function pollPending() {
       .where('outcome', PENDING_OUTCOME)
       .whereIn('skip_reason', PENDING_SKIP_REASONS)
       .whereNotNull('astro_pr_url')
-      .orderBy('claimed_at', 'asc')
+      // Random order, NOT claimed_at asc: parked runs (Codex-blocked, red
+      // build, awaiting a human) stay in this set indefinitely, so a fixed
+      // oldest-first order starves everything past the limit — once 25 runs
+      // are parked, a newly-merged newer PR would never be polled and never
+      // finalize (no IndexNow, no link planning, queue never completes).
+      // Random rotation guarantees every parked run is visited across ticks
+      // (every 2 min) with no schema change; with ≤25 parked it is identical
+      // coverage to before.
+      .orderByRaw('random()')
       .limit(25)
       .select('id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url', 'draft_payload', 'reviewer_notes', 'created_at');
   } catch (err) {

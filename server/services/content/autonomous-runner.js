@@ -2163,8 +2163,27 @@ class AutonomousRunner {
     const row = await db('autonomous_runs')
       .where('action_type', actionType)
       .where('shadow_mode', false)
-      .where('outcome', 'completed_published')
       .where('completed_at', '>=', since)
+      .where(function countable() {
+        this.where('outcome', 'completed_published')
+          // A run parked on an OPEN Astro PR is a publish in flight and must
+          // consume the cap at PR-open time: the blog lane NEVER produces
+          // 'completed_published' directly (the poller flips it after merge),
+          // so counting only that outcome made the daily/weekly caps a no-op
+          // for the main lane — one batch could open up to batchLimit PRs the
+          // same day and, with AUTONOMOUS_BLOG_AUTO_MERGE on, merge them all.
+          // Closed-unmerged / superseded runs rewrite skip_reason and drop
+          // back out of the count. astro_pr_url NOT NULL: a malformed
+          // adapter result can park with the pending reason but NO PR (the
+          // reviewer routes it manually) — that's not a publish in flight,
+          // and counting it would let one bad adapter response consume the
+          // whole day/week cap and block real publishes until it rolls over.
+          .orWhere(function prPending() {
+            this.where('outcome', 'completed_pending_review')
+              .whereIn('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge'])
+              .whereNotNull('astro_pr_url');
+          });
+      })
       .count('id as count')
       .first();
     return Number(row?.count || 0);

@@ -28,6 +28,7 @@ jest.mock('../services/content-astro/pages-poll', () => ({
   liveUrlResponds: jest.fn(),
   latestSuccessfulProductionDeployment: jest.fn(),
   deploymentTimestampMs: jest.fn(),
+  deploymentCreatedAtMs: jest.fn(),
 }));
 jest.mock('../services/content-astro/astro-publisher', () => ({
   assertCodexReviewClear: jest.fn(),
@@ -96,7 +97,7 @@ function makeMetadataRun(overrides = {}) {
 // overrides what the pre-merge .first() re-check sees (simulates an operator
 // action landing AFTER the tick-start snapshot). `briefs` backs the
 // content_briefs target_url fallback lookup.
-function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null } = {}) {
+function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null, publishedTodayCount = 0 } = {}) {
   const queueRows = queue !== undefined ? queue : pending
     .filter((r) => r.opportunity_id)
     .map((r) => ({ id: r.opportunity_id, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
@@ -114,11 +115,22 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         return q;
       }),
       whereNot: jest.fn(() => q),
+      whereNull: jest.fn(function (col) {
+        q._filters[`null:${col}`] = true;
+        return q;
+      }),
       whereNotNull: jest.fn(() => q),
       orderBy: jest.fn(() => q),
+      orderByRaw: jest.fn(() => q),
       limit: jest.fn(() => q),
+      count: jest.fn(function () { q._isCount = true; return q; }),
+      orWhere: jest.fn(() => q),
       select: jest.fn(() => Promise.resolve(table === 'opportunity_queue' ? queueRows : pending)),
       first: jest.fn(() => {
+        // maybeAutoMerge's daily publish-cap count on autonomous_runs.
+        if (q._isCount && table === 'autonomous_runs') {
+          return Promise.resolve({ count: publishedTodayCount });
+        }
         if (table === 'opportunity_queue') {
           if (queueFirst !== undefined) {
             return Promise.resolve(
@@ -147,19 +159,25 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
 }
 
 function runUpdates(updates) {
-  return updates.filter((u) => u.table === 'autonomous_runs');
+  // Run STATE transitions only — finalizeMerged's astro_pr_merged_at
+  // first-observation stamp (day-cap accounting, fires on every merged-PR
+  // observation) is filtered out so state assertions stay exact; the stamp
+  // has its own dedicated test in the daily-publish-cap suite.
+  return updates.filter((u) => u.table === 'autonomous_runs' && !('astro_pr_merged_at' in u.updates));
 }
 
 beforeEach(() => {
   // Default: merged targets respond live (production deploy already done).
   // Individual tests override to exercise the awaiting_live_deploy gate.
   pagesPoll.liveUrlResponds.mockResolvedValue(true);
-  // Default: a successful production deployment newer than any merge in
-  // these tests exists (timestamp 60s in the future of "now" covers the
-  // auto-merge path, whose mergedAt is stamped at merge time). Individual
-  // tests override to exercise the awaiting_production_deploy gate.
+  // Default: a successful production deployment CREATED after any merge in
+  // these tests exists (60s in the future of "now" covers the auto-merge
+  // path, whose mergedAt is stamped at merge time). The gate compares the
+  // deploy's CREATION time — a deploy created at/after the merge contains
+  // it; completion time is irrelevant. Individual tests override to
+  // exercise the awaiting_production_deploy gate.
   pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
-  pagesPoll.deploymentTimestampMs.mockImplementation(() => Date.now() + 60000);
+  pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
 });
 
 afterEach(() => {
@@ -814,8 +832,8 @@ describe('metadata_pr_pending_merge lane', () => {
       number: 42, state: 'closed', merged: true,
       merged_at: '2026-06-11T05:00:00Z', merge_commit_sha: 'mergesha1',
     });
-    // latest success is the PREVIOUS merge's deploy, an hour earlier
-    pagesPoll.deploymentTimestampMs.mockReturnValue(Date.parse('2026-06-11T04:00:00Z'));
+    // latest success is the PREVIOUS merge's deploy, CREATED an hour earlier
+    pagesPoll.deploymentCreatedAtMs.mockReturnValue(Date.parse('2026-06-11T04:00:00Z'));
     pagesPoll.deploymentCommitSha.mockReturnValue('someoldsha');
 
     const res = await poller.pollPending();
@@ -830,7 +848,7 @@ describe('metadata_pr_pending_merge lane', () => {
       number: 42, state: 'closed', merged: true,
       merged_at: '2026-06-11T05:00:00Z', merge_commit_sha: 'MergeSha1',
     });
-    pagesPoll.deploymentTimestampMs.mockReturnValue(null); // no usable timestamp
+    pagesPoll.deploymentCreatedAtMs.mockReturnValue(null); // no usable timestamp
     pagesPoll.deploymentCommitSha.mockReturnValue('mergesha1'); // case-insensitive match
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
 
@@ -972,5 +990,130 @@ describe('transient errors', () => {
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'unparseable_pr_url' });
     expect(gh.getPr).not.toHaveBeenCalled();
     expect(updates).toHaveLength(0);
+  });
+});
+
+describe('production-deploy gate compares deploy CREATION time (audit regression)', () => {
+  test('a deploy created BEFORE the merge that merely finished after it does NOT finalize', async () => {
+    // Hub builds take 30–45 min: the previous commit's deploy completing
+    // after this merge satisfied the old completion-time window and
+    // finalized the run (IndexNow + social) on stale content.
+    const updates = setupDb({ pending: [makeMetadataRun()] });
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'closed', merged: true,
+      merged_at: '2026-06-11T05:00:00Z', merge_commit_sha: 'mergesha1',
+    });
+    pagesPoll.deploymentCommitSha.mockReturnValue('someoldsha');
+    // Created 20 min pre-merge; (completion time is irrelevant to the gate.)
+    pagesPoll.deploymentCreatedAtMs.mockReturnValue(Date.parse('2026-06-11T04:40:00Z'));
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_production_deploy' });
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('a deploy created at/after the merge finalizes', async () => {
+    const updates = setupDb({ pending: [makeMetadataRun()] });
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'closed', merged: true,
+      merged_at: '2026-06-11T05:00:00Z', merge_commit_sha: 'mergesha1',
+    });
+    pagesPoll.deploymentCommitSha.mockReturnValue('someoldsha');
+    pagesPoll.deploymentCreatedAtMs.mockReturnValue(Date.parse('2026-06-11T05:00:30Z'));
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].merged).toBe(true);
+    expect(runUpdates(updates)[0].updates).toMatchObject({ outcome: 'completed_published' });
+  });
+});
+
+describe('daily publish cap on auto-merge (audit regression — poller had no day cap)', () => {
+  afterEach(() => { delete process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY; });
+
+  function openPr() {
+    return { number: 42, state: 'open', merged: false, merged_at: null, title: 'Blog: Test Post', head: { ref: 'content/autonomous-test', sha: 'headsha1' } };
+  }
+
+  test('cap reached: green + Codex-clear PR stays parked, no merge', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = '1';
+    const updates = setupDb({ pending: [makeRun()], publishedTodayCount: 1 });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'daily_publish_cap_reached' });
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('under the cap: merge proceeds', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = '3';
+    setupDb({ pending: [makeRun()], publishedTodayCount: 2 });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true, sha: 'mergesha' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue({ url: CANONICAL, queued: 1, candidates: 1 });
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('a cap of 0 is an ops freeze: the poller must not drain parked PRs (Codex round 1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = '0';
+    // Zero publishes today — the old `> 0` guard skipped the cap entirely
+    // here, so a Codex-clean parked PR still auto-merged despite the freeze.
+    setupDb({ pending: [makeRun()], publishedTodayCount: 0 });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'daily_publish_cap_reached' });
+  });
+
+  test('finalizeMerged stamps astro_pr_merged_at on first observation (whereNull-guarded) so in-flight merges count against the cap (Codex round 1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({ pending: [makeRun()] });
+    // Merged PR whose production deploy hasn't landed: finalize stays
+    // pending, but the merge marker must already be persisted — it is the
+    // only DB-visible evidence the day cap can count during the 30–45 min
+    // deploy window.
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'closed', merged: true,
+      merged_at: '2026-06-11T05:00:00Z', merge_commit_sha: 'mergesha1',
+    });
+    pagesPoll.deploymentCreatedAtMs.mockReturnValue(Date.parse('2026-06-11T04:00:00Z')); // pre-merge deploy only
+    pagesPoll.deploymentCommitSha.mockReturnValue('someoldsha');
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_production_deploy' });
+    const stamp = updates.find((u) =>
+      u.table === 'autonomous_runs' && u.updates.astro_pr_merged_at instanceof Date);
+    expect(stamp).toBeDefined();
+    // first-observation only (stable across pending re-polls) and stamped
+    // with the PR's merged_at, not "now"
+    expect(stamp.filters['null:astro_pr_merged_at']).toBe(true);
+    expect(stamp.updates.astro_pr_merged_at.toISOString()).toBe('2026-06-11T05:00:00.000Z');
   });
 });

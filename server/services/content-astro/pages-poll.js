@@ -116,17 +116,22 @@ function deploymentMatchesMergedPost(deploy, post) {
   if (wantedSha && deployedSha) return wantedSha === deployedSha;
 
   const mergedAt = timestampMs(post.astro_merged_at);
-  const deployedAt = deploymentTimestampMs(deploy);
-  if (mergedAt == null || deployedAt == null) return false;
-  // Bounded window: at/after the merge (minus clock-skew tolerance) AND within
-  // a plausible build-completion window after it. The previous check had only
-  // the lower bound, so ANY later production deploy (a subsequent unrelated
-  // merge) matched and could flip this post live prematurely. Upper bound is
-  // generous (default 60m > the hub's 30–45m build lag) and env-tunable.
-  const SKEW_MS = 120000;
+  const createdAt = deploymentCreatedAtMs(deploy);
+  if (mergedAt == null || createdAt == null) return false;
+  // Bounded window on the deploy's CREATION time: at/after the merge AND
+  // within a plausible trigger window after it. Two prior bugs live here:
+  // (1) only a lower bound, so ANY later production deploy (a subsequent
+  // unrelated merge) matched and could flip this post live prematurely;
+  // (2) the completion timestamp was compared, so a deploy of a PRE-merge
+  // commit that merely FINISHED after the merge (builds take 30–45 min)
+  // matched too. A deploy CREATED at/after the merge necessarily clones a
+  // tree containing it (main is linear via squash merges). No negative
+  // clock-skew allowance: a deploy created moments BEFORE the merge doesn't
+  // contain it, and losing the merge's own deploy to sub-second skew just
+  // means waiting for the next tick/deploy (fail closed, self-heals).
   const maxAge = Number(process.env.CF_DEPLOY_MATCH_MAX_AGE_MS);
   const MAX_AGE_MS = Number.isFinite(maxAge) && maxAge > 0 ? maxAge : 3600000;
-  return deployedAt >= mergedAt - SKEW_MS && deployedAt <= mergedAt + MAX_AGE_MS;
+  return createdAt >= mergedAt && createdAt <= mergedAt + MAX_AGE_MS;
 }
 
 function deploymentCommitSha(deploy) {
@@ -145,6 +150,18 @@ function deploymentTimestampMs(deploy) {
   const metadata = deploy?.deployment_trigger?.metadata || {};
   return timestampMs(deploy?.modified_on)
     ?? timestampMs(deploy?.created_on)
+    ?? timestampMs(metadata.committed_on)
+    ?? timestampMs(metadata.commit_time);
+}
+
+// When a deploy was TRIGGERED — never modified_on. "Contains the merge"
+// reasoning must compare the merge time against when the deploy was created
+// (CF clones the repo after that), not when it finished: hub production
+// builds take 30–45 min, so a deploy of a PRE-merge commit routinely
+// COMPLETES after the merge and a completion-time window matches it.
+function deploymentCreatedAtMs(deploy) {
+  const metadata = deploy?.deployment_trigger?.metadata || {};
+  return timestampMs(deploy?.created_on)
     ?? timestampMs(metadata.committed_on)
     ?? timestampMs(metadata.commit_time);
 }
@@ -196,7 +213,15 @@ async function pollPost(post, { allowMerge = true } = {}) {
         }
         try {
           const { mergeAstro } = require('./astro-publisher');
-          await mergeAstro(post.id);
+          // Pin the merge to the commit this GREEN deploy was built from:
+          // latestDeploymentForBranch returns the newest deployment for the
+          // branch, which can still be an OLDER commit's build when a fresh
+          // push hasn't registered its deployment yet — without the pin, a
+          // green build of commit A would authorize merging commit B.
+          // deploymentCommitSha may be null (CF metadata missing) — mergeAstro
+          // treats null as "no build-commit assertion" and still enforces its
+          // own Codex-clear + head-pinned merge.
+          await mergeAstro(post.id, { expectHeadSha: deploymentCommitSha(deploy) });
           logger.info(`[pages-poll] auto-merged PR for ${post.slug || post.id} (preview build succeeded)`);
           return { ok: true, url, autoMerged: true };
         } catch (mergeErr) {
@@ -338,7 +363,9 @@ module.exports = {
   // Also reused by the poller: PR-backed publishes (including
   // new_supporting_blog, which can UPDATE an existing slug) must not
   // finalize until a successful production deploy contains the merge —
-  // exact merge-sha match, or latest success at/after merged_at.
+  // exact merge-sha match, or latest success CREATED at/after merged_at
+  // (deploymentCreatedAtMs, never the completion timestamp — see its note).
   latestSuccessfulProductionDeployment,
   deploymentTimestampMs,
+  deploymentCreatedAtMs,
 };

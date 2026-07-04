@@ -2188,3 +2188,105 @@ describe('publishMetadataRewrite casing-aware meta fields', () => {
     expect(String(data.updated)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
+
+describe('mergeAstro head pinning (audit regression — merge was not sha-pinned)', () => {
+  const HEAD_SHA = 'abcdef1234567890abcdef1234567890abcdef12';
+
+  function hubOnlyPost() {
+    return {
+      id: 'post-pin-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      astro_status: 'pr_open',
+      astro_pr_number: 42,
+      astro_branch_name: 'content/blog-ant-trails',
+    };
+  }
+
+  function mockHubOnlyBranchFile() {
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/ant-trails-bradenton.md' && ref === 'content/blog-ant-trails') {
+        return {
+          content: [
+            '---',
+            'title: Ant Trails in Bradenton',
+            'slug: /ant-trails-bradenton/',
+            'domains:',
+            '  - wavespestcontrol.com',
+            '---',
+            'Hub-only branch.',
+          ].join('\n'),
+        };
+      }
+      return null;
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE = 'false';
+  });
+  afterEach(() => { delete process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE; });
+
+  test('a clean merge is pinned to the exact head the gates vetted (sha param)', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
+    const queries = [read];
+    db.mockImplementation(() => queries.shift() || chain());
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'open', merged: false,
+      head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA },
+    });
+    mockHubOnlyBranchFile();
+    gh.listIssueComments.mockResolvedValue([{
+      user: { login: 'wavespestcontrolfl' },
+      body: `@codex review\n\nReady on head \`${HEAD_SHA}\`.`,
+      created_at: '2026-07-02T12:00:00Z',
+    }]);
+    gh.listPrReviews.mockResolvedValue([{
+      user: { login: 'chatgpt-codex-connector' },
+      body: "Codex Review: Didn't find any major issues.",
+      state: 'COMMENTED',
+      commit_id: HEAD_SHA,
+      submitted_at: '2026-07-02T12:05:00Z',
+    }]);
+    gh.mergePr.mockResolvedValue({ merged: true, sha: 'merge-commit-sha' });
+
+    const result = await AstroPublisher.mergeAstro('post-pin-1');
+
+    expect(result.merged).toBe(true);
+    // GitHub 409s the merge if the head moved after the gates ran — the pin
+    // is what makes the Codex/hub-only checks race-proof.
+    expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({ sha: HEAD_SHA }));
+  });
+
+  test('expectHeadSha mismatch (green build of an older commit) refuses to merge', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
+    const queries = [read];
+    db.mockImplementation(() => queries.shift() || chain());
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'open', merged: false,
+      head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA },
+    });
+
+    await expect(AstroPublisher.mergeAstro('post-pin-1', { expectHeadSha: '1111111111111111111111111111111111111111' }))
+      .rejects.toThrow(/no longer matches the verified build commit/);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+});
+
+describe('deploy-match window uses CREATION time, not completion (audit regression)', () => {
+  test('a deploy created before the merge that COMPLETED after it does not match', () => {
+    // Old code compared modified_on (completion): a 30–45 min build of the
+    // PREVIOUS commit finishing after this merge matched the window.
+    const deploy = {
+      environment: 'production',
+      latest_stage: { name: 'deploy', status: 'success' },
+      stages: [{ name: 'deploy', status: 'success' }],
+      created_on: '2026-05-08T12:40:00.000Z', // triggered pre-merge
+      modified_on: '2026-05-08T13:10:00.000Z', // finished post-merge
+      deployment_trigger: { metadata: { branch: 'main' } },
+    };
+    const post = { astro_merged_at: '2026-05-08T13:00:00.000Z' };
+    expect(PagesPoll.deploymentMatchesMergedPost(deploy, post)).toBe(false);
+  });
+});
