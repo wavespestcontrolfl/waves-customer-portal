@@ -1788,7 +1788,7 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] ${maskSid(callSid)}: pre-linked customer ${call.customer_id} is keyed on an internal number (${maskPhone(linked.phone)}) — phantom from forwarding-masked linking; treating call as unlinked`);
         call.customer_id = null;
         // Persist the unlink now, not just in memory: the terminal early exits
-        // below (no_transcription / extraction_failed / spam / voicemail / v2
+        // below (no_transcription / extraction_failed_retryable / spam / voicemail / v2
         // hard veto) write processing_status without touching customer_id, so an
         // in-memory-only clear would leave the phantom link on the row for any
         // call that takes one of those paths. The happy path re-stamps the real
@@ -1926,8 +1926,14 @@ const CallRecordingProcessor = {
       extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, deadlineSignal: runDeadlineSignal });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
+      // 'extraction_failed_retryable', NOT the legacy 'extraction_failed': this
+      // write happens before any side effects (no customer/lead/appointment/
+      // interaction rows exist yet), so processAllPending may safely re-enter
+      // it. The legacy name is reserved for pre-existing prod rows that the
+      // old whole-pipeline catch also wrote AFTER side effects — those are
+      // ambiguous and quarantined from the cron (manual reprocess only).
       await db('call_log').where({ id: call.id }).update({
-        processing_status: 'extraction_failed',
+        processing_status: 'extraction_failed_retryable',
         processing_token: null,
         processing_started_at: null,
         updated_at: new Date(),
@@ -3449,14 +3455,15 @@ const CallRecordingProcessor = {
     } catch (procErr) {
       logger.error(`[call-proc] Unhandled error processing ${callSid}: ${procErr.message}\n${procErr.stack || ''}`);
       try {
-        // Distinct from the pre-side-effect 'extraction_failed' status: this
-        // catch wraps the WHOLE pipeline, so it can fire after Step 3+ side
-        // effects (customer/lead/appointment/interaction rows) have already
-        // run. Those inserts are not all idempotent, so this state must NOT be
-        // auto-reselected by processAllPending — a blind cron rerun would
-        // duplicate them. 'processing_error' is a human-review terminal state
-        // (manual reprocess only); only the pre-extraction 'extraction_failed'
-        // rows, which have no side effects yet, are cron-retryable.
+        // Distinct from the pre-side-effect 'extraction_failed_retryable'
+        // status: this catch wraps the WHOLE pipeline, so it can fire after
+        // Step 3+ side effects (customer/lead/appointment/interaction rows)
+        // have already run. Those inserts are not all idempotent, so this
+        // state must NOT be auto-reselected by processAllPending — a blind
+        // cron rerun would duplicate them. 'processing_error' is a
+        // human-review terminal state (manual reprocess only); only the
+        // pre-extraction 'extraction_failed_retryable' rows, which have no
+        // side effects yet, are cron-retryable.
         //
         // Fence on processing_token (owner-only column). If the 10-min stale
         // reclaim handed the lock to a peer, the peer's claim overwrote our
@@ -3469,10 +3476,31 @@ const CallRecordingProcessor = {
             processing_status: 'processing_error',
             processing_token: null,
             processing_started_at: null,
+            review_status: 'open',
             updated_at: new Date(),
           });
         if (released === 0) {
           logger.warn(`[call-proc] Skipped lock release for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+        } else {
+          // Terminal-but-invisible is not acceptable: the cron will never
+          // reselect 'processing_error', and the Needs Review inbox is driven
+          // by triage_items rows (admin-triage.js), not call_log.review_status
+          // alone — without this insert the promised human review never sees
+          // the call. Same dedupe pattern as the other triage writes (partial
+          // unique index on open/in_progress items). Only written while we
+          // still own the lock, so a reclaiming peer can't get a duplicate.
+          try {
+            const errTriageItem = buildTriageItem({
+              callLogId: call.id,
+              flag: 'processing_error',
+              extraction: { meta: { call_summary: `Call processing failed after side effects may have run: ${procErr.message}`.slice(0, 500) } },
+            });
+            await db('triage_items').insert(errTriageItem)
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore();
+          } catch (triageErr) {
+            logger.warn(`[call-proc] processing_error triage item insert skipped for ${callSid}: ${triageErr.message}`);
+          }
         }
       } catch (releaseErr) {
         logger.error(`[call-proc] Failed to release lock for ${callSid}: ${releaseErr.message}`);
@@ -3492,13 +3520,20 @@ const CallRecordingProcessor = {
     //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
     //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
     //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly)
-    //   - processing_status='extraction_failed' but stale > 10 min. This status is written ONLY
-    //     at the pre-side-effect extraction step, so retrying it is safe (no customer/lead/
-    //     appointment rows exist yet to duplicate). A transient provider TIMEOUT during
-    //     extraction lands here, so it must re-enter the retry path to self-heal; the 10-min age
-    //     gate keeps a deterministically-failing transcript from re-billing the extraction model
-    //     every 5-min cron pass. Late/unknown pipeline failures use 'processing_error' instead
-    //     and are intentionally NOT reselected here (a rerun would duplicate side effects).
+    //   - processing_status='extraction_failed_retryable' but stale > 10 min. This status is
+    //     written ONLY at the pre-side-effect extraction step, so retrying it is safe (no
+    //     customer/lead/appointment rows exist yet to duplicate). A transient provider TIMEOUT
+    //     during extraction lands here, so it must re-enter the retry path to self-heal; the
+    //     10-min age gate keeps a deterministically-failing transcript from re-billing the
+    //     extraction model every 5-min cron pass. Late/unknown pipeline failures use
+    //     'processing_error' instead and are intentionally NOT reselected here (a rerun would
+    //     duplicate side effects). Legacy 'extraction_failed' rows are ALSO not reselected:
+    //     before the retryable/terminal split, the whole-pipeline catch wrote that same status
+    //     after side effects had possibly run, so pre-existing rows are ambiguous — retrying
+    //     them blind could duplicate customer/lead/appointment inserts. Using a NEW status name
+    //     for the retryable state (instead of migrating old rows) also keeps any row written by
+    //     a still-draining old-code instance during deploy overlap out of the retry pool.
+    //     Legacy rows keep their pre-existing behavior: manual reprocess only.
     //   - processing_status='processing' but stale > 10 min (orphaned claim from crash/hang)
     // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
     // with duration_seconds fallback, since the call-status webhook may not have populated
@@ -3506,32 +3541,7 @@ const CallRecordingProcessor = {
     const pending = await db('call_log')
       .where('recording_url', '!=', '')
       .whereNotNull('recording_url')
-      .where(function () {
-        this.where(function () {
-          // Fresh / waiting branches — only after the 10-min CDN-settle window.
-          // updated_at on these rows is the recording-status webhook timestamp
-          // (or the Twilio transcription webhook if that fired first); either
-          // way it tracks recording-land time, not call-start time, so it's a
-          // tighter gate than created_at for long calls.
-          this.where(function () {
-            this.whereNull('processing_status')
-              .orWhere('processing_status', 'pending')
-              .orWhere(function () {
-                this.where('transcription_status', 'pending').whereNull('transcription');
-              });
-          })
-          .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
-        })
-        .orWhere('processing_status', 'no_transcription')
-        .orWhere(function () {
-          this.where('processing_status', 'extraction_failed')
-            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
-        })
-        .orWhere(function () {
-          this.where('processing_status', 'processing')
-            .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
-        });
-      })
+      .where(pendingReprocessEligibility)
       .where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))
       .orderBy('created_at', 'desc')
       .limit(20);
@@ -3676,6 +3686,38 @@ const CallRecordingProcessor = {
   },
 };
 
+// The processAllPending reprocess pool — a knex where-callback, extracted so
+// tests can assert its SQL shape. Invariants (rationale in processAllPending):
+// selects the pre-side-effect 'extraction_failed_retryable' status and must
+// NEVER select the legacy ambiguous 'extraction_failed' or the terminal
+// 'processing_error' — both can sit on rows whose side effects already ran.
+function pendingReprocessEligibility() {
+  this.where(function () {
+    // Fresh / waiting branches — only after the 10-min CDN-settle window.
+    // updated_at on these rows is the recording-status webhook timestamp
+    // (or the Twilio transcription webhook if that fired first); either
+    // way it tracks recording-land time, not call-start time, so it's a
+    // tighter gate than created_at for long calls.
+    this.where(function () {
+      this.whereNull('processing_status')
+        .orWhere('processing_status', 'pending')
+        .orWhere(function () {
+          this.where('transcription_status', 'pending').whereNull('transcription');
+        });
+    })
+    .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+  })
+  .orWhere('processing_status', 'no_transcription')
+  .orWhere(function () {
+    this.where('processing_status', 'extraction_failed_retryable')
+      .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+  })
+  .orWhere(function () {
+    this.where('processing_status', 'processing')
+      .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+  });
+}
+
 CallRecordingProcessor._test = {
   canonicalWavesService,
   referrerNameFromExtracted,
@@ -3699,6 +3741,7 @@ CallRecordingProcessor._test = {
   extractCallDataV2,
   normalizeOpenAISegments,
   fetchWithTimeout,
+  pendingReprocessEligibility,
 };
 
 module.exports = CallRecordingProcessor;

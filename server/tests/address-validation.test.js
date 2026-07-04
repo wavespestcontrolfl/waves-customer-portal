@@ -139,3 +139,74 @@ describe('validateAddress deadline handling', () => {
     expect(res.status).toBe(STATUSES.API_UNAVAILABLE);
   });
 });
+
+describe('reverse geocode timeout budget', () => {
+  const realFetch = global.fetch;
+  const realEnabled = process.env.ADDRESS_VALIDATION_ENABLED;
+  const realKey = process.env.GOOGLE_API_KEY;
+
+  beforeEach(() => {
+    process.env.ADDRESS_VALIDATION_ENABLED = 'true';
+    process.env.GOOGLE_API_KEY = 'test-key';
+  });
+  afterEach(() => {
+    global.fetch = realFetch;
+    if (realEnabled === undefined) delete process.env.ADDRESS_VALIDATION_ENABLED;
+    else process.env.ADDRESS_VALIDATION_ENABLED = realEnabled;
+    if (realKey === undefined) delete process.env.GOOGLE_API_KEY;
+    else process.env.GOOGLE_API_KEY = realKey;
+  });
+
+  const AV_RESULT = {
+    result: {
+      verdict: { addressComplete: true, validationGranularity: 'PREMISE' },
+      address: {
+        addressComponents: [
+          { componentType: 'street_number', componentName: { text: '17451' } },
+          { componentType: 'route', componentName: { text: 'Florida 62' } },
+          { componentType: 'locality', componentName: { text: 'Parrish' } },
+          { componentType: 'administrative_area_level_1', componentName: { text: 'FL' } },
+          { componentType: 'postal_code', componentName: { text: '34219' } },
+        ],
+      },
+      geocode: { location: { latitude: 27.58, longitude: -82.42 } },
+    },
+    responseId: 'resp-1',
+  };
+  const GEO_RESULT = {
+    results: [{ address_components: [{ types: ['administrative_area_level_2'], long_name: 'Manatee County' }] }],
+  };
+
+  // The AV POST's 30s AbortSignal.timeout starts ticking before the request;
+  // if the reverse geocode reused it, a slow first call would leave the
+  // geocode a near-zero budget — it aborts instantly, county comes back null,
+  // and a valid in-area address silently downgrades to confirm_needed. The
+  // geocode must get its OWN fresh per-call cap while still honoring the
+  // caller's run deadline.
+  test('reverse geocode gets a fresh signal, still bound by the caller deadline', async () => {
+    const caller = new AbortController();
+    const seen = [];
+    global.fetch = async (url, opts = {}) => {
+      seen.push({ url: String(url), signal: opts.signal });
+      if (String(url).includes('addressvalidation.googleapis.com')) {
+        return { ok: true, json: async () => AV_RESULT };
+      }
+      // Reverse geocode: fresh budget (not the AV POST's spent signal), and
+      // the caller's run deadline must still propagate into it.
+      expect(opts.signal).not.toBe(seen[0].signal);
+      expect(opts.signal.aborted).toBe(false);
+      caller.abort();
+      expect(opts.signal.aborted).toBe(true);
+      return { ok: true, json: async () => GEO_RESULT };
+    };
+
+    const res = await validateAddress({
+      addressLines: ['17451 State Road 62', 'Parrish FL 34219'],
+      signal: caller.signal,
+    });
+    expect(seen).toHaveLength(2);
+    expect(seen[1].url).toContain('maps.googleapis.com');
+    expect(res.county).toBe('Manatee County');
+    expect(res.status).toBe(STATUSES.VALIDATED_ACCEPT);
+  });
+});

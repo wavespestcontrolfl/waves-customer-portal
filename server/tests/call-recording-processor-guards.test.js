@@ -1245,3 +1245,43 @@ describe('fetchWithTimeout (provider deadline)', () => {
     ).rejects.toThrow(/over budget request timed out \(run deadline\)/);
   });
 });
+
+describe('processAllPending reprocess pool (retry-eligibility SQL shape)', () => {
+  const { pendingReprocessEligibility } = CallRecordingProcessor._test;
+  const knex = require('knex');
+  const qb = knex({ client: 'pg' });
+  afterAll(() => qb.destroy());
+
+  test('retries only the pre-side-effect extraction_failed_retryable status', () => {
+    const sql = qb('call_log').where(pendingReprocessEligibility).toString();
+    expect(sql).toContain("'extraction_failed_retryable'");
+  });
+
+  test('never reselects legacy extraction_failed or terminal processing_error', () => {
+    // Legacy 'extraction_failed' rows predate the retryable/terminal split:
+    // the old whole-pipeline catch wrote that status after side effects had
+    // possibly run, so a cron rerun could duplicate customer/lead/appointment
+    // inserts. 'processing_error' is the post-side-effect terminal state.
+    // Both must stay quarantined to manual reprocess only.
+    const sql = qb('call_log').where(pendingReprocessEligibility).toString();
+    expect(sql).not.toMatch(/'extraction_failed'/);
+    expect(sql).not.toMatch(/'processing_error'/);
+  });
+});
+
+describe('processing_error triage routing (buildTriageItem)', () => {
+  const { buildTriageItem } = require('../services/call-routing-gates');
+
+  test('maps to an open, blocking service_unknown item with the error summary', () => {
+    const item = buildTriageItem({
+      callLogId: 42,
+      flag: 'processing_error',
+      extraction: { meta: { call_summary: 'Call processing failed after side effects may have run: boom' } },
+    });
+    expect(item.category).toBe('service_unknown');
+    expect(item.severity).toBe('blocking');
+    expect(item.status).toBe('open');
+    expect(item.reason_code).toBe('processing_error');
+    expect(item.summary).toMatch(/boom/);
+  });
+});

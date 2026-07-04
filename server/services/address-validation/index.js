@@ -163,7 +163,13 @@ async function validateAddress({ addressLines, regionCode = 'US', signal = null 
       return { status: STATUSES.API_UNAVAILABLE, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false };
     }
     const data = await res.json();
-    const county = await reverseGeocodeCounty(data.result?.geocode?.location, key, abortSignal);
+    // Fresh requestSignal, NOT the abortSignal above: that timer started
+    // before the validateAddress POST, so by now most of its 30s may be
+    // spent and the reverse geocode would abort near-instantly — swallowed
+    // as county=null, which downgrades otherwise-valid in-area addresses to
+    // confirm_needed. Reverse geocoding gets its own per-call cap; the
+    // caller's run deadline still applies through `signal`.
+    const county = await reverseGeocodeCounty(data.result?.geocode?.location, key, requestSignal(signal));
     const out = deriveStatus(data.result, county);
     out.providerResponseId = data.responseId || null;
     return out;
