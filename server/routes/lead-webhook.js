@@ -186,7 +186,20 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // widget posts (cf-turnstile-response), so a form that renders the widget
     // without remapping still verifies instead of 403-ing after rollout (codex P1).
     const turnstileToken = body && (body.turnstile_token || body['cf-turnstile-response']);
-    const turnstile = await verifyTurnstileToken(turnstileToken, req.ip);
+    // Resolve the submitting host so verify() can select the token's OWNING
+    // widget secret and call siteverify exactly once — Turnstile tokens are
+    // single-use, so probing other widgets' secrets would spend the token (codex
+    // P1). Origin/Referer are browser-set and reliable on the cross-origin POST
+    // from the astro fleet; fall back to the page URL we already capture.
+    const hostFromUrl = (u) => { try { return new URL(u).hostname.toLowerCase(); } catch (_e) { return ''; } };
+    const submitHost =
+      hostFromUrl(req.headers.origin)
+      || hostFromUrl(req.headers.referer)
+      || hostFromUrl(body && body.page_url)
+      || hostFromUrl(body && body.landing_url)
+      || hostFromUrl(body && body.attribution && body.attribution.landing_url)
+      || (body && typeof body.domain === 'string' ? body.domain.toLowerCase() : '');
+    const turnstile = await verifyTurnstileToken(turnstileToken, req.ip, submitHost);
     if (!turnstile.ok) {
       logger.info(
         `[lead-webhook] turnstile ${turnstile.reason} ` +
