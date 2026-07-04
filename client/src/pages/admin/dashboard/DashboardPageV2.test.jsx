@@ -146,6 +146,15 @@ const FIXTURES = {
     total_overdue: 2410,
   },
   "/admin/dashboard/mrr-trend": { trend: [], avg_growth_pct: 7 },
+  "/admin/dashboard/churn-reasons": {
+    period: { from: "2025-08-01", months: 12 },
+    reasons: [
+      { code: "price", label: "Price", customers: 4, mrr: 380, mrrShare: 54.3, cumulativePct: 54.3 },
+      { code: "unclassified", label: "Unclassified", customers: 3, mrr: 320, mrrShare: 45.7, cumulativePct: 100 },
+    ],
+    totals: { customers: 7, mrr: 700 },
+    unclassifiedShare: 42.9,
+  },
   "/admin/dashboard/mrr-bridge": {
     months: [
       {
@@ -327,6 +336,13 @@ describe("DashboardPageV2 sections", () => {
     // Net-MRR bridge: month strip + waterfall rows + in-progress flag
     expect(document.getElementById("retention")).toContainElement(
       screen.getByText("MRR Bridge"),
+    );
+    // Churn Pareto card + always-visible unclassified share
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("Why Customers Leave"),
+    );
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("42.9% unclassified"),
     );
     expect(document.getElementById("retention")).toContainElement(
       screen.getByText("Churned"),
