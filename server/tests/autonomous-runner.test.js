@@ -947,6 +947,13 @@ function loadRunnerWith({
   // protected-page guard (which now also runs for in-place editors like
   // rewrite_title_meta). Protection-specific tests pass their own mock.
   protectedPages = { isProtected: jest.fn().mockResolvedValue({ protected: false }) },
+  factsSufficiency = null,
+  // undefined = real module; the string 'unavailable' = simulate a module
+  // LOAD failure (the doMock factory throws, so the runner's lazy() require
+  // catches it and returns null); an object = plain mock.
+  contentGuardrails = undefined,
+  comparisonTableGate = undefined,
+  claimsLedgerValidator = undefined,
 }) {
   jest.resetModules();
   const dbMock = jest.fn(() => {
@@ -971,6 +978,18 @@ function loadRunnerWith({
   if (linkPlanner) jest.doMock('../services/content/internal-link-planner', () => linkPlanner);
   if (internalLinkExecutor) jest.doMock('../services/content/internal-link-pr-executor', () => internalLinkExecutor);
   if (protectedPages) jest.doMock('../services/content/protected-pages', () => protectedPages);
+  if (factsSufficiency) jest.doMock('../services/content/facts-sufficiency', () => factsSufficiency);
+  const mockOrLoadFail = (path, value) => {
+    // doMock registrations survive jest.resetModules(), so an earlier test's
+    // throwing factory would leak into later tests — explicitly restore the
+    // real module when no mock is requested.
+    if (value === undefined) { jest.dontMock(path); return; }
+    if (value === 'unavailable') jest.doMock(path, () => { throw new Error('module load failed'); });
+    else jest.doMock(path, () => value);
+  };
+  mockOrLoadFail('../services/content/content-guardrails', contentGuardrails);
+  mockOrLoadFail('../services/content/comparison-table-gate', comparisonTableGate);
+  mockOrLoadFail('../services/content/claims-ledger-validator', claimsLedgerValidator);
   return require('../services/content/autonomous-runner');
 }
 
@@ -2288,5 +2307,112 @@ describe('approveAndPublishNamedCompetitor — stale named-competitor run guard'
     const runner = dbReturning([runB, runB]); // by-id → B, latest-parked → B (same)
     await expect(runner.approveAndPublishNamedCompetitor(7, { runId: 2 }))
       .rejects.toMatchObject({ statusCode: 422 }); // got past the stale-run guard
+  });
+});
+
+describe('gate module-load failures fail CLOSED (regression — these silently skipped)', () => {
+  const claimedAt = new Date('2026-07-02T13:00:00Z');
+  const makeQueue = (oppId) => ({
+    claimNext: jest.fn().mockResolvedValue({ id: oppId, action_type: 'new_supporting_blog', claimed_at: claimedAt }),
+    complete: jest.fn().mockResolvedValue(true),
+    pendingReview: jest.fn().mockResolvedValue(true),
+    release: jest.fn().mockResolvedValue(true),
+  });
+  const makeBriefBuilder = () => ({
+    compose: jest.fn().mockResolvedValue({
+      id: 'brief_gate_unavail',
+      action_type: 'new_supporting_blog',
+      page_type: 'supporting-blog',
+      human_review_required: false,
+    }),
+  });
+  const makeDispatcher = () => ({
+    runWithBrief: jest.fn().mockResolvedValue({
+      ok: true,
+      draft: { url: '/blog/gate-unavailable/', title: 'Gate Unavailable Post', body: 'Benign copy about seasonal ant pressure in Southwest Florida homes.' },
+    }),
+  });
+
+  test('content-guardrails load failure routes to review instead of skipping the price/brand/FAQ/link P0s', async () => {
+    const queue = makeQueue('opp_guardrails_unavail');
+    const publisher = { publishOrUpdatePage: jest.fn() };
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder: makeBriefBuilder(),
+      dispatcher: makeDispatcher(),
+      publisher,
+      contentGuardrails: 'unavailable',
+    });
+    const result = await runner.runNext();
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('content_guardrails_unavailable');
+    expect(result.content_guardrails_result).toMatchObject({ pass: false });
+    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_guardrails_unavail', 'content_guardrails_unavailable', { claimToken: claimedAt });
+  });
+
+  test('comparison-table-gate load failure routes to review instead of skipping the disparagement checks', async () => {
+    const queue = makeQueue('opp_comparison_unavail');
+    const publisher = { publishOrUpdatePage: jest.fn() };
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder: makeBriefBuilder(),
+      dispatcher: makeDispatcher(),
+      publisher,
+      comparisonTableGate: 'unavailable',
+    });
+    const result = await runner.runNext();
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('comparison_table_unavailable');
+    expect(result.comparison_table_result).toMatchObject({ pass: false });
+    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_comparison_unavail', 'comparison_table_unavailable', { claimToken: claimedAt });
+  });
+
+  test('claims-ledger-validator load failure on a facts-sufficient draft routes to review', async () => {
+    const queue = makeQueue('opp_claims_unavail');
+    const publisher = { publishOrUpdatePage: jest.fn() };
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder: makeBriefBuilder(),
+      dispatcher: makeDispatcher(),
+      publisher,
+      factsSufficiency: {
+        check: jest.fn().mockResolvedValue({ applicable: true, sufficient: true, city_id: 'venice', service_id: 'pest', county: 'sarasota' }),
+      },
+      claimsLedgerValidator: 'unavailable',
+    });
+    const result = await runner.runNext();
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('claims_ledger_unavailable');
+    expect(result.claims_ledger_result).toMatchObject({ pass: false });
+    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_claims_unavail', 'claims_ledger_unavailable', { claimToken: claimedAt });
+  });
+});
+
+describe('operator brief text for the comparison gate includes sourcing fields (Codex round 14)', () => {
+  const { operatorBriefTextForComparisonGate, OPERATOR_INTERCEPT_BUCKET } = require('../services/content/autonomous-runner')._internals;
+
+  test('required_sources URLs and source_notes authorize the competitor they name', () => {
+    // A required https://www.orkin.com/... citation must authorize "orkin"
+    // exactly like naming it in the title/outline — otherwise the binding
+    // citation itself reads as an unauthorized mention and the run
+    // hard-blocks at comparison_table_failed instead of the review path.
+    const text = operatorBriefTextForComparisonGate(
+      { bucket: OPERATOR_INTERCEPT_BUCKET },
+      { voice_constraints: { operator_brief: {
+        working_title: 'Cancellation fees explained',
+        primary_kw: 'pest control cancellation fee',
+        required_sources: ['https://www.orkin.com/plans/cancellation'],
+        source_notes: ['Terminix publishes its bond terms in the FAQ'],
+      } } }
+    );
+    expect(text).toContain('orkin.com');
+    expect(text).toContain('Terminix');
+  });
+
+  test('non-intercept buckets still produce empty text', () => {
+    expect(operatorBriefTextForComparisonGate({ bucket: 'mined' }, { voice_constraints: { operator_brief: { required_sources: ['https://www.orkin.com/x'] } } })).toBe('');
   });
 });

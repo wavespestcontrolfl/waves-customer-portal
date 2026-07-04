@@ -115,10 +115,13 @@ describe('hard checks: schema/canonical/indexable', () => {
 // ── city-service checks ─────────────────────────────────────────────
 
 describe('city-service: nap / proof / cta / menu / faq / schema', () => {
-  test('NAP check requires brand + phone', () => {
-    expect(checkNapConsistent({ body: 'Waves Pest Control · 941-555-1234' }).ok).toBe(true);
+  test('NAP check requires brand + a WAVES phone (not just any phone)', () => {
+    expect(checkNapConsistent({ body: 'Waves Pest Control · (941) 297-2606' }).ok).toBe(true);
     expect(checkNapConsistent({ body: 'No phone here.' }).ok).toBe(false);
-    expect(checkNapConsistent({ body: 'Just 941-555-1234' }).ok).toBe(false);
+    expect(checkNapConsistent({ body: 'Just (941) 297-2606' }).ok).toBe(false);
+    // A stray CUSTOMER number must NOT satisfy the business-NAP requirement —
+    // the pre-fix any-phone regex accepted it as "the phone".
+    expect(checkNapConsistent({ body: 'Waves Pest Control · 941-555-1234' })).toEqual({ ok: false, reason: 'waves_phone_missing' });
   });
   test('local proof requires quantified/quoted/tech signal', () => {
     expect(checkLocalProof({ body: '500+ jobs in Bradenton' }).ok).toBe(true);
@@ -170,6 +173,178 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
     expect(checkRedactionPassed({ body: 'Reach me at 941-555-9876.' }).ok).toBe(false);
     // Parenthesized customer number — earlier regex missed this entirely.
     expect(checkRedactionPassed({ body: 'My cell is (212) 555-1234.' }).ok).toBe(false);
+    // A customer number sharing a Waves line's LAST SEVEN digits in another
+    // area code — the pre-fix last-7 allowlist key accepted it as Waves.
+    expect(checkRedactionPassed({ body: 'Call 212-318-7612 anytime.' }).ok).toBe(false);
+  });
+  test('redaction: Waves\' own email is page furniture, customer emails are PII', () => {
+    expect(checkRedactionPassed({ body: 'Email info@wavespestcontrol.com to book.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'Email info@wavespestcontrol.com or karen@gmail.com.' }).ok).toBe(false);
+  });
+  test('redaction: customer NAMES and street ADDRESSES hard-fail (Codex round 4 — phones/emails alone left the exact gap this gate closes)', () => {
+    const addr = checkRedactionPassed({ body: 'John Smith at 4867 Maple Street told us the ants were back within a week.' });
+    expect(addr.ok).toBe(false);
+    expect(addr.reason).toMatch(/unredacted_(name|address)_in_body/);
+    const name = checkRedactionPassed({ body: 'My name is john smith and i want a quote' });
+    expect(name.ok).toBe(false);
+    expect(name.reason).toBe('unredacted_name_in_body');
+  });
+  test('redaction: Waves\' own office address is NAP furniture, never PII', () => {
+    expect(checkRedactionPassed({
+      body: 'Our Bradenton office at 13649 Luxe Ave #110, Bradenton, FL 34211 serves Lakewood Ranch.',
+    }).ok).toBe(true);
+  });
+  test('redaction: staff names and normal service copy stay clean', () => {
+    expect(checkRedactionPassed({
+      body: 'Owner Jose Alvarado has treated 500+ homes. Termites swarm in Venice every spring; call (941) 297-3337.',
+    }).ok).toBe(true);
+  });
+  test('redaction: office address WITHOUT the suite marker is still NAP furniture (Codex round 5)', () => {
+    expect(checkRedactionPassed({
+      body: 'Our office at 13649 Luxe Ave, Bradenton, FL 34211 serves the area.',
+    }).ok).toBe(true);
+  });
+  test('redaction: LOW redactor confidence hard-fails — "no findings" proves nothing on lowercase text (Codex round 5)', () => {
+    const r = checkRedactionPassed({
+      body: 'john smith told our technician the ants came back after two days and he was not happy about it at all',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/pii_confidence_low|unredacted_name_in_body/);
+  });
+  test('redaction: Waves spoke/GBP tracking lines are business numbers, not PII (Codex round 5)', () => {
+    expect(checkRedactionPassed({
+      body: 'Termites swarm in Venice; call (941) 326-5011 for the Bradenton line.',
+    }).ok).toBe(true);
+  });
+  test('redaction: CITY_TO_LOCATION service-area names are place furniture, never PII (Codex round 7)', () => {
+    expect(checkRedactionPassed({
+      body: 'Waves Pest Control serves Punta Gorda. Call (941) 297-5749.',
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: 'We treat homes across Boca Grande and Sun City Center every quarter, with same-day service in Englewood.',
+    }).ok).toBe(true);
+  });
+  test('redaction: markdown headings are structural furniture, not customer quotes (Codex round 9)', () => {
+    expect(checkRedactionPassed({
+      body: '## Our Process\n\nWe inspect first.\n\n## Why Choose Waves Pest Control\n\nBecause we live in Sarasota and answer the phone.',
+    }).ok).toBe(true);
+    // prose PII below a heading still fails
+    expect(checkRedactionPassed({
+      body: '## Our Process\n\nJohn Smith at 4867 Maple Street told us the ants were back.',
+    }).ok).toBe(false);
+  });
+  test('redaction: regional non-service cities (Fort Myers) are place pairs, not names (Codex round 9)', () => {
+    expect(checkRedactionPassed({
+      body: 'Residents in Fort Myers and Cape Coral see tegu lizards moving north toward Venice every year.',
+    }).ok).toBe(true);
+  });
+  test('redaction: title-cased pest/disease vocabulary is service copy, not a customer name (Codex round 15)', () => {
+    expect(checkRedactionPassed({
+      body: 'Brown Patch and Take All Root Rot spread in damp turf, while Chinch Bug and Sod Webworm damage shows up in dry spots. Call (941) 297-2606.',
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: 'Southern Chinch Bug activity peaks in July across St. Augustine Grass lawns from Palmetto to Venice.',
+    }).ok).toBe(true);
+    // A real customer name in the body still hard-fails.
+    const r = checkRedactionPassed({ body: 'This is James Brown and the ants are back again this week.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('unredacted_name_in_body');
+  });
+  test('redaction: short lowercase self-intro snippets hard-fail on confidence (Codex round 16)', () => {
+    // Under 40 letters the old backstop never ran, so this exact shape
+    // returned zero findings + high confidence and published a real name.
+    const r = checkRedactionPassed({ body: 'this is john smith ants are back' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('pii_confidence_low');
+  });
+  test('redaction: attached-extension customer phones are caught (Codex round 16)', () => {
+    const r = checkRedactionPassed({ body: 'Call the customer directly on 212-555-1234x99 to reschedule the visit.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('non_business_phone_number_in_body:2125551234');
+    // Waves' own line with an extension: the CORE number drives the
+    // allowlist compare, so extension digits don't poison the last-10.
+    expect(checkRedactionPassed({
+      body: 'Call (941) 297-2606 ext 2 to reach the Sarasota office today.',
+    }).ok).toBe(true);
+  });
+  test('redaction: SEO fields (title/meta) are scanned like the page they publish on (Codex round 16)', () => {
+    const clean = {
+      body: 'Chinch bugs thrive in dry Bradenton lawns. Call (941) 297-2606 for a free inspection.',
+      title: 'Chinch Bug Control in Bradenton',
+      meta_description: 'Serving Sarasota and Manatee County with same-day chinch bug treatment.',
+    };
+    expect(checkRedactionPassed(clean).ok).toBe(true);
+    const nameTitle = checkRedactionPassed({ ...clean, title: 'How John Smith Fixed His Lawn' });
+    expect(nameTitle.ok).toBe(false);
+    expect(nameTitle.reason).toBe('unredacted_name_in_title');
+    const phoneMeta = checkRedactionPassed({ ...clean, meta_description: 'Call John at 212-555-1234 for pest help.' });
+    expect(phoneMeta.ok).toBe(false);
+    expect(phoneMeta.reason).toBe('non_business_phone_number_in_meta_description:2125551234');
+    const emailMeta = checkRedactionPassed({ ...clean, meta_description: 'Email karen@gmail.com for a quote today.' });
+    expect(emailMeta.ok).toBe(false);
+    expect(emailMeta.reason).toBe('email_in_meta_description');
+    // frontmatter-shaped drafts get the same coverage
+    const fmTitle = checkRedactionPassed({ body: clean.body, frontmatter: { title: 'How John Smith Fixed His Lawn' } });
+    expect(fmTitle.ok).toBe(false);
+    expect(fmTitle.reason).toBe('unredacted_name_in_title');
+  });
+  test('redaction: low-confidence meta scans block like body prose (Codex round 17)', () => {
+    // A lowercase self-intro meta reports low confidence with zero
+    // findings — the round-16 meta path only read findings, so the name
+    // published in the public meta description.
+    const r = checkRedactionPassed({
+      body: 'Chinch bugs thrive in dry Bradenton lawns. Call (941) 297-2606 for a free inspection.',
+      meta_description: 'this is john smith ants are back',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('pii_confidence_low_in_meta_description');
+  });
+  test('redaction: camelCase SEO frontmatter fields are scanned too (Codex round 17)', () => {
+    const cleanBody = 'Chinch bugs thrive in dry Bradenton lawns. Call (941) 297-2606 for a free inspection.';
+    const phoneCamel = checkRedactionPassed({
+      body: cleanBody,
+      frontmatter: { metaDescription: 'Call John at 212-555-1234x99 for pest help.' },
+    });
+    expect(phoneCamel.ok).toBe(false);
+    expect(phoneCamel.reason).toBe('non_business_phone_number_in_meta_description:2125551234');
+    const nameCamel = checkRedactionPassed({
+      body: cleanBody,
+      frontmatter: { metaTitle: 'How John Smith Fixed His Lawn' },
+    });
+    expect(nameCamel.ok).toBe(false);
+    expect(nameCamel.reason).toBe('unredacted_name_in_title');
+    // clean camelCase fields stay clean
+    expect(checkRedactionPassed({
+      body: cleanBody,
+      frontmatter: { metaTitle: 'Chinch Bug Control in Bradenton', metaDescription: 'Serving Sarasota and Manatee County with same-day chinch bug treatment.' },
+    }).ok).toBe(true);
+  });
+  test('redaction: surname-shaped domain words stay pair-scoped in headings (Codex round 16)', () => {
+    // 'Brown' as a structural SINGLE waved "## James Brown" through; the
+    // pair allowlist clears "Brown Patch" without clearing the surname.
+    const james = checkRedactionPassed({ body: '## James Brown\n\nOur treatment schedule is weekly.' });
+    expect(james.ok).toBe(false);
+    expect(james.reason).toBe('unredacted_name_in_heading');
+    // Body prose is normally cased and multi-sentence: after heading
+    // stripping, a single 40+-letter sentence has 1 cap and trips the
+    // (accepted, fail-closed) low-caps confidence arm — not this test's
+    // subject.
+    expect(checkRedactionPassed({
+      body: '## Brown Patch Treatment in Bradenton\n\nFungicide applications work best preventively. Apply them in Bradenton before the summer rains arrive.',
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: '## Wood Destroying Organisms Explained\n\nWDO inspections cover termites and fungi.',
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: '## Late Summer Lawn Care\n\nFertilize before the rains taper off.',
+    }).ok).toBe(true);
+  });
+  test('redaction: compact E.164 customer phones are caught (Codex round 8 — 11-digit runs had no interior boundary to match)', () => {
+    const r = checkRedactionPassed({ body: 'Call our Sarasota line at (941) 297-2606 or the customer at +19415551234.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('non_business_phone_number_in_body:9415551234');
+    // Waves' own E.164 form passes
+    expect(checkRedactionPassed({ body: 'Tap +19412972606 to call our Sarasota office today for help.' }).ok).toBe(true);
   });
 });
 
@@ -292,7 +467,7 @@ describe('evaluate (full gate)', () => {
     // checks alone satisfy would let a draft miss EVERY soft check. The
     // old single global threshold (city-service-derived 54) made smaller
     // bundles unpassable: refresh maxes at 47.
-    expect(MIN_TOTAL_SCORES['city-service']).toBe(54); // 75% formula (hard sum 43)
+    expect(MIN_TOTAL_SCORES['city-service']).toBe(60); // 75% formula (ceiling 81, hard sum 51 incl. redaction 8)
     expect(MIN_TOTAL_SCORES['customer-question']).toBe(59); // all-hard bundle
     expect(MIN_TOTAL_SCORES.refresh).toBe(47); // all-hard bundle
     expect(MIN_TOTAL_SCORES['supporting-blog']).toBe(51); // 57 - voice 6
@@ -434,7 +609,7 @@ describe('evaluate (full gate)', () => {
     // neither answers the question up front nor links anywhere internal.
     const r = evaluate(
       fullDraft({
-        body: 'Many homeowners ask about this every spring.\n\nLonger detail follows here without any links at all.',
+        body: 'Many homeowners in Bradenton and Sarasota ask about this every spring.\n\nLonger detail follows here in Venice and Palmetto without any links at all.',
       }),
       brief({ page_type: 'customer-question' }),
       { previewBuildSuccess: true, sitemapHasUrl: true }
@@ -446,7 +621,11 @@ describe('evaluate (full gate)', () => {
 
     const good = evaluate(
       fullDraft({
-        body: 'A termite swarm means a mature colony is nearby — here is how to identify one fast.\n\nSee our [termite inspection](/termite-inspection/) page for next steps.',
+        // Realistic capitalization density: a two-sentence all-lowercase-ish
+        // body dips under the redactor's effectively-lowercase threshold and
+        // trips the (correct) pii_confidence_low hard fail — real drafts are
+        // article-length with headings and proper nouns.
+        body: 'A termite swarm means a mature colony is nearby — here is how to identify one fast. Swarmers in Southwest Florida usually appear after warm spring rain, and Sarasota homes see them first.\n\nSee our [termite inspection](/termite-inspection/) page for next steps.',
       }),
       brief({ page_type: 'customer-question' }),
       { previewBuildSuccess: true, sitemapHasUrl: true }
@@ -535,5 +714,99 @@ describe('FAQ checks are neutral on FAQ-blocked topics', () => {
     );
     expect(result.checks.faq_section_present.ok).toBe(true);
     expect(result.checks.faq_section_present.reason).toBe('faq_blocked_service_omission_is_correct');
+  });
+});
+
+describe('redaction: heading scan (Codex round 10)', () => {
+  test('a street address in a visible HEADING hard-fails (headings are only exempt from the NAME heuristic)', () => {
+    const r = checkRedactionPassed({
+      body: '## John Smith at 4867 Maple Street\n\nAnt control matters in every season across Sarasota and Bradenton. Our team in Venice applies targeted treatments so infestations never return.',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('unredacted_address_in_heading');
+  });
+  test('structural, office-NAP, and regional-city headings stay clean (round-9 false positives must not return)', () => {
+    for (const heading of [
+      '## Why Choose Waves Pest Control',
+      '## Visit Us at 13649 Luxe Ave, Bradenton, FL 34211',
+      '## Pest Control in Lakewood Ranch',
+    ]) {
+      const r = checkRedactionPassed({
+        body: `${heading}\n\nAnt control matters in every season across Sarasota and Bradenton. Our team in Venice applies targeted treatments so infestations never return.`,
+      });
+      expect(r.ok).toBe(true);
+    }
+  });
+});
+
+describe('redaction: all structured PII types block (Codex round 11)', () => {
+  test('SSN- and card-shaped findings hard-fail the body scan', () => {
+    const ssn = checkRedactionPassed({ body: 'The account holder provided 123-45-6789 during the call, which our team never records.' });
+    expect(ssn.ok).toBe(false);
+    expect(ssn.reason).toBe('unredacted_ssn_in_body');
+    const card = checkRedactionPassed({ body: 'Payment attempted with 4111 1111 1111 1111 before the visit was booked.' });
+    expect(card.ok).toBe(false);
+    expect(card.reason).toBe('unredacted_card_in_body');
+  });
+  test('headings block on structured PII too (only the NAME heuristic stays heading-exempt)', () => {
+    const r = checkRedactionPassed({
+      body: '## Case 123-45-6789 Review\n\nAnt control matters in every season across Sarasota and Bradenton. Our team in Venice applies targeted treatments so infestations never return.',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('unredacted_ssn_in_heading');
+  });
+  test('allowlist-owned types stay non-blocking here: Waves phone/email and service-area ZIP', () => {
+    // phone/email are validated ABOVE with the Waves allowlists — the
+    // redactor's own phone/email findings carry no allowlist, so blocking
+    // on them would hard-fail the business contact lines.
+    expect(checkRedactionPassed({ body: 'Call us at 941-318-7612 to schedule your Bradenton or Sarasota inspection today.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'Email info@wavespestcontrol.com to book your next Waves service visit in Venice.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'We serve Venice, FL 34285 and the surrounding Sarasota and Bradenton communities year round.' }).ok).toBe(true);
+  });
+});
+
+describe('redaction: customer names in headings (Codex round 13)', () => {
+  const filler = 'Ant control matters in every season across Sarasota and Bradenton. Our team in Venice applies targeted treatments so infestations never return.';
+
+  test('a bare customer-name heading hard-fails', () => {
+    const r = checkRedactionPassed({ body: `## John Smith\n\n${filler}` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('unredacted_name_in_heading');
+  });
+
+  test('structural / brand / pest / city headings still pass the narrowed name check', () => {
+    for (const heading of [
+      '## Why Choose Waves Pest Control',
+      '## Our Process',
+      '## Bed Bug Heat Treatment Explained',
+      '## Pest Control in Lakewood Ranch',
+      '## Serving Punta Gorda and North Port',
+    ]) {
+      expect(checkRedactionPassed({ body: `${heading}\n\n${filler}` }).ok).toBe(true);
+    }
+  });
+});
+
+describe('redaction: LOWERCASE customer names in headings (Codex round 14)', () => {
+  const filler = 'Ant control matters in every season across Sarasota and Bradenton. Our team in Venice applies targeted treatments so infestations never return.';
+
+  test('lowercase transcript-style name headings hard-fail (case-normalized, overlapping pair scan)', () => {
+    for (const heading of ['## john smith', '## about john smith and his lawn']) {
+      const r = checkRedactionPassed({ body: `${heading}\n\n${filler}` });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('unredacted_name_in_heading');
+    }
+  });
+
+  test('lowercase structural/prose headings stay clean after normalization', () => {
+    for (const heading of [
+      '## why choose waves pest control',
+      '## how it works',
+      '## what to expect',
+      '## ants in your kitchen',
+      '## roaches love damp cabinets',
+    ]) {
+      expect(checkRedactionPassed({ body: `${heading}\n\n${filler}` }).ok).toBe(true);
+    }
   });
 });

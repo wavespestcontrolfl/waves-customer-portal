@@ -24,8 +24,10 @@
  *   'medium' heuristic name detection fired OR address pattern matched
  *            (false-positive prone)
  *   'low'    text has long unstructured runs, mixed case proper nouns,
- *            or any unicode unrecognized class — gates downstream from
- *            quoting publicly
+ *            any unicode unrecognized class, OR is effectively all-
+ *            lowercase (the capitalized-name heuristics are blind there,
+ *            so nothing they "didn't find" can be trusted) — gates
+ *            downstream from quoting publicly
  *
  * Pure functions — no DB, no logger. Caller decides what to do with
  * `low` confidence output (typically: never quote publicly).
@@ -33,7 +35,10 @@
 
 const PATTERNS = [
   // Phone numbers — US, generous match: +1 / parens / dots / dashes / spaces.
-  { type: 'phone', token: '[phone]', re: /\b\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g },
+  // Optional attached extension (`x99`, `ext. 4`): without it the trailing
+  // \b cannot sit between the last digit and an `x` (both word chars), so
+  // `212-555-1234x99` — a common transcript form — matched nothing at all.
+  { type: 'phone', token: '[phone]', re: /\b\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?\b/gi },
 
   // Emails.
   { type: 'email', token: '[email]', re: /[\w.+-]+@[\w-]+\.[A-Za-z]{2,}/g },
@@ -45,12 +50,14 @@ const PATTERNS = [
   { type: 'card', token: '[card]', re: /\b(?:\d[ -]?){13,19}\b/g },
 
   // Street addresses — house number + street name + suffix.
-  // Conservative: requires a numeric prefix, capitalized street name(s),
-  // and a recognized suffix abbreviation.
+  // Case-INSENSITIVE: SMS/voice transcripts are frequently all-lowercase
+  // ("i live at 4867 maple street"), and a capitalized-only pattern was
+  // blind to them. The lookahead excludes common measure words so casual
+  // phrases like "a 10 minute drive" / "3 easy steps" don't redact.
   {
     type: 'address',
     token: '[address]',
-    re: /\b\d{1,6}\s+([A-Z][a-zA-Z]+\s+){1,4}(St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Cir|Circle|Pl|Place|Pkwy|Parkway|Hwy|Highway|Ter|Terrace|Trl|Trail)\.?\b/g,
+    re: /\b\d{1,6}\s+(?!(?:minutes?|hours?|seconds?|days?|weeks?|months?|years?|miles?|blocks?|steps?|feet|foot|stars?|points?|percent|dollars?|bucks?)\b)((?:\d{1,4}(?:st|nd|rd|th)|[A-Za-z][a-zA-Z]+)\s+){1,4}(St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Cir|Circle|Pl|Place|Pkwy|Parkway|Hwy|Highway|Ter|Terrace|Trl|Trail)\.?\b/gi,
   },
 
   // Long URLs — anything > 40 chars likely has tracking / query PII.
@@ -59,7 +66,7 @@ const PATTERNS = [
   // 5-digit ZIP only when adjacent to an FL state hint OR after a
   // redacted [address] marker (we redact a second pass after the address
   // pass to catch trailing ZIPs).
-  { type: 'zip', token: '[zip]', re: /\b(FL|Florida)\s+\d{5}(-\d{4})?\b/g },
+  { type: 'zip', token: '[zip]', re: /\b(FL|Florida)\s+\d{5}(-\d{4})?\b/gi },
 ];
 
 // Heuristic first+last name detection — separate pass so we can
@@ -83,6 +90,18 @@ const STANDALONE_NAME_PAIR = /\b([A-Z][a-z]{1,15})\s+([A-Z][a-z]{1,20})\b/g;
 // "Hi, this is Anthony" is still covered by the "this is" signal.
 const NAME_SIGNAL_SINGLE = /\b([Mm]y name is|[Tt]his is|[Ii]'?m|[Ii] am|[Nn]ame:|[Ii]t'?s)[,]?\s+([A-Z][a-z]{1,15})\b/g;
 
+// LOWERCASE names after an unambiguous signal. The capitalized heuristics
+// above are blind to all-lowercase transcripts ("my name is john smith"),
+// which are the NORM for SMS and voice-to-text. Only the strongest signals
+// qualify ("my name is" / "name:") — weaker ones ("this is", "i'm") are far
+// too ambiguous in lowercase prose ("this is great", "i'm sure"). The
+// stopword lookaheads keep "my name is not on the account" and similar
+// non-name continuations out; the allowlist check in redactNames still
+// protects staff/place tokens. The SIGNAL tolerates sentence-initial
+// capitalization ("My name is john smith" / "Name: john") — only the NAME
+// tokens must be lowercase, since a capitalized name is the other pass's job.
+const NAME_SIGNAL_LOWERCASE = /\b([Mm]y name is|[Nn]ame:)\s+(?!(?:not|no|the|a|an|on|in|at|to|so|very|really|actually|probably|still|already|also|just|spelled|pronounced|misspelled|wrong|correct|different)\b)([a-z][a-z'-]{1,15})(\s+(?!(?:and|but|i|we|you|calling|speaking|here|from|with|at|on|in|by|not|is|was)\b)[a-z][a-z'-]{1,20})?\b/g;
+
 // Words that look like names but are common false positives in this
 // domain (pest names, neighborhoods, products, businesses, etc.).
 const NAME_ALLOWLIST = new Set([
@@ -99,9 +118,94 @@ const NAME_ALLOWLIST = new Set([
   'Virginia', 'Jose', 'Jacob', 'Alvarado', 'Heaton', // staff
 ]);
 
+// Multi-word service-area names from the canonical CITY_TO_LOCATION map are
+// place furniture, never a customer name — "Waves Pest Control serves Punta
+// Gorda" must not produce a name finding (the hand-list above predates the
+// southern/Hillsborough reach). Matched as adjacent word PAIRS (covering
+// 3-word areas like Sun City Center via their bigrams), NOT as individual
+// words: allowlisting each word would make the detector skip any customer
+// who shares a name with a single-word city — "Hi, this is Laurel Smith"
+// must still redact even though Laurel is a service area. Config-unavailable
+// leaves the pair set empty (fail-closed direction: more redaction, never
+// less).
+const CITY_PAIR_ALLOWLIST = new Set([
+  // Regional cities OUTSIDE the service map that SWFL content routinely
+  // mentions ("Residents in Fort Myers see tegu lizards") — the name-pair
+  // heuristic reads them as First+Last otherwise.
+  'fort myers', 'cape coral', 'bonita springs', 'marco island',
+  'st petersburg', 'saint petersburg', 'plant city', 'winter haven',
+]);
+try {
+  const { CITY_TO_LOCATION } = require('../../config/locations');
+  for (const city of Object.keys(CITY_TO_LOCATION || {})) {
+    const words = city.trim().toLowerCase().split(/\s+/);
+    for (let i = 0; i + 1 < words.length; i++) {
+      CITY_PAIR_ALLOWLIST.add(`${words[i]} ${words[i + 1]}`);
+    }
+  }
+} catch { /* locations unavailable — the hand list above still applies */ }
+
+const NAME_ALLOWLIST_LOWER = new Set([...NAME_ALLOWLIST].map((w) => w.toLowerCase()));
+
+// Title-cased lawn/pest DOMAIN TERMS that read as First+Last pairs —
+// "Brown Patch", "Chinch Bug", "Sod Webworm", the bigrams of "Take All
+// Root Rot". Matched as PAIRS (same mechanism as CITY_PAIR_ALLOWLIST),
+// never as single words: allowlisting "Brown" alone would stop "James
+// Brown" from redacting, while the pair form only clears the exact
+// domain bigram. Multi-word terms are covered via their adjacent bigrams.
+const DOMAIN_TERM_PAIRS = new Set([
+  'brown patch', 'large patch', 'dollar spot', 'leaf spot', 'gray leaf',
+  'fairy ring', 'root rot', 'take all', 'all root', 'web blight',
+  'powdery mildew', 'sooty mold', 'chinch bug', 'chinch bugs',
+  'sod webworm', 'sod webworms', 'mole cricket', 'mole crickets',
+  'fire ant', 'fire ants', 'ghost ant', 'ghost ants', 'sugar ant',
+  'sugar ants', 'carpenter ant', 'carpenter ants', 'crazy ant',
+  'crazy ants', 'big headed', 'bed bug', 'bed bugs', 'white grub',
+  'white grubs', 'army worm', 'army worms', 'fall armyworm',
+  'fall armyworms', 'grass loopers', 'spittle bug', 'spittle bugs',
+  'bahia grass', 'bermuda grass', 'zoysia grass', 'centipede grass',
+  'buffalo grass', 'carpet grass', 'torpedo grass', 'crab grass',
+  'goose grass', 'dove weed', 'drywood termite', 'drywood termites',
+  'subterranean termite', 'subterranean termites', 'wolf spider',
+  'wolf spiders', 'black widow', 'brown recluse', 'paper wasp',
+  'paper wasps', 'yellow jacket', 'yellow jackets', 'stink bug',
+  'stink bugs', 'palmetto bug', 'palmetto bugs', 'love bug', 'love bugs',
+  'no see', 'see ums',
+  // Qualifier bigrams of 3+-word species/variety names. The body pass is
+  // NON-overlapping, so "Southern Chinch Bug" pairs as "Southern Chinch"
+  // (not the allowlisted "Chinch Bug") and "St. Augustine Grass" pairs as
+  // "Augustine Grass" (the period stops "St." from joining a pair).
+  'southern chinch', 'tropical sod', 'red imported', 'imported fire',
+  'german cockroach', 'american cockroach', 'australian cockroach',
+  'oriental cockroach', 'smokybrown cockroach', 'norway rat', 'roof rat',
+  'house mouse', 'asian tiger', 'tiger mosquito', 'formosan termite',
+  'formosan subterranean', 'eastern subterranean', 'asian subterranean',
+  'augustine grass', 'empire zoysia', 'dollar weed', 'fruit fly',
+  'fruit flies', 'drain fly', 'drain flies',
+  // Pair-scoped clearances for words that are BOTH domain vocabulary and
+  // real surnames/first names (Brown, Carpenter, Wood, Day, Bond, Love,
+  // Summer, Winter). These must never be single-word allowlisted anywhere
+  // — the heading structural set deliberately excludes them so
+  // "## James Brown" blocks — which makes their domain PAIR forms load-
+  // bearing here.
+  'brown patches', 'brown spot', 'brown spots', 'brown widow',
+  'brown widows', 'brown anole', 'brown anoles', 'carpenter bee',
+  'carpenter bees', 'wood rot', 'dry rot', 'wood destroying',
+  'destroying organisms', 'destroying insects', 'late summer',
+  'early summer', 'late spring', 'early spring', 'late fall', 'early fall',
+  'late winter', 'early winter', 'winter dormancy', 'winter weeds',
+  'summer patch', 'summer heat',
+]);
+
 function looksLikeFalsePositiveName(first, last) {
   if (!first || !last) return true;
   if (NAME_ALLOWLIST.has(first) || NAME_ALLOWLIST.has(last)) return true;
+  // A capitalized pair that IS a service-area name ("Punta Gorda", or a
+  // bigram of a longer one like "Sun City" / "City Center") is place
+  // furniture, not a person.
+  if (CITY_PAIR_ALLOWLIST.has(`${first} ${last}`.toLowerCase())) return true;
+  // Title-cased lawn/pest domain terms are page furniture, not people.
+  if (DOMAIN_TERM_PAIRS.has(`${first} ${last}`.toLowerCase())) return true;
   // All-caps single words are usually abbreviations, not names.
   if (first === first.toUpperCase() || last === last.toUpperCase()) return true;
   // Length sanity.
@@ -146,6 +250,17 @@ function redactNames(text, findings) {
     return `${prefix} [name]`;
   });
 
+  // Pass 1c: lowercase name(s) after an unambiguous signal ("my name is john
+  // smith"). Allowlist compare is case-insensitive here — the tokens arrive
+  // lowercase.
+  out = out.replace(NAME_SIGNAL_LOWERCASE, (match, prefix, first, last) => {
+    const lastClean = last ? last.trim() : '';
+    if (NAME_ALLOWLIST_LOWER.has(first) || (lastClean && NAME_ALLOWLIST_LOWER.has(lastClean))) return match;
+    if (first.length < 2) return match;
+    nameMatchCount++;
+    return `${prefix} [name]`;
+  });
+
   if (nameMatchCount > 0) findings.push({ type: 'name', count: nameMatchCount });
   return out;
 }
@@ -177,7 +292,51 @@ function redact(text) {
   // Downgrade to low if we still see suspicious unstructured runs.
   if (suspiciousUnstructured(out)) confidence = 'low';
 
+  // An (effectively) all-lowercase text is one the capitalization-based name
+  // heuristics are mostly BLIND to — the lowercase signal pass above only
+  // covers explicit self-introductions. Reporting 'high' here is what let
+  // lowercase transcripts with unredacted names sail past the downstream
+  // "never quote low confidence" protection. Cap at 'low' so such text is
+  // never quoted publicly, redacted or not.
+  if (effectivelyLowercase(String(text))) confidence = 'low';
+
   return { text: out, confidence, findings };
+}
+
+// True when the text is long enough to carry PII but has (almost) no
+// uppercase letters — i.e. the capitalized-name/address heuristics cannot be
+// trusted to have seen anything. Short fragments ("ok thanks") stay 'high'.
+// Arms: the RATIO catches long lowercase transcripts; the ABSOLUTE cap
+// catches 40+-letter texts where a single incidental capital
+// (autocapitalized "This is john smith and i had ants…" — 1 cap over 40+
+// letters is just over a 2% ratio) would otherwise report high confidence
+// on text the name heuristics were blind to. One or two caps across 40+
+// letters is a lowercase text with sentence-initial autocaps, not
+// properly-cased prose.
+// SHORT texts (15–39 letters) get ONE narrower arm — a blanket zero/low-caps
+// rule there would swallow legitimate short furniture ("Email
+// info@wavespestcontrol.com to book.", "this is great, thanks"): a lowercase
+// SELF-INTRO followed by a plausible lowercase name PAIR ("this is john
+// smith…", covering weak signals like "this is" that the lowercase NAME
+// pass deliberately excludes as too ambiguous to redact on). The pair
+// requirement is what separates an intro from an idiom — "this is great,
+// thanks" has no second adjacent word token (the comma breaks adjacency)
+// and "this is spot on" dies on the continuation stopwords, while "this is
+// john smith ants are back" matches. Reuses the NAME_SIGNAL_LOWERCASE
+// stopword lookaheads; ≤2 caps tolerates the autocapped "This is john
+// smith…". Length-bounded, so generated draft bodies (always 40+ letters)
+// never reach this arm — and a single lowercase first name after a STRONG
+// signal ("my name is john") is already REDACTED by NAME_SIGNAL_LOWERCASE,
+// so this arm only needs the first+last shape.
+const LOWERCASE_INTRO_PAIR = /(?:^|[^a-z])(?:this is|my name is|name:|it'?s|i'?m|i am)\s+(?!(?:not|no|the|a|an|on|in|at|to|so|very|really|actually|probably|still|already|also|just|spelled|pronounced|misspelled|wrong|correct|different)\b)[a-z][a-z'-]{1,15}\s+(?!(?:and|but|i|we|you|calling|speaking|here|from|with|at|on|in|by|not|is|was)\b)[a-z][a-z'-]{1,20}\b/i;
+function effectivelyLowercase(text) {
+  const letters = String(text).match(/[a-zA-Z]/g) || [];
+  if (letters.length < 15) return false;
+  const upper = letters.reduce((n, c) => n + (c >= 'A' && c <= 'Z' ? 1 : 0), 0);
+  if (letters.length < 40) {
+    return upper <= 2 && LOWERCASE_INTRO_PAIR.test(String(text));
+  }
+  return upper <= 2 || upper / letters.length < 0.02;
 }
 
 function suspiciousUnstructured(text) {
@@ -204,5 +363,6 @@ module.exports = {
     looksLikeFalsePositiveName,
     redactNames,
     suspiciousUnstructured,
+    effectivelyLowercase,
   },
 };
