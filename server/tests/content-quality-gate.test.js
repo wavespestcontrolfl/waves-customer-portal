@@ -615,3 +615,25 @@ describe('FAQ checks are neutral on FAQ-blocked topics', () => {
     expect(result.checks.faq_section_present.reason).toBe('faq_blocked_service_omission_is_correct');
   });
 });
+
+describe('redaction: heading scan (Codex round 10)', () => {
+  test('a street address in a visible HEADING hard-fails (headings are only exempt from the NAME heuristic)', () => {
+    const r = checkRedactionPassed({
+      body: '## John Smith at 4867 Maple Street\n\nAnt control matters in every season across the region.',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('unredacted_address_in_heading');
+  });
+  test('structural, office-NAP, and regional-city headings stay clean (round-9 false positives must not return)', () => {
+    for (const heading of [
+      '## Why Choose Waves Pest Control',
+      '## Visit Us at 13649 Luxe Ave, Bradenton, FL 34211',
+      '## Pest Control in Lakewood Ranch',
+    ]) {
+      const r = checkRedactionPassed({
+        body: `${heading}\n\nAnt control matters in every season across the region.`,
+      });
+      expect(r.ok).toBe(true);
+    }
+  });
+});

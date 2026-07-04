@@ -288,9 +288,14 @@ function claimSupported(text, attrValues) {
 }
 
 function draftScanTexts(draft, body) {
+  // Title/meta live at the draft TOP LEVEL in some producer shapes and in
+  // frontmatter in others (the runner and sibling gates accept both) — the
+  // legal scan must see them wherever they are, or a disparaging title on
+  // a metadata-only draft escapes entirely.
   const fm = draft?.frontmatter || {};
   const metaText = ['title', 'meta_description', 'metaTitle', 'metaDescription']
-    .map((k) => fm[k]).filter(Boolean).map(String).join('\n');
+    .flatMap((k) => [draft?.[k], fm[k]])
+    .filter(Boolean).map(String).join('\n');
   return metaText ? `${body}\n${metaText}` : body;
 }
 
@@ -515,7 +520,10 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   const body = String(draft?.body || draft?.content || '');
   const findings = [];
   const blocks = extractComparisonBlocks(body);
-  if (!body) return { pass: true, findings, requiresHumanReview: false };
+  // Empty body alone doesn't skip the scan — a metadata-only draft can
+  // still carry a disparaging title/meta (draftScanTexts covers both the
+  // top-level and frontmatter shapes).
+  if (!body && !draftScanTexts(draft, '').trim()) return { pass: true, findings, requiresHumanReview: false };
   if (blocks.length === 0) return evaluateProse(draft, body, { operatorBriefText });
 
   const fm = draft?.frontmatter || {};

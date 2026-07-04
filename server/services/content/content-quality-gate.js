@@ -584,11 +584,22 @@ function checkRedactionPassed(draft) {
   // on its own.
   try {
     const { redact } = require('./pii-redactor');
-    // Markdown HEADING lines are excluded from the PII scan: section titles
-    // like "## Our Process" / "## Why Choose Waves Pest Control" are
-    // title-case pairs the redactor's standalone name heuristic reads as
-    // customer names, and generated headings are structural furniture, not
-    // customer-derived quotes. Body prose keeps the full scan.
+    // Markdown HEADING lines are excluded from the NAME scan: section
+    // titles like "## Our Process" / "## Why Choose Waves Pest Control"
+    // are title-case pairs the redactor's standalone name heuristic reads
+    // as customer names, and generated headings are structural furniture.
+    // Headings are NOT exempt from the objective checks, though: their
+    // text still goes through the phone/email checks above (which scan the
+    // full body) and the ADDRESS scan below — "## John Smith at 4867 Maple
+    // Street" must fail on the address even though the name-pair heuristic
+    // can't be trusted on heading capitalization.
+    const headingText = (body.match(/^#{1,6}\s.*$/gm) || []).join('\n');
+    if (headingText) {
+      const headingScan = redact(stripWavesOfficeAddresses(headingText));
+      if ((headingScan.findings || []).some((f) => f.type === 'address')) {
+        return { ok: false, reason: 'unredacted_address_in_heading' };
+      }
+    }
     const scanBody = body.replace(/^#{1,6}\s.*$/gm, '');
     const scanned = redact(stripWavesOfficeAddresses(scanBody));
     const hit = (scanned.findings || []).find((f) => f.type === 'name' || f.type === 'address');

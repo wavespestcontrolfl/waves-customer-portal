@@ -748,3 +748,23 @@ describe('table-less drafts: operator-authorized competitor naming (Codex round 
     expect(r.findings).toHaveLength(0);
   });
 });
+
+describe('top-level title/meta in comparison scans (Codex round 10)', () => {
+  test('a disparaging TOP-LEVEL title is scanned even though frontmatter is empty', () => {
+    // The runner and sibling gates accept the metadata-at-top-level draft
+    // shape; draftScanTexts only read frontmatter, so a disparaging title
+    // there escaped the legal scan entirely.
+    const r = gate.evaluate({ body: 'Clean prose about seasonal pests.', title: 'Orkin is dishonest about pricing' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+  });
+  test('a metadata-only draft (no body) still gets its title scanned', () => {
+    const r = gate.evaluate({ title: 'Orkin overcharges everyone' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
+  test('clean top-level title passes', () => {
+    const r = gate.evaluate({ body: 'Clean prose.', title: 'Seasonal Pest Guide for Bradenton' }, {});
+    expect(r.pass).toBe(true);
+  });
+});

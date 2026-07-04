@@ -610,3 +610,38 @@ describe('outbound-link gate: encoded mailto separators, IP/localhost hosts, sem
     expect(prose.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 });
+
+describe('MDX expression props, unquoted destinations, decoded mailto controls (Codex round 10)', () => {
+  test('JSX string-expression link props are scheme-scanned (posts publish as MDX)', () => {
+    // React renders href={"javascript:..."} as a real link destination — the
+    // quote-anchored attribute regex alone never saw inside the braces.
+    const dq = guardrails.evaluate({ body: '<a href={"javascript:alert(1)"}>x</a>' }, {});
+    expect(dq.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    const sq = guardrails.evaluate({ body: "<a href={'data:text/html,hi'}>x</a>" }, {});
+    expect(sq.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    // internal path in an expression prop is fine
+    const ok = guardrails.evaluate({ body: '<a href={"/services/pest-control"}>x</a>' }, {});
+    expect(ok.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+
+  test('unquoted href/src values fail closed on embedded control characters', () => {
+    // The HTML tokenizer appends character-reference results to an unquoted
+    // value without terminating it, so href=java&#x09;script: really is a
+    // tab-smuggled javascript: link that the contiguous scheme regex misses.
+    const r = guardrails.evaluate({ body: '<a href=java&#x09;script:alert(1)>x</a>' }, {});
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('mailto addresses and headers that DECODE to control characters are P0', () => {
+    // %0A/%0D become separators/header breaks in mail clients: the split on
+    // [,;] left "attacker@x\ninfo@waves…" as ONE string that happens to end
+    // on the allowed domain.
+    const addr = guardrails.evaluate({ body: 'Email [x](mailto:attacker@gmail.com%0Ainfo@wavespestcontrol.com).' }, {});
+    expect(addr.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    const header = guardrails.evaluate({ body: 'Email [x](mailto:info@wavespestcontrol.com?cc=attacker@gmail.com%0Dinfo@wavespestcontrol.com).' }, {});
+    expect(header.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    // clean single- and multi-recipient mailtos still pass
+    const ok = guardrails.evaluate({ body: 'Email [us](mailto:info@wavespestcontrol.com?cc=office@wavespestcontrol.com).' }, {});
+    expect(ok.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});

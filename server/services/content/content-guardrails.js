@@ -245,7 +245,10 @@ const ABSOLUTE_URL_RE = /\b([a-z][a-z0-9+.-]*):\/\/[^\s<>()"'\]]+/gi;
 // writer prompt MANDATES tap-to-call [(941) 297-5749](tel:+19412975749)
 // links, so tel can't be blanket-blocked). Everything else is P0.
 const MD_DEST_SCHEME_RE = /\]\(\s*<?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
-const ATTR_SCHEME_RE = /\b(?:href|src)\s*=\s*["']?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
+// `\{?\s*` after `=`: these posts publish as MDX, so a JSX string-
+// expression prop (href={"javascript:alert(1)"}) is a real link
+// destination React will render — the quote-anchored form alone missed it.
+const ATTR_SCHEME_RE = /\b(?:href|src)\s*=\s*\{?\s*["']?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
 const AUTOLINK_SCHEME_RE = /<([a-z][a-z0-9+.-]*):(\/\/)?[^>\s]*>/gi;
 // Reference-style Markdown definitions — `[bad]: javascript:alert(1)` on
 // its own line becomes the destination of every `[click][bad]` use, and
@@ -303,8 +306,16 @@ function decodeEntitiesForScan(s) {
 // via entities, decoded above): browsers STRIP these while parsing hrefs,
 // so "java&#x09;script:" is a live javascript: link whose scheme no regex
 // sees contiguously. Fail closed on any control character inside an
-// href/src value or a markdown destination.
-const DEST_CONTROL_RE = /\]\(\s*<?[^)]*[\t\r\n][^)]*\)|\b(?:href|src)\s*=\s*"[^"]*[\t\r\n][^"]*"|\b(?:href|src)\s*=\s*'[^']*[\t\r\n][^']*'/;
+// href/src value (quoted, JSX-expression, or UNQUOTED — the HTML tokenizer
+// appends character-reference results to an unquoted value without
+// terminating it, so href=java&#x09;script: really does carry the tab) or
+// a markdown destination.
+const DEST_CONTROL_RE = new RegExp([
+  /\]\(\s*<?[^)]*[\t\r\n][^)]*\)/.source,
+  /\b(?:href|src)\s*=\s*\{?\s*"[^"]*[\t\r\n][^"]*"/.source,
+  /\b(?:href|src)\s*=\s*\{?\s*'[^']*[\t\r\n][^']*'/.source,
+  /\b(?:href|src)\s*=\s*[^"'\s{>][^>\n]*[\t\r][^>\n]*/.source,
+].join('|'));
 
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
@@ -373,6 +384,12 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     try { addressPart = decodeURIComponent(String(rawAddressPart || '')); } catch {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable address ("${String(rawAddressPart || '').slice(0, 60)}") — remove it.`);
     }
+    // Decoded control characters (%0A/%0D) act as separators/header breaks
+    // in mail clients — an address that contains any is smuggling, and no
+    // legitimate recipient carries one. Fail closed before splitting.
+    if (/[\u0000-\u001F]/.test(addressPart)) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a mailto link whose address decodes to control characters — remove it.');
+    }
     // Split on semicolons as well as commas — common mail clients accept
     // both as recipient separators, so "attacker@x;info@waves…" must not
     // pass as one string that happens to END on the company domain.
@@ -397,6 +414,9 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
       let value = eq === -1 ? '' : kv.slice(eq + 1);
       try { value = decodeURIComponent(value); } catch {
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable "${key}" header — remove it.`);
+      }
+      if (/[\u0000-\u001F]/.test(value)) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link whose "${key}" header decodes to control characters — remove it.`);
       }
       const extra = value.split(/[,;]/).map((r) => r.trim().toLowerCase()).filter(Boolean);
       if (extra.length === 0 || extra.some((r) => !r.endsWith('@wavespestcontrol.com'))) {
