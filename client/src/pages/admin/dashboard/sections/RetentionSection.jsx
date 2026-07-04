@@ -10,6 +10,8 @@ import {
 import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile, signed } from "../KpiTile";
+import Verdict from "../Verdict";
+import { mrrVerdict } from "../scorecard-metrics";
 
 // RETENTION — are customers staying? Net recurring-revenue momentum, the MRR
 // trend, signup-cohort retention, and the customer-quality signals behind it.
@@ -118,12 +120,14 @@ export default function RetentionSection({
         <MobileFold title="MRR Trend" sub={mrrTrendSub}>
           <ChartCard title="MRR Trend" sub={mrrTrendSub}>
             <MrrTrendChart trend={mrrTrend?.trend || []} />
+            <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
           </ChartCard>
         </MobileFold>
       ) : (
         <div className="mb-5">
           <ChartCard title="MRR Trend" sub={mrrTrendSub}>
             <MrrTrendChart trend={mrrTrend?.trend || []} />
+            <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
           </ChartCard>
         </div>
       )}

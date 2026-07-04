@@ -6,6 +6,8 @@ import {
 import DashboardSection from "../DashboardSection";
 import ActionInbox from "../ActionInbox";
 import { KpiStrip, KpiTile } from "../KpiTile";
+import Verdict from "../Verdict";
+import { completionVerdict } from "../scorecard-metrics";
 
 // TODAY — what needs attention right now: the ranked Action Inbox, today's
 // schedule completion, and the period's service-execution tiles.
@@ -38,13 +40,16 @@ export default function TodaySection({
           }
         >
           {today ? (
-            <CompletionGauge
-              completed={today.completed}
-              total={today.total}
-              remaining={today.remaining}
-              cancelled={today.cancelled}
-              noShow={today.noShow}
-            />
+            <>
+              <CompletionGauge
+                completed={today.completed}
+                total={today.total}
+                remaining={today.remaining}
+                cancelled={today.cancelled}
+                noShow={today.noShow}
+              />
+              <Verdict verdict={completionVerdict(today)} />
+            </>
           ) : (
             <EmptyState>Loading…</EmptyState>
           )}

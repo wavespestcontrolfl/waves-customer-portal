@@ -15,8 +15,12 @@ const PERIODS = [
 ];
 
 // Sticky section tabs + the period selector that drives the period-scoped
-// panels (Core-KPI tiles + Marketing Attribution). Sections are anchors on the
-// same page; the active tab tracks scroll via one IntersectionObserver.
+// panels (Core-KPI tiles + Marketing Attribution). Two modes:
+//   - scroll mode (default): sections are anchors on the same page; the active
+//     tab tracks scroll via one IntersectionObserver.
+//   - controlled mode (activeSection + onSelectSection passed — the mobile
+//     scorecard): the pills are real tabs; the parent owns which single
+//     section renders, so the observer is skipped entirely.
 export default function DashboardJumpNav({
   sections,
   period,
@@ -25,12 +29,18 @@ export default function DashboardJumpNav({
   periodLabel,
   onSelectPeriod,
   onApplyCustomRange,
+  activeSection,
+  onSelectSection,
 }) {
+  const controlled = typeof onSelectSection === "function";
   const [active, setActive] = useState(sections[0]?.id || null);
   const [showRangePicker, setShowRangePicker] = useState(false);
   const [draftFrom, setDraftFrom] = useState("");
+  const current = controlled ? activeSection : active;
 
   useEffect(() => {
+    // Controlled mode renders one section at a time — nothing to observe.
+    if (controlled) return undefined;
     // jsdom (tests) has no IntersectionObserver — the nav still renders and
     // scrolls, it just won't live-track the active section.
     if (typeof IntersectionObserver === "undefined") return undefined;
@@ -51,9 +61,13 @@ export default function DashboardJumpNav({
     );
     els.forEach((el) => io.observe(el));
     return () => io.disconnect();
-  }, [sections]);
+  }, [sections, controlled]);
 
   const jumpTo = (id) => {
+    if (controlled) {
+      onSelectSection(id);
+      return;
+    }
     setActive(id);
     const el = document.getElementById(id);
     if (el && typeof el.scrollIntoView === "function") {
@@ -82,9 +96,10 @@ export default function DashboardJumpNav({
               key={s.id}
               type="button"
               onClick={() => jumpTo(s.id)}
+              aria-current={current === s.id ? "true" : undefined}
               className={cn(
                 "h-11 sm:h-8 px-2.5 text-12 font-medium u-focus-ring border-b-2 -mb-px transition-colors whitespace-nowrap shrink-0",
-                active === s.id
+                current === s.id
                   ? "border-zinc-900 text-zinc-900"
                   : "border-transparent text-ink-secondary hover:text-zinc-900",
               )}

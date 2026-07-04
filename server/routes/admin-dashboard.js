@@ -968,6 +968,102 @@ router.get('/kpi-history', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/ebitda-bridge
+// Month-to-date adjusted-EBITDA waterfall: revenue → gross profit → contribution
+// (after marketing actuals) → adjusted EBITDA (after owner-entered overhead
+// assumptions, prorated to the elapsed month). Company-level profitability,
+// deliberately SEPARATE from the job-level gross-margin tile — see
+// services/ebitda-bridge.js for the formula and the "adjusted" caveats.
+router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
+  try {
+    const { buildEbitdaBridge } = require('../services/ebitda-bridge');
+    const now = new Date();
+    const monthStart = etMonthStart(now);
+    const today = etDateString(now);
+    const elapsedDays = Number(today.slice(8, 10));
+    const daysInMonth = Number(etMonthEnd(now).slice(8, 10));
+    const monthFraction = elapsedDays / daysInMonth;
+
+    // Revenue + gross profit — same source, window shape, and margin-weighting
+    // convention as the core-KPIs gross-margin tile (uncosted rows count their
+    // revenue but zero GP), so the bridge and the tile can't disagree.
+    const fin = await db('service_records')
+      .where('service_date', '>=', monthStart).where('service_date', '<=', today)
+      .whereNotNull('revenue')
+      .select(
+        db.raw('SUM(revenue) as rev'),
+        db.raw('SUM(revenue * gross_margin_pct / 100.0) as gp'),
+        db.raw('SUM(revenue) FILTER (WHERE gross_margin_pct IS NULL) as uncosted'),
+        db.raw('COUNT(*) as jobs'),
+      ).first();
+
+    // Marketing ACTUALS for the window — the same three sources the capital-
+    // allocation card's all-in CAC uses (admin-ads.js fetchChannelAttribution):
+    // platform ad spend, channel retainers (prorated: they're monthly figures),
+    // and per-conversion referral rewards. Each guarded so a missing table
+    // (pre-migration env) zeroes that component instead of 500ing the bridge.
+    let adSpend = 0;
+    try {
+      const r = await db('ad_performance_daily').where('date', '>=', monthStart).sum({ c: 'cost' }).first();
+      adSpend = parseFloat(r?.c) || 0;
+    } catch { /* ad_performance_daily absent */ }
+    let fixedCosts = 0;
+    try {
+      const r = await db('channel_fixed_costs').sum({ c: 'monthly_amount' }).first();
+      fixedCosts = (parseFloat(r?.c) || 0) * monthFraction;
+    } catch { /* channel_fixed_costs not present yet */ }
+    let referralRewards = 0;
+    try {
+      let perConversion = 50; // fallback ONLY if the settings row can't be read
+      try {
+        const s = await require('../services/referral-engine').getSettings();
+        perConversion = ((Number(s?.referrer_reward_cents) || 0) + (Number(s?.referee_discount_cents) || 0)) / 100;
+      } catch { /* settings unreadable — keep the default */ }
+      const [{ n }] = await db('ad_service_attribution')
+        .where({ lead_source: 'referral', funnel_stage: 'completed' })
+        .where('lead_date', '>=', monthStart)
+        .countDistinct({ n: 'customer_id' });
+      referralRewards = (Number(n) || 0) * perConversion;
+    } catch { /* no attribution rows — no referral cost */ }
+
+    // Overhead assumptions: latest company_financials row. Admin overhead is
+    // per-customer-year × active real customers ÷ 12 (a monthly figure like the
+    // other three; buildEbitdaBridge prorates all of them by monthFraction).
+    const finRow = await db('company_financials').orderBy('effective_date', 'desc').first().catch(() => null);
+    let overhead = null;
+    if (finRow) {
+      let activeCustomers = 0;
+      try {
+        const c = await db('customers').where({ active: true }).whereNull('deleted_at')
+          .modify(whereRealCustomer).count('* as count').first();
+        activeCustomers = parseInt(c?.count || 0, 10);
+      } catch (err) {
+        logger.error(`[admin-dashboard] ebitda-bridge customer count failed: ${err.message}`);
+      }
+      overhead = {
+        vehicleMonthly: parseFloat(finRow.vehicle_cost_per_month) || 0,
+        insuranceMonthly: parseFloat(finRow.insurance_cost_per_month) || 0,
+        softwareMonthly: parseFloat(finRow.software_cost_per_month) || 0,
+        adminMonthly: ((parseFloat(finRow.admin_cost_per_customer_year) || 0) * activeCustomers) / 12,
+      };
+    }
+
+    const bridge = buildEbitdaBridge({
+      revenue: parseFloat(fin?.rev) || 0,
+      grossProfit: parseFloat(fin?.gp) || 0,
+      marketing: { adSpend, fixedCosts, referralRewards },
+      overhead,
+      monthFraction,
+    });
+    res.json({
+      ...bridge,
+      period: { from: monthStart, to: today, label: 'Month to date', elapsedDays, daysInMonth },
+      jobs: parseInt(fin?.jobs || 0, 10),
+      uncostedRevenue: Math.round((parseFloat(fin?.uncosted) || 0) * 100) / 100,
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dashboard/retention-cohort?months=12
 // Signup-cohort retention grid: rows = the ET month a customer converted
 // (member_since, via the canonical CONVERSION_DATE_SQL), columns = whole months

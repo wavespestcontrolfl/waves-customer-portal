@@ -7,6 +7,8 @@ import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import BillingHealthPanel from "../BillingHealthPanel";
 import { KpiStrip, KpiTile } from "../KpiTile";
+import Verdict from "../Verdict";
+import { agingVerdict } from "../scorecard-metrics";
 
 // CASH — are we collecting what we earned? Collections, AR aging, and the
 // autopay/billing machinery that turns MRR into money.
@@ -97,6 +99,7 @@ export default function CashSection({
             totalOutstanding={aging?.total_outstanding}
             totalOverdue={aging?.total_overdue}
           />
+          <Verdict verdict={agingVerdict(aging)} />
         </ChartCard>
       </div>
 

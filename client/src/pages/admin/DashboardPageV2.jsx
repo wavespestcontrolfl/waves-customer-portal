@@ -95,6 +95,11 @@ export default function DashboardPageV2() {
   // (wave3). null while unfetched — tiles fall back to DEFAULT_KPI_TARGETS.
   const [kpiTargets, setKpiTargets] = useState(null);
   const [kpiHistory, setKpiHistory] = useState(null);
+  const [ebitda, setEbitda] = useState(null); // /admin/dashboard/ebitda-bridge (wave4)
+  // Mobile scorecard: below md the five sections render ONE at a time behind
+  // the jump-nav pills (real tabs), so a phone isn't scrolling five sections
+  // of charts. Desktop keeps the one-page scroll + IntersectionObserver nav.
+  const [mobileTab, setMobileTab] = useState(SECTIONS[0].id);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -146,6 +151,18 @@ export default function DashboardPageV2() {
     setCustomRange(null);
   }, []);
   const navigate = useNavigate();
+  // Mobile tab switch: swap the visible section and snap the admin scroll
+  // container back to the top so every tab opens at its header.
+  const selectMobileTab = useCallback((id) => {
+    setMobileTab(id);
+    const scroller = document.querySelector(".admin-main");
+    if (scroller && typeof scroller.scrollTo === "function") {
+      scroller.scrollTo({ top: 0 });
+    }
+  }, []);
+  // On mobile only the active tab's section mounts (five sections of recharts
+  // is heavy on a phone); on desktop every section renders for the one-page scroll.
+  const sectionVisible = (id) => !isMobile || mobileTab === id;
   // Drill-down: open the Leads list filtered to this attribution source, scoped
   // to the same period window the panel is showing so the list matches the count.
   const drillToSource = useCallback(
@@ -256,6 +273,16 @@ export default function DashboardPageV2() {
       return byMetric;
     });
     setKpiHistory((prev) => (hist?.series && typeof hist.series === "object" ? hist.series : prev));
+
+    // Wave 4 — the adjusted-EBITDA bridge. Its own wave for the same rate-limit
+    // reason wave3 exists (never grow an existing wave); fails soft to the
+    // card's loading/empty state.
+    const wave4 = await Promise.all([
+      track("/ebitda-bridge", adminFetch("/admin/dashboard/ebitda-bridge")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [eb] = wave4;
+    setEbitda((prev) => eb ?? prev);
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -523,53 +550,65 @@ export default function DashboardPageV2() {
         periodLabel={kpis?.periodLabel}
         onSelectPeriod={selectNamedPeriod}
         onApplyCustomRange={applyCustomRange}
+        activeSection={isMobile ? mobileTab : undefined}
+        onSelectSection={isMobile ? selectMobileTab : undefined}
       />
 
       {/* Alerts stay the first dashboard content, even with AI charts pinned. */}
-      <TodaySection alerts={alerts} alertsStale={alertsStale} today={today} {...kpiStripProps} />
+      {sectionVisible("today") && (
+        <TodaySection alerts={alerts} alertsStale={alertsStale} today={today} {...kpiStripProps} />
+      )}
 
       {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
           by default; the model only proposes SQL, the server sandboxes it. */}
-      {aiChartsEnabled && (
+      {aiChartsEnabled && sectionVisible("today") && (
         <div className="mb-5">
           <AiChartsPanel />
         </div>
       )}
 
 
-      <GrowthSection
-        data={data}
-        compare={compare}
-        salesCapture={salesCapture}
-        funnel={funnel}
-        revenueByCity={revenueByCity}
-        capAlloc={capAlloc}
-        callsBySource={callsBySource}
-        leadsBySource={leadsBySource}
-        channelMix={channelMix}
-        attributionLoading={attributionLoading}
-        attributionError={attributionError}
-        onDrillSource={drillToSource}
-        isMobile={isMobile}
-        {...kpiStripProps}
-      />
+      {sectionVisible("growth") && (
+        <GrowthSection
+          data={data}
+          compare={compare}
+          salesCapture={salesCapture}
+          funnel={funnel}
+          revenueByCity={revenueByCity}
+          capAlloc={capAlloc}
+          callsBySource={callsBySource}
+          leadsBySource={leadsBySource}
+          channelMix={channelMix}
+          attributionLoading={attributionLoading}
+          attributionError={attributionError}
+          onDrillSource={drillToSource}
+          isMobile={isMobile}
+          {...kpiStripProps}
+        />
+      )}
 
-      <ProfitSection mix={mix} isMobile={isMobile} {...kpiStripProps} />
+      {sectionVisible("profit") && (
+        <ProfitSection mix={mix} ebitda={ebitda} isMobile={isMobile} {...kpiStripProps} />
+      )}
 
-      <RetentionSection
-        mrrTrend={mrrTrend}
-        cohort={cohort}
-        reviewTrend={reviewTrend}
-        isMobile={isMobile}
-        {...kpiStripProps}
-      />
+      {sectionVisible("retention") && (
+        <RetentionSection
+          mrrTrend={mrrTrend}
+          cohort={cohort}
+          reviewTrend={reviewTrend}
+          isMobile={isMobile}
+          {...kpiStripProps}
+        />
+      )}
 
-      <CashSection
-        aging={aging}
-        billing={billing}
-        isMobile={isMobile}
-        {...kpiStripProps}
-      />
+      {sectionVisible("cash") && (
+        <CashSection
+          aging={aging}
+          billing={billing}
+          isMobile={isMobile}
+          {...kpiStripProps}
+        />
+      )}
     </div>
   );
 }

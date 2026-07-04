@@ -14,6 +14,12 @@ import {
 import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile } from "../KpiTile";
+import Verdict from "../Verdict";
+import {
+  capitalVerdict,
+  captureVerdict,
+  funnelVerdict,
+} from "../scorecard-metrics";
 
 // Build a daily-revenue sparkline series from the array of { date, total }
 // returned by /admin/dashboard. Pad to at least 2 points so the sparkline
@@ -107,6 +113,7 @@ export default function GrowthSection({
               wonCount={salesCapture.wonCount}
               lostCount={salesCapture.lostCount}
             />
+            <Verdict verdict={captureVerdict(salesCapture)} />
           </ChartCard>
         )}
         <ChartCard
@@ -223,6 +230,7 @@ export default function GrowthSection({
             rates={funnel?.rates || {}}
             totalAcceptedValue={funnel?.total_accepted_value}
           />
+          <Verdict verdict={funnelVerdict(funnel)} />
         </ChartCard>
         {revenueByCity ? (
           <ChartCard
@@ -239,28 +247,31 @@ export default function GrowthSection({
         )}
       </div>
 
-      {/* Capital allocation — acquisition channels banded by LTV:CAC (lifetime
-          gross profit ÷ ad spend) so the owner can see where to pour cash and
-          where it's leaking. Trailing 90 days. */}
+      {/* Capital allocation — acquisition channels banded by LTV:CAC. Basis
+          (stated on the card itself): 12-mo lifetime GROSS PROFIT ÷ all-in
+          marketing cost (ad spend + retainers + referral rewards) — see
+          server/services/capital-allocation.js. Trailing 90 days. */}
       {isMobile ? (
         <MobileFold
           title="Where to Put Ad Dollars"
-          sub="channels by LTV:CAC · last 90 days"
+          sub="gross-profit LTV : all-in CAC · 90 days"
         >
           <ChartCard
             title="Where to Put Ad Dollars"
-            sub="channels by LTV:CAC · last 90 days"
+            sub="gross-profit LTV : all-in CAC · last 90 days"
           >
             <CapitalAllocationCard data={capAlloc} />
+            <Verdict verdict={capitalVerdict(capAlloc)} />
           </ChartCard>
         </MobileFold>
       ) : (
         <div className="mb-5">
           <ChartCard
             title="Where to Put Ad Dollars"
-            sub="acquisition channels by LTV:CAC · last 90 days"
+            sub="acquisition channels by gross-profit LTV : all-in CAC · last 90 days"
           >
             <CapitalAllocationCard data={capAlloc} />
+            <Verdict verdict={capitalVerdict(capAlloc)} />
           </ChartCard>
         </div>
       )}

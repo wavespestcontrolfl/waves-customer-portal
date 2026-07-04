@@ -142,6 +142,31 @@ const FIXTURES = {
     total_overdue: 2410,
   },
   "/admin/dashboard/mrr-trend": { trend: [], avg_growth_pct: 7 },
+  "/admin/dashboard/ebitda-bridge": {
+    rows: [
+      { key: "revenue", label: "Revenue", amount: 497, kind: "start" },
+      { key: "cogs", label: "COGS (labor · materials · drive)", amount: -114, kind: "minus" },
+      { key: "gross_profit", label: "Gross profit", amount: 383, kind: "subtotal", marginPct: 77 },
+      { key: "marketing", label: "Marketing (ads · retainers · referral rewards)", amount: -50, kind: "minus" },
+      { key: "contribution", label: "Contribution", amount: 333, kind: "subtotal", marginPct: 67 },
+      { key: "overhead", label: "Overhead (vehicle · insurance · software · admin)", amount: -160, kind: "minus" },
+      { key: "ebitda", label: "Adjusted EBITDA", amount: 173, kind: "result", marginPct: 34.8 },
+    ],
+    revenue: 497,
+    cogs: 114,
+    grossProfit: 383,
+    grossMarginPct: 77,
+    marketing: { adSpend: 50, fixedCosts: 0, referralRewards: 0, total: 50 },
+    contribution: 333,
+    contributionMarginPct: 67,
+    overhead: { vehicle: 28, insurance: 13, software: 12, admin: 107, total: 160 },
+    overheadEntered: true,
+    ebitda: 173,
+    ebitdaMarginPct: 34.8,
+    monthFraction: 0.033,
+    period: { from: "2026-07-01", to: "2026-07-01", label: "Month to date", elapsedDays: 1, daysInMonth: 31 },
+    uncostedRevenue: 0,
+  },
   "/admin/dashboard/service-mix": { mix: [], total_services: 3 },
   "/admin/dashboard/revenue-by-city": { cities: [], total: 331 },
   "/admin/dashboard/review-trend": { trend: [], total: 180, avgRating: 5 },
@@ -232,9 +257,16 @@ describe("DashboardPageV2 sections", () => {
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("Marketing Attribution"),
     );
-    // PROFIT
+    // PROFIT — the adjusted-EBITDA bridge is its own card NEXT TO the margin
+    // tiles (company-level vs job-level; never combined).
     expect(document.getElementById("profit")).toContainElement(
       screen.getByText("Service Mix"),
+    );
+    expect(document.getElementById("profit")).toContainElement(
+      screen.getByText("Adjusted EBITDA Bridge"),
+    );
+    expect(document.getElementById("profit")).toContainElement(
+      screen.getByText("Adjusted EBITDA"),
     );
     // RETENTION
     expect(document.getElementById("retention")).toContainElement(
