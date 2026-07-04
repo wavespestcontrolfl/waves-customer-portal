@@ -119,6 +119,14 @@ async function syncCampaigns() {
         .first();
 
       if (existing) {
+        // While the capacity loop has the campaign throttled (budget_mode
+        // 'spent'/'stop'), the live amount read back here IS the throttle —
+        // writing it into daily_budget_base would make the reduced budget the
+        // new canonical base and a later green-capacity run could never
+        // restore full spend. Live amount only becomes base in 'base' mode.
+        if (existing.budget_mode && existing.budget_mode !== 'base') {
+          delete data.daily_budget_base;
+        }
         await db('ad_campaigns').where({ id: existing.id }).update(data);
         results.push({ ...existing, ...data });
       } else {

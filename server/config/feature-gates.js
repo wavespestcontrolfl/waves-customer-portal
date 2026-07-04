@@ -263,12 +263,15 @@ const gates = {
 
   // Ads Budget Live Push — allow the 2-hourly capacity-based budget cron
   // (BudgetManager.adjustBudgets) to push its budget changes to the Google
-  // Ads API. Off in prod until the owner verifies campaign links + base
-  // budgets in /admin/ads: with it off the cron records intended budgets
-  // locally only (dashboard/advisor state, no real spend change). Manual
-  // budget/mode controls in /admin/ads push live regardless of this gate —
-  // it covers only the autonomous loop.
-  adsBudgetLivePush: isProd ? process.env.GATE_ADS_BUDGET_LIVE_PUSH === 'true' : true,
+  // Ads API. Off until the owner verifies campaign links + base budgets in
+  // /admin/ads: with it off the cron records intended budgets locally only
+  // (dashboard/advisor state, no real spend change). Manual budget/mode
+  // controls in /admin/ads push live regardless of this gate — it covers
+  // only the autonomous loop. Controls real ad spend, so like the auto-send
+  // gates it FAILS CLOSED (explicit opt-in in EVERY environment): a dev or
+  // preview env with copied Google Ads creds + cronJobs open must never
+  // mutate live campaign budgets by default.
+  adsBudgetLivePush: process.env.GATE_ADS_BUDGET_LIVE_PUSH === 'true',
 
   // Booking "pay per application" — LINKED-ESTIMATE, PEST-ONLY BY DESIGN: prices
   // ONLY a booking explicitly linked to an estimate (estimate_id), and only for

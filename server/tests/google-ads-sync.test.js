@@ -96,6 +96,51 @@ describe('Google Ads campaign sync', () => {
     expect(mockInsert.mock.calls[0][0]).not.toHaveProperty('daily_budget');
   });
 
+  test('preserves daily_budget_base while the local row is throttled', async () => {
+    // A pushed capacity throttle (stop = 1% of base) read back from Google
+    // must not become the new canonical base — a later green-capacity run
+    // could never restore full spend.
+    mockQueryFirst.mockResolvedValue({
+      id: 'row-1',
+      platform_campaign_id: '22594274874',
+      budget_mode: 'stop',
+      daily_budget_base: 40,
+    });
+    mockUpdate.mockResolvedValue(1);
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: '22594274874', name: 'Sarasota Pest', status: 2, advertising_channel_type: 'SEARCH' },
+      campaign_budget: { amount_micros: 400_000 },
+    }]);
+
+    const results = await GoogleAds.syncCampaigns();
+
+    const updateArg = mockUpdate.mock.calls[0][0];
+    expect(updateArg).not.toHaveProperty('daily_budget_base');
+    expect(updateArg.daily_budget_current).toBe(0.4);
+    expect(results[0].daily_budget_base).toBe(40);
+  });
+
+  test('writes live budget into base when the local row is in base mode', async () => {
+    mockQueryFirst.mockResolvedValue({
+      id: 'row-1',
+      platform_campaign_id: '22594274874',
+      budget_mode: 'base',
+      daily_budget_base: 40,
+    });
+    mockUpdate.mockResolvedValue(1);
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: '22594274874', name: 'Sarasota Pest', status: 2, advertising_channel_type: 'SEARCH' },
+      campaign_budget: { amount_micros: 45_000_000 },
+    }]);
+
+    await GoogleAds.syncCampaigns();
+
+    expect(mockUpdate.mock.calls[0][0]).toEqual(expect.objectContaining({
+      daily_budget_base: 45,
+      daily_budget_current: 45,
+    }));
+  });
+
   test('enables campaigns using the current mutateResources update format', async () => {
     mockMutateResources.mockResolvedValue({});
 

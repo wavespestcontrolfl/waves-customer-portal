@@ -1,9 +1,12 @@
 // adjustBudgets must push budget changes to the Google Ads API (push-first,
 // commit local state only on success) when the adsBudgetLivePush gate is on,
 // and keep the legacy DB-only intent tracking when the gate is off, the
-// campaign is unlinked, or the API is unconfigured. setMode mirrors the manual
-// /campaigns/:id/budget route: DB first, best-effort push, outcome reported
-// via googleAdsUpdated.
+// campaign is unlinked, or the API is unconfigured. Gate-on runs with no mode
+// transition reconcile drift: a recorded mode whose calculated budget doesn't
+// match daily_budget_current (mode shadow-written while the gate was off,
+// then the daily sync restored Google's live amount) is re-pushed. setMode
+// mirrors the manual /campaigns/:id/budget route: DB first, best-effort push,
+// outcome reported via googleAdsUpdated.
 
 const mockIsEnabled = jest.fn();
 jest.mock('../config/feature-gates', () => ({ isEnabled: mockIsEnabled }));
@@ -154,6 +157,81 @@ describe('BudgetManager live Google Ads push', () => {
 
       expect(mockUpdateBudget).not.toHaveBeenCalled();
       expect(mockCampaignUpdate).toHaveBeenCalled();
+    });
+  });
+
+  describe('adjustBudgets reconcile (no transition, gate on)', () => {
+    test('shadowed stop mode pushed once the gate turns on', async () => {
+      // Shadow run (gate off) already set budget_mode='stop'; the 6AM sync
+      // then wrote Google's live 40 back into daily_budget_current. Same
+      // capacity zone → no transition, but stop's budget (1% of base = 0.4)
+      // was never live on Google.
+      campaignRows = [{ ...baseCampaign(), budget_mode: 'stop', daily_budget_current: '40' }];
+      mockIsEnabled.mockReturnValue(true);
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.4);
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 0.4 });
+      expect(mockLogInsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          previous_mode: 'stop',
+          new_mode: 'stop',
+          new_budget: 0.4,
+          trigger: 'auto',
+          reason: expect.stringContaining('Reconcile'),
+        })
+      );
+    });
+
+    test('no reconcile when the mode budget is already live', async () => {
+      campaignRows = [{ ...baseCampaign(), budget_mode: 'stop', daily_budget_current: '0.4' }];
+      mockIsEnabled.mockReturnValue(true);
+      mockIsConfigured.mockReturnValue(true);
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      expect(mockLogInsert).not.toHaveBeenCalled();
+    });
+
+    test('gate off: shadowed drift is left alone (no push, no writes)', async () => {
+      campaignRows = [{ ...baseCampaign(), budget_mode: 'stop', daily_budget_current: '40' }];
+      mockIsEnabled.mockReturnValue(false);
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+    });
+
+    test('reconcile push failure: local state untouched, retried next run', async () => {
+      campaignRows = [{ ...baseCampaign(), budget_mode: 'stop', daily_budget_current: '40' }];
+      mockIsEnabled.mockReturnValue(true);
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue(null);
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      expect(mockLogInsert).not.toHaveBeenCalled();
+    });
+
+    test("'spent' mode never reconciles — freeze-at-current is identity", async () => {
+      // 80% utilization → 'spent' zone, matching the recorded mode.
+      BudgetManager.getCapacityForArea.mockResolvedValue({ utilizationPct: 80, booked: 6, slots: 8, techs: 1 });
+      campaignRows = [{ ...baseCampaign(), budget_mode: 'spent', daily_budget_current: '37.5' }];
+      mockIsEnabled.mockReturnValue(true);
+      mockIsConfigured.mockReturnValue(true);
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
     });
   });
 

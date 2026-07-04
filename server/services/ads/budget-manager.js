@@ -18,6 +18,9 @@ class BudgetManager {
    * With the adsBudgetLivePush gate on, each mode change is pushed to the
    * Google Ads API before being committed locally; with it off, changes are
    * DB-only intent tracking (dashboard/advisor state, no real spend change).
+   * Gate-on runs with no mode transition also reconcile drift — a recorded
+   * mode whose budget never reached Google (shadow-written while the gate
+   * was off, or a failed manual push) is re-pushed.
    */
   async adjustBudgets() {
     const now = new Date();
@@ -107,6 +110,44 @@ class BudgetManager {
           });
 
           logger.info(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} (capacity ${pct.toFixed(0)}%${pushedLive ? ', pushed to Google Ads' : ', local only'})`);
+        } else if (isEnabled('adsBudgetLivePush') && campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+          // No transition this run, but the recorded mode may never have
+          // reached Google: modes shadow-written before the gate was enabled
+          // (or committed by a manual setMode whose push failed) leave
+          // budget_mode at e.g. 'stop' while Google runs the old budget — and
+          // since the mode already matches, the transition branch above never
+          // fires to correct it. The daily sync writes Google's live amount
+          // back into daily_budget_current, so a mismatch between that and
+          // the mode's calculated budget is exactly this drift. Push the
+          // mode's budget to reconcile. 'spent' is freeze-at-current by
+          // definition, so it can never trigger this.
+          const expectedBudget = this.calculateBudget(campaign, campaign.budget_mode);
+          if (Math.abs(parseFloat(campaign.daily_budget_current) - expectedBudget) > 0.005) {
+            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, expectedBudget);
+            if (!pushed) {
+              logger.error(`Budget: ${campaign.campaign_name} reconcile of ${campaign.budget_mode} budget NOT applied — Google Ads push failed; will retry next run`);
+              continue;
+            }
+
+            await db('ad_campaigns').where({ id: campaign.id }).update({
+              daily_budget_current: expectedBudget,
+            });
+
+            await db('ad_budget_log').insert({
+              campaign_id: campaign.id,
+              campaign_name: campaign.campaign_name,
+              previous_mode: campaign.budget_mode,
+              new_mode: campaign.budget_mode,
+              previous_budget: campaign.daily_budget_current,
+              new_budget: expectedBudget,
+              reason: `Reconcile: local ${campaign.budget_mode} budget was not live on Google — pushed to Google Ads`,
+              trigger: 'auto',
+              capacity_pct: pct,
+              check_date: checkDate,
+            });
+
+            logger.info(`Budget: ${campaign.campaign_name} reconciled ${campaign.budget_mode} budget to ${expectedBudget} (pushed to Google Ads)`);
+          }
         }
       } catch (err) {
         logger.error(`Budget adjust failed for ${campaign.campaign_name}: ${err.message}`);
