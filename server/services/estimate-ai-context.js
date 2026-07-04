@@ -174,6 +174,25 @@ const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|k
 // starve the pest product's reviewed guidance.
 const RECIPIENT_ACTIVITY_PATTERN = /\b(?:water(?:ing|ed|s)?|irrigat\w*|mow\w*|walk\w*|play\w*|re-?enter\w*|enter\w*)\s+(?:on\s+|onto\s+|in\s+)?(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plant(?:ing)?s?|palms?)\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
 
+// A recipient list that STARTS with people/pets ("safe for my dog and
+// lawn?", "will it hurt the kids or the shrubs?") is recipients all the way
+// through — an area noun after the conjunction is one more recipient, not
+// the treatment family being asked about. AFFECTED_AREA_PATTERN cannot see
+// these lists (its match must start at an area noun, and the conjunction
+// carries no for/on/near trigger of its own), so the mixed list is consumed
+// whole before area matching runs. The trailing lookahead keeps target
+// phrasing: "for my dog and the lawn treatment" backtracks to strip only
+// "for my dog", leaving the lawn family in place.
+const LIVING_RECIPIENT_NOUNS = '(?:pets?|dogs?|cats?|pupp(?:y|ies)|kittens?|kids?|child|children|toddlers?|bab(?:y|ies)|infants?|famil(?:y|ies)|people|everyone|guests?|animals?|birds?|chickens?|fish|koi)';
+const LIVING_RECIPIENT_LIST_PATTERN = new RegExp(
+  '\\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\\s+(?:the\\s+|my\\s+|our\\s+)?'
+  + LIVING_RECIPIENT_NOUNS
+  + '(?:\\s*(?:,|and|or|&)\\s*(?:the\\s+|my\\s+|our\\s+)?'
+  + `(?:${LIVING_RECIPIENT_NOUNS}|lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\\s+)?plant(?:ing)?s?|palms?))*`
+  + '\\b(?!\\s+(?:treat\\w*|appl\\w*|spray\\w*|service|care|program|plan))',
+  'gi',
+);
+
 // Canonical service_key prefixes → family, checked BEFORE the loose label
 // matcher: "rodent_bait_quarterly" must classify as rodent_bait, not hit the
 // termite pattern's bare "bait" alternate. Order matters — the specific
@@ -238,8 +257,10 @@ function serviceFamiliesFromText(value) {
   // treatment VERB right before the preposition ("what do you spray on the
   // lawn?") makes the area the treatment target, so those phrases survive.
   // "safe" between the verb and the preposition ("the mosquito spray safe
-  // for the lawn") keeps recipient semantics.
-  const targeted = text.replace(AFFECTED_AREA_PATTERN, (match, offset, whole) => {
+  // for the lawn") keeps recipient semantics. Mixed people/pet + area lists
+  // go first: a leading living recipient fixes the whole list as recipients,
+  // with no treatment-target reading to preserve.
+  const targeted = text.replace(LIVING_RECIPIENT_LIST_PATTERN, ' ').replace(AFFECTED_AREA_PATTERN, (match, offset, whole) => {
     // Harm-verb phrases ("hurt my shrubs") are ALWAYS recipients.
     if (/^(?:hurt|harms?|damage|kills?|burn|stains?)\b/i.test(match)) return ' ';
     const before = whole.slice(Math.max(0, offset - 40), offset);
@@ -644,6 +665,23 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         .where(function linkedProducts() {
           for (const name of linkedLookupNames) {
             this.orWhere('name', 'ilike', `%${name}%`);
+            // The library/protocol alias can be a token SUBSET of the
+            // catalog name ("Advion Gel" → "Advion Cockroach Gel").
+            // familiesForProduct attributes those token-wise, so the fetch
+            // must match the same way — a contiguous ilike never loads the
+            // row and the linked product silently drops out of the working
+            // set. Word-boundary regexes mirror familiesForProduct's
+            // whole-token equality, under the same distinctive-token anchor
+            // so two everyday short tokens can't fetch by themselves.
+            const aliasTokens = tokensOf(name);
+            if (aliasTokens.length
+              && aliasTokens.some((token) => token.length >= 4 || /\d/.test(token))) {
+              this.orWhere(function tokenAliasProducts() {
+                for (const token of aliasTokens) {
+                  this.andWhereRaw('name ~* ?', [`\\m${token}\\M`]);
+                }
+              });
+            }
           }
         })
         .select(...PRODUCT_CATALOG_COLUMNS)

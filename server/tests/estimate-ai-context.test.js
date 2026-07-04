@@ -38,6 +38,20 @@ function filteringDb(tables = {}) {
       },
       whereNull() { return this; },
       orWhere(column, _op, pattern) {
+        if (typeof column === 'function') {
+          // Grouped token-alias clause (linked-product query): every
+          // \m<token>\M word-boundary regex in the group must match the name.
+          const tokens = [];
+          column.call({
+            andWhereRaw(sql, bindings = []) {
+              const value = Array.isArray(bindings) ? bindings[0] : bindings;
+              if (typeof value === 'string') tokens.push(value.replace(/\\m|\\M/g, '').toLowerCase());
+              return this;
+            },
+          });
+          if (tokens.length) likes.push({ column: 'name', tokens });
+          return this;
+        }
         if (typeof pattern === 'string') likes.push({ column, needle: pattern.replace(/%/g, '').toLowerCase() });
         return this;
       },
@@ -54,9 +68,12 @@ function filteringDb(tables = {}) {
       select() { return this; },
       limit(count) {
         const rows = (tables[table] || []).filter((row) => !likes.length
-          || likes.some(({ column, needle, normalized }) => (normalized
-            ? normalize(row[column]).includes(needle)
-            : String(row[column] || '').toLowerCase().includes(needle))));
+          || likes.some(({ column, needle, normalized, tokens }) => {
+            if (tokens) return tokens.every((token) => new RegExp(`\\b${token}\\b`, 'i').test(String(row[column] || '')));
+            return normalized
+              ? normalize(row[column]).includes(needle)
+              : String(row[column] || '').toLowerCase().includes(needle);
+          }));
         return Promise.resolve(rows.slice(0, count));
       },
     };
@@ -98,6 +115,13 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Is the mosquito spray safe for the lawn?')).toEqual(['mosquito']);
     // ...including coordinated recipient lists.
     expect(serviceFamiliesFromText('Is the mosquito spray safe for lawns and shrubs?')).toEqual(['mosquito']);
+    // A recipient list that STARTS with people/pets keeps its trailing area
+    // nouns as recipients too — the list has no treatment-target reading.
+    expect(serviceFamiliesFromText('Is the mosquito spray safe for my dog and lawn?')).toEqual(['mosquito']);
+    expect(serviceFamiliesFromText('Will it hurt the kids or the shrubs?')).toEqual([]);
+    // ...but a target phrase after the list keeps its family: only the
+    // living recipients strip.
+    expect(serviceFamiliesFromText('Is it safe for my dog and the lawn treatment?')).toEqual(['lawn_care']);
     // ...but "for the lawn treatment" TARGETS the lawn family.
     expect(serviceFamiliesFromText('What product is used for the lawn treatment?')).toEqual(['lawn_care']);
     // A treatment verb before the preposition makes the area the target...
@@ -561,6 +585,47 @@ describe('estimate AI support context', () => {
     expect(linked).toBeDefined();
     expect(linked.serviceKeys).toEqual(['lawn_care']);
     expect(result.productCatalogTruncated).toBe(true);
+  });
+
+  test('a token-subset library alias still fetches its linked catalog row', async () => {
+    // 30 broad-term matches fill the broad limit(24) first — only the
+    // dedicated linked-product query can still fetch the linked row.
+    const fillers = Array.from({ length: 30 }, (_, i) => ({
+      name: `Pest Filler ${i}`,
+      category: 'insecticide',
+      active_ingredient: `Filler Ingredient ${i}`,
+      active: true,
+      label_verified_by: 'waves-admin',
+    }));
+    const result = await loadEstimateAiSupportContext({
+      db: filteringDb({
+        services: [{
+          service_key: 'pest_quarterly',
+          name: 'Pest Control',
+          description: 'Quarterly perimeter plan',
+          category: 'pest_control',
+          is_active: true,
+          default_products: ['Advion Gel'],
+        }],
+        products_catalog: [...fillers, {
+          // The library alias is a token SUBSET of the stored name — a
+          // contiguous ilike ('%Advion Gel%') never matches it, and with the
+          // broad cap full of fillers nothing else fetches it either.
+          // familiesForProduct would attribute it token-wise if only it were
+          // loaded; the fetch must match the same token-wise way.
+          name: 'Advion Cockroach Gel Bait',
+          category: 'insecticide',
+          active_ingredient: 'Indoxacarb',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is it safe for pets?',
+      context: { services: [{ label: 'Pest Control', detail: 'Quarterly perimeter plan' }] },
+    });
+    const linked = result.productCatalog.find((r) => r.activeIngredient === 'Indoxacarb');
+    expect(linked).toBeDefined();
+    expect(linked.serviceKeys).toEqual(['pest_control']);
   });
 
   test('question-derived service keys use the whole-word matcher for support loading', () => {

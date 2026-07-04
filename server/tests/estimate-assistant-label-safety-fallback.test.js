@@ -129,8 +129,14 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
   test('watering questions surface the label irrigation guidance', () => {
     const context = JSON.parse(JSON.stringify(verifiedContext));
     context.supportContext.productCatalog[0].irrigationNotes = 'Avoid irrigation for 24 hours after application.';
+    // Only one of the two scoped products states watering guidance — the
+    // line must not read as covering both.
     const answer = answerEstimateQuestionFallback('Can I water the lawn after the application?', context);
-    expect(answer).toContain('Label watering/irrigation guidance: Avoid irrigation for 24 hours after application.');
+    expect(answer).toContain('Where a product label provides watering/irrigation guidance: Avoid irrigation for 24 hours after application; not every product on this estimate has watering guidance on file.');
+    // With every scoped product stating guidance, the blanket form returns.
+    context.supportContext.productCatalog[1].irrigationNotes = 'Avoid irrigation for 24 hours after application.';
+    const covered = answerEstimateQuestionFallback('Can I water the lawn after the application?', context);
+    expect(covered).toContain('Label watering/irrigation guidance: Avoid irrigation for 24 hours after application.');
   });
 
   // The support context is built from ALL estimate services, so a bundle must
@@ -179,6 +185,16 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('rainfast in about 180 minutes');
     expect(answer).not.toContain('until dry.');
     expect(answer).not.toContain('irrigation');
+  });
+
+  test('a pet + area recipient list stays scoped to the asked family', () => {
+    // "for my dog and lawn" is recipients all the way through — the trailing
+    // lawn noun must not pull the herbicide's facts into a mosquito answer.
+    const answer = answerEstimateQuestionFallback('Is the mosquito spray safe for my dog and lawn?', bundleContext);
+    expect(answer).toContain('Stay out of the treated area until sprays have dried');
+    expect(answer).not.toContain('Keep people and pets off treated areas until dry');
+    expect(answer).not.toContain('rainfast in about 180 minutes');
+    expect(answer).not.toContain('Quinclorac');
   });
 
   test('family question with no attributable product says nothing rather than quoting the wrong label', () => {
@@ -375,6 +391,21 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).toContain('Keep people and pets off treated areas until dry');
   });
 
+  test('a passive/product-subject unresolved name fails the answer closed too', () => {
+    // The product sits BEFORE the usage verb — no "is X safe" or
+    // verb-then-product anchor fires, but the question still names an
+    // off-catalog product and the lawn facts must not read as covering it.
+    const answer = answerEstimateQuestionFallback('Will Roundup be used on my lawn, and is it safe for dogs?', verifiedContext);
+    expect(answer).not.toContain('Label re-entry guidance');
+    expect(answer).not.toContain('Keep people and pets off treated areas until dry');
+    expect(answer).not.toContain('Carfentrazone');
+    expect(answer).toContain('follow the product label directions');
+    // A RESOLVED on-estimate product in the same passive position keeps its
+    // facts flowing.
+    const resolved = answerEstimateQuestionFallback('Will 2,4-D be sprayed on my lawn, and is it safe for dogs?', verifiedContext);
+    expect(resolved).toContain('Keep people and pets off treated areas until dry');
+  });
+
   test('an unqualified category on a plant area scopes to that area\'s family', () => {
     const answer = answerEstimateQuestionFallback('Is the insecticide on landscape plants safe?', {
       serviceMode: 'recurring',
@@ -423,7 +454,9 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).toContain('Stay out of the treated area until sprays have dried');
     // Most conservative rainfast across every named family.
     expect(answer).toContain('rainfast in about 180 minutes');
-    expect(answer).toContain('Label watering/irrigation guidance: Avoid irrigation for 24 hours after application.');
+    // Only the lawn product states watering guidance — the line stays
+    // qualified rather than reading as covering the mosquito product too.
+    expect(answer).toContain('Where a product label provides watering/irrigation guidance: Avoid irrigation for 24 hours after application; not every product on this estimate has watering guidance on file.');
   });
 
   test('a question naming a specific ingredient narrows to that product even with no family word', () => {
@@ -555,9 +588,10 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     const context = JSON.parse(JSON.stringify(verifiedContext));
     context.supportContext.productCatalog[0].irrigationNotes = 'Avoid irrigation for 24 hours after application.';
     // "outside" is a location here, not a pest-treatment scope — the lawn
-    // rows carrying the irrigation guidance must survive scoping.
+    // rows carrying the irrigation guidance must survive scoping. Only one
+    // of the two scoped products states guidance, so the line is qualified.
     const answer = answerEstimateQuestionFallback('Can I water my outside plants after treatment?', context);
-    expect(answer).toContain('Label watering/irrigation guidance: Avoid irrigation for 24 hours after application.');
+    expect(answer).toContain('Where a product label provides watering/irrigation guidance: Avoid irrigation for 24 hours after application; not every product on this estimate has watering guidance on file.');
   });
 
   test('"safe for the lawn" scopes to the asked-about spray, not the lawn family', () => {
@@ -660,6 +694,10 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     const answer = answerEstimateQuestionFallback('Is it safe for pets?', context);
     expect(answer).not.toContain('Treated areas are rainfast');
     expect(answer).toContain('Where a product label states a rainfast window, treated areas are rainfast in about 180 minutes');
+    // The unverified product's re-entry guidance is just as unknown — the
+    // verified products' instruction must not read as blanket either.
+    expect(answer).not.toContain('Label re-entry guidance:');
+    expect(answer).toContain('Where a product label provides re-entry guidance: Keep people and pets off treated areas until dry; not every product on this estimate has re-entry guidance on file.');
   });
 
   test('family questions fail closed on unattributed rows, even on a single-family estimate', () => {
@@ -778,6 +816,18 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     const answer = answerEstimateQuestionFallback('Is it safe for pets?', context);
     expect(answer).not.toContain('Treated areas are rainfast');
     expect(answer).toContain('Where a product label states a rainfast window, treated areas are rainfast in about 180 minutes');
+  });
+
+  test('a truncated catalog slice qualifies the re-entry and signal-word copy too', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    // An omitted product can carry a longer or different re-entry interval —
+    // the blanket instruction must not read as covering it.
+    context.supportContext.productCatalogTruncated = true;
+    const answer = answerEstimateQuestionFallback('Is it safe for pets?', context);
+    expect(answer).not.toContain('Label re-entry guidance:');
+    expect(answer).toContain('Where a product label provides re-entry guidance: Keep people and pets off treated areas until dry; not every product on this estimate has re-entry guidance on file.');
+    expect(answer).not.toContain('Label signal word: Caution.');
+    expect(answer).toContain('Label signal word for the products on file: Caution.');
   });
 
   test('one-time mode does not answer from the recurring alternative\'s products', () => {

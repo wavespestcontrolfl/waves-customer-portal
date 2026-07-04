@@ -917,7 +917,14 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
       if (!looksLikeUnresolvedProduct(word)) continue;
       const askSubject = new RegExp(`\\b(?:is|are|was|were|will)\\s+(?:the\\s+|my\\s+|our\\s+|a\\s+|an\\s+)?${word}\\s+(?:safe|ok|okay|toxic|dangerous|harmful|poisonous)\\b`, 'i');
       const askUsage = new RegExp(`\\b(?:use|uses|used|using|sprayed|spraying|applied|applying)\\s+(?:the\\s+|any\\s+)?${word}\\b`, 'i');
-      if (askSubject.test(normalizedQuestion) || askUsage.test(normalizedQuestion)) return [];
+      // Passive/product-subject usage puts the product BEFORE the verb:
+      // "will Roundup be used on my lawn?", "is Roundup being sprayed?",
+      // "Roundup was applied last visit". The product-ask anchors above only
+      // see verb-then-product order, so without this the question falls
+      // through to the scoped family rows and their facts read as covering
+      // the off-catalog name.
+      const askPassiveUsage = new RegExp(`\\b${word}\\s+(?:will\\s+|would\\s+|going\\s+to\\s+)?(?:be|being|is|are|was|were|gets?|got)\\s+(?:being\\s+)?(?:used|sprayed|applied|put)\\b`, 'i');
+      if (askSubject.test(normalizedQuestion) || askUsage.test(normalizedQuestion) || askPassiveUsage.test(normalizedQuestion)) return [];
     }
   }
   const categoryMentions = rows.filter((row) => catalogRowMentionsCategory(row, question) && onEstimate(row));
@@ -994,25 +1001,51 @@ function labelSafetyFactsFromSupport(context = {}, question = '') {
     .filter((minutes) => Number.isFinite(minutes) && minutes > 0);
   const irrigation = [...new Set(scoped.map((row) => cleanText(row.irrigationNotes || '')).filter(Boolean))];
   const parts = [];
-  if (reentries.length === 1) parts.push(`Label re-entry guidance: ${reentries[0].replace(/\.$/, '')}.`);
-  else if (reentries.length > 1) parts.push(`Label re-entry guidance by product: ${reentries.map((text) => text.replace(/\.$/, '')).join('; ')}.`);
-  if (signalWords.length) parts.push(`Label signal word${signalWords.length > 1 ? 's' : ''}: ${signalWords.join(', ')}.`);
-  // Multiple products: quote the longest (most conservative) window — but as
-  // a blanket claim only when EVERY scoped product (verified or not, hence
-  // scopedRows not scoped) states one AND the catalog slice wasn't truncated
-  // at its row cap (a truncated slice can't prove completeness — an omitted
-  // product may have no stated window). The label seed intentionally leaves
-  // rainfast blank where the label doesn't state a window, unverified rows
-  // carry no window at all, and one product's window must not become a
-  // claim about the rest.
+  // Every fact line below carries the same completeness rule as the rainfast
+  // claim: the copy reads as covering the whole treatment, so the blanket
+  // form may only be used when EVERY scoped product (verified or not, hence
+  // scopedRows not scoped — unverified rows never carry the field) states the
+  // fact AND the catalog slice wasn't truncated at a row cap. A truncated
+  // slice can't prove completeness — an omitted product may carry a longer
+  // re-entry interval, a harsher signal word, or contrary watering guidance —
+  // so the qualified variants say what is and is not on file.
   const catalogTruncated = (context.supportContext || context.aiSupport || {}).productCatalogTruncated === true;
+  const coversEveryScopedRow = (field) => !catalogTruncated
+    && scoped.filter((row) => cleanText(row[field] || '')).length === scopedRows.length;
+  if (reentries.length) {
+    const listed = reentries.map((text) => text.replace(/\.$/, '')).join('; ');
+    if (coversEveryScopedRow('reentry')) {
+      parts.push(reentries.length === 1
+        ? `Label re-entry guidance: ${listed}.`
+        : `Label re-entry guidance by product: ${listed}.`);
+    } else {
+      parts.push(reentries.length === 1
+        ? `Where a product label provides re-entry guidance: ${listed}; not every product on this estimate has re-entry guidance on file.`
+        : `Where product labels provide re-entry guidance, by product: ${listed}; not every product on this estimate has re-entry guidance on file.`);
+    }
+  }
+  if (signalWords.length) parts.push(`Label signal word${signalWords.length > 1 ? 's' : ''}${coversEveryScopedRow('signalWord') ? '' : ' for the products on file'}: ${signalWords.join(', ')}.`);
+  // Multiple products: quote the longest (most conservative) window. The
+  // label seed intentionally leaves rainfast blank where the label doesn't
+  // state a window, so one product's window must not become a claim about
+  // the rest.
   if (rainfast.length === scopedRows.length && rainfast.length && !catalogTruncated) {
     parts.push(`Treated areas are rainfast in about ${Math.max(...rainfast)} minutes.`);
   } else if (rainfast.length) {
     parts.push(`Where a product label states a rainfast window, treated areas are rainfast in about ${Math.max(...rainfast)} minutes; not every product on this estimate has a stated window on file.`);
   }
-  if (irrigation.length === 1) parts.push(`Label watering/irrigation guidance: ${irrigation[0].replace(/\.$/, '')}.`);
-  else if (irrigation.length > 1) parts.push(`Label watering/irrigation guidance by product: ${irrigation.map((text) => text.replace(/\.$/, '')).join('; ')}.`);
+  if (irrigation.length) {
+    const listed = irrigation.map((text) => text.replace(/\.$/, '')).join('; ');
+    if (coversEveryScopedRow('irrigationNotes')) {
+      parts.push(irrigation.length === 1
+        ? `Label watering/irrigation guidance: ${listed}.`
+        : `Label watering/irrigation guidance by product: ${listed}.`);
+    } else {
+      parts.push(irrigation.length === 1
+        ? `Where a product label provides watering/irrigation guidance: ${listed}; not every product on this estimate has watering guidance on file.`
+        : `Where product labels provide watering/irrigation guidance, by product: ${listed}; not every product on this estimate has watering guidance on file.`);
+    }
+  }
   return parts.join(' ');
 }
 
