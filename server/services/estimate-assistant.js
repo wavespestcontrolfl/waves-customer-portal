@@ -873,26 +873,28 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
   const coveredTokens = new Set(productMentions.flatMap((row) => namingTokensByRow.get(row)));
   const namedTokens = namedRows.flatMap((row) => namingTokensByRow.get(row));
   if (namedTokens.some((token) => !coveredTokens.has(token))) return [];
-  // A product-looking word coordinated with a RESOLVED product mention that
-  // itself resolves to no loaded row means the customer named a product the
-  // catalog does not carry at all ("2,4-D and Roundup" — the dedicated
-  // named-product fetch would have loaded any catalog match). Answering from
-  // the resolved rows alone would read as covering it: fail closed. The
-  // anchor requirement (a resolved token on one side of the conjunction)
-  // keeps ordinary nouns out of this — "safe for kids and adults" names no
-  // product on either side.
+  // A product-looking word that resolves to NO loaded row means the
+  // customer named a product the catalog does not carry at all — the
+  // dedicated named-product fetch would have loaded any catalog match.
+  // Answering from the estimate's own rows would read as covering it: fail
+  // closed. Two ANCHORED detections keep ordinary nouns out:
+  //   1. Coordinated with a RESOLVED product mention ("2,4-D and Roundup")
+  //      — "safe for kids and adults" names no product on either side.
+  //   2. A LONE mention in product-ask position ("Is Roundup safe for
+  //      pets?", "do you use Roundup?") — "is it safe for my golden
+  //      retriever" has no candidate in the subject slot.
   const resolvedTokens = new Set(namedTokens.filter((token) => token !== '__name__'));
+  const normalizeWord = (word) => word.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const questionWordList = cleanText(question).replace(/&/g, ' and ').split(/\s+/).map(normalizeWord).filter(Boolean);
+  const looksLikeUnresolvedProduct = (word) => Boolean(word)
+    && (word.length >= 5 || /\d/.test(word))
+    && !resolvedTokens.has(word)
+    && !GENERIC_QUESTION_TERMS.has(word)
+    && !new RegExp(`^${CATEGORY_NOUNS}$`, 'i').test(word)
+    && !/^(?:lawns?|turf|grass|weeds?|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|ornamentals?|palms?|roach\w*|cockroach\w*|ants?|spiders?|fleas?|ticks?|bees?|wasps?|treat\w*|sprays?|services?|products?|chemicals?|pesticides?|barriers?|granul\w*|dunks?|tablets?|stations?|traps?|concentrates?|liquids?|waveguard)$/.test(word);
   if (resolvedTokens.size) {
-    const normalizeWord = (word) => word.toLowerCase().replace(/[^a-z0-9]+/g, '');
-    const questionWordList = cleanText(question).replace(/&/g, ' and ').split(/\s+/).map(normalizeWord).filter(Boolean);
     const CONJUNCTION_WORDS = new Set(['and', 'plus', 'or']);
     const SKIPPABLE_ARTICLES = new Set(['the', 'my', 'our', 'a', 'an', 'this', 'that', 'other']);
-    const looksLikeUnresolvedProduct = (word) => Boolean(word)
-      && (word.length >= 5 || /\d/.test(word))
-      && !resolvedTokens.has(word)
-      && !GENERIC_QUESTION_TERMS.has(word)
-      && !new RegExp(`^${CATEGORY_NOUNS}$`, 'i').test(word)
-      && !/^(?:lawns?|turf|grass|weeds?|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|ornamentals?|palms?|roach\w*|cockroach\w*|ants?|spiders?|fleas?|ticks?|bees?|wasps?|treat\w*|sprays?|services?|products?|chemicals?|pesticides?)$/.test(word);
     for (let i = 0; i < questionWordList.length; i += 1) {
       if (!CONJUNCTION_WORDS.has(questionWordList[i])) continue;
       const leftWord = i > 0 ? questionWordList[i - 1] : '';
@@ -903,6 +905,19 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
         || (resolvedTokens.has(rightWord) && looksLikeUnresolvedProduct(leftWord))) {
         return [];
       }
+    }
+  }
+  // A pre-token flag match ('__name__') can't say WHICH question word named
+  // its row — the lone-mention scan would misread that word as unresolved,
+  // so it only runs when every name match is tokenized (the builder always
+  // stamps tokens; only legacy/hand-built contexts lack them).
+  if (!namedTokens.includes('__name__')) {
+    const normalizedQuestion = ` ${questionWordList.join(' ')} `;
+    for (const word of new Set(questionWordList)) {
+      if (!looksLikeUnresolvedProduct(word)) continue;
+      const askSubject = new RegExp(`\\b(?:is|are|was|were|will)\\s+(?:the\\s+|my\\s+|our\\s+|a\\s+|an\\s+)?${word}\\s+(?:safe|ok|okay|toxic|dangerous|harmful|poisonous)\\b`, 'i');
+      const askUsage = new RegExp(`\\b(?:use|uses|used|using|sprayed|spraying|applied|applying)\\s+(?:the\\s+|any\\s+)?${word}\\b`, 'i');
+      if (askSubject.test(normalizedQuestion) || askUsage.test(normalizedQuestion)) return [];
     }
   }
   const categoryMentions = rows.filter((row) => catalogRowMentionsCategory(row, question) && onEstimate(row));

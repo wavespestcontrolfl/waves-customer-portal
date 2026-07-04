@@ -179,16 +179,23 @@ const RECIPIENT_ACTIVITY_PATTERN = /\b(?:water(?:ing|ed|s)?|irrigat\w*|mow\w*|wa
 // termite pattern's bare "bait" alternate. Order matters — the specific
 // compound keys (pest_rodent, pest_termite) come before the bare pest rule.
 const SERVICE_KEY_FAMILY_PREFIXES = [
-  ['rodent_bait', /^(?:rodent|pest_rodent)/],
-  ['termite_bait', /^(?:termite|pest_termite)/],
+  // pest_rodent_* / pest_termite_* are COMBINED services (one visit covers
+  // the perimeter pest treatment AND the station program — see the
+  // combined_service_cutover migration), so they carry BOTH families; the
+  // specialty lane leads so single-family consumers keep their prior
+  // classification.
+  [['rodent_bait', 'pest_control'], /^pest_rodent/],
+  [['termite_bait', 'pest_control'], /^pest_termite/],
+  [['rodent_bait'], /^rodent/],
+  [['termite_bait'], /^termite/],
   // palm(?!etto): pest_initial_palmetto_knockdown is a ROACH job — the
   // suffix scan below must not hand its "palmetto_knockdown" suffix to the
   // palm-injection lane.
-  ['palm_injection', /^palm(?!etto)/],
-  ['mosquito', /^(?:mosquito|one_time_mosquito)/],
-  ['tree_shrub', /^(?:tree|shrub)/],
-  ['lawn_care', /^(?:lawn|one_time_lawn)/],
-  ['pest_control', /^(?:pest|cockroach|german_roach|bed_bug|fire_ant|flea_tick|bee_wasp|mud_dauber|one_time_pest)/],
+  [['palm_injection'], /^palm(?!etto)/],
+  [['mosquito'], /^(?:mosquito|one_time_mosquito)/],
+  [['tree_shrub'], /^(?:tree|shrub)/],
+  [['lawn_care'], /^(?:lawn|one_time_lawn)/],
+  [['pest_control'], /^(?:pest|cockroach|german_roach|bed_bug|fire_ant|flea_tick|bee_wasp|mud_dauber|one_time_pest)/],
 ];
 
 // Combo keys ("lawn_tree_shrub_combo" is live in the service library) embed
@@ -205,9 +212,11 @@ function serviceFamiliesFromKey(serviceKey) {
   }
   const families = [];
   for (const suffix of suffixes) {
-    for (const [family, pattern] of SERVICE_KEY_FAMILY_PREFIXES) {
+    for (const [familyList, pattern] of SERVICE_KEY_FAMILY_PREFIXES) {
       if (pattern.test(suffix)) {
-        if (!families.includes(family)) families.push(family);
+        for (const family of familyList) {
+          if (!families.includes(family)) families.push(family);
+        }
         break;
       }
     }
@@ -508,7 +517,13 @@ function questionNameTokensFor(name, questionWords) {
     .filter((token) => (token.length >= 5 || /\d/.test(token))
       && token.length >= 2
       && !GENERIC_NAME_TOKENS.has(token));
-  const matched = tokens.filter((token) => questionWords.includes(token));
+  // Hyphenated names normalize to one token ("Three-Way" → "threeway") that
+  // no single question word can equal — adjacent question words are also
+  // compared JOINED ("three way" → "threeway"), so a punctuated name still
+  // matches words the customer actually typed.
+  const questionBigrams = questionWords.slice(1).map((word, index) => `${questionWords[index]}${word}`);
+  const comparableQuestionTokens = new Set([...questionWords, ...questionBigrams]);
+  const matched = tokens.filter((token) => comparableQuestionTokens.has(token));
   if (!matched.length) return [];
   // A common English word isn't a product mention — "Drive XLR8" must not
   // be "named" by "is it safe to DRIVE on the lawn?". But short DISTINCTIVE
@@ -614,8 +629,29 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         .limit(8)
       : [];
 
+    // The estimate's own LINKED products (service-library defaults +
+    // protocol names) must survive the broad cap the same way question-
+    // named products do: the broad query is an unordered OR, and 24 generic
+    // term matches can fill its cap before the linked rows — leaving
+    // scoping with no attributed rows and letting unattributed rows answer.
+    const linkedLookupNames = unique(productNames).slice(0, 24);
+    const linkedNamesTruncated = unique(productNames).length > linkedLookupNames.length;
+    const linkedRows = linkedLookupNames.length
+      ? await db('products_catalog')
+        .where(function activeProducts() {
+          this.where({ active: true }).orWhereNull('active');
+        })
+        .where(function linkedProducts() {
+          for (const name of linkedLookupNames) {
+            this.orWhere('name', 'ilike', `%${name}%`);
+          }
+        })
+        .select(...PRODUCT_CATALOG_COLUMNS)
+        .limit(24)
+      : [];
+
     const seenNames = new Set();
-    const rows = [...namedRows, ...broadRows].filter((row) => {
+    const rows = [...namedRows, ...linkedRows, ...broadRows].filter((row) => {
       const key = cleanText(row.name || '').toLowerCase()
         || cleanText(`${row.active_ingredient || ''}|${row.category || ''}`).toLowerCase();
       if (seenNames.has(key)) return false;
@@ -692,11 +728,15 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
       };
     }).filter((row) => row.snippet || row.title);
     // Truncated when rows were actually dropped (raw > working set), when
-    // the named-product query filled its own cap — an exactly-8 merge built
-    // from a capped named fetch is not provably complete — OR when a lookup
-    // candidate never even reached the query. Completeness claims must not
-    // be made from any of those.
-    return { rows: shaped, truncated: rows.length > 8 || namedRows.length >= 8 || lookupTruncated };
+    // the named-product or linked-product query filled its own cap — a
+    // merge built from a capped fetch is not provably complete — OR when a
+    // lookup candidate never even reached a query. Completeness claims must
+    // not be made from any of those.
+    return {
+      rows: shaped,
+      truncated: rows.length > 8 || namedRows.length >= 8 || linkedRows.length >= 24
+        || lookupTruncated || linkedNamesTruncated,
+    };
   } catch (err) {
     logger.warn(`[estimate-ai-context] products_catalog lookup skipped: ${err.message}`);
     return { rows: [], truncated: false };

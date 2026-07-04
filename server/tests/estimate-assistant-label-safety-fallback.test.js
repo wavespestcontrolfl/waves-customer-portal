@@ -358,6 +358,23 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).toContain('follow the product label directions');
   });
 
+  test('a LONE product name with no catalog match fails the answer closed too', () => {
+    // No coordination anchor here — the product-ask position ("Is X safe")
+    // is the signal that Roundup is a product, not an ordinary noun.
+    const answer = answerEstimateQuestionFallback('Is Roundup safe for pets?', verifiedContext);
+    expect(answer).not.toContain('Label re-entry guidance');
+    expect(answer).not.toContain('Keep people and pets off treated areas until dry');
+    expect(answer).not.toContain('Carfentrazone');
+    expect(answer).toContain('follow the product label directions');
+  });
+
+  test('ordinary nouns outside product-ask position keep the label facts', () => {
+    // "golden retriever" is a recipient, not a product mention — the
+    // unresolved-name guard must not starve the answer.
+    const answer = answerEstimateQuestionFallback('Is it safe for my golden retriever?', verifiedContext);
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+  });
+
   test('an unqualified category on a plant area scopes to that area\'s family', () => {
     const answer = answerEstimateQuestionFallback('Is the insecticide on landscape plants safe?', {
       serviceMode: 'recurring',

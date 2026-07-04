@@ -492,6 +492,75 @@ describe('estimate AI support context', () => {
     expect(serviceKeysFromContext({
       services: [{ service: 'pest_initial_palmetto_knockdown', label: 'Palmetto Bug Knockdown', detail: 'Initial cleanout' }],
     }, '')).toEqual(['pest_control']);
+    // Combined pest+specialty services (combined_service_cutover) carry
+    // BOTH families — the combined visit still includes the perimeter pest
+    // treatment.
+    expect(serviceKeysFromContext({
+      services: [{ service: 'pest_rodent_quarterly', label: 'Pest & Rodent Control', detail: 'Quarterly program' }],
+    }, '')).toEqual(['rodent_bait', 'pest_control']);
+    expect(serviceKeysFromContext({
+      services: [{ service: 'pest_termite_bait_quarterly', label: 'Quarterly Pest + Termite Bait Station', detail: 'Quarterly program' }],
+    }, '')).toEqual(['termite_bait', 'pest_control']);
+  });
+
+  test('a hyphenated product name matches the words the customer typed', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        products_catalog: [{
+          name: 'LESCO Three-Way Selective Herbicide',
+          category: 'herbicide',
+          active_ingredient: '2,4-D + MCPP + Dicamba',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      // "Three-Way" normalizes to ONE token; the customer types two words —
+      // adjacent question words must also be compared joined.
+      question: 'Is Three Way safe for pets?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    });
+    const row = result.productCatalog.find((r) => r.activeIngredient === '2,4-D + MCPP + Dicamba');
+    expect(row.questionNameMatch).toBe(true);
+    expect(row.questionNameTokens).toEqual(['threeway']);
+  });
+
+  test('linked service-library products survive the broad catalog cap', async () => {
+    const fillers = Array.from({ length: 30 }, (_, i) => ({
+      name: `Lawn Filler ${i}`,
+      category: 'herbicide',
+      active_ingredient: `Filler Ingredient ${i}`,
+      active: true,
+      label_verified_by: 'waves-admin',
+    }));
+    const result = await loadEstimateAiSupportContext({
+      db: filteringDb({
+        services: [{
+          service_key: 'lawn_care_program',
+          name: 'Lawn Care Program',
+          description: 'Weed control applications',
+          category: 'lawn_care',
+          is_active: true,
+          default_products: ['SpeedZone Southern'],
+        }],
+        products_catalog: [...fillers, {
+          // 31st row — matches no generic term and no question word; the
+          // broad limit(24) fills on fillers, so only the dedicated
+          // linked-product query can fetch it for attribution.
+          name: 'SpeedZone Southern EW',
+          category: 'herbicide',
+          active_ingredient: 'Carfentrazone + 2,4-D + MCPP + Dicamba',
+          active: true,
+          label_verified_by: 'waves-admin',
+          rainfast_minutes: 180,
+        }],
+      }),
+      question: 'Is it safe for pets?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    });
+    const linked = result.productCatalog.find((r) => r.activeIngredient === 'Carfentrazone + 2,4-D + MCPP + Dicamba');
+    expect(linked).toBeDefined();
+    expect(linked.serviceKeys).toEqual(['lawn_care']);
+    expect(result.productCatalogTruncated).toBe(true);
   });
 
   test('question-derived service keys use the whole-word matcher for support loading', () => {
