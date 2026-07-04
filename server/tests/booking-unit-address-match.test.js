@@ -10,7 +10,7 @@
  */
 const {
   addressMatchesCustomer, unitsConflict, stripInlineUnitFromLine, narrowCandidatesByUnit,
-  submittedUnitConflictsWithCustomer,
+  submittedUnitConflictsWithCustomer, carriedVisitUnit,
 } = require('../routes/booking')._internals;
 const { splitStreetLineUnit } = require('../utils/address-normalizer');
 
@@ -224,5 +224,28 @@ describe('submittedUnitConflictsWithCustomer (resolved-customer guard)', () => {
   test('unit submitted only INLINE in the street line still conflicts (codex rd9)', () => {
     expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt B', address_line2: '' })).toBe(true);
     expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt A', address_line2: '' })).toBe(false);
+  });
+});
+
+describe('carriedVisitUnit (no-backfill unit rides on the visit, codex rd10)', () => {
+  const streetOnly = { address_line1: '123 Main St', address_line2: null };
+
+  test('same-street submission against a unit-less record carries the unit', () => {
+    expect(carriedVisitUnit(streetOnly, { address_line1: '123 Main St', address_line2: 'Apt B' })).toBe('Apt B');
+    // Inline-only submissions carry too.
+    expect(carriedVisitUnit(streetOnly, { address_line1: '123 Main St Apt B', address_line2: '' })).toBe('Apt B');
+  });
+
+  test('record already carrying a unit (dedicated or legacy inline) carries nothing', () => {
+    const aptA = { address_line1: '123 Main St', address_line2: 'Apt A' };
+    const inlineA = { address_line1: '123 Main St Apt A', address_line2: null };
+    expect(carriedVisitUnit(aptA, { address_line1: '123 Main St', address_line2: 'Apt A' })).toBe('');
+    expect(carriedVisitUnit(inlineA, { address_line1: '123 Main St', address_line2: 'Apt A' })).toBe('');
+  });
+
+  test('a different street or no submitted unit carries nothing', () => {
+    expect(carriedVisitUnit(streetOnly, { address_line1: '999 Other Rd', address_line2: 'Apt B' })).toBe('');
+    expect(carriedVisitUnit(streetOnly, { address_line1: '123 Main St', address_line2: '' })).toBe('');
+    expect(carriedVisitUnit(streetOnly, null)).toBe('');
   });
 });

@@ -264,6 +264,21 @@ function submittedUnitConflictsWithCustomer(customer, newCustomer) {
   return unitsConflict(customerUnitOf(customer), submittedUnit);
 }
 
+// Unit to carry on the VISIT's own records when it can't be written to the
+// customer row (unit writes are token-proven): the booker's submitted unit,
+// only for a same-street submission against a record that has no unit of its
+// own. Conflicting submissions never reach this — they 400 upstream.
+function carriedVisitUnit(customer, newCustomer) {
+  if (!newCustomer || customerUnitOf(customer)) return '';
+  const submitted = splitStreetLineUnit(newCustomer.address_line1 || '');
+  const submittedUnit = newCustomer.address_line2 || submitted.unit;
+  if (!submittedUnit) return '';
+  const submittedStreet = normalizeAddress(submitted.street);
+  const onFileStreet = normalizeAddress(splitStreetLineUnit(customer.address_line1 || '').street);
+  if (!submittedStreet || submittedStreet !== onFileStreet) return '';
+  return normalizeUnitLine(submittedUnit);
+}
+
 function addressMatchesCustomer(customer, address, zip, unit) {
   // Legacy records may still carry the unit inline in address_line1
   // ("123 Main St Apt A", empty address_line2) — split both sides so a
@@ -390,9 +405,13 @@ router.get('/customer-lookup', async (req, res, next) => {
       // address_line2 is needed ABOVE for the unit-aware match but must not
       // be disclosed: a blank submitted unit stays compatible by design, so
       // phone + street knowledge would otherwise read back the apartment
-      // number. The booking UI never consumes it from this response.
+      // number. Same for a legacy unit still inline in address_line1 — the
+      // response carries the street only. The booking UI never consumes
+      // either field from this response.
       if (customer) {
         const { address_line2: _undisclosedUnit, ...publicCustomer } = customer;
+        publicCustomer.address_line1 = splitStreetLineUnit(publicCustomer.address_line1 || '').street
+          || publicCustomer.address_line1;
         return res.json({ customer: publicCustomer });
       }
       return res.json({ customer: null });
@@ -1050,7 +1069,13 @@ async function createSelfBooking(payload = {}) {
       .insert({ customer_id: custId })
       .onConflict('customer_id')
       .ignore();
-	
+
+    // A unit submitted on a no-backfill path must not vanish: the customer row
+    // stays untouched, but the visit's notes and the confirmation still carry
+    // the door the booker gave us. Empty when the record already has a unit,
+    // when this booking just created the customer, or on a different street.
+    const visitUnit = createdCustomerId ? '' : carriedVisitUnit(customer, new_customer);
+
 	    const config = (await db('booking_config').first()) || {};
     const duration = duration_minutes || config.slot_duration_minutes || 60;
 
@@ -1271,7 +1296,12 @@ async function createSelfBooking(payload = {}) {
         status: 'confirmed',
         customer_confirmed: true,
         confirmed_at: new Date(),
-        notes: customer_notes ? `Self-booked. Notes: ${customer_notes}` : 'Self-booked via portal',
+        notes: [
+          customer_notes ? `Self-booked. Notes: ${customer_notes}` : 'Self-booked via portal',
+          // Dispatch/tech surfaces render the address from the customer row,
+          // which has no unit on no-backfill paths — the note is the carrier.
+          visitUnit ? `Unit: ${visitUnit}` : null,
+        ].filter(Boolean).join(' — '),
         source: source || 'self_booked',
         self_booking_id: bookingRow.id,
         estimated_duration_minutes: duration,
@@ -1443,8 +1473,9 @@ async function createSelfBooking(payload = {}) {
       const endLabel = minToTime12(endMin);
       const timeLabel = `${startLabel} - ${endLabel}`;
       // line1 is street-only once units live in address_line2 — the
-      // confirmation must still show the apartment the visit is booked for.
-      const addressLabel = `${[customer.address_line1, customer.address_line2].filter(Boolean).join(', ')}, ${customer.city}`;
+      // confirmation must still show the apartment the visit is booked for,
+      // including a unit that only rides on this visit (no-backfill paths).
+      const addressLabel = `${[customer.address_line1, customer.address_line2 || visitUnit].filter(Boolean).join(', ')}, ${customer.city}`;
       const smsBody = await renderSmsTemplate(
         'self_booking_confirmation',
         {
@@ -1843,6 +1874,7 @@ module.exports._internals = {
   stripInlineUnitFromLine,
   narrowCandidatesByUnit,
   submittedUnitConflictsWithCustomer,
+  carriedVisitUnit,
   // Read-only engine surface reused by the voice agent's quoting tools so a
   // phoned-in availability check runs the exact same route-aware slot finder as
   // the web /book funnel (no duplicated scheduling logic).

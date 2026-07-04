@@ -215,6 +215,12 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       placeId: req.body.google_place_id || req.body.googlePlaceId,
       components: req.body.address_components || req.body.addressComponents,
     });
+    // Inline street unit and dedicated unit field disagree — ambiguous. Fail
+    // closed BEFORE the lead insert/update below (same guard as
+    // /public/quote/calculate) so no lead is captured on the wrong unit.
+    if (normalizedAddress.unitConflict) {
+      return res.status(400).json({ error: 'The street address and unit number disagree — please re-enter your address.' });
+    }
     const lookupAddress = normalizedAddress.fullAddress || String(address || '').trim();
     const streetForValidation = normalizedAddress.line1 || String(address || '').trim();
     // The parcel/geocode lookup gets the STREET-ONLY composition — a unit
