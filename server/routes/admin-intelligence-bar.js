@@ -99,6 +99,7 @@ const PII_TOOL_NAMES = new Set([
   'send_sms',
   'draft_sms_reply',
   'draft_sms',
+  'get_stock_movements',
 ]);
 
 function isNonAdminDashboardRequest(req) {

@@ -142,6 +142,21 @@ describe('adjust_stock', () => {
     expect(movement.args[0]).toMatchObject({ movement_type: 'correction', quantity: 0, stock_before: 0, stock_after: 0 });
   });
 
+  test('a correction that lowers stock keeps its sign in the ledger quantity (Codex rd2 P2)', async () => {
+    const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
+    const result = await executeProcurementTool('adjust_stock', {
+      product_name: 'Bifen', movement_type: 'correction', set_total: 32, confirmed: true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.success).toBe(true);
+    expect(result.stock_after).toBe(32);
+
+    const movement = mutations.find(m => m.table === 'product_inventory_movements' && m.op === 'insert');
+    expect(movement.args[0]).toMatchObject({
+      movement_type: 'correction', quantity: -32, stock_before: 64, stock_after: 32,
+    });
+  });
+
   test('set_total equal to current stock on a TRACKED product is rejected as a no-op', async () => {
     const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
     const result = await executeProcurementTool('adjust_stock', {
@@ -186,6 +201,21 @@ describe('adjust_stock', () => {
     expect(result.error).toMatch(/Multiple products match/);
     expect(result.candidates).toHaveLength(2);
     expect(mutations).toEqual([]);
+  });
+});
+
+describe('query_stock', () => {
+  test('zero on-hand counts as low stock even with no threshold set (Codex rd2 P2)', async () => {
+    useDb({
+      products_catalog: [
+        { ...TRACKED_PRODUCT, id: 'prod-0', name: 'Talstar P', inventory_on_hand: 0, low_stock_threshold: null },
+      ],
+    });
+    const result = await executeProcurementTool('query_stock', {});
+    expect(result.error).toBeUndefined();
+    const talstar = result.products.find(p => p.name === 'Talstar P');
+    expect(talstar.tracked).toBe(true);
+    expect(talstar.low_stock).toBe(true);
   });
 });
 

@@ -803,7 +803,10 @@ function stockFields(p) {
     unit: p.inventory_unit || null,
     low_stock_threshold: threshold,
     tracked: onHand != null,
-    low_stock: onHand != null && threshold != null && onHand <= threshold,
+    // Zero/negative on-hand is low even without a threshold — products
+    // seeded via adjust_stock start with no threshold set, and completion
+    // deduction can still block them as out of stock.
+    low_stock: onHand != null && (onHand <= 0 || (threshold != null && onHand <= threshold)),
   };
 }
 
@@ -901,8 +904,10 @@ async function queryStock(input) {
   }
   if (category) query = query.whereILike('category', `%${category}%`);
   if (low_stock_only === true) {
-    query = query.whereNotNull('inventory_on_hand').whereNotNull('low_stock_threshold')
-      .whereRaw('inventory_on_hand <= low_stock_threshold');
+    query = query.whereNotNull('inventory_on_hand').where(function () {
+      this.where('inventory_on_hand', '<=', 0)
+        .orWhereRaw('(low_stock_threshold is not null and inventory_on_hand <= low_stock_threshold)');
+    });
   }
   if (untracked_only === true) query = query.whereNull('inventory_on_hand');
 
@@ -914,7 +919,7 @@ async function queryStock(input) {
       .select(
         db.raw('count(*) as total'),
         db.raw('count(inventory_on_hand) as tracked'),
-        db.raw('count(*) filter (where inventory_on_hand is not null and low_stock_threshold is not null and inventory_on_hand <= low_stock_threshold) as low_stock'),
+        db.raw('count(*) filter (where inventory_on_hand is not null and (inventory_on_hand <= 0 or (low_stock_threshold is not null and inventory_on_hand <= low_stock_threshold))) as low_stock'),
       )
       .first();
     totals = {
@@ -1073,7 +1078,10 @@ async function adjustStock(input) {
     const [movement] = await trx('product_inventory_movements').insert({
       product_id: fresh.id,
       movement_type: movementType,
-      quantity: Math.abs(locked.delta),
+      // Corrections keep their sign (the history UI renders quantity as-is);
+      // restock/damaged_lost store the positive magnitude like the admin
+      // adjust endpoint, with direction carried by the movement type.
+      quantity: movementType === 'correction' ? locked.delta : Math.abs(locked.delta),
       unit: locked.inventoryUnit,
       stock_before: locked.stockBefore,
       stock_after: locked.stockAfter,
