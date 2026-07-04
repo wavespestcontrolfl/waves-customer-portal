@@ -2447,19 +2447,44 @@ class AutonomousRunner {
           reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),
           updated_at: new Date(),
         });
-      const opps = await db('opportunity_queue')
+      // Ids first (we hold the engine lock, so nothing claims or approves
+      // between the read and the writes): the parked opportunities' runs
+      // that are STILL at named_competitor_review must be parked too — a
+      // crash after the opportunity claim but before the run flips to
+      // publishing_named_competitor leaves the run untouched, and the
+      // review model derives the approve button from the run alone, so the
+      // interrupted item would keep an approve action whose path 409s on
+      // the parked opportunity.
+      const stuckOpps = await db('opportunity_queue')
         .where({ status: 'claimed', skip_reason: 'named_competitor_publishing' })
         .where('claimed_at', '<', cutoff)
-        .update({
-          status: 'pending_review',
-          skip_reason: REASON,
-          completed_at: new Date(),
-          updated_at: new Date(),
-        });
-      if (runs > 0 || opps > 0) {
-        logger.error(`[autonomous-runner] parked ${runs} run(s) / ${opps} opportunit${opps === 1 ? 'y' : 'ies'} stuck in named-competitor publishing for human reconciliation (${REASON})`);
+        .select('id');
+      const stuckOppIds = stuckOpps.map((r) => r.id);
+      let opps = 0;
+      let reviewRuns = 0;
+      if (stuckOppIds.length) {
+        opps = await db('opportunity_queue')
+          .whereIn('id', stuckOppIds)
+          .update({
+            status: 'pending_review',
+            skip_reason: REASON,
+            completed_at: new Date(),
+            updated_at: new Date(),
+          });
+        reviewRuns = await db('autonomous_runs')
+          .whereIn('opportunity_id', stuckOppIds)
+          .where('outcome', 'completed_pending_review')
+          .where('skip_reason', 'named_competitor_review')
+          .update({
+            skip_reason: REASON,
+            reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),
+            updated_at: new Date(),
+          });
       }
-      return { runs, opps };
+      if (runs > 0 || opps > 0 || reviewRuns > 0) {
+        logger.error(`[autonomous-runner] parked ${runs} run(s) / ${opps} opportunit${opps === 1 ? 'y' : 'ies'} / ${reviewRuns} review-stage run(s) stuck in named-competitor publishing for human reconciliation (${REASON})`);
+      }
+      return { runs, opps, review_runs: reviewRuns };
     } finally {
       try { await lockConn.query('SELECT pg_advisory_unlock($1)', [ENGINE_PUBLISH_LOCK_KEY]); }
       catch (err) { logger.warn(`[autonomous-runner] named-competitor janitor: advisory unlock failed (${err.message}); lock auto-clears on session end`); }

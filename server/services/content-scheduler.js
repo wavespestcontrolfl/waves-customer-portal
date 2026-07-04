@@ -576,20 +576,31 @@ const ContentScheduler = {
               .update({ publish_status: 'failed', updated_at: new Date() }).catch(() => {});
           } else {
             // Same fork as resetStalePublishingBlogs: where the row goes
-            // depends on whether Astro state exists NOW (publishAstro may
-            // have set it before throwing — re-check, don't trust the
-            // tick-start snapshot).
-            //   - no astro_status (e.g. a transient GitHub blip before the
-            //     PR opened): release to 'pending' so the next tick retries
-            //     — parking at pending_review would strand it permanently,
-            //     because the pending query only re-selects pending_review
-            //     rows when astro_status='live'.
-            //   - astro_status set (PR opened / build failed / live):
-            //     'pending_review', the state pages-poll and the live-flip
-            //     path drive forward.
+            // depends on whether Astro made external progress (publishAstro
+            // may have written state before throwing — re-check, don't
+            // trust the tick-start snapshot).
+            //   - no astro_status, OR 'publish_failed' with NO PR opened
+            //     (publishAstro's own catch stamps publish_failed on every
+            //     pre-PR throw before this handler ever sees the row, so a
+            //     bare whereNull never matched a transient GitHub blip):
+            //     release to 'pending' and clear the failed marker so the
+            //     next tick retries — parking at pending_review would
+            //     strand it permanently (the pending query only re-selects
+            //     pending_review rows when astro_status='live', and
+            //     pages-poll only watches pr_open/build_failed/merged).
+            //     astro_publish_error is kept for the audit trail.
+            //   - anything else (PR opened / build failed / live —
+            //     astro_pr_number marks an opened PR even when a later
+            //     step stamped publish_failed over pr_open): 'pending_review';
+            //     blind-retrying those could open a duplicate PR.
             const retried = await db('blog_posts').where('id', blog.id)
-              .where('publish_status', 'publishing').whereNull('astro_status')
-              .update({ publish_status: 'pending', updated_at: new Date() }).catch(() => 0);
+              .where('publish_status', 'publishing')
+              .where(function () {
+                this.whereNull('astro_status').orWhere(function () {
+                  this.where('astro_status', 'publish_failed').whereNull('astro_pr_number');
+                });
+              })
+              .update({ publish_status: 'pending', astro_status: null, updated_at: new Date() }).catch(() => 0);
             if (!retried) {
               await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing')
                 .update({ publish_status: 'pending_review', updated_at: new Date() }).catch(() => {});
@@ -701,13 +712,21 @@ const ContentScheduler = {
    */
   async resetStalePublishingBlogs({ staleMinutes = 30 } = {}) {
     const cutoff = new Date(Date.now() - staleMinutes * 60000);
+    // Retryable = crashed with no Astro progress: either no astro state at
+    // all, or publishAstro's catch stamped 'publish_failed' before the PR
+    // opened (astro_pr_number is the opened-PR marker — with a PR out,
+    // blind-retrying could open a duplicate, so those park below instead).
     const retried = await db('blog_posts')
       .where('publish_status', 'publishing')
       .where('updated_at', '<', cutoff)
-      .whereNull('astro_status')
-      .update({ publish_status: 'pending', updated_at: new Date() });
+      .where(function () {
+        this.whereNull('astro_status').orWhere(function () {
+          this.where('astro_status', 'publish_failed').whereNull('astro_pr_number');
+        });
+      })
+      .update({ publish_status: 'pending', astro_status: null, updated_at: new Date() });
     if (retried > 0) {
-      logger.warn(`[content-scheduler] reset ${retried} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m with no Astro state back to pending (crashed pre-PR; publish will retry)`);
+      logger.warn(`[content-scheduler] reset ${retried} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m with no Astro progress back to pending (crashed pre-PR; publish will retry)`);
     }
     const reset = await db('blog_posts')
       .where('publish_status', 'publishing')

@@ -27,6 +27,9 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 // a queued refresh derives city + service exactly the way the engine's own
 // decay_refresh rows do — instead of re-deriving them from blog_posts fields.
 const { _internals: miner } = require('./gsc-opportunity-miner');
+// Same claim-budget ceiling claimNext/peek enforce — the re-enqueue CASE below
+// resets exhausted counts against this exact number, never a private copy.
+const { _internals: { maxClaimAttempts } } = require('../content/opportunity-queue');
 
 // Astro/GSC canonical hub origin (used only for DISPLAY + a never-seeded
 // fallback — gsc_pages/decay matching below is path-keyed and domain-scoped).
@@ -448,7 +451,16 @@ class RefreshAudit {
              -- reset the lifetime claim budget, or a re-enqueued
              -- attempts_exhausted row would be pending yet unclaimable
              -- (claimNext refuses it, the janitor instantly re-skips it).
+             -- The pending-with-exhausted-count arm covers the window
+             -- between the claim that hit the budget and the daily sweep
+             -- that flips it to skipped: the row is still 'pending' there,
+             -- and without the reset this route reports queued=true for a
+             -- row claimNext/peek refuse until the sweep + a second
+             -- re-enqueue.
              attempt_count = CASE WHEN opportunity_queue.status IN ('skipped', 'expired')
+                                  THEN 0
+                                  WHEN opportunity_queue.status = 'pending'
+                                       AND opportunity_queue.attempt_count >= ?
                                   THEN 0
                                   ELSE opportunity_queue.attempt_count
                              END,
@@ -479,6 +491,7 @@ class RefreshAudit {
         'pending',
         expiresAt,
         dedupeKey,
+        maxClaimAttempts(),
       ]
     );
 

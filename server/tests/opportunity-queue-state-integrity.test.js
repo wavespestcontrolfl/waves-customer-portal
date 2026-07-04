@@ -133,15 +133,21 @@ describe('recoverStaleClaims vs named-competitor approval claims', () => {
 });
 
 describe('named-competitor publish janitor (autonomous-runner)', () => {
-  function loadRunnerWithJanitorDb({ lockAcquired = true } = {}) {
+  function loadRunnerWithJanitorDb({ lockAcquired = true, stuckOppIds = ['opp1'] } = {}) {
     jest.resetModules();
     const updates = [];
+    const selects = [];
     const lockQueries = [];
     jest.doMock('../models/db', () => {
       const fn = jest.fn((table) => {
         const q = {
           _table: table, _filters: [],
           where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+          whereIn: jest.fn(function (col, vals) { q._filters.push(['whereIn', col, vals]); return q; }),
+          select: jest.fn(() => {
+            selects.push({ table, filters: q._filters.slice() });
+            return Promise.resolve(stuckOppIds.map((id) => ({ id })));
+          }),
           update: jest.fn((u) => { updates.push({ table, filters: q._filters.slice(), updates: u }); return Promise.resolve(1); }),
         };
         return q;
@@ -160,15 +166,15 @@ describe('named-competitor publish janitor (autonomous-runner)', () => {
       return fn;
     });
     const runner = require('../services/content/autonomous-runner');
-    return { runner, updates, lockQueries };
+    return { runner, updates, selects, lockQueries };
   }
 
   test('parks stuck runs + claimed opportunities at named_competitor_publish_interrupted — never a claimable state', async () => {
-    const { runner, updates, lockQueries } = loadRunnerWithJanitorDb({ lockAcquired: true });
+    const { runner, updates, selects, lockQueries } = loadRunnerWithJanitorDb({ lockAcquired: true });
 
     const res = await runner.recoverStuckNamedCompetitorPublishes({ staleMinutes: 60 });
 
-    expect(res).toEqual({ runs: 1, opps: 1 });
+    expect(res).toEqual({ runs: 1, opps: 1, review_runs: 1 });
     const runUpdate = updates.find((u) => u.table === 'autonomous_runs');
     expect(runUpdate.filters).toEqual(expect.arrayContaining([
       ['outcome', 'publishing_named_competitor'],
@@ -177,10 +183,17 @@ describe('named-competitor publish janitor (autonomous-runner)', () => {
     expect(runUpdate.updates.outcome).toBe('completed_pending_review');
     expect(runUpdate.updates.skip_reason).toBe('named_competitor_publish_interrupted');
 
-    const oppUpdate = updates.find((u) => u.table === 'opportunity_queue');
-    expect(oppUpdate.filters).toEqual(expect.arrayContaining([
+    // The stuck-opportunity set is SELECTED (under the engine lock) with the
+    // stale-claim filters, then parked by id — the ids drive the
+    // review-stage run parking below.
+    const oppSelect = selects.find((s) => s.table === 'opportunity_queue');
+    expect(oppSelect.filters).toEqual(expect.arrayContaining([
       [{ status: 'claimed', skip_reason: 'named_competitor_publishing' }],
       ['claimed_at', '<', expect.any(Date)],
+    ]));
+    const oppUpdate = updates.find((u) => u.table === 'opportunity_queue');
+    expect(oppUpdate.filters).toEqual(expect.arrayContaining([
+      ['whereIn', 'id', ['opp1']],
     ]));
     // pending_review + a reason the approval path does NOT accept: the item
     // surfaces for a human but can't be blindly re-published or re-drafted.
@@ -189,6 +202,28 @@ describe('named-competitor publish janitor (autonomous-runner)', () => {
     // the sweep ran under the engine lock and released it after
     expect(lockQueries.some((s) => /pg_try_advisory_lock/.test(s))).toBe(true);
     expect(lockQueries.some((s) => /pg_advisory_unlock/.test(s))).toBe(true);
+  });
+
+  test('still-approvable runs of parked opportunities are parked too (Codex round 2 — a pre-run-flip crash left a live approve button that 409s)', async () => {
+    const { runner, updates } = loadRunnerWithJanitorDb({ lockAcquired: true });
+
+    await runner.recoverStuckNamedCompetitorPublishes({ staleMinutes: 60 });
+
+    // Crash window: _approveNamedCompetitorLocked claimed the opportunity
+    // but died before flipping the run to publishing_named_competitor — the
+    // run stays at completed_pending_review/named_competitor_review, and
+    // the review model derives can_approve from the run alone. Flipping the
+    // skip_reason hides the approve action; outcome stays pending_review so
+    // requeue/dismiss remain available for reconciliation.
+    const reviewUpdate = updates.filter((u) => u.table === 'autonomous_runs')[1];
+    expect(reviewUpdate).toBeDefined();
+    expect(reviewUpdate.filters).toEqual(expect.arrayContaining([
+      ['whereIn', 'opportunity_id', ['opp1']],
+      ['outcome', 'completed_pending_review'],
+      ['skip_reason', 'named_competitor_review'],
+    ]));
+    expect(reviewUpdate.updates.skip_reason).toBe('named_competitor_publish_interrupted');
+    expect(reviewUpdate.updates.outcome).toBeUndefined();
   });
 
   test('a HELD engine lock means an approval is still alive: the janitor parks nothing (Codex round 1)', async () => {
@@ -212,6 +247,14 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
     for (const mod of resetSrc) {
       const src = fs.readFileSync(require.resolve(mod), 'utf8');
       expect(src).toMatch(/attempt_count = CASE WHEN opportunity_queue\.status IN \('skipped', 'expired'\)\s*\n\s*THEN 0/);
+      // Codex round 2: a row can be pending WITH an exhausted count (the
+      // window between the claim that hit the budget and the daily sweep
+      // that flips it to skipped) — the operator resurrection must reset
+      // that too, or the enqueue reports queued while claimNext/peek
+      // refuse the row. The ceiling is the SHARED maxClaimAttempts(),
+      // never a private copy.
+      expect(src).toMatch(/WHEN opportunity_queue\.status = 'pending'\s*\n\s*AND opportunity_queue\.attempt_count >= \?\s*\n\s*THEN 0/);
+      expect(src).toMatch(/maxClaimAttempts\(\)/);
     }
     // The unattended miners keep 'skipped' sticky instead — a cron must not
     // overturn a dismissal or an attempts_exhausted sweep.

@@ -150,6 +150,18 @@ describe('stale-publishing sweep', () => {
     await ContentScheduler.processScheduledPosts();
     expect(mockState.updates.some(isStaleSweepUpdate)).toBe(true);
   });
+
+  test('the sweep retries publish_failed rows with no opened PR too (Codex round 2)', async () => {
+    await ContentScheduler.resetStalePublishingBlogs();
+    const sweeps = mockState.updates.filter(isStaleSweepUpdate);
+    const retry = sweeps.find((u) => u.updates.publish_status === 'pending');
+    expect(retry.filters).toEqual(expect.arrayContaining([
+      ['whereNull', 'astro_status'],
+      ['astro_status', 'publish_failed'],
+      ['whereNull', 'astro_pr_number'],
+    ]));
+    expect(retry.updates.astro_status).toBeNull();
+  });
 });
 
 describe('atomic publishing claim', () => {
@@ -211,6 +223,32 @@ describe('atomic publishing claim', () => {
       && u.filters.some(([col, val]) => col === 'publish_status' && val === 'publishing')
       && u.filters.some(([kind, col]) => kind === 'whereNull' && col === 'astro_status'));
     expect(retry).toBeDefined();
+  });
+
+  test('publish failure where publishAstro stamped publish_failed pre-PR still retries (Codex round 2 — the whereNull-only branch was dead)', async () => {
+    mockState.pendingBlogs = [blog];
+    AstroPublisher.publishAstro.mockRejectedValue(new Error('GitHub down'));
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(result.errors).toBe(1);
+    const retry = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'pending'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7));
+    expect(retry).toBeDefined();
+    // publishAstro's own catch stamps astro_status='publish_failed' on
+    // EVERY pre-PR throw before this handler sees the row, so the
+    // retryable set must be (astro_status IS NULL) OR (publish_failed with
+    // NO opened PR) — astro_pr_number is the opened-PR marker, and a row
+    // with a PR out is never blind-retried (duplicate PR).
+    expect(retry.filters).toEqual(expect.arrayContaining([
+      ['whereNull', 'astro_status'],
+      ['astro_status', 'publish_failed'],
+      ['whereNull', 'astro_pr_number'],
+    ]));
+    // the failed marker is cleared so the pending query re-selects the row
+    expect(retry.updates.astro_status).toBeNull();
   });
 
   test('publish failure WITH Astro state parks the row at pending_review (claim-guarded)', async () => {
