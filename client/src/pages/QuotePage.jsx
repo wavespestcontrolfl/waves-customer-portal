@@ -397,6 +397,10 @@ export default function QuotePage({ serviceSlug = '' }) {
   // single-use token. It never blocks — server verification fails open while the
   // gate is off, so a slow/blocked widget can't trap a real lead.
   const honeypotRef = useRef(null);
+  // The honeypot input lives in the intake stage and unmounts before the
+  // confirm/calculate step, so submitIntake snapshots its value here for the
+  // later /public/quote/calculate POST.
+  const honeypotSnapshotRef = useRef('');
   const turnstile = useTurnstile();
 
   useEffect(() => {
@@ -590,6 +594,11 @@ export default function QuotePage({ serviceSlug = '' }) {
     const phoneDigits = intake.phone.replace(/\D/g, '');
     try {
       const resolvedAddress = await resolveAddressForSubmit();
+      // Read the honeypot + token BEFORE the stage switch — 'lookup' unmounts
+      // both inputs, and the single-use token must be solved while the widget
+      // is still on screen (same ordering bug as the astro EstimateForm fix).
+      honeypotSnapshotRef.current = honeypotRef.current?.value || '';
+      const turnstileToken = await turnstile.getToken();
 
       setStage('lookup');
       setLookupStatus('Measuring your property');
@@ -608,6 +617,8 @@ export default function QuotePage({ serviceSlug = '' }) {
           service_interest: selectedServiceInterest(intake),
           attribution: attribution || undefined,
           ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
+          fax_number: honeypotSnapshotRef.current,
+          turnstile_token: turnstileToken || undefined,
         }),
       });
       const d = await r.json();
@@ -635,6 +646,8 @@ export default function QuotePage({ serviceSlug = '' }) {
       setError(e.message || 'Lookup failed.');
       setStage('intake');
       setIntakeIdx(INTAKE_STEPS.length - 1);
+      // The attempt consumed the single-use token; remount for a fresh solve.
+      turnstile.reset();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -789,6 +802,9 @@ export default function QuotePage({ serviceSlug = '' }) {
           },
           attribution: attribution || undefined,
           newsletter_opt_in: newsletterOptIn,
+          // No turnstile_token here — the single-use token was spent on
+          // property-lookup (step 1); this step rides the verified leadId.
+          fax_number: honeypotRef.current?.value || honeypotSnapshotRef.current || '',
         }),
       });
       const d = await r.json();
@@ -1121,12 +1137,12 @@ export default function QuotePage({ serviceSlug = '' }) {
                   style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, opacity: 0 }}
                 />
 
-                {/* Turnstile only on the final step of the flows that actually
-                    POST to /api/leads (Other / one-time / not-sure) — mirrors the
-                    submitIntake routing. The ongoing/recurring path goes to
-                    /public/estimator/property-lookup (no token), so no challenge
-                    there. Renders nothing until VITE_TURNSTILE_SITE_KEY is set. */}
-                {intakeIdx === INTAKE_STEPS.length - 1 && (isOtherFlow || intake.frequency !== 'ongoing') && (
+                {/* Turnstile on the final intake step of EVERY flow: Other /
+                    one-time / not-sure POST to /api/leads, and the ongoing path
+                    POSTs to /public/estimator/property-lookup — both endpoints
+                    verify the token (gated). Renders nothing until
+                    VITE_TURNSTILE_SITE_KEY is set. */}
+                {intakeIdx === INTAKE_STEPS.length - 1 && (
                   <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center' }}>
                     <TurnstileWidget key={`ts-${turnstile.nonce}`} onToken={turnstile.onToken} />
                   </div>

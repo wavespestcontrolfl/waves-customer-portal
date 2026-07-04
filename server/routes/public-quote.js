@@ -21,6 +21,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
+const { isHoneypotTripped } = require('../utils/lead-abuse');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -365,6 +366,13 @@ const quoteLimiter = rateLimit({
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
+    // Honeypot (always on). /calculate is step 2 of the quote flow — the paid
+    // property-lookup (step 1) carries the Turnstile check; here the cheap
+    // pricing call just drops indiscriminate bots that filled the hidden field.
+    if (isHoneypotTripped(req.body)) {
+      logger.info('[public-quote] honeypot tripped — dropping calculate');
+      return res.status(200).json({ ok: true });
+    }
     const {
       leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
       buildingSizeConfirmed,
