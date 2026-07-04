@@ -251,6 +251,34 @@ describe('atomic publishing claim', () => {
     expect(retry.updates.astro_status).toBeNull();
   });
 
+  test('a deterministic content-policy failure parks the post as failed instead of hot-looping the retry (Codex round 3)', async () => {
+    mockState.pendingBlogs = [blog];
+    const gateErr = new Error('content guardrails failed: P0 HARDCODED_PRICE');
+    gateErr.code = 'BLOG_GUARDRAILS_FAILED';
+    AstroPublisher.publishAstro.mockRejectedValue(gateErr);
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(result.errors).toBe(1);
+    // Content-property failures repeat identically every run — the 15-min
+    // retry loop would re-burn the gates (fact check is an LLM call)
+    // forever. Parked 'failed' like the no-content terminal case, claim-
+    // guarded like every other branch.
+    const parkedFailed = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'failed'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7)
+      && u.filters.some(([col, val]) => col === 'publish_status' && val === 'publishing'));
+    expect(parkedFailed).toBeDefined();
+    // (id-scoped: the tick's stale-publishing SWEEP also writes a 'pending'
+    // retry update, but with the cutoff filter and no id — that one is fine)
+    const retried = mockState.updates.find((u) =>
+      u.table === 'blog_posts'
+      && u.updates.publish_status === 'pending'
+      && u.filters.some(([col, val]) => col === 'id' && val === 7));
+    expect(retried).toBeUndefined();
+  });
+
   test('publish failure WITH Astro state parks the row at pending_review (claim-guarded)', async () => {
     mockState.pendingBlogs = [blog];
     AstroPublisher.publishAstro.mockRejectedValue(new Error('boom after PR opened'));

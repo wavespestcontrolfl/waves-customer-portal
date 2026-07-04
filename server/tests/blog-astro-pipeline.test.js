@@ -1672,6 +1672,77 @@ describe('Astro publisher merge guard', () => {
   });
 });
 
+describe('publishAstro catch persists an already-opened PR marker (Codex round 3)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  function validPost(overrides = {}) {
+    return {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
+      ...overrides,
+    };
+  }
+
+  test('a failure AFTER PR creation keeps astro_pr_number — the scheduler must not retry into a duplicate PR', async () => {
+    const updates = [];
+    const q = chain({
+      first: jest.fn().mockResolvedValue(validPost()),
+      update: jest.fn((u) => {
+        updates.push(u);
+        // The pr_open stamp itself is the fallible step Codex flagged: the
+        // PR exists on GitHub but the DB write recording it dies.
+        if (u.astro_status === 'pr_open') return Promise.reject(new Error('db blip while stamping pr_open'));
+        return Promise.resolve(1);
+      }),
+    });
+    db.mockImplementation(() => q);
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow('db blip while stamping pr_open');
+
+    const parked = updates.find((u) => u.astro_status === 'publish_failed');
+    expect(parked).toBeDefined();
+    expect(parked.astro_pr_number).toBe(123);
+    expect(parked.astro_branch_name).toEqual(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
+  });
+
+  test('a failure BEFORE PR creation stamps publish_failed with NO marker — provably retryable', async () => {
+    // FAQ on a rodent post = a guardrails P0 thrown well before any PR.
+    const post = validPost({
+      tag: 'Rodents',
+      content: '## Sealing entry points\n\nRats squeeze through dime-sized gaps.\n\n## Frequently Asked Questions\n\nQ: How fast can you help?',
+    });
+    const updates = [];
+    const q = chain({
+      first: jest.fn().mockResolvedValue(post),
+      update: jest.fn((u) => { updates.push(u); return Promise.resolve(1); }),
+    });
+    db.mockImplementation(() => q);
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/content guardrails failed/);
+
+    const parked = updates.find((u) => u.astro_status === 'publish_failed');
+    expect(parked).toBeDefined();
+    expect(parked.astro_pr_number).toBeUndefined();
+    expect(gh.createPr).not.toHaveBeenCalled();
+  });
+});
+
 describe('Pages poll auto-merge per-tick cap', () => {
   const originalEnv = {
     CF_API_TOKEN: process.env.CF_API_TOKEN,

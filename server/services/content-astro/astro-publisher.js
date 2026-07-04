@@ -677,6 +677,12 @@ async function publishAstro(postId) {
 
   const slug = post.slug || slugify(post.title);
   const branch = `content/blog-${slug}-${shortId()}`;
+  // Tracked OUTSIDE the try: once a PR exists on GitHub, the catch below
+  // must persist its number even though the pr_open stamp never landed —
+  // "astro_pr_number IS NULL" is what the scheduler's transient-retry fork
+  // reads as proof the failure happened BEFORE PR creation, and losing the
+  // marker here would let the next tick open a duplicate PR.
+  let openedPr = null;
 
   try {
     // 1. Hero image (required by the Astro schema). Fetch before branch
@@ -836,6 +842,7 @@ async function publishAstro(postId) {
       title: `Blog: ${post.title}`.slice(0, 72),
       body: prBody,
     });
+    openedPr = pr;
     await requestCodexReview({
       pr,
       headSha: pr.head?.sha || fileCommit?.commit?.sha,
@@ -866,6 +873,12 @@ async function publishAstro(postId) {
     await db('blog_posts').where({ id: postId }).update({
       astro_status: 'publish_failed',
       astro_publish_error: err.message.slice(0, 1000),
+      // A PR that opened before the failure keeps its marker (the pr_open
+      // stamp above may be the very thing that threw): the scheduler's
+      // retry fork only treats publish_failed as retryable when
+      // astro_pr_number is NULL, and the build_failed/republish path
+      // closes + deletes a stale PR by this number before recutting.
+      ...(openedPr ? { astro_pr_number: openedPr.number, astro_branch_name: branch } : {}),
       updated_at: new Date(),
     });
     throw err;

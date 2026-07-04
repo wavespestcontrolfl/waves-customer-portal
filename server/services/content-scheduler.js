@@ -566,12 +566,27 @@ const ContentScheduler = {
       } catch (err) {
         errors++;
         const terminalFailure = err.message === 'Scheduled blog has no content; cannot open Astro publish PR';
+        // Deterministic content-policy rejections fail IDENTICALLY every
+        // run — frontmatter/schema, guardrails, comparison gate, fact
+        // check, MDX token leak are all properties of the post's content,
+        // not of the moment. Retrying them every 15 minutes re-burns the
+        // gates (the fact check is an LLM call) and can never succeed, so
+        // they park as 'failed' like the no-content terminal case: the
+        // author edits the post and republishes. Everything else (GitHub /
+        // network / DB blips) stays on the transient retry fork below.
+        const DETERMINISTIC_PUBLISH_CODES = new Set([
+          'BLOG_FRONTMATTER_INVALID',
+          'BLOG_GUARDRAILS_FAILED',
+          'BLOG_COMPARISON_GATE_FAILED',
+          'BLOG_FACTCHECK_FAILED',
+          'BLOG_MDX_TOKEN_LEAK',
+        ]);
         // Only release a claim WE hold — if the claim update itself failed
         // (or another instance holds it), writing here would stomp the
         // active attempt's 'publishing' state (hence the publish_status
         // guard on every branch).
         if (claimed) {
-          if (terminalFailure) {
+          if (terminalFailure || DETERMINISTIC_PUBLISH_CODES.has(err.code)) {
             await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing')
               .update({ publish_status: 'failed', updated_at: new Date() }).catch(() => {});
           } else {
