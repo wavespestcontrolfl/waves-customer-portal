@@ -209,6 +209,16 @@ async function executeContentTool(toolName, input) {
       const post = await db('blog_posts').where('id', input.post_id).first();
       if (!post) return { error: 'Post not found' };
 
+      // Live-status gate (shared with the admin share-social route): the
+      // agent drafts a portal row that is NOT Astro-published — sharing at
+      // draft time posted a dead 404 link to every enabled platform, with
+      // no human review anywhere in the loop (audit P1-10). The tool now
+      // reports why instead of sharing; once the post is actually live the
+      // per-merge auto-share and RSS backstop handle distribution anyway.
+      const { blogPostShareability } = require('./blog-share-gate');
+      const shareable = blogPostShareability(post);
+      if (!shareable.ok) return { error: shareable.reason, post_id: input.post_id, skipped: true };
+
       const link = post.url || `https://www.wavespestcontrol.com/${post.slug}`;
       const description = post.meta_description || (post.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300);
 
@@ -229,11 +239,16 @@ async function executeContentTool(toolName, input) {
         });
       } catch { /* column may not exist */ }
 
+      // publishToAll returns { success, platforms } — the old `result.results`
+      // key never existed, so every outcome reported success_count 0/0 and
+      // the run summary couldn't distinguish "posted" from "nothing posted"
+      // (automation paused, all platforms skipped/failed).
+      const platformResults = Array.isArray(result?.platforms) ? result.platforms : [];
       return {
         post_id: input.post_id,
-        platforms: result.results || [],
-        success_count: (result.results || []).filter(r => r.success).length,
-        total_platforms: (result.results || []).length,
+        platforms: platformResults,
+        success_count: platformResults.filter(r => r.success).length,
+        total_platforms: platformResults.length,
       };
     }
 

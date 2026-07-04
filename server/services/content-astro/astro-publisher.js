@@ -29,6 +29,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
+const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
 const { normalizeContentUrl } = require('../content/content-registry');
 const { normalizeSpokeSites, SPOKE_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
@@ -749,6 +750,45 @@ async function publishAstro(postId) {
       gErr.code = 'BLOG_GUARDRAILS_FAILED';
       gErr.details = blocking;
       throw gErr;
+    }
+
+    // 2b-2. Comparison-table / named-competitor legal scan. The autonomous
+    // lane runs this before every publish, but the manual/calendar path
+    // skipped it entirely — a calendar-scheduled AI draft disparaging or
+    // ranking against a competitor could go fully live unattended (the
+    // scheduler-lane auto-merge needs no human once the build is green and
+    // Codex is clean). Same P0/P1 block as the guardrails above. A draft
+    // that PASSES but names curated competitors in a validated
+    // <ComparisonTable> (requiresHumanReview) is allowed through here: the
+    // admin's publish/schedule action is the human sign-off the autonomous
+    // lane parks for. Excluding those posts from the scheduler auto-merge
+    // as well is a deliberate follow-up — that merge path is under active
+    // review on #2293 and must not be edited concurrently.
+    let namedCompetitorEnabled = false;
+    try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
+    const comparison = comparisonTableGate.evaluate({ body, frontmatter: data }, { namedCompetitorEnabled });
+    if (!comparison.pass) {
+      // UNCLASSIFIED_OPTION is fail-closed classification AMBIGUITY (a
+      // business-SHAPED phrase like "Comparing Pest Control" in a title, or
+      // a category column the classifier can't prove is generic) — designed
+      // for the unattended autonomous lane, where a reviewer resolves it.
+      // Hard-blocking it here strands legitimate category-only comparisons
+      // at publish_failed, so on this lane it is ADVISORY (logged; Codex
+      // still reviews the PR). Every DEFINITE finding — disparagement,
+      // unknown real competitor, rigged ranking, unsourced competitor facts,
+      // competitor-in-prose, named-competitor-disabled — still blocks.
+      const blocking = comparison.findings.filter((f) =>
+        (f.severity === 'P0' || f.severity === 'P1') && f.code !== 'COMPARISON_UNCLASSIFIED_OPTION');
+      if (blocking.length > 0) {
+        const cErr = new Error(`comparison/named-competitor gate failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`);
+        cErr.code = 'BLOG_COMPARISON_GATE_FAILED';
+        cErr.details = blocking;
+        throw cErr;
+      }
+      const advisory = comparison.findings.filter((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION');
+      if (advisory.length > 0) {
+        logger.warn(`[astro-publisher] comparison gate advisory for ${slug}: ${advisory.map((f) => f.message).join(' | ')}`);
+      }
     }
 
     // 2c. LLM fact-check — the rule-based guardrails can't catch a wrong

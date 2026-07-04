@@ -580,7 +580,11 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[content] publish-astro failed: ${err.message}`);
-    const isClientErr = err.code === 'BLOG_FRONTMATTER_INVALID' || err.code === 'BLOG_GUARDRAILS_FAILED';
+    // Content-policy rejections are the author's to fix — 400, not 500
+    // (a 500 here reads as a server failure and can trip error alerting).
+    const isClientErr = err.code === 'BLOG_FRONTMATTER_INVALID'
+      || err.code === 'BLOG_GUARDRAILS_FAILED'
+      || err.code === 'BLOG_COMPARISON_GATE_FAILED';
     res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
   }
 });
@@ -632,6 +636,12 @@ router.post('/blog/:id/share-social', async (req, res, next) => {
   try {
     const post = await db('blog_posts').where({ id: req.params.id }).first();
     if (!post) return res.status(404).json({ error: 'Post not found' });
+
+    // Live-status gate (shared with the content-agent's distribute tool):
+    // a non-live post shares a dead 404 link to every enabled platform.
+    const { blogPostShareability } = require('../services/content/blog-share-gate');
+    const shareable = blogPostShareability(post);
+    if (!shareable.ok) return res.status(409).json({ error: shareable.reason });
 
     const link = post.astro_live_url || post.url || `https://www.wavespestcontrol.com/${post.slug}`;
     const title = post.title;
