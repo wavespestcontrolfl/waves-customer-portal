@@ -235,25 +235,48 @@ function stripInlineUnitFromLine(line, submittedUnit) {
   return [split.street, ...rest].join(',');
 }
 
+// The unit a customer record carries: the dedicated column, or a legacy
+// inline unit still living in address_line1.
+function customerUnitOf(customer) {
+  return customer?.address_line2 || splitStreetLineUnit(customer?.address_line1 || '').unit;
+}
+
 function addressMatchesCustomer(customer, address, zip, unit) {
   // Legacy records may still carry the unit inline in address_line1
   // ("123 Main St Apt A", empty address_line2) — split both sides so a
   // street-only + dedicated-unit submission still matches its own record.
   const submitted = splitStreetLineUnit(address);
+  // A submission carrying TWO disagreeing units (inline in the street field
+  // AND the dedicated box) is ambiguous — fail it rather than pick one.
+  if (unitsConflict(submitted.unit, unit)) return false;
   const onFile = splitStreetLineUnit(customer?.address_line1);
   const lookupAddress = normalizeAddress(submitted.street);
   const customerAddress = normalizeAddress(onFile.street);
   if (!lookupAddress || !customerAddress || lookupAddress !== customerAddress) return false;
   // Same street is NOT the same household in a multi-unit building — a
   // submitted unit that disagrees with the one on file fails verification.
-  if (unitsConflict(customer?.address_line2 || onFile.unit, unit || submitted.unit)) return false;
+  if (unitsConflict(customerUnitOf(customer), unit || submitted.unit)) return false;
   const lookupZip = normalizeZip(zip);
   const customerZip = normalizeZip(customer?.zip);
   return !lookupZip || !customerZip || lookupZip === customerZip;
 }
 
+// Narrow same-street candidates by the submitted unit: exact unit matches
+// win outright; only when none exists do blank-unit records stay compatible.
+// Otherwise a street-only legacy row on the same street would destroy the
+// uniqueness check and cost a returning customer their exact Apt match.
+function narrowCandidatesByUnit(candidates, submittedUnit) {
+  const compatible = candidates.filter((c) => !unitsConflict(customerUnitOf(c), submittedUnit));
+  const submittedKey = unitValueKey(submittedUnit);
+  if (!submittedKey) return compatible;
+  const exact = compatible.filter((c) => unitValueKey(customerUnitOf(c)) === submittedKey);
+  return exact.length ? exact : compatible;
+}
+
 async function findUniqueCustomerByAddress(address, city, zip, unit) {
   const submitted = splitStreetLineUnit(address);
+  // Two disagreeing units in one submission is ambiguous — no match.
+  if (unitsConflict(submitted.unit, unit)) return null;
   const normalizedAddress = normalizeAddress(submitted.street);
   if (!normalizedAddress) return null;
   const number = streetNumber(address);
@@ -282,11 +305,10 @@ async function findUniqueCustomerByAddress(address, city, zip, unit) {
     .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone')
     .limit(1000);
 
-  const matches = candidates.filter((customer) => {
-    const onFile = splitStreetLineUnit(customer.address_line1);
-    return normalizeAddress(onFile.street) === normalizedAddress
-      && !unitsConflict(customer.address_line2 || onFile.unit, unit || submitted.unit);
-  });
+  const sameStreet = candidates.filter(
+    (customer) => normalizeAddress(splitStreetLineUnit(customer.address_line1).street) === normalizedAddress
+  );
+  const matches = narrowCandidatesByUnit(sameStreet, unit || submitted.unit);
   const normalizedZip = normalizeZip(zip);
   const cityValue = String(city || '').trim().toLowerCase();
   if (normalizedZip || cityValue) {
@@ -1768,6 +1790,7 @@ module.exports._internals = {
   addressMatchesCustomer,
   unitsConflict,
   stripInlineUnitFromLine,
+  narrowCandidatesByUnit,
   // Read-only engine surface reused by the voice agent's quoting tools so a
   // phoned-in availability check runs the exact same route-aware slot finder as
   // the web /book funnel (no duplicated scheduling logic).

@@ -36,7 +36,11 @@ export default function AddressAutocomplete({
 }) {
   const inputRef = useRef(null);
   const acRef = useRef(null);
-  const lastSelectedRef = useRef('');
+  // Every value a parent might render for the last selection (formatted OR
+  // street-only line1) — parents differ, and the blur fallback must not
+  // re-geocode a value that IS the current selection (it would come back
+  // without the subpremise and wipe the unit).
+  const lastSelectedRef = useRef([]);
   const onSelectRef = useRef(onSelect);
 
   useEffect(() => {
@@ -98,13 +102,7 @@ export default function AddressAutocomplete({
           lng: p.geometry?.location?.lng?.() ?? null,
         };
         if (parts.state && parts.state !== 'FL') return;
-        // Record what the parent will DISPLAY, not the raw formatted string:
-        // for unit-bearing selections the parent shows street-only line1 (the
-        // unit lives in its own field), and a mismatched guard here would make
-        // the blur fallback re-geocode the street and wipe the unit.
-        lastSelectedRef.current = parts.line2
-          ? (parts.line1 || parts.formatted || '')
-          : (parts.formatted || parts.line1 || '');
+        lastSelectedRef.current = [parts.formatted, parts.line1].filter(Boolean);
         onSelectRef.current?.(parts);
       });
       acRef.current = ac;
@@ -144,7 +142,7 @@ export default function AddressAutocomplete({
       onChange={(e) => onChange?.(e.target.value)}
       onBlur={() => {
         const typed = (inputRef.current?.value || '').trim();
-        if (!typed || typed === lastSelectedRef.current || !window.google?.maps?.Geocoder) return;
+        if (!typed || lastSelectedRef.current.includes(typed) || !window.google?.maps?.Geocoder) return;
         const geocoder = new window.google.maps.Geocoder();
         geocoder.geocode({
           address: typed,
@@ -173,9 +171,7 @@ export default function AddressAutocomplete({
             lng: p.geometry?.location?.lng?.() ?? null,
           };
           if (parts.state && parts.state !== 'FL') return;
-          lastSelectedRef.current = parts.line2
-            ? (parts.line1 || parts.formatted || typed)
-            : (parts.formatted || parts.line1 || typed);
+          lastSelectedRef.current = [parts.formatted, parts.line1, typed].filter(Boolean);
           onSelectRef.current?.(parts);
         });
       }}

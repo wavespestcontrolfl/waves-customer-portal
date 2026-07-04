@@ -8,7 +8,9 @@
  * when BOTH sides carry a unit and they disagree; a blank side stays
  * compatible because most on-file addresses predate unit capture.
  */
-const { addressMatchesCustomer, unitsConflict, stripInlineUnitFromLine } = require('../routes/booking')._internals;
+const {
+  addressMatchesCustomer, unitsConflict, stripInlineUnitFromLine, narrowCandidatesByUnit,
+} = require('../routes/booking')._internals;
 
 describe('unitsConflict', () => {
   test('no conflict when either side is blank', () => {
@@ -37,6 +39,11 @@ describe('unitsConflict', () => {
     expect(unitsConflict('Bldg 2', 'Apt 2')).toBe(true);
     expect(unitsConflict('Floor 2', 'Unit 2')).toBe(true);
     expect(unitsConflict('Bldg 2', 'Bldg 2')).toBe(false);
+  });
+
+  test('structural aliases do not conflict with themselves (codex rd5)', () => {
+    expect(unitsConflict('Building 2', 'Bldg 2')).toBe(false);
+    expect(unitsConflict('Floor 2', 'Fl 2')).toBe(false);
   });
 });
 
@@ -99,6 +106,41 @@ describe('legacy inline units in address_line1 (pre-capture records)', () => {
     const multi = { address_line1: '123 Main St Bldg 2 Apt 4', address_line2: null, zip: '34231' };
     expect(addressMatchesCustomer(multi, '123 Main St', '34231', 'Bldg 2 Apt 4')).toBe(true);
     expect(addressMatchesCustomer(multi, '123 Main St', '34231', 'Apt 9')).toBe(false);
+  });
+
+  test('comma-notation legacy records match their split submission (codex rd5)', () => {
+    const commaLegacy = { address_line1: '123 Main St, Apt B', address_line2: null, zip: '34231' };
+    expect(addressMatchesCustomer(commaLegacy, '123 Main St', '34231', 'Apt B')).toBe(true);
+    expect(addressMatchesCustomer(commaLegacy, '123 Main St', '34231', 'Apt A')).toBe(false);
+  });
+
+  test('two disagreeing units in one submission is ambiguous → no match (codex rd5)', () => {
+    const aptA = { address_line1: '123 Main St', address_line2: 'Apt A', zip: '34231' };
+    expect(addressMatchesCustomer(aptA, '123 Main St Apt B', '34231', 'Apt A')).toBe(false);
+    // Agreeing inline + dedicated units are fine.
+    expect(addressMatchesCustomer(aptA, '123 Main St Apt A', '34231', '#A')).toBe(true);
+  });
+});
+
+describe('narrowCandidatesByUnit (unique-match narrowing)', () => {
+  const aptA = { id: 1, address_line1: '123 Main St', address_line2: 'Apt A', zip: '34231' };
+  const streetOnly = { id: 2, address_line1: '123 Main St', address_line2: null, zip: '34231' };
+  const aptB = { id: 3, address_line1: '123 Main St', address_line2: 'Apt B', zip: '34231' };
+
+  test('an exact unit match beats a blank-unit legacy record (codex rd5)', () => {
+    expect(narrowCandidatesByUnit([aptA, streetOnly], 'Apt A')).toEqual([aptA]);
+  });
+
+  test('no exact match → blank-unit records stay compatible', () => {
+    expect(narrowCandidatesByUnit([streetOnly], 'Apt A')).toEqual([streetOnly]);
+  });
+
+  test('conflicting units are excluded entirely', () => {
+    expect(narrowCandidatesByUnit([aptB], 'Apt A')).toEqual([]);
+  });
+
+  test('no submitted unit → all candidates stay', () => {
+    expect(narrowCandidatesByUnit([aptA, streetOnly], '')).toEqual([aptA, streetOnly]);
   });
 });
 

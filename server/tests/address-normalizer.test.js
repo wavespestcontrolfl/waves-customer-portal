@@ -332,9 +332,18 @@ describe('unitLineValueKey', () => {
     expect(unitLineValueKey('Bldg 2')).not.toBe(unitLineValueKey('Apt 2'));
   });
 
+  test('structural long/short spellings are the same door (codex rd5)', () => {
+    expect(unitLineValueKey('Building 2')).toBe(unitLineValueKey('Bldg 2'));
+    expect(unitLineValueKey('Floor 2')).toBe(unitLineValueKey('Fl 2'));
+    expect(unitLineValueKey('Space 7')).toBe(unitLineValueKey('Spc 7'));
+    expect(unitLineValueKey('Building 2 Apartment 4')).toBe(unitLineValueKey('Bldg 2 Apt 4'));
+  });
+
   test('multi-token units keep their full shape', () => {
-    expect(unitLineValueKey('Bldg 2 Apt 4')).toBe('bldg 2 apt 4');
+    expect(unitLineValueKey('Bldg 2 Apt 4')).toBe('bldg 2 unit 4');
+    expect(unitLineValueKey('Bldg 2 Apt 4')).toBe(unitLineValueKey('Bldg 2 Unit 4'));
     expect(unitLineValueKey('Bldg 2 Apt 4')).not.toBe(unitLineValueKey('Apt 4'));
+    expect(unitLineValueKey('Bldg 2 Apt 4')).not.toBe(unitLineValueKey('Bldg 2'));
   });
 });
 
@@ -364,6 +373,19 @@ describe('splitStreetLineUnit', () => {
   test('multi-part inline units peel fully (codex rd3)', () => {
     expect(splitStreetLineUnit('123 Main St Bldg 2 Apt 4')).toEqual({ street: '123 Main St', unit: 'Bldg 2 Apt 4' });
     expect(splitStreetLineUnit('123 Main St Bldg 2 #4')).toEqual({ street: '123 Main St', unit: 'Bldg 2 #4' });
+  });
+
+  test('comma-separated units are preserved, not truncated (codex rd5)', () => {
+    expect(splitStreetLineUnit('123 Main St, Apt B')).toEqual({ street: '123 Main St', unit: 'Apt B' });
+    expect(splitStreetLineUnit('123 Main St, Apt B, Sarasota, FL')).toEqual({ street: '123 Main St', unit: 'Apt B' });
+    expect(splitStreetLineUnit('123 Main St, #4')).toEqual({ street: '123 Main St', unit: '#4' });
+    // A non-unit second segment (city) stays out of the street line.
+    expect(splitStreetLineUnit('123 Main St, Sarasota')).toEqual({ street: '123 Main St', unit: '' });
+  });
+
+  test('hash units consume their designator ("Apt #4" leaves no dangling Apt)', () => {
+    expect(splitStreetLineUnit('123 Main St Apt #4')).toEqual({ street: '123 Main St', unit: 'Apt #4' });
+    expect(splitStreetLineUnit('123 Main St Suite #210')).toEqual({ street: '123 Main St', unit: 'Suite #210' });
   });
 });
 

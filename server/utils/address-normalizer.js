@@ -301,18 +301,28 @@ function normalizeUnitLine(value) {
   return ['Unit', ...tokens.map(normalizeUnitToken)].join(' ');
 }
 
-// Designators that all mean "the dwelling unit" — interchangeable across
-// notations ("Apt 4" = "Unit 4" = "Ste 4" = "#4" → "Unit 4"). Structural
-// designators (bldg / floor / lot / space) are NOT interchangeable — Bldg 2
-// is a different door than Apt 2 — and keep their designator in the key.
-const INTERCHANGEABLE_UNIT_DESIGNATORS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite']);
+// Canonical form per designator. The dwelling designators (apt / apartment /
+// unit / ste / suite) are interchangeable across notations ("Apt 4" =
+// "Unit 4" = "#4") and canonicalize to 'unit'. Structural designators are
+// NOT interchangeable with dwellings — Bldg 2 is a different door than
+// Apt 2 — but their own long/short spellings are the same thing
+// (Building 2 = Bldg 2, Floor 2 = Fl 2, Space 7 = Spc 7).
+const UNIT_DESIGNATOR_CANONICAL = {
+  apt: 'unit', apartment: 'unit', unit: 'unit', ste: 'unit', suite: 'unit',
+  bldg: 'bldg', building: 'bldg',
+  fl: 'fl', floor: 'fl',
+  spc: 'spc', space: 'spc',
+  lot: 'lot',
+};
 
-// Designator-stripped comparison key for a NORMALIZED unit line:
-// "Apt 4B" / "Unit 4B" → "4b", but "Bldg 2" → "bldg 2". Multi-token units
-// keep their full shape so "Bldg 2 Apt 4" never collides with "Apt 4".
+// Comparison key for a NORMALIZED unit line: a lone dwelling designator is
+// dropped ("Apt 4B" / "Unit 4B" → "4b"); structural designators stay, alias-
+// canonicalized ("Building 2" / "Bldg 2" → "bldg 2"). Multi-token units keep
+// their full shape so "Bldg 2 Apt 4" never collides with "Apt 4".
 function unitLineValueKey(normalizedUnitLine) {
-  const tokens = String(normalizedUnitLine || '').toLowerCase().split(' ').filter(Boolean);
-  return tokens.length === 2 && INTERCHANGEABLE_UNIT_DESIGNATORS.has(tokens[0]) ? tokens[1] : tokens.join(' ');
+  const tokens = String(normalizedUnitLine || '').toLowerCase().split(' ').filter(Boolean)
+    .map((token) => UNIT_DESIGNATOR_CANONICAL[token] || token);
+  return tokens.length === 2 && tokens[0] === 'unit' ? tokens[1] : tokens.join(' ');
 }
 
 // Split a street line into its street part and a trailing inline unit —
@@ -326,15 +336,31 @@ function unitLineValueKey(normalizedUnitLine) {
 // street must still lead with a house number, so a line that is ONLY units
 // never splits down to a nonsense street.
 function splitStreetLineUnit(value) {
-  const line = cleanString(value).split(',')[0].trim();
+  const segments = cleanString(value).split(',').map((s) => s.trim()).filter(Boolean);
+  let line = segments[0] || '';
+  // Legacy values often carry the unit as its own comma segment
+  // ("123 Main St, Apt B, Sarasota") — pull that segment back into the line
+  // so the peel below sees it instead of treating the record as street-only.
+  if (segments[1]) {
+    const firstTok = segments[1].split(' ')[0].replace(/\./g, '').toLowerCase();
+    if (firstTok.startsWith('#') || UNIT_DESIGNATORS.has(firstTok)) {
+      line = `${line} ${segments[1]}`;
+    }
+  }
   let tokens = line.split(' ').filter(Boolean);
   const unitParts = [];
   while (tokens.length >= 2) {
     const last = tokens[tokens.length - 1].replace(/[.,]/g, '');
     const secondLast = tokens[tokens.length - 2].replace(/[.,]/g, '').toLowerCase();
     if (/^#\S+$/.test(last)) {
-      unitParts.unshift(last);
-      tokens = tokens.slice(0, -1);
+      // "Apt #4" — the designator belongs to the unit, not the street.
+      if (UNIT_DESIGNATORS.has(secondLast)) {
+        unitParts.unshift(`${tokens[tokens.length - 2]} ${last}`);
+        tokens = tokens.slice(0, -2);
+      } else {
+        unitParts.unshift(last);
+        tokens = tokens.slice(0, -1);
+      }
       continue;
     }
     if (tokens.length >= 3 && UNIT_DESIGNATORS.has(secondLast)
@@ -345,7 +371,7 @@ function splitStreetLineUnit(value) {
     }
     break;
   }
-  if (!unitParts.length || !/^\d/.test(tokens[0] || '')) return { street: line, unit: '' };
+  if (!unitParts.length || !/^\d/.test(tokens[0] || '')) return { street: segments[0] || '', unit: '' };
   return { street: tokens.join(' '), unit: unitParts.join(' ') };
 }
 
