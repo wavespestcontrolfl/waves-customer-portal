@@ -637,3 +637,29 @@ describe('redaction: heading scan (Codex round 10)', () => {
     }
   });
 });
+
+describe('redaction: all structured PII types block (Codex round 11)', () => {
+  test('SSN- and card-shaped findings hard-fail the body scan', () => {
+    const ssn = checkRedactionPassed({ body: 'The account holder provided 123-45-6789 during the call, which our team never records.' });
+    expect(ssn.ok).toBe(false);
+    expect(ssn.reason).toBe('unredacted_ssn_in_body');
+    const card = checkRedactionPassed({ body: 'Payment attempted with 4111 1111 1111 1111 before the visit was booked.' });
+    expect(card.ok).toBe(false);
+    expect(card.reason).toBe('unredacted_card_in_body');
+  });
+  test('headings block on structured PII too (only the NAME heuristic stays heading-exempt)', () => {
+    const r = checkRedactionPassed({
+      body: '## Case 123-45-6789 Review\n\nAnt control matters in every season across the region.',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('unredacted_ssn_in_heading');
+  });
+  test('allowlist-owned types stay non-blocking here: Waves phone/email and service-area ZIP', () => {
+    // phone/email are validated ABOVE with the Waves allowlists — the
+    // redactor's own phone/email findings carry no allowlist, so blocking
+    // on them would hard-fail the business contact lines.
+    expect(checkRedactionPassed({ body: 'Call us at 941-318-7612 to schedule your inspection today.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'Email info@wavespestcontrol.com to book your service.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'We serve Venice, FL 34285 and the surrounding communities year round.' }).ok).toBe(true);
+  });
+});

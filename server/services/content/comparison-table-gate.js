@@ -287,15 +287,21 @@ function claimSupported(text, attrValues) {
   return false;
 }
 
-function draftScanTexts(draft, body) {
-  // Title/meta live at the draft TOP LEVEL in some producer shapes and in
-  // frontmatter in others (the runner and sibling gates accept both) — the
-  // legal scan must see them wherever they are, or a disparaging title on
-  // a metadata-only draft escapes entirely.
+// Title/meta live at the draft TOP LEVEL in some producer shapes and in
+// frontmatter in others (the runner and sibling gates accept both) — every
+// scan that includes metadata must collect from BOTH places, or a
+// disparaging title on a metadata-only draft escapes entirely. Single
+// collector so the table-path prose scan and the table-less scan can never
+// drift apart on which shape they see.
+function draftMetaText(draft) {
   const fm = draft?.frontmatter || {};
-  const metaText = ['title', 'meta_description', 'metaTitle', 'metaDescription']
+  return ['title', 'meta_description', 'metaTitle', 'metaDescription']
     .flatMap((k) => [draft?.[k], fm[k]])
     .filter(Boolean).map(String).join('\n');
+}
+
+function draftScanTexts(draft, body) {
+  const metaText = draftMetaText(draft);
   return metaText ? `${body}\n${metaText}` : body;
 }
 
@@ -526,9 +532,11 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   if (!body && !draftScanTexts(draft, '').trim()) return { pass: true, findings, requiresHumanReview: false };
   if (blocks.length === 0) return evaluateProse(draft, body, { operatorBriefText });
 
-  const fm = draft?.frontmatter || {};
-  const metaText = ['title', 'meta_description', 'metaTitle', 'metaDescription']
-    .map((k) => fm[k]).filter(Boolean).map(String).join('\n');
+  // Same collector as draftScanTexts: the prose-only competitor check below
+  // appends metaText to proseText, so a frontmatter-only rebuild here would
+  // let a TOP-LEVEL title like "Orkin vs Waves in Sarasota" ride alongside a
+  // sourced table with only requiresHumanReview instead of a prose finding.
+  const metaText = draftMetaText(draft);
   const scanText = draftScanTexts(draft, body);
   // For NAME detection only, drop double quotes AND backslashes (so an embedded-
   // quote brand like All "U" Need Pest Control — or its escaped \"U\" form — is

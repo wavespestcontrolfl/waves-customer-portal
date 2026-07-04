@@ -584,25 +584,41 @@ function checkRedactionPassed(draft) {
   // on its own.
   try {
     const { redact } = require('./pii-redactor');
+    // Which redactor finding types BLOCK here: every structured PII type
+    // except the ones with a deliberate reason not to —
+    //   phone/email: already validated ABOVE with the Waves allowlists
+    //     (isWavesPhone / @wavespestcontrol.com); the redactor's own
+    //     phone/email findings carry NO allowlist, so blocking on them
+    //     would hard-fail the business's own contact lines.
+    //   zip: "Venice, FL 34285" is service-area furniture; a customer ZIP
+    //     only identifies anyone alongside an address, which fails itself.
+    //   url: link policy is owned end-to-end by the outbound-link gate in
+    //     content-guardrails (scheme/host/mailto/tel validation on every
+    //     destination); a long https URL is a citation, not per-se PII.
+    // Everything else — name, address, ssn, card — is customer PII with no
+    // legitimate page-furniture form and hard-fails the publish gate.
+    const BLOCKING_PII_TYPES = new Set(['name', 'address', 'ssn', 'card']);
     // Markdown HEADING lines are excluded from the NAME scan: section
     // titles like "## Our Process" / "## Why Choose Waves Pest Control"
     // are title-case pairs the redactor's standalone name heuristic reads
     // as customer names, and generated headings are structural furniture.
     // Headings are NOT exempt from the objective checks, though: their
     // text still goes through the phone/email checks above (which scan the
-    // full body) and the ADDRESS scan below — "## John Smith at 4867 Maple
-    // Street" must fail on the address even though the name-pair heuristic
-    // can't be trusted on heading capitalization.
+    // full body) and the structured scan below — "## John Smith at 4867
+    // Maple Street" must fail on the address even though the name-pair
+    // heuristic can't be trusted on heading capitalization.
     const headingText = (body.match(/^#{1,6}\s.*$/gm) || []).join('\n');
     if (headingText) {
       const headingScan = redact(stripWavesOfficeAddresses(headingText));
-      if ((headingScan.findings || []).some((f) => f.type === 'address')) {
-        return { ok: false, reason: 'unredacted_address_in_heading' };
+      const headingHit = (headingScan.findings || [])
+        .find((f) => BLOCKING_PII_TYPES.has(f.type) && f.type !== 'name');
+      if (headingHit) {
+        return { ok: false, reason: `unredacted_${headingHit.type}_in_heading` };
       }
     }
     const scanBody = body.replace(/^#{1,6}\s.*$/gm, '');
     const scanned = redact(stripWavesOfficeAddresses(scanBody));
-    const hit = (scanned.findings || []).find((f) => f.type === 'name' || f.type === 'address');
+    const hit = (scanned.findings || []).find((f) => BLOCKING_PII_TYPES.has(f.type));
     if (hit) return { ok: false, reason: `unredacted_${hit.type}_in_body` };
     // 'low' confidence means the redactor itself says its heuristics were
     // blind on this text (effectively all-lowercase, long unstructured

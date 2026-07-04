@@ -248,7 +248,19 @@ const MD_DEST_SCHEME_RE = /\]\(\s*<?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
 // `\{?\s*` after `=`: these posts publish as MDX, so a JSX string-
 // expression prop (href={"javascript:alert(1)"}) is a real link
 // destination React will render — the quote-anchored form alone missed it.
-const ATTR_SCHEME_RE = /\b(?:href|src)\s*=\s*\{?\s*["']?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
+// Backtick included: href={`javascript:...`} template literals render the
+// same way and were invisible to the single/double-quote class.
+const ATTR_SCHEME_RE = /\b(?:href|src)\s*=\s*\{?\s*["'`]?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
+// A JSX expression prop whose value is NOT a plain string literal —
+// template interpolation (`...${x}...`), concatenation ('java'+'script:'),
+// an identifier — is a DYNAMIC link destination this static gate cannot
+// verify at all, so it fails closed rather than hoping the scheme regexes
+// see a contiguous literal. The literal test's backtick arm excludes `$`
+// entirely: a template with no interpolation is a plain string; one with
+// `${` is dynamic (and `[^}]*` cutting at the interpolation's inner `}`
+// also fails the literal test — closed either way).
+const ATTR_EXPR_PROP_RE = /\b(?:href|src)\s*=\s*\{([^}]*)\}/gi;
+const PLAIN_STRING_LITERAL_RE = /^\s*(?:"[^"]*"|'[^']*'|`[^`$]*`)\s*$/;
 const AUTOLINK_SCHEME_RE = /<([a-z][a-z0-9+.-]*):(\/\/)?[^>\s]*>/gi;
 // Reference-style Markdown definitions — `[bad]: javascript:alert(1)` on
 // its own line becomes the destination of every `[click][bad]` use, and
@@ -314,7 +326,15 @@ const DEST_CONTROL_RE = new RegExp([
   /\]\(\s*<?[^)]*[\t\r\n][^)]*\)/.source,
   /\b(?:href|src)\s*=\s*\{?\s*"[^"]*[\t\r\n][^"]*"/.source,
   /\b(?:href|src)\s*=\s*\{?\s*'[^']*[\t\r\n][^']*'/.source,
-  /\b(?:href|src)\s*=\s*[^"'\s{>][^>\n]*[\t\r][^>\n]*/.source,
+  /\b(?:href|src)\s*=\s*\{?\s*`[^`]*[\t\r\n][^`]*`/.source,
+  // Unquoted values: ALL of tab/CR/LF count — the tokenizer appends
+  // char-reference results (incl. &#10; → \n) to an unquoted value
+  // without terminating it. The trailing `:` requirement is what keeps
+  // this arm safe: a control-smuggled SCHEME needs its colon, while a
+  // legit unquoted internal path in multi-line JSX (href=/services +
+  // newline + the next prop) has none, so formatting whitespace between
+  // props can't false-fail the gate.
+  /\b(?:href|src)\s*=\s*[^"'\s{>`][^:>]*[\t\r\n][^:>]*:/.source,
 ].join('|'));
 
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
@@ -322,6 +342,13 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   if (!body) return null;
   if (DEST_CONTROL_RE.test(body)) {
     return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a link destination with embedded control characters (tab/newline) — browsers strip these while parsing, which can smuggle an executable scheme. Remove them.');
+  }
+  const exprPropRe = new RegExp(ATTR_EXPR_PROP_RE.source, ATTR_EXPR_PROP_RE.flags);
+  let ep;
+  while ((ep = exprPropRe.exec(body)) !== null) {
+    if (!PLAIN_STRING_LITERAL_RE.test(ep[1])) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a link/image prop with a dynamic (non-literal) JSX expression ("${ep[0].slice(0, 60)}") — a computed destination cannot be statically validated. Use a plain quoted string.`);
+    }
   }
   for (const src of [MD_DEST_SCHEME_RE, ATTR_SCHEME_RE, AUTOLINK_SCHEME_RE, REF_DEF_SCHEME_RE]) {
     const destRe = new RegExp(src.source, src.flags);

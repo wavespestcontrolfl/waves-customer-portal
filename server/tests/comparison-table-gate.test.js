@@ -768,3 +768,18 @@ describe('top-level title/meta in comparison scans (Codex round 10)', () => {
     expect(r.pass).toBe(true);
   });
 });
+
+describe('top-level title/meta on the TABLE path (Codex round 11)', () => {
+  test('a top-level competitor title alongside a sourced table raises the prose finding, not just review', () => {
+    // The table path rebuilt metaText from frontmatter only, so a TOP-LEVEL
+    // "Orkin vs Waves" title rode along with requiresHumanReview alone.
+    const body = [
+      'Intro prose.',
+      '<ComparisonTable competitor="Orkin" sources={["https://www.orkin.com/plans"]}>',
+      '| Feature | Waves | Orkin |',
+      '</ComparisonTable>',
+    ].join('\n');
+    const r = gate.evaluate({ body, title: 'Orkin vs Waves in Sarasota' }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
+});

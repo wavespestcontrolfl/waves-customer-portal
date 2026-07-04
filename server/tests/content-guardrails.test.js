@@ -645,3 +645,40 @@ describe('MDX expression props, unquoted destinations, decoded mailto controls (
     expect(ok.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 });
+
+describe('template-literal / dynamic JSX props, LF-smuggled unquoted values (Codex round 11)', () => {
+  test('template-literal link props are scheme-scanned like quoted ones', () => {
+    const js = guardrails.evaluate({ body: '<a href={`javascript:alert(1)`}>x</a>' }, {});
+    expect(js.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    const data = guardrails.evaluate({ body: '<img src={`data:text/html,hi`}>' }, {});
+    expect(data.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    // a plain internal-path template literal is still fine
+    const ok = guardrails.evaluate({ body: '<a href={`/services/pest-control`}>x</a>' }, {});
+    expect(ok.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+
+  test('NON-literal JSX expression destinations fail closed (interpolation, concatenation, identifiers)', () => {
+    // A computed destination cannot be statically validated at all — the
+    // scheme regexes only ever see contiguous literals, so anything dynamic
+    // is P0 by policy rather than trusting what the pieces look like.
+    for (const body of [
+      '<a href={`java${"x"}script:alert(1)`}>x</a>',
+      "<a href={'java'+'script:alert(1)'}>x</a>",
+      '<a href={someVar}>x</a>',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('unquoted values fail closed on decoded LINE FEEDS too, without false-failing multi-line JSX', () => {
+    // &#10; decodes to \n INSIDE an unquoted value (the tokenizer does not
+    // terminate on a decoded reference), same smuggling class as tab/CR.
+    const lf = guardrails.evaluate({ body: '<a href=java&#10;script:alert(1)>x</a>' }, {});
+    expect(lf.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    // ...but a real newline BETWEEN props (formatted JSX, no colon in the
+    // value) is formatting, not smuggling — the arm requires the scheme colon.
+    const formatted = guardrails.evaluate({ body: '<a href=/services\n  target=_blank>book</a>' }, {});
+    expect(formatted.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});
