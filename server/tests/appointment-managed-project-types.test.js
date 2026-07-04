@@ -8,6 +8,7 @@ const {
   appointmentManagedProjectTypes,
   serializeProfile,
   V1_EXCLUDED_PROJECT_TYPES,
+  PROJECT_CREATION_KEPT_TYPES,
 } = require('../services/service-completion-profiles');
 
 function makeKnex({ rows = [], backedRows = [], hasTable = true, throwOnQuery = false } = {}) {
@@ -37,10 +38,10 @@ function makeKnex({ rows = [], backedRows = [], hasTable = true, throwOnQuery = 
 describe('appointmentManagedProjectTypes', () => {
   test('returns the set of project types with active service_report profiles', async () => {
     const knex = makeKnex({
-      rows: [{ project_type: 'cockroach' }, { project_type: 'flea' }, { project_type: null }],
+      rows: [{ project_type: 'cockroach' }, { project_type: 'bed_bug' }, { project_type: null }],
     });
     const managed = await appointmentManagedProjectTypes(knex);
-    expect(managed).toEqual(new Set(['cockroach', 'flea']));
+    expect(managed).toEqual(new Set(['cockroach', 'bed_bug']));
   });
 
   test('pre-cutover (no flipped rows) is an empty set — Projects creation unchanged', async () => {
@@ -64,6 +65,33 @@ describe('appointmentManagedProjectTypes', () => {
     });
     const managed = await appointmentManagedProjectTypes(knex);
     expect(managed).toEqual(new Set(['cockroach']));
+  });
+
+  // Owner directive 2026-07-04: flea + rodent trapping stay in the Create
+  // Project Report picker as standalone documentation projects even though
+  // their routine appointment completions fully cut over to the typed
+  // service-report flow. Creation-only exemption — no profile coercion.
+  test('creation-kept types (flea, rodent trapping) never become appointment-managed', async () => {
+    const knex = makeKnex({
+      rows: [{ project_type: 'flea' }, { project_type: 'rodent_trapping' }, { project_type: 'cockroach' }],
+    });
+    const managed = await appointmentManagedProjectTypes(knex);
+    expect(managed).toEqual(new Set(['cockroach']));
+    expect(PROJECT_CREATION_KEPT_TYPES.has('flea')).toBe(true);
+    expect(PROJECT_CREATION_KEPT_TYPES.has('rodent_trapping')).toBe(true);
+  });
+
+  // Unlike the V1 exclusion, the creation-kept exemption must NOT coerce the
+  // profile: routine flea/rodent appointments keep completing through the
+  // typed service-report flow.
+  test('creation-kept types keep their service_report profiles uncoerced', () => {
+    const profile = serializeProfile({
+      service_key: 'flea_service',
+      completion_mode: 'service_report',
+      project_type: 'flea',
+      active: true,
+    });
+    expect(profile.completionMode).toBe('service_report');
   });
 
   // wdo_inspection completion is compliance machinery (licensee e-signature
