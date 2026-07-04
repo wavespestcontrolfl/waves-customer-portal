@@ -1,4 +1,5 @@
 import React from 'react';
+import { estimateCard } from './cardStyles';
 
 /**
  * Payment preference picker. Rendered after a slot is selected. Clicking
@@ -166,10 +167,7 @@ export default function PaymentPreferenceButtons({
 
   if (invoiceMode) {
     return (
-      <div style={{
-        background: W.white, borderRadius: 16, padding: 24,
-        border: `1px solid ${W.border}`, marginBottom: 16,
-      }}>
+      <div style={estimateCard()}>
         <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
           textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
           {oneTimeBooking ? 'Book your visit' : 'Accept your estimate'}
@@ -206,10 +204,7 @@ export default function PaymentPreferenceButtons({
     const feeText = fmtMoney(cardHold?.noShowFeeAmount != null ? cardHold.noShowFeeAmount : 49);
     const windowText = `${cardHold?.cancelWindowHours != null ? cardHold.cancelWindowHours : 24} hours`;
     return (
-      <div style={{
-        background: W.white, borderRadius: 16, padding: 24,
-        border: `1px solid ${W.border}`, marginBottom: 16,
-      }}>
+      <div style={estimateCard()}>
         <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
           textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
           {holdRequired ? 'Hold your appointment' : 'Book your visit'}
@@ -234,10 +229,7 @@ export default function PaymentPreferenceButtons({
   }
 
   return (
-    <div style={{
-      background: W.white, borderRadius: 16, padding: 24,
-      border: `1px solid ${W.border}`, marginBottom: 16,
-    }}>
+    <div style={estimateCard()}>
       <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
         {isOneTime ? 'Book your visit' : 'Reserve your spot'}

@@ -13,7 +13,7 @@ const {
   extractVisibleFaqs,
   pestPracticesComplete,
 } = require('./blog-seo-contract');
-const { isFaqBlockedService } = require('./content-guardrails');
+const { isFaqBlockedService, findHardcodedPrice } = require('./content-guardrails');
 
 const P0_CODES = new Set([
   'P0_MISSING_TITLE',
@@ -265,33 +265,39 @@ function schemaMentionsHiddenFaq(draft = {}, renderedHtml = null) {
   return /FAQPage/i.test(schemaText) && extractVisibleFaqs(body).length === 0;
 }
 
-const WAVES_PHONE_LAST_SEVEN = new Set([
-  '3187612', '2972817', '2972606', '2973337', '2402066', '2975749',
-]);
+// Single-sourced from waves-phones.js (shared with content-quality-gate and
+// content-guardrails' tel: destination check) — the per-file copies had
+// already drifted once (last-7 vs full-10 keys). isWavesPhone covers every
+// owned line incl. spoke/GBP tracking numbers, which legitimately appear in
+// refresh/spoke copy.
+const { isWavesPhone } = require('./waves-phones');
 
 function detectPii(body = '') {
   const text = String(body || '');
-  const phoneRe = /\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
-  const phoneMatches = text.match(phoneRe) || [];
-  for (const raw of phoneMatches) {
-    const digits = raw.replace(/\D/g, '');
+  // Same E.164-capable pattern as content-quality-gate's redaction check
+  // (compact +1/11-digit forms had no interior word boundary to match on),
+  // including its optional attached-extension arm: without it the trailing
+  // \b cannot sit between the last digit and an `x` (both word chars), so
+  // `212-555-1234x99` matched nothing here — and supporting blogs don't run
+  // redaction_passed, making this the only phone guard on that path. The
+  // CORE number is captured separately so extension digits never pollute
+  // the last-10 compare against the Waves allowlist.
+  const phoneRe = /(?<!\d)(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?\b/gi;
+  let pm;
+  while ((pm = phoneRe.exec(text)) !== null) {
+    const digits = pm[1].replace(/\D/g, '');
     const last10 = digits.length >= 10 ? digits.slice(-10) : null;
     if (!last10) return true;
-    if (!WAVES_PHONE_LAST_SEVEN.has(last10.slice(-7))) return true;
+    if (!isWavesPhone(last10)) return true;
   }
   return /[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/.test(text);
 }
 
+// Single-sourced from content-guardrails (comma-grouped amounts, single-digit
+// prices, calculator-framing AND regulatory-fine exemptions) — this gate's
+// previous private copy had drifted on all four.
 function detectHardcodedPrice(body = '') {
-  const text = String(body || '');
-  const priceRe = /(^|[\s(])\$\s?\d{2,5}\b|\b\d{2,5}\s+(?:dollars|bucks)\b/gi;
-  let match;
-  while ((match = priceRe.exec(text)) !== null) {
-    const window = text.slice(Math.max(0, match.index - 80), Math.min(text.length, match.index + 120));
-    if (/\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
-    return true;
-  }
-  return false;
+  return findHardcodedPrice(body) !== null;
 }
 
 function hasDuplicateIntentFailure(result = {}) {

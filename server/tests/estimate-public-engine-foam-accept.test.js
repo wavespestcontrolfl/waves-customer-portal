@@ -5,7 +5,7 @@ const {
   buildPricingBundle,
   deriveServiceCategory,
 } = require('../routes/estimate-public.js');
-const { _internals: { durationForService } } = require('../services/estimate-slot-availability.js');
+const { _internals: { resolveEstimateSlotProfile } } = require('../services/estimate-slot-availability.js');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine.js');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper.js');
 const { priceRecurringFoam } = require('../services/pricing-engine/service-pricing.js');
@@ -13,8 +13,8 @@ const { priceRecurringFoam } = require('../services/pricing-engine/service-prici
 // The compact line-item shape public-quote.js / lead-estimate-automation.js
 // persist: name + frequency survive, but cadence and estimatedDurationMinutes are
 // dropped, and `annual` is the authoritative sold total alongside a rounded
-// `monthly`. The frequency/booking helpers must recover cadence, keep the sold
-// annual to the cent, and size the slot from the tier duration.
+// `monthly`. The frequency/booking helpers must recover cadence and keep the sold
+// annual to the cent.
 function compactFoamEngineResult({ name, frequency, annual, monthly }) {
   return {
     summary: { monthlyTotal: monthly, annualTotal: annual },
@@ -126,23 +126,20 @@ describe('engine-backed foam frequency recovers cadence / annual / duration from
     expect(q.perTreatment).toBe(277); // 1108 / 4
   });
 
-  test('booking slot duration uses the foam tier minutes carried on the row, not the 90-min default', () => {
-    // 20-pt foam → 180 min. With the source now carrying estimatedDurationMinutes,
-    // durationForService sizes the slot from it (clamped to the 15-min grid).
-    expect(durationForService({ service: 'foam_recurring', estimatedDurationMinutes: 180 })).toBe(180);
-    expect(durationForService({ service: 'foam_recurring', estimatedDurationMinutes: 120 })).toBe(120);
-    // Thin row with no duration still degrades to the foam default (not 45).
-    expect(durationForService({ service: 'foam_recurring' })).toBe(90);
-  });
-
-  test('a foam row labeled only by name is still classified as foam for slot sizing', () => {
-    // Engine-backed rows can reach slot sizing with just a display label (no
-    // mapped service key). serviceKeyFor must classify them as foam_recurring so
-    // the carried tier duration is used instead of the generic window.
-    expect(durationForService({ name: 'Recurring Foam Treatment', estimatedDurationMinutes: 180 })).toBe(180);
-    expect(durationForService({ service: 'FoamRecurring', estimatedDurationMinutes: 120 })).toBe(120);
-    // One-time "Drill-and-Foam Termite" still classifies as termite (not foam).
-    expect(durationForService({ name: 'Drill-and-Foam Termite' })).toBe(45);
+  test('foam booking slots use the flat 60-minute default, not the tier labor minutes', () => {
+    // Owner directive (2026-07-03): every service call defaults to 60 minutes;
+    // techs adjust individual appointments afterward. Tier durations carried on
+    // engine rows no longer stretch the reserved slot.
+    const profile = resolveEstimateSlotProfile({
+      estimate_data: {
+        result: {
+          recurring: {
+            services: [{ service: 'foam_recurring', name: 'Recurring Foam Treatment', estimatedDurationMinutes: 180, mo: 92 }],
+          },
+        },
+      },
+    }, {});
+    expect(profile.durationMinutes).toBe(60);
   });
 });
 

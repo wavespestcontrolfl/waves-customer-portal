@@ -1405,50 +1405,28 @@ describe('public estimate one-time breakdown', () => {
     expect(profile.serviceLabel).toContain('Bora-Care');
   });
 
-  test('one-time slot is sized for the add-on: pest visit + Bora-Care reserves a longer slot', () => {
-    const base = {
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [] } } },
-    };
-    // Pest visit alone keeps the 60-minute one-time length.
-    const pestOnly = estimateSlotAvailability.resolveEstimateSlotProfile(base, { serviceMode: 'one_time' });
-    expect(pestOnly.durationMinutes).toBe(60);
-
-    // Pest visit (60) + Bora-Care wood treatment (90) → a 150-minute slot.
-    const withBora = estimateSlotAvailability.resolveEstimateSlotProfile({
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] } } },
-    }, { serviceMode: 'one_time' });
-    expect(withBora.durationMinutes).toBe(150);
-  });
-
-  test('one-time slot duration uses the raw service key, the termite key, and a 60-min default', () => {
+  test('one-time slots book the flat 60-minute default regardless of the service mix', () => {
+    // Owner directive (2026-07-03): every service call defaults to 60 minutes;
+    // techs adjust individual appointments afterward. Add-ons still surface in
+    // the label (previous test) but no longer stretch the reserved slot.
     const mk = (estimate) => estimateSlotAvailability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
 
-    // Pest visit (60) + a German-roach cleanout specialty priced by its raw key (75,
-    // not the broad pest 60) = 135.
+    // Pest visit alone.
     expect(mk({
       show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 500 }] } } },
-    }).durationMinutes).toBe(135);
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [] } } },
+    }).durationMinutes).toBe(60);
 
-    // A standalone Termite Inspection (service 'termite') reserves 90, not the default.
+    // Pest visit + Bora-Care wood treatment: still 60.
+    expect(mk({
+      show_one_time_option: true,
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] } } },
+    }).durationMinutes).toBe(60);
+
+    // Standalone termite inspection: still 60.
     expect(mk({
       estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite', name: 'Termite Inspection', price: 175 }] } } },
-    }).durationMinutes).toBe(90);
-
-    // A termite-install alias (termite_bait_installation, not in the table) classifies
-    // as termite_bait and falls back to the category's 90, not the generic default.
-    expect(mk({
-      estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite_bait_installation', name: 'Termite Bait Installation', price: 1200 }] } } },
-    }).durationMinutes).toBe(90);
-
-    // An unknown/residual row (positive "Other one-time services" adjustment) keeps
-    // the 60-minute default rather than being under-reserved: pest 60 + adjustment 60.
-    expect(mk({
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 400, items: [] } } },
-    }).durationMinutes).toBe(120);
+    }).durationMinutes).toBe(60);
   });
 
   test('phase 0 mosquito recurring contract uses mosquito copy without pest gates', async () => {
@@ -2890,7 +2868,7 @@ describe('public estimate one-time breakdown', () => {
 
     // Hero + Waves AI card are Bora-Care-specific, not the generic/pest fallback.
     // (The hero apostrophe is HTML-escaped, so match without it.)
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
     expect(html).toContain('the Bora-Care application rate to price this treatment.');
     expect(html).not.toContain('choose your pest control option');
@@ -2997,7 +2975,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
     expect(html).not.toContain('30-day callback period if pests return');
     expect(html).not.toContain('class="mini-guarantee"');
@@ -3051,7 +3029,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
     // Hero treatment name comes from the normalized rows too, so the nested shape
@@ -3511,7 +3489,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).not.toContain('your termite trenching quote.');
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
   });
@@ -3770,7 +3748,7 @@ describe('public estimate one-time breakdown', () => {
       oneTimeChoicePrice: pricing.anchorOneTimePrice,
     }, estimateData);
 
-    expect(html).toContain('Hey Dana, choose your pest control option.');
+    expect(html).toContain('Hello Dana, your estimate is ready!');
     expect(html).toContain('<span class="num" id="onetime-display">$202</span>');
     expect(html).toContain('One-Time Pest Control');
     expect(html).not.toContain('One-time items (billed separately)');
@@ -5378,7 +5356,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your lawn care estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your lawn before pricing this estimate');
     expect(html).toContain('Grass type');
     expect(html).toContain('St. Augustine');
@@ -5530,7 +5508,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5590,7 +5568,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5656,7 +5634,7 @@ describe('public estimate one-time breakdown', () => {
       satelliteUrl: 'https://maps.example/mosquito-onetime.png',
     }, estimateData);
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5730,7 +5708,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('termite protection estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your termite perimeter before pricing this estimate');
     expect(html).toContain('Termite perimeter');
     expect(html).toContain('185 linear ft');

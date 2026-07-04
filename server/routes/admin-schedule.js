@@ -1250,7 +1250,7 @@ router.get('/', async (req, res, next) => {
         leadScore: s.lead_score, lawnType: s.lawn_type,
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
-        estimatedDuration: s.estimated_duration_minutes || estimateDuration(normalizedType, s.property_sqft, s.lot_sqft),
+        estimatedDuration: s.estimated_duration_minutes || 60,
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
@@ -1721,7 +1721,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
     const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
     const zone = getZone(customer?.city, customer?.zip);
-    let duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
+    // Owner directive (2026-07-03): every service call defaults to 60 minutes;
+    // the service-record default or an explicit tech-entered duration wins below.
+    let duration = 60;
 
     // Look up service from services table for duration/pricing
     let serviceRecord = null;
@@ -5076,18 +5078,6 @@ function fmtTime(t) {
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
 }
 
-function estimateDuration(serviceType, propertySqft, lotSqft) {
-  const s = (serviceType || '').toLowerCase();
-  if (s.includes('lawn') || s.includes('turf')) return Math.round(8 + (lotSqft || 5000) / 1000 * 1.75);
-  if (s.includes('pest') && s.includes('interior')) return Math.round(20 + (propertySqft || 1800) / 1000 * 5);
-  if (s.includes('pest')) return Math.round(25 + (propertySqft || 1800) / 1000 * 3);
-  if (s.includes('mosquito')) return Math.round(15 + (lotSqft || 5000) / 1000 * 2);
-  if (s.includes('tree') || s.includes('shrub')) return Math.round(25 + (lotSqft || 5000) / 1000 * 2);
-  if (s.includes('termite')) return 20;
-  if (s.includes('rodent')) return 25;
-  return 30;
-}
-
 function haversine(lat1, lng1, lat2, lng2) {
   const R = 3959;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -5675,14 +5665,17 @@ router.get('/services-dropdown', async (req, res, next) => {
       const services = await db('services').where({ is_active: true }).orderBy('sort_order');
       if (services.length > 0) {
         const byCategory = {};
+        // NULL catalog prices must stay null — emitting 0 here reads as a
+        // real $0 to any `!= null` consumer (the trap #2331 avoided).
+        const toPrice = (v) => (v == null ? null : parseFloat(v));
         for (const s of services) {
           const cat = s.category || 'other';
           if (!byCategory[cat]) byCategory[cat] = { category: cat, items: [] };
           byCategory[cat].items.push({
             id: s.id, name: s.name, duration: s.default_duration_minutes,
-            priceMin: parseFloat(s.price_range_min || s.base_price || 0),
-            priceMax: parseFloat(s.price_range_max || s.base_price || 0),
-            base_price: parseFloat(s.base_price || 0),
+            priceMin: toPrice(s.price_range_min ?? s.base_price),
+            priceMax: toPrice(s.price_range_max ?? s.base_price),
+            base_price: toPrice(s.base_price),
             default_duration_minutes: s.default_duration_minutes,
           });
         }
@@ -6222,6 +6215,31 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     await refreshAnnualPrepayTermsForCustomer(parent.customer_id);
 
     res.json({ success: true, action, created });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/next-visit?customerId=X — the customer's next upcoming
+// visit, used by the completion panel's "Next scheduled visit" card. Returns the
+// soonest FUTURE scheduled service (after today, ET) that is still on the books
+// (not cancelled/rescheduled/completed/skipped/no-show). Returns { nextVisit: null }
+// when there's nothing scheduled ahead.
+router.get('/next-visit', async (req, res, next) => {
+  try {
+    const customerId = req.query.customerId;
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    const today = etDateString();
+    const row = await db('scheduled_services')
+      .where({ customer_id: customerId })
+      .andWhere('scheduled_date', '>', today)
+      .whereNotIn('status', ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'])
+      .orderBy('scheduled_date', 'asc')
+      .first(
+        'id',
+        db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as date"),
+        'service_type as serviceType',
+      );
+    if (!row) return res.json({ nextVisit: null });
+    res.json({ nextVisit: { id: row.id, date: row.date, serviceType: row.serviceType } });
   } catch (err) { next(err); }
 });
 

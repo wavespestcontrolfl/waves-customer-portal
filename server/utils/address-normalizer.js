@@ -4,6 +4,12 @@ const UNIT_DESIGNATORS = new Set([
   'apt', 'apartment', 'bldg', 'building', 'fl', 'floor', 'lot', 'spc',
   'space', 'ste', 'suite', 'unit',
 ]);
+// 'fl' the floor designator collides with FL the state — a ZIP-shaped value
+// after 'fl' means "FL 34236" (state+ZIP tail), never a floor number.
+const ZIP_SHAPED = /^\d{5}(-\d{4})?$/;
+function isStateZipPair(designator, value) {
+  return designator === 'fl' && ZIP_SHAPED.test(value);
+}
 const STREET_SUFFIX_ALIASES = {
   street: 'ST',
   st: 'ST',
@@ -280,6 +286,106 @@ function normalizeZip(value) {
   return matches?.length ? matches[matches.length - 1] : '';
 }
 
+function normalizeUnitToken(token) {
+  return /^[A-Za-z]?\d+[A-Za-z]?$/.test(token) ? token.toUpperCase() : titleToken(token);
+}
+
+// Second address line (unit / apt / suite). Kept separate from line1 so the
+// street line stays clean for geocoding and house-number parcel matching. A
+// bare value ("4B", "#12") gains a "Unit" designator; a value that already
+// leads with one keeps it, title-cased. '#' is decoration, not unit identity
+// — "Apt #4", "#4", and "Apt 4" all mean unit 4 — so it's stripped globally
+// to keep stored values comparable across notations.
+function normalizeUnitLine(value) {
+  const cleaned = cleanString(value).replace(/[#,]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60).trim();
+  if (!cleaned) return '';
+  const tokens = cleaned.split(' ').filter(Boolean);
+  const firstKey = tokens[0].replace(/\./g, '').toLowerCase();
+  if (UNIT_DESIGNATORS.has(firstKey)) {
+    return [titleToken(firstKey), ...tokens.slice(1).map(normalizeUnitToken)].join(' ');
+  }
+  return ['Unit', ...tokens.map(normalizeUnitToken)].join(' ');
+}
+
+// Canonical form per designator. The dwelling designators (apt / apartment /
+// unit / ste / suite) are interchangeable across notations ("Apt 4" =
+// "Unit 4" = "#4") and canonicalize to 'unit'. Structural designators are
+// NOT interchangeable with dwellings — Bldg 2 is a different door than
+// Apt 2 — but their own long/short spellings are the same thing
+// (Building 2 = Bldg 2, Floor 2 = Fl 2, Space 7 = Spc 7).
+const UNIT_DESIGNATOR_CANONICAL = {
+  apt: 'unit', apartment: 'unit', unit: 'unit', ste: 'unit', suite: 'unit',
+  bldg: 'bldg', building: 'bldg',
+  fl: 'fl', floor: 'fl',
+  spc: 'spc', space: 'spc',
+  lot: 'lot',
+};
+
+// Comparison key for a NORMALIZED unit line: a lone dwelling designator is
+// dropped ("Apt 4B" / "Unit 4B" → "4b"); structural designators stay, alias-
+// canonicalized ("Building 2" / "Bldg 2" → "bldg 2"). Multi-token units keep
+// their full shape so "Bldg 2 Apt 4" never collides with "Apt 4".
+function unitLineValueKey(normalizedUnitLine) {
+  const tokens = String(normalizedUnitLine || '').toLowerCase().split(' ').filter(Boolean)
+    .map((token) => UNIT_DESIGNATOR_CANONICAL[token] || token);
+  return tokens.length === 2 && tokens[0] === 'unit' ? tokens[1] : tokens.join(' ');
+}
+
+// Split a street line into its street part and a trailing inline unit —
+// "123 Main St Apt A" → { street: '123 Main St', unit: 'Apt A' }, and
+// multi-part units peel fully: "123 Main St Bldg 2 Apt 4" →
+// { street: '123 Main St', unit: 'Bldg 2 Apt 4' }. Legacy records stored
+// units inline in address_line1 before dedicated unit capture existed.
+// Conservative on purpose: only trailing "<designator> <unit-ish value>"
+// pairs or a trailing "#<value>" token peel, so street names that contain
+// designator words ("4501 Space Coast Blvd") stay intact — and the remaining
+// street must still lead with a house number, so a line that is ONLY units
+// never splits down to a nonsense street.
+function splitStreetLineUnit(value) {
+  const segments = cleanString(value).split(',').map((s) => s.trim()).filter(Boolean);
+  let line = segments[0] || '';
+  // Legacy values often carry the unit as its own comma segment — possibly
+  // several ("123 Main St, Bldg 2, Apt 4, Sarasota") — pull consecutive
+  // unit-leading segments back into the line so the peel below sees them
+  // instead of treating the record as street-only. A "FL <zip>" segment is a
+  // state tail, not a floor.
+  for (let i = 1; i < segments.length; i += 1) {
+    const segTokens = segments[i].split(' ').filter(Boolean);
+    const firstTok = (segTokens[0] || '').replace(/\./g, '').toLowerCase();
+    const isUnitSegment = (firstTok.startsWith('#') || UNIT_DESIGNATORS.has(firstTok))
+      && !isStateZipPair(firstTok, (segTokens[1] || '').replace(/[.,]/g, ''));
+    if (!isUnitSegment) break;
+    line = `${line} ${segments[i]}`;
+  }
+  let tokens = line.split(' ').filter(Boolean);
+  const unitParts = [];
+  while (tokens.length >= 2) {
+    const last = tokens[tokens.length - 1].replace(/[.,]/g, '');
+    const secondLast = tokens[tokens.length - 2].replace(/[.,]/g, '').toLowerCase();
+    if (/^#\S+$/.test(last)) {
+      // "Apt #4" — the designator belongs to the unit, not the street.
+      if (UNIT_DESIGNATORS.has(secondLast)) {
+        unitParts.unshift(`${tokens[tokens.length - 2]} ${last}`);
+        tokens = tokens.slice(0, -2);
+      } else {
+        unitParts.unshift(last);
+        tokens = tokens.slice(0, -1);
+      }
+      continue;
+    }
+    if (tokens.length >= 3 && UNIT_DESIGNATORS.has(secondLast)
+        && !isStateZipPair(secondLast, last)
+        && /^#?[A-Za-z]?\d+[A-Za-z]?$|^[A-Za-z]$/.test(last)) {
+      unitParts.unshift(`${tokens[tokens.length - 2]} ${last}`);
+      tokens = tokens.slice(0, -2);
+      continue;
+    }
+    break;
+  }
+  if (!unitParts.length || !/^\d/.test(tokens[0] || '')) return { street: segments[0] || '', unit: '' };
+  return { street: tokens.join(' '), unit: unitParts.join(' ') };
+}
+
 function splitStreetAndCity(value) {
   const tokens = cleanString(value).split(' ').filter(Boolean);
   if (tokens.length < 2) return { line1: value, city: '' };
@@ -334,12 +440,21 @@ function parseRawAddress(raw) {
   let zip = '';
 
   if (parts.length >= 3) {
-    const rawPossibleUnit = parts[1].split(' ')[0].replace(/[.,]/g, '').toLowerCase();
-    const possibleUnit = rawPossibleUnit.replace(/^#/, '');
-    const hasUnitPart = rawPossibleUnit.startsWith('#') || UNIT_DESIGNATORS.has(possibleUnit);
-    line1 = hasUnitPart ? `${parts[0]} ${parts[1]}` : parts[0];
-    city = hasUnitPart ? parts[2] : parts[1];
-    const stateZip = parts.slice(hasUnitPart ? 3 : 2).join(' ');
+    // Consecutive unit segments after the street all belong to line1
+    // ("123 Main St, Bldg 2, Apt 4, Sarasota, FL 34236") — never the city.
+    // A "FL <zip>" segment is the state tail, not a floor.
+    let unitEnd = 1;
+    while (unitEnd < parts.length) {
+      const segTokens = parts[unitEnd].split(' ').filter(Boolean);
+      const firstTok = (segTokens[0] || '').replace(/[.,]/g, '').toLowerCase();
+      const isUnitSegment = (firstTok.startsWith('#') || UNIT_DESIGNATORS.has(firstTok.replace(/^#/, '')))
+        && !isStateZipPair(firstTok, (segTokens[1] || '').replace(/[.,]/g, ''));
+      if (!isUnitSegment) break;
+      unitEnd += 1;
+    }
+    line1 = parts.slice(0, unitEnd).join(' ');
+    city = parts[unitEnd] || '';
+    const stateZip = parts.slice(unitEnd + 1).join(' ');
     zip = normalizeZip(stateZip);
     state = findState(stateZip).state;
   } else if (parts.length === 2) {
@@ -378,7 +493,34 @@ function normalizeLeadAddress(input = {}) {
   const raw = cleanString(input.raw || input.address || components.formatted);
   const parsed = parseRawAddress(raw);
 
-  const line1 = normalizeStreetLine(input.line1 || input.addressLine1 || input.address_line1 || components.line1 || parsed.line1);
+  let line1 = normalizeStreetLine(input.line1 || input.addressLine1 || input.address_line1 || components.line1 || parsed.line1);
+  const rawLine2 = normalizeUnitLine(
+    input.line2 || input.addressLine2 || input.address_line2 || input.unit || components.line2 || components.unit
+  );
+  // A raw/fallback submission can carry the unit inline in line1 AND in the
+  // dedicated field. Keep the DEDICATED field and strip the inline copy —
+  // downstream consumers (parcel lookup, customer creation) need a street-only
+  // line1 with the unit in line2, not the reverse. Compare by unit VALUE, not
+  // display text: "Apt 4" inline and a "#4" field are the same unit. An
+  // inline duplicate that can't be cleanly peeled falls back to dropping
+  // line2 so the rendered address still never repeats it.
+  const inlineSplit = splitStreetLineUnit(line1);
+  let line2 = rawLine2;
+  let unitConflict = false;
+  if (rawLine2 && inlineSplit.unit) {
+    if (unitLineValueKey(normalizeUnitLine(inlineSplit.unit)) === unitLineValueKey(rawLine2)) {
+      line1 = inlineSplit.street;
+    } else {
+      // Inline and dedicated units DISAGREE — a contradictory service
+      // address must never be stored, so the normalized shape keeps only the
+      // inline value (line1 as submitted, line2 empty) and raises the flag
+      // for interactive callers to fail closed on.
+      unitConflict = true;
+      line2 = '';
+    }
+  } else if (rawLine2 && line1.toLowerCase().includes(rawLine2.toLowerCase())) {
+    line2 = '';
+  }
   const city = titleCaseWords(input.city || components.city || parsed.city);
   const state = normalizeState(input.state || components.state || parsed.state || 'FL') || 'FL';
   const zip = normalizeZip(input.zip || components.zip || parsed.zip);
@@ -387,16 +529,18 @@ function normalizeLeadAddress(input = {}) {
   const stateZip = (city || zip)
     ? [state, zip].filter(Boolean).join(' ')
     : '';
-  const fullAddress = [line1, city, stateZip].filter(Boolean).join(', ');
+  const fullAddress = [line1, line2, city, stateZip].filter(Boolean).join(', ');
 
   return {
     raw,
     line1,
+    line2,
     city,
     state,
     zip,
     placeId,
     fullAddress,
+    unitConflict,
   };
 }
 
@@ -414,6 +558,9 @@ module.exports = {
   normalizeLeadAddress,
   formatAddress,
   normalizeStreetLine,
+  normalizeUnitLine,
+  unitLineValueKey,
+  splitStreetLineUnit,
   titleCaseWords,
   normalizeState,
   parseRawAddress,

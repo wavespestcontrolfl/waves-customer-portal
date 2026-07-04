@@ -396,6 +396,11 @@ const KnowledgeBridge = {
         color_health: assessment.color_health,
         fungus_control: assessment.fungus_control,
         thatch_level: assessment.thatch_level,
+        // Tech-confirmed consolidated damage score (higher = healthier), folding
+        // disease/thatch/insect/drought/mechanical. This is the score the tech can
+        // correct on completion, so it — not the raw AI fungus/thatch sub-reads —
+        // is authoritative for whether damage recommendations are warranted.
+        stress_damage: assessment.stress_damage,
         observations: assessment.observations,
         season: assessment.season,
       };
@@ -411,12 +416,14 @@ Customer: ${customer?.first_name} ${customer?.last_name}
 Grass Type: ${grassType} (Track ${grassTrack || 'unspecified'})
 Month: ${monthName} (Season: ${assessment.season})
 
-Current Scores:
+Current Scores (all 0-100, higher = healthier):
 - Turf Density: ${scores.turf_density}%
 - Weed Suppression: ${scores.weed_suppression}%
-- Color Health: ${scores.color_health}%
+- Color Health: ${scores.color_health}%${scores.stress_damage != null ? `
+- Stress / Damage (TECH-CONFIRMED, consolidates disease, thatch, insect, drought & mechanical): ${scores.stress_damage}%
+  ↳ Fungus Control ${scores.fungus_control}% and Thatch Level ${scores.thatch_level}% are the AI's raw sub-reads only. When the tech-confirmed Stress/Damage is healthy, do NOT recommend fungicide/dethatch treatments those raw sub-reads might otherwise imply; when it is low but fungus/thatch look fine, the damage is drought/mechanical/insect — recommend accordingly.` : `
 - Fungus Control: ${scores.fungus_control}%
-- Thatch Level: ${scores.thatch_level}%
+- Thatch Level: ${scores.thatch_level}%`}
 - Observations: ${scores.observations || 'None'}
 
 Protocol References (from Claudeopedia):
