@@ -514,13 +514,17 @@ export function ServiceMixDonut({ mix = [], height = 220 }) {
 // Each stage shrinks proportionally to the top of the funnel (sent).
 // Pass `funnel` { sent, viewed, accepted, declined } and `rates` { view_rate,
 // close_rate, decline_rate }.
-export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue }) {
+export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue, byService }) {
   const sent = funnel.sent || 0;
+  const pending = funnel.pending || 0;
   const stages = [
     { label: 'Sent',     count: sent,                  pct: 100 },
     { label: 'Viewed',   count: funnel.viewed || 0,    pct: rates.view_rate || 0 },
     { label: 'Accepted', count: funnel.accepted || 0,  pct: rates.close_rate || 0 },
     { label: 'Declined', count: funnel.declined || 0,  pct: rates.decline_rate || 0, dim: true },
+    // Neither won nor lost yet — these are the follow-up work, so they earn a
+    // visible row instead of hiding in the sent-minus-decided arithmetic.
+    { label: 'Pending',  count: pending, pct: sent > 0 ? Math.round((pending / sent) * 100) : 0, dim: true },
   ];
   if (sent === 0) return <EmptyState>No estimates sent this period</EmptyState>;
   return (
@@ -549,6 +553,28 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue }) 
         <div className="pt-3 mt-3 flex items-baseline justify-between">
           <span className="u-label text-ink-secondary">Accepted value</span>
           <span className="u-nums text-18 font-medium">{fmtMoney(totalAcceptedValue)}</span>
+        </div>
+      )}
+
+      {/* What leads asked for — the sent cohort grouped by requested service,
+          with each row's current outcome. Won/lost colors reuse the documented
+          dashboard triage exception. */}
+      {Array.isArray(byService) && byService.length > 0 && (
+        <div className="pt-3 mt-3 border-t border-hairline border-zinc-100">
+          <div className="u-label text-ink-secondary mb-2">What leads asked for</div>
+          <div className="space-y-1.5">
+            {byService.map((s) => (
+              <div key={s.service} className="flex items-baseline justify-between gap-3 text-12">
+                <span className="text-ink-primary truncate">{s.service}</span>
+                <span className="u-nums whitespace-nowrap text-ink-tertiary">
+                  {fmtInt(s.sent)} sent
+                  <span className="ml-2" style={{ color: s.won > 0 ? '#10B981' : undefined }}>{fmtInt(s.won)} won</span>
+                  <span className="ml-2" style={{ color: s.lost > 0 ? '#C8312F' : undefined }}>{fmtInt(s.lost)} lost</span>
+                  {s.open > 0 && <span className="ml-2">{fmtInt(s.open)} open</span>}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

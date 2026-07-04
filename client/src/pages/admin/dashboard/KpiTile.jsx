@@ -25,7 +25,9 @@ export function signed(n, fmt) {
   return `${v > 0 ? "+" : "−"}${fmt(Math.abs(v))}`;
 }
 
-export function KpiGrid({ children, className = "grid grid-cols-2 md:grid-cols-4 gap-3" }) {
+// On mobile an odd tile count leaves a dead half-row cell — stretch the last
+// odd tile across both columns instead (owner whitespace feedback).
+export function KpiGrid({ children, className = "grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-3 max-md:[&>:last-child:nth-child(odd)]:col-span-2" }) {
   return <div className={className}>{children}</div>;
 }
 
@@ -79,9 +81,9 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
   // sub beside it — no duplicate big number.
   if (chart?.kind === "gauge") {
     return (
-      <div className={cn("bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3", lowConfidence && "opacity-70")}>
+      <div className={cn("bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-2.5 md:p-3", lowConfidence && "opacity-70")}>
         <div className="u-label text-ink-secondary">{label}</div>
-        <div className="flex items-center gap-3 mt-2">
+        <div className="flex items-center gap-2.5 md:gap-3 mt-1.5 md:mt-2">
           <KpiRing
             value={chart.value}
             max={chart.max}
@@ -103,14 +105,14 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
   }
   // Bullet / diverging tiles keep the big number, with the bar beneath.
   return (
-    <div className={cn("bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3", lowConfidence && "opacity-70")}>
+    <div className={cn("bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-2.5 md:p-3", lowConfidence && "opacity-70")}>
       <div className="u-label text-ink-secondary">{label}</div>
       {/* Diverging/no-chart tiles have no ring or bar to carry the tone, so
           the number itself shows the full red/amber/green verdict (red stays
           alert-only; untargeted tiles keep the neutral zinc). */}
       <div
         className={cn(
-          "u-nums text-22 font-medium tracking-tight mt-2 leading-none",
+          "u-nums text-22 font-medium tracking-tight mt-1.5 md:mt-2 leading-none",
           alertResolved
             ? "text-alert-fg"
             : warn

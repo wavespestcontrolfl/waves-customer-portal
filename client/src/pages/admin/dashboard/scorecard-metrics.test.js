@@ -171,6 +171,15 @@ describe("small-sample verdicts stay neutral (visible, not tooltip'd)", () => {
     const v = captureVerdict({ captureRate: 80, captured: 4000, missed: 1000, wonCount: 4, lostCount: 2 });
     expect(v.tone).toBe("good");
   });
+
+  it("funnelVerdict names still-open estimates as the follow-up action", () => {
+    const v = funnelVerdict({
+      funnel: { sent: 8, viewed: 7, accepted: 4, declined: 1, pending: 3 },
+      rates: { view_rate: 88, close_rate: 50 },
+    });
+    expect(v.tone).toBe("good");
+    expect(v.action).toContain("3 estimates still open");
+  });
 });
 
 describe("remaining card verdicts", () => {

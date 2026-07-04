@@ -656,6 +656,31 @@ async function getEstimateFunnel(input) {
       .whereBetween('e.accepted_at', [fromTs, toTs])
   ).select(db.raw('COALESCE(SUM(COALESCE(e.monthly_total,0) + COALESCE(e.onetime_total,0)), 0) as total')).first();
 
+  // What leads asked for: the window's SENT cohort grouped by the free-text
+  // service_interest captured at estimate creation, each row carrying the
+  // cohort's current outcome (won / lost / still open). Cohort semantics on
+  // purpose — the question is "of the estimates we sent, what services were
+  // they for and how are they closing", not stage-transition volume like the
+  // funnel above (an estimate sent last week and accepted today counts in ITS
+  // sent-week cohort, not today's).
+  const SERVICE_KEY_SQL = "COALESCE(NULLIF(TRIM(e.service_interest), ''), 'Unspecified')";
+  const byService = await excludeInternalEstimates(
+    db({ e: 'estimates' })
+      .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
+      .whereNotNull('e.sent_at')
+      .whereBetween('e.sent_at', [fromTs, toTs])
+  )
+    .select(
+      db.raw(`${SERVICE_KEY_SQL} as service`),
+      db.raw('COUNT(*) as sent'),
+      db.raw("COUNT(*) FILTER (WHERE e.status = 'accepted') as won"),
+      db.raw("COUNT(*) FILTER (WHERE e.status = 'declined') as lost"),
+      db.raw("COALESCE(SUM(COALESCE(e.monthly_total,0) + COALESCE(e.onetime_total,0)) FILTER (WHERE e.status = 'accepted'), 0) as won_value"),
+    )
+    .groupBy(db.raw(SERVICE_KEY_SQL))
+    .orderByRaw('COUNT(*) DESC')
+    .limit(8);
+
   return {
     period: { from, to },
     funnel: {
@@ -665,6 +690,14 @@ async function getEstimateFunnel(input) {
       declined: totalDeclined,
       pending: totalSent - totalAccepted - totalDeclined,
     },
+    by_service: byService.map((r) => ({
+      service: r.service,
+      sent: parseInt(r.sent, 10),
+      won: parseInt(r.won, 10),
+      lost: parseInt(r.lost, 10),
+      open: parseInt(r.sent, 10) - parseInt(r.won, 10) - parseInt(r.lost, 10),
+      wonValue: parseFloat(r.won_value) || 0,
+    })),
     rates: {
       view_rate: totalSent > 0 ? Math.round(totalViewed / totalSent * 100) : 0,
       close_rate: totalSent > 0 ? Math.round(totalAccepted / totalSent * 100) : 0,

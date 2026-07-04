@@ -184,6 +184,10 @@ export function funnelVerdict(data) {
   if (closeRate != null && closeRate < 30) {
     return { happened, action: "They're viewed but not accepted — the sticking point is the offer, not delivery. Review pricing on recent declines.", tone: "warn", sampleN: f.sent };
   }
+  // Pending estimates are the live follow-up work — name them in the action.
+  if (f.pending > 0) {
+    return { happened, action: `Funnel is converting — ${f.pending} estimate${f.pending === 1 ? "" : "s"} still open; follow up before they expire.`, tone: "good", sampleN: f.sent };
+  }
   return { happened, action: "Funnel is converting — keep estimates going out same-day.", tone: "good", sampleN: f.sent };
 }
 

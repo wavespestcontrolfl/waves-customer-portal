@@ -234,6 +234,7 @@ export default function GrowthSection({
             funnel={funnel?.funnel || {}}
             rates={funnel?.rates || {}}
             totalAcceptedValue={funnel?.total_accepted_value}
+            byService={funnel?.by_service}
           />
           <Verdict verdict={funnelVerdict(funnel)} />
         </ChartCard>

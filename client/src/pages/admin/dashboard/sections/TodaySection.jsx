@@ -60,11 +60,13 @@ export default function TodaySection({
           )}
         </ChartCard>
         <div className="md:col-span-2">
+          {/* 2-up even at 390px — full-width tiles for two small numbers read
+              as empty space on a phone (owner feedback). */}
           <KpiStrip
             loading={kpisLoading}
             error={kpisError}
             ready={!!kpis}
-            gridClassName="grid grid-cols-1 sm:grid-cols-2 gap-3"
+            gridClassName="grid grid-cols-2 gap-2 sm:gap-3"
           >
             {kpis && (
               <>
