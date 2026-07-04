@@ -146,6 +146,26 @@ const FIXTURES = {
     total_overdue: 2410,
   },
   "/admin/dashboard/mrr-trend": { trend: [], avg_growth_pct: 7 },
+  "/admin/dashboard/mrr-bridge": {
+    months: [
+      {
+        month: "2026-06-01", label: "Jun \u201926", degraded: true, inProgress: false,
+        startMrr: null, endMrr: null, net: 75,
+        new: { mrr: 120, count: 2 }, reactivated: { mrr: 0, count: 0 },
+        expansion: { mrr: 0, count: 0 }, contraction: { mrr: 0, count: 0 },
+        churned: { mrr: 45, count: 1 },
+      },
+      {
+        month: "2026-07-01", label: "Jul \u201926", degraded: false, inProgress: true,
+        startMrr: 9804.69, endMrr: 9749.69, net: -55,
+        new: { mrr: 0, count: 0 }, reactivated: { mrr: 0, count: 0 },
+        expansion: { mrr: 0, count: 0 }, contraction: { mrr: 0, count: 0 },
+        churned: { mrr: 55, count: 1 },
+      },
+    ],
+    snapshotStart: "2026-06-01",
+    today: "2026-07-04",
+  },
   "/admin/dashboard/ebitda-bridge": {
     rows: [
       { key: "revenue", label: "Revenue", amount: 497, kind: "start" },
@@ -285,6 +305,16 @@ describe("DashboardPageV2 sections", () => {
     // RETENTION
     expect(document.getElementById("retention")).toContainElement(
       screen.getByText("MRR Trend"),
+    );
+    // Net-MRR bridge: month strip + waterfall rows + in-progress flag
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("MRR Bridge"),
+    );
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("Churned"),
+    );
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("in progress"),
     );
     expect(document.getElementById("retention")).toContainElement(
       screen.getByText("Retention by Cohort"),

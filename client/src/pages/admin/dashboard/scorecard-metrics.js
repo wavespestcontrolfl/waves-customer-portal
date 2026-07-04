@@ -212,6 +212,45 @@ export function mrrVerdict(mrr) {
   return { happened, action: "Pure growth, zero churn — keep doing what you're doing.", tone: "good" };
 }
 
+// Net-MRR bridge — one month entry from /admin/dashboard/mrr-bridge.
+export function mrrBridgeVerdict(m) {
+  if (!m) return null;
+  if (m.degraded) {
+    // Approximate months get facts, not recommendations — the split that
+    // would justify an action (expansion vs churn vs reactivation) isn't real.
+    if (!(m.new?.mrr > 0) && !(m.churned?.mrr > 0)) return null;
+    return {
+      happened: `${m.label}: roughly ${usd(m.new.mrr)} recurring added vs ${usd(m.churned.mrr)} lost (net ${m.net >= 0 ? "+" : "−"}${usd(Math.abs(m.net))}) — approximate, rebuilt from customer records at today's rates.`,
+      action: "Treat as directional only; exact per-customer bridges begin with the first snapshot month.",
+      tone: "neutral",
+    };
+  }
+  const adds = (m.new?.mrr || 0) + (m.reactivated?.mrr || 0) + (m.expansion?.mrr || 0);
+  const drags = (m.contraction?.mrr || 0) + (m.churned?.mrr || 0);
+  if (adds === 0 && drags === 0) {
+    return {
+      happened: `${m.label}: recurring revenue held flat at ${usd(m.endMrr)} — no adds, no losses.`,
+      action: "Flat MRR only compounds if you add to it — check Growth for the channel to feed.",
+      tone: "neutral",
+    };
+  }
+  const happened = `${m.label}: ${usd(m.startMrr)} became ${usd(m.endMrr)} — +${usd(m.new.mrr)} new, +${usd(m.reactivated.mrr)} reactivated, +${usd(m.expansion.mrr)} expansion, −${usd(m.contraction.mrr)} contraction, −${usd(m.churned.mrr)} churn.`;
+  if (m.net < 0) {
+    const churnLed = (m.churned?.mrr || 0) >= (m.contraction?.mrr || 0);
+    return {
+      happened,
+      action: churnLed
+        ? `Churn drove the loss (${m.churned.count} account${m.churned.count === 1 ? "" : "s"}) — work the Action Inbox at-risk list before chasing new sales.`
+        : "Downgrades drove the loss — call the contracted accounts; a save beats a new sale.",
+      tone: "bad",
+    };
+  }
+  if (drags > 0) {
+    return { happened, action: "Growth outran the losses — still worth asking the churned/downgraded accounts why.", tone: "good" };
+  }
+  return { happened, action: "All adds, zero losses — protect it by keeping service quality where it is.", tone: "good" };
+}
+
 // AR aging — /admin/dashboard/aging payload.
 export function agingVerdict(data) {
   const a = data?.aging;
