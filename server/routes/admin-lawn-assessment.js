@@ -982,8 +982,18 @@ router.post('/confirm', async (req, res, next) => {
         // 4. Lawn health → customer health signal
         await LawnIntel.emitHealthSignal(updated.customer_id);
 
-        // 5. Send assessment notification (SMS/email with score + photo)
-        await LawnIntel.sendAssessmentNotification(assessmentId);
+        // 5. Standalone lawn assessments (fallback customer picker, no
+        //    scheduled service — service_id is null) have no later completion
+        //    SMS to fold the score into, so they still get the standalone
+        //    "lawn health report ready" notification. Assessments linked to a
+        //    service instead get the score folded into the single completion
+        //    service-report text (see admin-dispatch completion +
+        //    LawnIntel.buildCompletionScoreBlock) so the customer gets one
+        //    message, not two. This step runs after recommendation generation
+        //    (step 2) so the standalone notification's tip is populated.
+        if (!updated.service_id) {
+          await LawnIntel.sendAssessmentNotification(assessmentId);
+        }
 
         // 6. Auto-generate service report
         await LawnIntel.generateServiceReport(assessmentId);

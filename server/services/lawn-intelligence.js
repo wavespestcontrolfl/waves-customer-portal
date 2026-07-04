@@ -361,7 +361,74 @@ If no contradictions, return: { "contradictions": [] }`
     return context;
   },
 
-  // ── 7. Assessment notification ──────────────────────────────
+  // ── 7. Assessment score parts (shared) ──────────────────────
+  // Overall score + delta vs the previous confirmed assessment + customer tip.
+  // Shared by the completion-time report SMS (score folded into the single
+  // service-report text) and the legacy standalone notification below.
+  async computeAssessmentScoreParts(assessment) {
+    if (!assessment) return null;
+    const scoreOf = (a) => a.overall_score || Math.round(
+      (a.turf_density + a.weed_suppression + a.fungus_control +
+        (a.color_health || 0) + (a.thatch_level || 0)) / 5
+    );
+    const overall = scoreOf(assessment);
+
+    // Get previous assessment for delta
+    const previous = await db('lawn_assessments')
+      .where({ customer_id: assessment.customer_id, confirmed_by_tech: true })
+      .where('service_date', '<', assessment.service_date)
+      .orderBy('service_date', 'desc')
+      .first();
+    const delta = previous ? overall - scoreOf(previous) : null;
+
+    // Parse recommendations for customer tip
+    let tip = '';
+    try {
+      const recs = typeof assessment.recommendations === 'string'
+        ? JSON.parse(assessment.recommendations) : assessment.recommendations;
+      tip = recs?.customerTip ? String(recs.customerTip).trim() : '';
+    } catch {}
+
+    const deltaStr = delta != null && delta !== 0
+      ? `, ${delta > 0 ? 'up' : 'down'} ${Math.abs(delta)} from last visit` : '';
+    return { overall, delta, deltaStr, tip };
+  },
+
+  // Score lines folded into the completion service-report SMS so the
+  // customer's lawn health score rides in the SAME text as the report link,
+  // instead of a separate "lawn health report ready" message at confirm time.
+  // Returns { scoreLine, tipLine } (tipLine may be '') or null when there's no
+  // confirmed assessment/score. Split so the caller can drop the (longer) tip
+  // to stay within its SMS segment budget. Never throws.
+  // Note: recommendations.customerTip is generated asynchronously after
+  // /confirm, so tipLine can legitimately be '' when a completion races ahead
+  // of that generation — the full recommendations still live in the linked
+  // report, so an occasional missing inline tip degrades gracefully.
+  async buildCompletionScoreBlock(assessmentId) {
+    try {
+      if (!assessmentId) return null;
+      const assessment = await db('lawn_assessments')
+        .where({ id: assessmentId, confirmed_by_tech: true })
+        .first();
+      if (!assessment) return null;
+      const parts = await LawnIntelligence.computeAssessmentScoreParts(assessment);
+      if (!parts || !Number.isFinite(parts.overall)) return null;
+      return {
+        scoreLine: `You scored ${parts.overall}/100${parts.deltaStr}.`,
+        tipLine: parts.tip ? `Tip: ${parts.tip}` : '',
+      };
+    } catch (err) {
+      logger.error(`[lawn-intel] buildCompletionScoreBlock failed: ${err.message}`);
+      return null;
+    }
+  },
+
+  // ── 7b. Assessment notification (legacy standalone) ─────────
+  // SUPERSEDED: the lawn health score is now folded into the single
+  // completion service-report SMS (see admin-dispatch completion +
+  // buildCompletionScoreBlock) so customers get one report text, not two.
+  // Retained for manual re-send / backfill; no longer invoked from the
+  // confirm pipeline.
   async sendAssessmentNotification(assessmentId) {
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();
@@ -370,32 +437,11 @@ If no contradictions, return: { "contradictions": [] }`
       const customer = await db('customers').where({ id: assessment.customer_id }).first();
       if (!customer) return null;
 
-      // Build notification message
-      const overall = assessment.overall_score || Math.round(
-        (assessment.turf_density + assessment.weed_suppression + assessment.fungus_control +
-          (assessment.color_health || 0) + (assessment.thatch_level || 0)) / 5
-      );
+      const parts = await LawnIntelligence.computeAssessmentScoreParts(assessment);
+      const overall = parts?.overall ?? 0;
+      const deltaStr = parts?.deltaStr || '';
+      const tip = parts?.tip ? `\nTip: ${parts.tip}` : '';
 
-      // Get previous assessment for delta
-      const previous = await db('lawn_assessments')
-        .where({ customer_id: customer.id, confirmed_by_tech: true })
-        .where('service_date', '<', assessment.service_date)
-        .orderBy('service_date', 'desc')
-        .first();
-
-      const delta = previous ? overall - (previous.overall_score || Math.round(
-        (previous.turf_density + previous.weed_suppression + previous.fungus_control +
-          (previous.color_health || 0) + (previous.thatch_level || 0)) / 5
-      )) : null;
-
-      // Parse recommendations for customer tip
-      let tip = '';
-      try {
-        const recs = typeof assessment.recommendations === 'string' ? JSON.parse(assessment.recommendations) : assessment.recommendations;
-        tip = recs?.customerTip ? `\nTip: ${recs.customerTip}` : '';
-      } catch {}
-
-      const deltaStr = delta != null && delta !== 0 ? `, ${delta > 0 ? 'up' : 'down'} ${Math.abs(delta)} from last visit` : '';
       const smsMessage = await renderRequiredSmsTemplate('lawn_health_report_ready', {
         first_name: customer.first_name || 'there',
         overall_score: String(overall),

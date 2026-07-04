@@ -31,6 +31,7 @@ const TurfHeightOcr = require('../services/turf-height-ocr');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
   buildServiceReportV1DeliveryContext,
+  foldLawnScoreIntoCompletionSms,
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
@@ -4780,6 +4781,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               });
               ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
             }
+          }
+        }
+        // Lawn health score consolidation: fold the confirmed assessment's
+        // score (and tip) into the SAME completion report text instead of
+        // sending a separate "lawn health report ready" SMS at confirm time.
+        // Branch-agnostic — applies to whichever completion template was
+        // chosen above. Best-effort; a failure here must never block the send.
+        if (sentSmsBody && !isIncompleteVisit && completedLawnAssessmentId) {
+          try {
+            const LawnIntel = require('../services/lawn-intelligence');
+            const scoreParts = await LawnIntel.buildCompletionScoreBlock(completedLawnAssessmentId);
+            if (scoreParts?.scoreLine) {
+              const folded = foldLawnScoreIntoCompletionSms(sentSmsBody, scoreParts, { maxSegments: 2 });
+              if (folded.folded) {
+                sentSmsBody = folded.body;
+                if (folded.truncated) completionSmsWasTruncated = true;
+              } else {
+                logger.info(`[dispatch] lawn score fold-in skipped for ${record.id} (segment budget)`);
+              }
+            }
+          } catch (scoreErr) {
+            logger.warn(`[dispatch] lawn score fold-in failed for ${record.id}: ${scoreErr.message}`);
           }
         }
         if (sentSmsBody) {
