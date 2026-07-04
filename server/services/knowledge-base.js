@@ -339,6 +339,11 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
         const status = await linkedin.getStatus();
         if (!status.connected) {
           results.push({ ...credential, status: 'error', error: 'Not connected — authorize via Admin Settings → Integrations' });
+        } else if (!status.companyId) {
+          // Creds + OAuth present but no org to post to — createPost() throws
+          // "LINKEDIN_COMPANY_ID not configured", so don't report a health the
+          // publish path can't honor (same guard as token-health.js).
+          results.push({ ...credential, status: 'error', error: 'LINKEDIN_COMPANY_ID not set' });
         } else {
           const expiresAt = status.tokenExpiresAt ? new Date(status.tokenExpiresAt) : null;
           if (expiresAt && expiresAt.getTime() <= Date.now()) {
@@ -403,6 +408,12 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
           expires_at: r.expires_at || null,
           updated_at: new Date(),
         };
+        // Keep the stored env var pointer current on updates too — the LinkedIn
+        // check's source var changed (LINKEDIN_ACCESS_TOKEN → LINKEDIN_CLIENT_ID)
+        // and a pre-existing row would otherwise keep showing the retired var.
+        // Only when the result carries one: the catch-path results don't, and a
+        // transient failure must not null out a good pointer.
+        if (r.env_var_name) data.env_var_name = r.env_var_name;
         if (existing) {
           await db('token_credentials').where({ id: existing.id }).update(data);
         } else {

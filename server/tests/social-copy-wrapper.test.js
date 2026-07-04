@@ -61,6 +61,13 @@ describe('stripModelWrapper', () => {
     expect(stripModelWrapper(hyphen)).toBe('Brown patch or chinch bugs? The blade base tells you.');
   });
 
+  test('strips a bold-wrapped preamble heading ("**Here\'s a LinkedIn post:**")', () => {
+    const raw = "**Here's a LinkedIn post:**\n\nVenice pest pressure is peaking. Stay ahead of it.";
+    expect(stripModelWrapper(raw)).toBe('Venice pest pressure is peaking. Stay ahead of it.');
+    const ack = "**Sure — here's your caption:**\n\nParrish lawns are showing fungus after the rain.";
+    expect(stripModelWrapper(ack)).toBe('Parrish lawns are showing fungus after the rain.');
+  });
+
   test('strips a prompt-echo preamble ("…post based on this blog article:")', () => {
     const echo = "Here's a professional LinkedIn post based on this blog article: Venice pest pressure is peaking. Stay ahead of it.";
     expect(stripModelWrapper(echo)).toBe('Venice pest pressure is peaking. Stay ahead of it.');

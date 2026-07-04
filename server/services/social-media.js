@@ -389,6 +389,10 @@ async function withRetry(fn, { maxAttempts = 3, label = '' } = {}) {
 // the line to name the artifact (post/caption/copy/draft).
 function stripModelWrapper(raw) {
   let text = String(raw || '').replace(/\r\n?/g, '\n').trim();
+  // Markdown bold — readers would see the literal **. Unwrap FIRST so a bolded
+  // wrapper heading ("**Here's a LinkedIn post:**") is bare text before the
+  // preamble match below; running it last would let that heading publish.
+  text = text.replace(/\*\*([^*\n][^*]*)\*\*/g, '$1');
   // Leading meta line: "Here's a <platform> post …:" / "Sure — here is your caption:".
   // The acknowledgement separator takes comma/period/bang or a dash/colon ("Sure —").
   // (?!-) keeps hyphenated adjectives ("Here's a post-storm mosquito tip:"), and the
@@ -414,8 +418,6 @@ function stripModelWrapper(raw) {
   // "Note: keep pets off the lawn for 2 hours." survive.
   text = text.replace(/\n[\s*_(]*note:[^\n]*(?:\bchar(?:acter)?s?\b|\blength limits?\b)[^\n]*$/i, '');
   text = stripFences(text);
-  // Markdown bold — readers would see the literal **
-  text = text.replace(/\*\*([^*\n][^*]*)\*\*/g, '$1');
   return text.replace(/\n{3,}/g, '\n\n').trim();
 }
 
