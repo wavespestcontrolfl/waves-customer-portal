@@ -383,6 +383,92 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('240');
   });
 
+  // Lawn + pest bundle with one attributed product per family.
+  const lawnPestContext = {
+    serviceMode: 'recurring',
+    services: [
+      { label: 'Lawn Care', detail: 'Weed control applications', summary: 'Lawn Care — weed control' },
+      { label: 'Pest Control', detail: 'Exterior perimeter plan', summary: 'Pest Control — perimeter' },
+    ],
+    supportContext: {
+      productCatalog: [
+        {
+          source: 'admin_product_catalog',
+          title: 'herbicide active ingredient',
+          category: 'herbicide',
+          activeIngredient: 'Quinclorac',
+          labelVerified: true,
+          signalWord: 'Caution',
+          reentry: 'Keep people and pets off treated areas until dry.',
+          rainfastMinutes: 180,
+          irrigationNotes: null,
+          serviceKeys: ['lawn_care'],
+        },
+        {
+          source: 'admin_product_catalog',
+          title: 'insecticide active ingredient',
+          category: 'insecticide',
+          activeIngredient: 'Bifenthrin',
+          labelVerified: true,
+          signalWord: 'Caution',
+          reentry: 'Re-enter once sprays have dried.',
+          rainfastMinutes: 45,
+          irrigationNotes: null,
+          serviceKeys: ['pest_control'],
+        },
+      ],
+    },
+  };
+
+  test('a family question about a service NOT on this estimate quotes nothing', () => {
+    // Question terms can pull mosquito products into the support context
+    // even on a lawn-only estimate — the customer didn't buy them.
+    const answer = answerEstimateQuestionFallback('Is the mosquito spray safe for pets?', {
+      serviceMode: 'recurring',
+      services: [{ label: 'Lawn Care', detail: 'Weed control applications', summary: 'Lawn Care — weed control' }],
+      supportContext: {
+        productCatalog: [
+          JSON.parse(JSON.stringify(bundleContext.supportContext.productCatalog[0])),
+          JSON.parse(JSON.stringify(bundleContext.supportContext.productCatalog[1])),
+        ],
+      },
+    });
+    expect(answer).not.toContain('Deltamethrin');
+    expect(answer).not.toContain('Label re-entry guidance');
+    expect(answer).not.toContain('rainfast');
+    expect(answer).toContain('follow the product label directions');
+  });
+
+  test('"exterior spray" questions scope to pest control on a mixed estimate', () => {
+    const answer = answerEstimateQuestionFallback('Is the exterior spray safe for pets?', lawnPestContext);
+    expect(answer).toContain('Bifenthrin');
+    expect(answer).toContain('Re-enter once sprays have dried');
+    expect(answer).toContain('rainfast in about 45 minutes');
+    expect(answer).not.toContain('Quinclorac');
+    expect(answer).not.toContain('rainfast in about 180 minutes');
+  });
+
+  test('"lawn insect" questions stay lawn-scoped despite the insecticide category', () => {
+    const answer = answerEstimateQuestionFallback('Is the lawn insect treatment safe for pets?', lawnPestContext);
+    expect(answer).toContain('Quinclorac');
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).toContain('rainfast in about 180 minutes');
+    // "insect" must not mention-match the insecticide CATEGORY.
+    expect(answer).not.toContain('Bifenthrin');
+    expect(answer).not.toContain('sprays have dried');
+    expect(answer).not.toContain('rainfast in about 45 minutes');
+  });
+
+  test('a truncated catalog slice forces the qualified rainfast copy', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    // The catalog query caps its slice; a full slice can't prove every
+    // scoped product has a stated window.
+    context.supportContext.productCatalogTruncated = true;
+    const answer = answerEstimateQuestionFallback('Is it safe for pets?', context);
+    expect(answer).not.toContain('Treated areas are rainfast');
+    expect(answer).toContain('Where a product label states a rainfast window, treated areas are rainfast in about 180 minutes');
+  });
+
   test('"water bugs" is a pest question, not a watering question', () => {
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Do you treat water bugs?')).toBe(false);
     const answer = answerEstimateQuestionFallback('Do you treat water bugs?', {

@@ -691,6 +691,11 @@ const GENERIC_QUESTION_TERMS = new Set([
   'application', 'applications', 'applied', 'service', 'services', 'yard', 'home', 'house',
   'area', 'areas', 'okay', 'after', 'before', 'around', 'inside', 'outside', 'water', 'long',
   'active', 'ingredient', 'ingredients',
+  // bug/insect wording is family vocabulary, not a product name — and
+  // "insect" substring-matches the insecticide CATEGORY, which would let
+  // "lawn insect" questions mention-match pest products before family
+  // scoping runs. Saying "insecticide" itself still counts as a mention.
+  'bugs', 'insect', 'insects',
 ]);
 
 // True when the question explicitly names this catalog row (active ingredient
@@ -736,8 +741,12 @@ function catalogRowMentionsQuestion(row = {}, question = '') {
 //      attributed to this estimate's services; a mentioned row we can't tie
 //      to the estimate is not "your product" and fails closed.
 //   2. Named service families ("the lawn and mosquito treatments") — rows
-//      attributed to ANY named family; unattributed rows fail closed even
-//      on a single-family estimate.
+//      attributed to ANY named family AND on this estimate; unattributed
+//      rows fail closed even on a single-family estimate, and asking about
+//      a family the estimate doesn't include ("is the mosquito spray safe?"
+//      on a lawn-only estimate) quotes nothing — the question terms can pull
+//      that family's products into the support context, but the customer
+//      didn't buy them.
 //   3. Nothing targeted ("is it pet safe?") — prefer estimate-attributed
 //      rows when any exist, otherwise keep every row (linkage can be sparse
 //      for peripheral services and a generic question is answerable from
@@ -756,7 +765,7 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
   if (mentionedRows.length) return mentionedRows.filter(onEstimate);
   const questionFamilies = serviceFamiliesFromText(question);
   if (questionFamilies.length) {
-    return rows.filter((row) => attributedTo(row, questionFamilies));
+    return rows.filter((row) => attributedTo(row, questionFamilies) && onEstimate(row));
   }
   const attributed = rows.filter(onEstimate);
   return attributed.length ? attributed : rows;
@@ -792,11 +801,14 @@ function labelSafetyFactsFromSupport(context = {}, question = '') {
   if (signalWords.length) parts.push(`Label signal word${signalWords.length > 1 ? 's' : ''}: ${signalWords.join(', ')}.`);
   // Multiple products: quote the longest (most conservative) window — but as
   // a blanket claim only when EVERY scoped product (verified or not, hence
-  // scopedRows not scoped) states one. The label seed intentionally leaves
+  // scopedRows not scoped) states one AND the catalog slice wasn't truncated
+  // at its row cap (a truncated slice can't prove completeness — an omitted
+  // product may have no stated window). The label seed intentionally leaves
   // rainfast blank where the label doesn't state a window, unverified rows
   // carry no window at all, and one product's window must not become a
   // claim about the rest.
-  if (rainfast.length === scopedRows.length && rainfast.length) {
+  const catalogTruncated = (context.supportContext || context.aiSupport || {}).productCatalogTruncated === true;
+  if (rainfast.length === scopedRows.length && rainfast.length && !catalogTruncated) {
     parts.push(`Treated areas are rainfast in about ${Math.max(...rainfast)} minutes.`);
   } else if (rainfast.length) {
     parts.push(`Where a product label states a rainfast window, treated areas are rainfast in about ${Math.max(...rainfast)} minutes; not every product on this estimate has a stated window on file.`);

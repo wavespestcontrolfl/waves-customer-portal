@@ -50,6 +50,8 @@ describe('estimate AI support context', () => {
     // question — chinch bugs and lawn insects are lawn-care targets.
     expect(serviceFamiliesFromText('Is the chinch bug treatment safe for pets?')).toEqual(['lawn_care']);
     expect(serviceFamiliesFromText('Is the lawn insect treatment safe?')).toEqual(['lawn_care']);
+    // interior/exterior mirror the force-gate's pest wording.
+    expect(serviceFamiliesFromText('Is the exterior spray safe for pets?')).toEqual(['pest_control']);
     expect(serviceFamiliesFromText('')).toEqual([]);
   });
 
@@ -149,8 +151,29 @@ describe('estimate AI support context', () => {
       }),
     ]);
     expect(JSON.stringify(result)).not.toContain('Celsius WG');
+    expect(result.productCatalogTruncated).toBe(false);
     expect(result.externalSources.some((source) => source.title.includes('UF/IFAS'))).toBe(true);
     expect(result.externalSources.some((source) => source.title.includes('Florida-Friendly'))).toBe(true);
+  });
+
+  test('flags the product catalog slice as truncated when the row cap fills', () => {
+    const manyProducts = Array.from({ length: 9 }, (_, i) => ({
+      name: `Product ${i}`,
+      category: 'herbicide',
+      active_ingredient: `Ingredient ${i}`,
+      active: true,
+      label_verified_by: 'waves-admin',
+    }));
+    return loadEstimateAiSupportContext({
+      db: fakeDb({ products_catalog: manyProducts }),
+      question: 'Is the herbicide safe for pets?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    }).then((result) => {
+      expect(result.productCatalog).toHaveLength(8);
+      // A full slice can't prove completeness — the assistant must not make
+      // blanket every-product claims from it.
+      expect(result.productCatalogTruncated).toBe(true);
+    });
   });
 
   test('label-verified safety fields flow into the product snippet; unverified rows stay safety-silent', async () => {

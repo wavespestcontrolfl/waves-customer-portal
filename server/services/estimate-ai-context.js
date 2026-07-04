@@ -125,7 +125,9 @@ function serviceKeyFromText(value) {
 // contains "ant") — and scoping label facts into the wrong family quotes the
 // wrong product's safety guidance. These patterns require whole words.
 const SERVICE_FAMILY_QUESTION_PATTERNS = [
-  ['pest_control', /\b(?:pests?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter)\b/i],
+  // interior/exterior/inside/outside mirror the force-fallback gate, which
+  // already treats them as pest wording ("is the exterior spray safe?").
+  ['pest_control', /\b(?:pests?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter|interiors?|exteriors?|inside|outside)\b/i],
   ['lawn_care', /\b(?:lawns?|turf|weeds?|fertil\w*|fungus|chinch|grass)\b/i],
   ['mosquito', /\b(?:mosquito(?:es)?|midges?|no[-\s]?see[-\s]?ums?)\b/i],
   ['tree_shrub', /\b(?:trees?|shrubs?|ornamentals?)\b/i],
@@ -341,9 +343,13 @@ async function searchServiceLibrary(db, terms) {
   }
 }
 
+// Returns {rows, truncated}: truncated=true when the query filled the row
+// cap, meaning more matching products exist than were loaded — completeness
+// claims ("every product is rainfast within N minutes") must not be made
+// from a truncated slice.
 async function searchProductCatalog(db, terms, productNames = [], productFamiliesByName = {}) {
   const lookupTerms = unique([...terms, ...productNames]).slice(0, 20);
-  if (!db || !lookupTerms.length) return [];
+  if (!db || !lookupTerms.length) return { rows: [], truncated: false };
   // Attribute a catalog row to service families via the service library's
   // default_products linkage (real data, not a guessed category map), so the
   // assistant can scope family-specific safety questions to the right product.
@@ -374,7 +380,7 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         'signal_word', 'ppe_text', 'rei_hours', 'rainfast_minutes', 'reentry_summary', 'reentry_text', 'irrigation_notes')
       .limit(8);
 
-    return rows.map((row) => {
+    const shaped = rows.map((row) => {
       // Label-verified safety facts (signal word, re-entry, rainfast,
       // irrigation timing) let Ask Waves answer "is it pet safe?" from the
       // product's own reviewed label instead of generic knowledge. Fail
@@ -425,9 +431,10 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         snippet: trimSnippet(parts.join(' - ')),
       };
     }).filter((row) => row.snippet || row.title);
+    return { rows: shaped, truncated: rows.length >= 8 };
   } catch (err) {
     logger.warn(`[estimate-ai-context] products_catalog lookup skipped: ${err.message}`);
-    return [];
+    return { rows: [], truncated: false };
   }
 }
 
@@ -541,7 +548,7 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
       productFamiliesByName[key] = unique([...(productFamiliesByName[key] || []), family]);
     }
   }
-  const productCatalog = await searchProductCatalog(db, searchTerms, serviceProductNames, productFamiliesByName);
+  const productCatalogResult = await searchProductCatalog(db, searchTerms, serviceProductNames, productFamiliesByName);
   const publicServiceLibrary = serviceLibrary.map(({ _productNames, ...row }) => row);
 
   return {
@@ -550,7 +557,8 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
     knowledgeBase,
     agronomicWiki,
     serviceLibrary: publicServiceLibrary,
-    productCatalog,
+    productCatalog: productCatalogResult.rows,
+    productCatalogTruncated: productCatalogResult.truncated,
     repositoryFiles: loadRepoContext(searchTerms),
     externalSources: externalReferencesFor(serviceKeys),
   };
