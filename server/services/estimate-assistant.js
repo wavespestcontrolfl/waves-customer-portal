@@ -678,7 +678,10 @@ function activeIngredientsFromSupport(context = {}, question = '') {
 // trigger: "will you still come if it rains?" is a scheduling question and
 // "how long does the treatment last?" is a duration question — both belong
 // on the normal path, not in safety copy.
-const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water\w*|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\b|\bafter\s+(?:the\s+|it\s+)?rains?\b|\brain\s+wash\w*\b/i;
+// water(?:ing|ed|s)? with the (?!\s+bugs?\b) lookahead instead of water\w*:
+// "water bugs" is a PEST, not a watering question, and must keep its
+// pest-branch answer.
+const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\b|\bafter\s+(?:the\s+|it\s+)?rains?\b|\brain\s+wash\w*\b/i;
 
 // Generic treatment vocabulary says nothing about WHICH product a question
 // targets, so it never counts as naming one.
@@ -722,31 +725,41 @@ function catalogRowMentionsQuestion(row = {}, question = '') {
 }
 
 // Scope targeted questions to the product(s) they target — the support
-// context is built from ALL estimate services, so on a multi-service
-// estimate the lawn herbicide's facts must not answer a mosquito question.
+// context is built from ALL estimate services (and the catalog search can
+// pull rows that aren't on this estimate at all, e.g. every herbicide when
+// the question says "herbicide"), so the wrong product's label facts must
+// never answer for another. Attribution = the serviceKeys each row carries
+// from the service library's default_products linkage.
 // Targeting precedence, most specific first:
 //   1. Explicit product mention ("is bifenthrin safe?", "is the 2,4-D lawn
-//      spray safe?") — always narrows to the mentioned row(s), even on a
-//      single-family estimate with several products of that family.
-//   2. Named service families ("the lawn and mosquito treatments") — EVERY
-//      named family, matched against the serviceKeys each row carries from
-//      the service library's default_products linkage. A single-family
-//      estimate asked about only that same family needs no attribution.
-//   3. Nothing targeted ("is it pet safe?") — keep every row.
+//      spray safe?") — narrows to the mentioned row(s) that are ALSO
+//      attributed to this estimate's services; a mentioned row we can't tie
+//      to the estimate is not "your product" and fails closed.
+//   2. Named service families ("the lawn and mosquito treatments") — rows
+//      attributed to ANY named family; unattributed rows fail closed even
+//      on a single-family estimate.
+//   3. Nothing targeted ("is it pet safe?") — prefer estimate-attributed
+//      rows when any exist, otherwise keep every row (linkage can be sparse
+//      for peripheral services and a generic question is answerable from
+//      whatever the estimate loaded).
 // No survivors = an empty set (callers fail closed to generic copy) rather
 // than the wrong treatment's rows.
 function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
   if (!rows.length) return rows;
-  const mentionedRows = rows.filter((row) => catalogRowMentionsQuestion(row, question));
-  if (mentionedRows.length) return mentionedRows;
-  const questionFamilies = serviceFamiliesFromText(question);
-  if (!questionFamilies.length) return rows;
   const estimateFamilies = serviceKeysFromContext(context, '');
-  if (estimateFamilies.length === 1 && questionFamilies.every((family) => family === estimateFamilies[0])) {
-    return rows;
+  const attributedTo = (row, families) => Array.isArray(row.serviceKeys)
+    && row.serviceKeys.some((key) => families.includes(key));
+  const onEstimate = (row) => (estimateFamilies.length
+    ? attributedTo(row, estimateFamilies)
+    : (Array.isArray(row.serviceKeys) && row.serviceKeys.length > 0));
+  const mentionedRows = rows.filter((row) => catalogRowMentionsQuestion(row, question));
+  if (mentionedRows.length) return mentionedRows.filter(onEstimate);
+  const questionFamilies = serviceFamiliesFromText(question);
+  if (questionFamilies.length) {
+    return rows.filter((row) => attributedTo(row, questionFamilies));
   }
-  return rows.filter((row) => Array.isArray(row.serviceKeys)
-    && row.serviceKeys.some((key) => questionFamilies.includes(key)));
+  const attributed = rows.filter(onEstimate);
+  return attributed.length ? attributed : rows;
 }
 
 // Deterministic label-safety line for the forced-fallback safety answer, built
@@ -759,11 +772,13 @@ function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
 function labelSafetyFactsFromSupport(context = {}, question = '') {
   // Scope over ALL catalog rows first, then keep only verified survivors —
   // if the question names a product whose row is unverified, the answer must
-  // carry NO label facts, not another (verified) product's facts.
+  // carry NO label facts, not another (verified) product's facts. scopedRows
+  // (verified or not) stays around as the denominator for the rainfast
+  // completeness check below.
   const catalogRows = supportRows(context)
     .filter((row) => row.source === 'admin_product_catalog');
-  const scoped = scopeCatalogRowsToQuestion(catalogRows, context, question)
-    .filter((row) => row.labelVerified);
+  const scopedRows = scopeCatalogRowsToQuestion(catalogRows, context, question);
+  const scoped = scopedRows.filter((row) => row.labelVerified);
   if (!scoped.length) return '';
   const reentries = [...new Set(scoped.map((row) => cleanText(row.reentry || '')).filter(Boolean))];
   const signalWords = [...new Set(scoped.map((row) => cleanText(row.signalWord || '')).filter(Boolean))];
@@ -776,13 +791,15 @@ function labelSafetyFactsFromSupport(context = {}, question = '') {
   else if (reentries.length > 1) parts.push(`Label re-entry guidance by product: ${reentries.map((text) => text.replace(/\.$/, '')).join('; ')}.`);
   if (signalWords.length) parts.push(`Label signal word${signalWords.length > 1 ? 's' : ''}: ${signalWords.join(', ')}.`);
   // Multiple products: quote the longest (most conservative) window — but as
-  // a blanket claim only when EVERY scoped product states one. The label
-  // seed intentionally leaves rainfast blank where the label doesn't state a
-  // window, and one product's window must not become a claim about the rest.
-  if (rainfast.length === scoped.length && rainfast.length) {
+  // a blanket claim only when EVERY scoped product (verified or not, hence
+  // scopedRows not scoped) states one. The label seed intentionally leaves
+  // rainfast blank where the label doesn't state a window, unverified rows
+  // carry no window at all, and one product's window must not become a
+  // claim about the rest.
+  if (rainfast.length === scopedRows.length && rainfast.length) {
     parts.push(`Treated areas are rainfast in about ${Math.max(...rainfast)} minutes.`);
   } else if (rainfast.length) {
-    parts.push(`Products whose labels state a rainfast window are rainfast in about ${Math.max(...rainfast)} minutes; the other product labels do not state one.`);
+    parts.push(`Where a product label states a rainfast window, treated areas are rainfast in about ${Math.max(...rainfast)} minutes; not every product on this estimate has a stated window on file.`);
   }
   if (irrigation.length === 1) parts.push(`Label watering/irrigation guidance: ${irrigation[0].replace(/\.$/, '')}.`);
   else if (irrigation.length > 1) parts.push(`Label watering/irrigation guidance by product: ${irrigation.map((text) => text.replace(/\.$/, '')).join('; ')}.`);
@@ -981,7 +998,9 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // must land in this branch. Bare "rain"/"treatment" deliberately do NOT
   // match: "will you still come if it rains?" (scheduling) and "how long
   // does the treatment last?" (duration) belong to the branches below.
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water\w*|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\b|\bafter\s+(?:the\s+|it\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
+  // "water bugs" is a pest, not a watering question — the lookahead sends
+  // it to the pest branch.
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\b|\bafter\s+(?:the\s+|it\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
     const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';
@@ -1011,7 +1030,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
       : `I do not see lawn care on this estimate. Call or text Waves at ${phone} if you want it added.`;
   }
 
-  if (/\b(pest|bug|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/.test(q)) {
+  if (/\b(pest|bugs?|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/.test(q)) {
     const pest = findService(context, /pest|roach|ant|spider|perimeter/i);
     const activeIngredients = activeIngredientsFromSupport(context, question);
     return pest

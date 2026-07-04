@@ -327,8 +327,70 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     context.supportContext.productCatalog[1].rainfastMinutes = null;
     const answer = answerEstimateQuestionFallback('Are the lawn and mosquito treatments safe for pets?', context);
     expect(answer).not.toContain('Treated areas are rainfast');
-    expect(answer).toContain('Products whose labels state a rainfast window are rainfast in about 180 minutes');
-    expect(answer).toContain('the other product labels do not state one');
+    expect(answer).toContain('Where a product label states a rainfast window, treated areas are rainfast in about 180 minutes');
+    expect(answer).toContain('not every product on this estimate has a stated window on file');
+  });
+
+  test('a scoped unverified product blocks the blanket rainfast claim too', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    // Unverified rows carry no safety fields at all — their rainfast is
+    // unknown, so the verified products' window must not read as blanket.
+    context.supportContext.productCatalog.push({
+      source: 'admin_product_catalog',
+      category: 'adjuvant',
+      activeIngredient: 'Surfactant blend',
+      labelVerified: false,
+      signalWord: null,
+      reentry: null,
+      rainfastMinutes: null,
+      irrigationNotes: null,
+      serviceKeys: ['lawn_care'],
+    });
+    const answer = answerEstimateQuestionFallback('Is it safe for pets?', context);
+    expect(answer).not.toContain('Treated areas are rainfast');
+    expect(answer).toContain('Where a product label states a rainfast window, treated areas are rainfast in about 180 minutes');
+  });
+
+  test('family questions fail closed on unattributed rows, even on a single-family estimate', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    context.supportContext.productCatalog.forEach((row) => { row.serviceKeys = []; });
+    const answer = answerEstimateQuestionFallback('Is the lawn spray safe for pets?', context);
+    expect(answer).not.toContain('Label re-entry guidance');
+    expect(answer).not.toContain('rainfast');
+    expect(answer).toContain('follow the product label directions');
+  });
+
+  test('a mentioned product not attributed to this estimate is never quoted', () => {
+    // The catalog search can pull EVERY herbicide when the question says
+    // "herbicide" — a row not linked to this estimate's services must not
+    // answer as if it were the customer's product.
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    context.supportContext.productCatalog.push({
+      source: 'admin_product_catalog',
+      category: 'herbicide',
+      activeIngredient: 'Glyphosate',
+      labelVerified: true,
+      signalWord: 'Warning',
+      reentry: 'Foreign product re-entry claim.',
+      rainfastMinutes: 240,
+      irrigationNotes: null,
+      serviceKeys: [],
+    });
+    const answer = answerEstimateQuestionFallback('Is the herbicide safe for pets?', context);
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).not.toContain('Glyphosate');
+    expect(answer).not.toContain('Foreign product re-entry claim');
+    expect(answer).not.toContain('240');
+  });
+
+  test('"water bugs" is a pest question, not a watering question', () => {
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Do you treat water bugs?')).toBe(false);
+    const answer = answerEstimateQuestionFallback('Do you treat water bugs?', {
+      serviceMode: 'recurring',
+      services: [{ label: 'Pest Control', detail: 'Exterior perimeter plan', summary: 'Pest Control — quarterly' }],
+    });
+    expect(answer).toContain('For pest control');
+    expect(answer).not.toContain('follow the product label directions');
   });
 
   test('naming an ingredient narrows even on a single-family estimate with several products', () => {

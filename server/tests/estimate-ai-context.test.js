@@ -44,9 +44,22 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Can I water my plants after treatment?')).toEqual([]);
     expect(serviceFamiliesFromText('Are the lawn and mosquito treatments safe for pets?')).toEqual(['lawn_care', 'mosquito']);
     expect(serviceFamiliesFromText('Do you treat for ants?')).toEqual(['pest_control']);
-    // Customers say "bug spray" for pest control.
+    // Customers say "bug spray" for pest control...
     expect(serviceFamiliesFromText('Is the bug spray safe for pets?')).toEqual(['pest_control']);
+    // ...but generic bug/insect words must not broaden a family-specific
+    // question — chinch bugs and lawn insects are lawn-care targets.
+    expect(serviceFamiliesFromText('Is the chinch bug treatment safe for pets?')).toEqual(['lawn_care']);
+    expect(serviceFamiliesFromText('Is the lawn insect treatment safe?')).toEqual(['lawn_care']);
     expect(serviceFamiliesFromText('')).toEqual([]);
+  });
+
+  test('question-derived service keys use the whole-word matcher for support loading', () => {
+    // "plants" must not add pest_control to the support search (loose label
+    // pattern would substring-match "ant").
+    expect(serviceKeysFromContext(
+      { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+      'Can I water my plants after treatment?',
+    )).toEqual(['lawn_care']);
   });
 
   test('builds compact search terms from services, question, tier, and location context', () => {

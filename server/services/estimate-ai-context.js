@@ -125,7 +125,7 @@ function serviceKeyFromText(value) {
 // contains "ant") — and scoping label facts into the wrong family quotes the
 // wrong product's safety guidance. These patterns require whole words.
 const SERVICE_FAMILY_QUESTION_PATTERNS = [
-  ['pest_control', /\b(?:pests?|bugs?|insects?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter)\b/i],
+  ['pest_control', /\b(?:pests?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter)\b/i],
   ['lawn_care', /\b(?:lawns?|turf|weeds?|fertil\w*|fungus|chinch|grass)\b/i],
   ['mosquito', /\b(?:mosquito(?:es)?|midges?|no[-\s]?see[-\s]?ums?)\b/i],
   ['tree_shrub', /\b(?:trees?|shrubs?|ornamentals?)\b/i],
@@ -134,15 +134,23 @@ const SERVICE_FAMILY_QUESTION_PATTERNS = [
   ['rodent_bait', /\b(?:rodents?|rats?|mice|mouse)\b/i],
 ];
 
+// Customers say "bug spray" for pest control — but ONLY when nothing more
+// specific is named: "chinch bug" / "lawn insects" describe that family's
+// insects, and adding pest_control there would scope perimeter-pest label
+// facts into a lawn answer.
+const PEST_GENERIC_INSECT_PATTERN = /\b(?:bugs?|insects?)\b/i;
+
 // ALL families a question names, not just the first — a bundle question like
 // "are the lawn and mosquito treatments safe?" targets two families and the
 // assistant must scope label facts to every one of them.
 function serviceFamiliesFromText(value) {
   const text = cleanText(value);
   if (!text) return [];
-  return SERVICE_FAMILY_QUESTION_PATTERNS
+  const families = SERVICE_FAMILY_QUESTION_PATTERNS
     .filter(([, pattern]) => pattern.test(text))
     .map(([key]) => key);
+  if (!families.length && PEST_GENERIC_INSECT_PATTERN.test(text)) families.push('pest_control');
+  return families;
 }
 
 function serviceKeysFromContext(context = {}, question = '') {
@@ -158,8 +166,12 @@ function serviceKeysFromContext(context = {}, question = '') {
     if (key) keys.push(key);
   }
 
-  const questionKey = serviceKeyFromText(question);
-  if (questionKey) keys.unshift(questionKey);
+  // Question-derived keys use the whole-word family matcher — the loose
+  // label patterns substring-match free text ("plants" contains "ant"),
+  // which would load the wrong family's products into the support context
+  // before scoping ever runs. Labels themselves stay on the loose matcher.
+  const questionFamilies = serviceFamiliesFromText(question);
+  if (questionFamilies.length) keys.unshift(...questionFamilies);
   return unique(keys);
 }
 
