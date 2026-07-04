@@ -319,6 +319,18 @@ describe('comparison-table-gate', () => {
       .findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
   });
 
+  test('does/doesn\'t reliability forms are caught like never/won\'t (Codex round 17)', () => {
+    // Named-competitor proximity path.
+    const named = gate.evaluate({ body: `Orkin does not answer the phone when you call.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(named.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    // Generic business-shaped name as subject (table-less prose path).
+    const generic = gate.evaluate({ body: "Acme Pest Solutions doesn't call back after you leave a message." });
+    expect(generic.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    // The require-idiom "call for" stays clean even next to a provider name.
+    expect(gate.evaluate({ body: `Orkin agrees light infestations do not call for fumigation.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true })
+      .findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
+  });
+
   // ── Round-5 findings ──
 
   test('R5-2a: an uncurated fact behind a "Free" cell (treated as affirmative) is rejected', () => {

@@ -65,7 +65,13 @@ const PROVIDER_DISPARAGEMENT_RE = new RegExp([
 
 // Negative service-reliability claims about a provider. Flagged inside table
 // blocks OR in prose/title/meta when within PROXIMITY of a named competitor.
-const PROVIDER_NEGATIVE_RE = /\b(unreliable|unresponsive|no[\s-]?shows?|never (?:answers?|calls?|shows?)\b|hard to reach|leaves? you waiting|ghosts? you|won'?t call (?:you )?back|don'?t show up)\b/i;
+// The negated-verb arm covers every common auxiliary, not just "never"/
+// "won't call back": "does not answer the phone" / "doesn't call back" /
+// "don't show up" are the ordinary prose forms of the same claim and
+// previously produced no finding. The "call FOR" lookahead keeps the
+// require-idiom clean — "light infestations do not call for fumigation"
+// is treatment advice, not a reliability claim.
+const PROVIDER_NEGATIVE_RE = /\b(unreliable|unresponsive|no[\s-]?shows?|(?:never|doesn'?t|does\s+not|don'?t|do\s+not|won'?t|will\s+not)\s+(?:answers?(?:\s+(?:the\s+)?(?:phone|calls?))?|calls?(?!\s+for\b)(?:\s+(?:you\s+)?back)?|shows?(?:\s+up)?|responds?|replies|reply|returns?\s+calls?)\b|hard to reach|leaves? you waiting|ghosts? you|won'?t call (?:you )?back)\b/i;
 
 // ACTIVE disparaging predicates — verb-plus-victim shapes ("scams customers",
 // "charges hidden fees") for the generic-name directed scan. The victim object

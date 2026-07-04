@@ -757,9 +757,17 @@ function checkRedactionPassed(draft) {
     // name scan (the heading check would case-promote every meta word and
     // flag any unlisted adjacent pair, e.g. "straight antennae"). Objective
     // PII (address/ssn/card, phone, email) blocks outright in both.
+    // Both casings of each field are collected — refreshes/non-blog pages
+    // preserve camelCase frontmatter (metaTitle/metaDescription, the
+    // editable-meta set content-guardrails scans) and Astro renders those
+    // too, so scanning only the snake_case names left the camelCase route
+    // unchecked. Concatenated for scanning; the `where` label stays the
+    // canonical rendered slot.
+    const fm = draft.frontmatter || {};
+    const joinFields = (...vals) => vals.filter(Boolean).map(String).join('\n');
     const seoFields = [
-      ['title', String(draft.title || (draft.frontmatter && draft.frontmatter.title) || '')],
-      ['meta_description', String(draft.meta_description || (draft.frontmatter && draft.frontmatter.meta_description) || '')],
+      ['title', joinFields(draft.title, fm.title, draft.metaTitle, fm.metaTitle)],
+      ['meta_description', joinFields(draft.meta_description, fm.meta_description, draft.metaDescription, fm.metaDescription)],
     ];
     for (const [where, raw] of seoFields) {
       if (!raw.trim()) continue;
@@ -777,6 +785,16 @@ function checkRedactionPassed(draft) {
       if (fieldHit) return { ok: false, reason: `unredacted_${fieldHit.type}_in_${where}` };
       if (titleCased && headingCustomerNamePair(stripped)) {
         return { ok: false, reason: `unredacted_name_in_${where}` };
+      }
+      // Prose-shaped metas get the body's low-confidence backstop too: a
+      // lowercase self-intro meta ("this is john smith ants are back")
+      // reports low confidence with ZERO findings — the redactor is saying
+      // its heuristics were blind, so "no findings" proves nothing. Titles
+      // skip this: the case-promoting heading-pair check above already
+      // covers casing-blind names there, and Title Case never trips the
+      // lowercase arms anyway.
+      if (!titleCased && fieldScan.confidence === 'low') {
+        return { ok: false, reason: `pii_confidence_low_in_${where}` };
       }
     }
   } catch (err) {

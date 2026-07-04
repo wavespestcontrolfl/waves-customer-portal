@@ -275,11 +275,17 @@ const { isWavesPhone } = require('./waves-phones');
 function detectPii(body = '') {
   const text = String(body || '');
   // Same E.164-capable pattern as content-quality-gate's redaction check
-  // (compact +1/11-digit forms had no interior word boundary to match on).
-  const phoneRe = /(?<!\d)\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
-  const phoneMatches = text.match(phoneRe) || [];
-  for (const raw of phoneMatches) {
-    const digits = raw.replace(/\D/g, '');
+  // (compact +1/11-digit forms had no interior word boundary to match on),
+  // including its optional attached-extension arm: without it the trailing
+  // \b cannot sit between the last digit and an `x` (both word chars), so
+  // `212-555-1234x99` matched nothing here — and supporting blogs don't run
+  // redaction_passed, making this the only phone guard on that path. The
+  // CORE number is captured separately so extension digits never pollute
+  // the last-10 compare against the Waves allowlist.
+  const phoneRe = /(?<!\d)(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?\b/gi;
+  let pm;
+  while ((pm = phoneRe.exec(text)) !== null) {
+    const digits = pm[1].replace(/\D/g, '');
     const last10 = digits.length >= 10 ? digits.slice(-10) : null;
     if (!last10) return true;
     if (!isWavesPhone(last10)) return true;

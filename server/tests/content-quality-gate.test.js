@@ -288,6 +288,37 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
     expect(fmTitle.ok).toBe(false);
     expect(fmTitle.reason).toBe('unredacted_name_in_title');
   });
+  test('redaction: low-confidence meta scans block like body prose (Codex round 17)', () => {
+    // A lowercase self-intro meta reports low confidence with zero
+    // findings — the round-16 meta path only read findings, so the name
+    // published in the public meta description.
+    const r = checkRedactionPassed({
+      body: 'Chinch bugs thrive in dry Bradenton lawns. Call (941) 297-2606 for a free inspection.',
+      meta_description: 'this is john smith ants are back',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('pii_confidence_low_in_meta_description');
+  });
+  test('redaction: camelCase SEO frontmatter fields are scanned too (Codex round 17)', () => {
+    const cleanBody = 'Chinch bugs thrive in dry Bradenton lawns. Call (941) 297-2606 for a free inspection.';
+    const phoneCamel = checkRedactionPassed({
+      body: cleanBody,
+      frontmatter: { metaDescription: 'Call John at 212-555-1234x99 for pest help.' },
+    });
+    expect(phoneCamel.ok).toBe(false);
+    expect(phoneCamel.reason).toBe('non_business_phone_number_in_meta_description:2125551234');
+    const nameCamel = checkRedactionPassed({
+      body: cleanBody,
+      frontmatter: { metaTitle: 'How John Smith Fixed His Lawn' },
+    });
+    expect(nameCamel.ok).toBe(false);
+    expect(nameCamel.reason).toBe('unredacted_name_in_title');
+    // clean camelCase fields stay clean
+    expect(checkRedactionPassed({
+      body: cleanBody,
+      frontmatter: { metaTitle: 'Chinch Bug Control in Bradenton', metaDescription: 'Serving Sarasota and Manatee County with same-day chinch bug treatment.' },
+    }).ok).toBe(true);
+  });
   test('redaction: surname-shaped domain words stay pair-scoped in headings (Codex round 16)', () => {
     // 'Brown' as a structural SINGLE waved "## James Brown" through; the
     // pair allowlist clears "Brown Patch" without clearing the surname.
