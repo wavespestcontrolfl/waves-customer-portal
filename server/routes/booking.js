@@ -9,6 +9,7 @@ const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
@@ -1291,8 +1292,11 @@ async function createSelfBooking(payload = {}) {
         weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
       });
       const startLabel = minToTime12(timeToMin(slot_start));
-      const endLabel = minToTime12(endMin);
-      const timeLabel = `${startLabel} - ${endLabel}`;
+      // {time} quotes the 2-hour arrival promise. endMin is the job-duration
+      // block that sized the scheduled_services window above — never the
+      // customer-facing window (see sms-time-format).
+      const arrivalEndLabel = minToTime12((timeToMin(slot_start) + ARRIVAL_WINDOW_MINUTES) % (24 * 60));
+      const timeLabel = `${startLabel} - ${arrivalEndLabel}`;
       const addressLabel = `${customer.address_line1}, ${customer.city}`;
       const smsBody = await renderSmsTemplate(
         'self_booking_confirmation',

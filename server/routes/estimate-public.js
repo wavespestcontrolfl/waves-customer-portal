@@ -10,7 +10,7 @@ const { verifyStaffBearer } = require('../middleware/admin-auth');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, formatETDate } = require('../utils/datetime-et');
-const { formatSmsTimeRange } = require('../utils/sms-time-format');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -7715,9 +7715,11 @@ router.put('/:token/accept', async (req, res, next) => {
             const serviceDate = scheduledDate
               ? formatETDate(new Date(`${scheduledDate}T12:00:00Z`))
               : 'your selected date';
-            const start = hhmm(confirmedAppointmentRow?.window_start);
-            const end = hhmm(confirmedAppointmentRow?.window_end);
-            const timeWindow = start && end ? formatSmsTimeRange(`${start}-${end}`) : 'your selected window';
+            // {time} quotes the 2-hour arrival promise from the window start.
+            // window_end is the job-duration block that sizes scheduling —
+            // never the customer-facing window (see sms-time-format).
+            const arrivalRange = arrivalWindowRange(confirmedAppointmentRow?.window_start);
+            const timeWindow = arrivalRange ? formatSmsTimeRange(arrivalRange) : 'your selected window';
             // appointment_confirmation renders {reschedule_line}, and
             // getTemplate suppresses the whole SMS on an unresolved
             // placeholder — every render site must pass the clause ('' when
