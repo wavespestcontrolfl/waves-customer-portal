@@ -391,6 +391,25 @@ describe('admin customers route helpers', () => {
     expect(serviceCatalogMatch({ service: 'rodent_bait' }, legacyIndex)?.service_key).toBe('rodent_monitoring');
   });
 
+  test('tick-only lines resolve to tick_control, not the flea-only rebranded service (Codex P2)', () => {
+    const serviceIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'flea_tick', name: 'Flea Control Service', short_name: 'Flea' },
+      { id: 2, service_key: 'tick_control', name: 'Tick Control Service', short_name: 'Tick' },
+    ]);
+
+    expect(serviceCatalogMatch({ name: 'Tick Treatment' }, serviceIndex)?.service_key).toBe('tick_control');
+    expect(serviceCatalogMatch({ name: 'Flea Treatment' }, serviceIndex)?.service_key).toBe('flea_tick');
+    // A combined flea-and-tick line keeps resolving to the flea service.
+    expect(serviceCatalogMatch({ name: 'Flea and Tick Yard Treatment' }, serviceIndex)?.service_key).toBe('flea_tick');
+
+    // Envs without a tick_control row keep the legacy flea_tick resolution
+    // rather than dropping the line to no-match.
+    const legacyIndex = indexServicesForSchedule([
+      { id: 1, service_key: 'flea_tick', name: 'Flea Control Service', short_name: 'Flea' },
+    ]);
+    expect(serviceCatalogMatch({ name: 'Tick Treatment' }, legacyIndex)?.service_key).toBe('flea_tick');
+  });
+
   test('does not create fallback schedule lines from billing-only estimate rows', () => {
     const lines = scheduleLinesFromEstimate({
       id: 'estimate-1',
