@@ -144,6 +144,43 @@ try {
 
 const NAME_ALLOWLIST_LOWER = new Set([...NAME_ALLOWLIST].map((w) => w.toLowerCase()));
 
+// Title-cased lawn/pest DOMAIN TERMS that read as First+Last pairs —
+// "Brown Patch", "Chinch Bug", "Sod Webworm", the bigrams of "Take All
+// Root Rot". Matched as PAIRS (same mechanism as CITY_PAIR_ALLOWLIST),
+// never as single words: allowlisting "Brown" alone would stop "James
+// Brown" from redacting, while the pair form only clears the exact
+// domain bigram. Multi-word terms are covered via their adjacent bigrams.
+const DOMAIN_TERM_PAIRS = new Set([
+  'brown patch', 'large patch', 'dollar spot', 'leaf spot', 'gray leaf',
+  'fairy ring', 'root rot', 'take all', 'all root', 'web blight',
+  'powdery mildew', 'sooty mold', 'chinch bug', 'chinch bugs',
+  'sod webworm', 'sod webworms', 'mole cricket', 'mole crickets',
+  'fire ant', 'fire ants', 'ghost ant', 'ghost ants', 'sugar ant',
+  'sugar ants', 'carpenter ant', 'carpenter ants', 'crazy ant',
+  'crazy ants', 'big headed', 'bed bug', 'bed bugs', 'white grub',
+  'white grubs', 'army worm', 'army worms', 'fall armyworm',
+  'fall armyworms', 'grass loopers', 'spittle bug', 'spittle bugs',
+  'bahia grass', 'bermuda grass', 'zoysia grass', 'centipede grass',
+  'buffalo grass', 'carpet grass', 'torpedo grass', 'crab grass',
+  'goose grass', 'dove weed', 'drywood termite', 'drywood termites',
+  'subterranean termite', 'subterranean termites', 'wolf spider',
+  'wolf spiders', 'black widow', 'brown recluse', 'paper wasp',
+  'paper wasps', 'yellow jacket', 'yellow jackets', 'stink bug',
+  'stink bugs', 'palmetto bug', 'palmetto bugs', 'love bug', 'love bugs',
+  'no see', 'see ums',
+  // Qualifier bigrams of 3+-word species/variety names. The body pass is
+  // NON-overlapping, so "Southern Chinch Bug" pairs as "Southern Chinch"
+  // (not the allowlisted "Chinch Bug") and "St. Augustine Grass" pairs as
+  // "Augustine Grass" (the period stops "St." from joining a pair).
+  'southern chinch', 'tropical sod', 'red imported', 'imported fire',
+  'german cockroach', 'american cockroach', 'australian cockroach',
+  'oriental cockroach', 'smokybrown cockroach', 'norway rat', 'roof rat',
+  'house mouse', 'asian tiger', 'tiger mosquito', 'formosan termite',
+  'formosan subterranean', 'eastern subterranean', 'asian subterranean',
+  'augustine grass', 'empire zoysia', 'dollar weed', 'fruit fly',
+  'fruit flies', 'drain fly', 'drain flies',
+]);
+
 function looksLikeFalsePositiveName(first, last) {
   if (!first || !last) return true;
   if (NAME_ALLOWLIST.has(first) || NAME_ALLOWLIST.has(last)) return true;
@@ -151,6 +188,8 @@ function looksLikeFalsePositiveName(first, last) {
   // bigram of a longer one like "Sun City" / "City Center") is place
   // furniture, not a person.
   if (CITY_PAIR_ALLOWLIST.has(`${first} ${last}`.toLowerCase())) return true;
+  // Title-cased lawn/pest domain terms are page furniture, not people.
+  if (DOMAIN_TERM_PAIRS.has(`${first} ${last}`.toLowerCase())) return true;
   // All-caps single words are usually abbreviations, not names.
   if (first === first.toUpperCase() || last === last.toUpperCase()) return true;
   // Length sanity.

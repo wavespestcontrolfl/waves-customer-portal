@@ -238,6 +238,18 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
       body: 'Residents in Fort Myers and Cape Coral see tegu lizards moving north toward Venice every year.',
     }).ok).toBe(true);
   });
+  test('redaction: title-cased pest/disease vocabulary is service copy, not a customer name (Codex round 15)', () => {
+    expect(checkRedactionPassed({
+      body: 'Brown Patch and Take All Root Rot spread in damp turf, while Chinch Bug and Sod Webworm damage shows up in dry spots. Call (941) 297-2606.',
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: 'Southern Chinch Bug activity peaks in July across St. Augustine Grass lawns from Palmetto to Venice.',
+    }).ok).toBe(true);
+    // A real customer name in the body still hard-fails.
+    const r = checkRedactionPassed({ body: 'This is James Brown and the ants are back again this week.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('unredacted_name_in_body');
+  });
   test('redaction: compact E.164 customer phones are caught (Codex round 8 — 11-digit runs had no interior boundary to match)', () => {
     const r = checkRedactionPassed({ body: 'Call our Sarasota line at (941) 297-2606 or the customer at +19415551234.' });
     expect(r.ok).toBe(false);

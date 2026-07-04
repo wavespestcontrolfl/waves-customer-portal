@@ -275,6 +275,18 @@ describe('lowercase transcripts (regression — the heuristics were capitalizati
     expect(laurel.findings.some((f) => f.type === 'name')).toBe(true);
     expect(laurel.text).not.toContain('Laurel Smith');
   });
+  test('title-cased lawn/pest domain terms are page furniture, not names (Codex round 15)', () => {
+    // The vocabulary city-service/customer-question copy is built from.
+    expect(redact('Brown Patch spreads fast; Chinch Bug and Sod Webworm damage looks similar, and Take All Root Rot thrives in wet soil.').findings).toEqual([]);
+    // The body pass pairs NON-overlapping, so 3-word species names surface
+    // their QUALIFIER bigram ("Southern Chinch", "Tropical Sod"), and the
+    // period in "St." leaves "Augustine Grass" as the matched pair.
+    expect(redact('Southern Chinch Bug and Tropical Sod Webworm both attack St. Augustine Grass in summer.').findings).toEqual([]);
+    // Pair-form allowlisting must not weaken real-name redaction.
+    const brown = redact('Hi, this is James Brown calling about my lawn.');
+    expect(brown.findings.some((f) => f.type === 'name')).toBe(true);
+    expect(brown.text).not.toContain('James Brown');
+  });
   test('lowercase name signal ignores non-name continuations and allowlisted tokens', () => {
     expect(redact('my name is not on the account but my husband handles it').text).not.toContain('[name]');
     // staff/owner names stay (allowlist, case-insensitive)
