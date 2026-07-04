@@ -181,12 +181,15 @@ function bundleScenario() {
           isPest: false,
           waveGuardTierEligible: true,
           defaultFrequencyKey: 'standard',
+          // $100/mo base, Gold 15% → $85/mo. Non-pest rows carry monthlyBase
+          // (pre-discount monthly), never perVisit — mirrors the real payload.
           frequencies: [{
             key: 'standard',
             label: 'Lawn Program',
             serviceCategory: 'lawn_care',
             visitsPerYear: 8,
             monthly: 85,
+            monthlyBase: 100,
             annual: 1020,
             billingFrequencyKey: 'monthly',
             included: [
@@ -204,14 +207,16 @@ function bundleScenario() {
           isPest: false,
           waveGuardTierEligible: true,
           defaultFrequencyKey: 'monthly',
+          // $61.18/mo base, Gold 15% → $52/mo (real payloads never set
+          // perVisit on non-pest rows).
           frequencies: [{
             key: 'monthly',
             label: 'Monthly',
             serviceCategory: 'mosquito',
             visitsPerYear: 12,
             monthly: 52,
+            monthlyBase: 61.18,
             annual: 624,
-            perVisit: 52,
             included: [{ key: 'mosquito', label: 'Mosquito', detail: null }],
             addOns: [],
           }],

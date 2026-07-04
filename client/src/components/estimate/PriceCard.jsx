@@ -96,6 +96,21 @@ const DEFAULT_WORDING = {
   guaranteeLine: 'Try us risk-free — 90-day money-back guarantee.',
 };
 
+// Pre-discount anchor for a frequency entry, expressed in the displayed
+// billing period. Pest entries carry a per-visit anchor (pest bills one visit
+// per interval, so per-visit == per-interval); non-pest entries (own-cadence
+// ladders and mirrored bundle rows) never get perVisit — they carry
+// monthlyBase, the pre-WaveGuard-discount monthly, so the anchor derives from
+// it. Without this fallback a tier-discounted lawn/tree/mosquito/termite
+// section shows its member price with no evidence a discount was applied.
+function anchorPeriodPrice(frequency = {}, intervalMonths = 1) {
+  const perVisit = Number(frequency.perVisit || 0);
+  if (perVisit > 0) return perVisit;
+  const monthlyBase = Number(frequency.monthlyBase || 0);
+  if (!(monthlyBase > 0)) return 0;
+  return Math.round(monthlyBase * intervalMonths * 100) / 100;
+}
+
 // Savings + period for a frequency entry — shared with the bundle layout,
 // which renders the "You save …" lines BELOW all service boxes instead of
 // inside each card. Mirrors the in-card math exactly (incl. the
@@ -106,7 +121,7 @@ export function priceCardSavingsInfo(frequency = {}) {
   const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
   const periodLabel = billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo';
   const cadencePrice = Math.round(Number(frequency.monthly) * intervalMonths * 100) / 100;
-  const anchorPrice = Number(frequency.perVisit || 0);
+  const anchorPrice = anchorPeriodPrice(frequency, intervalMonths);
   const raw = anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
   const savings = raw >= 0.05 ? raw : 0;
   return savings > 0 ? { savings, periodLabel } : null;
@@ -124,7 +139,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const periodLabel = wording?.periodLabelByKey?.[billingKey]
     || (billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo');
   const cadencePrice = quoteRequired || monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
-  const anchorPrice = Number(frequency.perVisit || 0);
+  const anchorPrice = anchorPeriodPrice(frequency, intervalMonths);
   // cadencePrice round-trips through the rounded monthly figure (e.g. a $94
   // quarterly visit → $31.33/mo → $93.99/quarter), so a 0%-discount tier
   // (WaveGuard Bronze) can land a phantom cent or two under the per-visit

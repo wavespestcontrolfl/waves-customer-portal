@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import PriceCard from './PriceCard';
+import PriceCard, { priceCardSavingsInfo } from './PriceCard';
 
 afterEach(() => cleanup());
 
@@ -164,5 +164,50 @@ describe('PriceCard — WaveGuard savings display', () => {
 
     expect(screen.getByText(/You save/)).toHaveTextContent('You save $10/quarter with WaveGuard Silver');
     expect(screen.getByText('$100/quarter')).toBeInTheDocument();
+  });
+
+  it('derives the anchor from monthlyBase when perVisit is absent (non-pest bundle rows)', () => {
+    // Lawn in a Silver bundle: $83/mo base → $74.70/mo member price. Own-cadence
+    // ladder rows never carry perVisit, only monthlyBase.
+    render(
+      <PriceCard
+        frequency={{ key: 'premium', label: 'Monthly', monthly: 74.7, monthlyBase: 83, visitsPerYear: 12 }}
+        waveGuardTier="Silver"
+      />,
+    );
+
+    expect(screen.getByText('$83/mo')).toBeInTheDocument();
+    expect(screen.getByText(/You save/)).toHaveTextContent('You save $8.30/mo with WaveGuard Silver');
+  });
+
+  it('shows no anchor or savings when monthlyBase equals the billed monthly (0% tier)', () => {
+    render(
+      <PriceCard
+        frequency={{ key: 'premium', label: 'Monthly', monthly: 83, monthlyBase: 83, visitsPerYear: 12 }}
+        waveGuardTier="Bronze"
+      />,
+    );
+
+    expect(screen.queryByText(/You save/)).toBeNull();
+    expect(screen.queryByText('$83/mo')).toBeNull();
+    expect(screen.getByText('$83')).toBeInTheDocument();
+  });
+});
+
+describe('priceCardSavingsInfo — bundle save lines below the boxes', () => {
+  it('reports savings for a non-pest row via the monthlyBase anchor', () => {
+    const info = priceCardSavingsInfo({ key: 'enhanced', label: '9 visits / yr', monthly: 46.58, monthlyBase: 51.75, visitsPerYear: 9 });
+    expect(info).toEqual({ savings: 5.17, periodLabel: '/mo' });
+  });
+
+  it('still prefers the per-visit anchor for pest cadence rows', () => {
+    const info = priceCardSavingsInfo({ key: 'quarterly', monthly: 43.5, monthlyBase: 48.33, perVisit: 145 });
+    // Quarterly cadence price 130.50 vs $145/visit anchor.
+    expect(info).toEqual({ savings: 14.5, periodLabel: '/quarter' });
+  });
+
+  it('returns null when there is no discount to report', () => {
+    expect(priceCardSavingsInfo({ key: 'monthly', monthly: 52, monthlyBase: 52 })).toBeNull();
+    expect(priceCardSavingsInfo({ key: 'monthly', monthly: 52 })).toBeNull();
   });
 });
