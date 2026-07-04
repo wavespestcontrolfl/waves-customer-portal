@@ -803,11 +803,12 @@ async function publishAstro(postId) {
     // scheduler-lane auto-merge needs no human once the build is green and
     // Codex is clean). Same P0/P1 block as the guardrails above. A draft
     // that PASSES but names curated competitors in a validated
-    // <ComparisonTable> (requiresHumanReview) is allowed through here: the
-    // admin's publish/schedule action is the human sign-off the autonomous
-    // lane parks for. Excluding those posts from the scheduler auto-merge
-    // as well is a deliberate follow-up — that merge path is under active
-    // review on #2293 and must not be edited concurrently.
+    // <ComparisonTable> (requiresHumanReview) is allowed to open its PR:
+    // the human sign-off happens at MERGE time — the admin lane's
+    // merge-astro click provides it, and the scheduler lane's unattended
+    // pages-poll auto-merge reads the astro_requires_human_merge stamp
+    // (persisted with the PR state below, from this exact evaluation) and
+    // withholds the merge for an admin instead.
     let namedCompetitorEnabled = false;
     try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
     const comparison = comparisonTableGate.evaluate({ body, frontmatter: data }, { namedCompetitorEnabled });
@@ -898,6 +899,13 @@ async function publishAstro(postId) {
       astro_preview_url: previewUrl,
       astro_publish_error: null,
       astro_published_at: null,
+      // Stamped from the comparison gate's evaluation of THIS publish (not
+      // re-derived later from row fields, which could drift from what was
+      // actually scanned): pages-poll withholds the scheduler-lane
+      // auto-merge when true, so competitor-naming posts always get a
+      // human merge. Explicit false otherwise — a republish of a post
+      // whose competitor mentions were edited out clears an old stamp.
+      astro_requires_human_merge: comparison.requiresHumanReview === true,
       updated_at: new Date(),
     });
 

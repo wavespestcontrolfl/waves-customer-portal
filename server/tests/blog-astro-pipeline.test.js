@@ -1556,6 +1556,69 @@ describe('Astro publisher hero image republish', () => {
   });
 });
 
+describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+  afterEach(() => { jest.restoreAllMocks(); });
+
+  function plainPost() {
+    return {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
+    };
+  }
+
+  test('a competitor-free post stamps an explicit FALSE (a republish clears a stale stamp)', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+      astro_status: 'pr_open',
+      astro_requires_human_merge: false,
+    }));
+  });
+
+  test('a requiresHumanReview gate pass stamps TRUE from that exact evaluation', async () => {
+    // A validated curated-competitor table passes the gate with
+    // requiresHumanReview — pin the gate result rather than hand-building a
+    // fully sourced curated table; the stamp must mirror the evaluation the
+    // publish actually ran, and pages-poll withholds the scheduler
+    // auto-merge on it.
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
+    const read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+      astro_status: 'pr_open',
+      astro_requires_human_merge: true,
+    }));
+  });
+});
+
 describe('Astro publisher idempotency guard', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
@@ -1913,6 +1976,49 @@ describe('Pages poll auto-merge per-tick cap', () => {
     expect(result.deferred).toBe(1);
     const deferred = result.results.filter((r) => r.mergeDeferred);
     expect(deferred).toHaveLength(1);
+  });
+
+  test('a post stamped astro_requires_human_merge is parked for admin merge, never auto-merged (audit lane 4b)', async () => {
+    const posts = [
+      { id: 'post-hr', slug: 'named-competitor-post', astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: 'hr-branch', astro_requires_human_merge: true },
+      { id: 'post-ok', slug: 'plain-post', astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: 'ok-branch', astro_requires_human_merge: false },
+    ];
+    const updates = [];
+    const selects = [];
+    db.mockImplementation(() => {
+      const q = {
+        _filters: [],
+        whereIn: jest.fn().mockReturnThis(),
+        whereNotNull: jest.fn().mockReturnThis(),
+        where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+        select: jest.fn((...cols) => { selects.push(cols); return Promise.resolve(posts); }),
+        update: jest.fn((u) => { updates.push({ filters: q._filters.slice(), updates: u }); return Promise.resolve(1); }),
+      };
+      return q;
+    });
+    mockCloudflareDeploymentList(posts.map((p) => previewDeployment(p.astro_branch_name)));
+    const mergeSpy = jest.spyOn(AstroPublisher, 'mergeAstro').mockResolvedValue({ merged: true });
+
+    const result = await PagesPoll.pollPending();
+
+    // Only the unstamped post merges; the flagged one is withheld — the
+    // scheduler's claim is not the human sign-off named-competitor content
+    // publishes under (the admin's merge click is).
+    expect(mergeSpy).toHaveBeenCalledTimes(1);
+    expect(mergeSpy.mock.calls[0][0]).toBe('post-ok');
+    const withheld = result.results.find((r) => r.id === 'post-hr');
+    expect(withheld.humanMergeRequired).toBe(true);
+    // The claim is parked pending_review (claim-guarded like the scheduler's
+    // own CAS writes) so the auto-merge branch disarms instead of re-arming
+    // every tick; the PR stays open for merge-astro.
+    const park = updates.find((u) => u.updates.publish_status === 'pending_review');
+    expect(park).toBeDefined();
+    expect(park.filters).toEqual(expect.arrayContaining([
+      [{ id: 'post-hr', publish_status: 'publishing' }],
+    ]));
+    // The pending select actually carries the flag — pollPost can only see
+    // columns this query names.
+    expect(selects[0]).toEqual(expect.arrayContaining(['astro_requires_human_merge']));
   });
 });
 
