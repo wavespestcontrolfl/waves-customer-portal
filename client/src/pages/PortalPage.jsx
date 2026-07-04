@@ -284,7 +284,6 @@ function useLawnHealth(customerId) {
     photos: [], beforeAfter: null, trend: [], recommendations: null,
     assessmentCount: 0, nextMilestone: null,
     seasonalContext: null, neighborBenchmark: null,
-    latestSnapshot: null, recommendationCards: [],
   });
 
   useEffect(() => {
@@ -303,34 +302,12 @@ function useLawnHealth(customerId) {
         nextMilestone: d.nextMilestone || null,
         seasonalContext: d.seasonalContext || null,
         neighborBenchmark: d.neighborBenchmark || null,
-        latestSnapshot: d.latestSnapshot || null,
-        recommendationCards: d.recommendationCards || [],
         mowingHeight: d.mowingHeight || null,
       }))
       .catch(() => setData(prev => ({ ...prev, loading: false })));
   }, [customerId]);
 
   return data;
-}
-
-const sentLawnRecommendationEvents = new Set();
-
-function trackLawnRecommendationEvent(customerId, payload = {}) {
-  if (!customerId || !payload.eventType) return;
-  const key = [
-    customerId,
-    payload.eventType,
-    payload.snapshotId || '',
-    payload.recommendationId || '',
-    payload.placement || '',
-  ].join(':');
-  if (sentLawnRecommendationEvents.has(key)) return;
-  sentLawnRecommendationEvents.add(key);
-  api.trackLawnRecommendationEvent(customerId, {
-    surface: 'customer_portal',
-    placement: 'lawn_snapshot_card',
-    ...payload,
-  }).catch(() => {});
 }
 
 // =========================================================================
@@ -606,122 +583,6 @@ function PhotoGallery({ photos }) {
 // =========================================================================
 // LAWN HEALTH CARD — overall score, progress bars, photos, trend, recs
 // =========================================================================
-function LawnSnapshotCard({ customerId, snapshot, recommendationCards = [], onRequest }) {
-  useEffect(() => {
-    if (!customerId || !snapshot?.id) return;
-    trackLawnRecommendationEvent(customerId, {
-      eventType: 'snapshot_viewed',
-      snapshotId: snapshot.id,
-    });
-    recommendationCards.forEach((card) => {
-      if (!card?.id) return;
-      trackLawnRecommendationEvent(customerId, {
-        eventType: 'recommendation_shown',
-        snapshotId: snapshot.id,
-        recommendationId: card.id,
-      });
-    });
-  }, [customerId, snapshot?.id, recommendationCards]);
-
-  if (!snapshot) return null;
-  const finding = snapshot.findings?.[0];
-  const treatment = snapshot.treatment || {};
-  const expected = snapshot.expectedWindow || {};
-  const expectedText = expected.minDays && expected.maxDays
-    ? `Visible improvement usually takes ${expected.minDays}-${expected.maxDays} days, depending on irrigation, mowing, rainfall, and site conditions.`
-    : 'Visible improvement depends on irrigation, mowing, rainfall, and site conditions.';
-  const whatWeDid = treatment.completedToday
-    ? `Your technician completed the scheduled lawn service${treatment.productsAppliedSummary ? ` and applied ${treatment.productsAppliedSummary}` : ''}.`
-    : 'We documented the condition so it can be compared on the next lawn review.';
-
-  return (
-    <section style={{
-      marginBottom: 16,
-      padding: 16,
-      borderRadius: 12,
-      border: `1px solid ${B.green}22`,
-      background: `${B.green}07`,
-    }}>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-        <ShellIconTile icon="leaf" tone="success" size={38} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 850, color: B.green, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: 0 }}>
-            Today's Lawn Snapshot
-          </div>
-          <div style={{ marginTop: 3, fontSize: 18, fontWeight: 850, color: B.navy, fontFamily: FONTS.heading, lineHeight: 1.2 }}>
-            {snapshot.headline || 'Lawn condition update'}
-          </div>
-          {snapshot.summary && (
-            <div style={{ marginTop: 7, fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
-              {snapshot.summary}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
-        <SnapshotDetail label="What we saw" value={finding?.customerCopy || 'No major issue was observed during this lawn review.'} />
-        <SnapshotDetail label="What we did" value={whatWeDid} />
-        <SnapshotDetail label="What to expect" value={expectedText} />
-        <SnapshotDetail
-          label="What we're watching"
-          value={snapshot.nextWatchItems?.[0] || 'We will compare this area against today\'s review during the next service.'}
-        />
-      </div>
-
-      {recommendationCards.length > 0 && (
-        <div style={{ marginTop: 14, display: 'grid', gap: 8 }}>
-          {recommendationCards.map((card) => (
-            <div key={card.id} style={{
-              padding: 12,
-              borderRadius: 10,
-              background: B.white,
-              border: `1px solid ${PORTAL_SHELL.border}`,
-            }}>
-              <div style={{ fontSize: 14, fontWeight: 850, color: B.navy, fontFamily: FONTS.heading }}>
-                {card.title}
-              </div>
-              <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-                {card.customerCopy}
-              </div>
-              {card.action?.label && (
-                <button
-                  type="button"
-                  style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, padding: '9px 12px', fontSize: 14 }}
-                  onClick={() => {
-                    trackLawnRecommendationEvent(customerId, {
-                      eventType: 'recommendation_clicked',
-                      snapshotId: snapshot.id,
-                      recommendationId: card.id,
-                      actionType: card.action?.type || null,
-                    });
-                    onRequest?.(card.action);
-                  }}
-                >
-                  {card.action.label}
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function SnapshotDetail({ label, value }) {
-  return (
-    <div style={{ paddingLeft: 50 }}>
-      <div style={{ fontSize: 12, fontWeight: 850, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0, fontFamily: FONTS.heading }}>
-        {label}
-      </div>
-      <div style={{ marginTop: 2, fontSize: 14, color: B.grayDark, lineHeight: 1.45 }}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
 // Customer card mowing-height section. Advisory voice — Waves doesn't mow, so the
 // copy speaks to how the lawn is being kept. `below` is the only red state.
 function PortalMowingHeight({ mowing }) {
@@ -758,7 +619,7 @@ function PortalMowingHeight({ mowing }) {
   );
 }
 
-function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, latestSnapshot, recommendationCards, mowingHeight, onRequest }) {
+function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, mowingHeight }) {
   const [animated, setAnimated] = useState(false);
   const [showTrend, setShowTrend] = useState(false);
 
@@ -791,8 +652,6 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       ...PORTAL_CARD_STYLE,
       padding: 20,
     }}>
-      <LawnSnapshotCard customerId={customerId} snapshot={latestSnapshot} recommendationCards={recommendationCards} onRequest={onRequest} />
-
       {/* Header with overall score ring */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
         <ScoreRing score={overallScore} size={80} label="OVERALL" />
@@ -1623,10 +1482,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           recommendations={lawnHealth.recommendations}
           seasonalContext={lawnHealth.seasonalContext}
           neighborBenchmark={lawnHealth.neighborBenchmark}
-          latestSnapshot={lawnHealth.latestSnapshot}
-          recommendationCards={lawnHealth.recommendationCards}
           mowingHeight={lawnHealth.mowingHeight}
-          onRequest={() => onSwitchTab?.('request')}
         />
       )}
       {!lawnHealth.loading && lawnHealth.hasLawnCare && (!lawnHealth.scores || !lawnHealth.initialScores) && (

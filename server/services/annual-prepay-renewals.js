@@ -260,10 +260,6 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null) {
   return dates;
 }
 
-function defaultCoverageDurationMinutes(serviceType) {
-  return /pest/i.test(String(serviceType || '')) ? 45 : 30;
-}
-
 async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
@@ -357,7 +353,8 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
   }
 
   const createdRows = [];
-  const baseDuration = defaultCoverageDurationMinutes(coverageServiceType);
+  // Owner directive (2026-07-03): every service call defaults to 60 minutes.
+  const baseDuration = 60;
   const recurringParentId = existingRows[0]?.recurring_parent_id || existingRows[0]?.id || null;
   let createdParentId = recurringParentId;
 
@@ -1623,7 +1620,6 @@ module.exports = {
     inferCoverageCadence,
     normalizeCoverageServiceType,
     normalizeCoverageVisitCount,
-    defaultCoverageDurationMinutes,
     ensureCoverageRowsForTerm,
     coverageRowsForTerm,
     resetCachesForTests,

@@ -311,7 +311,7 @@ describe('annual prepay renewal helpers', () => {
       is_recurring: true,
       recurring_pattern: 'quarterly',
       recurring_ongoing: false,
-      estimated_duration_minutes: 45,
+      estimated_duration_minutes: 60,
     }));
     expect(childInsert1.insert).toHaveBeenCalledWith(expect.objectContaining({
       scheduled_date: '2026-09-15',
@@ -587,7 +587,7 @@ describe('annual prepay renewal helpers', () => {
     expect(parentInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
       service_type: 'Monthly Lawn Care',
       recurring_pattern: 'monthly',
-      estimated_duration_minutes: 30,
+      estimated_duration_minutes: 60,
     }));
     expect(childInsert1.insert).toHaveBeenCalledWith(expect.objectContaining({
       scheduled_date: '2026-07-15',
@@ -652,7 +652,7 @@ describe('annual prepay renewal helpers', () => {
       service_type: 'Monthly Lawn Care',
       recurring_pattern: 'custom',
       recurring_interval_days: 42,
-      estimated_duration_minutes: 30,
+      estimated_duration_minutes: 60,
     }));
     expect(childInsert1.insert).toHaveBeenCalledWith(expect.objectContaining({
       scheduled_date: '2026-07-27',

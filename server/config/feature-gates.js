@@ -22,6 +22,7 @@
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
+ *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
@@ -225,6 +226,18 @@ const gates = {
   // Lead Estimate Auto-Send — sends generated lead-webhook draft estimates
   // after a delay. Requires leadEstimateAutomation in the scheduler too.
   leadEstimateAutoSend: process.env.GATE_LEAD_ESTIMATE_AUTO_SEND === 'true',
+
+  // Lead Webhook Turnstile — enforce Cloudflare Turnstile on the public,
+  // unauthenticated lead webhook (POST /api/leads). Closes the direct-POST spam
+  // vector: without it any bot can mint a lead + customer + draft estimate and
+  // page the owner's cell. Explicit opt-in in EVERY environment (off in dev/test
+  // too) so the Jest suite + local forms that issue no token keep working, and so
+  // prod stays on today's behavior until (a) TURNSTILE_SECRET_KEY is set on
+  // Railway and (b) the Astro forms shipping the widget have fully propagated on
+  // Cloudflare Pages. While OFF, tokens are still verified-and-logged (shadow)
+  // but never block; a missing secret or a Cloudflare error always fails OPEN so
+  // real leads never break. Flip GATE_LEAD_TURNSTILE=true to begin blocking.
+  leadTurnstile: process.env.GATE_LEAD_TURNSTILE === 'true',
 
   // AutoPay Customer SMS — customer-facing autopay/pre-charge/payment-retry
   // texts are opt-in everywhere until the WaveGuard autopay rollout is

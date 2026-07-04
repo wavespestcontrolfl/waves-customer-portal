@@ -461,15 +461,34 @@ export default function CreateProjectModal({
     }));
   }, [applicators]);
   // The stored findings are the printed name + FDACS ID pair, so the select's
-  // current value is recovered by matching that pair back to a technician
-  // (an unmatched pair — restored free-text draft or hand-edited ID — falls
-  // back to showing the raw name).
-  const selectedApplicator = useMemo(() => (
-    applicators.find((a) => (
-      a.name === String(findings.applicator_name || '').trim()
-      && String(a.fdacsId || '') === String(findings.applicator_fdacs_id || '').trim()
-    )) || null
-  ), [applicators, findings.applicator_name, findings.applicator_fdacs_id]);
+  // current value is recovered by matching that pair back to a technician.
+  // Drafts saved before the printed-name column carry the tech's old display
+  // name — legacyName keeps them matched (an unmatched pair — restored
+  // free-text draft or hand-edited ID — falls back to showing the raw name).
+  const selectedApplicator = useMemo(() => {
+    const storedName = String(findings.applicator_name || '').trim();
+    const storedId = String(findings.applicator_fdacs_id || '').trim();
+    return applicators.find((a) => (
+      (a.name === storedName || (a.legacyName && a.legacyName === storedName))
+      && String(a.fdacsId || '') === storedId
+    )) || null;
+  }, [applicators, findings.applicator_name, findings.applicator_fdacs_id]);
+  // Upgrade a stored legacy display name to the printed name once the list
+  // loads, so a draft saved as "Adam" re-sends as "Adam Benetti" instead of
+  // silently keeping the casual name on a compliance certificate.
+  useEffect(() => {
+    if (!applicators.length) return;
+    setFindings(prev => {
+      const storedName = String(prev.applicator_name || '').trim();
+      if (!storedName) return prev;
+      const match = applicators.find((a) => (
+        a.legacyName && a.legacyName === storedName && a.name !== storedName
+        && String(a.fdacsId || '') === String(prev.applicator_fdacs_id || '').trim()
+      ));
+      if (!match) return prev;
+      return { ...prev, applicator_name: match.name };
+    });
+  }, [applicators]);
   const hasChemistryFields = typeFieldKeys.has('product_name')
     && typeFieldKeys.has('concentration_pct')
     && typeFieldKeys.has('gallons_applied');
@@ -1159,7 +1178,11 @@ export default function CreateProjectModal({
               </div>
 
               <div>
-                <label style={labelStyle}>Inspection / project date</label>
+                {/* The certificate has no separate findings-level date — this
+                    project date IS the date of treatment it prints. */}
+                <label style={labelStyle}>
+                  {projectType === 'pre_treatment_termite_certificate' ? 'Date of treatment' : 'Inspection / project date'}
+                </label>
                 <input
                   type="date"
                   value={projectDate}

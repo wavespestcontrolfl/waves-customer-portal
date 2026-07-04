@@ -110,6 +110,10 @@ describe('public project reports', () => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'activity_log') return activityInsert;
       if (table === 'project_photos') return photosRead;
+      // The router.param('token') suppression gate checks every 32-hex token
+      // against service_records (report_view_token) — no row means "not a
+      // service report", and the request falls through to the project route.
+      if (table === 'service_records') return chain();
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -167,5 +171,50 @@ describe('public project reports', () => {
       expect(projectRead.where).toHaveBeenCalledWith('p.report_token', 'like', '0123456789ab%');
       expect(projectRead.limit).toHaveBeenCalledWith(2);
     });
+  });
+
+  // The hero contact block prints the customer's email/phone on customer-only
+  // report links, but a WDO link is also emailed to the third parties named
+  // on the FDACS form (sendWdoReportCopies) — the payload must withhold the
+  // homeowner's direct contact details there.
+  test('customer email/phone serve on customer-only types but never on WDO', async () => {
+    const baseRow = {
+      id: 'project-1',
+      customer_id: 'customer-1',
+      report_token: '0123456789abcdef0123456789abcdef',
+      report_viewed_at: '2026-05-02T14:00:00.000Z',
+      status: 'sent',
+      first_name: 'Georgia',
+      last_name: 'Lobban',
+      customer_email: 'georgia@example.com',
+      customer_phone: '9415550100',
+      city: 'Bradenton',
+      state: 'FL',
+    };
+    const photosRead = () => chain({ orderBy: jest.fn().mockResolvedValue([]) });
+
+    for (const [projectType, expectedEmail, expectedPhone] of [
+      ['pest_inspection', 'georgia@example.com', '9415550100'],
+      ['wdo_inspection', null, null],
+    ]) {
+      const projectRead = chain({
+        first: jest.fn().mockResolvedValue({ ...baseRow, project_type: projectType }),
+      });
+      db.mockImplementation((table) => {
+        if (table === 'projects as p') return projectRead;
+        if (table === 'project_photos') return photosRead();
+        if (table === 'service_records') return chain();
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.projectType).toBe(projectType);
+        expect(body.customerEmail).toBe(expectedEmail);
+        expect(body.customerPhone).toBe(expectedPhone);
+      });
+    }
   });
 });

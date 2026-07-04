@@ -6,10 +6,11 @@ const config = require('../config');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
+const { verifyStaffBearer } = require('../middleware/admin-auth');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, formatETDate } = require('../utils/datetime-et');
-const { formatSmsTimeRange } = require('../utils/sms-time-format');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -50,6 +51,7 @@ const {
   WAVES_SUPPORT_PHONE_E164,
   WAVES_SUPPORT_PHONE_TEL,
   WAVES_SUPPORT_SMS_TEL,
+  WAVES_ADDRESS_LINE,
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
@@ -1593,6 +1595,7 @@ const COMPANY = {
   phone: WAVES_SUPPORT_PHONE_DISPLAY,
   phoneRaw: WAVES_SUPPORT_PHONE_E164,
   email: 'contact@wavespestcontrol.com',
+  address: WAVES_ADDRESS_LINE,
 };
 
 const SOCIAL_LINKS = [
@@ -3233,7 +3236,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const hasOnlyBoraCareServices = hasOnlyBoraCareServiceMix(recurring, boraCareOneTimeRows);
   const pageCopy = hasOnlyLawnCareServices
     ? {
-        heroSuffix: "here's your lawn care estimate.",
         recurringAssurance: 'Your plan includes scheduled turf applications, visit notes, and treatment timing matched to Southwest Florida conditions.',
         aggregateDayLabel: 'lawn care',
         billingHeading: 'Choose how you want to pay',
@@ -3259,7 +3261,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       }
     : (hasOnlyMosquitoServices
       ? {
-          heroSuffix: "here's your mosquito control estimate.",
           recurringAssurance: 'Your plan targets shaded resting zones, lanai edges, and breeding-source pressure around your property.',
           aggregateDayLabel: 'mosquito control',
           billingHeading: 'Choose how you want to pay',
@@ -3285,7 +3286,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         }
       : (hasOnlyTreeShrubServices
         ? {
-          heroSuffix: "here's your tree & shrub estimate.",
           recurringAssurance: 'Your plan includes scheduled ornamental treatments, visit notes, and treatment timing matched to Southwest Florida conditions.',
           aggregateDayLabel: 'tree & shrub care',
           billingHeading: 'Choose how you want to pay',
@@ -3311,7 +3311,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         }
       : (hasOnlyTermiteBaitServices
         ? {
-            heroSuffix: "here's your termite protection estimate.",
             recurringAssurance: 'Your plan includes termite station service and treatment timing matched to your home perimeter.',
             aggregateDayLabel: 'termite protection',
             billingHeading: 'Choose how you want to pay',
@@ -3337,7 +3336,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           }
         : (hasOnlyTermiteTrenchingServices
           ? {
-              heroSuffix: "here's your termite trenching quote.",
               recurringAssurance: 'This trenching quote is based on the measured treatment path and office review.',
               aggregateDayLabel: 'termite trenching',
               billingHeading: 'Choose how you want to pay',
@@ -3363,7 +3361,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
             }
           : (hasOnlyBoraCareServices
             ? {
-                heroSuffix: "here's your Bora-Care wood treatment quote.",
                 recurringAssurance: 'This quote is based on the measured attic and surface wood areas treated with Bora-Care.',
                 aggregateDayLabel: 'Bora-Care wood treatment',
                 billingHeading: 'Choose how you want to pay',
@@ -3388,7 +3385,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 finalBody: 'No payment today.',
               }
             : {
-              heroSuffix: "here's your custom quote.",
               recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
               aggregateDayLabel: 'complete home protection',
               billingHeading: 'Choose how you want to pay',
@@ -4521,7 +4517,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .site-footer-socials .soc{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;background:#F7F5EE;border:1px solid #E7E2D7;color:#1B2C5B;transition:all .15s}
   .site-footer-socials .soc:hover{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
   .site-footer-contact{margin-bottom:10px;font-size:13px;color:#3F4A65}
-  .site-footer-contact a{color:#1B2C5B;text-decoration:none;font-weight:500}
+  .site-footer-contact a{color:#1B2C5B;text-decoration:none;font-weight:500;white-space:nowrap}
   .site-footer-contact a:hover{text-decoration:underline}
   .site-footer-contact .dot{margin:0 8px;color:#9CA3AF}
   .site-footer-legal{font-size:11px;color:#6B7280}
@@ -4560,7 +4556,7 @@ ${shellTopBar()}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
-    <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : escapeHtml(pageCopy.heroSuffix)}</h1>
+    <h1>Hello ${firstName}, your estimate is ready!</h1>
     ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
     ${customerEmail ? `<div class="hero-contact">${customerEmail}</div>` : ''}
@@ -4813,6 +4809,7 @@ ${shellTopBar()}
       <span class="dot">&middot;</span>
       <a href="tel:${COMPANY.phoneRaw}">${COMPANY.phone}</a>
     </div>
+    <div class="site-footer-contact">${escapeHtml(COMPANY.address)}</div>
     <div class="site-footer-legal">&copy; ${new Date().getFullYear()} ${COMPANY.legalName}. All rights reserved.</div>
   </footer>
 </div>
@@ -6350,15 +6347,25 @@ async function handleEstimateView(req, res, next) {
     const cardHoldForcesReactView = CardHolds.isCardHoldEnabled()
       && !effectiveInvoiceMode
       && (estimate.show_one_time_option === true || isStructuralOneTimeOnlyEstimate(estData, estimate));
+    // Staff can request the REAL React renderer for an unpublished row via
+    // ?adminPreview=1 (the estimate tool's "Customer View" + the estimates
+    // list's Preview). The param is NOT authorization — this route only
+    // serves the SPA shell; GET /:token/data does the staff-JWT check and
+    // still 404s the draft for anyone else, so a non-staff hit on the URL
+    // renders the React "link isn't valid" screen (strictly less exposure
+    // than the SSR draft page below).
+    const adminPreviewRequested = req.query.adminPreview === '1';
     const shouldUseReactEstimateView = (estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView)
       // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
       // renderer so office staff can still preview a draft via /estimate/<token>
-      // before it's sent. The React `/:token/data` gate 404s drafts (security),
-      // so routing them to React would break draft preview; the default flip
-      // only takes effect once the estimate is actually published.
-      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+      // before it's sent — UNLESS the staff preview param asks for the React
+      // page (the renderer the customer actually gets once it's sent; the
+      // /:token/data staff gate makes that path draft-safe). The use_v2_view
+      // default flip otherwise only takes effect once the estimate is
+      // actually published.
+      && (!UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status) || adminPreviewRequested);
     if (shouldUseReactEstimateView && req.path.startsWith('/estimate/')) {
       return next();
     }
@@ -7711,9 +7718,11 @@ router.put('/:token/accept', async (req, res, next) => {
             const serviceDate = scheduledDate
               ? formatETDate(new Date(`${scheduledDate}T12:00:00Z`))
               : 'your selected date';
-            const start = hhmm(confirmedAppointmentRow?.window_start);
-            const end = hhmm(confirmedAppointmentRow?.window_end);
-            const timeWindow = start && end ? formatSmsTimeRange(`${start}-${end}`) : 'your selected window';
+            // {time} quotes the 2-hour arrival promise from the window start.
+            // window_end is the job-duration block that sizes scheduling —
+            // never the customer-facing window (see sms-time-format).
+            const arrivalRange = arrivalWindowRange(confirmedAppointmentRow?.window_start);
+            const timeWindow = arrivalRange ? formatSmsTimeRange(arrivalRange) : 'your selected window';
             // appointment_confirmation renders {reschedule_line}, and
             // getTemplate suppresses the whole SMS on an unresolved
             // placeholder — every render site must pass the clause ('' when
@@ -9516,6 +9525,20 @@ function assertExistingAppointmentUpdateApplied(updatedCount) {
 // customer link is out, possibly mid-send before expires_at is written), so
 // they are intentionally NOT here.
 const UNPUBLISHED_ESTIMATE_STATUSES = ['draft', 'scheduled'];
+
+// Whether a /:token/data request MAY be upgraded to a staff draft preview —
+// the only bypass of isEstimateCustomerViewable, and deliberately narrow:
+// unpublished (draft/scheduled), non-archived rows only, and only when the
+// caller explicitly asked (?adminPreview=1). Expired/send_failed/archived
+// stay 404 even for staff. This predicate is the cheap half; the caller must
+// ALSO verify a staff Bearer JWT (verifyStaffBearer) before honoring it —
+// the `waves_admin` marker cookie is a view-count signal, never authorization.
+function adminDraftPreviewEligible(estimate, adminPreviewParam) {
+  return adminPreviewParam === '1'
+    && !!estimate
+    && !estimate.archived_at
+    && UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+}
 
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
@@ -12345,12 +12368,22 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // server-HTML page short-circuited these to the expired/not-found shell
     // before building any payload; the data endpoint owns that guard for the
     // React path. Non-viewable → 404 (the SPA renders its "this link may have
-    // expired or isn't valid" screen). No admin bypass: this fetch carries no
-    // current-session credential (the public page sends no admin Bearer token),
-    // and the `waves_admin` marker cookie is a 2-year, logout-persistent
-    // view-count signal — not authorization — so previewing a draft/expired
-    // estimate goes through an authenticated admin surface, never this endpoint.
-    if (!isEstimateCustomerViewable(estimate)) {
+    // expired or isn't valid" screen).
+    //
+    // ONE bypass: the staff draft preview. When the page URL carries
+    // ?adminPreview=1 the SPA attaches the staff session's Bearer token, and
+    // an UNPUBLISHED row is served to a VERIFIED staff JWT only
+    // (verifyStaffBearer — same checks as adminAuthenticate+requireTechOrAdmin;
+    // the `waves_admin` marker cookie is a 2-year logout-persistent view-count
+    // signal, never authorization, and still grants nothing here). This is
+    // what lets "Customer View" show a draft through the RENDERER the customer
+    // actually gets, instead of the diverging legacy SSR page. Expired /
+    // send_failed / archived rows stay 404 even for staff, and every view
+    // side effect below is skipped — a preview must not count views or flip
+    // a draft's status.
+    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
+      && Boolean(await verifyStaffBearer(req));
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
@@ -12365,7 +12398,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
     // suppress the very first "viewed" count + admin notification.
     const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
-    if (!isInternalRefresh && shouldCountView(req, ip, estimate)) {
+    if (!adminDraftPreview && !isInternalRefresh && shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
           view_count: db.raw('COALESCE(view_count, 0) + 1'),
@@ -12387,7 +12420,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // First-view transition — keep admin preview clicks from making the
     // estimate look customer-opened. Internal React refreshes (?refresh=1) are
     // never the first view, so they must not flip status or notify admin twice.
-    if (!isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    // The staff draft preview is hard-excluded above IP/UA heuristics: the
+    // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
+    // effect) if a staff preview ever slipped through shouldApplyFirstView.
+    if (!adminDraftPreview && !isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
@@ -12562,6 +12598,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       : null;
 
     res.json({
+      // Only present on a verified staff draft preview — the React page keys
+      // its "draft preview, not sent" banner + accept guards off this. Absent
+      // (not false) otherwise so customer responses stay byte-identical.
+      ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,
@@ -12810,3 +12850,4 @@ module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTierDiscount;
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
+module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;

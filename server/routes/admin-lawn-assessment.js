@@ -13,16 +13,16 @@ const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
 const KnowledgeBridge = require('../services/knowledge-bridge');
 const LawnIntel = require('../services/lawn-intelligence');
-const LawnSnapshot = require('../services/lawn-snapshot');
-const RecommendationEngine = require('../services/lawn-recommendation-engine');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
 const { seasonAwareAdjustment } = require('../services/service-report/lawn-seasonality');
 const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
+const { loadCustomerGrassContext } = require('../services/lawn-grass-context');
+const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
 
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
 const config = require('../config');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts } = require('../utils/datetime-et');
 
 function applyLawnServiceFilter(query, alias = 'ss') {
   return query.where(function () {
@@ -244,35 +244,6 @@ async function resolveAssessmentServiceRecordId(assessment) {
   return serviceRecord.id;
 }
 
-// Fixed namespace for the per-assessment snapshot-generation advisory lock, so
-// hashtext(assessmentId) can't collide with any other advisory lock key.
-const SNAPSHOT_LOCK_NAMESPACE = 0x4c41574e; // 'LAWN'
-
-// Generate the property-health snapshot + recommendation cards as one
-// serialized unit. A pg_advisory_xact_lock keyed on the assessment makes
-// overlapping POST /confirm or /snapshot/regenerate requests run one-at-a-time,
-// so the supersede→insert sequence can't race itself into duplicate (or
-// orphaned) pre-review artifacts. The lock auto-releases when the txn ends.
-async function generateSnapshotAndCards({ assessmentId, serviceId, serviceRecordId, customerId, generatedBy }) {
-  return db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [SNAPSHOT_LOCK_NAMESPACE, assessmentId]);
-    const snapshot = await LawnSnapshot.buildLawnSnapshot({
-      assessmentId,
-      serviceId,
-      serviceRecordId,
-      generatedBy,
-      trx,
-    });
-    const cards = await RecommendationEngine.generateRecommendationCards({
-      snapshotId: snapshot.id,
-      assessmentId,
-      customerId,
-      trx,
-    });
-    return { snapshot, cards };
-  });
-}
-
 async function attachOutcomePhotoRefs(outcome, assessmentId) {
   if (!outcome) return;
   try {
@@ -299,264 +270,8 @@ async function attachOutcomePhotoRefs(outcome, assessmentId) {
   }
 }
 
-function normalizeSnapshotRow(row) {
-  if (!row) return null;
-  return {
-    ...row,
-    property_context: parseJsonObject(row.property_context),
-    findings: parseJsonArray(row.findings),
-    treatment_context: parseJsonObject(row.treatment_context),
-    weather_context: parseJsonObject(row.weather_context),
-    expected_window: parseJsonObject(row.expected_window),
-    next_watch_items: parseJsonArray(row.next_watch_items),
-    disclaimers: parseJsonArray(row.disclaimers),
-  };
-}
-
-function normalizeRecommendationRow(row) {
-  if (!row) return null;
-  return {
-    ...row,
-    trigger_signals: parseJsonArray(row.trigger_signals),
-    recommended_action: parseJsonObject(row.recommended_action),
-    guardrails: parseJsonObject(row.guardrails),
-    outcome: parseJsonObject(row.outcome),
-  };
-}
-
-function assertAdminAction(req, res) {
-  if (req.techRole === 'admin') return true;
-  res.status(403).json({ error: 'Admin approval required' });
-  return false;
-}
-
-function canShowRecommendationToCustomer(card) {
-  if (!card) return false;
-  if (card.approved_at) return true;
-  return card.type === 'customer_education' && card.requires_human_approval === false;
-}
-
-// Statuses the customer-facing queries (lawn-health + service report) treat as
-// surfaceable. Promoting a card into any of these must clear the copy-safety
-// gate, exactly like the approve / customer_visible flags do.
-const CUSTOMER_FACING_STATUSES = new Set(['approved', 'customer_visible', 'accepted']);
-
-const CUSTOMER_COPY_BLOCKLIST = [
-  /callback\s+risk/i,
-  /\bchurn\b/i,
-  /\bupsell\b/i,
-  /\bmargin\b/i,
-  /AI\s+predicted/i,
-  /artificial\s+intelligence\s+predicted/i,
-  /\bguarantee(?:d|s)?\b/i,
-  /\bwill\s+recover\b/i,
-  /\bpromise(?:d|s)?\b/i,
-  /\bdiagnosed\b/i,
-  /\bconfirmed\s+(?:fungus|disease|chinch|pest)\b/i,
-];
-
-function customerCopyViolation(copy = '') {
-  const text = String(copy || '');
-  const match = CUSTOMER_COPY_BLOCKLIST.find((pattern) => pattern.test(text));
-  if (!match) return null;
-  return `Customer-facing copy contains blocked wording: ${match.source}`;
-}
-
-function assertCustomerCopySafe(res, copy) {
-  const violation = customerCopyViolation(copy);
-  if (!violation) return true;
-  res.status(400).json({ error: 'Unsafe customer-facing copy', details: [violation] });
-  return false;
-}
-
-function recommendationEventMetadata(card = {}, extra = {}) {
-  return {
-    type: card.type || null,
-    status: card.status || null,
-    customer_visible: card.customer_visible === true,
-    ...extra,
-  };
-}
-
-function normalizeRecommendationEventRow(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    recommendation_id: row.recommendation_id || null,
-    snapshot_id: row.snapshot_id || null,
-    customer_id: row.customer_id || null,
-    event_type: row.event_type,
-    actor_type: row.actor_type,
-    actor_id: row.actor_id || null,
-    metadata: parseJsonObject(row.metadata),
-    created_at: row.created_at,
-  };
-}
-
-function summarizeRecommendationEvents(events = [], card = {}) {
-  const counts = {
-    generated: 0,
-    approved: 0,
-    shown: 0,
-    recommendation_shown: 0,
-    clicked: 0,
-    recommendation_clicked: 0,
-    follow_up_requested: 0,
-    accepted: 0,
-    dismissed: 0,
-  };
-  let latestEventAt = null;
-  for (const event of events || []) {
-    const type = String(event.event_type || '');
-    if (Object.prototype.hasOwnProperty.call(counts, type)) counts[type] += 1;
-    if (type === 'recommendation_clicked') counts.clicked += 1;
-    if (type === 'recommendation_shown') counts.shown += 1;
-    const createdAt = event.created_at ? new Date(event.created_at).toISOString() : null;
-    if (createdAt && (!latestEventAt || createdAt > latestEventAt)) latestEventAt = createdAt;
-  }
-  if (card.status === 'accepted') counts.accepted = Math.max(counts.accepted, 1);
-  if (card.status === 'dismissed') counts.dismissed = Math.max(counts.dismissed, 1);
-  if (card.approved_at) counts.approved = Math.max(counts.approved, 1);
-  const shown = counts.recommendation_shown || counts.shown;
-  const clicked = counts.recommendation_clicked || counts.clicked;
-  return {
-    counts,
-    latestEventAt,
-    clickThroughRate: shown > 0 ? Number((clicked / shown).toFixed(3)) : null,
-  };
-}
-
-async function logRecommendationEvent({ recommendationId, snapshotId, customerId, eventType, req, metadata = {} }) {
-  await db('property_recommendation_events').insert({
-    recommendation_id: recommendationId || null,
-    snapshot_id: snapshotId || null,
-    customer_id: customerId || null,
-    event_type: eventType,
-    actor_type: req?.techRole === 'admin' ? 'admin' : 'tech',
-    actor_id: req?.technicianId || null,
-    metadata: JSON.stringify(metadata),
-  }).catch((err) => logger.error(`[lawn-assessment] Recommendation event log failed: ${err.message}`));
-}
-
-async function getSnapshotReviewPayload(assessmentId) {
-  const snapshot = await db('property_health_snapshots')
-    .where({ assessment_id: assessmentId, domain: 'lawn' })
-    .orderBy('created_at', 'desc')
-    .first();
-  if (!snapshot) return { snapshot: null, recommendationCards: [] };
-
-  const cards = await db('property_recommendation_cards')
-    .where({ snapshot_id: snapshot.id })
-    .orderByRaw(`
-      CASE priority
-        WHEN 'high' THEN 1
-        WHEN 'medium' THEN 2
-        ELSE 3
-      END
-    `)
-    .orderBy('created_at', 'asc');
-  const cardIds = cards.map((card) => card.id).filter(Boolean);
-  const events = cardIds.length
-    ? await db('property_recommendation_events')
-      .whereIn('recommendation_id', cardIds)
-      .orderBy('created_at', 'desc')
-      .catch(() => [])
-    : [];
-  const eventsByCard = events.reduce((acc, event) => {
-    const key = event.recommendation_id;
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(event);
-    return acc;
-  }, {});
-
-  return {
-    snapshot: normalizeSnapshotRow(snapshot),
-    recommendationCards: cards.map((card) => ({
-      ...normalizeRecommendationRow(card),
-      performance: summarizeRecommendationEvents(eventsByCard[card.id] || [], card),
-    })),
-  };
-}
-
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
-
-// =========================================================================
-// GET /recommendation-performance — aggregate recommendation event performance
-// =========================================================================
-router.get('/recommendation-performance', async (req, res, next) => {
-  try {
-    const days = Math.max(1, Math.min(365, Number(req.query.days) || 90));
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-    const customerId = String(req.query.customerId || '').trim();
-
-    const cardQuery = db('property_recommendation_cards')
-      .where({ domain: 'lawn' })
-      .where('created_at', '>=', since);
-    if (customerId) cardQuery.where({ customer_id: customerId });
-    const cards = await cardQuery.select(
-      'id',
-      'customer_id',
-      'snapshot_id',
-      'type',
-      'priority',
-      'status',
-      'customer_visible',
-      'approved_at',
-      'created_at',
-    );
-    const cardIds = cards.map((card) => card.id).filter(Boolean);
-    const events = cardIds.length
-      ? await db('property_recommendation_events')
-        .whereIn('recommendation_id', cardIds)
-        .where('created_at', '>=', since)
-        .orderBy('created_at', 'desc')
-      : [];
-    const eventsByCard = events.reduce((acc, event) => {
-      const key = event.recommendation_id;
-      if (!acc[key]) acc[key] = [];
-      acc[key].push(event);
-      return acc;
-    }, {});
-    const cardsWithPerformance = cards.map((card) => ({
-      id: card.id,
-      customer_id: card.customer_id,
-      snapshot_id: card.snapshot_id,
-      type: card.type,
-      priority: card.priority,
-      status: card.status,
-      customer_visible: card.customer_visible === true,
-      approved_at: card.approved_at || null,
-      created_at: card.created_at,
-      performance: summarizeRecommendationEvents(eventsByCard[card.id] || [], card),
-    }));
-    const totals = cardsWithPerformance.reduce((acc, card) => {
-      acc.cards += 1;
-      for (const [key, value] of Object.entries(card.performance.counts)) {
-        acc.counts[key] = (acc.counts[key] || 0) + Number(value || 0);
-      }
-      if (card.status === 'approved' || card.status === 'customer_visible' || card.approved_at) acc.approvedCards += 1;
-      if (card.customer_visible) acc.visibleCards += 1;
-      if (card.performance.latestEventAt && (!acc.latestEventAt || card.performance.latestEventAt > acc.latestEventAt)) {
-        acc.latestEventAt = card.performance.latestEventAt;
-      }
-      return acc;
-    }, {
-      cards: 0,
-      approvedCards: 0,
-      visibleCards: 0,
-      counts: {},
-      latestEventAt: null,
-    });
-    const shown = totals.counts.recommendation_shown || totals.counts.shown || 0;
-    const clicked = totals.counts.recommendation_clicked || totals.counts.clicked || 0;
-    totals.clickThroughRate = shown > 0 ? Number((clicked / shown).toFixed(3)) : null;
-
-    res.json({ days, customerId: customerId || null, totals, cards: cardsWithPerformance });
-  } catch (err) {
-    next(err);
-  }
-});
 
 // =========================================================================
 // GET /customers — list lawn care customers (active lawn service)
@@ -645,12 +360,16 @@ router.post('/assess', async (req, res, next) => {
     // If serviceId is provided, validate it exists AND belongs to the
     // supplied customerId. 404 for missing, 400 for ownership mismatch
     // — different errors so the panel can surface the correct message.
+    // Hoisted so the vision-context build can anchor season/protocol to the
+    // validated visit's date instead of the current clock.
+    let scheduledService = null;
     if (serviceId) {
       const svc = await db('scheduled_services').where({ id: serviceId }).first();
       if (!svc) return res.status(404).json({ error: 'serviceId not found' });
       if (svc.customer_id !== customerId) {
         return res.status(400).json({ error: 'serviceId does not belong to customerId' });
       }
+      scheduledService = svc;
     }
 
     // Photo quality gating — runs in parallel with a small cap so a
@@ -686,13 +405,148 @@ router.post('/assess', async (req, res, next) => {
       ? passedIndices
       : photos.map((_, i) => i);
 
+    // Context for the vision prompt: what we already know about this lawn/visit,
+    // so the model reasons with it instead of guessing (grass type, season,
+    // region, irrigation, mowing height, the tech's own notes, and the prior
+    // visit). The photo stays the primary evidence — buildVisionPrompt tells the
+    // model not to let context override what the image shows. All lookups are
+    // best-effort; a miss just omits that line.
+    // Anchor the visit to the scheduled service's date (a business event in
+    // Eastern time) when we have one, else "now" in ET — never the raw server
+    // clock (Railway is UTC), which would flip the month/season near a boundary.
+    // Normalize whether pg hands back the DATE column as a 'YYYY-MM-DD' string or a
+    // Date object — String(Date) is "Fri Jul 03 2026 …", which would fail the regex
+    // and silently fall back to today's clock (defeating the whole schedule anchor).
+    const rawScheduledDate = scheduledService?.scheduled_date;
+    const scheduledDateStr = rawScheduledDate == null
+      ? null
+      : (rawScheduledDate instanceof Date
+        ? rawScheduledDate.toISOString().slice(0, 10)
+        : String(rawScheduledDate).slice(0, 10));
+    const visitServiceDateStr = scheduledDateStr && /^\d{4}-\d{2}-\d{2}$/.test(scheduledDateStr)
+      ? scheduledDateStr
+      : etDateString(new Date());
+    const visitDate = /^\d{4}-\d{2}-\d{2}$/.test(visitServiceDateStr)
+      ? new Date(`${visitServiceDateStr}T12:00:00-05:00`)
+      : new Date();
+    const visitMonth = etParts(visitDate).month;
+    const visionContext = {
+      season: lawnAssessment.getSeason(visitMonth),
+      month: visitMonth,
+      region: 'Southwest Florida',
+    };
+    // Mowing height — only accept a value in the same 0.5–8 in range the completion
+    // path enforces, so an out-of-range typed reading never biases the scoring.
+    const turfHeightNum = Number(req.body.turfHeightIn);
+    if (Number.isFinite(turfHeightNum) && turfHeightNum >= 0.5 && turfHeightNum <= 8) {
+      visionContext.turfHeightIn = turfHeightNum;
+    }
+    if (req.body.technicianNotes) visionContext.technicianNotes = String(req.body.technicianNotes);
+    // Canonical grass context — resolves the turf type + protocol track from the
+    // profile OR the legacy customers.lawn_type, so a customer with only lawn_type
+    // still gets a known grass type (and the right protocol track below) rather than
+    // silently falling back to the prompt's St. Augustine default.
+    let grassCtx = {};
+    try { grassCtx = await loadCustomerGrassContext(customerId, db); } catch (err) { logger.warn(`[lawn-assessment] grass-context lookup failed: ${err.message}`); }
+    if (grassCtx.grassTypeLabel) visionContext.grassType = grassCtx.grassTypeLabel;
+    try {
+      const turf = await db('customer_turf_profiles')
+        .where({ customer_id: customerId })
+        .first('irrigation_type', 'irrigation_inches_per_week');
+      const irr = [];
+      const irrType = grassCtx.irrigationSystem || turf?.irrigation_type;
+      if (irrType) irr.push(String(irrType).replace(/_/g, ' '));
+      if (turf?.irrigation_inches_per_week != null) irr.push(`${turf.irrigation_inches_per_week} in/wk`);
+      if (irr.length) visionContext.irrigation = irr.join(', ');
+    } catch (err) { logger.warn(`[lawn-assessment] irrigation context lookup failed: ${err.message}`); }
+    try {
+      // The PREVIOUS visit's summary — strictly a service SCHEDULED before this one.
+      // lawn_assessments.service_date is the assessment RUN date (can be out of
+      // schedule order on backfills), so bound by the linked scheduled_services
+      // .scheduled_date (falling back to service_date only for rows with no
+      // service_id), and never this same service, so a later/same-visit summary
+      // can't leak in and bias the new score.
+      const prior = await db('lawn_assessments as la')
+        .leftJoin('scheduled_services as ss', 'la.service_id', 'ss.id')
+        .where('la.customer_id', customerId)
+        .whereNotNull('la.ai_summary')
+        .andWhere(function () {
+          this.where('ss.scheduled_date', '<', visitServiceDateStr)
+            .orWhere(function () { this.whereNull('la.service_id').andWhere('la.service_date', '<', visitServiceDateStr); });
+        })
+        .modify((q) => { if (serviceId) q.andWhere(function () { this.whereNull('la.service_id').orWhereNot('la.service_id', serviceId); }); })
+        .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC')
+        .first('la.ai_summary');
+      if (prior?.ai_summary) visionContext.priorSummary = String(prior.ai_summary);
+    } catch (err) { logger.warn(`[lawn-assessment] prior-summary context lookup failed: ${err.message}`); }
+
+    // The products this visit's protocol calls for, plus their label
+    // safety/irrigation notes. Knowing a herbicide is in the plan helps the model
+    // read temporary chemical injury as treatment rather than disease; a fungicide
+    // frames brown patches as being treated. Best-effort — protocol/catalog misses
+    // just omit these lines.
+    try {
+      // Only claim planned products when we actually know the turf track — never
+      // guess st_augustine, which would attribute the wrong protocol's products.
+      const track = grassCtx.trackKey;
+      // Honor the window the office linked on the appointment (catch-up / rescheduled
+      // / manually-assigned visits): a keyed window overrides the date-derived one so
+      // the model sees the products the tech is actually expected to apply.
+      const assignedWindowKey = scheduledService?.lawn_protocol_window_key || null;
+      const protoCtx = track
+        ? await getProtocolWindowContext(db, { serviceDate: visitDate, grassTrack: track, windowKey: assignedWindowKey })
+        : null;
+      const structured = protoCtx ? summarizeProtocolContext(protoCtx) : null;
+      // Only claim products we're CERTAIN were applied: default-in-plan AND
+      // unconditional. A product carrying gates (ordinance / heat / disease-soil,
+      // etc.) may be blocked at closeout, so without evaluating those gates here we
+      // must not tell the vision model it was applied. Conservative by design — a
+      // gated product just omits its line rather than risk a false "was treated" cue.
+      const hasGates = (g) => (Array.isArray(g) ? g.length > 0 : !!g && typeof g === 'object' && Object.keys(g).length > 0);
+      const plannedProducts = (structured?.products || [])
+        .filter((p) => p.productName && p.defaultInPlan && !hasGates(p.gates));
+      if (plannedProducts.length) {
+        visionContext.productsApplied = plannedProducts.map((p) => (
+          p.role ? `${p.productName} (${String(p.role).replace(/_/g, ' ')})` : p.productName
+        ));
+        const ids = [...new Set(plannedProducts.map((p) => p.productId).filter(Boolean))];
+        if (ids.length) {
+          const catalogRows = await db('products_catalog')
+            .whereIn('id', ids)
+            .select(
+              'name',
+              'customer_precaution_summary',
+              'customer_safety_summary',
+              'reentry_summary',
+              'reentry_text',
+              'irrigation_notes',
+              'rei_hours',
+            )
+            .catch(() => []);
+          const constraints = [];
+          for (const c of catalogRows) {
+            const bits = [];
+            const safety = c.customer_precaution_summary || c.customer_safety_summary;
+            if (safety) bits.push(String(safety).trim());
+            const reentry = c.reentry_summary || c.reentry_text;
+            if (reentry) bits.push(`re-entry: ${String(reentry).trim()}`);
+            const reiHours = c.rei_hours == null ? null : Number(c.rei_hours);
+            if (c.irrigation_notes) bits.push(`watering: ${String(c.irrigation_notes).trim()}`);
+            else if (Number.isFinite(reiHours) && reiHours > 0) bits.push(`REI ${reiHours}h`);
+            if (bits.length) constraints.push(`${c.name}: ${bits.join('; ')}`);
+          }
+          if (constraints.length) visionContext.labelConstraints = constraints.slice(0, 6);
+        }
+      }
+    } catch (err) { logger.warn(`[lawn-assessment] protocol-products context lookup failed: ${err.message}`); }
+
     // Multi-photo AI runs in parallel with the same small cap. Each
     // analyzePhoto call is itself two vision-API calls (Claude +
     // Gemini) under the hood — capping at 3 keeps the upper bound
     // at 6 concurrent vision calls per /assess request, which is
     // well inside both providers' burst limits.
     const photoResults = await withConcurrency(photosToAnalyze, 3, (photo) =>
-      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg'),
+      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg', visionContext),
     );
 
     // Map AI result back to original photo index. validResults preserves
@@ -730,16 +584,25 @@ router.post('/assess', async (req, res, next) => {
     // Determine season and apply adjustment. Prefer a WEATHER-driven normalization —
     // St. Augustine slows by actual cold, not the calendar — using the customer's
     // recent overnight lows. Falls back to the legacy month bucket on any miss.
+    // Use the SAME visit month (scheduled service date, ET) the prompt used, so the
+    // model and the persisted score normalization agree — not the UTC server clock.
     const now = new Date();
-    const month = now.getMonth() + 1;
+    const month = visitMonth;
     const season = lawnAssessment.getSeason(month);
+    // fetchRecentMinTempF returns the trailing window ending TODAY, so it only makes
+    // sense for a visit being analyzed same-day. For a backfilled/non-today visit,
+    // today's warm/cold nights would wrongly override the visit month's dormancy
+    // fallback — so skip the weather read and let the month bucket drive the season.
+    const visitIsToday = visitServiceDateStr === etDateString(now);
     let recentMinTempF = null;
-    try {
-      const cust = await db('customers').where({ id: customerId }).select('latitude', 'longitude').first();
-      if (cust && Number.isFinite(Number(cust.latitude)) && Number.isFinite(Number(cust.longitude))) {
-        recentMinTempF = await fetchRecentMinTempF({ latitude: Number(cust.latitude), longitude: Number(cust.longitude) });
-      }
-    } catch (err) { logger.warn(`[lawn-assessment] recent-temp lookup failed: ${err.message}`); }
+    if (visitIsToday) {
+      try {
+        const cust = await db('customers').where({ id: customerId }).select('latitude', 'longitude').first();
+        if (cust && Number.isFinite(Number(cust.latitude)) && Number.isFinite(Number(cust.longitude))) {
+          recentMinTempF = await fetchRecentMinTempF({ latitude: Number(cust.latitude), longitude: Number(cust.longitude) });
+        }
+      } catch (err) { logger.warn(`[lawn-assessment] recent-temp lookup failed: ${err.message}`); }
+    }
     const adjustedScores = Number.isFinite(recentMinTempF)
       ? seasonAwareAdjustment(displayScores, { month, recentMinTempF })
       : lawnAssessment.applySeasonalAdjustment(displayScores, month);
@@ -947,8 +810,8 @@ const STRESS_FLAG_KEYS = [
   'disease_suspicion',
   'recent_scalp',
   'new_sod',
-  // Consumed by lawn-recommendation-engine.evaluateFollowUp to trigger a
-  // follow-up card; must be an accepted key or /confirm rejects it (400).
+  // Tech-flagged "needs a follow-up look"; must be an accepted key or
+  // /confirm rejects it (400).
   'follow_up_needed',
 ];
 
@@ -1013,21 +876,24 @@ router.post('/confirm', async (req, res, next) => {
       fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
       thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
     };
-    // Stress/Damage = worst of the tech-corrected fungus + thatch and the AI
-    // worst-spot floor stored at /assess (which already folds in insect/drought/
-    // mechanical and the worst per-photo disease/thatch). A tech correcting the
-    // overall fungus/thatch can push it lower; the AI worst-spot floor holds so
-    // a trouble spot isn't lost. Pre-stress_damage rows (null floor) fall back
-    // to worst-of(fungus, thatch) — never 0.
+    // Stress/Damage. The tech now corrects a single "Stress" score directly on
+    // the completion screen, so honor an explicit adjustedScores.stress_damage
+    // when sent. When it isn't (older clients, or a prefill re-confirm that only
+    // carries the AI values), fall back to the prior derivation: worst of the
+    // fungus + thatch scores and the AI worst-spot floor stored at /assess (which
+    // already folds in insect/drought/mechanical and the worst per-photo
+    // disease/thatch). Pre-stress_damage rows (null floor) fall back to
+    // worst-of(fungus, thatch) — never 0.
     {
       const aiFloor = Number.isFinite(Number(assessment.stress_damage))
         ? Number(assessment.stress_damage)
         : 95;
-      finalScores.stress_damage = Math.min(
+      const derivedStress = Math.min(
         Number(finalScores.fungus_control),
         Number(finalScores.thatch_level),
         aiFloor,
       );
+      finalScores.stress_damage = scoreValue(adjustedScores?.stress_damage, derivedStress);
     }
 
     const updateData = {
@@ -1081,24 +947,9 @@ router.post('/confirm', async (req, res, next) => {
       logger.error(`[lawn-assessment] Wiki linkTreatmentOutcome failed (non-blocking): ${wikiErr.message}`);
     }
 
-    // Property Health Snapshot + Smart Recommendation Cards. This is
-    // intentionally isolated from confirmation success: confirmation is the
-    // source-of-truth event, while snapshot generation can be retried by admin.
-    let propertySnapshot = null;
-    let recommendationCards = [];
-    try {
-      const generated = await generateSnapshotAndCards({
-        assessmentId,
-        serviceId: updated.service_id || null,
-        serviceRecordId: resolvedServiceRecordId,
-        customerId: updated.customer_id,
-        generatedBy: req.technician?.role === 'admin' ? 'admin' : 'tech',
-      });
-      propertySnapshot = generated.snapshot;
-      recommendationCards = generated.cards;
-    } catch (snapshotErr) {
-      logger.error(`[lawn-assessment] Snapshot/recommendation generation failed (non-blocking): ${snapshotErr.message}`);
-    }
+    // The legacy "Customer snapshot" (lawn_snapshot_v1) narrative + recommendation
+    // cards are retired — Lawn Report V2 owns the customer-facing story now — so we
+    // no longer generate them on confirm.
 
     // Knowledge Bridge + Lawn Intelligence: fire all async intelligence (non-blocking)
     setImmediate(async () => {
@@ -1115,6 +966,16 @@ router.post('/confirm', async (req, res, next) => {
           const aiScores = calibrationBaseline
             ? (typeof calibrationBaseline === 'string' ? JSON.parse(calibrationBaseline) : calibrationBaseline)
             : {};
+          // Legacy pre-stress_damage baselines have no stress in the AI JSON, so the
+          // calibration would write ai_stress_damage=null and skip the delta. Seed it
+          // the same way the UI/confirm fallback does — min(fungus, thatch, 95) — so a
+          // tech's Stress correction on a legacy row records a real delta, not zero.
+          if (aiScores && aiScores.stress_damage == null) {
+            const f = Number(aiScores.fungus_control);
+            const t = Number(aiScores.thatch_level);
+            const parts = [f, t, 95].filter(Number.isFinite);
+            if (parts.length > 1) aiScores.stress_damage = Math.min(...parts);
+          }
           await LawnIntel.recordTechCalibration(assessmentId, aiScores, adjustedScores);
         }
 
@@ -1138,278 +999,7 @@ router.post('/confirm', async (req, res, next) => {
     res.json({
       success: true,
       assessment: updated,
-      propertySnapshot: propertySnapshot ? {
-        id: propertySnapshot.id,
-        status: propertySnapshot.status,
-        customer_visible: propertySnapshot.customer_visible,
-      } : null,
-      recommendationCards: recommendationCards.map((card) => ({
-        id: card.id,
-        type: card.type,
-        status: card.status,
-        customer_visible: card.customer_visible,
-        requires_human_approval: card.requires_human_approval,
-      })),
     });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// =========================================================================
-// GET /:assessmentId/snapshot — snapshot + recommendation review payload
-// =========================================================================
-router.get('/:assessmentId/snapshot', async (req, res, next) => {
-  try {
-    const assessment = await db('lawn_assessments')
-      .where({ id: req.params.assessmentId })
-      .first('id');
-    if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
-
-    res.json(await getSnapshotReviewPayload(req.params.assessmentId));
-  } catch (err) {
-    next(err);
-  }
-});
-
-// =========================================================================
-// POST /:assessmentId/snapshot/regenerate — rebuild internal snapshot/cards
-// =========================================================================
-router.post('/:assessmentId/snapshot/regenerate', async (req, res, next) => {
-  try {
-    if (!assertAdminAction(req, res)) return;
-
-    const assessment = await db('lawn_assessments')
-      .where({ id: req.params.assessmentId })
-      .first();
-    if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
-    if (assessment.confirmed_by_tech !== true) {
-      return res.status(400).json({ error: 'Cannot generate a snapshot from an unconfirmed assessment' });
-    }
-
-    await generateSnapshotAndCards({
-      assessmentId: assessment.id,
-      serviceId: assessment.service_id || null,
-      serviceRecordId: assessment.service_record_id || null,
-      customerId: assessment.customer_id,
-      generatedBy: 'admin',
-    });
-
-    res.json({ success: true, ...(await getSnapshotReviewPayload(assessment.id)) });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// =========================================================================
-// PATCH /snapshots/:snapshotId — edit/approve/hide customer snapshot
-// =========================================================================
-router.patch('/snapshots/:snapshotId', async (req, res, next) => {
-  try {
-    if (!assertAdminAction(req, res)) return;
-
-    const snapshot = await db('property_health_snapshots')
-      .where({ id: req.params.snapshotId, domain: 'lawn' })
-      .first();
-    if (!snapshot) return res.status(404).json({ error: 'Snapshot not found' });
-
-    const allowedStatuses = new Set(['draft', 'tech_confirmed', 'admin_approved', 'customer_visible', 'archived']);
-    const patch = { updated_at: new Date() };
-    const { headline, summary_customer, summary_internal, status, customer_visible: customerVisible } = req.body || {};
-
-    if (headline != null) patch.headline = String(headline).slice(0, 180);
-    if (summary_customer != null) {
-      if (!assertCustomerCopySafe(res, summary_customer)) return;
-      patch.summary_customer = String(summary_customer);
-    }
-    if (summary_internal != null) patch.summary_internal = String(summary_internal);
-    if (status != null) {
-      if (!allowedStatuses.has(status)) return res.status(400).json({ error: 'Invalid snapshot status' });
-      patch.status = status;
-    }
-    if (customerVisible != null) {
-      patch.customer_visible = customerVisible === true;
-      if (customerVisible === true) {
-        const effectiveSummary = patch.summary_customer ?? snapshot.summary_customer ?? '';
-        if (!assertCustomerCopySafe(res, effectiveSummary)) return;
-        patch.status = 'customer_visible';
-        patch.approved_by = req.technicianId;
-        patch.approved_at = new Date();
-      }
-    }
-    if (req.body?.approve === true) {
-      const effectiveSummary = patch.summary_customer ?? snapshot.summary_customer ?? '';
-      if (!assertCustomerCopySafe(res, effectiveSummary)) return;
-      patch.status = 'admin_approved';
-      patch.approved_by = req.technicianId;
-      patch.approved_at = new Date();
-    }
-    if (req.body?.hide === true) {
-      patch.customer_visible = false;
-      patch.status = 'archived';
-    }
-
-    const [updated] = await db('property_health_snapshots')
-      .where({ id: snapshot.id })
-      .update(patch)
-      .returning('*');
-
-    res.json({ success: true, snapshot: normalizeSnapshotRow(updated) });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// =========================================================================
-// PATCH /recommendations/:recommendationId — edit/approve/dismiss cards
-// =========================================================================
-router.patch('/recommendations/:recommendationId', async (req, res, next) => {
-  try {
-    if (!assertAdminAction(req, res)) return;
-
-    const card = await db('property_recommendation_cards')
-      .where({ id: req.params.recommendationId, domain: 'lawn' })
-      .first();
-    if (!card) return res.status(404).json({ error: 'Recommendation not found' });
-
-    const allowedStatuses = new Set([
-      'draft',
-      'needs_admin_review',
-      'approved',
-      'customer_visible',
-      'dismissed',
-      'accepted',
-      'expired',
-    ]);
-    const patch = { updated_at: new Date() };
-    const body = req.body || {};
-
-    if (body.title != null) patch.title = String(body.title).slice(0, 180);
-    if (body.customer_copy != null) {
-      if (!assertCustomerCopySafe(res, body.customer_copy)) return;
-      patch.customer_copy = String(body.customer_copy);
-    }
-    if (body.internal_reason != null) patch.internal_reason = String(body.internal_reason);
-    if (body.priority != null) {
-      if (!['low', 'medium', 'high'].includes(body.priority)) return res.status(400).json({ error: 'Invalid priority' });
-      patch.priority = body.priority;
-    }
-    if (body.status != null) {
-      if (!allowedStatuses.has(body.status)) return res.status(400).json({ error: 'Invalid recommendation status' });
-      // A direct status set into a customer-facing status must clear the same
-      // copy-safety blocklist as the approve / customer_visible flags — don't
-      // let it be a side door around the gate.
-      if (CUSTOMER_FACING_STATUSES.has(body.status)) {
-        const effectiveCopy = patch.customer_copy ?? card.customer_copy ?? '';
-        if (!assertCustomerCopySafe(res, effectiveCopy)) return;
-      }
-      patch.status = body.status;
-    }
-
-    if (body.approve === true) {
-      const effectiveCopy = patch.customer_copy ?? card.customer_copy ?? '';
-      if (!assertCustomerCopySafe(res, effectiveCopy)) return;
-      patch.status = 'approved';
-      patch.approved_by = req.technicianId;
-      patch.approved_at = new Date();
-    }
-    if (body.dismiss === true) {
-      patch.status = 'dismissed';
-      patch.customer_visible = false;
-      patch.outcome = JSON.stringify({
-        ...parseJsonObject(card.outcome),
-        dismissed_at: new Date().toISOString(),
-      });
-    }
-    if (body.customer_visible != null) {
-      const nextVisible = body.customer_visible === true;
-      const candidate = { ...card, ...patch, customer_visible: nextVisible };
-      const effectiveCopy = patch.customer_copy ?? card.customer_copy ?? '';
-      if (nextVisible && !assertCustomerCopySafe(res, effectiveCopy)) return;
-      if (nextVisible && !canShowRecommendationToCustomer(candidate)) {
-        patch.approved_by = req.technicianId;
-        patch.approved_at = new Date();
-      }
-      patch.customer_visible = nextVisible;
-      if (nextVisible) patch.status = 'customer_visible';
-    }
-
-    const [updated] = await db('property_recommendation_cards')
-      .where({ id: card.id })
-      .update(patch)
-      .returning('*');
-
-    const eventType = body.dismiss === true
-      ? 'dismissed'
-      : body.customer_visible === true
-        ? 'shown'
-        : body.approve === true
-          ? 'approved'
-          : 'edited';
-    await logRecommendationEvent({
-      recommendationId: updated.id,
-      snapshotId: updated.snapshot_id,
-      customerId: updated.customer_id,
-      eventType,
-      req,
-      metadata: recommendationEventMetadata(updated),
-    });
-
-    res.json({ success: true, recommendation: normalizeRecommendationRow(updated) });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// =========================================================================
-// GET /recommendations/:recommendationId/events — read outcome event history
-// =========================================================================
-router.get('/recommendations/:recommendationId/events', async (req, res, next) => {
-  try {
-    const card = await db('property_recommendation_cards')
-      .where({ id: req.params.recommendationId, domain: 'lawn' })
-      .first();
-    if (!card) return res.status(404).json({ error: 'Recommendation not found' });
-
-    const events = await db('property_recommendation_events')
-      .where({ recommendation_id: card.id })
-      .orderBy('created_at', 'desc')
-      .limit(100)
-      .catch(() => []);
-
-    res.json({
-      recommendation: normalizeRecommendationRow(card),
-      performance: summarizeRecommendationEvents(events, card),
-      events: events.map(normalizeRecommendationEventRow).filter(Boolean),
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// =========================================================================
-// POST /recommendations/:recommendationId/events — append outcome event
-// =========================================================================
-router.post('/recommendations/:recommendationId/events', async (req, res, next) => {
-  try {
-    const card = await db('property_recommendation_cards')
-      .where({ id: req.params.recommendationId, domain: 'lawn' })
-      .first();
-    if (!card) return res.status(404).json({ error: 'Recommendation not found' });
-
-    const eventType = String(req.body?.event_type || '').trim();
-    if (!eventType) return res.status(400).json({ error: 'event_type is required' });
-
-    await logRecommendationEvent({
-      recommendationId: card.id,
-      snapshotId: card.snapshot_id,
-      customerId: card.customer_id,
-      eventType,
-      req,
-      metadata: parseJsonObject(req.body?.metadata),
-    });
-
-    res.json({ success: true });
   } catch (err) {
     next(err);
   }
@@ -1510,14 +1100,7 @@ router.get('/latest/:customerId', async (req, res, next) => {
 router._test = {
   customerVisibleForQualityCheck,
   normalizeStressFlags,
-  normalizeSnapshotRow,
-  normalizeRecommendationRow,
   applyServiceAssessmentOrder,
-  canShowRecommendationToCustomer,
-  CUSTOMER_FACING_STATUSES,
-  customerCopyViolation,
-  summarizeRecommendationEvents,
-  normalizeRecommendationEventRow,
 };
 
 module.exports = router;

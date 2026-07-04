@@ -108,9 +108,24 @@ function formatTimeLabel(hhmm) {
   return `${hour12}:${String(m || 0).padStart(2, '0')} ${suffix}`;
 }
 
-function windowLabel(start, end) {
+// The arrival window promised to the customer is 2 HOURS from the visit's
+// window start (owner directive; matches the estimate SlotPicker and the
+// window_start + 2h promise the late detector enforces). The API's
+// windowStart/windowEnd echo the job-duration block that sizes scheduling —
+// never show windowEnd as the arrival window.
+const ARRIVAL_WINDOW_MINUTES = 120;
+
+function arrivalEndHHMM(start) {
+  const [h, m] = String(start || '').split(':').map(Number);
+  if (Number.isNaN(h)) return null;
+  const total = (h * 60 + (m || 0) + ARRIVAL_WINDOW_MINUTES) % (24 * 60);
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function arrivalWindowLabel(start) {
   const s = formatTimeLabel(start);
-  const e = formatTimeLabel(end);
+  if (!s) return '';
+  const e = formatTimeLabel(arrivalEndHHMM(start));
   return e ? `${s}–${e}` : s;
 }
 
@@ -227,7 +242,7 @@ function SuccessCard({ result, service }) {
       <div style={{ fontSize: 15, color: S.body, lineHeight: 1.6 }}>
         Your {service?.type || 'service'} visit is now scheduled for{' '}
         <strong style={{ color: S.text }}>{formatDateLabel(result.newDate)}</strong>, arrival window{' '}
-        <strong style={{ color: S.text }}>{result.startLabel}–{result.endLabel}</strong>.
+        <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
         We'll text you a confirmation shortly.
       </div>
     </Card>
@@ -319,7 +334,7 @@ export default function ReschedulePage() {
         <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
           Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit is currently
           scheduled for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>
-          {current.windowStart ? <>, arrival window <strong style={{ color: S.text }}>{windowLabel(current.windowStart, current.windowEnd)}</strong></> : null}.
+          {current.windowStart ? <>, arrival window <strong style={{ color: S.text }}>{arrivalWindowLabel(current.windowStart)}</strong></> : null}.
         </div>
         {data.isRecurring ? (
           <div style={{

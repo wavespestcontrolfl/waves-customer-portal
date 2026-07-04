@@ -690,6 +690,38 @@ async function uploadImageToS3(base64Data, filename) {
   }
 }
 
+// ── S3 Video Upload (for FB video posts / IG Reels — requires public HTTPS URL) ──
+// Same bucket/CDN as images; the MP4 passes through untouched (no sharp).
+// CDN is checked BEFORE the PUT so a misconfigured deploy can't orphan objects.
+async function uploadVideoToS3(buffer, filename) {
+  if (!config.s3.accessKeyId || !config.s3.bucket) return null;
+  const cdnDomain = process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+  if (!cdnDomain) {
+    logger.error('[social] SOCIAL_MEDIA_CDN_DOMAIN not set — private S3 URLs are not publicly fetchable');
+    return null;
+  }
+  try {
+    const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+    const s3 = new S3Client({
+      region: config.s3.region,
+      credentials: { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey },
+    });
+    const key = `social-media/${filename.replace(/\.\w+$/, '.mp4')}`;
+    await s3.send(new PutObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: 'video/mp4',
+    }));
+    const url = `https://${cdnDomain}/${key}`;
+    logger.info(`[social] Video uploaded: ${url}`);
+    return url;
+  } catch (err) {
+    logger.error(`[social] S3 video upload failed: ${err.message}`);
+    return null;
+  }
+}
+
 // Render a deterministic brand card (SVG -> JPEG) and host it on S3/CDN, so
 // autonomous posts (incl. blog shares) carry the on-brand card instead of a
 // generic AI image. Returns null on any failure (no S3/CDN, render error) so
@@ -821,6 +853,82 @@ async function postToInstagram(caption, imageUrl) {
   const data = await publishRes.json();
   logger.info(`[social] Instagram post published: ${data.id}`);
   return { platform: 'instagram', postId: data.id, success: true, mediaContainerId: container.id, mediaStatus: containerStatus.status_code };
+}
+
+// Reels use the same 3-step container flow as feed photos, but video ingestion
+// is slower (30s–2min typical; Meta says poll up to 5min). Budget: 100s — over
+// typical ingestion, but bounded so the approve request can't hang for minutes.
+// A timeout records IG as a partial failure; the approve path's per-run
+// advisory lock + draft_created status guard make an admin retry safe (no
+// duplicate publish — an unpublished container simply expires).
+async function postToInstagramReel(caption, videoUrl) {
+  const token = process.env.FACEBOOK_ACCESS_TOKEN; // Instagram uses same token
+  if (!token) throw new Error('FACEBOOK_ACCESS_TOKEN not configured');
+  if (!videoUrl) throw new Error('Instagram Reels require a video URL');
+
+  // Step 1: Create the REELS media container (Meta fetches the hosted MP4)
+  const containerRes = await fetch(
+    `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/media`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ media_type: 'REELS', video_url: videoUrl, caption, access_token: token }),
+    }
+  );
+  if (!containerRes.ok) {
+    const err = await containerRes.text();
+    throw new Error(`Instagram Reel container ${containerRes.status}: ${err}`);
+  }
+  const container = await containerRes.json();
+
+  // Step 2: Wait for video ingestion (FINISHED) — longer budget than photos.
+  const containerStatus = await waitForInstagramContainer(container.id, token, { maxWaitMs: 100 * 1000 });
+
+  // Step 3: Publish
+  const publishRes = await fetch(
+    `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/media_publish`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ creation_id: container.id, access_token: token }),
+    }
+  );
+  if (!publishRes.ok) {
+    const err = await publishRes.text();
+    throw new Error(`Instagram Reel publish ${publishRes.status}: ${err}`);
+  }
+  const data = await publishRes.json();
+  logger.info(`[social] Instagram Reel published: ${data.id}`);
+  return { platform: 'instagram', postId: data.id, success: true, mediaContainerId: container.id, mediaStatus: containerStatus.status_code, mediaType: 'reel' };
+}
+
+// Page video post via hosted-URL ingestion (file_url) — one call, no resumable
+// upload session. Publishes as a page VIDEO (the dedicated FB "Reels" surface
+// needs the rupload.facebook.com session flow — deferred; a page video still
+// reaches the feed). Graph ingests asynchronously, so success here means
+// "accepted", not "transcoded". Video uploads go through the dedicated
+// graph-video.facebook.com host (Meta's Video API publishing guide) — the
+// regular graph host can reject them. A page video has no separate link
+// preview parameter, so the CTA link rides in the description (same as the
+// photo path's caption).
+async function postToFacebookVideo(message, link, videoUrl) {
+  const token = process.env.FACEBOOK_ACCESS_TOKEN;
+  if (!token) throw new Error('FACEBOOK_ACCESS_TOKEN not configured');
+  if (!videoUrl) throw new Error('Facebook video post requires a video URL');
+
+  const description = link ? `${message}\n\n${link}` : message;
+  const res = await fetch(`https://graph-video.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/videos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_url: videoUrl, description, access_token: token }),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Facebook video API ${res.status}: ${err}`);
+  }
+  const data = await res.json();
+  logger.info(`[social] Facebook video post created: ${data.id}`);
+  return { platform: 'facebook', postId: data.id, success: true, mediaType: 'video' };
 }
 
 // LinkedIn posting goes through the OAuth-backed service (services/linkedin.js):
@@ -1084,7 +1192,10 @@ const SocialMediaService = {
   // postId: update that existing social_media_posts row (a draft being approved
   // from the studio queue) with the publish outcome instead of inserting a new
   // history row — one row follows the post through its draft → published life.
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null }) {
+  // videoUrl: a hosted MP4 (creative-engine Reel). FB posts it as a page video
+  // and IG as a Reel; GBP has no video ingestion, so it keeps the image params
+  // (imageUrl/gbpImageUrl are the still fallback alongside a video).
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -1095,6 +1206,9 @@ const SocialMediaService = {
     const platformResults = [];
     const requestedPlatforms = normalizePublishChannels(channels);
     const requestedGbpLocations = normalizeGbpLocationIds(gbpLocationIds);
+    // Only an https URL counts as a video — Meta fetches it server-side, so a
+    // junk/non-public value must degrade to the image path, not fail FB+IG.
+    const hasVideo = typeof videoUrl === 'string' && /^https:\/\//i.test(videoUrl);
 
     // Only generate an AI image if a platform can actually consume it.
     // Both Instagram and GBP use generatedImageUrl, and both need the image
@@ -1141,7 +1255,10 @@ const SocialMediaService = {
       // location filter (which posts to zero locations) doesn't burn image
       // credits either. (The autonomous single-profile path uses a per-location
       // check via assertSocialPublishingReady.)
-      metaWantsImage = instagramCanConsume; // FB/IG consume the 1:1 image
+      // With a video, FB/IG post the MP4 — don't render/generate a 1:1 image
+      // nobody consumes (GBP's 4:3 want below is independent: it never takes
+      // the video, so it may still render its card).
+      metaWantsImage = instagramCanConsume && !hasVideo; // FB/IG consume the 1:1 image
       if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
         && (requestedGbpLocations === null || requestedGbpLocations.size > 0)) {
         const configured = await gbpService.getConfiguredLocations();
@@ -1183,7 +1300,7 @@ const SocialMediaService = {
 
     // Generate content for each platform and post
     const fbReady = !!process.env.FACEBOOK_ACCESS_TOKEN && !!FACEBOOK_PAGE_ID;
-    const igReady = fbReady && !!INSTAGRAM_ACCOUNT_ID && !!generatedImageUrl;
+    const igReady = fbReady && !!INSTAGRAM_ACCOUNT_ID && (hasVideo || !!generatedImageUrl);
     // LinkedIn is "ready" only when an admin has actually completed OAuth (tokens
     // in DB) AND a company id exists — `configured` alone (CLIENT_ID/SECRET) would
     // mark it enabled and the loop would call postToLinkedIn → "not connected"
@@ -1250,14 +1367,27 @@ const SocialMediaService = {
 
         if (p.key === 'facebook') {
           // The image is OPTIONAL for Facebook (text+link /feed posts fine). If
-          // the /photos path fails — Meta rejected or couldn't fetch the image —
+          // the photo path fails — Meta rejected or couldn't fetch the image —
           // fall back to a text/link /feed post instead of dropping a post that
           // would otherwise publish. Mirrors the GBP media-fallback below.
+          // A VIDEO gets NO text fallback (same rule as the IG Reel branch): the
+          // admin approved a video, and a silent text post would also count as a
+          // platform success and let the approval finalize as "published" with
+          // no video anywhere. A video failure surfaces as a failure so the
+          // draft stays retryable.
           let r;
           try {
-            r = await withRetry(() => postToFacebook(content, link, generatedImageUrl), { label: 'facebook' });
+            r = hasVideo
+              // NOT wrapped in withRetry: the /videos create is non-idempotent.
+              // If Meta accepts the upload but the response is lost/times out,
+              // a retry creates a DUPLICATE page video (same rationale as the
+              // IG container flow below). A transient failure surfaces as an
+              // FB partial failure, and the approval's channel-narrowed retry
+              // re-attempts only Facebook.
+              ? await postToFacebookVideo(content, link, videoUrl)
+              : await withRetry(() => postToFacebook(content, link, generatedImageUrl), { label: 'facebook' });
           } catch (fbErr) {
-            if (generatedImageUrl && /Facebook photo API/i.test(String(fbErr.message))) {
+            if (!hasVideo && generatedImageUrl && /Facebook photo API/i.test(String(fbErr.message))) {
               logger.warn(`[social] Facebook photo post failed (${fbErr.message}); retrying text-only`);
               r = await withRetry(() => postToFacebook(content, link, null), { label: 'facebook' });
             } else {
@@ -1267,7 +1397,13 @@ const SocialMediaService = {
           platformResults.push({ ...r, content });
         } else if (p.key === 'instagram') {
           const imgUrl = typeof generatedImageUrl === 'string' ? generatedImageUrl : null;
-          if (imgUrl) {
+          if (hasVideo) {
+            // NOT wrapped in withRetry (same rationale as the image container
+            // below) — and no image fallback here: an admin who approved a
+            // VIDEO variant must not silently get a still posted instead.
+            const r = await postToInstagramReel(content, videoUrl);
+            platformResults.push({ ...r, content });
+          } else if (imgUrl) {
             // NOT wrapped in withRetry: postToInstagram already polls Meta for
             // media ingestion (bounded ~45s). Retrying the whole call would
             // redo that wait (blocking the request for minutes) and create a
@@ -1515,6 +1651,7 @@ module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
 module.exports.validateContent = validateContent;
 module.exports.normalizeUrl = normalizeUrl;
 module.exports.uploadImageToS3 = uploadImageToS3;
+module.exports.uploadVideoToS3 = uploadVideoToS3;
 module.exports.postToGBP = postToGBP;
 module.exports.isGbpMediaError = isGbpMediaError;
 module.exports.normalizePublishChannels = normalizePublishChannels;

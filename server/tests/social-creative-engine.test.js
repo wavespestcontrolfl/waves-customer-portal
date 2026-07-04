@@ -4,8 +4,9 @@
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/social-media', () => ({ uploadImageToS3: jest.fn() }));
+jest.mock('../services/social-media', () => ({ uploadImageToS3: jest.fn(), uploadVideoToS3: jest.fn() }));
 jest.mock('../services/content/image-generator', () => ({ ImageGenerator: jest.fn() }));
+jest.mock('../services/content/video-generator', () => ({ generate: jest.fn() }));
 // Hosting preflight reads S3 creds from config; make them present by default so
 // generateVariants tests exercise the pipeline (one test blanks them below).
 jest.mock('../config', () => ({ s3: { accessKeyId: 'ak', secretAccessKey: 'sk', bucket: 'bkt', region: 'us-east-1' } }));
@@ -15,8 +16,9 @@ jest.mock('../services/social-card-renderer', () => ({
 }));
 
 const Engine = require('../services/social-creative-engine');
-const { uploadImageToS3 } = require('../services/social-media');
+const { uploadImageToS3, uploadVideoToS3 } = require('../services/social-media');
 const { ImageGenerator } = require('../services/content/image-generator');
+const VideoGenerator = require('../services/content/video-generator');
 const Renderer = require('../services/social-card-renderer');
 
 const NOW = new Date('2026-07-02T12:00:00Z');
@@ -27,7 +29,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   jest.clearAllMocks();
-  for (const k of ['SOCIAL_CREATIVE_ENGINE_ENABLED', 'SOCIAL_CREATIVE_VARIANTS', 'SOCIAL_IMAGE_PROVIDER', 'SOCIAL_MEDIA_CDN_DOMAIN']) {
+  for (const k of ['SOCIAL_CREATIVE_ENGINE_ENABLED', 'SOCIAL_CREATIVE_VARIANTS', 'SOCIAL_IMAGE_PROVIDER', 'SOCIAL_MEDIA_CDN_DOMAIN', 'SOCIAL_VIDEO_ENABLED', 'SOCIAL_VIDEO_INTERVAL_DAYS']) {
     if (ORIGINAL_ENV[k] === undefined) delete process.env[k];
     else process.env[k] = ORIGINAL_ENV[k];
   }
@@ -253,5 +255,98 @@ describe('generateVariants', () => {
     expect(variants).toEqual([]);
     expect(generate).not.toHaveBeenCalled(); // provider never invoked
     expect(ImageGenerator).not.toHaveBeenCalled();
+  });
+});
+
+// ── video (Veo Reels) ───────────────────────────────────────────────
+
+describe('VIDEO_FLAGS + isVideoDay', () => {
+  test('video is OFF by default; interval defaults to 3 and clamps to 1..14', () => {
+    delete process.env.SOCIAL_VIDEO_ENABLED;
+    expect(Engine.VIDEO_FLAGS.enabled).toBe(false);
+    delete process.env.SOCIAL_VIDEO_INTERVAL_DAYS;
+    expect(Engine.VIDEO_FLAGS.intervalDays).toBe(3);
+    process.env.SOCIAL_VIDEO_INTERVAL_DAYS = '99';
+    expect(Engine.VIDEO_FLAGS.intervalDays).toBe(14);
+    process.env.SOCIAL_VIDEO_INTERVAL_DAYS = '0';
+    expect(Engine.VIDEO_FLAGS.intervalDays).toBe(1);
+  });
+
+  test('isVideoDay is deterministic for a date and always true at interval 1', () => {
+    process.env.SOCIAL_VIDEO_INTERVAL_DAYS = '3';
+    expect(Engine.isVideoDay(NOW)).toBe(Engine.isVideoDay(NOW));
+    process.env.SOCIAL_VIDEO_INTERVAL_DAYS = '1';
+    expect(Engine.isVideoDay(NOW)).toBe(true);
+    expect(Engine.isVideoDay(new Date('2026-07-03T12:00:00Z'))).toBe(true);
+  });
+
+  test('cadence is monotonic across month boundaries (epoch-day, not month*31+day)', () => {
+    const jun30 = new Date('2026-06-30T12:00:00Z');
+    const jul1 = new Date('2026-07-01T12:00:00Z');
+    // consecutive ET days differ by exactly 1…
+    expect(Engine.etEpochDay(jul1) - Engine.etEpochDay(jun30)).toBe(1);
+    // …so an every-2-days paid cadence can never fire on both of them
+    // (the old month*31+day seed skipped 217 between Jun 30=216 and Jul 1=218)
+    process.env.SOCIAL_VIDEO_INTERVAL_DAYS = '2';
+    expect(Engine.isVideoDay(jun30)).not.toBe(Engine.isVideoDay(jul1));
+  });
+});
+
+describe('buildVideoPrompt', () => {
+  test('carries the concept, motion/audio constraints, and hard negatives', () => {
+    const concept = Engine.SCENE_LIBRARY.mosquito[0];
+    const prompt = Engine.buildVideoPrompt({ topic: 'mosquito pressure', city: 'Venice', concept });
+    expect(prompt).toContain(concept.scene);
+    expect(prompt).toContain('Venice');
+    expect(prompt).toMatch(/vertical/i);
+    expect(prompt).toMatch(/no cuts/i);
+    expect(prompt).toMatch(/ambient/i);
+    expect(prompt).toMatch(/no music, no narration/i);
+    expect(prompt).toMatch(/NO text/i);
+    expect(prompt).toMatch(/no teal/i);
+  });
+
+  test('strips newlines from untrusted input', () => {
+    const prompt = Engine.buildVideoPrompt({ topic: 'a\nb', city: 'c\r\nd', concept: Engine.SCENE_LIBRARY.general[0] });
+    expect(prompt).not.toMatch(/[\r\n]/);
+  });
+});
+
+describe('generateVideoVariant', () => {
+  const okVideo = { buffer: Buffer.from('mp4'), mimeType: 'video/mp4', model: 'veo-fast' };
+
+  test('produces a typed video variant with a hosted URL and excluded concepts respected', async () => {
+    VideoGenerator.generate.mockResolvedValue(okVideo);
+    uploadVideoToS3.mockResolvedValue('https://cdn.test/reel.mp4');
+
+    const imageConcepts = Engine.pickConcepts({ service: 'mosquito', count: 3, now: NOW }).map((c) => c.key);
+    const variant = await Engine.generateVideoVariant({
+      topic: 'mosquito pressure',
+      service: 'mosquito',
+      city: 'Venice',
+      excludeConcepts: imageConcepts,
+      now: NOW,
+    });
+
+    expect(variant).toMatchObject({ type: 'video', videoUrl: 'https://cdn.test/reel.mp4', aspectRatio: '9:16', sceneModel: 'veo-fast' });
+    expect(imageConcepts).not.toContain(variant.conceptKey);
+    expect(VideoGenerator.generate).toHaveBeenCalledWith(expect.objectContaining({ aspectRatio: '9:16' }));
+    expect(uploadVideoToS3).toHaveBeenCalledWith(okVideo.buffer, expect.stringMatching(/\.mp4$/));
+  });
+
+  test('returns null (never throws) on generator failure or failed upload', async () => {
+    VideoGenerator.generate.mockRejectedValue(new Error('veo down'));
+    expect(await Engine.generateVideoVariant({ topic: 'x', now: NOW })).toBeNull();
+
+    VideoGenerator.generate.mockResolvedValue(okVideo);
+    uploadVideoToS3.mockResolvedValue(null);
+    expect(await Engine.generateVideoVariant({ topic: 'x', now: NOW })).toBeNull();
+  });
+
+  test('skips Veo entirely when hosting is not configured', async () => {
+    delete process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+    VideoGenerator.generate.mockResolvedValue(okVideo);
+    expect(await Engine.generateVideoVariant({ topic: 'x', now: NOW })).toBeNull();
+    expect(VideoGenerator.generate).not.toHaveBeenCalled();
   });
 });

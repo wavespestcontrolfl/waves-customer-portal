@@ -14,7 +14,8 @@
  *   Extra checks by page type:
  *     city-service        nap_consistent, local_proof_present,
  *                         cta_above_fold, service_menu_present,
- *                         FAQ_from_customer_calls, LocalBusiness+Service schema
+ *                         FAQ_from_customer_calls, LocalBusiness+Service schema,
+ *                         redaction_passed
  *     customer-question   answer_in_first_paragraph,
  *                         source_internal_link, redaction_passed,
  *                         (FAQPage schema NOT required — deprecated May 7 2026)
@@ -104,6 +105,13 @@ const PAGE_TYPE_CHECKS = {
     { name: 'service_menu_present', weight: 6, evaluate: checkServiceMenu },
     { name: 'faq_from_customer_calls', weight: 6, evaluate: checkFaqFromCustomer },
     { name: 'localbusiness_service_schema', weight: 6, isHard: true, evaluate: checkLocalBusinessServiceSchema },
+    // Hard: city-service bodies are built from customer-derived signals
+    // (FAQ-from-calls, local proof) exactly like customer-question pages,
+    // but this was the ONE body-writing lane with no publish-time PII
+    // check — a customer name/phone/email surviving the insights miner's
+    // redactor published unchecked. Same check the customer-question
+    // bundle enforces.
+    { name: 'redaction_passed', weight: 8, isHard: true, evaluate: checkRedactionPassed },
   ],
   'customer-question': [
     // Both hard: commons (37) + redaction (8) = 45 already clears this
@@ -147,7 +155,7 @@ const PAGE_TYPE_CHECKS = {
 // Common hard checks sum to 37. Ceiling → threshold per page type
 // (75% of ceiling, floored at one-worst-case-soft-miss — see
 // computeMinTotalScores):
-//   city-service      37+36 = 73 → 54 (75% formula; hard sum 43)
+//   city-service      37+44 = 81 → 60 (75% formula; hard sum 51)
 //   customer-question 37+22 = 59 → 59 (all-hard bundle)
 //   refresh           37+10 = 47 → 47 (all-hard bundle)
 //   supporting-blog   37+20 = 57 → 51 (= 57 - voice 6; formula's 42 sat
@@ -367,11 +375,13 @@ function checkPreviewSuccess(_draft, _brief, context) {
 
 function checkNapConsistent(draft, brief) {
   const body = String(draft.body || '');
-  // NAP = Name, Address, Phone. For a city-service page, must include
-  // a Waves phone number tied to that city (per the WAVES_HUB_CITY_PHONES
-  // mapping in the repo) and a service-area mention.
+  // NAP = Name, Address, Phone. For a city-service page, must include a
+  // WAVES phone number (WAVES_PHONES allowlist). The previous any-phone
+  // regex let a stray CUSTOMER number satisfy the "phone present"
+  // requirement — the one check meant to assert the business's own NAP.
   if (!/Waves Pest Control/i.test(body)) return { ok: false, reason: 'business_name_missing' };
-  if (!/\b\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(body)) return { ok: false, reason: 'phone_missing' };
+  const phones = body.match(/\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g) || [];
+  if (!phones.some(isWavesPhone)) return { ok: false, reason: 'waves_phone_missing' };
   return { ok: true };
 }
 
@@ -508,35 +518,289 @@ function checkSourceInternalLink(draft) {
   return { ok: true };
 }
 
-// Explicit allowlist of known Waves phone numbers (last 7 digits — all
-// in the 941 area code today). Per memory: 318-7612 LWR/Bradenton,
-// 297-2817 Parrish, 297-2606 Sarasota, 297-3337 Venice, 240-2066 NP,
-// 297-5749 main (PC + Palmetto). Anything not on the list is treated
-// as customer PII regardless of area code.
-const WAVES_PHONE_LAST_SEVEN = new Set([
-  '3187612', '2972817', '2972606', '2973337', '2402066', '2975749',
+// Single-sourced from waves-phones.js (shared with seo-completion-gate and
+// content-guardrails' tel: destination check) — the per-file copies had
+// already drifted once (last-7 vs full-10 keys).
+const { isWavesPhone } = require('./waves-phones');
+
+// Waves' own office street addresses (config/locations.js) are legitimate
+// city-service NAP furniture — strip them before the PII address scan so
+// the business's own address can never hard-fail the redaction gate.
+function stripWavesOfficeAddresses(text) {
+  let out = String(text || '');
+  try {
+    const { WAVES_LOCATIONS } = require('../../config/locations');
+    for (const loc of WAVES_LOCATIONS || []) {
+      const street = String(loc?.address || '').split(',')[0].trim(); // street portion
+      if (!street) continue;
+      // Strip the BASE street (unit/suite marker removed): valid NAP copy
+      // may write "13649 Luxe Ave" without the "#110", and the base form is
+      // a substring of the full form, so one replacement covers both (a
+      // leftover " #110" fragment doesn't match the address pattern).
+      const base = street.split(/\s+(?:#|Ste\.?\b|Suite\b|Unit\b)/i)[0].trim() || street;
+      const re = new RegExp(base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'gi');
+      out = out.replace(re, '[waves-office]');
+    }
+  } catch { /* locations unavailable — scan unstripped (more conservative) */ }
+  return out;
+}
+
+// Title-case vocabulary that generated STRUCTURAL headings are built from —
+// question/marketing words plus home/lawn/treatment nouns. A capitalized
+// pair in a heading blocks as a customer name only when NEITHER token is
+// structural and the redactor's own allowlists (brand, staff, pests,
+// cities, all-caps, city bigrams via looksLikeFalsePositiveName) don't
+// clear it. This narrows the old blanket heading-name exemption ("## John
+// Smith" must block) without resurrecting the round-9 false positives
+// ("## Why Choose Waves Pest Control" reads as a name pair otherwise).
+// Fail-closed bias: an unlisted vocabulary word in a heading pair parks the
+// draft for human review — cheap next to a published customer name.
+// NO surname-shaped singles: a word that is both domain vocabulary and a
+// real surname ('Brown', 'Carpenter', 'Wood', 'Day', 'Bond', 'Love',
+// 'Summer', 'Winter') must NOT be listed here — the pair scan skips a pair
+// when EITHER token is structural, so a structural 'Brown' waves
+// "## James Brown" through. Those words are cleared pair-scoped instead,
+// via the redactor's DOMAIN_TERM_PAIRS ("Brown Patch" clears, "James
+// Brown" blocks) inside looksLikeFalsePositiveName.
+const STRUCTURAL_HEADING_WORDS = new Set([
+  'Why', 'Choose', 'Choosing', 'Our', 'Your', 'The', 'How', 'What', 'When',
+  'Where', 'Which', 'Who', 'Guide', 'Complete', 'Ultimate', 'Process',
+  'Tips', 'Signs', 'Cost', 'Costs', 'Pricing', 'Price', 'Service',
+  'Services', 'Serving', 'Treatment', 'Treatments', 'Prevention', 'Prevent',
+  'Preventing', 'Benefits', 'Common', 'Questions', 'Question', 'Frequently',
+  'Asked', 'Near', 'Best', 'Top', 'Versus', 'Vs', 'Plan', 'Plans', 'Options',
+  'Option', 'Works', 'Safe', 'Safety', 'Kids', 'Pets', 'Home', 'Homes',
+  'House', 'Yard', 'Garden', 'Free', 'Get', 'Getting', 'Avoid', 'Identify',
+  'Identifying', 'Remove', 'Removing', 'Removal', 'Stop', 'Keep', 'Keeping',
+  'Protect', 'Protecting', 'About', 'Contact', 'Visit', 'Areas', 'Area',
+  'Local', 'Professional', 'Expert', 'Experts', 'Year', 'Round', 'Season',
+  'Seasonal', 'Spring', 'Fall', 'Every', 'Homeowner',
+  'Homeowners', 'Need', 'Needs', 'Know', 'Should', 'Right', 'Now', 'Today',
+  'Emergency', 'Same', 'Inspection', 'Inspections', 'Estimate',
+  'Estimates', 'Quote', 'Quotes', 'Schedule', 'Book', 'Booking', 'Call',
+  'Bed', 'Bug', 'Bugs', 'Heat', 'Damage', 'Repair', 'Explained',
+  'Checklist', 'Myths', 'Facts', 'Natural', 'Chemical', 'Baits', 'Traps',
+  'Spray', 'Spraying', 'Granules', 'Fertilizer', 'Weed', 'Weeds', 'Grass',
+  'Sod', 'Turf', 'Soil', 'Patch', 'Grub', 'Grubs', 'Chinch',
+  'Fire', 'Ghost', 'Sugar', 'Flea', 'Fleas', 'Tick', 'Ticks',
+  'Silverfish', 'Earwig', 'Earwigs', 'Millipede', 'Millipedes', 'Fly',
+  'Flies', 'Gnat', 'Gnats', 'Mole', 'Cricket', 'Crickets', 'Sentricon',
+  'Warranty', 'Coverage', 'Covered', 'Included', 'Includes',
+  // Function words + common heading vocabulary — needed because the pair
+  // scan runs on CASE-NORMALIZED heading text (see below), which promotes
+  // every lowercase word to a pair candidate ("in", "to", "ants").
+  'In', 'On', 'At', 'To', 'Of', 'For', 'And', 'Or', 'But', 'It', 'Is',
+  'Are', 'Be', 'Do', 'Does', 'Did', 'Can', 'Could', 'Will', 'Would',
+  'May', 'Might', 'You', 'We', 'They', 'My', 'Me', 'Us', 'This', 'That',
+  'These', 'Those', 'There', 'Here', 'With', 'Without', 'From', 'Into',
+  'Over', 'Under', 'After', 'Before', 'During', 'Between', 'Against',
+  'More', 'Most', 'Less', 'Very', 'Much', 'Many', 'Few', 'Some', 'Any',
+  'All', 'No', 'Not', 'So', 'Than', 'Then', 'If', 'As', 'By', 'Up',
+  'Down', 'Out', 'Off', 'New', 'Old', 'Long', 'Short', 'High', 'Low',
+  'Good', 'Bad', 'Easy', 'Hard', 'Fast', 'Slow', 'First', 'Last', 'Next',
+  'Ants', 'Roaches', 'Cockroach', 'Cockroaches', 'Spiders', 'Termites',
+  'Rodents', 'Mosquitoes', 'Wasps', 'Bees', 'Rats', 'Mice', 'Rat',
+  'Mouse', 'Snakes', 'Snake', 'Lizards', 'Lizard', 'Beetles', 'Beetle',
+  'Kitchen', 'Bathroom', 'Bedroom', 'Garage', 'Attic', 'Cabinets',
+  'Walls', 'Windows', 'Doors', 'Baseboards', 'Lanai', 'Pool', 'Patio',
+  'Deck', 'Fence', 'Roof', 'Eaves', 'Soffit', 'Foundation', 'Slab',
+  'Mulch', 'Trees', 'Shrubs', 'Plants', 'Hate', 'Hide',
+  'Hiding', 'Bite', 'Bites', 'Biting', 'Sting', 'Stings', 'Swarm',
+  'Swarming', 'Swarmers', 'Nest', 'Nesting', 'Nests', 'Eat', 'Eating',
+  'Come', 'Coming', 'Back', 'Return', 'Returning', 'Live', 'Living',
+  'Look', 'Looks', 'Like', 'Mean', 'Means', 'Work', 'Working', 'Find',
+  'Finding', 'See', 'Seeing', 'Smell', 'Smells', 'Sound', 'Sounds',
+  'Cause', 'Causes', 'Causing', 'Damp', 'Wet', 'Dry', 'Dark', 'Warm',
+  'Cold', 'Rain', 'Rainy', 'Storm', 'Storms', 'Water', 'Food', 'Trash',
 ]);
+
+// The one heading-scan exception the redactor's name heuristic needs: find a
+// First+Last-shaped pair that survives BOTH the structural vocabulary above
+// and the redactor's own false-positive filters. Case-NORMALIZED first —
+// customer-derived headings from SMS/voice transcripts are frequently
+// lowercase ("## john smith"), and a Title-Case-only pair scan was blind to
+// exactly the text the transcripts produce. Normalizing every word to
+// Title Case makes lowercase words pair candidates too; the expanded
+// structural vocabulary + allowlists absorb ordinary heading prose, and an
+// unlisted pair parks the draft for review (fail-closed by design).
+// Returns the offending pair or null.
+function headingCustomerNamePair(headingText) {
+  let looksLikeFalsePositiveName;
+  try {
+    ({ looksLikeFalsePositiveName } = require('./pii-redactor')._internals);
+  } catch {
+    // Redactor unavailable — caller's outer try/catch fails the gate closed.
+    throw new Error('pii-redactor unavailable for heading name scan');
+  }
+  const normalized = String(headingText || '').replace(/\b[a-z]/g, (ch) => ch.toUpperCase());
+  const pairRe = /\b([A-Z][a-z]{1,15})\s+([A-Z][a-z]{1,20})\b/g;
+  let m;
+  while ((m = pairRe.exec(normalized)) !== null) {
+    const [, first, last] = m;
+    // OVERLAPPING scan: resume from after the FIRST token, not after the
+    // whole match — a non-overlapping pass consumes "About John" and never
+    // evaluates "John Smith" ("## about john smith…" sailed through).
+    pairRe.lastIndex = m.index + first.length;
+    if (STRUCTURAL_HEADING_WORDS.has(first) || STRUCTURAL_HEADING_WORDS.has(last)) continue;
+    if (looksLikeFalsePositiveName(first, last)) continue;
+    return `${first} ${last}`;
+  }
+  return null;
+}
 
 function checkRedactionPassed(draft) {
   const body = String(draft.body || '');
-  // Broad phone regex covers both `941-555-1234` and `(941) 555-1234`
-  // (and a few common variants). Previous regex missed parenthesized
-  // formats, which let parenthesized customer numbers bypass the
-  // redaction hard check entirely.
-  const phoneRe = /\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
-  const phoneMatches = body.match(phoneRe) || [];
-  for (const raw of phoneMatches) {
-    const digits = raw.replace(/\D/g, '');
-    // Normalize to last 10 digits (drops a leading 1).
-    const last10 = digits.length >= 10 ? digits.slice(-10) : null;
-    if (!last10) return { ok: false, reason: 'malformed_phone_number_in_body' };
-    const last7 = last10.slice(-7);
-    if (!WAVES_PHONE_LAST_SEVEN.has(last7)) {
-      return { ok: false, reason: `non_business_phone_number_in_body:${last10}` };
+  // Broad phone regex covers `941-555-1234`, `(941) 555-1234`, and compact
+  // 11-digit / E.164 forms (`+19415551234`, `19415551234`) — the earlier
+  // 10-digit-only pattern could not match an 11-digit run (no interior
+  // word boundary), so a customer number pasted in E.164 form sailed
+  // through. The digit lookbehind keeps mid-run starts out, so long
+  // numeric IDs still don't false-match.
+  // The CORE number is captured separately from an optional attached
+  // extension (`x99`, `ext. 4`): the trailing \b cannot sit between a digit
+  // and an `x` (both word chars), so `212-555-1234x99` previously matched
+  // nothing at all — and extension digits must not pollute the last-10
+  // comparison against the Waves allowlist.
+  const phoneRe = /(?<!\d)(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?\b/gi;
+  const scanPhones = (text, where) => {
+    const re = new RegExp(phoneRe.source, phoneRe.flags);
+    let pm;
+    while ((pm = re.exec(text)) !== null) {
+      const digits = pm[1].replace(/\D/g, '');
+      const last10 = digits.length >= 10 ? digits.slice(-10) : null;
+      if (!last10) return { ok: false, reason: `malformed_phone_number_in_${where}` };
+      // isWavesPhone, not the core-office set: spoke/refresh copy legitimately
+      // carries domain/GBP tracking lines, which are Waves' own numbers too.
+      if (!isWavesPhone(last10)) {
+        return { ok: false, reason: `non_business_phone_number_in_${where}:${last10}` };
+      }
     }
-  }
-  if (/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/.test(body)) {
+    return null;
+  };
+  const bodyPhoneHit = scanPhones(body, 'body');
+  if (bodyPhoneHit) return bodyPhoneHit;
+  // Waves' own addresses are legitimate page furniture (city-service NAP
+  // blocks carry info@wavespestcontrol.com); every other email is customer
+  // PII. The previous any-email hard fail false-positived the business's
+  // own contact line.
+  const emails = body.match(/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/g) || [];
+  if (emails.some((e) => !e.toLowerCase().endsWith('@wavespestcontrol.com'))) {
     return { ok: false, reason: 'email_in_body' };
+  }
+  // Names + street addresses via the pii-redactor's own patterns — phones
+  // and emails alone left exactly the gap this hard check exists to close:
+  // customer-derived local proof like "John Smith at 4867 Maple Street"
+  // sailed through. Waves' own office addresses (NAP furniture) are
+  // stripped first so they can never hard-fail the gate; the redactor's
+  // staff/place allowlist handles team names. ZIP findings are deliberately
+  // NOT failed — "Venice, FL 34285" is service-area furniture, and a
+  // customer ZIP only identifies anyone alongside an address, which fails
+  // on its own.
+  try {
+    const { redact } = require('./pii-redactor');
+    // Which redactor finding types BLOCK here: every structured PII type
+    // except the ones with a deliberate reason not to —
+    //   phone/email: already validated ABOVE with the Waves allowlists
+    //     (isWavesPhone / @wavespestcontrol.com); the redactor's own
+    //     phone/email findings carry NO allowlist, so blocking on them
+    //     would hard-fail the business's own contact lines.
+    //   zip: "Venice, FL 34285" is service-area furniture; a customer ZIP
+    //     only identifies anyone alongside an address, which fails itself.
+    //   url: link policy is owned end-to-end by the outbound-link gate in
+    //     content-guardrails (scheme/host/mailto/tel validation on every
+    //     destination); a long https URL is a citation, not per-se PII.
+    // Everything else — name, address, ssn, card — is customer PII with no
+    // legitimate page-furniture form and hard-fails the publish gate.
+    const BLOCKING_PII_TYPES = new Set(['name', 'address', 'ssn', 'card']);
+    // Markdown HEADING lines are excluded from the redactor's raw NAME scan
+    // (title-case section headings like "## Why Choose Waves Pest Control"
+    // read as name pairs) but NOT from name detection altogether: a
+    // narrower heading-specific pair check (headingCustomerNamePair) blocks
+    // "## John Smith" while the structural vocabulary + redactor allowlists
+    // clear generated section headings. Objective checks apply in full:
+    // phone/email were scanned above on the whole body, and the structured
+    // scan here fails on address/ssn/card — "## John Smith at 4867 Maple
+    // Street" fails on the address before the name pair is even consulted.
+    const headingText = (body.match(/^#{1,6}\s.*$/gm) || []).join('\n');
+    if (headingText) {
+      const strippedHeadings = stripWavesOfficeAddresses(headingText);
+      const headingScan = redact(strippedHeadings);
+      const headingHit = (headingScan.findings || [])
+        .find((f) => BLOCKING_PII_TYPES.has(f.type) && f.type !== 'name');
+      if (headingHit) {
+        return { ok: false, reason: `unredacted_${headingHit.type}_in_heading` };
+      }
+      if (headingCustomerNamePair(strippedHeadings)) {
+        return { ok: false, reason: 'unredacted_name_in_heading' };
+      }
+    }
+    const scanBody = body.replace(/^#{1,6}\s.*$/gm, '');
+    const scanned = redact(stripWavesOfficeAddresses(scanBody));
+    const hit = (scanned.findings || []).find((f) => BLOCKING_PII_TYPES.has(f.type));
+    if (hit) return { ok: false, reason: `unredacted_${hit.type}_in_body` };
+    // 'low' confidence means the redactor itself says its heuristics were
+    // blind on this text (effectively all-lowercase, long unstructured
+    // runs) — "no findings" proves nothing there, so a hard publish gate
+    // must fail: a lowercase customer quote with an unredacted name
+    // reports exactly low + zero findings. Generated drafts are properly
+    // capitalized markdown and never trip this.
+    if (scanned.confidence === 'low') {
+      return { ok: false, reason: 'pii_confidence_low' };
+    }
+    // SEO FIELDS — the publisher writes title + meta_description to the
+    // public page too, so a clean body with "John Smith" or a customer
+    // phone in the frontmatter still published PII. Same checks, same
+    // allowlists. Name semantics differ BY FIELD SHAPE: titles are Title
+    // Case furniture, so they get the heading-pair check (the raw name
+    // scan reads "Chinch Bug Control" as a person) — while metas are
+    // sentence-cased prose like the body, so they get the body-style raw
+    // name scan (the heading check would case-promote every meta word and
+    // flag any unlisted adjacent pair, e.g. "straight antennae"). Objective
+    // PII (address/ssn/card, phone, email) blocks outright in both.
+    // Both casings of each field are collected — refreshes/non-blog pages
+    // preserve camelCase frontmatter (metaTitle/metaDescription, the
+    // editable-meta set content-guardrails scans) and Astro renders those
+    // too, so scanning only the snake_case names left the camelCase route
+    // unchecked. Concatenated for scanning; the `where` label stays the
+    // canonical rendered slot.
+    const fm = draft.frontmatter || {};
+    const joinFields = (...vals) => vals.filter(Boolean).map(String).join('\n');
+    const seoFields = [
+      ['title', joinFields(draft.title, fm.title, draft.metaTitle, fm.metaTitle)],
+      ['meta_description', joinFields(draft.meta_description, fm.meta_description, draft.metaDescription, fm.metaDescription)],
+    ];
+    for (const [where, raw] of seoFields) {
+      if (!raw.trim()) continue;
+      const phoneHit = scanPhones(raw, where);
+      if (phoneHit) return phoneHit;
+      const fieldEmails = raw.match(/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/g) || [];
+      if (fieldEmails.some((e) => !e.toLowerCase().endsWith('@wavespestcontrol.com'))) {
+        return { ok: false, reason: `email_in_${where}` };
+      }
+      const stripped = stripWavesOfficeAddresses(raw);
+      const fieldScan = redact(stripped);
+      const titleCased = where === 'title';
+      const fieldHit = (fieldScan.findings || [])
+        .find((f) => BLOCKING_PII_TYPES.has(f.type) && (titleCased ? f.type !== 'name' : true));
+      if (fieldHit) return { ok: false, reason: `unredacted_${fieldHit.type}_in_${where}` };
+      if (titleCased && headingCustomerNamePair(stripped)) {
+        return { ok: false, reason: `unredacted_name_in_${where}` };
+      }
+      // Prose-shaped metas get the body's low-confidence backstop too: a
+      // lowercase self-intro meta ("this is john smith ants are back")
+      // reports low confidence with ZERO findings — the redactor is saying
+      // its heuristics were blind, so "no findings" proves nothing. Titles
+      // skip this: the case-promoting heading-pair check above already
+      // covers casing-blind names there, and Title Case never trips the
+      // lowercase arms anyway.
+      if (!titleCased && fieldScan.confidence === 'low') {
+        return { ok: false, reason: `pii_confidence_low_in_${where}` };
+      }
+    }
+  } catch (err) {
+    // Redactor unavailable = we cannot prove the body is clean — this is a
+    // HARD publish gate, so fail closed rather than silently passing.
+    return { ok: false, reason: `pii_scan_unavailable:${err.message}` };
   }
   return { ok: true };
 }

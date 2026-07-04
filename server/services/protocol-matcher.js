@@ -200,11 +200,21 @@ const MATCH_RULES = [
     reason: 'ant_service',
     terms: ['ant', 'ants', 'ghost ant', 'ghost ants', 'fire ant', 'fire ants', 'carpenter ant', 'carpenter ants'],
   },
+  // Flea and tick share the pest visit-4 broadcast protocol but are separate
+  // catalog services (flea_tick is flea-only "Flea Control Service" since the
+  // 2026-07 rebrand; ticks are tick_control) — keep their match reasons split
+  // so downstream labeling never calls a tick request a flea service.
   {
     programKey: 'pest',
     visit: 4,
-    reason: 'flea_tick',
-    terms: ['flea', 'fleas', 'tick', 'ticks'],
+    reason: 'flea_service',
+    terms: ['flea', 'fleas'],
+  },
+  {
+    programKey: 'pest',
+    visit: 4,
+    reason: 'tick_service',
+    terms: ['tick', 'ticks'],
   },
   {
     programKey: 'pest',

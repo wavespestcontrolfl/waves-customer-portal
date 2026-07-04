@@ -7,7 +7,7 @@ const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
-const { formatSmsTimeRange } = require('../utils/sms-time-format');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
@@ -584,6 +584,29 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
     }
   }
   return blocks;
+}
+
+// Manufacturer re-entry interval (REI) for the products applied this visit, in
+// minutes — the most restrictive (max) across products. Returns null when no
+// applied product carries an REI so the caller keeps the service-line default.
+// Used to make the "Exterior ready in …" countdown reflect the product label
+// instead of a flat default.
+async function maxProductReentryMinutes(knex, submittedProducts = []) {
+  const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
+  if (!productIds.length) return null;
+  const rows = await knex('products_catalog')
+    .whereIn('id', productIds)
+    .select('rei_hours')
+    .catch(() => []);
+  let maxMinutes = null;
+  for (const row of rows) {
+    const hours = Number(row.rei_hours);
+    if (Number.isFinite(hours) && hours >= 0) {
+      const minutes = Math.round(hours * 60);
+      if (maxMinutes == null || minutes > maxMinutes) maxMinutes = minutes;
+    }
+  }
+  return maxMinutes;
 }
 
 async function actualProductInventoryBlocks(submittedProducts = []) {
@@ -3083,8 +3106,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // its re-entry window even when only exterior areas were chipped.
             // This is the gate: the advisory is persisted here and the report
             // build can only zero it further, never restore it.
+            // Exterior re-entry ("Ready in …") reflects the manufacturer REI of
+            // the products actually applied — the most restrictive wins — falling
+            // back to the service-line default when no product carries an REI. Kept
+            // no lower than the default so a 0-hr / "until dry" product still shows
+            // a sensible dry-down window.
+            const productReentryMin = await maxProductReentryMinutes(trx, products || []);
+            const advisoryDefaultsForVisit = productReentryMin != null
+              ? {
+                ...reportConfig.advisoryDefaults,
+                exterior_reentry_min: Math.max(
+                  Number(reportConfig.advisoryDefaults?.exterior_reentry_min) || 0,
+                  productReentryMin,
+                ),
+              }
+              : reportConfig.advisoryDefaults;
             const advisoryNormalized = buildCompletionAdvisory({
-              advisoryDefaults: reportConfig.advisoryDefaults,
+              advisoryDefaults: advisoryDefaultsForVisit,
               completionAreas,
               protocolActionScopes: reportProtocolActionScopes,
               applications: products || [],
@@ -6111,7 +6149,11 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
             .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
           const win = parseRescheduleWindow(newWindow);
-          const windowText = win.start && win.end ? `, ${formatSmsTimeRange(`${win.start}-${win.end}`)}` : '';
+          // window_text quotes the 2-hour arrival promise from the new start.
+          // win.end is the job-duration block the dispatcher sized the visits
+          // with — never the customer-facing window (see sms-time-format).
+          const arrivalRange = arrivalWindowRange(win.start);
+          const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
           try {
             const body = await renderRequiredTemplate('appointment_series_rescheduled', {
               first_name: svc.first_name || 'there',

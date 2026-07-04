@@ -252,7 +252,7 @@ describe('estimate slot weekend and expander behavior', () => {
       .toContain('route-10');
   });
 
-  test('estimate slot profile uses selected per-service treatments for combo first visit duration', () => {
+  test('estimate slot profile books the flat 60-minute default for a combo first visit', () => {
     const profile = slotAvailabilityInternals.resolveEstimateSlotProfile({
       service_interest: 'Pest Control + Lawn Care',
       estimate_data: {
@@ -271,17 +271,9 @@ describe('estimate slot weekend and expander behavior', () => {
       },
     }, { selectedFrequency: 'quarterly' });
 
-    expect(profile.durationMinutes).toBe(105);
+    expect(profile.durationMinutes).toBe(60);
     expect(profile.serviceLabel).toBe('4x Pest Control + 9x Lawn Care');
     expect(profile.services.map((svc) => svc.service)).toEqual(['pest_control', 'lawn_care']);
-  });
-
-  test('quarterly pest estimate slots default to 60 minutes', () => {
-    expect(slotAvailabilityInternals.durationForService({
-      service: 'pest_control',
-      label: 'Pest Control (Quarterly)',
-      visitsPerYear: 4,
-    })).toBe(60);
   });
 
   test('estimate slot profile honors selected v1 pricing frequency without a send snapshot', () => {
@@ -306,7 +298,7 @@ describe('estimate slot weekend and expander behavior', () => {
       },
     }, { selectedFrequency: 'monthly' });
 
-    expect(profile.durationMinutes).toBe(75);
+    expect(profile.durationMinutes).toBe(60);
     expect(profile.serviceLabel).toBe('12x Pest Control + 9x Lawn Care');
     expect(profile.services).toEqual([
       expect.objectContaining({ service: 'pest_control', visitsPerYear: 12 }),
@@ -354,7 +346,7 @@ describe('estimate slot weekend and expander behavior', () => {
 
     const profile = slotAvailabilityInternals.resolveEstimateSlotProfile(estimate, { selectedFrequency: 'premium' });
 
-    expect(profile.durationMinutes).toBe(45);
+    expect(profile.durationMinutes).toBe(60);
     expect(profile.serviceLabel).toBe('12x Lawn Care');
     expect(profile.services).toEqual([
       expect.objectContaining({ service: 'lawn_care', visitsPerYear: 12 }),
@@ -390,7 +382,7 @@ describe('estimate slot weekend and expander behavior', () => {
       },
     }, { selectedFrequency: 'basic' });
 
-    expect(profile.durationMinutes).toBe(45);
+    expect(profile.durationMinutes).toBe(60);
     expect(profile.selectedFrequency).toBe('basic');
     expect(profile.serviceLabel).toBe('4x Lawn Care');
     expect(profile.services).toEqual([
@@ -428,7 +420,7 @@ describe('estimate slot weekend and expander behavior', () => {
       },
     }, { selectedFrequency: 'quarterly' });
 
-    expect(profile.durationMinutes).toBe(105);
+    expect(profile.durationMinutes).toBe(60);
     expect(profile.serviceLabel).toBe('4x Pest Control + 9x Lawn Care');
     expect(profile.services.map((svc) => svc.service)).toEqual(['pest_control', 'lawn_care']);
   });

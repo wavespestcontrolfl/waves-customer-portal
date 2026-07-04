@@ -231,6 +231,25 @@ function validateServicePayload(data, { partial = false } = {}) {
   }
 }
 
+const numOrNull = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+
+// Cross-field pricing rules, checked on the merged row (create insert, or
+// before+update) after numeric coercion. A 'fixed' service with no positive
+// base_price silently books unpriced (call-booking-catalog requires
+// fixed && base > 0), and a literal $0 would become a real $0 charge via the
+// admin-schedule base_price fallback — so fixed requires base_price > 0.
+function assertPricingConsistency(merged) {
+  const num = numOrNull;
+  const min = num(merged.price_range_min);
+  const max = num(merged.price_range_max);
+  if (min != null && max != null && min > max) {
+    throw validationError('price_range_min cannot exceed price_range_max');
+  }
+  if (merged.pricing_type === 'fixed' && !(num(merged.base_price) > 0)) {
+    throw validationError('Fixed pricing requires a base price greater than zero');
+  }
+}
+
 /**
  * Paginated list of services with filters
  */
@@ -366,6 +385,7 @@ async function createService(data, { audit } = {}) {
   } else if (!insert.closeout_requirements_source) {
     insert.closeout_requirements_source = 'manual';
   }
+  assertPricingConsistency(insert);
 
   return db.transaction(async (trx) => {
     const [row] = await trx('services').insert(insert).returning('*');
@@ -446,6 +466,17 @@ async function updateService(id, data, { audit } = {}) {
       Object.assign(update, inferCloseoutDefaults({ ...before, ...update }, update.name || before.name));
     }
   }
+
+  // Only enforce when the update actually changes a pricing value — the
+  // admin forms submit the full form on every save, so unchanged pricing
+  // fields are always present; a pre-existing inconsistency on a legacy row
+  // must not block unrelated edits (e.g. a rename). Compare after coercion
+  // (pg returns numerics as strings, the form as numbers/'' ).
+  const pricingChanged =
+    (data.pricing_type !== undefined && update.pricing_type !== before.pricing_type)
+    || ['base_price', 'price_range_min', 'price_range_max']
+      .some((key) => data[key] !== undefined && numOrNull(update[key]) !== numOrNull(before[key]));
+  if (pricingChanged) assertPricingConsistency({ ...before, ...update });
 
   let archiveReferences = null;
   if (update.is_archived === true && before.is_archived !== true) {

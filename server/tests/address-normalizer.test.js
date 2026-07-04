@@ -1,4 +1,7 @@
-const { normalizeLeadAddress, parseRawAddress, formatAddress } = require('../utils/address-normalizer');
+const {
+  normalizeLeadAddress, parseRawAddress, formatAddress,
+  normalizeUnitLine, unitLineValueKey, splitStreetLineUnit,
+} = require('../utils/address-normalizer');
 
 describe('address normalizer', () => {
   test('splits the malformed Bill Waterman Parrish address into street/city/state/zip', () => {
@@ -239,6 +242,197 @@ describe('address normalizer', () => {
       state: 'FL',
       zip: '34236',
       fullAddress: '123 Main St Apt 4, Sarasota, FL 34236',
+    });
+  });
+
+  test('carries a dedicated unit field as line2 and into fullAddress', () => {
+    expect(normalizeLeadAddress({
+      line1: '123 Main St', line2: '4b', city: 'Sarasota', state: 'FL', zip: '34236',
+    })).toMatchObject({
+      line1: '123 Main St',
+      line2: 'Unit 4B',
+      fullAddress: '123 Main St, Unit 4B, Sarasota, FL 34236',
+    });
+  });
+
+  test('accepts the unit via the address_line2 / unit input keys', () => {
+    expect(normalizeLeadAddress({
+      line1: '123 Main St', address_line2: 'apt 4', city: 'Sarasota', zip: '34236',
+    }).line2).toBe('Apt 4');
+    expect(normalizeLeadAddress({
+      line1: '123 Main St', unit: '#12', city: 'Sarasota', zip: '34236',
+    }).line2).toBe('Unit 12');
+  });
+
+  test('a unit in both the street line and the dedicated field lands in line2, street-only line1 (codex rd6)', () => {
+    expect(normalizeLeadAddress({
+      raw: '123 Main St Apt 4 Sarasota FL 34236', line2: 'Apt 4',
+    })).toMatchObject({
+      line1: '123 Main St',
+      line2: 'Apt 4',
+      fullAddress: '123 Main St, Apt 4, Sarasota, FL 34236',
+    });
+  });
+
+  test('dedupes an inline unit by VALUE, not display text ("Apt 4" inline vs "#4" field)', () => {
+    expect(normalizeLeadAddress({
+      raw: '123 Main St Apt 4 Sarasota FL 34236', line2: '#4',
+    })).toMatchObject({
+      line1: '123 Main St',
+      line2: 'Unit 4',
+      fullAddress: '123 Main St, Unit 4, Sarasota, FL 34236',
+      unitConflict: false,
+    });
+  });
+
+  test('disagreeing inline + dedicated units raise unitConflict and never store both (codex rd9)', () => {
+    const result = normalizeLeadAddress({
+      raw: '123 Main St Apt A Sarasota FL 34236', line2: 'Apt B',
+    });
+    expect(result.unitConflict).toBe(true);
+    expect(result.line1).toBe('123 Main St Apt A');
+    expect(result.line2).toBe('');
+  });
+
+  test('line2 stays empty when no unit is provided (fullAddress unchanged)', () => {
+    const result = normalizeLeadAddress({ raw: '17394 Whiskey Crk Trl, Parrish, FL 34219, USA' });
+    expect(result.line2).toBe('');
+    expect(result.fullAddress).toBe('17394 Whiskey Crk Trl, Parrish, FL 34219');
+  });
+});
+
+describe('normalizeUnitLine', () => {
+  test('bare unit values gain a Unit designator and uppercase the token', () => {
+    expect(normalizeUnitLine('4b')).toBe('Unit 4B');
+    expect(normalizeUnitLine('302')).toBe('Unit 302');
+    expect(normalizeUnitLine('#12')).toBe('Unit 12');
+  });
+
+  test('existing designators are kept and title-cased', () => {
+    expect(normalizeUnitLine('apt 4b')).toBe('Apt 4B');
+    expect(normalizeUnitLine('SUITE 210')).toBe('Suite 210');
+    expect(normalizeUnitLine('unit 7')).toBe('Unit 7');
+  });
+
+  test('empty and whitespace-only input returns empty string', () => {
+    expect(normalizeUnitLine('')).toBe('');
+    expect(normalizeUnitLine('   ')).toBe('');
+    expect(normalizeUnitLine(null)).toBe('');
+    expect(normalizeUnitLine('#')).toBe('');
+  });
+
+  test('hashes after designators are stripped — "Apt #4" is the same unit as "#4"', () => {
+    expect(normalizeUnitLine('Apt #4')).toBe('Apt 4');
+    expect(normalizeUnitLine('Suite #210')).toBe('Suite 210');
+    expect(unitLineValueKey(normalizeUnitLine('Apt #4'))).toBe(unitLineValueKey(normalizeUnitLine('#4')));
+  });
+});
+
+describe('unitLineValueKey', () => {
+  test('drops a lone interchangeable designator so notations compare equal', () => {
+    expect(unitLineValueKey('Apt 4B')).toBe('4b');
+    expect(unitLineValueKey('Unit 4B')).toBe('4b');
+    expect(unitLineValueKey('Suite 210')).toBe('210');
+  });
+
+  test('structural designators keep their designator — Bldg 2 is not Apt 2', () => {
+    expect(unitLineValueKey('Bldg 2')).toBe('bldg 2');
+    expect(unitLineValueKey('Fl 2')).toBe('fl 2');
+    expect(unitLineValueKey('Lot 2')).toBe('lot 2');
+    expect(unitLineValueKey('Bldg 2')).not.toBe(unitLineValueKey('Apt 2'));
+  });
+
+  test('structural long/short spellings are the same door (codex rd5)', () => {
+    expect(unitLineValueKey('Building 2')).toBe(unitLineValueKey('Bldg 2'));
+    expect(unitLineValueKey('Floor 2')).toBe(unitLineValueKey('Fl 2'));
+    expect(unitLineValueKey('Space 7')).toBe(unitLineValueKey('Spc 7'));
+    expect(unitLineValueKey('Building 2 Apartment 4')).toBe(unitLineValueKey('Bldg 2 Apt 4'));
+  });
+
+  test('multi-token units keep their full shape', () => {
+    expect(unitLineValueKey('Bldg 2 Apt 4')).toBe('bldg 2 unit 4');
+    expect(unitLineValueKey('Bldg 2 Apt 4')).toBe(unitLineValueKey('Bldg 2 Unit 4'));
+    expect(unitLineValueKey('Bldg 2 Apt 4')).not.toBe(unitLineValueKey('Apt 4'));
+    expect(unitLineValueKey('Bldg 2 Apt 4')).not.toBe(unitLineValueKey('Bldg 2'));
+  });
+});
+
+describe('splitStreetLineUnit', () => {
+  test('splits a trailing designator + value pair', () => {
+    expect(splitStreetLineUnit('123 Main St Apt A')).toEqual({ street: '123 Main St', unit: 'Apt A' });
+    expect(splitStreetLineUnit('123 Main St Unit 4B')).toEqual({ street: '123 Main St', unit: 'Unit 4B' });
+  });
+
+  test('splits a trailing # token', () => {
+    expect(splitStreetLineUnit('123 Main St #4')).toEqual({ street: '123 Main St', unit: '#4' });
+  });
+
+  test('drops trailing city/state segments before splitting', () => {
+    expect(splitStreetLineUnit('123 Main St Apt A, Sarasota, FL')).toEqual({ street: '123 Main St', unit: 'Apt A' });
+  });
+
+  test('street names containing designator words stay intact', () => {
+    expect(splitStreetLineUnit('4501 Space Coast Blvd')).toEqual({ street: '4501 Space Coast Blvd', unit: '' });
+  });
+
+  test('a line that is only a unit never splits to an empty street', () => {
+    expect(splitStreetLineUnit('Apt 4')).toEqual({ street: 'Apt 4', unit: '' });
+    expect(splitStreetLineUnit('Bldg 2 Apt 4')).toEqual({ street: 'Bldg 2 Apt 4', unit: '' });
+  });
+
+  test('multi-part inline units peel fully (codex rd3)', () => {
+    expect(splitStreetLineUnit('123 Main St Bldg 2 Apt 4')).toEqual({ street: '123 Main St', unit: 'Bldg 2 Apt 4' });
+    expect(splitStreetLineUnit('123 Main St Bldg 2 #4')).toEqual({ street: '123 Main St', unit: 'Bldg 2 #4' });
+  });
+
+  test('comma-separated units are preserved, not truncated (codex rd5)', () => {
+    expect(splitStreetLineUnit('123 Main St, Apt B')).toEqual({ street: '123 Main St', unit: 'Apt B' });
+    expect(splitStreetLineUnit('123 Main St, Apt B, Sarasota, FL')).toEqual({ street: '123 Main St', unit: 'Apt B' });
+    expect(splitStreetLineUnit('123 Main St, #4')).toEqual({ street: '123 Main St', unit: '#4' });
+    // A non-unit second segment (city) stays out of the street line.
+    expect(splitStreetLineUnit('123 Main St, Sarasota')).toEqual({ street: '123 Main St', unit: '' });
+  });
+
+  test('hash units consume their designator ("Apt #4" leaves no dangling Apt)', () => {
+    expect(splitStreetLineUnit('123 Main St Apt #4')).toEqual({ street: '123 Main St', unit: 'Apt #4' });
+    expect(splitStreetLineUnit('123 Main St Suite #210')).toEqual({ street: '123 Main St', unit: 'Suite #210' });
+  });
+
+  test('a FL state+ZIP tail is not a floor unit (codex rd7)', () => {
+    expect(splitStreetLineUnit('123 Main St Sarasota FL 34236'))
+      .toEqual({ street: '123 Main St Sarasota FL 34236', unit: '' });
+    expect(splitStreetLineUnit('123 Main St, FL 34236')).toEqual({ street: '123 Main St', unit: '' });
+    expect(splitStreetLineUnit('123 Main St Sarasota FL 34236-1234').unit).toBe('');
+    // A real floor still peels.
+    expect(splitStreetLineUnit('123 Main St Fl 2')).toEqual({ street: '123 Main St', unit: 'Fl 2' });
+  });
+
+  test('consecutive comma-separated unit segments all join the unit (codex rd7)', () => {
+    expect(splitStreetLineUnit('123 Main St, Bldg 2, Apt 4'))
+      .toEqual({ street: '123 Main St', unit: 'Bldg 2 Apt 4' });
+    expect(splitStreetLineUnit('123 Main St, Bldg 2, Apt 4, Sarasota, FL'))
+      .toEqual({ street: '123 Main St', unit: 'Bldg 2 Apt 4' });
+  });
+});
+
+describe('parseRawAddress multi-part comma units (codex rd8)', () => {
+  test('consecutive unit segments join line1 — never the city', () => {
+    expect(parseRawAddress('123 Main St, Bldg 2, Apt 4, Sarasota, FL 34236')).toMatchObject({
+      line1: '123 Main St Bldg 2 Apt 4',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+    });
+  });
+
+  test('raw multi-part unit + dedicated field dedupes to street-only line1', () => {
+    expect(normalizeLeadAddress({
+      address: '123 Main St, Bldg 2, Apt 4, Sarasota, FL 34236', unit: 'Bldg 2 Apt 4',
+    })).toMatchObject({
+      line1: '123 Main St',
+      line2: 'Bldg 2 Apt 4',
+      city: 'Sarasota',
+      zip: '34236',
     });
   });
 });

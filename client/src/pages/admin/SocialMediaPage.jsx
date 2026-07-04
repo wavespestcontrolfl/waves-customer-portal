@@ -998,9 +998,14 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
             const isPendingDraft = run.status === "draft_created";
             const variants = isPendingDraft ? draftRunVariants(run) : [];
             const chosenIdx = Math.min(variantChoice[run.id] ?? 0, Math.max(0, variants.length - 1));
-            const displayImage = isPendingDraft && variants.length
-              ? variants[chosenIdx]?.imageUrl
-              : run.imageUrl;
+            const chosenVariant = isPendingDraft && variants.length ? variants[chosenIdx] : null;
+            // A published run that shipped a Reel records preview.visual.videoUrl —
+            // show the actual video in the audit row, not just the fallback still.
+            const publishedVideoUrl = !isPendingDraft ? safeHttpHref(run.preview?.visual?.videoUrl) : null;
+            const chosenIsVideo = chosenVariant ? chosenVariant.type === "video" : !!publishedVideoUrl;
+            const displayImage = chosenVariant
+              ? (chosenIsVideo ? chosenVariant.videoUrl : chosenVariant.imageUrl)
+              : (publishedVideoUrl || run.imageUrl);
             const drafts = run.preview?.drafts || {};
             const busy = acting === `approve-${run.id}` || acting === `reject-${run.id}`;
             return (
@@ -1062,7 +1067,8 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                       {variants.length > 1 && (
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
                           {variants.map((v, idx) => {
-                            const src = safeHttpHref(v?.imageUrl);
+                            const isVideo = v?.type === "video";
+                            const src = safeHttpHref(isVideo ? v?.videoUrl : v?.imageUrl);
                             if (!src) return null;
                             const selected = idx === chosenIdx;
                             return (
@@ -1079,13 +1085,36 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                                   background: "none",
                                   lineHeight: 0,
                                   opacity: selected ? 1 : 0.75,
+                                  position: "relative",
                                 }}
                               >
-                                <img
-                                  src={src}
-                                  alt={v?.conceptKey || `Variant ${idx + 1}`}
-                                  style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6 }}
-                                />
+                                {isVideo ? (
+                                  <video
+                                    src={src}
+                                    muted
+                                    playsInline
+                                    style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, pointerEvents: "none" }}
+                                  />
+                                ) : (
+                                  <img
+                                    src={src}
+                                    alt={v?.conceptKey || `Variant ${idx + 1}`}
+                                    style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6 }}
+                                  />
+                                )}
+                                {isVideo && (
+                                  <span
+                                    style={{
+                                      position: "absolute",
+                                      bottom: 4,
+                                      left: 4,
+                                      ...sBadge(`${D.heading}E6`, D.white),
+                                      lineHeight: "14px",
+                                    }}
+                                  >
+                                    ▶ REEL
+                                  </span>
+                                )}
                               </button>
                             );
                           })}
@@ -1188,20 +1217,37 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                 </div>
 
                 {safeHttpHref(displayImage) && (
-                  <a href={safeHttpHref(displayImage)} target="_blank" rel="noopener noreferrer" style={{ display: "block" }}>
-                    <img
+                  chosenIsVideo ? (
+                    <video
                       src={safeHttpHref(displayImage)}
-                      alt=""
+                      controls
+                      muted
+                      playsInline
                       style={{
                         width: "100%",
-                        aspectRatio: "1 / 1",
+                        aspectRatio: "9 / 16",
                         objectFit: "cover",
                         borderRadius: 8,
                         border: `1px solid ${D.border}`,
                         background: "#FAFAFA",
                       }}
                     />
-                  </a>
+                  ) : (
+                    <a href={safeHttpHref(displayImage)} target="_blank" rel="noopener noreferrer" style={{ display: "block" }}>
+                      <img
+                        src={safeHttpHref(displayImage)}
+                        alt=""
+                        style={{
+                          width: "100%",
+                          aspectRatio: "1 / 1",
+                          objectFit: "cover",
+                          borderRadius: 8,
+                          border: `1px solid ${D.border}`,
+                          background: "#FAFAFA",
+                        }}
+                      />
+                    </a>
+                  )
                 )}
               </div>
             );

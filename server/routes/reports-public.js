@@ -10,6 +10,7 @@ const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
+const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
@@ -138,7 +139,6 @@ const reportEventLimiter = rateLimit({
   message: { error: 'Too many report events. Please try again in a minute.' },
 });
 
-const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 const ALLOWED_REPORT_EVENTS = new Set([
   'service_report_viewed',
   'ai_summary_viewed',
@@ -310,7 +310,8 @@ async function findProjectByReportSegment(segment) {
     .leftJoin('technicians as t', 'p.created_by_tech_id', 't.id')
     .select(
       'p.*',
-      'c.first_name', 'c.last_name', 'c.city', 'c.state',
+      'c.first_name', 'c.last_name', 'c.email as customer_email', 'c.phone as customer_phone',
+      'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
       't.name as technician_name',
     );
   if (lookup.type === 'full') {
@@ -374,26 +375,19 @@ router.get('/project/:token/data', async (req, res, next) => {
       return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };
     }));
 
-    let upcomingAppointment = null;
-    const appointmentSelect = [
-      's.id',
-      's.service_type',
-      's.scheduled_date',
-      's.window_start',
-      's.window_end',
-      's.status',
-      'st.name as technician_name',
-    ];
-    const todayET = etDateString();
-    if (project.scheduled_service_id) {
-      upcomingAppointment = await db('scheduled_services as s')
-        .where({ 's.id': project.scheduled_service_id, 's.customer_id': project.customer_id })
-        .where('s.scheduled_date', '>=', todayET)
-        .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
-        .leftJoin('technicians as st', 's.technician_id', 'st.id')
-        .select(appointmentSelect)
-        .first();
-    }
+    // The report labels this "Follow-up" / "your next visit", so it must be
+    // the documented visit's own continuation — never the visit the report
+    // documents (the old bug: on the service day the linked appointment is
+    // the just-treated visit itself, so the report printed today's service
+    // as its own follow-up), and never an unrelated appointment on the
+    // customer's calendar (a shareable report token must not disclose the
+    // routine schedule). Scoping rules live in the shared helper, which the
+    // admin project detail endpoint also uses so the staff preview matches
+    // this page.
+    const upcomingAppointment = await findReportFollowupAppointment({
+      customerId: project.customer_id,
+      scheduledServiceId: project.scheduled_service_id,
+    });
 
     // WDO: serve the as-sent findings snapshot archived at send time, so the
     // public link always matches the emailed signed FDACS-13645 PDF even if
@@ -422,7 +416,22 @@ router.get('/project/:token/data', async (req, res, next) => {
       status: project.status,
       title: project.title,
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
+      // Customer email/phone for the hero contact lines — the report hero
+      // mirrors the customer estimate, which prints the recipient's own
+      // contact block under the headline. NEVER on a WDO: sendWdoReportCopies
+      // emails this same public link to the third parties named on the FDACS
+      // form (realtor/title company), and a link the system itself hands to
+      // outsiders must not carry the homeowner's direct contact details.
+      // Every other project type's link is sent to the customer only.
+      customerEmail: project.project_type === 'wdo_inspection' ? null : (project.customer_email || null),
+      customerPhone: project.project_type === 'wdo_inspection' ? null : (project.customer_phone || null),
       cityState: `${project.city || ''}${project.state ? ', ' + project.state : ''}`.trim().replace(/^,\s*/, ''),
+      // Full service address for the hero — the report page mirrors the
+      // customer estimate, which shows the street address under the headline.
+      customerAddress: [
+        [project.address_line1, project.address_line2].filter(Boolean).join(' ').trim(),
+        [project.city, [project.state, project.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+      ].filter(Boolean).join(', '),
       technicianName: project.technician_name,
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,

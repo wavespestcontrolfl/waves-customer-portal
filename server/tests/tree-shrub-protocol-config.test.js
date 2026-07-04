@@ -12,7 +12,9 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
   test('is published as the active tree and shrub program', () => {
     const program = protocols.tree_shrub;
 
-    expect(program.name).toMatch(/10\/10 SWFL Tree & Shrub Protocol/);
+    // Display name was refined to "Tree & Shrub Protocol" (#1799); the
+    // version string still pins the 10/10 SWFL program identity.
+    expect(program.name).toMatch(/Tree & Shrub Protocol/);
     expect(program.version).toBe('2026.06-swfl-tree-shrub-10');
     expect(program.visits).toHaveLength(12);
     expect(program.notes.join('\n')).toMatch(/IRAC\/FRAC/);

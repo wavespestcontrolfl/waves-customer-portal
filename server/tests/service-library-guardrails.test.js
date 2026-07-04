@@ -207,6 +207,109 @@ describe('service library guardrails', () => {
     expect(auditServiceCatalogChange).not.toHaveBeenCalled();
   });
 
+  test('rejects creating a fixed-price service without a positive base price', async () => {
+    mockServiceDb();
+
+    await expect(serviceLibrary.createService({
+      name: 'Fixed No Price',
+      pricing_type: 'fixed',
+    })).rejects.toMatchObject({
+      status: 400,
+      message: 'Fixed pricing requires a base price greater than zero',
+    });
+
+    await expect(serviceLibrary.createService({
+      name: 'Fixed Zero Price',
+      pricing_type: 'fixed',
+      base_price: 0,
+    })).rejects.toMatchObject({ status: 400 });
+
+    expect(auditServiceCatalogChange).not.toHaveBeenCalled();
+  });
+
+  test('rejects an inverted price range on create', async () => {
+    mockServiceDb();
+
+    await expect(serviceLibrary.createService({
+      name: 'Inverted Range',
+      pricing_type: 'variable',
+      price_range_min: 200,
+      price_range_max: 100,
+    })).rejects.toMatchObject({
+      status: 400,
+      message: 'price_range_min cannot exceed price_range_max',
+    });
+  });
+
+  test('rejects switching a priceless service to fixed pricing', async () => {
+    mockServiceDb({ before: serviceRow({ pricing_type: 'variable', base_price: null }) });
+
+    await expect(serviceLibrary.updateService('service-1', { pricing_type: 'fixed' }))
+      .rejects.toMatchObject({
+        status: 400,
+        message: 'Fixed pricing requires a base price greater than zero',
+      });
+
+    expect(auditServiceCatalogChange).not.toHaveBeenCalled();
+  });
+
+  test('rejects clearing the base price of a fixed-price service', async () => {
+    mockServiceDb({ before: serviceRow({ pricing_type: 'fixed', base_price: '150' }) });
+
+    await expect(serviceLibrary.updateService('service-1', { base_price: '' }))
+      .rejects.toMatchObject({ status: 400 });
+  });
+
+  test('rejects a partial update that inverts the stored price range', async () => {
+    mockServiceDb({ before: serviceRow({ pricing_type: 'variable', price_range_max: '100' }) });
+
+    await expect(serviceLibrary.updateService('service-1', { price_range_min: 200 }))
+      .rejects.toMatchObject({
+        status: 400,
+        message: 'price_range_min cannot exceed price_range_max',
+      });
+  });
+
+  test('allows non-pricing edits to a legacy row with inconsistent pricing', async () => {
+    const before = serviceRow({ pricing_type: 'fixed', base_price: null });
+    const after = serviceRow({ pricing_type: 'fixed', base_price: null, name: 'Renamed' });
+    mockServiceDb({ before, after });
+
+    await expect(serviceLibrary.updateService('service-1', { name: 'Renamed' }))
+      .resolves.toEqual(after);
+  });
+
+  test('allows a full-form save that does not change pricing values on a legacy row', async () => {
+    // The admin forms submit every field on save, including unchanged
+    // pricing (empty inputs arrive as ''), so the guard must compare
+    // values, not payload presence.
+    const before = serviceRow({ pricing_type: 'fixed', base_price: null, price_range_min: null });
+    const after = serviceRow({ pricing_type: 'fixed', base_price: null, name: 'Renamed' });
+    mockServiceDb({ before, after });
+
+    await expect(serviceLibrary.updateService('service-1', {
+      name: 'Renamed',
+      pricing_type: 'fixed',
+      base_price: '',
+      price_range_min: '',
+      price_range_max: '',
+    })).resolves.toEqual(after);
+  });
+
+  test('still rejects when a full-form save changes pricing on an inconsistent row', async () => {
+    const before = serviceRow({ pricing_type: 'variable', base_price: null });
+    mockServiceDb({ before });
+
+    await expect(serviceLibrary.updateService('service-1', {
+      name: 'Renamed',
+      pricing_type: 'fixed',
+      base_price: '',
+    })).rejects.toMatchObject({
+      status: 400,
+      message: 'Fixed pricing requires a base price greater than zero',
+    });
+  });
+
   test('archives and audits services with no blocking references', async () => {
     const before = serviceRow();
     const after = serviceRow({ is_active: false, is_archived: true });

@@ -290,3 +290,134 @@ describe('social content studio', () => {
     expect(Studio.normalizePublishMode(undefined, 'draft')).toBe('draft');  // unset → fallback
   });
 });
+
+describe('assessApprovalPublish (approval retry semantics)', () => {
+  const CHANNELS = ['gbp', 'facebook', 'instagram'];
+
+  test('image approval: any platform success is complete (unchanged rule)', () => {
+    const a = Studio.assessApprovalPublish({
+      isVideoVariant: false,
+      channels: CHANNELS,
+      priorPlatforms: [],
+      current: { success: true, platforms: [{ platform: 'gbp', location: 'sarasota', success: true }] },
+    });
+    expect(a.complete).toBe(true);
+  });
+
+  test('video approval: GBP-only success does not finalize (no video posted)', () => {
+    const a = Studio.assessApprovalPublish({
+      isVideoVariant: true,
+      channels: CHANNELS,
+      priorPlatforms: [],
+      current: {
+        success: true,
+        platforms: [
+          { platform: 'gbp', location: 'sarasota', success: true },
+          { platform: 'facebook', success: false, error: 'video API 500' },
+          { platform: 'instagram', success: false, error: 'container timeout' },
+        ],
+      },
+    });
+    expect(a.videoPosted).toBe(false);
+    expect(a.complete).toBe(false);
+  });
+
+  test('video approval: FB video posted but IG failed stays incomplete (retryable for IG)', () => {
+    const a = Studio.assessApprovalPublish({
+      isVideoVariant: true,
+      channels: CHANNELS,
+      priorPlatforms: [],
+      current: {
+        success: true,
+        platforms: [
+          { platform: 'facebook', success: true, mediaType: 'video' },
+          { platform: 'instagram', success: false, error: 'container timeout' },
+        ],
+      },
+    });
+    expect(a.videoPosted).toBe(true);
+    expect(a.videoBlocked).toBe(true);
+    expect(a.complete).toBe(false);
+  });
+
+  test('video approval: a SKIPPED (unconfigured) Meta channel does not block', () => {
+    const a = Studio.assessApprovalPublish({
+      isVideoVariant: true,
+      channels: CHANNELS,
+      priorPlatforms: [],
+      current: {
+        success: true,
+        platforms: [
+          { platform: 'facebook', success: true, mediaType: 'video' },
+          { platform: 'instagram', skipped: 'Disabled' },
+        ],
+      },
+    });
+    expect(a.complete).toBe(true);
+  });
+
+  test('retry merge: prior FB video success + current IG Reel success completes', () => {
+    const a = Studio.assessApprovalPublish({
+      isVideoVariant: true,
+      channels: CHANNELS,
+      priorPlatforms: [
+        { platform: 'facebook', success: true, mediaType: 'video' },
+        { platform: 'instagram', success: false, error: 'container timeout' },
+        { platform: 'gbp', location: 'sarasota', success: true },
+      ],
+      current: { success: true, platforms: [{ platform: 'instagram', success: true, mediaType: 'reel' }] },
+    });
+    expect(a.complete).toBe(true);
+    // merged record carries the prior successes plus this attempt
+    const merged = a.mergedPublishResult.platforms;
+    expect(merged.filter((p) => p.success)).toHaveLength(3);
+    // prior FAILURES are not re-recorded (only successes carry forward)
+    expect(merged.some((p) => p.error === 'container timeout')).toBe(false);
+  });
+
+  test('prior dry-run entries never count as posted', () => {
+    const a = Studio.assessApprovalPublish({
+      isVideoVariant: true,
+      channels: CHANNELS,
+      priorPlatforms: [
+        { platform: 'facebook', success: false, dryRun: true },
+        { platform: 'instagram', success: false, dryRun: true },
+      ],
+      current: { success: false, platforms: [] },
+    });
+    expect(a.success).toBe(false);
+    expect(a.complete).toBe(false);
+  });
+});
+
+describe('assessApprovalPublish (round 5: unresolved channels block)', () => {
+  const CHANNELS = ['gbp', 'facebook', 'instagram'];
+
+  test('a global-skip retry (automation paused) cannot finalize a half-posted video', () => {
+    const a = Studio.assessApprovalPublish({
+      isVideoVariant: true,
+      channels: CHANNELS,
+      priorPlatforms: [
+        { platform: 'facebook', success: true, mediaType: 'video' },
+        { platform: 'instagram', success: false, error: 'container timeout' },
+      ],
+      // publishToAll under a paused/disabled gate returns ONE global row —
+      // no per-channel entries — and prior failures are not carried forward.
+      current: { success: false, platforms: [{ platform: 'all', skipped: 'Automation is paused' }] },
+    });
+    expect(a.success).toBe(true); // the FB video is genuinely live
+    expect(a.videoPosted).toBe(true);
+    expect(a.videoBlocked).toBe(true); // instagram is unresolved, not skipped
+    expect(a.complete).toBe(false);
+  });
+
+  test('a requested Meta channel with no entry at all keeps the run retryable', () => {
+    const a = Studio.assessApprovalPublish({
+      isVideoVariant: true,
+      channels: CHANNELS,
+      priorPlatforms: [{ platform: 'facebook', success: true, mediaType: 'video' }],
+      current: { success: false, platforms: [] },
+    });
+    expect(a.complete).toBe(false);
+  });
+});

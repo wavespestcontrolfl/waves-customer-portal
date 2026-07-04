@@ -113,23 +113,16 @@ const CHIP_OBSERVATIONS_PEST = [
   "Customer concern discussed",
 ];
 const CHIP_OBSERVATIONS_LAWN = [
-  "Pest activity noted",
+  "Lawn stress/dry patches",
   "Standing water found",
   "Irrigation issue",
-  "Rodent signs",
-  "Lawn stress/dry patches",
-  "Fungus visible",
+  "Fungus/disease visible",
   "Weeds spreading",
+  "Lawn pest activity (chinch/armyworm/grubs)",
+  "Thinning/bare areas",
+  "Scalping/mowing damage",
   "Property access issue",
   "Customer concern discussed",
-  "Debris in gutters",
-  "Ant trails observed",
-  "Roach activity (live/dead)",
-  "Spider webs/egg sacs",
-  "Wasp/bee nests found",
-  "Moisture/conducive conditions",
-  "Entry points identified",
-  "Conducive vegetation against structure",
 ];
 const CHIP_OBSERVATIONS_TREE_SHRUB = [
   "Scale insects present",
@@ -155,9 +148,8 @@ const CHIP_RECOMMENDATIONS_PEST = [
 const CHIP_RECOMMENDATIONS_LAWN = [
   "Callback recommended",
   "Irrigation adjustment needed",
+  "Raise mowing height",
   "Follow-up in 2 weeks",
-  "Schedule interior next visit",
-  "Bait station replacement",
   "Customer wants estimate",
 ];
 const CHIP_RECOMMENDATIONS_TREE_SHRUB = [
@@ -383,7 +375,7 @@ const AREAS_BY_SERVICE = {
   lawn: [
     "Front yard",
     "Back yard",
-    "Side yard",
+    "Side yards",
   ],
   universal: [
     "No issues found",
@@ -5176,12 +5168,16 @@ function TypedFindingsSection({
   );
 }
 
+// The four scores the tech reviews/adjusts, matching the customer report's
+// consolidated diagnosis (Density / Weeds / Color / Stress-Damage). The AI still
+// assesses the underlying fungus/thatch/insect/drought/mechanical signals — those
+// stay on the assessment row for analytics + folding into stress_damage — but the
+// tech now corrects one "Stress" score directly instead of separate Fungus/Thatch.
 const LAWN_ASSESSMENT_METRICS = [
   { key: "turf_density", label: "Density" },
   { key: "weed_suppression", label: "Weeds" },
   { key: "color_health", label: "Color" },
-  { key: "fungus_control", label: "Fungus" },
-  { key: "thatch_level", label: "Thatch" },
+  { key: "stress_damage", label: "Stress" },
 ];
 
 const LAWN_STRESS_FLAGS = [
@@ -5249,13 +5245,24 @@ function readLawnAssessmentPhoto(file) {
 }
 
 function parseAssessmentScores(row = {}) {
-  return {
-    turf_density: row.turf_density ?? row.turfDensity ?? 0,
-    weed_suppression: row.weed_suppression ?? row.weedSuppression ?? 0,
-    color_health: row.color_health ?? row.colorHealth ?? 0,
-    fungus_control: row.fungus_control ?? row.fungusControl ?? 0,
-    thatch_level: row.thatch_level ?? row.thatchLevel ?? 0,
-  };
+  const turf_density = row.turf_density ?? row.turfDensity ?? 0;
+  const weed_suppression = row.weed_suppression ?? row.weedSuppression ?? 0;
+  const color_health = row.color_health ?? row.colorHealth ?? 0;
+  // Kept (not shown as chips) so a re-confirm preserves the AI values; the tech
+  // now corrects stress_damage directly instead of these two.
+  const fungus_control = row.fungus_control ?? row.fungusControl ?? 0;
+  const thatch_level = row.thatch_level ?? row.thatchLevel ?? 0;
+  // Legacy assessments (created before the stress_damage column) have a null
+  // stress_damage. Coercing that to 0 would make a plain re-confirm POST
+  // stress_damage: 0, which /confirm treats as an explicit "push Stress to 0"
+  // override and persists an artificially low score. Instead derive it exactly the
+  // way the server's confirm fallback does — min(fungus, thatch, AI-floor) with the
+  // legacy 95 floor — so posting the seeded chip value is a no-op, not an override.
+  const rawStress = row.stress_damage ?? row.stressDamage;
+  const stress_damage = rawStress != null
+    ? rawStress
+    : Math.min(Number(fungus_control) || 0, Number(thatch_level) || 0, 95);
+  return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
 }
 
 function parseStressFlags(value) {
@@ -5312,6 +5319,9 @@ function LawnAssessmentCompletionBlock({
   // documents. Stored on the same shared turf-height state.
   gaugeHeightIn = null,
   onGaugeHeight,
+  // The tech's free-text visit notes (owned by CompletionPanel) — passed through
+  // so the AI photo analysis can factor them in alongside the images.
+  technicianNotes = "",
 }) {
   const [photos, setPhotos] = useState([]);
   const [result, setResult] = useState(null);
@@ -5321,8 +5331,6 @@ function LawnAssessmentCompletionBlock({
     EMPTY_PROTOCOL_FIELD_CHECKS,
   );
   const [confirmedId, setConfirmedId] = useState(null);
-  const [snapshotReview, setSnapshotReview] = useState(null);
-  const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -5348,7 +5356,6 @@ function LawnAssessmentCompletionBlock({
     setStressFlags(EMPTY_LAWN_STRESS_FLAGS);
     setProtocolFieldChecks(EMPTY_PROTOCOL_FIELD_CHECKS);
     setConfirmedId(null);
-    setSnapshotReview(null);
     setError("");
     onConfirmed?.(null);
     if (!service?.id) return () => { cancelled = true; };
@@ -5374,7 +5381,6 @@ function LawnAssessmentCompletionBlock({
         if (assessment.confirmed_by_tech) {
           setConfirmedId(assessment.id);
           onConfirmed?.(assessment.id);
-          loadSnapshotReview(assessment.id);
         }
       })
       .catch(() => {})
@@ -5386,49 +5392,6 @@ function LawnAssessmentCompletionBlock({
       cancelled = true;
     };
   }, [service?.id]);
-
-  async function loadSnapshotReview(assessmentId) {
-    if (!assessmentId) return;
-    setSnapshotLoading(true);
-    try {
-      const data = await adminFetch(`/admin/lawn-assessment/${assessmentId}/snapshot`);
-      setSnapshotReview(data);
-    } catch {
-      setSnapshotReview(null);
-    } finally {
-      setSnapshotLoading(false);
-    }
-  }
-
-  async function patchSnapshot(snapshotId, body) {
-    if (!snapshotId || !confirmedId) return;
-    setSnapshotLoading(true);
-    try {
-      await adminFetch(`/admin/lawn-assessment/snapshots/${snapshotId}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      });
-      await loadSnapshotReview(confirmedId);
-    } catch (err) {
-      setError(err.message || "Snapshot update failed");
-      setSnapshotLoading(false);
-    }
-  }
-
-  async function patchRecommendation(recommendationId, body) {
-    if (!recommendationId || !confirmedId) return;
-    setSnapshotLoading(true);
-    try {
-      await adminFetch(`/admin/lawn-assessment/recommendations/${recommendationId}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      });
-      await loadSnapshotReview(confirmedId);
-    } catch (err) {
-      setError(err.message || "Recommendation update failed");
-      setSnapshotLoading(false);
-    }
-  }
 
   async function addPhotos(event) {
     const files = Array.from(event.target.files || []);
@@ -5473,6 +5436,9 @@ function LawnAssessmentCompletionBlock({
             data: photo.data.split(",")[1],
             mimeType: photo.mimeType || "image/jpeg",
           })),
+          // Extra context for the vision model (see buildVisionPrompt server-side).
+          turfHeightIn: gaugeHeightIn,
+          technicianNotes,
         }),
       });
       if (response.success === false) {
@@ -5517,7 +5483,6 @@ function LawnAssessmentCompletionBlock({
       const assessmentId = response?.assessment?.id || result.assessment.id;
       setConfirmedId(assessmentId);
       onConfirmed?.(assessmentId);
-      await loadSnapshotReview(assessmentId);
     } catch (err) {
       setError(err.message || "Confirm failed");
     } finally {
@@ -5690,7 +5655,7 @@ function LawnAssessmentCompletionBlock({
       )}
       {hasResult && (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 6 }}>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
             {LAWN_ASSESSMENT_METRICS.map((metric) => {
               const value = Number(scoreSource?.[metric.key] || 0);
               return (
@@ -5897,7 +5862,6 @@ function LawnAssessmentCompletionBlock({
                 setTechScores(null);
                 setProtocolFieldChecks(EMPTY_PROTOCOL_FIELD_CHECKS);
                 setConfirmedId(null);
-                setSnapshotReview(null);
                 setError("");
                 onConfirmed?.(null);
               }}
@@ -5920,96 +5884,10 @@ function LawnAssessmentCompletionBlock({
           </div>
         </>
       )}
-      {(snapshotLoading || snapshotReview?.snapshot) && (
-        <ScheduleLawnSnapshotReview
-          review={snapshotReview}
-          loading={snapshotLoading}
-          onSnapshotAction={patchSnapshot}
-          onRecommendationAction={patchRecommendation}
-        />
-      )}
       {error && <div style={{ fontSize: 12, color: D.red, lineHeight: 1.45 }}>{error}</div>}
     </div>
   );
 }
-
-function ScheduleLawnSnapshotReview({ review, loading, onSnapshotAction, onRecommendationAction }) {
-  const snapshot = review?.snapshot;
-  const cards = review?.recommendationCards || [];
-  if (loading && !snapshot) {
-    return <div style={{ fontSize: 12, color: D.muted }}>Loading snapshot review...</div>;
-  }
-  if (!snapshot) return null;
-
-  return (
-    <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: D.white }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 800, color: D.heading }}>Customer snapshot</div>
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-            {snapshot.status} · {snapshot.customer_visible ? "Customer visible" : "Internal only"}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <button type="button" onClick={() => onSnapshotAction(snapshot.id, { approve: true })} style={miniOutlineButton}>
-            Approve
-          </button>
-          <button type="button" onClick={() => onSnapshotAction(snapshot.id, { customer_visible: true })} style={miniOutlineButton}>
-            Show
-          </button>
-          <button type="button" onClick={() => onSnapshotAction(snapshot.id, { hide: true })} style={{ ...miniOutlineButton, color: D.red }}>
-            Hide
-          </button>
-        </div>
-      </div>
-      <div style={{ fontSize: 12, color: D.text, lineHeight: 1.45, marginTop: 8 }}>
-        {snapshot.summary_customer}
-      </div>
-      {cards.length > 0 && (
-        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
-          {cards.map((card) => (
-            <div key={card.id} style={{ borderTop: `1px solid ${D.border}`, paddingTop: 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>{card.title}</div>
-              <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                {card.status} · {card.customer_visible ? "Customer visible" : "Internal only"}
-              </div>
-              {card.performance && (
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
-                  Shown {card.performance.counts?.recommendation_shown || card.performance.counts?.shown || 0}
-                  {" · "}Clicked {card.performance.counts?.recommendation_clicked || card.performance.counts?.clicked || 0}
-                  {" · "}CTR {Number.isFinite(Number(card.performance.clickThroughRate)) ? `${Math.round(Number(card.performance.clickThroughRate) * 100)}%` : "—"}
-                </div>
-              )}
-              <div style={{ display: "flex", gap: 5, marginTop: 6, flexWrap: "wrap" }}>
-                <button type="button" onClick={() => onRecommendationAction(card.id, { approve: true })} style={miniOutlineButton}>
-                  Approve
-                </button>
-                <button type="button" onClick={() => onRecommendationAction(card.id, { customer_visible: true })} style={miniOutlineButton}>
-                  Show
-                </button>
-                <button type="button" onClick={() => onRecommendationAction(card.id, { dismiss: true })} style={{ ...miniOutlineButton, color: D.red }}>
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const miniOutlineButton = {
-  height: 28,
-  padding: "0 8px",
-  borderRadius: 6,
-  border: `1px solid ${D.border}`,
-  background: D.white,
-  color: D.text,
-  fontSize: 11,
-  fontWeight: 800,
-  cursor: "pointer",
-};
 
 const scoreButtonStyle = {
   width: 24,
@@ -7097,11 +6975,9 @@ export function CompletionPanel({
   );
   const [selectedRecommendationLabels, setSelectedRecommendationLabels] =
     useState([]);
-  const [protocolTaskStatus, setProtocolTaskStatus] = useState({});
-  const [protocolTreatedSqft, setProtocolTreatedSqft] = useState("");
   const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
     useState("");
-  const [skippedProtocolProducts, setSkippedProtocolProducts] = useState({});
+  const [treatmentPlanMixItems, setTreatmentPlanMixItems] = useState([]);
   const [officeApprovalReasonCode, setOfficeApprovalReasonCode] = useState("");
   const [officeApprovalNote, setOfficeApprovalNote] = useState("");
   const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState("");
@@ -7383,41 +7259,24 @@ export function CompletionPanel({
       .filter((sub) => sub.originalProductId)
       .map((sub) => [String(sub.originalProductId), sub]),
   );
-  const requiredProtocolTasks =
-    treatmentPlanStructuredProtocol?.window?.requiredTasks || [];
-  const missingProtocolTasks = requiredProtocolTasks.filter(
-    (task) => !protocolTaskStatus[task],
-  );
-  const protocolProductKey = (product) =>
-    product?.id || product?.productId || product?.productName;
-  const defaultProtocolProducts =
-    treatmentPlanStructuredProtocol?.products?.filter(
-      (product) => product.defaultInPlan,
-    ) || [];
-  const undispositionedDefaultProtocolProducts = defaultProtocolProducts.filter(
-    (product) => {
-      const key = protocolProductKey(product);
-      const substitution = product.productId
-        ? substitutionByOriginalProductId.get(String(product.productId))
-        : null;
-      const selected = product.productId
-        ? selectedProductIds.has(String(product.productId))
-          || (substitution?.substituteProductId && selectedProductIds.has(String(substitution.substituteProductId)))
-        : false;
-      return !selected && !skippedProtocolProducts[key];
-    },
-  );
+  // Protocol checklist / default-product disposition were removed with the
+  // read-only protocol redesign — they no longer gate completion.
   const selectedProductsMissingActualAmount = selectedProducts.filter(
     (product) =>
       !product.totalAmount ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit,
   );
+  // The protocol is now a read-only reference (mixing ratios), so the checklist
+  // and default-product-disposition no longer gate completion. Real safeguards
+  // stay: a WaveGuard lawn completion must record at least one applied product
+  // (an empty list would write a protocol completion with no actuals or
+  // inventory deductions), every applied product needs actual amounts, and
+  // inventory blocks still hold.
   const protocolActualsCompletionBlocked =
     calibrationRequired &&
     !isIncompleteVisit &&
-    (missingProtocolTasks.length > 0 ||
-      undispositionedDefaultProtocolProducts.length > 0 ||
+    (selectedProducts.length === 0 ||
       selectedProductsMissingActualAmount.length > 0 ||
       treatmentPlanInventoryBlocks.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
@@ -7516,13 +7375,11 @@ export function CompletionPanel({
     : tankCleanoutCompletionBlocked
       ? "Tank Cleanout Required"
       : protocolActualsCompletionBlocked
-        ? missingProtocolTasks.length
-          ? "Protocol Checklist Required"
+        ? !selectedProducts.length
+          ? "Products Applied Required"
           : selectedProductsMissingActualAmount.length
             ? "Product Actuals Required"
-            : treatmentPlanInventoryBlocks.length
-              ? "Inventory Blocked"
-              : "Product Disposition Required"
+            : "Inventory Blocked"
         : blackoutCompletionBlocked
           ? canApproveOfficeExceptions
             ? "Office Approval Required"
@@ -7724,26 +7581,20 @@ export function CompletionPanel({
           setEquipmentSystemId(selectedCalibration.equipment_system_id);
           setCalibrationId(selectedCalibration.id || "");
         }
-        const requiredTasks =
-          data?.plan?.closeout?.requiredProtocolTasks ||
-          data?.plan?.protocol?.structured?.window?.requiredTasks ||
-          [];
-        setProtocolTaskStatus((prev) => {
-          const next = { ...prev };
-          requiredTasks.forEach((task) => {
-            if (!(task in next)) next[task] = false;
-          });
-          return next;
-        });
-        if (!protocolTreatedSqft && data?.plan?.mixCalculator?.lawnSqft) {
-          setProtocolTreatedSqft(String(data.plan.mixCalculator.lawnSqft));
-        }
-        if (!protocolCarrierGalPer1000 && data?.plan?.mixCalculator?.carrierGalPer1000) {
-          setProtocolCarrierGalPer1000(String(data.plan.mixCalculator.carrierGalPer1000));
-        }
+        // The carrier feeds the read-only mix box, so it must track every plan
+        // fetch — equipment/calibration changes refetch with a new carrier. The
+        // old set-once-when-empty latch predates removing the carrier input;
+        // with no input left to preserve, latching would show mix amounts for
+        // the previous equipment after a calibration switch.
+        setProtocolCarrierGalPer1000(
+          data?.plan?.mixCalculator?.carrierGalPer1000
+            ? String(data.plan.mixCalculator.carrierGalPer1000)
+            : "",
+        );
         const baseItems = data?.plan?.protocol?.base || [];
         const conditionalItems = data?.plan?.protocol?.conditional || [];
         const mixItems = data?.plan?.mixCalculator?.items || [];
+        setTreatmentPlanMixItems(mixItems);
         setTreatmentPlanSubstitutions(
           mixItems.map((item) => item?.substitution).filter(Boolean),
         );
@@ -7967,7 +7818,12 @@ export function CompletionPanel({
     );
     setRecapStaleAfterEdit(false);
     setAreasServiced(
-      Array.isArray(savedDraft.areasServiced) ? savedDraft.areasServiced : [],
+      // Map the legacy singular "Side yard" to the renamed "Side yards" so a draft
+      // saved before the rename restores as the currently-rendered option (and
+      // dedupe, so re-selecting can't submit both strings). Other values pass through.
+      Array.isArray(savedDraft.areasServiced)
+        ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
+        : [],
     );
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
@@ -8430,7 +8286,16 @@ export function CompletionPanel({
         applicationArea: "",
         areaValue: "",
         areaUnit: areaRequirement?.unit || "",
-        targets: [],
+        // Prefill the targets from the manufacturer label (products_catalog
+        // target_pests) so the tech starts from what the product is labeled to
+        // control and trims rather than typing from scratch. Editable as before.
+        // Protocol-added products (addProduct(action.product)) are serialized
+        // without target_pests, so fall back to the loaded catalog row by id.
+        targets: normalizeLabelTargets(
+          product.target_pests
+            ?? product.targetPests
+            ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
+        ),
       },
     ]);
     setProductSearch("");
@@ -8486,28 +8351,6 @@ export function CompletionPanel({
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
-  }
-  function toggleProtocolTask(task) {
-    setProtocolTaskStatus((prev) => ({ ...prev, [task]: !prev[task] }));
-  }
-  function updateSkippedProtocolProduct(product, skipped, reason = "") {
-    const key = product.id || product.productId || product.productName;
-    if (!key) return;
-    setSkippedProtocolProducts((prev) => {
-      const next = { ...prev };
-      if (!skipped) {
-        delete next[key];
-        return next;
-      }
-      next[key] = {
-        protocolProductId: product.id || null,
-        productId: product.productId || null,
-        productName: product.productName || product.protocolProductName || "Protocol product",
-        role: product.role || null,
-        reason: reason || next[key]?.reason || "Not applied",
-      };
-      return next;
-    });
   }
   function handleEquipmentSelect(value) {
     setEquipmentSystemId(value);
@@ -8731,28 +8574,9 @@ export function CompletionPanel({
         }
       }
     }
-    if (
-      calibrationRequired &&
-      !isIncompleteVisit &&
-      missingProtocolTasks.length
-    ) {
+    if (calibrationRequired && !isIncompleteVisit && !selectedProducts.length) {
       alert(
-        `Complete the required protocol checklist before closeout: ${missingProtocolTasks
-          .map((task) => task.replace(/_/g, " "))
-          .join(", ")}.`,
-      );
-      return;
-    }
-    if (
-      calibrationRequired &&
-      !isIncompleteVisit &&
-      undispositionedDefaultProtocolProducts.length
-    ) {
-      alert(
-        `Mark each default protocol product as applied or skipped before closeout: ${undispositionedDefaultProtocolProducts
-          .map((product) => product.productName)
-          .filter(Boolean)
-          .join(", ")}.`,
+        "Add the products applied on this visit before closeout — a WaveGuard lawn completion records product actuals.",
       );
       return;
     }
@@ -8896,23 +8720,12 @@ export function CompletionPanel({
           areaUnit: p.areaUnit,
           targets: Array.isArray(p.targets) ? p.targets : [],
         })),
-        lawnProtocolCompletion:
-          calibrationRequired && treatmentPlanStructuredProtocol
-            ? {
-                checklist: requiredProtocolTasks.map((task) => ({
-                  key: task,
-                  label: task.replace(/_/g, " "),
-                  completed: !!protocolTaskStatus[task],
-                })),
-                treatedSqft: protocolTreatedSqft
-                  ? Number(protocolTreatedSqft)
-                  : null,
-                carrierGalPer1000: protocolCarrierGalPer1000
-                  ? Number(protocolCarrierGalPer1000)
-                  : null,
-                skippedProducts: Object.values(skippedProtocolProducts),
-              }
-            : null,
+        // The protocol block is now read-only (mixing-ratio reference), so the tech
+        // no longer submits a checklist / treated-sqft / disposition. The server
+        // still records a protocol completion for WaveGuard lawn visits, deriving
+        // treated area + carrier from the plan; what was actually applied comes
+        // through the products list.
+        lawnProtocolCompletion: null,
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
               ...treeShrubCloseout,
@@ -8934,8 +8747,10 @@ export function CompletionPanel({
         reviewScheduledFor: oneTimeRecapOnly
           ? null
           : selectedReviewScheduledFor,
-        areasTreated: areasServiced,
         timeOnSite: elapsed,
+        // Single source of truth for the treated areas. The server reads
+        // areasServiced (falling back to a legacy areasTreated only if present),
+        // so we no longer post the same list under both keys.
         areasServiced,
         customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
         protocolActionsCompleted: reportProtocolActions,
@@ -9925,6 +9740,7 @@ export function CompletionPanel({
                   onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
                   gaugeHeightIn={turfHeight.heightIn}
                   onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
+                  technicianNotes={notes}
                 />
               </Field>
             )}
@@ -9954,189 +9770,24 @@ export function CompletionPanel({
             )}
             {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
               <Field label="Lawn Care Protocol">
-                <div
-                  style={{
-                    background: M.card,
-                    border: `0.5px solid ${M.hairline}`,
-                    borderRadius: 12,
-                    padding: 12,
-                    marginBottom: 10,
+                <ProtocolMixSummary
+                  protocol={treatmentPlanStructuredProtocol}
+                  mixItems={treatmentPlanMixItems}
+                  carrierGalPer1000={
+                    protocolCarrierGalPer1000 ||
+                    treatmentPlanStructuredProtocol.window.defaultCarrierGalPer1000
+                  }
+                  inventoryBlocks={treatmentPlanInventoryBlocks}
+                  theme={{
+                    card: M.card,
+                    border: M.hairline,
+                    ink: M.ink,
+                    muted: M.ink3,
+                    err: M.err,
+                    errBg: M.err + "10",
+                    font,
                   }}
-                >
-                  <div
-                    style={{
-                      fontFamily: font,
-                      fontSize: 13,
-                      fontWeight: 700,
-                      color: M.ink,
-                      marginBottom: 4,
-                    }}
-                  >
-                    {treatmentPlanStructuredProtocol.window.title}
-                  </div>
-                  <div
-                    style={{
-                      fontFamily: font,
-                      fontSize: 12,
-                      color: M.ink3,
-                      lineHeight: 1.35,
-                    }}
-                  >
-                    {treatmentPlanStructuredProtocol.window.goal}
-                  </div>
-                  <div
-                    style={{
-                      marginTop: 10,
-                      display: "grid",
-                      gridTemplateColumns: "1fr 1fr",
-                      gap: 8,
-                      fontFamily: font,
-                      fontSize: 11,
-                      color: M.ink3,
-                    }}
-                  >
-                    <div>
-                      <strong style={{ color: M.ink }}>Assignment:</strong>{" "}
-                      {treatmentPlanAppointmentAssignment?.assignedAt
-                        ? "linked"
-                        : "current window"}
-                    </div>
-                    <div>
-                      <strong style={{ color: M.ink }}>Inventory:</strong>{" "}
-                      {treatmentPlanInventoryBlocks.length
-                        ? `${treatmentPlanInventoryBlocks.length} block`
-                        : treatmentPlanInventoryWarnings.length
-                          ? `${treatmentPlanInventoryWarnings.length} warning`
-                          : "clear"}
-                    </div>
-                  </div>
-                </div>
-                {treatmentPlanInventoryBlocks.length > 0 && (
-                  <div
-                    style={{
-                      background: M.err + "10",
-                      border: `1px solid ${M.err}`,
-                      borderRadius: 10,
-                      color: M.err,
-                      fontFamily: font,
-                      fontSize: 12,
-                      lineHeight: 1.35,
-                      padding: 10,
-                      marginBottom: 10,
-                    }}
-                  >
-                    {treatmentPlanInventoryBlocks
-                      .map((block) => block.message)
-                      .filter(Boolean)
-                      .join(" ")}
-                  </div>
-                )}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-                  <input
-                    type="number"
-                    value={protocolTreatedSqft}
-                    onChange={(e) => setProtocolTreatedSqft(e.target.value)}
-                    placeholder="Treated sq ft"
-                    style={mInput}
-                  />
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={protocolCarrierGalPer1000}
-                    onChange={(e) => setProtocolCarrierGalPer1000(e.target.value)}
-                    placeholder="Carrier gal/1K"
-                    style={mInput}
-                  />
-                </div>
-                {(treatmentPlanStructuredProtocol.window.requiredTasks || []).length > 0 && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
-                    {treatmentPlanStructuredProtocol.window.requiredTasks.map((task) => {
-                      const checked = !!protocolTaskStatus[task];
-                      return (
-                        <button
-                          key={task}
-                          type="button"
-                          onClick={() => toggleProtocolTask(task)}
-                          disabled={isIncompleteVisit || submitting}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 10,
-                            fontSize: 13,
-                            fontWeight: 600,
-                            textAlign: "left",
-                            cursor: "pointer",
-                            background: checked ? M.success + "18" : M.card,
-                            color: checked ? M.success : M.ink,
-                            border: `1px solid ${checked ? M.success : M.hairline}`,
-                          }}
-                        >
-                          {checked ? "\u2713 " : ""}
-                          {task.replace(/_/g, " ")}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-                {(treatmentPlanStructuredProtocol.products || []).length > 0 && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <div style={{ ...subLabelStyle, marginBottom: 2 }}>
-                      Default product disposition
-                    </div>
-                    {undispositionedDefaultProtocolProducts.length > 0 && (
-                      <div style={{ fontFamily: font, fontSize: 12, color: M.err, lineHeight: 1.35 }}>
-                        Mark default products as applied through the product list or skipped below before closeout.
-                      </div>
-                    )}
-                    {treatmentPlanStructuredProtocol.products
-                      .filter((product) => product.defaultInPlan)
-                      .slice(0, 6)
-                      .map((product) => {
-                        const key = product.id || product.productId || product.productName;
-                        const skipped = !!skippedProtocolProducts[key];
-                        const substitution = product.productId
-                          ? substitutionByOriginalProductId.get(String(product.productId))
-                          : null;
-                        return (
-                          <div
-                            key={key}
-                            style={{
-                              display: "grid",
-                              gridTemplateColumns: "auto 1fr",
-                              gap: 8,
-                              alignItems: "center",
-                            }}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => updateSkippedProtocolProduct(product, !skipped)}
-                              style={{
-                                height: 34,
-                                padding: "0 10px",
-                                borderRadius: 8,
-                                border: `1px solid ${skipped ? M.err : M.hairline}`,
-                                background: skipped ? M.err + "12" : M.card,
-                                color: skipped ? M.err : M.ink3,
-                                fontSize: 12,
-                                fontWeight: 700,
-                                cursor: "pointer",
-                              }}
-                            >
-                              {skipped ? "Skipped" : "Applied"}
-                            </button>
-                            <input
-                              value={skippedProtocolProducts[key]?.reason || ""}
-                              onChange={(e) => updateSkippedProtocolProduct(product, true, e.target.value)}
-                              placeholder={substitution
-                                ? `${product.productName} replaced by ${substitution.substituteProductName}`
-                                : `${product.productName} skip reason`}
-                              disabled={!skipped}
-                              style={{ ...mInput, marginBottom: 0, opacity: skipped ? 1 : 0.55 }}
-                            />
-                          </div>
-                        );
-                      })}
-                  </div>
-                )}
+                />
               </Field>
             )}
             {calibrationRequired && (
@@ -11071,6 +10722,8 @@ export function CompletionPanel({
                       <ProductTargetsPicker
                         idSuffix={sp.productId}
                         targets={sp.targets}
+                        suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
+                        noun={isLawn ? "" : "pest"}
                         onChange={(next) =>
                           updateProduct(sp.productId, "targets", next)
                         }
@@ -11847,6 +11500,7 @@ export function CompletionPanel({
                 onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
                 gaugeHeightIn={turfHeight.heightIn}
                 onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
+                technicianNotes={notes}
               />
             </div>
           )}
@@ -11877,42 +11531,26 @@ export function CompletionPanel({
           )}
           {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
             <div style={{ marginBottom: 20 }}>
-              <label style={labelStyle}>WaveGuard Execution Checklist</label>
-              <div
-                style={{
-                  background: D.input,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 10,
-                  padding: 14,
-                  marginBottom: 10,
-                }}
-              >
-                <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>
-                  {treatmentPlanStructuredProtocol.window.title}
-                </div>
-                <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45, marginTop: 4 }}>
-                  {treatmentPlanStructuredProtocol.window.goal}
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10, fontSize: 12, color: D.muted }}>
-                  <div>
-                    <strong style={{ color: D.text }}>Assignment:</strong>{" "}
-                    {treatmentPlanAppointmentAssignment?.assignedAt ? "linked" : "current window"}
-                  </div>
-                  <div>
-                    <strong style={{ color: D.text }}>Inventory:</strong>{" "}
-                    {treatmentPlanInventoryBlocks.length
-                      ? `${treatmentPlanInventoryBlocks.length} block`
-                      : treatmentPlanInventoryWarnings.length
-                        ? `${treatmentPlanInventoryWarnings.length} warning`
-                        : "clear"}
-                  </div>
-                </div>
+              <label style={labelStyle}>Lawn Care Protocol</label>
+              <div style={{ marginBottom: 10 }}>
+                <ProtocolMixSummary
+                  protocol={treatmentPlanStructuredProtocol}
+                  mixItems={treatmentPlanMixItems}
+                  carrierGalPer1000={
+                    protocolCarrierGalPer1000 ||
+                    treatmentPlanStructuredProtocol.window.defaultCarrierGalPer1000
+                  }
+                  inventoryBlocks={treatmentPlanInventoryBlocks}
+                  theme={{
+                    card: D.input,
+                    border: D.border,
+                    ink: D.heading,
+                    muted: D.muted,
+                    err: D.red,
+                    errBg: D.red + "12",
+                  }}
+                />
               </div>
-              {treatmentPlanInventoryBlocks.length > 0 && (
-                <div style={{ background: D.red + "12", border: `1px solid ${D.red}`, borderRadius: 10, padding: 10, color: D.red, fontSize: 12, lineHeight: 1.4, marginBottom: 10 }}>
-                  {treatmentPlanInventoryBlocks.map((block) => block.message).filter(Boolean).join(" ")}
-                </div>
-              )}
               {treatmentPlanSubstitutions.length > 0 && (
                 <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
                   {treatmentPlanSubstitutions.map((sub) => {
@@ -11958,90 +11596,6 @@ export function CompletionPanel({
                         >
                           {selected ? "Added to products" : "Add substitute to products"}
                         </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-                <input
-                  type="number"
-                  value={protocolTreatedSqft}
-                  onChange={(e) => setProtocolTreatedSqft(e.target.value)}
-                  placeholder="Treated sq ft"
-                  style={inputStyle}
-                />
-                <input
-                  type="number"
-                  step="0.1"
-                  value={protocolCarrierGalPer1000}
-                  onChange={(e) => setProtocolCarrierGalPer1000(e.target.value)}
-                  placeholder="Carrier gal/1K"
-                  style={inputStyle}
-                />
-              </div>
-              {requiredProtocolTasks.length > 0 && (
-                <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-                  {requiredProtocolTasks.map((task) => {
-                    const checked = !!protocolTaskStatus[task];
-                    return (
-                      <button
-                        key={task}
-                        type="button"
-                        onClick={() => toggleProtocolTask(task)}
-                        disabled={isIncompleteVisit || submitting}
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: 8,
-                          fontSize: 13,
-                          fontWeight: 700,
-                          textAlign: "left",
-                          cursor: "pointer",
-                          background: checked ? D.green + "18" : D.input,
-                          color: checked ? D.green : D.text,
-                          border: `1px solid ${checked ? D.green : D.border}`,
-                        }}
-                      >
-                        {checked ? "\u2713 " : ""}
-                        {task.replace(/_/g, " ")}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              {defaultProtocolProducts.length > 0 && (
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, color: undispositionedDefaultProtocolProducts.length ? D.red : D.muted, lineHeight: 1.4 }}>
-                    Mark each default protocol product as applied in product actuals or skipped below.
-                  </div>
-                  {defaultProtocolProducts.slice(0, 6).map((product) => {
-                    const key = protocolProductKey(product);
-                    const skipped = !!skippedProtocolProducts[key];
-                    return (
-                      <div key={key} style={{ display: "grid", gridTemplateColumns: "96px 1fr", gap: 8, alignItems: "center" }}>
-                        <button
-                          type="button"
-                          onClick={() => updateSkippedProtocolProduct(product, !skipped)}
-                          style={{
-                            height: 36,
-                            borderRadius: 8,
-                            border: `1px solid ${skipped ? D.red : D.border}`,
-                            background: skipped ? D.red + "12" : D.input,
-                            color: skipped ? D.red : D.text,
-                            fontSize: 12,
-                            fontWeight: 800,
-                            cursor: "pointer",
-                          }}
-                        >
-                          {skipped ? "Skipped" : "Applied"}
-                        </button>
-                        <input
-                          value={skippedProtocolProducts[key]?.reason || ""}
-                          onChange={(e) => updateSkippedProtocolProduct(product, true, e.target.value)}
-                          placeholder={`${product.productName} skip reason`}
-                          disabled={!skipped}
-                          style={{ ...inputStyle, margin: 0, opacity: skipped ? 1 : 0.55 }}
-                        />
                       </div>
                     );
                   })}
@@ -13023,6 +12577,8 @@ export function CompletionPanel({
                   <ProductTargetsPicker
                     idSuffix={sp.productId}
                     targets={sp.targets}
+                    suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
+                    noun={isLawn ? "" : "pest"}
                     onChange={(next) =>
                       updateProduct(sp.productId, "targets", next)
                     }
@@ -13444,6 +13000,17 @@ const checkboxRow = {
 // Quick-pick suggestions for the per-product pest-target picker. The field is
 // free-text (string[]), so this list is convenience only — techs can type any
 // target. Common SWFL household/lawn pests.
+// Normalize a products_catalog.target_pests value (JSONB array, or a stringified
+// one) into a clean string[] for prefilling a product's Targets from its label.
+function normalizeLabelTargets(value) {
+  let v = value;
+  if (typeof v === "string") {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  if (!Array.isArray(v)) return [];
+  return v.map((t) => String(t).trim()).filter(Boolean);
+}
+
 const PEST_TARGET_SUGGESTIONS = [
   "Ghost ants",
   "Big-headed ants",
@@ -13470,13 +13037,133 @@ const PEST_TARGET_SUGGESTIONS = [
   "Scorpions",
 ];
 
-// Per-product pest-target multiselect: free-text chips with datalist
-// suggestions. Stored on the selected product as `targets` (string[]); the
-// completion route persists it to service_products.targets. Optional.
-function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
+// What a lawn product treats: weeds, turf-damaging insects, and turf diseases —
+// what a lawn tech actually enters as a product's target, not structural pests.
+const LAWN_TARGET_SUGGESTIONS = [
+  "Broadleaf weeds",
+  "Crabgrass",
+  "Nutsedge / sedge",
+  "Dollarweed",
+  "Doveweed",
+  "Chamberbitter",
+  "Spurge",
+  "Clover",
+  "Goosegrass",
+  "Torpedograss",
+  "Chinch bugs",
+  "Armyworms",
+  "Sod webworms",
+  "Grubs",
+  "Mole crickets",
+  "Fire ants",
+  "Nematodes",
+  "Brown patch / large patch",
+  "Dollar spot",
+  "Gray leaf spot",
+  "Take-all root rot",
+];
+
+// The standard field rig. The protocol mix amounts are shown for this tank so
+// the tech reads the ratios off one number they recognize.
+const PROTOCOL_TANK_GAL = 110;
+
+function formatMixAmount(n) {
+  if (!Number.isFinite(n)) return null;
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+// Read-only Lawn Care Protocol reference: the protocol window (title + goal) and,
+// for each product in the generated plan, how much to put in a 110-gallon tank
+// (ratePer1000 × tank-coverage). Rows come from plan.mixCalculator.items — the
+// per-visit mix, which carries engine-derived nutrition rates, selected
+// conditionals, and approved substitutes that the static protocol definitions
+// don't. No inputs, no checklist — the tech reads it and records what they
+// actually applied through the Products Applied list. Inventory blocks (a real
+// stock safeguard) still surface here.
+function ProtocolMixSummary({ protocol, mixItems = [], carrierGalPer1000, inventoryBlocks = [], theme }) {
+  if (!protocol?.window) return null;
+  const t = theme || {};
+  const carrier = Number(carrierGalPer1000);
+  const hasCarrier = Number.isFinite(carrier) && carrier > 0;
+  const planRows = (mixItems || [])
+    .filter((item) => item?.product)
+    .map((item) => ({
+      key: item.product.id || item.product.name,
+      name: item.product.name,
+      // Null when the engine couldn't derive a rate — rendered as "—", never 0.
+      ratePer1000: Number(item.mix?.ratePer1000) || null,
+      rateUnit: item.mix?.rateUnit || null,
+    }));
+  // Fallback while the plan hasn't loaded (or matched no catalog products):
+  // static protocol rows, defaults preferred, excluding rows without a usable
+  // stored rate — a null rate must not read as a concrete 0.
+  const allProducts = protocol.products || [];
+  const planned = allProducts.filter((p) => p.defaultInPlan);
+  const staticRows = (planned.length ? planned : allProducts)
+    .filter((p) => Number(p.ratePer1000) > 0)
+    .map((p) => ({
+      key: p.id || p.productId || p.productName,
+      name: p.productName,
+      ratePer1000: Number(p.ratePer1000),
+      rateUnit: p.rateUnit || null,
+    }));
+  const rows = planRows.length ? planRows : staticRows;
+  return (
+    <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 12, padding: 12 }}>
+      <div style={{ fontFamily: t.font, fontSize: 13, fontWeight: 700, color: t.ink }}>
+        {protocol.window.title}
+      </div>
+      {protocol.window.goal ? (
+        <div style={{ fontFamily: t.font, fontSize: 12, color: t.muted, lineHeight: 1.35, marginTop: 4 }}>
+          {protocol.window.goal}
+        </div>
+      ) : null}
+      {rows.length ? (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontFamily: t.font, fontSize: 11, fontWeight: 700, color: t.muted, textTransform: "uppercase", letterSpacing: 0.3 }}>
+            Mix for a {PROTOCOL_TANK_GAL}-gal tank
+          </div>
+          <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 5 }}>
+            {rows.map((row, i) => {
+              const amt =
+                hasCarrier && row.ratePer1000 > 0
+                  ? row.ratePer1000 * (PROTOCOL_TANK_GAL / carrier)
+                  : null;
+              return (
+                <div key={row.key || i} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontFamily: t.font, fontSize: 13, color: t.ink }}>
+                  <span>{row.name}</span>
+                  <strong style={{ whiteSpace: "nowrap" }}>
+                    {amt != null ? `${formatMixAmount(amt)} ${row.rateUnit || "oz"}` : "—"}
+                  </strong>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 6, fontFamily: t.font, fontSize: 11, color: t.muted }}>
+            {hasCarrier
+              ? `Based on ${carrier} gal/1K carrier — reference only, nothing to fill in.`
+              : "Carrier rate unavailable — see the treatment plan for amounts."}
+          </div>
+        </div>
+      ) : null}
+      {inventoryBlocks.length ? (
+        <div style={{ marginTop: 10, background: t.errBg, border: `1px solid ${t.err}`, borderRadius: 10, color: t.err, fontFamily: t.font, fontSize: 12, lineHeight: 1.35, padding: 10 }}>
+          {inventoryBlocks.map((b) => b.message).filter(Boolean).join(" ")}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// Per-product target multiselect: free-text chips with datalist suggestions.
+// Stored on the selected product as `targets` (string[]); the completion route
+// persists it to service_products.targets. Optional. `suggestions`/`noun` are
+// service-line aware — pest services get pests, lawn services get weeds/turf
+// pests/diseases — so the label and datalist match what's actually being treated.
+function ProductTargetsPicker({ targets, onChange, idSuffix, theme, suggestions = PEST_TARGET_SUGGESTIONS, noun = "pest" }) {
   const [draft, setDraft] = useState("");
   const list = Array.isArray(targets) ? targets : [];
-  const datalistId = `pest-targets-${idSuffix}`;
+  const datalistId = `targets-${idSuffix}`;
   function commit(raw) {
     const cleaned = String(raw || "")
       .split(",")
@@ -13550,7 +13237,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
         type="text"
         list={datalistId}
         value={draft}
-        placeholder={list.length ? "Add target…" : "Add pest target…"}
+        placeholder={list.length || !noun ? "Add target…" : `Add ${noun} target…`}
         onChange={(e) => {
           const value = e.target.value;
           if (value.includes(",")) {
@@ -13560,7 +13247,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
           // Auto-commit when the value exactly matches a suggestion (datalist
           // pick), so selecting works without relying on Enter/blur on mobile.
           if (
-            PEST_TARGET_SUGGESTIONS.some(
+            suggestions.some(
               (s) => s.toLowerCase() === value.trim().toLowerCase(),
             )
           ) {
@@ -13581,7 +13268,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
         style={{ ...theme.inputStyle, flex: "1 1 140px", minWidth: 120 }}
       />
       <datalist id={datalistId}>
-        {PEST_TARGET_SUGGESTIONS.map((p) => (
+        {suggestions.map((p) => (
           <option key={p} value={p} />
         ))}
       </datalist>

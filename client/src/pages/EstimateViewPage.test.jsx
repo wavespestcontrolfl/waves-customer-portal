@@ -135,7 +135,8 @@ describe('ServiceSection', () => {
 
     expect(screen.getByText('$72')).toBeInTheDocument();
     expect(screen.getByText('/mo')).toBeInTheDocument();
-    expect(screen.getByText('Service visits: Bi-monthly')).toBeInTheDocument();
+    // The "Service visits: …" cadence line was removed per owner directive.
+    expect(screen.queryByText(/Service visits:/)).not.toBeInTheDocument();
     expect(screen.queryByText('/bi-monthly')).not.toBeInTheDocument();
   });
 
@@ -289,6 +290,31 @@ describe('estimateAddServiceOffer', () => {
 });
 
 describe('TerminalStateCard', () => {
+  it('shows the booked visit date on an accepted estimate instead of follow-up copy', () => {
+    render(
+      <TerminalStateCard
+        state="accepted"
+        customerFirstName="William"
+        address="10225 Kalamazoo Pl"
+        appointmentLabel="Thursday, July 9 · 9:00–10:00 AM"
+        appointmentServiceType="Quarterly Pest Control"
+      />,
+    );
+
+    expect(screen.getByText(/you're booked/)).toBeInTheDocument();
+    expect(screen.getByText('Thursday, July 9 · 9:00–10:00 AM')).toBeInTheDocument();
+    expect(screen.getByText('Quarterly Pest Control')).toBeInTheDocument();
+    expect(screen.queryByText(/Our team will follow up/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the follow-up copy on an accepted estimate with no upcoming visit', () => {
+    render(
+      <TerminalStateCard state="accepted" customerFirstName="William" address="10225 Kalamazoo Pl" />,
+    );
+
+    expect(screen.getByText(/Our team will follow up/)).toBeInTheDocument();
+  });
+
   it('shows the quote-required reason in the blocked React estimate state', () => {
     render(
       <TerminalStateCard
@@ -400,6 +426,51 @@ describe('getServiceLabel', () => {
         services: [{ key: 'mosquito', label: 'Mosquito Control', isRecurring: true }],
       },
     )).toBe('Seasonal Mosquito Control or One-Time Mosquito Control');
+  });
+
+  it('pins the label to an accepted one-time booking on a mixed estimate', () => {
+    expect(getServiceLabel(
+      { key: 'quarterly', label: 'Quarterly' },
+      { showOneTimeOption: true },
+      {
+        anchorOneTimePrice: 202,
+        services: [{ key: 'pest_control', label: 'Pest Control', isRecurring: true }],
+      },
+      'one_time',
+    )).toBe('One-Time Pest Control');
+  });
+
+  it('drops the one-time choice suffix once a recurring plan is accepted', () => {
+    expect(getServiceLabel(
+      { key: 'quarterly', label: 'Quarterly' },
+      { showOneTimeOption: true },
+      {
+        anchorOneTimePrice: 202,
+        services: [{ key: 'pest_control', label: 'Pest Control', isRecurring: true }],
+      },
+      'recurring',
+    )).toBe('Quarterly Pest Control');
+  });
+
+  it('excludes fee/review rows from the one-time eyebrow', () => {
+    expect(getServiceLabel(null, { isOneTimeOnly: true }, {
+      oneTimeBreakdown: {
+        items: [
+          { label: 'German Roach Cleanout', amount: 350 },
+          { label: 'WDO Inspection', amount: 150 },
+          { label: 'WaveGuard Setup', amount: 99 },
+          { label: 'Prepay credit', amount: 0 },
+        ],
+      },
+    })).toBe('German Roach Cleanout');
+  });
+
+  it('falls back to non-billable row labels when nothing billable remains', () => {
+    expect(getServiceLabel(null, { isOneTimeOnly: true }, {
+      oneTimeBreakdown: {
+        items: [{ label: 'WDO Inspection', amount: 150 }],
+      },
+    })).toBe('WDO Inspection');
   });
 });
 

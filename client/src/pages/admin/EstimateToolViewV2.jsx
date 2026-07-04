@@ -57,6 +57,10 @@ import {
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
+import {
+  normalizePhoneDigits,
+  mergePhoneLookupMatch,
+} from "./estimateSendPhoneLookup";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -433,26 +437,6 @@ const RODENT_GUARANTEE_ELIGIBILITY_KEYS = [
   "rgSanitationBaseline",
   "rgNoActivityAfterFinalCheck",
 ];
-
-const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
-  "dethatchingCleanupLevel",
-  "dethatchingDebrisRemovalIncluded",
-  "dethatchingAccess",
-  "dethatchingManagerApproved",
-  "dethatchingManagerApprovalReason",
-  "grassType",
-  "thatchProbe1Inches",
-  "thatchProbe2Inches",
-  "thatchProbe3Inches",
-  "thatchDepthInches",
-  "thatchMeasurementSource",
-  // Commercial cadence: changing the business type re-prices pest/rodent, so it
-  // must invalidate a generated estimate (else Save persists stale totals).
-  "commercialRiskType",
-  "treeShrubDensity",
-  "mosquitoPressure",
-  ...RODENT_GUARANTEE_ELIGIBILITY_KEYS,
-]);
 
 const MOSQUITO_PROTOCOL_STEPS = [
   "Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.",
@@ -1028,12 +1012,31 @@ function cadenceFromPestTier(tier) {
   return { key: "quarterly", label: "Quarterly", intervalMonths: 3, period: "/quarter" };
 }
 
-function fallbackCadenceForPreview() {
+function fallbackCadenceForPreview(E) {
+  // Mirror the customer page (estimate-public renderPage): with no pest tier,
+  // a termite-bait recurring line displays the total on the QUARTERLY cadence
+  // (hasTermiteBait → selectedRecurringFrequencyKey 'quarterly'); every other
+  // non-pest program bills monthly and the engine's grandTotal is already a
+  // monthly number. The old unconditional-quarterly fallback showed a
+  // lawn-only estimate as "$360/quarter" when the customer is billed $120/mo.
+  const services = Array.isArray(E?.recurring?.services) ? E.recurring.services : [];
+  const hasTermiteBait = services.some((s) => {
+    const label = String(s?.service || s?.name || s?.label || s?.displayName || "").toLowerCase();
+    return label.includes("termite") && label.includes("bait");
+  });
+  if (hasTermiteBait) {
+    return {
+      key: "quarterly",
+      label: "Quarterly",
+      intervalMonths: 3,
+      period: "/quarter",
+    };
+  }
   return {
-    key: "quarterly",
-    label: "Quarterly",
-    intervalMonths: 3,
-    period: "/quarter",
+    key: "monthly",
+    label: "Monthly",
+    intervalMonths: 1,
+    period: "/mo",
   };
 }
 
@@ -2352,9 +2355,28 @@ export default function EstimateToolViewV2({
     };
   }, [form]);
 
-  const [estimate, setEstimate] = useState(null);
+  const [estimate, setEstimateState] = useState(null);
+  // Monotonic invalidation version for the generated estimate. Every
+  // setEstimate(null) bumps it; doGenerate snapshots it at start and discards
+  // its result if an invalidation landed while /calculate-estimate was in
+  // flight — otherwise the resolving generate re-mounts a price computed from
+  // pre-edit inputs, and Save would persist that stale engineRequest (which
+  // the server replays verbatim, so the recompute agrees with the stale price
+  // and no drift notice fires).
+  const estimateVersionRef = useRef(0);
+  const setEstimate = useCallback((value) => {
+    if (value === null) estimateVersionRef.current += 1;
+    setEstimateState(value);
+  }, []);
   const [savedId, setSavedId] = useState(null);
   const [savedViewUrl, setSavedViewUrl] = useState(null);
+  // Send-form phone lookup guards (rules in estimateSendPhoneLookup.js):
+  // the sequence + abort pair kills stale responses so a slow lookup for a
+  // previous number can't land on a newer one, and the auto-fill ref tracks
+  // what the lookup wrote so it never clobbers operator-entered name/email.
+  const sendPhoneLookupSeqRef = useRef(0);
+  const sendPhoneLookupAbortRef = useRef(null);
+  const sendPhoneAutoFillRef = useRef({ name: null, email: null });
   // Full-screen, pricing-only "present to customer" mode — hides the booking
   // section + book CTA so the operator can show prices in person (issue: in-person
   // billing display). Reuses CustomerEstimatePreviewV2 with presentMode=true.
@@ -2456,11 +2478,16 @@ export default function EstimateToolViewV2({
       }
       return next;
     });
-    if (key.startsWith("svc") || DETHATCHING_ESTIMATE_RESET_FIELDS.has(key)) {
-      setEstimate(null);
-      setSavedId(null);
-      setSavedViewUrl(null);
-    }
+    // Every CheckboxV2 key is a pricing input or pricing gate (service
+    // selections, palm/trenching/pre-slab flags, rodent surcharges, rg
+    // eligibility, dethatching approvals…), so any flip invalidates a
+    // generated estimate. An allowlist here previously let flags like
+    // rodentTrappingEmergency slip through: the preview kept the pre-flip
+    // price, Save persisted the pre-flip engineRequest, and the server's
+    // authoritative replay agreed with the stale number — no drift notice.
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
   }, []);
   const setCustomerChoiceOption = useCallback((enabled) => {
     setForm((f) => {
@@ -2996,7 +3023,13 @@ export default function EstimateToolViewV2({
       msg: "Analyzing satellite imagery with AI...",
     });
     setSatelliteData(null);
+    // Clearing measuredTurfSf is already a pricing edit, and the analysis
+    // below rewrites lot/bed/palm/termite inputs — invalidate up front exactly
+    // like doLookup so a generated estimate can't sit on pre-analysis inputs.
     setForm((f) => ({ ...f, measuredTurfSf: "" }));
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
     try {
       const r = await fetch("/api/admin/lookup/satellite-ai", {
         method: "POST",
@@ -3071,6 +3104,11 @@ export default function EstimateToolViewV2({
         }
         return next;
       });
+      // Invalidate again at apply time: a Generate run while the analysis was
+      // in flight would otherwise keep a price from pre-analysis inputs.
+      setEstimate(null);
+      setSavedId(null);
+      setSavedViewUrl(null);
 
       const verify = (data.fieldVerify || []).length;
       const conf =
@@ -3090,6 +3128,10 @@ export default function EstimateToolViewV2({
 
   async function doGenerate(overrides = {}) {
     if (generating) return null;
+    // Snapshot the invalidation version. Inputs stay editable while the
+    // calculate call is in flight, so an edit that lands mid-flight must make
+    // this generate discard its result (it was priced from pre-edit inputs).
+    const versionAtStart = estimateVersionRef.current;
     setGenerating(true);
     try {
       const selectedServices = [];
@@ -3580,6 +3622,13 @@ export default function EstimateToolViewV2({
       // be the authority on the persisted price (Decision #2). This is the same
       // payload sent to /calculate-estimate above.
       result.engineRequest = { profile, selectedServices, options };
+      if (estimateVersionRef.current !== versionAtStart) {
+        // A pricing edit landed while the calculate call was in flight; the
+        // invalidation already cleared the preview. Mounting this result would
+        // pair stale pricing with the new form state (and Save would persist
+        // the stale engineRequest), so drop it and let the operator regenerate.
+        return null;
+      }
       setEstimate(result);
       setSavedId(null);
       setSavedViewUrl(null);
@@ -3650,19 +3699,21 @@ export default function EstimateToolViewV2({
       const onetimeDiffers =
         Number.isFinite(serverOnetime) &&
         Math.abs(serverOnetime - (onetimeTotal || 0)) >= 0.5;
+      let recomputeNotice = null;
       if ((monthlyDiffers || onetimeDiffers) && d.pricingAuthority === "SERVER") {
-        setPriceRecomputeNotice({
+        recomputeNotice = {
           serverMonthly: monthlyDiffers ? serverMonthly : null,
           clientMonthly: monthlyDiffers ? monthlyTotal || 0 : null,
           serverOnetime: onetimeDiffers ? serverOnetime : null,
           clientOnetime: onetimeDiffers ? onetimeTotal || 0 : null,
-        });
-      } else {
-        setPriceRecomputeNotice(null);
+        };
       }
+      setPriceRecomputeNotice(recomputeNotice);
       setSavedId(id);
       setSavedViewUrl(viewUrl);
-      return { id, viewUrl };
+      // recomputeNotice rides along so saveAndSend can gate the send on it —
+      // the banner state set above renders too late to stop an in-flight send.
+      return { id, viewUrl, recomputeNotice };
     } catch (e) {
       alert(e.message);
       return null;
@@ -3897,9 +3948,35 @@ export default function EstimateToolViewV2({
       }
     }
     const saved = savedId
-      ? { id: savedId, viewUrl: savedViewUrl }
+      ? // Already-saved path: any drift was surfaced by that earlier save and
+        // still lives in the banner state — gate on it the same way.
+        { id: savedId, viewUrl: savedViewUrl, recomputeNotice: priceRecomputeNotice }
       : await doSave();
-    if (saved?.id) await doSend(saved.id, method);
+    if (!saved?.id) return;
+    // Server-authoritative repricing (Decision #2) can move the number at save
+    // time (pricing-constant changes, existing-customer combined-tier fold).
+    // Without this gate the send fires before the recompute banner is even
+    // readable, so a price the operator never saw goes to the customer.
+    if (saved.recomputeNotice) {
+      const n = saved.recomputeNotice;
+      const parts = [];
+      if (n.serverMonthly != null) {
+        parts.push(
+          `$${n.serverMonthly.toFixed(2)}/mo (preview showed $${Number(n.clientMonthly || 0).toFixed(2)}/mo)`,
+        );
+      }
+      if (n.serverOnetime != null) {
+        parts.push(
+          `$${n.serverOnetime.toFixed(2)} one-time (preview showed $${Number(n.clientOnetime || 0).toFixed(2)})`,
+        );
+      }
+      const proceed = window.confirm(
+        `The server recomputed the final price on save: ${parts.join(", ")}.\n\n` +
+          "This recomputed price is what the customer will see. Send it?",
+      );
+      if (!proceed) return;
+    }
+    await doSend(saved.id, method);
   }
 
   async function previewCustomerEstimate() {
@@ -3930,10 +4007,17 @@ export default function EstimateToolViewV2({
       alert("Preview link unavailable. Save the estimate and try again.");
       return;
     }
+    // A just-saved estimate is a DRAFT: the bare URL renders the legacy SSR
+    // page, not what the customer gets. The param routes staff to the real
+    // React customer page (staff-JWT-gated /data, banner, inert booking).
+    // Harmless on an already-sent estimate — published rows ignore it.
+    const previewUrl = saved.viewUrl.includes("?")
+      ? `${saved.viewUrl}&adminPreview=1`
+      : `${saved.viewUrl}?adminPreview=1`;
     if (pendingPreviewWindow) {
-      pendingPreviewWindow.location.replace(saved.viewUrl);
+      pendingPreviewWindow.location.replace(previewUrl);
     } else {
-      window.open(saved.viewUrl, "_blank", "noopener,noreferrer");
+      window.open(previewUrl, "_blank", "noopener,noreferrer");
     }
   }
 
@@ -4165,7 +4249,7 @@ export default function EstimateToolViewV2({
                       form={form}
                       satelliteUrl={satelliteData?.imageUrl || null}
                       presentMode
-                      onSelectPestFreq={(apps) => {
+                      onSelectPestFreq={async (apps) => {
                         // Ignore tier taps while a recalc is in flight: doGenerate
                         // early-returns on `generating`, but the form mutation below
                         // would still apply, pairing the in-flight (old-tier) estimate
@@ -4178,10 +4262,18 @@ export default function EstimateToolViewV2({
                         // estimate in place when it resolves. Still mirror set()'s
                         // saved-state reset, since changing the cadence invalidates the
                         // saved record (keeps the "unsaved preview" warning accurate).
+                        const prevPestFreq = form.pestFreq;
                         setForm((f) => ({ ...f, pestFreq: String(apps) }));
                         setSavedId(null);
                         setSavedViewUrl(null);
-                        doGenerate({ pestFreq: apps });
+                        const regenerated = await doGenerate({ pestFreq: apps });
+                        // A failed regenerate leaves the previous estimate mounted —
+                        // restore its cadence so the visible price and form.pestFreq
+                        // stay paired (Save in that state would persist the old-cadence
+                        // engineRequest under inputs claiming the new cadence).
+                        if (!regenerated) {
+                          setForm((f) => ({ ...f, pestFreq: prevPestFreq }));
+                        }
                       }}
                     />
                   </EstimateErrorBoundary>
@@ -4328,6 +4420,30 @@ export default function EstimateToolViewV2({
                       palmLicensedApplicator: false,
                       treeCount: "",
                       measuredTurfSf: "",
+                      // Structure-specific measurements must clear with the
+                      // property — leaving them meant house B could be quoted
+                      // on house A's attic sqft or trench footage. (Contact/
+                      // lead linkage intentionally survives Clear All; product
+                      // choices keep their defaults.)
+                      termiteFootprintSqFt: "",
+                      termitePerimeterLF: "",
+                      boracareSqft: "",
+                      boracareSurfaceLinearFt: "",
+                      boracareSurfaceHeightFt: "",
+                      preslabSqft: "",
+                      trenchingPerimeterLF: "",
+                      trenchingConcreteLF: "",
+                      trenchingDirtLF: "",
+                      trenchingConcretePct: "",
+                      // The footprint-derivation choice is a per-property
+                      // measurement method — left true, the next property
+                      // auto-prices trenching from ITS footprint with the
+                      // missing-measurement warning suppressed.
+                      trenchingEstimateFromFootprint: false,
+                      _termiteFootprintAuto: false,
+                      _trenchingPerimeterAuto: false,
+                      _boracareSqftAuto: false,
+                      _preslabSqftAuto: false,
                     }));
                     setLookupStatus({ type: "", msg: "" });
                     setEnrichedProfile(null);
@@ -4335,6 +4451,9 @@ export default function EstimateToolViewV2({
                     setSatelliteStatus({ type: "", msg: "" });
                     setSatelliteData(null);
                     setEstimate(null);
+                    // A saved row priced on the cleared property is stale too.
+                    setSavedId(null);
+                    setSavedViewUrl(null);
                   }}
                 >
                   Clear All
@@ -6431,31 +6550,53 @@ export default function EstimateToolViewV2({
                     type="tel"
                     value={form.customerPhone || ""}
                     onChange={async (e) => {
-                      let raw = e.target.value.replace(/\D/g, "");
-                      if (raw.length === 11 && raw.startsWith("1"))
-                        raw = raw.slice(1);
-                      const digits = raw.slice(0, 10);
+                      const digits = normalizePhoneDigits(e.target.value);
                       set("customerPhone", digits);
-                      if (digits.length >= 7) {
-                        try {
-                          const r = await fetch(
-                            `/api/admin/customers?search=${encodeURIComponent(digits)}&limit=1`,
-                            { headers: authHeaders },
+                      // Every edit supersedes any in-flight lookup — bump the
+                      // sequence and abort the fetch so a slow response for a
+                      // previous number can never land on a newer one (a stale
+                      // match here means the quote texts a stranger).
+                      const seq = ++sendPhoneLookupSeqRef.current;
+                      if (sendPhoneLookupAbortRef.current) {
+                        sendPhoneLookupAbortRef.current.abort();
+                        sendPhoneLookupAbortRef.current = null;
+                      }
+                      // Only a complete number may fire the lookup — a 7-digit
+                      // prefix can match a same-exchange stranger.
+                      if (digits.length !== 10) return;
+                      const controller = new AbortController();
+                      sendPhoneLookupAbortRef.current = controller;
+                      try {
+                        const r = await fetch(
+                          `/api/admin/customers?search=${encodeURIComponent(digits)}&limit=1`,
+                          { headers: authHeaders, signal: controller.signal },
+                        );
+                        if (!r.ok || seq !== sendPhoneLookupSeqRef.current)
+                          return;
+                        const d = await r.json();
+                        if (seq !== sendPhoneLookupSeqRef.current) return;
+                        // A miss (c = null) must run the merge too: fields the
+                        // previous lookup filled would otherwise stay in place
+                        // and pair the old customer's name/email with the new
+                        // number on send. The merge clears owned fields on a
+                        // miss and never touches operator-entered ones.
+                        const c = (d.customers || d)?.[0] || null;
+                        setForm((f) => {
+                          const { updates, autoFill } = mergePhoneLookupMatch(
+                            f,
+                            c,
+                            sendPhoneAutoFillRef.current,
                           );
-                          if (r.ok) {
-                            const d = await r.json();
-                            const c = (d.customers || d)?.[0];
-                            if (c) {
-                              set(
-                                "customerName",
-                                `${c.firstName} ${c.lastName}`,
-                              );
-                              set("customerEmail", c.email || "");
-                            }
-                          }
-                        } catch {
-                          /* ignore */
-                        }
+                          sendPhoneAutoFillRef.current = autoFill;
+                          return { ...f, ...updates };
+                        });
+                        // Contact fields feed the saved record — mirror the
+                        // CONTACT_FIELDS reset set() applies (saved snapshot
+                        // is stale; the generated estimate is not).
+                        setSavedId(null);
+                        setSavedViewUrl(null);
+                      } catch {
+                        /* aborted or failed lookup — never block typing */
                       }
                     }}
                     placeholder="9415551234"
@@ -6762,16 +6903,37 @@ export default function EstimateToolViewV2({
                     </Button>{" "}
                   </div>{" "}
                   <div className="max-h-[calc(100vh-120px)] overflow-y-auto pr-2">
-                    <CustomerEstimatePreviewV2
-                      E={E}
-                      R={R}
-                      form={form}
-                      satelliteUrl={satelliteData?.imageUrl || null}
-                      onSelectPestFreq={(apps) => {
-                        set("pestFreq", String(apps));
-                        doGenerate({ pestFreq: apps });
-                      }}
-                    />
+                    {presentQuoteRequired ? (
+                      // Custom-quote estimate: the in-page preview must not
+                      // render full prices the customer will never see — the
+                      // saved/public flow zeroes totals and the customer page
+                      // shows "your account manager will finalize" with no
+                      // dollar amounts. (Present mode already gates this;
+                      // engine numbers stay in the details panel below.)
+                      <div className="customer-preview-scope rounded-[14px] border border-[#E7E2D7] bg-white p-8 text-center mb-2">
+                        <div className="customer-preview-serif text-[24px] leading-tight text-[#1B2C5B] mb-3">
+                          This is a custom quote
+                        </div>
+                        <div className="mx-auto max-w-[460px] text-14 leading-relaxed text-[#6B7280]">
+                          The selected services need review before a firm
+                          price, so the customer page shows no dollar amounts —
+                          just that their account manager will finalize the
+                          quote. Engine pricing detail stays available under
+                          Estimator engine details below.
+                        </div>
+                      </div>
+                    ) : (
+                      <CustomerEstimatePreviewV2
+                        E={E}
+                        R={R}
+                        form={form}
+                        satelliteUrl={satelliteData?.imageUrl || null}
+                        onSelectPestFreq={(apps) => {
+                          set("pestFreq", String(apps));
+                          doGenerate({ pestFreq: apps });
+                        }}
+                      />
+                    )}
                     <details className="border-hairline border-zinc-300 rounded-sm bg-white mb-2">
                       <summary className="cursor-pointer px-4 py-3 text-13 font-medium text-zinc-900 list-none border-b-hairline border-zinc-200">
                         Estimator engine details

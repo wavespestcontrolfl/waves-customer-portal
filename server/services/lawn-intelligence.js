@@ -551,7 +551,11 @@ If no contradictions, return: { "contradictions": [] }`
       const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
       if (!assessment || !assessment.technician_id) return null;
 
-      const fields = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level'];
+      // stress_damage is the consolidated score the tech actually corrects on the
+      // completion screen now (fungus/thatch are AI-only and unchanged), so it must
+      // be part of the calibration delta/bias — otherwise a real Stress correction
+      // reads as zero delta.
+      const fields = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
       const deltas = [];
       const row = { assessment_id: assessmentId, technician_id: assessment.technician_id };
 
