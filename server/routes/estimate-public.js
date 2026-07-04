@@ -4517,7 +4517,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .site-footer-socials .soc{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;background:#F7F5EE;border:1px solid #E7E2D7;color:#1B2C5B;transition:all .15s}
   .site-footer-socials .soc:hover{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
   .site-footer-contact{margin-bottom:10px;font-size:13px;color:#3F4A65}
-  .site-footer-contact a{color:#1B2C5B;text-decoration:none;font-weight:500}
+  .site-footer-contact a{color:#1B2C5B;text-decoration:none;font-weight:500;white-space:nowrap}
   .site-footer-contact a:hover{text-decoration:underline}
   .site-footer-contact .dot{margin:0 8px;color:#9CA3AF}
   .site-footer-legal{font-size:11px;color:#6B7280}

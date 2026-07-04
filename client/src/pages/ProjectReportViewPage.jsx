@@ -36,10 +36,13 @@ const cardStyle = {
   border: `1px solid ${ESTIMATE_BORDER}`,
 };
 
+// Same tracking as the estimate's kicker/label system (HEADER_EYEBROW_STYLE /
+// SECTION_KICKER_STYLE in EstimateViewPage) so the two pages read as one
+// family.
 const eyebrowStyle = {
   fontSize: 12,
   color: ESTIMATE_MUTED,
-  letterSpacing: 0,
+  letterSpacing: '0.12em',
   textTransform: 'uppercase',
   fontWeight: 700,
 };
@@ -372,8 +375,10 @@ export default function ProjectReportViewPage() {
     && (data.projectType !== 'wdo_inspection' || Boolean(data.fdacsPdfAvailable));
   const atAGlanceRows = buildAtAGlance({ data, typeLabel });
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  // The certificate headline mirrors the full type label (owner directive
+  // 2026-07-04) — same wording as the kicker, not the bare short form.
   const headline = isCertificate
-    ? `Hey ${firstName}, here's your Certificate of Compliance.`
+    ? `Hey ${firstName}, here's your ${typeLabel}.`
     : `Hey ${firstName}, here's your ${typeLabel.toLowerCase()} report.`;
   // The address line of the hero contact block. Document types use the
   // REPORT's own recorded address, never the live customer row: a
@@ -445,7 +450,7 @@ export default function ProjectReportViewPage() {
             fontFamily: FONTS.serif,
             fontSize: 'clamp(34px, 5vw, 48px)',
             fontWeight: 500,
-            letterSpacing: 0,
+            letterSpacing: '-0.01em',
             lineHeight: 1.1,
             color: ESTIMATE_TEXT,
             margin: 0,
@@ -455,7 +460,7 @@ export default function ProjectReportViewPage() {
           {heroContactLines.length ? (
             <div style={{ marginTop: 14, display: 'grid', gap: 4 }}>
               {heroContactLines.map((line) => (
-                <div key={line} style={{ ...eyebrowStyle, letterSpacing: '0.12em', lineHeight: 1.5 }}>{line}</div>
+                <div key={line} style={{ ...eyebrowStyle, lineHeight: 1.5 }}>{line}</div>
               ))}
             </div>
           ) : null}
@@ -701,12 +706,8 @@ function CertificateFieldGrid({ fields, compact }) {
       {fields.map(([label, value]) => (
         <div key={label}>
           <div style={{
+            ...eyebrowStyle,
             fontFamily: FONT_BODY,
-            fontSize: 12,
-            fontWeight: 700,
-            textTransform: 'uppercase',
-            letterSpacing: 0,
-            color: ESTIMATE_MUTED,
             marginBottom: 5,
           }}>
             {label}
@@ -993,11 +994,13 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           <a href={`tel:${WAVES_PHONE_TEL}`} style={{
             color: 'inherit',
             textDecoration: 'none',
+            whiteSpace: 'nowrap',
           }}>{WAVES_PHONE_DISPLAY}</a>
           {' • '}
           <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{
             color: 'inherit',
             textDecoration: 'none',
+            whiteSpace: 'nowrap',
           }}>wavespestcontrol.com/register</a>
         </div>
         <div style={{
