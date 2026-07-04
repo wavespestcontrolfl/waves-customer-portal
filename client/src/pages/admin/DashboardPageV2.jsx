@@ -97,6 +97,7 @@ export default function DashboardPageV2() {
   const [kpiHistory, setKpiHistory] = useState(null);
   const [ebitda, setEbitda] = useState(null); // /admin/dashboard/ebitda-bridge (wave4)
   const [mrrBridge, setMrrBridge] = useState(null); // /admin/dashboard/mrr-bridge (wave5)
+  const [revenueOverview, setRevenueOverview] = useState(null); // /admin/revenue/overview (wave6 — margin by line)
   // Mobile scorecard: below md the five sections render ONE at a time behind
   // the jump-nav pills (real tabs), so a phone isn't scrolling five sections
   // of charts. Desktop keeps the one-page scroll + IntersectionObserver nav.
@@ -293,6 +294,16 @@ export default function DashboardPageV2() {
     if (!mountedRef.current) { inFlightRef.current = false; return; }
     const [mb] = wave5;
     setMrrBridge((prev) => mb ?? prev);
+
+    // Wave 6 — revenue overview for the margin-by-service-line card (reuses
+    // the revenue page's job-costed byServiceLine; zero new SQL). Same
+    // one-fetch-per-new-wave rate-limit rule; fails soft.
+    const wave6 = await Promise.all([
+      track("/revenue-overview", adminFetch("/admin/revenue/overview?period=month")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [ro] = wave6;
+    setRevenueOverview((prev) => ro ?? prev);
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -598,7 +609,13 @@ export default function DashboardPageV2() {
       )}
 
       {sectionVisible("profit") && (
-        <ProfitSection mix={mix} ebitda={ebitda} isMobile={isMobile} {...kpiStripProps} />
+        <ProfitSection
+          mix={mix}
+          ebitda={ebitda}
+          revenueOverview={revenueOverview}
+          isMobile={isMobile}
+          {...kpiStripProps}
+        />
       )}
 
       {sectionVisible("retention") && (

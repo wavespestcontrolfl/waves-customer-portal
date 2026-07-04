@@ -11,16 +11,12 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 
-function classifyServiceLine(type) {
-  const t = (type || '').toLowerCase();
-  // "turf": commercial lawn persists as "Commercial Turf Treatment Program"
-  if (t.includes('lawn') || t.includes('turf')) return 'Lawn Care';
-  if (t.includes('mosquito')) return 'Mosquito';
-  if (t.includes('tree') || t.includes('shrub')) return 'Tree & Shrub';
-  if (t.includes('termite')) return 'Termite';
-  if (t.includes('rodent')) return 'Rodent';
-  return 'Pest Control';
-}
+// Canonical classifier — shared with admin-revenue.js and the dashboard's
+// margin-by-line card (services/service-line.js). This module's old local
+// copy had drifted: it lacked the One-Time branch, so one-time services
+// misfiled under Pest Control here while the revenue page filed them under
+// One-Time.
+const { classifyServiceLine } = require('../service-line');
 
 function getPeriodDates(period) {
   const now = new Date();

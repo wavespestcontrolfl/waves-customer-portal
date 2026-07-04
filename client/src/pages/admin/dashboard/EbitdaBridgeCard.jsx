@@ -52,6 +52,20 @@ export default function EbitdaBridgeCard({ bridge }) {
               <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
                 <div className="h-full rounded-sm" style={{ width: scale(r.amount), background: tone.bar }} />
               </div>
+              {/* Job-costing component detail under the headline COGS row —
+                  indented, barless, reconciles via the "Unsplit" line. */}
+              {r.key === "cogs" && Array.isArray(bridge.cogsDetail) && bridge.cogsDetail.length > 0 && (
+                <div className="mt-1 pl-3 border-l border-hairline border-zinc-200 space-y-0.5">
+                  {bridge.cogsDetail.map((d) => (
+                    <div key={d.key} className="flex items-baseline justify-between gap-3 text-11 text-ink-tertiary">
+                      <span className="truncate">{d.label}</span>
+                      <span className="u-nums whitespace-nowrap">
+                        {d.amount < 0 ? `+${fmtMoney(Math.abs(d.amount))}` : `−${fmtMoney(d.amount)}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}
@@ -60,7 +74,23 @@ export default function EbitdaBridgeCard({ bridge }) {
       {!bridge.overheadEntered && (
         <div className="mt-3 text-12 text-ink-tertiary border border-dashed border-zinc-300 rounded-sm px-2.5 py-2">
           Overhead not entered — the bridge stops at Contribution. Add monthly
-          operating costs (vehicle, insurance, software, admin) to see adjusted EBITDA.
+          operating costs in Settings → Financials → Operating Costs to see
+          adjusted EBITDA.
+        </div>
+      )}
+
+      {/* Basis is stated ON the card, not in a tooltip: an approximated
+          EBITDA must never read as an entered one. */}
+      {bridge.overheadEntered && bridge.overheadBasis === "pricing_defaults" && (
+        <div className="mt-3 text-12 text-amber-700 border border-amber-300 bg-amber-50 rounded-sm px-2.5 py-2">
+          Overhead is approximated from pricing-settings assumptions. Enter
+          real monthly operating costs (Settings → Financials → Operating
+          Costs) for a true adjusted EBITDA.
+        </div>
+      )}
+      {bridge.overheadEntered && bridge.overheadBasis === "entered" && bridge.overheadEnteredAt && (
+        <div className="mt-3 text-11 text-ink-tertiary">
+          Operating costs entered {String(bridge.overheadEnteredAt).slice(0, 10)}.
         </div>
       )}
 
@@ -69,9 +99,10 @@ export default function EbitdaBridgeCard({ bridge }) {
       <FormulaNote>
         Revenue − COGS (labor, materials, drive — from job costing) = gross
         profit; − marketing actuals (ad platforms, retainers, referral rewards)
-        = contribution; − operating overhead (owner-entered monthly assumptions
+        = contribution; − operating overhead (owner-entered monthly operating
+        costs when present, else pricing-settings assumptions
         {bridge.period?.elapsedDays != null && bridge.monthFraction < 1
-          ? `, prorated to ${bridge.period.elapsedDays} of ${bridge.period.daysInMonth} days`
+          ? `; prorated to ${bridge.period.elapsedDays} of ${bridge.period.daysInMonth} days`
           : ""}
         ) = adjusted EBITDA. Adjusted: before owner pay, interest, taxes, and
         depreciation. Formula: server/services/ebitda-bridge.js.

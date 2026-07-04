@@ -4,6 +4,7 @@ import {
   Activity,
   Building2,
   ChevronRight,
+  DollarSign,
   MapPinned,
   Plug,
   RotateCcw,
@@ -133,6 +134,7 @@ const VALID_TABS = [
   "team",
   "service-reports",
   "kpi-targets",
+  "operating-costs",
   "system",
 ];
 
@@ -143,8 +145,7 @@ const SETTINGS_TAB_GROUPS = [
   { key: "general", label: "General", Icon: Building2, tabs: ["general", "team"] },
   { key: "integrations", label: "Integrations", Icon: Plug, tabs: ["integrations"] },
   { key: "service-reports", label: "Service Reports", Icon: MapPinned, tabs: ["service-reports"] },
-  // Financials grows an "Operating Costs" leaf in the dashboard lane's Phase 5.
-  { key: "financials", label: "Financials", Icon: Target, tabs: ["kpi-targets"] },
+  { key: "financials", label: "Financials", Icon: Target, tabs: ["kpi-targets", "operating-costs"] },
   { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system"] },
 ];
 
@@ -155,6 +156,7 @@ const SETTINGS_LEAF_META = {
   integrations: { label: "Integrations", Icon: Plug },
   "service-reports": { label: "Service Reports", Icon: MapPinned },
   "kpi-targets": { label: "KPI Targets", Icon: Target },
+  "operating-costs": { label: "Operating Costs", Icon: DollarSign },
   gates: { label: "Feature Gates", Icon: ToggleLeft },
   system: { label: "System", Icon: Server },
 };
@@ -546,6 +548,9 @@ export default function SettingsPage() {
       {tab === "kpi-targets" && (
         <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />
       )}
+      {tab === "operating-costs" && (
+        <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />
+      )}
       {/* ── SYSTEM ── */}
       {tab === "system" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -886,6 +891,165 @@ function VisitTimelineSettingsCard() {
 }
 
 // Editable red/amber/green thresholds for the dashboard KPI tiles
+// Owner-entered MONTHLY operating overhead (company_financials ovh_* — the
+// adjusted-EBITDA bridge's authoritative overhead once entered; until then the
+// bridge falls back to pricing assumptions and says so). Deliberately separate
+// from the pricing inputs: a pricing tweak must never rewrite the P&L view.
+const OVH_FIELDS_UI = [
+  { key: "ovhOfficePayroll", col: "ovh_office_payroll", label: "Office payroll", hint: "admin/CSR wages — NOT tech labor (that's in job costs)" },
+  { key: "ovhRent", col: "ovh_rent", label: "Rent / storage", hint: "office, warehouse, storage units" },
+  { key: "ovhInsurance", col: "ovh_insurance", label: "Business insurance", hint: "GL, workers' comp, umbrella" },
+  { key: "ovhSoftware", col: "ovh_software", label: "Software & subscriptions", hint: "portal hosting, phones, SaaS" },
+  { key: "ovhVehicleFixed", col: "ovh_vehicle_fixed", label: "Vehicles (fixed)", hint: "payments, insurance, registration — fuel rides in job drive costs" },
+  { key: "ovhOtherGa", col: "ovh_other_ga", label: "Other G&A", hint: "banking, professional fees, misc overhead" },
+];
+
+function OperatingCostsSettingsTab({ canAdmin }) {
+  const [row, setRow] = useState(null); // latest company_financials row
+  const [dirty, setDirty] = useState({}); // { ovhKey: string input value }
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState(null); // { text, error }
+
+  useEffect(() => {
+    adminFetch("/admin/revenue/settings")
+      .then((data) => {
+        if (!data || typeof data !== "object" || !("settings" in data)) {
+          throw new Error(data?.error || "Could not load operating costs.");
+        }
+        setRow(data.settings || {});
+      })
+      .catch((err) => setMessage({ text: err.message || "Could not load operating costs.", error: true }));
+  }, []);
+
+  const valueOf = (f) =>
+    dirty[f.key] !== undefined ? dirty[f.key] : row?.[f.col] != null ? String(parseFloat(row[f.col])) : "";
+
+  const save = async () => {
+    const body = {};
+    for (const f of OVH_FIELDS_UI) {
+      if (dirty[f.key] === undefined) continue;
+      const raw = String(dirty[f.key]).trim();
+      if (raw === "") { body[f.key] = null; continue; } // blank clears the figure
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v < 0) {
+        setMessage({ text: `"${f.label}" must be a number ≥ 0 (or blank to clear).`, error: true });
+        return;
+      }
+      body[f.key] = v;
+    }
+    if (!Object.keys(body).length) {
+      setMessage({ text: "Nothing to save yet — edit a figure first.", error: true });
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      const result = await adminFetch("/admin/revenue/settings", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      if (result?.error) throw new Error(result.error);
+      if (result?.settings) setRow(result.settings);
+      setDirty({});
+      setMessage({ text: "Saved. The dashboard's EBITDA bridge switches to these entered costs on its next refresh.", error: false });
+    } catch (err) {
+      setMessage({ text: err.message || "Could not save operating costs.", error: true });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Fail closed — no inputs until the latest row actually loaded (editing on
+  // top of a failed load could clobber entered figures with blanks).
+  if (!row) {
+    return (
+      <Card>
+        <div style={{ color: message?.error ? D.red : D.muted, fontSize: 13 }}>
+          {message?.text || "Loading operating costs..."}
+        </div>
+      </Card>
+    );
+  }
+
+  const monthlyTotal = OVH_FIELDS_UI.reduce((t, f) => {
+    const v = Number(valueOf(f));
+    return t + (Number.isFinite(v) ? v : 0);
+  }, 0);
+  const enteredAt = row.overhead_entered_at ? String(row.overhead_entered_at).slice(0, 10) : null;
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <Card>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Operating Costs</div>
+            <div style={{ marginTop: 4, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+              Real monthly overhead for the dashboard's adjusted-EBITDA bridge. Separate from the
+              pricing assumptions on purpose — job pricing and the company P&amp;L must not rewrite
+              each other. Until these are entered, the bridge approximates from pricing settings
+              and labels itself accordingly.
+            </div>
+            <div style={{ marginTop: 6, fontSize: 12, color: D.muted }}>
+              {enteredAt ? `Last entered ${enteredAt}.` : "Never entered — the bridge is running on pricing assumptions."}
+            </div>
+          </div>
+          {canAdmin && (
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || Object.keys(dirty).length === 0}
+              style={{ ...settingsButtonStyle("primary"), opacity: saving || Object.keys(dirty).length === 0 ? 0.6 : 1 }}
+            >
+              <Save size={15} /> {saving ? "Saving..." : "Save costs"}
+            </button>
+          )}
+        </div>
+        {message && (
+          <div style={{ marginTop: 12, fontSize: 12, color: message.error ? D.red : D.green }}>
+            {message.text}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div style={{ display: "grid", gap: 12 }}>
+          {OVH_FIELDS_UI.map((f) => (
+            <div key={f.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, color: D.text }}>
+                  {f.label}
+                  {dirty[f.key] !== undefined && <span style={{ color: D.amber, marginLeft: 6 }}>•</span>}
+                </div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{f.hint}</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                <span style={{ fontSize: 13, color: D.muted }}>$</span>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={valueOf(f)}
+                  placeholder="0"
+                  disabled={!canAdmin}
+                  onChange={(ev) => setDirty((d) => ({ ...d, [f.key]: ev.target.value }))}
+                  style={{ width: 110, padding: "6px 8px", fontSize: 13, fontFamily: MONO, border: `1px solid ${D.inputBorder}`, borderRadius: 6, background: D.white, color: D.text }}
+                />
+                <span style={{ fontSize: 12, color: D.muted }}>/mo</span>
+              </div>
+            </div>
+          ))}
+          <div style={{ display: "flex", justifyContent: "space-between", borderTop: `1px solid ${D.border}`, paddingTop: 12, fontSize: 13 }}>
+            <span style={{ color: D.muted }}>Monthly overhead total</span>
+            <span style={{ fontFamily: MONO, color: D.heading, fontWeight: 700 }}>
+              ${monthlyTotal.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+            </span>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 // (/api/admin/kpi-targets, seeded from the old hardcoded values). Every
 // snapshot metric is listed — ones without a target simply have no tone until
 // the owner sets one. The dashboard falls back to DEFAULT_KPI_TARGETS when a

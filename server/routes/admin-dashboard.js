@@ -1052,19 +1052,67 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
       } catch (err) {
         logger.error(`[admin-dashboard] ebitda-bridge customer count failed: ${err.message}`);
       }
-      overhead = {
-        vehicleMonthly: parseFloat(finRow.vehicle_cost_per_month) || 0,
-        insuranceMonthly: parseFloat(finRow.insurance_cost_per_month) || 0,
-        softwareMonthly: parseFloat(finRow.software_cost_per_month) || 0,
-        adminMonthly: ((parseFloat(finRow.admin_cost_per_customer_year) || 0) * activeCustomers) / 12,
-      };
+      // Basis resolution (Phase 5): owner-typed ovh_* operating costs are
+      // authoritative once entered; otherwise fall back to the pricing-input
+      // approximation (labeled as such on the card). The two column families
+      // are deliberately separate — pricing tweaks must not rewrite the P&L
+      // view and vice versa.
+      const ovhKeys = ['ovh_office_payroll', 'ovh_rent', 'ovh_insurance', 'ovh_software', 'ovh_vehicle_fixed', 'ovh_other_ga'];
+      const hasEntered = finRow.overhead_entered_at != null && ovhKeys.some((k) => finRow[k] != null);
+      overhead = hasEntered
+        ? {
+          basis: 'entered',
+          enteredAt: finRow.overhead_entered_at,
+          components: {
+            payroll: parseFloat(finRow.ovh_office_payroll) || 0,
+            rent: parseFloat(finRow.ovh_rent) || 0,
+            insurance: parseFloat(finRow.ovh_insurance) || 0,
+            software: parseFloat(finRow.ovh_software) || 0,
+            vehicle: parseFloat(finRow.ovh_vehicle_fixed) || 0,
+            other: parseFloat(finRow.ovh_other_ga) || 0,
+          },
+        }
+        : {
+          basis: 'pricing_defaults',
+          components: {
+            vehicle: parseFloat(finRow.vehicle_cost_per_month) || 0,
+            insurance: parseFloat(finRow.insurance_cost_per_month) || 0,
+            software: parseFloat(finRow.software_cost_per_month) || 0,
+            admin: ((parseFloat(finRow.admin_cost_per_customer_year) || 0) * activeCustomers) / 12,
+          },
+        };
     }
+
+    // COGS component split — window actuals from the job_costs ledger, gated
+    // to completed visits via scheduled_services (job_costs has no status
+    // column; the join also drops manual/equipment-only rows, matching
+    // ad-attribution-sync's customerRealized discipline). Guarded: a missing
+    // table/link just omits the detail.
+    let cogsSplit = null;
+    try {
+      const jc = await db('job_costs as jc')
+        .join('scheduled_services as ss', 'ss.id', 'jc.scheduled_service_id')
+        .where('ss.status', 'completed')
+        .where('jc.service_date', '>=', monthStart)
+        .where('jc.service_date', '<=', today)
+        .select(
+          db.raw('COALESCE(SUM(jc.labor_cost), 0) as labor'),
+          db.raw('COALESCE(SUM(jc.products_cost), 0) as materials'),
+          db.raw('COALESCE(SUM(COALESCE(jc.drive_cost, 0) + COALESCE(jc.equipment_cost, 0)), 0) as drive'),
+        ).first();
+      cogsSplit = {
+        labor: parseFloat(jc?.labor) || 0,
+        materials: parseFloat(jc?.materials) || 0,
+        drive: parseFloat(jc?.drive) || 0,
+      };
+    } catch { /* job_costs absent — headline COGS only */ }
 
     const bridge = buildEbitdaBridge({
       revenue: parseFloat(fin?.rev) || 0,
       grossProfit: parseFloat(fin?.gp) || 0,
       marketing: { adSpend, fixedCosts, referralRewards },
       overhead,
+      cogsSplit,
       monthFraction,
     });
     res.json({
