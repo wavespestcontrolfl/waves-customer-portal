@@ -663,23 +663,45 @@ async function getEstimateFunnel(input) {
   // they for and how are they closing", not stage-transition volume like the
   // funnel above (an estimate sent last week and accepted today counts in ITS
   // sent-week cohort, not today's).
+  //
+  // lost = declined OR expired — expired is a terminal loss everywhere else
+  // (sales-capture's won/lost semantics above; EstimatePage stats), so a dead
+  // estimate must not read as still-open follow-up work here. Archived rows
+  // are excluded entirely: the conversion-guard sweep archives WITHOUT
+  // changing status, so without the filter they'd re-inflate service demand
+  // (same reason the pending-estimates KPI filters archived_at).
   const SERVICE_KEY_SQL = "COALESCE(NULLIF(TRIM(e.service_interest), ''), 'Unspecified')";
   const byService = await excludeInternalEstimates(
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
       .whereNotNull('e.sent_at')
+      .whereNull('e.archived_at')
       .whereBetween('e.sent_at', [fromTs, toTs])
   )
     .select(
       db.raw(`${SERVICE_KEY_SQL} as service`),
       db.raw('COUNT(*) as sent'),
       db.raw("COUNT(*) FILTER (WHERE e.status = 'accepted') as won"),
-      db.raw("COUNT(*) FILTER (WHERE e.status = 'declined') as lost"),
+      db.raw("COUNT(*) FILTER (WHERE e.status IN ('declined', 'expired')) as lost"),
       db.raw("COALESCE(SUM(COALESCE(e.monthly_total,0) + COALESCE(e.onetime_total,0)) FILTER (WHERE e.status = 'accepted'), 0) as won_value"),
     )
     .groupBy(db.raw(SERVICE_KEY_SQL))
     .orderByRaw('COUNT(*) DESC')
     .limit(8);
+
+  // Open follow-up work: the window's sent cohort still undecided RIGHT NOW
+  // (status sent/viewed, not archived). A direct count — the old
+  // sent−accepted−declined arithmetic mixed stage-transition windows, so a
+  // period with carry-over wins/losses could go negative or understate the
+  // live pipeline.
+  const openNow = await excludeInternalEstimates(
+    db({ e: 'estimates' })
+      .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
+      .whereNotNull('e.sent_at')
+      .whereNull('e.archived_at')
+      .whereBetween('e.sent_at', [fromTs, toTs])
+      .whereIn('e.status', ['sent', 'viewed'])
+  ).count('* as c').first();
 
   return {
     period: { from, to },
@@ -688,7 +710,10 @@ async function getEstimateFunnel(input) {
       viewed: totalViewed,
       accepted: totalAccepted,
       declined: totalDeclined,
-      pending: totalSent - totalAccepted - totalDeclined,
+      // Current open follow-ups from this window's sent cohort — NOT
+      // sent−accepted−declined (those are per-stage transition counts whose
+      // windows don't share a cohort; the subtraction could go negative).
+      pending: parseInt(openNow?.c || 0, 10),
     },
     by_service: byService.map((r) => ({
       service: r.service,

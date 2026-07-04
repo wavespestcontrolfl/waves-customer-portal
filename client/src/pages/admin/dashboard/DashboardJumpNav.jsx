@@ -153,6 +153,21 @@ export default function DashboardJumpNav({
                 : "Custom range…"}
             </option>
           </select>
+          {/* Re-selecting the already-active custom option fires no change
+              event, so once a range is applied the select alone can't reopen
+              the picker — this button is the way back in on mobile. */}
+          {period === "custom" && (
+            <button
+              type="button"
+              onClick={() => {
+                setDraftFrom(customRange?.from || "");
+                setShowRangePicker((v) => !v);
+              }}
+              className="md:hidden shrink-0 h-9 px-2.5 text-11 uppercase tracking-label font-medium border-hairline border-zinc-200 rounded-sm bg-white text-ink-secondary u-focus-ring"
+            >
+              Edit
+            </button>
+          )}
           <div className="hidden md:block max-w-full overflow-x-auto">
             <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
               {PERIODS.map((p) => (
