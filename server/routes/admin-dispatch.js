@@ -7,7 +7,7 @@ const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
-const { formatSmsTimeRange } = require('../utils/sms-time-format');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
@@ -6149,7 +6149,11 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
             .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
           const win = parseRescheduleWindow(newWindow);
-          const windowText = win.start && win.end ? `, ${formatSmsTimeRange(`${win.start}-${win.end}`)}` : '';
+          // window_text quotes the 2-hour arrival promise from the new start.
+          // win.end is the job-duration block the dispatcher sized the visits
+          // with — never the customer-facing window (see sms-time-format).
+          const arrivalRange = arrivalWindowRange(win.start);
+          const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
           try {
             const body = await renderRequiredTemplate('appointment_series_rescheduled', {
               first_name: svc.first_name || 'there',
