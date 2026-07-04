@@ -5,6 +5,7 @@ import {
   FONTS,
 } from '../theme-brand';
 import Icon from '../components/Icon';
+import BrandFooter from '../components/BrandFooter';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
 
@@ -578,10 +579,12 @@ export default function ProjectReportViewPage() {
           </div>
         </div>
 
-        {/* No trust strip / newsletter / brand-footer tail on project
-            reports (owner directive 2026-07-03) — the page ends with the
-            report content and contact CTA, like a delivered document. */}
       </main>
+      {/* Quiet contact footer mirroring the customer estimate (owner
+          directive 2026-07-04): company email · phone · street address.
+          Still no trust strip / newsletter tail — the 2026-07-03 "delivered
+          document" directive stands for everything above this line. */}
+      <BrandFooter variant="contact" />
     </div>
   );
 }
@@ -959,7 +962,15 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           marginTop: 4,
           letterSpacing: 0.3,
         }}>
-          {WAVES_PHONE_DISPLAY} • wavespestcontrol.com/register
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{
+            color: 'inherit',
+            textDecoration: 'none',
+          }}>{WAVES_PHONE_DISPLAY}</a>
+          {' • '}
+          <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{
+            color: 'inherit',
+            textDecoration: 'none',
+          }}>wavespestcontrol.com/register</a>
         </div>
         <div style={{
           fontSize: 10,

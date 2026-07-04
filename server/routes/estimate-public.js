@@ -51,6 +51,7 @@ const {
   WAVES_SUPPORT_PHONE_E164,
   WAVES_SUPPORT_PHONE_TEL,
   WAVES_SUPPORT_SMS_TEL,
+  WAVES_ADDRESS_LINE,
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
@@ -1594,6 +1595,7 @@ const COMPANY = {
   phone: WAVES_SUPPORT_PHONE_DISPLAY,
   phoneRaw: WAVES_SUPPORT_PHONE_E164,
   email: 'contact@wavespestcontrol.com',
+  address: WAVES_ADDRESS_LINE,
 };
 
 const SOCIAL_LINKS = [
@@ -4807,6 +4809,7 @@ ${shellTopBar()}
       <span class="dot">&middot;</span>
       <a href="tel:${COMPANY.phoneRaw}">${COMPANY.phone}</a>
     </div>
+    <div class="site-footer-contact">${escapeHtml(COMPANY.address)}</div>
     <div class="site-footer-legal">&copy; ${new Date().getFullYear()} ${COMPANY.legalName}. All rights reserved.</div>
   </footer>
 </div>
