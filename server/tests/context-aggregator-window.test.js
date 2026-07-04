@@ -40,10 +40,14 @@ describe('ContextAggregator.UPCOMING_SERVICE_STATUSES (Codex P2: no phantom visi
 });
 
 describe('ContextAggregator.deriveWindow', () => {
-  test('window_start/window_end (the populated columns) become the stated window', () => {
-    // 545/545 upcoming prod rows have these times; only 1 has window_display.
+  test('customer-facing window = window_start + 2 HOURS, never the job block (owner directive)', () => {
+    // 545/545 upcoming prod rows have window_start. window_end is the
+    // internal job-duration block that drives scheduling — quoting it to a
+    // customer contradicts the confirmation SMS (which says start+2h).
     expect(aggregator.deriveWindow({ window_start: '13:00:00', window_end: '14:00:00' }))
-      .toBe('1:00 PM–2:00 PM');
+      .toBe('1:00 PM–3:00 PM');
+    expect(aggregator.deriveWindow({ window_start: '08:30:00', window_end: '11:45:00' }))
+      .toBe('8:30 AM–10:30 AM');
   });
 
   test('an explicit window_display wins when present', () => {
@@ -61,7 +65,25 @@ describe('ContextAggregator.deriveWindow', () => {
       .toBeNull();
   });
 
-  test('a lone start time still surfaces rather than collapsing to null', () => {
-    expect(aggregator.deriveWindow({ window_start: '15:00:00', window_end: null })).toBe('3:00 PM');
+  test('a lone start time still yields the full start+2h range', () => {
+    expect(aggregator.deriveWindow({ window_start: '15:00:00', window_end: null })).toBe('3:00 PM–5:00 PM');
+  });
+});
+
+describe('ContextAggregator.calendarDay (v8 TODAY marker)', () => {
+  test('pg DATE (Date at local midnight) → its local calendar day, never the UTC-shifted prior day', () => {
+    expect(aggregator.calendarDay(new Date(2026, 6, 4))).toBe('2026-07-04');
+    expect(aggregator.calendarDay(new Date(2026, 0, 1))).toBe('2026-01-01');
+  });
+
+  test('string dates pass through their date prefix', () => {
+    expect(aggregator.calendarDay('2026-07-04')).toBe('2026-07-04');
+    expect(aggregator.calendarDay('2026-07-04T00:00:00.000Z')).toBe('2026-07-04');
+  });
+
+  test('unparseable values return null, never a guess', () => {
+    expect(aggregator.calendarDay(null)).toBeNull();
+    expect(aggregator.calendarDay('')).toBeNull();
+    expect(aggregator.calendarDay('soon')).toBeNull();
   });
 });

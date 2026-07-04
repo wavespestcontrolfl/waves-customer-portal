@@ -36,12 +36,19 @@ const REPLY_WINDOW_HOURS = 24;
 const BATCH_LIMIT = 40; // max LLM-eligible drafts judged per nightly run
 const VERDICTS = ['draft_better', 'equivalent', 'human_better', 'draft_unsafe', 'human_no_reply', 'both_no_reply'];
 
-function buildJudgePrompt({ inboundMessage, draftReply, humanReply, intent, contextSummary }) {
+function buildJudgePrompt({ inboundMessage, draftReply, humanReply, intent, contextSummary, factsBlock }) {
+  // Grade grounding against what the drafter actually SAW (facts_block,
+  // v8+) whenever it was persisted; the one-line summary is the legacy
+  // fallback. Without this, a draft that correctly uses a grounded fact
+  // (a live dispatch status, a phone-call detail) reads as an invention.
+  const context = factsBlock
+    ? `FACTS THE DRAFTER HAD (a detail grounded here is NOT invented):\n${factsBlock}`
+    : `CUSTOMER CONTEXT: ${contextSummary || '(none)'}`;
   return `You are grading an AI-drafted SMS reply for Waves Pest Control against the reply a human teammate actually sent. The AI draft was never sent — this is an internal evaluation.
 
 ${CUSTOMER_SMS_HOUSE_VOICE}
 
-CUSTOMER CONTEXT: ${contextSummary || '(none)'}
+${context}
 CLASSIFIED INTENT: ${intent || 'GENERAL'}
 
 CUSTOMER'S MESSAGE: "${inboundMessage}"
@@ -197,6 +204,7 @@ async function judgeOne(draft, humanReply) {
         humanReply: humanReply.message_body,
         intent: draft.intent,
         contextSummary: draft.context_summary,
+        factsBlock: draft.facts_block,
       }),
     }],
   });
@@ -234,7 +242,7 @@ async function judgeShadowDrafts({ batchLimit = BATCH_LIMIT } = {}) {
     .select(
       'message_drafts.id', 'message_drafts.customer_id', 'message_drafts.inbound_message',
       'message_drafts.draft_response', 'message_drafts.intent', 'message_drafts.context_summary',
-      'message_drafts.created_at', 'message_drafts.sms_log_id',
+      'message_drafts.facts_block', 'message_drafts.created_at', 'message_drafts.sms_log_id',
       'inbound_sms.created_at as inbound_at'
     )
     .orderBy('message_drafts.created_at', 'asc')

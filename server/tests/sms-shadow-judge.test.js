@@ -124,6 +124,30 @@ describe('shadow judge — LLM response contract', () => {
     expect(() => JSON.parse(template)).not.toThrow();
   });
 
+  test('judge grades grounding against the facts the drafter SAW when persisted (v8)', () => {
+    const facts = 'UPCOMING SERVICES:\n- Pest TODAY on Friday, Jul 4, window 1:00 PM\u20133:00 PM, tech Adam, LIVE STATUS: tech marked en route to this visit';
+    const withFacts = buildJudgePrompt({
+      inboundMessage: 'Where is the tech?',
+      draftReply: 'Adam is on the way now!',
+      humanReply: 'He is 10 min out.',
+      intent: 'general_customer_sms_needs_review',
+      contextSummary: 'Dale Cooper — Quarterly Pest',
+      factsBlock: facts,
+    });
+    expect(withFacts).toContain('FACTS THE DRAFTER HAD');
+    expect(withFacts).toContain('LIVE STATUS: tech marked en route');
+    // the one-line summary is superseded, not doubled up
+    expect(withFacts).not.toContain('CUSTOMER CONTEXT:');
+
+    // pre-v8 rows have no facts_block — legacy fallback unchanged
+    const withoutFacts = buildJudgePrompt({
+      inboundMessage: 'x', draftReply: 'y', humanReply: 'z',
+      intent: 'i', contextSummary: 'Dale Cooper — Quarterly Pest', factsBlock: null,
+    });
+    expect(withoutFacts).toContain('CUSTOMER CONTEXT: Dale Cooper — Quarterly Pest');
+    expect(withoutFacts).not.toContain('FACTS THE DRAFTER HAD');
+  });
+
   test('verdict + version constants are stable for the dashboard', () => {
     expect(PROMPT_VERSION).toBe('shadow_judge_v1');
     expect(VERDICTS).toEqual(expect.arrayContaining(['draft_better', 'equivalent', 'human_better', 'draft_unsafe', 'human_no_reply', 'both_no_reply']));

@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
+const { arrivalWindowRange } = require('../utils/sms-time-format');
 
 // Statuses that represent a real, confidently-stated upcoming visit. This is
 // an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
@@ -32,7 +33,7 @@ class ContextAggregator {
   // pick a different (or deleted) account that shares the number.
   async getContextForCustomer(customer) {
     // Parallel data fetch
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance] = await Promise.all([
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
       db('service_records').where({ customer_id: customer.id }).orderBy('service_date', 'desc').limit(5),
       db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
@@ -46,6 +47,7 @@ class ContextAggregator {
       db('estimates').where({ customer_id: customer.id }).whereIn('status', ['sent', 'viewed']).whereNull('archived_at').orderBy('created_at', 'desc').first(),
       db('sms_sequences').where({ customer_id: customer.id, sequence_type: 'cancellation_save', status: 'active' }).first(),
       this.getCompliance(customer.id),
+      this.getRecentCalls(customer.id),
     ]);
 
     const lastService = serviceHistory[0] || null;
@@ -79,28 +81,70 @@ class ContextAggregator {
       },
       smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type })),
       lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: lastService.technician_notes } : null,
-      upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null })),
+      upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() })),
       billing: { outstandingBalance: balance, recentPayments: payments.slice(0, 3) },
       propertyPrefs: propertyPrefs || {},
       flags, compliance,
       recentInteractions: interactions.slice(0, 5).map(i => ({ type: i.interaction_type, subject: i.subject, date: i.created_at })),
+      recentCalls: recentCalls.map(c => ({ summary: c.call_summary, direction: c.direction, outcome: c.call_outcome, date: c.created_at })),
       summary,
     };
   }
 
-  // The arrival window lives in window_start/window_end (Postgres `time`, ET
-  // wall-clock strings like '13:00:00') on nearly every row — booking and
-  // admin-schedule both write those, while window_display is set by only a
-  // few legacy paths (1 of 545 upcoming in prod). Derive a human window from
-  // whatever is present so the drafter states the REAL time instead of
-  // "no window set"; time_window ('morning'/'afternoon') is the coarse fallback.
+  // Last few phone calls that produced an AI summary (call-recording-processor
+  // writes call_log.call_summary after transcription). Customers routinely
+  // text about what "we discussed on the phone" — without these the drafter
+  // is blind to the other channel and invents what was said. Summaries only:
+  // raw transcripts are long and speaker-attribution on legacy rows is
+  // unreliable, while summaries exist on ~half of recent calls in prod.
+  async getRecentCalls(customerId) {
+    try {
+      return await db('call_log')
+        .where({ customer_id: customerId })
+        .where('created_at', '>', new Date(Date.now() - 30 * 86400000))
+        .whereNotNull('call_summary')
+        .whereRaw("length(trim(call_summary)) > 0")
+        .orderBy('created_at', 'desc')
+        .limit(2)
+        .select('direction', 'call_outcome', 'call_summary', 'created_at');
+    } catch (err) {
+      logger.warn(`[context] recent-call lookup failed for customer ${customerId}: ${err.message}`);
+      return [];
+    }
+  }
+
+  // Calendar day 'YYYY-MM-DD' of a Postgres DATE value. pg hands DATE columns
+  // over as Date objects at local midnight, so the local calendar parts are
+  // the true day (same idiom as the shadow drafter's formatEtDate); strings
+  // pass through their date prefix. Never treat these as instants — a UTC
+  // reparse shifts the day.
+  calendarDay(value) {
+    if (!value) return null;
+    if (value instanceof Date) {
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+    }
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value));
+    return m ? m[1] : null;
+  }
+
+  // The arrival window lives in window_start (Postgres `time`, ET wall-clock
+  // strings like '13:00:00') on nearly every row — booking and admin-schedule
+  // both write it, while window_display is set by only a few legacy paths
+  // (1 of 545 upcoming in prod). The CUSTOMER-FACING window is ALWAYS
+  // window_start + 2 hours (owner directive; see utils/sms-time-format.js) —
+  // window_end is the internal job-duration block that drives scheduling and
+  // must never be quoted to a customer. Everything this context feeds is a
+  // customer-facing SMS surface, so derive start+2h here; time_window
+  // ('morning'/'afternoon') is the coarse fallback.
   deriveWindow(s) {
     const display = (s.window_display || '').toString().trim();
     if (display) return display;
-    const start = this.formatClockTime(s.window_start);
-    const end = this.formatClockTime(s.window_end);
-    if (start && end) return `${start}–${end}`;
-    if (start) return start;
+    const range = arrivalWindowRange((s.window_start || '').toString());
+    if (range) {
+      const [rs, re] = range.split('-');
+      return `${this.formatClockTime(rs)}–${this.formatClockTime(re)}`;
+    }
     const tw = (s.time_window || '').toString().trim();
     if (tw) return tw.charAt(0).toUpperCase() + tw.slice(1);
     return null;
