@@ -293,6 +293,11 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     // are still treatment-tied rain wording.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains after my lawn service?')).toBe(true);
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains after the pest control treatment?')).toBe(true);
+    // The reversed word order is the same label question — and without the
+    // reversed alternate, family words the gate does not list bare
+    // ("mosquito") would reach the live models entirely.
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How soon after my lawn service can it rain?')).toBe(true);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How soon after the mosquito treatment can it rain?')).toBe(true);
     // Bare "when can I water?" is irrigation intent even without context.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('When can I water?')).toBe(true);
     // Non-safety questions still reach the live models — bare "rain" and
@@ -340,6 +345,14 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
 
   test('service-qualified rain questions land in the safety branch too', () => {
     const answer = answerEstimateQuestionFallback('What if it rains after my lawn service?', verifiedContext);
+    expect(answer).toContain('rainfast in about 180 minutes');
+  });
+
+  test('reversed rain-after wording gets the same rainfast answer', () => {
+    // "How soon after my lawn service can it rain?" is the rain-after label
+    // question with the order flipped — it must not fall through to the
+    // generic lawn copy without the reviewed rainfast window.
+    const answer = answerEstimateQuestionFallback('How soon after my lawn service can it rain?', verifiedContext);
     expect(answer).toContain('rainfast in about 180 minutes');
   });
 

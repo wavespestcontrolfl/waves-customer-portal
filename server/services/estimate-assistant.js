@@ -681,15 +681,16 @@ function activeIngredientsFromSupport(context = {}, question = '') {
 // water(?:ing|ed|s)? with the (?!\s+bugs?\b) lookahead instead of water\w*:
 // "water bugs" is a PEST, not a watering question, and must keep its
 // pest-branch answer. The rain-after alternates are anchored to treatment
-// vocabulary — "what if it rains after treatment?" is a label question, but
-// "will you still come if it rains after 2pm?" is scheduling and must stay
-// on the normal path.
+// vocabulary and accept BOTH word orders — "what if it rains after
+// treatment?" and "how soon after my lawn service can it rain?" are the
+// same label question — but "will you still come if it rains after 2pm?"
+// is scheduling and must stay on the normal path.
 // "water" alternates are irrigation-anchored: watering-context wording
 // ("water the lawn", "how soon can I water") routes here, but "standing
 // water" (mosquito breeding) and "keep mosquitoes off" (efficacy) are
 // service questions and stay on the normal path. keep-off is restricted to
 // people/pets — that's re-entry wording.
-const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
+const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b|\bafter\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b[^.?!]{0,40}\brains?\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
 
 // Generic treatment vocabulary says nothing about WHICH product a question
 // targets, so it never counts as naming one.
@@ -1095,10 +1096,11 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // match: "will you still come if it rains?" (scheduling) and "how long
   // does the treatment last?" (duration) belong to the branches below.
   // Same intent anchoring as the force gate: irrigation-context "water",
-  // people/pet "keep off", treatment-anchored rain-after, re-entry/dry
-  // wording. "water bugs"/"standing water"/"keep mosquitoes off" are
-  // service questions and belong to the branches below.
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
+  // people/pet "keep off", treatment-anchored rain-after in BOTH word
+  // orders ("rains after my service" / "after my service can it rain"),
+  // re-entry/dry wording. "water bugs"/"standing water"/"keep mosquitoes
+  // off" are service questions and belong to the branches below.
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b|\bafter\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b[^.?!]{0,40}\brains?\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
     const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';

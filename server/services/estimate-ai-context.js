@@ -128,7 +128,7 @@ const SERVICE_FAMILY_QUESTION_PATTERNS = [
   ['pest_control', /\b(?:pests?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter|fleas?|ticks?|bees?|wasps?|hornets?|scorpions?|earwigs?|silverfish|bed\s?bugs?)\b/i],
   ['lawn_care', /\b(?:lawns?|turf|weeds?|fertil\w*|fungus|chinch|grass)\b/i],
   ['mosquito', /\b(?:mosquito(?:es)?|midges?|no[-\s]?see[-\s]?ums?)\b/i],
-  ['tree_shrub', /\b(?:trees?|shrubs?|ornamentals?)\b/i],
+  ['tree_shrub', /\b(?:trees?|shrubs?|ornamentals?|landscape\s+plant(?:ing)?s?)\b/i],
   ['termite_bait', /\b(?:termites?|wdo)\b/i],
   ['palm_injection', /\b(?:palms?|lethal bronzing)\b/i],
   ['rodent_bait', /\b(?:rodents?|rats?|mice|mouse)\b/i],
@@ -157,13 +157,13 @@ const PEST_PERIMETER_CONTEXT_PATTERN = /\b(?:interiors?|exteriors?|inside|outsid
 // The repeat group consumes COORDINATED recipient lists ("for lawns and
 // shrubs", "near the trees or palms") so a later area noun can't survive the
 // strip and read as a target family.
-const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?)(?:\s*(?:,|and|or|&)\s*(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?))*\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
+const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plants?|palms?)(?:\s*(?:,|and|or|&)\s*(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plants?|palms?))*\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
 
 // "Water the lawn", "re-enter the lawn", "mow the grass": the area is the
 // recipient of the customer's ACTIVITY, not the treatment family being asked
 // about — on a pest-only estimate these must not scope to lawn_care and
 // starve the pest product's reviewed guidance.
-const RECIPIENT_ACTIVITY_PATTERN = /\b(?:water(?:ing|ed|s)?|irrigat\w*|mow\w*|walk\w*|play\w*|re-?enter\w*|enter\w*)\s+(?:on\s+|onto\s+|in\s+)?(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?)\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
+const RECIPIENT_ACTIVITY_PATTERN = /\b(?:water(?:ing|ed|s)?|irrigat\w*|mow\w*|walk\w*|play\w*|re-?enter\w*|enter\w*)\s+(?:on\s+|onto\s+|in\s+)?(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plants?|palms?)\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
 
 // Canonical service_key prefixes → family, checked BEFORE the loose label
 // matcher: "rodent_bait_quarterly" must classify as rodent_bait, not hit the
@@ -469,7 +469,13 @@ const PRODUCT_CATALOG_COLUMNS = ['name', 'category', 'active_ingredient', 'moa_g
   'signal_word', 'ppe_text', 'rei_hours', 'rainfast_minutes', 'reentry_summary', 'reentry_text', 'irrigation_notes'];
 
 async function searchProductCatalog(db, terms, productNames = [], productFamiliesByName = {}, question = '') {
-  const lookupTerms = unique([...terms, ...productNames]).slice(0, 20);
+  // Known product names outrank generic search terms for the cap slots: a
+  // linked product that can't even be LOOKED UP is provably missing from the
+  // working set, so dropping any candidate here must also fail completeness
+  // claims (truncated), same as the row caps below.
+  const lookupCandidates = unique([...productNames, ...terms]);
+  const lookupTerms = lookupCandidates.slice(0, 40);
+  const lookupTruncated = lookupCandidates.length > lookupTerms.length;
   if (!db || !lookupTerms.length) return { rows: [], truncated: false };
   const questionWords = cleanText(question)
     .toLowerCase()
@@ -527,6 +533,9 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
     // the broad service terms match — otherwise the off-estimate fail-close
     // never sees it and the fallback answers from the estimate's own facts.
     // This dedicated query runs BEFORE any cap can displace it.
+    // Question words are normalized to bare alphanumerics ("2,4-D" → "24d"),
+    // so the columns are normalized the same way before comparing — a raw
+    // ilike could never match the stored punctuated spelling.
     const namedRows = distinctiveQuestionWords.length
       ? await db('products_catalog')
         .where(function activeProducts() {
@@ -535,8 +544,8 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         .where(function namedProducts() {
           for (const word of distinctiveQuestionWords.slice(0, 6)) {
             const like = `%${word}%`;
-            this.orWhere('name', 'ilike', like)
-              .orWhere('active_ingredient', 'ilike', like);
+            this.orWhereRaw("regexp_replace(lower(coalesce(name, '')), '[^a-z0-9]', '', 'g') like ?", [like])
+              .orWhereRaw("regexp_replace(lower(coalesce(active_ingredient, '')), '[^a-z0-9]', '', 'g') like ?", [like]);
           }
         })
         .select(...PRODUCT_CATALOG_COLUMNS)
@@ -553,10 +562,12 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
     });
 
     // Pull question-word matches to the front before slicing down to the
-    // working set of 8.
+    // working set of 8. Same normalization as the named query — "2,4-D"
+    // must rank up for the question word "24d".
+    const normalizedAlnum = (value) => cleanText(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const matchesQuestionWord = (row) => distinctiveQuestionWords.some((word) => (
-      cleanText(row.name || '').toLowerCase().includes(word)
-      || cleanText(row.active_ingredient || '').toLowerCase().includes(word)
+      normalizedAlnum(row.name).includes(word)
+      || normalizedAlnum(row.active_ingredient).includes(word)
     ));
     const prioritized = distinctiveQuestionWords.length
       ? [...rows.filter(matchesQuestionWord), ...rows.filter((row) => !matchesQuestionWord(row))]
@@ -615,11 +626,12 @@ async function searchProductCatalog(db, terms, productNames = [], productFamilie
         snippet: trimSnippet(parts.join(' - ')),
       };
     }).filter((row) => row.snippet || row.title);
-    // Truncated when rows were actually dropped (raw > working set), OR when
+    // Truncated when rows were actually dropped (raw > working set), when
     // the named-product query filled its own cap — an exactly-8 merge built
-    // from a capped named fetch is not provably complete, and completeness
-    // claims must not be made from it.
-    return { rows: shaped, truncated: rows.length > 8 || namedRows.length >= 8 };
+    // from a capped named fetch is not provably complete — OR when a lookup
+    // candidate never even reached the query. Completeness claims must not
+    // be made from any of those.
+    return { rows: shaped, truncated: rows.length > 8 || namedRows.length >= 8 || lookupTruncated };
   } catch (err) {
     logger.warn(`[estimate-ai-context] products_catalog lookup skipped: ${err.message}`);
     return { rows: [], truncated: false };
@@ -772,7 +784,24 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
       productFamiliesByName[key] = unique([...(productFamiliesByName[key] || []), family]);
     }
   }
-  const productCatalogResult = await searchProductCatalog(db, searchTerms, serviceProductNames, productFamiliesByName, question);
+  // Attribution alone is not enough for protocol-only products: the catalog
+  // FETCH must also look their names up, or a generic lawn safety/rainfast
+  // question never loads the row for a product the protocol actually uses
+  // (SpeedZone Southern + NIS on B/Z/B) and completeness claims get made
+  // from the smaller default-product set. Scoped to lawn contexts — every
+  // protocol product attributes to lawn_care, and feeding lawn names into a
+  // pest or mosquito lookup would let them displace the asked family's rows
+  // in the capped working set.
+  const protocolProductNames = serviceKeys.includes('lawn_care')
+    ? Object.keys(protocolProductFamilies)
+    : [];
+  const productCatalogResult = await searchProductCatalog(
+    db,
+    searchTerms,
+    unique([...serviceProductNames, ...protocolProductNames]),
+    productFamiliesByName,
+    question,
+  );
   const publicServiceLibrary = serviceLibrary.map(({ _productNames, ...row }) => row);
 
   return {

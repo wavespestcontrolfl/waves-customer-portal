@@ -23,6 +23,46 @@ function fakeDb(tables = {}) {
   });
 }
 
+// WHERE-aware fake: applies the recorded ilike patterns (and the normalized
+// orWhereRaw predicate the named-product query uses) so the broad query and
+// the dedicated named-product query return different rows — the shared
+// fakeDb ignores predicates and cannot reproduce cap or punctuation cases.
+function filteringDb(tables = {}) {
+  const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return (table) => {
+    const likes = [];
+    return {
+      where(arg) {
+        if (typeof arg === 'function') arg.call(this);
+        return this;
+      },
+      whereNull() { return this; },
+      orWhere(column, _op, pattern) {
+        if (typeof pattern === 'string') likes.push({ column, needle: pattern.replace(/%/g, '').toLowerCase() });
+        return this;
+      },
+      orWhereNull() { return this; },
+      orWhereRaw(sql, bindings = []) {
+        // Mirrors regexp_replace(lower(coalesce(<col>, '')), '[^a-z0-9]', '', 'g') like ?
+        const column = String(sql).includes('active_ingredient') ? 'active_ingredient' : 'name';
+        const pattern = Array.isArray(bindings) ? bindings[0] : bindings;
+        if (typeof pattern === 'string') {
+          likes.push({ column, needle: pattern.replace(/%/g, '').toLowerCase(), normalized: true });
+        }
+        return this;
+      },
+      select() { return this; },
+      limit(count) {
+        const rows = (tables[table] || []).filter((row) => !likes.length
+          || likes.some(({ column, needle, normalized }) => (normalized
+            ? normalize(row[column]).includes(needle)
+            : String(row[column] || '').toLowerCase().includes(needle))));
+        return Promise.resolve(rows.slice(0, count));
+      },
+    };
+  };
+}
+
 describe('estimate AI support context', () => {
   test('infers service keys from estimate context and customer question', () => {
     const context = {
@@ -70,6 +110,13 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Is the flea and tick treatment safe for my dog?')).toEqual(['pest_control']);
     expect(serviceFamiliesFromText('Is the wasp spray safe near the patio?')).toEqual(['pest_control']);
     expect(serviceFamiliesFromText('Will the pest treatment hurt my shrubs?')).toEqual(['pest_control']);
+    // "landscape plant" is Tree & Shrub wording (mirrors the service label
+    // matcher) when it TARGETS the treatment...
+    expect(serviceFamiliesFromText('Is the landscape plant treatment safe for pets?')).toEqual(['tree_shrub']);
+    // ...but stays recipient/activity wording when it names what the
+    // customer sprays near or waters.
+    expect(serviceFamiliesFromText('Is the pest spray safe near the landscape plants?')).toEqual(['pest_control']);
+    expect(serviceFamiliesFromText('Can I water the landscape plants after treatment?')).toEqual([]);
     // Plain location words are not pest scope without treatment context...
     expect(serviceFamiliesFromText('Can I water my outside plants after treatment?')).toEqual([]);
     // ...but treatment-tied perimeter wording is.
@@ -236,31 +283,6 @@ describe('estimate AI support context', () => {
   });
 
   test('a named product ranked past 24 broad matches is still fetched', async () => {
-    // WHERE-aware fake: applies the recorded ilike patterns so the broad
-    // query and the dedicated named-product query return different rows —
-    // the shared fakeDb ignores predicates and cannot reproduce this case.
-    const filteringDb = (tables = {}) => (table) => {
-      const likes = [];
-      return {
-        where(arg) {
-          if (typeof arg === 'function') arg.call(this);
-          return this;
-        },
-        whereNull() { return this; },
-        orWhere(column, _op, pattern) {
-          if (typeof pattern === 'string') likes.push({ column, needle: pattern.replace(/%/g, '').toLowerCase() });
-          return this;
-        },
-        orWhereNull() { return this; },
-        orWhereRaw() { return this; },
-        select() { return this; },
-        limit(count) {
-          const rows = (tables[table] || []).filter((row) => !likes.length
-            || likes.some(({ column, needle }) => String(row[column] || '').toLowerCase().includes(needle)));
-          return Promise.resolve(rows.slice(0, count));
-        },
-      };
-    };
     const fillers = Array.from({ length: 30 }, (_, i) => ({
       name: `Lawn Filler ${i}`,
       category: 'herbicide',
@@ -288,6 +310,96 @@ describe('estimate AI support context', () => {
     expect(named.questionNameMatch).toBe(true);
     // Question-word matches rank ahead of broad matches in the working set.
     expect(result.productCatalog[0].activeIngredient).toBe('Zeta-cypermethrin');
+    expect(result.productCatalogTruncated).toBe(true);
+  });
+
+  test('a punctuated active ingredient still matches the named-product lookup', async () => {
+    // "2,4-D" in the question normalizes to "24d"; the catalog stores the
+    // punctuated spelling. The named query must compare normalized text —
+    // a raw ilike '%24d%' can never match "2,4-D" and the row would be
+    // silently absent, so the off-estimate fail-close never sees it.
+    const result = await loadEstimateAiSupportContext({
+      db: filteringDb({
+        products_catalog: [
+          {
+            name: 'Lawn Filler',
+            category: 'herbicide',
+            active_ingredient: 'Filler Ingredient',
+            active: true,
+            label_verified_by: 'waves-admin',
+          },
+          {
+            name: 'Surge Broadleaf',
+            category: 'herbicide',
+            active_ingredient: '2,4-D dimethylamine salt',
+            active: true,
+            label_verified_by: 'waves-admin',
+          },
+        ],
+      }),
+      question: 'Is 2,4-D safe for my dog?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    });
+    const named = result.productCatalog.find((r) => r.activeIngredient === '2,4-D dimethylamine salt');
+    expect(named).toBeDefined();
+    // Prioritization normalizes the same way — the punctuated row ranks first.
+    expect(result.productCatalog[0].activeIngredient).toBe('2,4-D dimethylamine salt');
+  });
+
+  test('protocol-only products are fetched for lawn questions, not just attributed', async () => {
+    // SpeedZone lives in lawn_protocol_products (B/Z/B tracks), NOT in the
+    // cleaned service defaults — attribution alone never fetched its row,
+    // so a generic lawn rainfast question could treat the smaller default-
+    // product set as complete while missing a product the protocol uses.
+    const tables = {
+      lawn_protocol_products: [{ product_name: 'SpeedZone Southern + NIS' }],
+      products_catalog: [{
+        name: 'SpeedZone Southern EW',
+        category: 'herbicide',
+        active_ingredient: 'Carfentrazone + 2,4-D + MCPP + Dicamba',
+        active: true,
+        label_verified_by: 'waves-admin',
+        rainfast_minutes: 180,
+      }],
+    };
+    const result = await loadEstimateAiSupportContext({
+      db: filteringDb(tables),
+      question: 'Will rain wash away my lawn treatment?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    });
+    const row = result.productCatalog.find((r) => r.activeIngredient === 'Carfentrazone + 2,4-D + MCPP + Dicamba');
+    expect(row).toBeDefined();
+    expect(row.serviceKeys).toEqual(['lawn_care']);
+    expect(row.rainfastMinutes).toBe(180);
+
+    // Protocol names are lawn linkage — they must not dilute the capped
+    // working set of a pest-scoped lookup.
+    const pestResult = await loadEstimateAiSupportContext({
+      db: filteringDb(tables),
+      question: 'Is the pest spray safe for pets?',
+      context: { services: [{ label: 'Pest Control', detail: 'Quarterly perimeter plan' }] },
+    });
+    expect(pestResult.productCatalog.find((r) => r.activeIngredient === 'Carfentrazone + 2,4-D + MCPP + Dicamba')).toBeUndefined();
+  });
+
+  test('overflowing the lookup-term cap flags the catalog as truncated', async () => {
+    // A lookup candidate that never reaches the query means the fetched set
+    // is not provably complete — blanket completeness claims must fail
+    // closed exactly like the row caps.
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        lawn_protocol_products: Array.from({ length: 45 }, (_, i) => ({ product_name: `Protocol Product ${i}` })),
+        products_catalog: [{
+          name: 'Lawn Filler',
+          category: 'herbicide',
+          active_ingredient: 'Filler Ingredient',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'Is the lawn treatment safe for pets?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed control applications' }] },
+    });
     expect(result.productCatalogTruncated).toBe(true);
   });
 
