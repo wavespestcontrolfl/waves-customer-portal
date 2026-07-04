@@ -982,8 +982,10 @@ router.post('/confirm', async (req, res, next) => {
         // 4. Lawn health → customer health signal
         await LawnIntel.emitHealthSignal(updated.customer_id);
 
-        // 5. Send assessment notification (SMS/email with score + photo)
-        await LawnIntel.sendAssessmentNotification(assessmentId);
+        // 5. (Removed) Standalone "lawn health report ready" SMS/email.
+        //    The score is now folded into the single completion service-report
+        //    text (see admin-dispatch completion + LawnIntel.buildCompletionScoreBlock)
+        //    so the customer gets one report message, not two.
 
         // 6. Auto-generate service report
         await LawnIntel.generateServiceReport(assessmentId);

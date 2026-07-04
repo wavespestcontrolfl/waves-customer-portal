@@ -4782,6 +4782,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }
           }
         }
+        // Lawn health score consolidation: fold the confirmed assessment's
+        // score (and tip) into the SAME completion report text instead of
+        // sending a separate "lawn health report ready" SMS at confirm time.
+        // Branch-agnostic — applies to whichever completion template was
+        // chosen above. Best-effort; a failure here must never block the send.
+        if (sentSmsBody && !isIncompleteVisit && completedLawnAssessmentId) {
+          try {
+            const LawnIntel = require('../services/lawn-intelligence');
+            const scoreBlock = await LawnIntel.buildCompletionScoreBlock(completedLawnAssessmentId);
+            if (scoreBlock) {
+              // Insert right after the "your report is ready: <link>" lead so the
+              // score reads as part of the report, above the invoice/re-entry
+              // lines. DB templates separate paragraphs with a blank line; the
+              // prebuilt V1 body uses single newlines — split on whichever this
+              // body uses so the score lands under the lead line either way.
+              const sep = sentSmsBody.includes('\n\n') ? '\n\n' : '\n';
+              const parts = sentSmsBody.split(sep);
+              parts.splice(1, 0, scoreBlock);
+              sentSmsBody = parts.join(sep);
+            }
+          } catch (scoreErr) {
+            logger.warn(`[dispatch] lawn score fold-in failed for ${record.id}: ${scoreErr.message}`);
+          }
+        }
         if (sentSmsBody) {
           const sendingNotes = {
             ...recordStructuredNotes,
