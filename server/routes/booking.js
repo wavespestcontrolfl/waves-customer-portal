@@ -239,6 +239,16 @@ function stripInlineUnitFromLine(line, submittedUnit) {
       return [split.street, ...segments.slice(k + 1)].join(',');
     }
   }
+  // A comma-free one-line address hides the duplicate mid-line behind its
+  // city/state/zip tail ("123 Main St Apt A Sarasota FL 34236") — parse the
+  // tail off, re-peel, and rebuild in comma form (street, city, state zip) so
+  // the stored value keeps every part except the double-stored unit.
+  const parsed = parseRawAddress(line || '');
+  const tailSplit = parsed.line1 ? splitStreetLineUnit(parsed.line1) : { street: '', unit: '' };
+  if (tailSplit.unit && unitValueKey(tailSplit.unit) === submittedKey) {
+    const stateZip = [parsed.state, parsed.zip].filter(Boolean).join(' ');
+    return [tailSplit.street, parsed.city, stateZip].filter(Boolean).join(', ');
+  }
   return line;
 }
 
@@ -248,15 +258,22 @@ function customerUnitOf(customer) {
   return customer?.address_line2 || splitStreetLineUnit(customer?.address_line1 || '').unit;
 }
 
-// The inline unit of a SUBMITTED street line. splitStreetLineUnit only peels
+// Street + inline unit of a SUBMITTED line. splitStreetLineUnit only peels
 // trailing units; a full one-line address ("123 Main St Apt A Sarasota FL
 // 34236") hides the unit mid-line behind the city/state tail, so when the
-// direct peel finds nothing, parse the tail off and re-peel.
-function submittedInlineUnit(line) {
+// direct peel finds nothing, parse the tail off and re-peel. The re-parse is
+// used only when it actually finds a unit — otherwise the direct split keeps
+// its existing street semantics.
+function submittedStreetAndUnit(line) {
   const direct = splitStreetLineUnit(line || '');
-  if (direct.unit) return direct.unit;
+  if (direct.unit) return direct;
   const parsedLine1 = parseRawAddress(line || '').line1 || '';
-  return parsedLine1 ? splitStreetLineUnit(parsedLine1).unit : '';
+  const reparsed = parsedLine1 ? splitStreetLineUnit(parsedLine1) : { street: '', unit: '' };
+  return reparsed.unit ? reparsed : direct;
+}
+
+function submittedInlineUnit(line) {
+  return submittedStreetAndUnit(line).unit;
 }
 
 // The dedicated unit field of a submission — trimmed, because a whitespace-only
@@ -273,7 +290,10 @@ function submittedDedicatedUnit(newCustomer) {
 // (legacy/manual clients). Only same-street submissions count: a different
 // street line is not a unit statement about this record.
 function submittedUnitConflictsWithCustomer(customer, newCustomer) {
-  const submitted = splitStreetLineUnit(newCustomer?.address_line1 || '');
+  // Tail-aware split: a one-line submitted address must yield both its
+  // mid-line unit AND its bare street, or the street compare below could
+  // never match the on-file record.
+  const submitted = submittedStreetAndUnit(newCustomer?.address_line1);
   const submittedUnit = submittedDedicatedUnit(newCustomer) || submitted.unit;
   if (!submittedUnit) return false;
   const submittedStreet = normalizeAddress(submitted.street);
@@ -288,7 +308,7 @@ function submittedUnitConflictsWithCustomer(customer, newCustomer) {
 // own. Conflicting submissions never reach this — they 400 upstream.
 function carriedVisitUnit(customer, newCustomer) {
   if (!newCustomer || customerUnitOf(customer)) return '';
-  const submitted = splitStreetLineUnit(newCustomer.address_line1 || '');
+  const submitted = submittedStreetAndUnit(newCustomer.address_line1);
   const submittedUnit = submittedDedicatedUnit(newCustomer) || submitted.unit;
   if (!submittedUnit) return '';
   const submittedStreet = normalizeAddress(submitted.street);

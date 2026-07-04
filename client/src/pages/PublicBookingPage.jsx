@@ -212,12 +212,11 @@ export default function PublicBookingPage() {
   }, []);
 
   const checkExistingCustomerByAddress = useCallback(async (nextAddress) => {
-    // Unit-bearing selections keep line1 street-only while formatted still
-    // carries the unit inline — look up by the street line so it can match
-    // street-only customers.address_line1; the unit travels as its own param.
-    const lookupAddress = nextAddress.line2
-      ? (nextAddress.line1 || nextAddress.formatted)
-      : (nextAddress.formatted || nextAddress.line1);
+    // Always look up by the street-only line1 when we have it: formatted can
+    // still carry a subpremise inline AFTER the visitor clears the unit box,
+    // and a lookup on it would re-submit the stale unit and link the wrong
+    // apartment's account. The unit travels only as its own param.
+    const lookupAddress = nextAddress.line1 || nextAddress.formatted;
     if (!lookupAddress) return;
     try {
       const params = new URLSearchParams({ address: lookupAddress });
@@ -257,9 +256,9 @@ export default function PublicBookingPage() {
     if (digits.length !== 10) return;
     try {
       const params = new URLSearchParams({ phone: digits });
-      const lookupAddress = address.line2
-        ? (address.line1 || address.formatted)
-        : (address.formatted || address.line1);
+      // Same street-only preference as checkExistingCustomerByAddress — a
+      // cleared unit box must not resurrect the subpremise inside formatted.
+      const lookupAddress = address.line1 || address.formatted;
       if (lookupAddress) params.set('address', lookupAddress);
       if (address.city) params.set('city', address.city);
       if (address.zip) params.set('zip', address.zip);

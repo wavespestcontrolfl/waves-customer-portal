@@ -189,6 +189,14 @@ describe('stripInlineUnitFromLine (double-entry dedup at insert)', () => {
     expect(stripInlineUnitFromLine('123 Main St, Bldg 2, Apt 4, Sarasota', 'Bldg 2 Apt 4'))
       .toBe('123 Main St, Sarasota');
   });
+
+  test('strips a mid-line duplicate hidden by a one-line address tail (codex rd13)', () => {
+    expect(stripInlineUnitFromLine('123 Main St Apt A Sarasota FL 34236', 'Apt A'))
+      .toBe('123 Main St, Sarasota, FL 34236');
+    // A DIFFERENT mid-line unit stays put — the conflict guard owns that case.
+    expect(stripInlineUnitFromLine('123 Main St Apt A Sarasota FL 34236', 'Apt 9'))
+      .toBe('123 Main St Apt A Sarasota FL 34236');
+  });
 });
 
 describe('submittedUnitConflictsWithCustomer (resolved-customer guard)', () => {
@@ -230,6 +238,11 @@ describe('submittedUnitConflictsWithCustomer (resolved-customer guard)', () => {
     expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt B', address_line2: '   ' })).toBe(true);
     expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt A', address_line2: '   ' })).toBe(false);
   });
+
+  test('one-line submitted address with a mid-line unit still conflicts (codex rd13)', () => {
+    expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt B Sarasota FL 34236', address_line2: '' })).toBe(true);
+    expect(submittedUnitConflictsWithCustomer(aptA, { address_line1: '123 Main St Apt A Sarasota FL 34236', address_line2: '' })).toBe(false);
+  });
 });
 
 describe('carriedVisitUnit (no-backfill unit rides on the visit, codex rd10)', () => {
@@ -256,5 +269,9 @@ describe('carriedVisitUnit (no-backfill unit rides on the visit, codex rd10)', (
 
   test('whitespace-only dedicated field falls through to the inline unit (codex rd12)', () => {
     expect(carriedVisitUnit(streetOnly, { address_line1: '123 Main St Apt B', address_line2: '   ' })).toBe('Apt B');
+  });
+
+  test('one-line submission with a mid-line unit still carries it (codex rd13)', () => {
+    expect(carriedVisitUnit(streetOnly, { address_line1: '123 Main St Apt B Sarasota FL 34231', address_line2: '' })).toBe('Apt B');
   });
 });
