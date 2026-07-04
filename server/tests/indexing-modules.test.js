@@ -59,10 +59,12 @@ describe('classifyResponse (indexnow)', () => {
 });
 
 describe('IndexNowSubmitter.submit', () => {
+  // Submissions are host-gated (#1772): off-host URLs skip before the key
+  // check or any fetch, so these use the configured wavespestcontrol host.
   test('rejects when INDEXNOW_KEY missing', async () => {
     delete process.env.INDEXNOW_KEY;
     const s = new IndexNowSubmitter();
-    const r = await s.submit('https://x.com/a', { fetchFn: jest.fn() });
+    const r = await s.submit('https://www.wavespestcontrol.com/a', { fetchFn: jest.fn() });
     expect(r.ok).toBe(false);
     expect(r.status).toBe('rejected');
     expect(r.error).toMatch(/INDEXNOW_KEY/);
@@ -95,14 +97,14 @@ describe('IndexNowSubmitter.submit', () => {
     process.env.INDEXNOW_KEY = 'abc';
     const fetchFn = jest.fn().mockReturnValue(err(429, 'too many'));
     const s = new IndexNowSubmitter();
-    const r = await s.submit('https://x.com/a', { fetchFn });
+    const r = await s.submit('https://www.wavespestcontrol.com/a', { fetchFn });
     expect(r.status).toBe('rate_limited');
   });
   test('403 (key rejected) → rejected with error', async () => {
     process.env.INDEXNOW_KEY = 'abc';
     const fetchFn = jest.fn().mockReturnValue(err(403, 'key not valid'));
     const s = new IndexNowSubmitter();
-    const r = await s.submit('https://x.com/a', { fetchFn });
+    const r = await s.submit('https://www.wavespestcontrol.com/a', { fetchFn });
     expect(r.status).toBe('rejected');
     expect(r.error).toMatch(/403/);
   });
