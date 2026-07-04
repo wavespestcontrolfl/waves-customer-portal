@@ -80,6 +80,7 @@ export default function DashboardPageV2() {
   const [callsBySource, setCallsBySource] = useState(null);
   const [leadsBySource, setLeadsBySource] = useState(null);
   const [channelMix, setChannelMix] = useState(null);
+  const [leadFunnel, setLeadFunnel] = useState(null); // /admin/dashboard/lead-funnel (period-driven)
   const [mix, setMix] = useState(null);
   const [revenueByCity, setRevenueByCity] = useState(null);
   const [reviewTrend, setReviewTrend] = useState(null);
@@ -417,6 +418,7 @@ export default function DashboardPageV2() {
       setCallsBySource(null);
       setLeadsBySource(null);
       setChannelMix(null);
+      setLeadFunnel(null);
       setAttributionError(null);
       setAttributionLoading(true);
     }
@@ -431,11 +433,21 @@ export default function DashboardPageV2() {
       adminFetch(`/admin/dashboard/channel-mix?${periodQS}`, {
         signal: ctrl.signal,
       }),
+      // Fails soft to null on its own — the optional funnel card must never
+      // reject the batch and take down the attribution panels beside it.
+      adminFetch(`/admin/dashboard/lead-funnel?${periodQS}`, {
+        signal: ctrl.signal,
+      }).catch((e) => {
+        if (e?.name !== "AbortError") console.error("[dashboard-v2] /lead-funnel", e);
+        return null;
+      }),
     ])
-      .then(([calls, leads, channels]) => {
+      .then(([calls, leads, channels, funnelBySrc]) => {
         setCallsBySource(calls);
         setLeadsBySource(leads);
         setChannelMix(channels);
+        // Preserve-on-fail like the loadAll panels (blanked on period switch above).
+        setLeadFunnel((prev) => funnelBySrc ?? prev);
         setAttributionError(null);
       })
       .catch((e) => {
@@ -600,6 +612,7 @@ export default function DashboardPageV2() {
           callsBySource={callsBySource}
           leadsBySource={leadsBySource}
           channelMix={channelMix}
+          leadFunnel={leadFunnel}
           attributionLoading={attributionLoading}
           attributionError={attributionError}
           onDrillSource={drillToSource}

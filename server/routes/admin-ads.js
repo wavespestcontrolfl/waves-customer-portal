@@ -624,28 +624,9 @@ function formatServiceName(key) {
   return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-function formatSourceName(key) {
-  const names = {
-    google_ads: 'Google Ads',
-    google_lsa: 'Google LSA',
-    organic: 'Organic',
-    referral: 'Referral',
-    domain_website: 'Domain Sites',
-    waves_website: 'Waves Website',
-    google_business: 'Google Business',
-    facebook: 'Facebook',
-    facebook_organic: 'Facebook (organic)',
-    nextdoor: 'Nextdoor',
-    van_wrap: 'Van Wrap',
-    // Fallback bucket from the lead webhook (lead-webhook.js) when a form URL
-    // matches no known domain/UTM — includes UNMAPPED spoke domains. NOT the Waves
-    // hub (that's always waves_website). Label it distinctly so it doesn't read as
-    // a duplicate "Website" next to "Waves Website" and so unattributed volume is a
-    // visible signal to map its source, not silently folded into the hub.
-    website: 'Unattributed (web)',
-  };
-  return names[key] || formatServiceName(key);
-}
+// Canonical map now lives in services/source-names.js (shared with the
+// dashboard lead-funnel card) — same one-copy rule as classifyServiceLine.
+const { formatSourceName } = require('../services/source-names');
 
 function aggregate(rows) {
   const spend = rows.reduce((s, r) => s + parseFloat(r.cost || 0), 0);

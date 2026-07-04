@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MIN_CONFIDENT_N,
+  leadFunnelVerdict,
   mrrBridgeVerdict,
   agingVerdict,
   capitalVerdict,
@@ -266,5 +267,38 @@ describe("mrrBridgeVerdict", () => {
     const v = mrrBridgeVerdict(month({ churned: { mrr: 0, count: 0 }, net: 0, endMrr: 9804.69 }));
     expect(v.tone).toBe("neutral");
     expect(v.happened).toContain("held flat");
+  });
+});
+
+describe("leadFunnelVerdict", () => {
+  const data = (totals, stagesPresent) => ({ totals, stagesPresent, sources: [], paid: {}, organic: {} });
+  const ALL = { contacted: true, estimate: true, booked: true };
+
+  it("names the widest RECORDED stage drop-off as the action", () => {
+    const v = leadFunnelVerdict(data({ leads: 20, contacted: 18, estimate: 9, booked: 7, completed: 5, bookRate: 35, completeRate: 25 }, ALL));
+    expect(v.action).toContain("contacted → estimate");
+    expect(v.tone).toBe("warn");
+  });
+
+  it("lead→won-only reality gets a won-rate verdict, never advice about unrecorded stages", () => {
+    const v = leadFunnelVerdict(data(
+      { leads: 20, contacted: 6, estimate: 6, booked: 6, completed: 6, lost: 2, bookRate: 30, completeRate: 30 },
+      { contacted: false, estimate: false, booked: false },
+    ));
+    expect(v.happened).toContain("20 attributed leads → 6 won");
+    expect(v.happened).not.toContain("contacted");
+    expect(v.action).not.toContain("first-response");
+    expect(v.tone).toBe("warn");
+  });
+
+  it("small samples refuse channel judgements", () => {
+    const v = leadFunnelVerdict(data({ leads: 3, contacted: 3, estimate: 3, booked: 3, completed: 2, bookRate: 100, completeRate: 67 }, ALL));
+    expect(v.tone).toBe("neutral");
+    expect(v.sampleN).toBe(3);
+  });
+
+  it("null on empty periods", () => {
+    expect(leadFunnelVerdict(data({ leads: 0 }))).toBeNull();
+    expect(leadFunnelVerdict(null)).toBeNull();
   });
 });
