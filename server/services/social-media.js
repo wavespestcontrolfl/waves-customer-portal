@@ -389,22 +389,30 @@ async function withRetry(fn, { maxAttempts = 3, label = '' } = {}) {
 // the line to name the artifact (post/caption/copy/draft).
 function stripModelWrapper(raw) {
   let text = String(raw || '').replace(/\r\n?/g, '\n').trim();
-  // Leading meta line: "Here's a <platform> post …:" / "Sure, here is your caption:".
-  // (?!-) keeps hyphenated adjectives ("Here's a post-storm mosquito tip:") —
-  // those are real hooks, not metadata; only the artifact noun counts.
-  text = text.replace(/^(?:(?:sure|certainly|of course)[,!.]?\s+)?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b(?!-)[^:\n]{0,60}:\s*/i, '');
+  // Leading meta line: "Here's a <platform> post …:" / "Sure — here is your caption:".
+  // The acknowledgement separator takes comma/period/bang or a dash/colon ("Sure —").
+  // (?!-) keeps hyphenated adjectives ("Here's a post-storm mosquito tip:"), and the
+  // tail after the artifact noun must open with wrapper phrasing (for/that/within/…)
+  // so unhyphenated adjective hooks ("Here's a post storm mosquito tip:",
+  // "Here's a post treatment reminder:") survive too — there "post" is followed by
+  // another content word, which real meta lines never do.
+  text = text.replace(/^(?:(?:sure|certainly|of course)(?:\s*[,!.:—–-]\s*|\s+))?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b(?!-)(?:[,—–-]?\s+(?:for|that|which|you|your|ready|within|under|below|about|in|on|to|at)\b[^:\n]{0,60})?:\s*/i, '');
   // Fences → count note → fences again: the count can sit inside the fences
   // ("---\ncopy\n*(Character count: ~240)*\n---") or a fence can sit between
   // the copy and the count — each pass exposes the other's target.
   const stripFences = (s) => s.replace(/^\s*-{3,}\s*/, '').replace(/\s*-{3,}\s*$/, '');
   text = stripFences(text);
-  // Trailing count notes: "*197 characters*", "*(Character count: ~240)*", "(197 characters)"
-  text = text.replace(/[\s*_]*\(?\s*(?:character count:?\s*~?\d+|~?\d+\s*characters?)\s*\)?[\s*_.]*$/i, '');
-  // Trailing "Note: …" meta line, only when it talks about the character
-  // limit (live example, LinkedIn 06-30: "*Note: This is 196 characters —
-  // right at your limit. Want me to trim or adjust the tone?*"). A content
-  // note like "Note: keep pets off the lawn for 2 hours." survives.
-  text = text.replace(/\n[\s*_(]*note:[^\n]*(?:\bcharacters?\b|\blimit\b|character count)[^\n]*$/i, '');
+  // Trailing count notes: "*197 characters*", "*(Character count: ~240)*", "(197 characters)".
+  // The lookbehind keeps this pass from biting the tail off a "*Note: … 196
+  // characters*" line — that would strand "*Note: This is" and hide the count
+  // words from the Note pass below, which strips those lines whole.
+  text = text.replace(/(?<!\bnote:[^\n]*)[\s*_]*\(?\s*(?:character count:?\s*~?\d+|~?\d+\s*characters?)\s*\)?[\s*_.]*$/i, '');
+  // Trailing "Note: …" meta line, only when it talks in character-count terms
+  // (live example, LinkedIn 06-30: "*Note: This is 196 characters — right at
+  // your limit. Want me to trim or adjust the tone?*"). Bare "limit" is NOT
+  // enough — care notes like "Note: limit irrigation after treatment." and
+  // "Note: keep pets off the lawn for 2 hours." survive.
+  text = text.replace(/\n[\s*_(]*note:[^\n]*(?:\bchar(?:acter)?s?\b|\blength limits?\b)[^\n]*$/i, '');
   text = stripFences(text);
   // Markdown bold — readers would see the literal **
   text = text.replace(/\*\*([^*\n][^*]*)\*\*/g, '$1');

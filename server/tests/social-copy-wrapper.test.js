@@ -52,6 +52,32 @@ describe('stripModelWrapper', () => {
     expect(stripModelWrapper(raw)).toBe('Sarasota mosquito pressure is at a 5 right now. Standing water is the driver.');
   });
 
+  test('strips a dash- or colon-separated acknowledgement ("Sure — here\'s a LinkedIn post:")', () => {
+    const dash = "Sure — here's a LinkedIn post: Venice pest pressure is peaking. Stay ahead of it.";
+    expect(stripModelWrapper(dash)).toBe('Venice pest pressure is peaking. Stay ahead of it.');
+    const colon = 'Of course: here is your caption:\n\nParrish lawns are showing fungus after the rain.';
+    expect(stripModelWrapper(colon)).toBe('Parrish lawns are showing fungus after the rain.');
+    const hyphen = "Certainly - here's a draft: Brown patch or chinch bugs? The blade base tells you.";
+    expect(stripModelWrapper(hyphen)).toBe('Brown patch or chinch bugs? The blade base tells you.');
+  });
+
+  test('strips a character-count "Note:" line atomically (count pass must not bite its tail first)', () => {
+    const raw = "Venice mosquito pressure is climbing after this week's rain.\n\n*Note: This is 196 characters*";
+    expect(stripModelWrapper(raw)).toBe("Venice mosquito pressure is climbing after this week's rain.");
+  });
+
+  test('keeps a legit trailing note that uses "limit" in the care sense', () => {
+    const copy = 'Fungicide applied to the front beds today.\n\nNote: limit irrigation for 24 hours after treatment.';
+    expect(stripModelWrapper(copy)).toBe(copy);
+  });
+
+  test('keeps non-hyphenated "post storm" / "post treatment" hooks', () => {
+    const hook = "Here's a post storm mosquito tip: dump standing water within 48 hours.";
+    expect(stripModelWrapper(hook)).toBe(hook);
+    const hook2 = "Here's a post treatment reminder: keep pets off the lawn for 2 hours.";
+    expect(stripModelWrapper(hook2)).toBe(hook2);
+  });
+
   test('keeps hyphenated "post-" hooks — adjective, not artifact noun', () => {
     const hook = "Here's a post-storm mosquito tip: dump standing water within 48 hours.";
     expect(stripModelWrapper(hook)).toBe(hook);
