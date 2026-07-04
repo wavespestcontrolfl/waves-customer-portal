@@ -2185,6 +2185,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   currentPrice={appointmentTotal}
                   deposit={estimateSource.deposit}
                   payment={estimateSource.payment}
+                  lines={estimateSource.lines}
                   style={{ marginBottom: 14 }}
                 />
               )}
