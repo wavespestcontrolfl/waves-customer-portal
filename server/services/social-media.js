@@ -379,7 +379,28 @@ async function withRetry(fn, { maxAttempts = 3, label = '' } = {}) {
 
 // ── AI Content Generation ──
 
-const BRAND_PREAMBLE = `You are writing social media content for Waves Pest Control, a family-owned pest control and lawn care company in Southwest Florida (Manatee, Sarasota, and Charlotte counties). 12 years in SWFL.
+// The model occasionally wraps its answer in assistant chatter — a leading
+// "Here's a LinkedIn post within your limits:" line, ----fenced copy, a
+// trailing "*197 characters*" note — and validateContent doesn't catch any of
+// it, so it publishes verbatim (live examples on GBP + LinkedIn, 2026-06-27
+// through 07-03). Markdown bold also renders as literal asterisks on every
+// platform we post to. Strip the wrapper, keep the post. Legit hooks like
+// "Here's what we're seeing in Venice:" survive: the prefix match requires
+// the line to name the artifact (post/caption/copy/draft).
+function stripModelWrapper(raw) {
+  let text = String(raw || '').replace(/\r\n?/g, '\n').trim();
+  // Leading meta line: "Here's a <platform> post …:" / "Sure, here is your caption:"
+  text = text.replace(/^(?:(?:sure|certainly|of course)[,!.]?\s+)?here(?:'|’)?s?(?: is)? (?:a|an|your|the) [^:\n]{0,90}?(?:post|caption|copy|draft|version)\b[^:\n]{0,60}:\s*/i, '');
+  // Trailing count notes: "*197 characters*", "*(Character count: ~240)*", "(197 characters)"
+  text = text.replace(/[\s*_]*\(?\s*(?:character count:?\s*~?\d+|~?\d+\s*characters?)\s*\)?[\s*_.]*$/i, '');
+  // --- fences left around the copy
+  text = text.replace(/^\s*-{3,}\s*/, '').replace(/\s*-{3,}\s*$/, '');
+  // Markdown bold — readers would see the literal **
+  text = text.replace(/\*\*([^*\n][^*]*)\*\*/g, '$1');
+  return text.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+const BRAND_PREAMBLE = `You are writing social media content for Waves Pest Control, a family-owned pest control and lawn care company in Southwest Florida (Manatee, Sarasota, and Charlotte counties).
 
 Voice: Knowledgeable neighbor, not corporate. You're talking to a homeowner over the fence. Casual, specific, occasionally funny. Never salesy or generic.
 
@@ -396,7 +417,8 @@ Rules:
 - Never make safety guarantees ("100% effective", "completely safe", "risk-free")
 - Never use: "Your trusted pest control provider", "Contact us today for all your pest control needs", "We are pleased to announce", "Dear valued customer"
 - Be specific: "Southern chinch bugs feed at the blade base" beats "chinch bugs damage lawns"
-- Reference SWFL naturally: Florida humidity, gulf coast weather, lanais, St. Augustine grass, local neighborhoods`;
+- Reference SWFL naturally: Florida humidity, gulf coast weather, lanais, St. Augustine grass, local neighborhoods
+- Output ONLY the post text itself — no preamble ("Here's a post…"), no character counts, no --- separators, no markdown formatting like **bold** (platforms render the asterisks literally)`;
 
 const HOOK_BANK = [
   "Here's what we're seeing in {location} after the rain…",
@@ -521,7 +543,7 @@ Article summary: ${safeDesc}`,
     messages: [{ role: 'user', content: prompt }],
   });
 
-  return response.content[0]?.text?.trim() || '';
+  return stripModelWrapper(response.content[0]?.text);
 }
 
 // ── AI copy for the Social Content Studio (campaign-framed, context-grounded) ──
@@ -595,7 +617,7 @@ ${grounding}`,
     max_tokens: 600,
     messages: [{ role: 'user', content: prompts[platform] || prompts.facebook }],
   });
-  return response.content[0]?.text?.trim() || '';
+  return stripModelWrapper(response.content[0]?.text);
 }
 
 // Generate brand-voice copy for the requested channels. Returns a partial map
@@ -1649,6 +1671,7 @@ module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
 module.exports.isPausedByAdmin = isPausedByAdmin;
 module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
 module.exports.validateContent = validateContent;
+module.exports.stripModelWrapper = stripModelWrapper;
 module.exports.normalizeUrl = normalizeUrl;
 module.exports.uploadImageToS3 = uploadImageToS3;
 module.exports.uploadVideoToS3 = uploadVideoToS3;
