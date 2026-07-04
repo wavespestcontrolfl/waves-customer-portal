@@ -50,8 +50,13 @@ describe('ContextAggregator.deriveWindow', () => {
       .toBe('8:30 AM–10:30 AM');
   });
 
-  test('an explicit window_display wins when present', () => {
-    expect(aggregator.deriveWindow({ window_display: '8-10am', window_start: '13:00:00', window_end: '14:00:00' }))
+  test('window_start derivation beats window_display (bare-start displays would quote a point time)', () => {
+    // the call processor's phone-booking path writes window_display='9:00 AM'
+    // alongside window_start — the derived 2h range must win (Codex P2 r2).
+    expect(aggregator.deriveWindow({ window_display: '9:00 AM', window_start: '09:00:00', window_end: '10:00:00' }))
+      .toBe('9:00 AM–11:00 AM');
+    // display only speaks when there is no derivable start
+    expect(aggregator.deriveWindow({ window_display: '8-10am', window_start: null, window_end: null }))
       .toBe('8-10am');
   });
 
@@ -67,6 +72,20 @@ describe('ContextAggregator.deriveWindow', () => {
 
   test('a lone start time still yields the full start+2h range', () => {
     expect(aggregator.deriveWindow({ window_start: '15:00:00', window_end: null })).toBe('3:00 PM–5:00 PM');
+  });
+});
+
+describe('ContextAggregator.extractedCallType (misdial/spam exclusion, Codex P2 r2)', () => {
+  test('reads call_type from stringified extraction JSON (the prod TEXT column shape)', () => {
+    expect(aggregator.extractedCallType(JSON.stringify({ call_type: 'Wrong_Number' }))).toBe('wrong_number');
+    expect(aggregator.extractedCallType(JSON.stringify({ call_type: 'existing_customer_service' }))).toBe('existing_customer_service');
+    expect(aggregator.extractedCallType({ call_type: 'spam' })).toBe('spam');
+  });
+
+  test('malformed/absent extraction reads as unknown — which stays ELIGIBLE', () => {
+    expect(aggregator.extractedCallType('not json')).toBe('');
+    expect(aggregator.extractedCallType(null)).toBe('');
+    expect(aggregator.extractedCallType(JSON.stringify({}))).toBe('');
   });
 });
 

@@ -13,6 +13,10 @@ const { arrivalWindowRange } = require('../utils/sms-time-format');
 // case a texting customer may hit.
 const UPCOMING_SERVICE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 
+// Calls the extractor affirmatively classified as not-a-real-conversation
+// with this customer — their summaries must never ground an SMS reply.
+const EXCLUDED_CALL_TYPES = new Set(['spam', 'wrong_number']);
+
 class ContextAggregator {
   async getFullCustomerContext(phone) {
     const clean = (phone || '').replace(/\D/g, '');
@@ -99,7 +103,7 @@ class ContextAggregator {
   // unreliable, while summaries exist on ~half of recent calls in prod.
   async getRecentCalls(customerId) {
     try {
-      return await db('call_log')
+      const rows = await db('call_log')
         .where({ customer_id: customerId })
         .where('created_at', '>', new Date(Date.now() - 30 * 86400000))
         .whereNotNull('call_summary')
@@ -112,12 +116,33 @@ class ContextAggregator {
         // miner's Codex P2).
         .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
         .orderBy('created_at', 'desc')
-        .limit(2)
-        .select('direction', 'call_outcome', 'call_summary', 'created_at');
+        // over-fetch: the extraction-classified misdials below are filtered
+        // in JS (ai_extraction is a TEXT column in prod — casting to jsonb in
+        // SQL throws on any malformed row), and a filtered row must not
+        // silently shrink the pick below 2 real calls.
+        .limit(6)
+        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction');
+      // Codex P2 round 2: the call processor classifies misdials/spam in the
+      // extraction (call_type) WITHOUT stamping call_outcome, so outcome
+      // filtering alone still leaks them. is_lead=false is NOT a signal here —
+      // existing customers' real calls are all is_lead=false.
+      return rows.filter((r) => !EXCLUDED_CALL_TYPES.has(this.extractedCallType(r.ai_extraction))).slice(0, 2);
     } catch (err) {
       logger.warn(`[context] recent-call lookup failed for customer ${customerId}: ${err.message}`);
       return [];
     }
+  }
+
+  // Extracted call_type from a call_log.ai_extraction value (TEXT column
+  // holding JSON.stringify output; tolerate an already-parsed object and
+  // malformed rows). Returns '' when unknown — unknown stays ELIGIBLE, the
+  // exclusion is only for calls the extractor affirmatively classified as
+  // not-this-customer's-business.
+  extractedCallType(raw) {
+    try {
+      const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return String(obj?.call_type || '').trim().toLowerCase();
+    } catch { return ''; }
   }
 
   // Calendar day 'YYYY-MM-DD' of a Postgres DATE value. pg hands DATE columns
@@ -145,13 +170,18 @@ class ContextAggregator {
   // customer-facing SMS surface, so derive start+2h here; time_window
   // ('morning'/'afternoon') is the coarse fallback.
   deriveWindow(s) {
-    const display = (s.window_display || '').toString().trim();
-    if (display) return display;
+    // window_start derivation comes FIRST (Codex P2): some writers (e.g. the
+    // call processor's phone-booking path) set window_display to a bare start
+    // time like '9:00 AM' alongside window_start — letting a display string
+    // short-circuit would quote a point time instead of the required 2-hour
+    // window. window_display only speaks when there is no derivable start.
     const range = arrivalWindowRange((s.window_start || '').toString());
     if (range) {
       const [rs, re] = range.split('-');
       return `${this.formatClockTime(rs)}–${this.formatClockTime(re)}`;
     }
+    const display = (s.window_display || '').toString().trim();
+    if (display) return display;
     const tw = (s.time_window || '').toString().trim();
     if (tw) return tw.charAt(0).toUpperCase() + tw.slice(1);
     return null;
