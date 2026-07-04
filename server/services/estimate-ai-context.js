@@ -140,13 +140,16 @@ const SERVICE_FAMILY_QUESTION_PATTERNS = [
 // perimeter-pest label facts into a lawn answer. An INDEPENDENT bug mention
 // ("the lawn and bug spray") still counts as pest control.
 const PEST_GENERIC_INSECT_PATTERN = /\b(?:bugs?|insects?)\b/i;
-const QUALIFIED_INSECT_PATTERN = /\b(?:chinch|lawn|turf|grass|trees?|shrubs?|ornamental|palms?|mosquito)\s+(?:bugs?|insects?)\b/gi;
+const QUALIFIED_INSECT_PATTERN = /\b(?:chinch|lawn|turf|grass|trees?|shrubs?|ornamental|palms?|mosquito|landscape\s+plant(?:ing)?s?)\s+(?:bugs?|insects?)\b/gi;
 
 // interior/exterior/inside/outside read as pest control ONLY when tied to a
 // treatment ("exterior spray", "treat the outside") — plain location words
 // ("my outside plants") say nothing about which service is being asked
 // about, and mis-scoping them starves the real family's label facts.
-const PEST_PERIMETER_CONTEXT_PATTERN = /\b(?:interiors?|exteriors?|inside|outside)\s+(?:treat\w*|appl\w*|spray\w*|service|barrier|pest\w*)\b|\b(?:spray\w*|treat\w*|apply\w*|service)\s+(?:the\s+|my\s+|our\s+)?(?:interiors?|exteriors?|inside|outside)\b/i;
+// A treatment word already qualified by another family ("the MOSQUITO spray
+// outside") is that family's treatment happening outside, not a perimeter
+// pest treatment — the lookbehind keeps pest_control out of it.
+const PEST_PERIMETER_CONTEXT_PATTERN = /\b(?:interiors?|exteriors?|inside|outside)\s+(?:treat\w*|appl\w*|spray\w*|service|barrier|pest\w*)\b|(?<!\b(?:mosquito(?:es)?|lawns?|turf|grass|weeds?|trees?|shrubs?|ornamentals?|palms?|termites?|rodents?|plant(?:ing)?s?)\s)\b(?:spray\w*|treat\w*|apply\w*|service)\s+(?:the\s+|my\s+|our\s+)?(?:interiors?|exteriors?|inside|outside)\b/i;
 
 // "Safe for the lawn" / "will it hurt my shrubs" name the RECIPIENT of a
 // treatment, not the treatment family the customer is asking about — strip
@@ -157,13 +160,13 @@ const PEST_PERIMETER_CONTEXT_PATTERN = /\b(?:interiors?|exteriors?|inside|outsid
 // The repeat group consumes COORDINATED recipient lists ("for lawns and
 // shrubs", "near the trees or palms") so a later area noun can't survive the
 // strip and read as a target family.
-const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plants?|palms?)(?:\s*(?:,|and|or|&)\s*(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plants?|palms?))*\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
+const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plant(?:ing)?s?|palms?)(?:\s*(?:,|and|or|&)\s*(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plant(?:ing)?s?|palms?))*\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
 
 // "Water the lawn", "re-enter the lawn", "mow the grass": the area is the
 // recipient of the customer's ACTIVITY, not the treatment family being asked
 // about — on a pest-only estimate these must not scope to lawn_care and
 // starve the pest product's reviewed guidance.
-const RECIPIENT_ACTIVITY_PATTERN = /\b(?:water(?:ing|ed|s)?|irrigat\w*|mow\w*|walk\w*|play\w*|re-?enter\w*|enter\w*)\s+(?:on\s+|onto\s+|in\s+)?(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plants?|palms?)\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
+const RECIPIENT_ACTIVITY_PATTERN = /\b(?:water(?:ing|ed|s)?|irrigat\w*|mow\w*|walk\w*|play\w*|re-?enter\w*|enter\w*)\s+(?:on\s+|onto\s+|in\s+)?(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|(?:landscape\s+)?plant(?:ing)?s?|palms?)\b(?!\s+(?:treat\w*|appl\w*|spray\w*|service|care|program|plan))/gi;
 
 // Canonical service_key prefixes → family, checked BEFORE the loose label
 // matcher: "rodent_bait_quarterly" must classify as rodent_bait, not hit the
@@ -788,11 +791,15 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
   // FETCH must also look their names up, or a generic lawn safety/rainfast
   // question never loads the row for a product the protocol actually uses
   // (SpeedZone Southern + NIS on B/Z/B) and completeness claims get made
-  // from the smaller default-product set. Scoped to lawn contexts — every
-  // protocol product attributes to lawn_care, and feeding lawn names into a
-  // pest or mosquito lookup would let them displace the asked family's rows
-  // in the capped working set.
+  // from the smaller default-product set. Scoped to lawn QUESTIONS (named
+  // lawn family, or untargeted) on lawn estimates — every protocol product
+  // attributes to lawn_care, and serviceKeys alone includes lawn_care on any
+  // mixed estimate, so a pest-specific question there would let dozens of
+  // lawn names displace the asked family's rows in the capped working set
+  // and then be filtered out by scoping anyway.
+  const questionFamilies = serviceFamiliesFromText(question);
   const protocolProductNames = serviceKeys.includes('lawn_care')
+    && (!questionFamilies.length || questionFamilies.includes('lawn_care'))
     ? Object.keys(protocolProductFamilies)
     : [];
   const productCatalogResult = await searchProductCatalog(

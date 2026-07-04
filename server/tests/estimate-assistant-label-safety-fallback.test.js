@@ -71,6 +71,20 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('Quinclorac');
   });
 
+  test('a salt/ester active form still counts as naming the short active', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    // The catalog stores the salt form; the customer says "2,4-D". The
+    // normalized whole-segment alias ("24ddimethylaminesalt") never equals
+    // "24d" — the segment's distinctive words must count as aliases, or the
+    // question scopes to every attributed lawn product instead.
+    context.supportContext.productCatalog[0].activeIngredient = '2,4-D dimethylamine salt';
+    context.supportContext.productCatalog[1].reentry = 'Re-enter after about 4 hours.';
+    const answer = answerEstimateQuestionFallback('Is the 2,4-D herbicide safe for pets?', context);
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).not.toContain('Re-enter after about 4 hours');
+    expect(answer).not.toContain('Quinclorac');
+  });
+
   test('a conjunction making the category its own subject unions the category rows', () => {
     const context = JSON.parse(JSON.stringify(verifiedContext));
     context.supportContext.productCatalog[1].reentry = 'Re-enter after about 4 hours.';

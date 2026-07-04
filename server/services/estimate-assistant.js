@@ -730,14 +730,23 @@ function catalogRowNamesProduct(row = {}, question = '') {
   // against normalized ingredient aliases by exact equality instead.
   // Ingredient lists separate aliases with +, /, ; or "and" — NOT comma,
   // which is part of names like 2,4-D.
+  // A short active stored inside a longer salt/ester form ("2,4-D
+  // dimethylamine salt") never equals the whole normalized segment, so each
+  // segment's DISTINCTIVE words (digit-bearing or >=5 chars — "24d",
+  // "dimethylamine", never everyday-short "salt") count as aliases too.
   const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
-  const aliases = cleanText(row.activeIngredient || '')
-    .split(/[+/;]|\band\b/i)
+  const aliasSegments = cleanText(row.activeIngredient || '').split(/[+/;]|\band\b/i);
+  const aliases = aliasSegments
     .map(normalize)
     .filter((alias) => alias.length >= 2);
-  if (!aliases.length) return false;
+  const aliasWords = aliasSegments
+    .flatMap((segment) => segment.split(/\s+/))
+    .map(normalize)
+    .filter((word) => word.length >= 2 && (/\d/.test(word) || word.length >= 5));
+  const comparable = [...aliases, ...aliasWords];
+  if (!comparable.length) return false;
   const questionWords = cleanText(question).split(/\s+/).map(normalize).filter(Boolean);
-  return aliases.some((alias) => questionWords.includes(alias));
+  return comparable.some((alias) => questionWords.includes(alias));
 }
 
 // True when the question names this row's broad CATEGORY ("the herbicide",

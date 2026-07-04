@@ -114,13 +114,21 @@ describe('estimate AI support context', () => {
     // matcher) when it TARGETS the treatment...
     expect(serviceFamiliesFromText('Is the landscape plant treatment safe for pets?')).toEqual(['tree_shrub']);
     // ...but stays recipient/activity wording when it names what the
-    // customer sprays near or waters.
+    // customer sprays near or waters — in BOTH spellings.
     expect(serviceFamiliesFromText('Is the pest spray safe near the landscape plants?')).toEqual(['pest_control']);
+    expect(serviceFamiliesFromText('Is the pest spray safe near the landscape plantings?')).toEqual(['pest_control']);
     expect(serviceFamiliesFromText('Can I water the landscape plants after treatment?')).toEqual([]);
+    // Family-qualified insect wording stays in that family, including the
+    // landscape-plant phrasing.
+    expect(serviceFamiliesFromText('Do you treat landscape plant bugs?')).toEqual(['tree_shrub']);
+    expect(serviceFamiliesFromText('Is the landscape plant insect treatment safe?')).toEqual(['tree_shrub']);
     // Plain location words are not pest scope without treatment context...
     expect(serviceFamiliesFromText('Can I water my outside plants after treatment?')).toEqual([]);
     // ...but treatment-tied perimeter wording is.
     expect(serviceFamiliesFromText('Do you spray inside the house?')).toEqual(['pest_control']);
+    // A treatment word already qualified by another family is NOT perimeter
+    // pest wording — the mosquito spray happening outside stays mosquito.
+    expect(serviceFamiliesFromText('Is the mosquito spray outside safe for pets?')).toEqual(['mosquito']);
     expect(serviceFamiliesFromText('')).toEqual([]);
   });
 
@@ -380,6 +388,34 @@ describe('estimate AI support context', () => {
       context: { services: [{ label: 'Pest Control', detail: 'Quarterly perimeter plan' }] },
     });
     expect(pestResult.productCatalog.find((r) => r.activeIngredient === 'Carfentrazone + 2,4-D + MCPP + Dicamba')).toBeUndefined();
+
+    // Estimate-level lawn presence is not enough: on a MIXED estimate, a
+    // pest-specific question must not spend lookup and working-set slots on
+    // lawn protocol names its scoping will filter out anyway.
+    const mixedPestResult = await loadEstimateAiSupportContext({
+      db: filteringDb(tables),
+      question: 'Is the pest spray safe for pets?',
+      context: {
+        services: [
+          { label: 'Lawn Care', detail: 'Weed control applications' },
+          { label: 'Pest Control', detail: 'Quarterly perimeter plan' },
+        ],
+      },
+    });
+    expect(mixedPestResult.productCatalog.find((r) => r.activeIngredient === 'Carfentrazone + 2,4-D + MCPP + Dicamba')).toBeUndefined();
+
+    // An untargeted question on the same mixed estimate still loads them.
+    const mixedGenericResult = await loadEstimateAiSupportContext({
+      db: filteringDb(tables),
+      question: 'Is it safe for pets and kids?',
+      context: {
+        services: [
+          { label: 'Lawn Care', detail: 'Weed control applications' },
+          { label: 'Pest Control', detail: 'Quarterly perimeter plan' },
+        ],
+      },
+    });
+    expect(mixedGenericResult.productCatalog.find((r) => r.activeIngredient === 'Carfentrazone + 2,4-D + MCPP + Dicamba')).toBeDefined();
   });
 
   test('overflowing the lookup-term cap flags the catalog as truncated', async () => {
