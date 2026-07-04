@@ -125,9 +125,7 @@ function serviceKeyFromText(value) {
 // contains "ant") — and scoping label facts into the wrong family quotes the
 // wrong product's safety guidance. These patterns require whole words.
 const SERVICE_FAMILY_QUESTION_PATTERNS = [
-  // interior/exterior/inside/outside mirror the force-fallback gate, which
-  // already treats them as pest wording ("is the exterior spray safe?").
-  ['pest_control', /\b(?:pests?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter|interiors?|exteriors?|inside|outside)\b/i],
+  ['pest_control', /\b(?:pests?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|perimeter)\b/i],
   ['lawn_care', /\b(?:lawns?|turf|weeds?|fertil\w*|fungus|chinch|grass)\b/i],
   ['mosquito', /\b(?:mosquito(?:es)?|midges?|no[-\s]?see[-\s]?ums?)\b/i],
   ['tree_shrub', /\b(?:trees?|shrubs?|ornamentals?)\b/i],
@@ -144,19 +142,36 @@ const SERVICE_FAMILY_QUESTION_PATTERNS = [
 const PEST_GENERIC_INSECT_PATTERN = /\b(?:bugs?|insects?)\b/i;
 const QUALIFIED_INSECT_PATTERN = /\b(?:chinch|lawn|turf|grass|trees?|shrubs?|ornamental|palms?|mosquito)\s+(?:bugs?|insects?)\b/gi;
 
+// interior/exterior/inside/outside read as pest control ONLY when tied to a
+// treatment ("exterior spray", "treat the outside") — plain location words
+// ("my outside plants") say nothing about which service is being asked
+// about, and mis-scoping them starves the real family's label facts.
+const PEST_PERIMETER_CONTEXT_PATTERN = /\b(?:interiors?|exteriors?|inside|outside)\s+(?:treat\w*|appl\w*|spray\w*|service|barrier|pest\w*)\b|\b(?:spray\w*|treat\w*|apply\w*|service)\s+(?:the\s+|my\s+|our\s+)?(?:interiors?|exteriors?|inside|outside)\b/i;
+
+// "Safe for the lawn" / "will it hurt my shrubs" name the RECIPIENT of a
+// treatment, not the treatment family the customer is asking about — strip
+// these phrases before family matching so "is the mosquito spray safe for
+// the lawn?" scopes to mosquito, not mosquito + lawn.
+const AFFECTED_AREA_PATTERN = /\b(?:for|on|onto|near|around|hurt|harms?|damage|kills?|burn|stains?)\s+(?:the\s+|my\s+|our\s+)?(?:lawns?|turf|grass|yards?|trees?|shrubs?|plants?|palms?)\b/gi;
+
 // ALL families a question names, not just the first — a bundle question like
 // "are the lawn and mosquito treatments safe?" targets two families and the
 // assistant must scope label facts to every one of them.
 function serviceFamiliesFromText(value) {
   const text = cleanText(value);
   if (!text) return [];
+  // Affected-area phrases name recipients, not target families.
+  const targeted = text.replace(AFFECTED_AREA_PATTERN, ' ');
   const families = SERVICE_FAMILY_QUESTION_PATTERNS
-    .filter(([, pattern]) => pattern.test(text))
+    .filter(([, pattern]) => pattern.test(targeted))
     .map(([key]) => key);
-  // Strip family-qualified insect phrases first, so only INDEPENDENT
-  // bug/insect wording reads as pest control — "the lawn and bug spray"
-  // adds pest_control, "the chinch bug treatment" does not.
-  const unqualified = text.replace(QUALIFIED_INSECT_PATTERN, ' ');
+  if (!families.includes('pest_control') && PEST_PERIMETER_CONTEXT_PATTERN.test(targeted)) {
+    families.push('pest_control');
+  }
+  // Strip family-qualified insect phrases, so only INDEPENDENT bug/insect
+  // wording reads as pest control — "the lawn and bug spray" adds
+  // pest_control, "the chinch bug treatment" does not.
+  const unqualified = targeted.replace(QUALIFIED_INSECT_PATTERN, ' ');
   if (!families.includes('pest_control') && PEST_GENERIC_INSECT_PATTERN.test(unqualified)) {
     families.push('pest_control');
   }

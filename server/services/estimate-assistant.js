@@ -680,8 +680,11 @@ function activeIngredientsFromSupport(context = {}, question = '') {
 // on the normal path, not in safety copy.
 // water(?:ing|ed|s)? with the (?!\s+bugs?\b) lookahead instead of water\w*:
 // "water bugs" is a PEST, not a watering question, and must keep its
-// pest-branch answer.
-const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\b|\bafter\s+(?:the\s+|it\s+)?rains?\b|\brain\s+wash\w*\b/i;
+// pest-branch answer. The rain-after alternates are anchored to treatment
+// vocabulary — "what if it rains after treatment?" is a label question, but
+// "will you still come if it rains after 2pm?" is scheduling and must stay
+// on the normal path.
+const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\s+(?:the\s+|my\s+|a\s+|an\s+|you\s+|we\s+)?(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
 
 // Generic treatment vocabulary says nothing about WHICH product a question
 // targets, so it never counts as naming one.
@@ -1034,8 +1037,9 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // match: "will you still come if it rains?" (scheduling) and "how long
   // does the treatment last?" (duration) belong to the branches below.
   // "water bugs" is a pest, not a watering question — the lookahead sends
-  // it to the pest branch.
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\b|\bafter\s+(?:the\s+|it\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
+  // it to the pest branch. Rain-after alternates are treatment-anchored so
+  // "if it rains after 2pm" scheduling wording stays out of safety copy.
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|water(?:ing|ed|s)?(?!\s+bugs?\b)|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof)\b|\brains?\s+(?:right\s+)?after\s+(?:the\s+|my\s+|a\s+|an\s+|you\s+|we\s+)?(?:treat\w*|appl\w*|spray\w*|service|visit)\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
     const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';

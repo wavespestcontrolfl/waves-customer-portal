@@ -54,6 +54,13 @@ describe('estimate AI support context', () => {
     expect(serviceFamiliesFromText('Is the exterior spray safe for pets?')).toEqual(['pest_control']);
     // An INDEPENDENT bug mention alongside another family keeps both.
     expect(serviceFamiliesFromText('Are the lawn and bug spray safe for pets?')).toEqual(['lawn_care', 'pest_control']);
+    // "the lawn" as the RECIPIENT of a treatment is not a target family.
+    expect(serviceFamiliesFromText('Is the mosquito spray safe for the lawn?')).toEqual(['mosquito']);
+    expect(serviceFamiliesFromText('Will the pest treatment hurt my shrubs?')).toEqual(['pest_control']);
+    // Plain location words are not pest scope without treatment context...
+    expect(serviceFamiliesFromText('Can I water my outside plants after treatment?')).toEqual([]);
+    // ...but treatment-tied perimeter wording is.
+    expect(serviceFamiliesFromText('Do you spray inside the house?')).toEqual(['pest_control']);
     expect(serviceFamiliesFromText('')).toEqual([]);
   });
 

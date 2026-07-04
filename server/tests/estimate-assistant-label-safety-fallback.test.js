@@ -267,11 +267,37 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     // Rainfast timing comes from reviewed rainfastMinutes — deterministic only.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How soon is it rainfast?')).toBe(true);
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains after treatment?')).toBe(true);
+    // Rain-after phrasing counts only when tied to the treatment.
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What if it rains right after you treat?')).toBe(true);
     // Non-safety questions still reach the live models — bare "rain" and
     // "treatment" are scheduling/duration vocabulary, not safety intent.
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('What time will the technician arrive?')).toBe(false);
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Will you still come if it rains?')).toBe(false);
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test('Will you still come if it rains after 2pm?')).toBe(false);
     expect(FORCE_FALLBACK_QUESTION_PATTERN.test('How long does the mosquito treatment last?')).toBe(false);
+  });
+
+  test('rain-timing scheduling questions never get label copy from the fallback', () => {
+    const answer = answerEstimateQuestionFallback('Will you still come if it rains after 2pm?', verifiedContext);
+    expect(answer).not.toContain('follow the product label directions');
+    expect(answer).not.toContain('Label re-entry guidance');
+  });
+
+  test('"outside plants" watering questions keep the lawn label facts', () => {
+    const context = JSON.parse(JSON.stringify(verifiedContext));
+    context.supportContext.productCatalog[0].irrigationNotes = 'Avoid irrigation for 24 hours after application.';
+    // "outside" is a location here, not a pest-treatment scope — the lawn
+    // rows carrying the irrigation guidance must survive scoping.
+    const answer = answerEstimateQuestionFallback('Can I water my outside plants after treatment?', context);
+    expect(answer).toContain('Label watering/irrigation guidance: Avoid irrigation for 24 hours after application.');
+  });
+
+  test('"safe for the lawn" scopes to the asked-about spray, not the lawn family', () => {
+    const answer = answerEstimateQuestionFallback('Is the mosquito spray safe for the lawn?', bundleContext);
+    expect(answer).toContain('Stay out of the treated area until sprays have dried');
+    expect(answer).not.toContain('Quinclorac');
+    expect(answer).not.toContain('until dry.');
+    expect(answer).not.toContain('rainfast in about 180 minutes');
   });
 
   test('rainfast questions land in the safety branch and quote the label window', () => {
