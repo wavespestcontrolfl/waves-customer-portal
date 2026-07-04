@@ -205,7 +205,11 @@ function serviceCatalogMatch(line, serviceIndex) {
   if (/tree|shrub|ornamental/.test(text)) return pick('tree_shrub_program');
   if (/mosquito/.test(text)) return pick('mosquito_monthly');
   if (/lawn|turf|weed|fertil/.test(text)) return pick('lawn_care_recurring');
-  if (/flea|tick/.test(text)) return pick('flea_tick');
+  // flea_tick is flea-only ("Flea Control Service") since the 2026-07 rebrand;
+  // tick-only lines go to the separate tick_control service. Flea is tested
+  // first so a combined "flea and tick" line keeps resolving to flea_tick.
+  if (/flea/.test(text)) return pick('flea_tick');
+  if (/tick/.test(text)) return pick('tick_control') || pick('flea_tick');
   if (/fire\s*ant/.test(text)) return pick('fire_ant');
   if (/bee|wasp|hornet|yellow/.test(text)) return pick('bee_wasp_removal');
   if (/pest|roach|ant|spider/.test(text)) {

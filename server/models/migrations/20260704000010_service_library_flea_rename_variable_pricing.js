@@ -3,7 +3,12 @@
  *
  *  1. Rebrand the `flea_tick` service "Flea & Tick Yard Treatment Service"
  *     -> "Flea Control Service" (flea-only copy). service_key stays
- *     `flea_tick` so every existing reference/join holds.
+ *     `flea_tick` so every existing reference/join holds. The completion
+ *     profile's `service_name_snapshot` is renamed in step (same pattern as
+ *     20260619000001_rename_lawn_assessment) — it is what `serializeProfile`
+ *     returns as `serviceName` and what typed flea completions write into the
+ *     customer-facing report snapshot; left stale, new flea reports would
+ *     still be headed "Flea & Tick...".
  *
  *  2. Convert EVERY service to variable, no-preset pricing:
  *       pricing_type      = 'variable'
@@ -36,6 +41,14 @@ exports.up = async function up(knex) {
       updated_at: knex.fn.now(),
     });
 
+  // Keep the completion-profile snapshot in step with the rename (profiles
+  // are keyed by service_key, one row per service).
+  if (await knex.schema.hasTable('service_completion_profiles')) {
+    await knex('service_completion_profiles')
+      .where({ service_key: 'flea_tick' })
+      .update({ service_name_snapshot: 'Flea Control Service', updated_at: knex.fn.now() });
+  }
+
   // 2) Every service -> variable pricing with no preset price or range
   await knex('services').update({
     pricing_type: 'variable',
@@ -60,4 +73,10 @@ exports.down = async function down(knex) {
       description: 'Full yard broadcast for flea and tick control. Interior treatment available as add-on.',
       updated_at: knex.fn.now(),
     });
+
+  if (await knex.schema.hasTable('service_completion_profiles')) {
+    await knex('service_completion_profiles')
+      .where({ service_key: 'flea_tick' })
+      .update({ service_name_snapshot: 'Flea & Tick Yard Treatment Service', updated_at: knex.fn.now() });
+  }
 };
