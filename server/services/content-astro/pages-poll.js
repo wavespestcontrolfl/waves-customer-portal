@@ -243,6 +243,22 @@ async function pollPost(post, { allowMerge = true } = {}) {
           return { ok: true, url, autoMerged: true };
         } catch (mergeErr) {
           logger.warn(`[pages-poll] auto-merge failed for ${post.slug || post.id}: ${mergeErr.message}`);
+          // Codex left findings on the PR → try to auto-fix them so the post
+          // can merge without a human. No-op unless AUTONOMOUS_CODEX_REMEDIATION
+          // is on; never merges (that still needs a genuine Codex-clean signal).
+          if (mergeErr.code === 'CODEX_REVIEW_REQUIRED') {
+            try {
+              const { maybeRemediateBlogPost } = require('../content/codex-remediation');
+              const rem = await maybeRemediateBlogPost(post);
+              if (rem?.remediated) {
+                logger.info(`[pages-poll] codex remediation round ${rem.round} pushed for ${post.slug || post.id} (${rem.findings} finding(s))`);
+              } else if (rem?.parked) {
+                logger.warn(`[pages-poll] codex remediation parked ${post.slug || post.id}: ${rem.reason}`);
+              }
+            } catch (remErr) {
+              logger.warn(`[pages-poll] codex remediation error for ${post.slug || post.id}: ${remErr.message}`);
+            }
+          }
         }
       }
 

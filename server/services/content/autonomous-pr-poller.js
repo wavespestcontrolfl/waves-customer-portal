@@ -598,6 +598,42 @@ async function maybeAutoMerge(run, pr) {
     await publisher.assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
   } catch (err) {
     if (err?.code === 'CODEX_REVIEW_REQUIRED') {
+      // Codex left findings → try to auto-fix them on the PR branch so the
+      // post can merge without a human. No-op unless AUTONOMOUS_CODEX_REMEDIATION
+      // is on; never merges (that still needs a genuine Codex-clean signal).
+      try {
+        const { maybeRemediateAutonomousPr, remediationEnabled } = require('./codex-remediation');
+        if (remediationEnabled()) {
+          // Fresh queue re-check, same as the merge path's last-instant guard
+          // below: remediation MUTATES the PR branch, so an operator requeue/
+          // dismiss that landed after tick-start validation must block it the
+          // same way it blocks the merge. A lookup error lands in the catch
+          // → remediation skipped this tick (fail-safe). Checked only when
+          // the flag is on so the disabled path adds no queue reads.
+          if (!(await queueRowStillParked(run))) {
+            logger.info(`[autonomous-pr-poller] codex remediation skipped for run ${run.id}: opportunity_queue row moved during gating (operator action)`);
+          } else {
+            // Pass the run row: remediation re-runs the runner's publish gates
+            // (claims-ledger/guardrails/comparison/uniqueness/quality/SEO/
+            // visibility) against the re-fetched run + brief before committing
+            // any fix, and parks when it can't prove them.
+            // prePushCheck closes the window DURING the LLM round: the check
+            // above ran before it, and an operator requeue/dismiss landing
+            // mid-round must still block the branch push (same last-instant
+            // posture as the merge below).
+            const rem = await maybeRemediateAutonomousPr(pr, run, {
+              prePushCheck: () => queueRowStillParked(run),
+            });
+            if (rem?.remediated) {
+              logger.info(`[autonomous-pr-poller] codex remediation round ${rem.round} pushed for run ${run.id} PR #${pr.number} (${rem.findings} finding(s))`);
+            } else if (rem?.parked) {
+              logger.warn(`[autonomous-pr-poller] codex remediation parked run ${run.id} PR #${pr.number}: ${rem.reason}`);
+            }
+          }
+        }
+      } catch (remErr) {
+        logger.warn(`[autonomous-pr-poller] codex remediation error for PR #${pr.number}: ${remErr.message}`);
+      }
       return { pending: true, reason: `codex_review_pending: ${err.message}` };
     }
     throw err; // lookup outage etc. — transient, retry next tick

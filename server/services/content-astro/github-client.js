@@ -183,6 +183,14 @@ async function listPrReviews(number) {
   return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/reviews`);
 }
 
+// Inline diff review comments (path/line/body/commit_id) — this is where Codex
+// leaves its actionable findings. Distinct from listIssueComments (the PR
+// conversation-level summary) and listPrReviews (top-level review objects).
+async function listPrReviewComments(number) {
+  const { owner, repo } = env();
+  return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/comments`);
+}
+
 async function mergePr(number, { method = 'squash', title, message, sha } = {}) {
   const { owner, repo } = env();
   const body = { merge_method: method, commit_title: title, commit_message: message };
@@ -246,6 +254,7 @@ module.exports = {
   ghFetchPaginated,
   listIssueComments,
   listPrReviews,
+  listPrReviewComments,
   mergePr,
   getPr,
   closePr,
