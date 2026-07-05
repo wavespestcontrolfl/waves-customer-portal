@@ -2331,6 +2331,10 @@ function PropertyZonesPanel({ customerId }) {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  // bumped by Retry — the fetch effect must not depend on the map/loading
+  // state it mutates, or its own setLoading(true) triggers the cleanup that
+  // cancels the request it just started
+  const [loadNonce, setLoadNonce] = useState(0);
 
   // The 360 sheet swaps customers in place (selected360Id) — everything here
   // is per-property state, so a customer change must drop it all or the old
@@ -2346,8 +2350,11 @@ function PropertyZonesPanel({ customerId }) {
     setMsg("");
   }, [customerId]);
 
+  // Deps are the EXPANSION triggers only (open / customer / Retry nonce) —
+  // never the map/loading state this effect writes, so starting the request
+  // cannot re-run the effect and self-cancel via its own cleanup.
   useEffect(() => {
-    if (!open || map || loading) return undefined;
+    if (!open || map) return undefined;
     // cancelled guards the resolve against a customer switch mid-flight —
     // without it, customer A's response would repopulate the panel after the
     // customerId reset, and a later save would post A's zones to B's id
@@ -2396,7 +2403,8 @@ function PropertyZonesPanel({ customerId }) {
     return () => {
       cancelled = true;
     };
-  }, [open, map, loading, customerId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, customerId, loadNonce]);
 
   const zones = map?.zones || [];
   // only lines that actually surface at least one zone (untagged zones match
@@ -2482,6 +2490,9 @@ function PropertyZonesPanel({ customerId }) {
       // operator can have unsaved marks on another service line, and wiping
       // everything here would silently discard them
       const savedLabels = new Set(entries.map((entry) => entry.areaLabel));
+      const savedKeys = new Set(
+        entries.map((entry) => normalizeZoneKey(entry.areaLabel)),
+      );
       const nextPreloads = { ...preloads };
       for (const entry of entries) {
         const key = normalizeZoneKey(entry.areaLabel);
@@ -2489,6 +2500,21 @@ function PropertyZonesPanel({ customerId }) {
         else nextPreloads[key] = entry.shape;
       }
       setPreloads(nextPreloads);
+      // saved zones are no longer stale — leaving the flags set would keep
+      // the warning (and the Clear-stale-marks button) alive and let every
+      // further click send another no-op clear
+      setMap((prev) =>
+        prev?.zones
+          ? {
+            ...prev,
+            zones: prev.zones.map((zone) =>
+              savedKeys.has(normalizeZoneKey(zone.label))
+                ? { ...zone, staleMark: false }
+                : zone,
+            ),
+          }
+          : prev,
+      );
       setMarks((prev) => {
         const next = { ...prev };
         savedLabels.forEach((label) => delete next[label]);
@@ -2541,6 +2567,7 @@ function PropertyZonesPanel({ customerId }) {
                   onClick={() => {
                     setMap(null);
                     setErr("");
+                    setLoadNonce((n) => n + 1);
                   }}
                 >
                   Retry
