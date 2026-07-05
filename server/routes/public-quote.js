@@ -570,10 +570,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.rodentBait = {};
     }
     if (services.treeShrub) {
+      // Only forward a real count. An explicit treeCount: 0 (the old ?? 0
+      // default) suppresses priceTreeShrub's density fallback — it estimates
+      // the count from the property's treeDensity only when the field is
+      // absent — so blank-count estimate-page quotes priced zero trees.
+      const treeShrubCount = Number(services.treeShrub.treeCount);
       engineInput.services.treeShrub = {
         tier: services.treeShrub.tier,
         access: services.treeShrub.access || 'easy',
-        treeCount: services.treeShrub.treeCount ?? 0,
+        ...(Number.isFinite(treeShrubCount) && treeShrubCount > 0 ? { treeCount: treeShrubCount } : {}),
       };
     }
     if (services.palm) {
