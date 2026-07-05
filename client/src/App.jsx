@@ -271,10 +271,7 @@ function ProtectedRoute({ children }) {
 }
 
 export default function App() {
-  return (
-    // growthbook is null without VITE_GROWTHBOOK_CLIENT_KEY — the provider
-    // then just renders children and every feature hook returns its fallback.
-    <GrowthBookProvider growthbook={growthbook || undefined}>
+  const app = (
     <AuthProvider>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <PublicFunnelTracking />
@@ -396,6 +393,13 @@ export default function App() {
         </BiometricGate>
       </BrowserRouter>
     </AuthProvider>
-    </GrowthBookProvider>
   );
+  // GrowthBook React requires a REAL instance — with no client key there is
+  // none, and <GrowthBookProvider growthbook={undefined}> can crash the SPA.
+  // Skip the provider entirely instead; no feature hooks are mounted while
+  // the lane is dark, and any future hook must tolerate the missing context
+  // exactly as it tolerates fallback values.
+  return growthbook
+    ? <GrowthBookProvider growthbook={growthbook}>{app}</GrowthBookProvider>
+    : app;
 }

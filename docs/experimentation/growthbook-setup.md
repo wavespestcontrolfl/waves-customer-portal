@@ -37,7 +37,8 @@ GrowthBook → **Metrics and Data → Data Sources → Add → Postgres**. Use a
 public endpoint from the *Postgres* service, never `DATABASE_URL` in the shell).
 Grant `SELECT` on `experiment_exposures`, `estimates`, `estimate_deposits`,
 `invoices`, `payments`, `scheduled_services`, `self_booked_appointments`,
-`customers`.
+`customers`, `booking_intents` (the booking-abandon-recovery conversion
+metric queries it).
 
 ### Identifier type + Experiment Assignment Query
 

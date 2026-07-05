@@ -146,7 +146,10 @@ const cspDirectives = {
   styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
   fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
   imgSrc: ["'self'", "https:", "data:", "blob:"],
-  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com"],
+  // cdn.growthbook.io: the client GrowthBook SDK fetches feature definitions
+  // from there once VITE_GROWTHBOOK_CLIENT_KEY is set (harmless while unset;
+  // self-hosted deployments must swap in their VITE_GROWTHBOOK_API_HOST).
+  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com", "https://cdn.growthbook.io"],
   frameSrc: ["'self'", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
   mediaSrc: ["'self'", "https:"],
   // PostHog session replay records via a web worker created from a blob URL.

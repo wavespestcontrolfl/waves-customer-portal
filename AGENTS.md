@@ -387,6 +387,23 @@ finding and warns on P1. Reviewers must return JSON matching
   when both LLM providers miss) read English AND Spanish — the prompt answers
   Spanish visitors in Spanish. NOT CORS-open — credentialed allowlist origins
   only (hub site)).
+  `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
+  GrowthBook experimentation surface — no auth, anonymous visitors are the
+  unit. **POST /exposure is gated behind GATE_GROWTHBOOK** (404 when off) with
+  a 30 req/min per-route rate limit on top of the global limiter. Invariants:
+  strict shape validation (experiment/unit/variation regexes, scalar-only
+  value clamped to 100 chars); the experiment key must be a currently-live
+  tracking key in the cached GrowthBook feature payload; SERVER-owned
+  experiment keys (`estimate-view`, `booking-abandon-recovery`) are ALWAYS
+  refused — server-side sticky replay trusts `experiment_exposures`, so a
+  public post must never be able to pre-assign a real unit's arm;
+  `unit_type='anon'` + `metadata.source='client'` are forced server-side; the
+  response is 204 for stored AND dropped posts (no experiment-enumeration
+  oracle); the first-exposure-wins unique constraint dedups repeats. No PII —
+  anonymous visitor id only. `GET /status` returns only `{enabled}` (boolean
+  master-gate probe, never 404s): the client SDK fetches feature definitions
+  only after it says enabled, which is what makes unsetting GATE_GROWTHBOOK a
+  real rollback for client experiments too).
   `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
   token, public `Cache-Control`. Consumed by the Astro build and the admin blog
   UI; no PII).

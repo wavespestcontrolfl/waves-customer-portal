@@ -23,17 +23,22 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const UID_STORAGE_KEY = 'waves_exp_uid';
 
+// Page-lifetime fallback when persistence is blocked (private mode): the
+// SAME id must serve both the GrowthBook attributes hash (set at
+// construction) and every later reportExposure() call — regenerating per
+// call would record exposures under a different unit than was assigned.
+let memoryUid = null;
+
 function anonId() {
-  // Private-mode / blocked storage must never break the app: fall back to a
-  // session-lifetime id (a fresh unit per load is acceptable, storage loss is
-  // rare and first-exposure-wins dedups server-side).
   let uid = null;
   try { uid = window.localStorage.getItem(UID_STORAGE_KEY); } catch { /* blocked */ }
   if (uid && /^[A-Za-z0-9-]{8,64}$/.test(uid)) return uid;
+  if (memoryUid) return memoryUid;
   uid = (window.crypto && typeof window.crypto.randomUUID === 'function')
     ? window.crypto.randomUUID()
     : `anon-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   try { window.localStorage.setItem(UID_STORAGE_KEY, uid); } catch { /* blocked */ }
+  memoryUid = uid;
   return uid;
 }
 
@@ -67,15 +72,28 @@ function createGrowthBook() {
       attributes: { id: anonId() },
       trackingCallback: reportExposure,
     });
-    // Background feature load — the app never waits on it; until features
-    // arrive every flag evaluates to its safe fallback.
-    gb.init({ timeout: 3000 }).catch(() => {});
+    // MASTER GATE: GATE_GROWTHBOOK off must roll back CLIENT experiments too,
+    // not just the exposure endpoint — otherwise unsetting the documented
+    // kill switch would leave client variants live (and unlogged). Features
+    // are only fetched after the server confirms the program is on; until
+    // then (and on any failure) every flag evaluates to its safe fallback —
+    // fails CLOSED, matching the dark-by-default posture.
+    fetch(`${API_BASE}/public/experiments/status`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((status) => {
+        if (status && status.enabled === true) {
+          // Background feature load — the app never waits on it.
+          gb.init({ timeout: 3000 }).catch(() => {});
+        }
+      })
+      .catch(() => {});
     return gb;
   } catch {
     return null;
   }
 }
 
-// Singleton for the app lifetime; null → GrowthBookProvider still renders
-// children normally and all feature hooks return their fallbacks.
+// Singleton for the app lifetime; null (no key / construction failure) →
+// App.jsx skips the GrowthBookProvider entirely, since GrowthBook React
+// requires a real instance — passing undefined can crash the SPA.
 export const growthbook = createGrowthBook();

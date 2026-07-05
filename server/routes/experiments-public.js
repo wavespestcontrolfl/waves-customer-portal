@@ -52,6 +52,14 @@ router.use(rateLimit({
   message: { error: 'Too many requests.' },
 }));
 
+// Master-gate probe for the client SDK: the browser only fetches GrowthBook
+// feature definitions after this says enabled, so unsetting GATE_GROWTHBOOK
+// rolls back CLIENT experiments too (not just exposure intake). Returns only
+// the boolean — no keys, no experiment names. Mirrors ask-waves GET /status.
+router.get('/status', (req, res) => {
+  res.json({ enabled: featureGates.isEnabled('growthbookExperiments') });
+});
+
 router.post('/exposure', (req, res) => {
   if (!featureGates.isEnabled('growthbookExperiments')) {
     return res.status(404).json({ error: 'Not found' });
