@@ -201,12 +201,18 @@ function spokeMergeBlockedByKillSwitch(run) {
  * /{category}/{leaf-slug}/ derived with astro-publisher's own routing helpers
  * (slugPathFromFrontmatter + normalizeAutonomousCategory + categoryRouteSlug +
  * canonicalUrlForSlug — the exact composition publishOrUpdatePage binds), so
- * this can never drift from the real route. Origin comes from the stored
- * canonical when present (spoke self-canonicals keep their spoke origin), hub
- * otherwise. Returns null when the frontmatter can't produce a safe slug or
- * the helpers are unavailable — never guess.
+ * this can never drift from the real route. `brief` must be the run's
+ * content_briefs row (or {} when the run has none): the publisher passes the
+ * brief into normalizeAutonomousCategory, whose brief.service /
+ * brief.target_keyword signals decide the category when the frontmatter
+ * omits or uses a non-canonical label — dropping them would derive the
+ * default /pest-control/ route for a post the publisher stamped under
+ * /lawn-care/, /termite/, etc. Origin comes from the stored canonical when
+ * present (spoke self-canonicals keep their spoke origin), hub otherwise.
+ * Returns null when the frontmatter can't produce a safe slug or the
+ * helpers are unavailable — never guess.
  */
-function deriveBlogRouteUrl(run) {
+function deriveBlogRouteUrl(run, brief = {}) {
   let internals;
   try { internals = require('../content-astro/astro-publisher')._internals || {}; } catch (_) { return null; }
   const { categoryRouteSlug, slugPathFromFrontmatter, canonicalUrlForSlug, normalizeAutonomousCategory } = internals;
@@ -215,11 +221,27 @@ function deriveBlogRouteUrl(run) {
   const frontmatter = draft.frontmatter || {};
   let slugPath;
   try { slugPath = slugPathFromFrontmatter(frontmatter); } catch (_) { return null; }
-  const routeSlug = categoryRouteSlug(slugPath, normalizeAutonomousCategory(frontmatter, {}));
+  const routeSlug = categoryRouteSlug(slugPath, normalizeAutonomousCategory(frontmatter, brief || {}));
   if (!routeSlug) return null;
   let origin = null;
   try { origin = frontmatter.canonical ? new URL(String(frontmatter.canonical)).origin : null; } catch (_) { origin = null; }
   return origin ? canonicalUrlForSlug(routeSlug, origin) : canonicalUrlForSlug(routeSlug);
+}
+
+/**
+ * The category signals deriveBlogRouteUrl needs from the run's brief
+ * (normalizeAutonomousCategory reads brief.service + brief.target_keyword).
+ * {} when the run has no brief. A lookup blip THROWS — callers inside
+ * finalizeMerged's live-check try ride the existing transient park
+ * (live_check_failed, retried next tick) rather than deriving from partial
+ * signals, which could probe (and adopt) the wrong category route.
+ */
+async function briefCategorySignalsForRun(run) {
+  if (!run.brief_id) return {};
+  const brief = await db('content_briefs')
+    .where('id', run.brief_id)
+    .first('service', 'target_keyword');
+  return brief || {};
 }
 
 async function resolveTargetForRun(run) {
@@ -421,7 +443,7 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
     let liveOk = false;
     if (target.url) liveOk = !!(await liveUrlResponds(target.url));
     if (!liveOk && String(run.action_type || '') === 'new_supporting_blog') {
-      const derived = deriveBlogRouteUrl(run);
+      const derived = deriveBlogRouteUrl(run, await briefCategorySignalsForRun(run));
       if (derived && derived !== target.url && (await liveUrlResponds(derived))) {
         logger.info(`[autonomous-pr-poller] run ${run.id}: stored target ${target.url || '(none)'} not live; adopting derived blog route ${derived}`);
         target.url = derived;

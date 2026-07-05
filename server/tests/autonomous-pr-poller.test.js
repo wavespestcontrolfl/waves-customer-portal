@@ -381,6 +381,41 @@ describe('merged-by-human reconciliation', () => {
       expect(indexNow.submit).not.toHaveBeenCalled();
     });
 
+    test('category inferred from the BRIEF (frontmatter omits it): derives the brief-driven route, not default /pest-control/', async () => {
+      // The publisher passes the run's brief into normalizeAutonomousCategory
+      // (brief.service / brief.target_keyword are category signals when the
+      // frontmatter category is missing or non-canonical), so the fallback
+      // must load and pass the same brief — an empty brief would probe
+      // /pest-control/<slug>/ for a post the publisher stamped under
+      // /lawn-care/ and leave the run parked forever.
+      const LAWN_DERIVED = 'https://www.wavespestcontrol.com/lawn-care/summer-lawn-fungus-guide/';
+      const run = makeRun({
+        brief_id: 'brief-lawn',
+        draft_payload: JSON.stringify({
+          type: 'draft',
+          frontmatter: {
+            slug: 'summer-lawn-fungus-guide',
+            title: 'Summer Fungus Guide for Florida Yards',
+          },
+        }),
+      });
+      const updates = setupDb({
+        pending: [run],
+        briefs: [{ id: 'brief-lawn', service: 'lawn care', target_keyword: 'lawn fungus treatment' }],
+      });
+      gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-19T05:04:33Z' });
+      pagesPoll.liveUrlResponds.mockImplementation(async (u) => u === LAWN_DERIVED);
+      indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+      publisher.planInternalLinksForTarget.mockResolvedValue({ url: LAWN_DERIVED, queued: 0, candidates: 0 });
+
+      const res = await poller.pollPending();
+
+      expect(res.results[0].merged).toBe(true);
+      const claim = runUpdates(updates)[0];
+      expect(claim.updates).toMatchObject({ outcome: 'completed_published', published_url: LAWN_DERIVED });
+      expect(pagesPoll.liveUrlResponds).not.toHaveBeenCalledWith('https://www.wavespestcontrol.com/pest-control/summer-lawn-fungus-guide/');
+    });
+
     test('non-blog lanes never derive: a 404 metadata target stays parked after ONE live check', async () => {
       setupDb({
         pending: [makeRun({
@@ -408,6 +443,12 @@ describe('merged-by-human reconciliation', () => {
       spoke.draft_payload = JSON.stringify(p);
       expect(poller._internals.deriveBlogRouteUrl(spoke))
         .toBe('https://sarasotaflpestcontrol.com/pest-control/dangerous-ants-in-florida/');
+      // brief signals decide the category exactly like the publisher:
+      // same frontmatter, lawn brief -> lawn-care route
+      expect(poller._internals.deriveBlogRouteUrl(
+        makeRun({ draft_payload: JSON.stringify({ frontmatter: { slug: 'summer-lawn-fungus-guide', title: 'Summer Fungus Guide' } }) }),
+        { service: 'lawn care' },
+      )).toBe('https://www.wavespestcontrol.com/lawn-care/summer-lawn-fungus-guide/');
       // no safe slug -> null, never a guess
       expect(poller._internals.deriveBlogRouteUrl(makeRun({ draft_payload: JSON.stringify({ frontmatter: {} }) }))).toBeNull();
     });
