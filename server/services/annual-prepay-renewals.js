@@ -1568,7 +1568,7 @@ function paymentReminderClaimColumnForDaysOut(daysOut) {
 // (not 24h) keeps yesterday's 10 AM dunning from suppressing today's 10 AM
 // reminder on the boundary.
 const PAYMENT_REMINDER_DUNNING_SUPPRESS_MS = 20 * 60 * 60 * 1000;
-async function invoiceDunningActiveToday(invoiceId, now = new Date()) {
+async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd = null } = {}) {
   try {
     const row = await db('invoice_followup_sequences')
       .where({ invoice_id: invoiceId })
@@ -1576,8 +1576,19 @@ async function invoiceDunningActiveToday(invoiceId, now = new Date()) {
     if (!row || row.status !== 'active') return false;
     if (row.last_touch_at && (now - new Date(row.last_touch_at)) < PAYMENT_REMINDER_DUNNING_SUPPRESS_MS) return true;
     if (row.next_touch_at) {
-      const endOfTodayEt = parseETDateTime(`${etDateString()} 23:59:59`);
-      if (new Date(row.next_touch_at) <= endOfTodayEt) return true;
+      // A due touch only suppresses on a day the follow-up cron can actually
+      // fire (Tue–Fri per config.sendWindow). A touch that came due over the
+      // weekend would otherwise suppress the Sat 3d AND Mon 1d reminders while
+      // no dunning ran either day — the customer would reach the visit with no
+      // pre-visit contact at all.
+      const followupConfig = require('../config/invoice-followups');
+      const sendDays = new Set(followupConfig?.sendWindow?.daysOfWeek || []);
+      const today = todayYmd || etDateString();
+      const todayEtDow = new Date(`${today}T12:00:00Z`).getUTCDay();
+      if (sendDays.has(todayEtDow)) {
+        const endOfTodayEt = parseETDateTime(`${today} 23:59:59`);
+        if (new Date(row.next_touch_at) <= endOfTodayEt) return true;
+      }
     }
     return false;
   } catch (err) {
@@ -1608,11 +1619,14 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   if (term[sentCol]) return { sent: false, reason: 'already_sent' };
   if (!term.prepay_invoice_id) return { sent: false, reason: 'no_invoice' };
 
-  const invoice = await db('invoices').where({ id: term.prepay_invoice_id }).first();
+  let invoice = await db('invoices').where({ id: term.prepay_invoice_id }).first();
   if (!invoice) return { sent: false, reason: 'invoice_missing' };
-  const invoiceStatus = String(invoice.status || '').toLowerCase();
-  if (invoiceStatus === 'paid' || INVOICE_CANCELLED_STATUSES.has(invoiceStatus)) {
-    return { sent: false, reason: 'invoice_settled_or_cancelled' };
+  // Canonical collectibility (invoice-helpers): paid/prepaid/PROCESSING/void/
+  // refunded/cancelled all skip — an in-flight ACH must not be asked to pay
+  // again, and the pay page would refuse these states anyway.
+  const { isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
+  if (!isInvoiceCollectibleStatus(invoice.status)) {
+    return { sent: false, reason: 'invoice_not_collectible' };
   }
   // Never text the homeowner a pay link for a payer-billed invoice — the
   // pay link + AR route to the payer (mirrors InvoiceService.sendViaSMS).
@@ -1621,6 +1635,24 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   if (await invoiceDunningActiveToday(invoice.id)) {
     return { sent: false, reason: 'dunning_active_today' };
   }
+
+  // Run the same account-credit seam the regular invoice send paths run
+  // before asking for money (feature-gated + fail-soft inside), then re-read:
+  // available credit may shrink or fully cover the balance, and the reminder
+  // must quote the amount Stripe will actually collect, not the gross total.
+  try {
+    const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
+    await autoApplyAccountCreditIfEnabled(invoice.id, { createdBy: 'system:annual_prepay_payment_reminder' });
+    const freshInvoice = await db('invoices').where({ id: invoice.id }).first();
+    if (freshInvoice) invoice = freshInvoice;
+  } catch (err) {
+    logger.warn(`[annual-prepay] credit seam skipped for invoice ${invoice.id}: ${err.message}`);
+  }
+  if (!isInvoiceCollectibleStatus(invoice.status)) {
+    return { sent: false, reason: 'invoice_not_collectible' };
+  }
+  const amountDue = invoiceAmountDue(invoice);
+  if (!(amountDue > 0)) return { sent: false, reason: 'fully_credited' };
 
   const now = new Date();
   const staleClaimCutoff = new Date(now.getTime() - NOTICE_CLAIM_TTL_MS);
@@ -1643,10 +1675,15 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   };
 
   try {
-    const customer = await db('customers').where({ id: claimedTerm.customer_id }).first();
+    // whereNull(deleted_at): a soft-deleted account must not get a pay-link
+    // text (mirrors the renewal scan's deleted-customer exclusion).
+    const customer = await db('customers')
+      .where({ id: claimedTerm.customer_id })
+      .whereNull('deleted_at')
+      .first();
     if (!customer) {
       await releaseClaim();
-      return { sent: false, reason: 'customer_not_found' };
+      return { sent: false, reason: 'customer_missing_or_deleted' };
     }
     if (!customer.phone) {
       // The invoice email already carries the pay link (sent at accept, plus
@@ -1668,9 +1705,8 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       customerId: customer.id,
       codePrefix: invoiceShortCodePrefix(invoice),
     });
-    const invoiceTotal = Number(invoice.total);
-    const amountText = Number.isFinite(invoiceTotal) && invoiceTotal > 0
-      ? ` for $${invoiceTotal.toFixed(2)}`
+    const amountText = Number.isFinite(amountDue) && amountDue > 0
+      ? ` for $${amountDue.toFixed(2)}`
       : '';
 
     const body = await renderSmsTemplate(

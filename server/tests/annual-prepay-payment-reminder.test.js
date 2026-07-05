@@ -20,6 +20,9 @@ jest.mock('../services/short-url', () => ({
 jest.mock('../utils/portal-url', () => ({
   publicPortalUrl: jest.fn(() => 'https://portal.wavespestcontrol.com'),
 }));
+jest.mock('../services/customer-credit', () => ({
+  autoApplyAccountCreditIfEnabled: jest.fn().mockResolvedValue(null),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -112,7 +115,10 @@ describe('annual prepay pre-visit payment reminders', () => {
         claimQ,
         markSentQ,
       ],
-      invoices: [query({ first: { ...UNPAID_INVOICE } })],
+      invoices: [
+        query({ first: { ...UNPAID_INVOICE } }),
+        query({ first: { ...UNPAID_INVOICE } }), // post-credit-seam re-read
+      ],
       invoice_followup_sequences: [query({ first: undefined })],
       customers: [query({ first: { ...CUSTOMER } })],
       customer_interactions: [query()],
@@ -146,16 +152,61 @@ describe('annual prepay pre-visit payment reminders', () => {
     }));
   });
 
-  test('skips when the prepay invoice is already paid (webhook lag) — no claim, no SMS', async () => {
+  test.each(['paid', 'processing', 'prepaid', 'void'])(
+    'skips a %s invoice (canonical collectibility — in-flight ACH must not be re-asked) — no claim, no SMS',
+    async (status) => {
+      setDbQueues({
+        annual_prepay_terms: [query({ columnInfo: REMINDER_COLS })],
+        invoices: [query({ first: { ...UNPAID_INVOICE, status } })],
+      });
+
+      const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+      expect(result).toEqual({ sent: false, reason: 'invoice_not_collectible' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  test('skips when applied account credit fully covers the balance', async () => {
     setDbQueues({
       annual_prepay_terms: [query({ columnInfo: REMINDER_COLS })],
-      invoices: [query({ first: { ...UNPAID_INVOICE, status: 'paid' } })],
+      invoices: [
+        query({ first: { ...UNPAID_INVOICE, credit_applied: '392.04' } }),
+        query({ first: { ...UNPAID_INVOICE, credit_applied: '392.04' } }),
+      ],
+      invoice_followup_sequences: [query({ first: undefined })],
     });
 
     const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
 
-    expect(result).toEqual({ sent: false, reason: 'invoice_settled_or_cancelled' });
+    expect(result).toEqual({ sent: false, reason: 'fully_credited' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('quotes the amount DUE (total minus applied credit), not the gross total', async () => {
+    const partialCredit = { ...UNPAID_INVOICE, credit_applied: '92.04' };
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: REMINDER_COLS }),
+        query({ returning: [{ ...BASE_TERM }] }),
+        query(),
+      ],
+      invoices: [query({ first: partialCredit }), query({ first: partialCredit })],
+      invoice_followup_sequences: [query({ first: undefined })],
+      customers: [query({ first: { ...CUSTOMER } })],
+      customer_interactions: [query()],
+    });
+    renderSmsTemplate.mockResolvedValue('pay reminder body');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    expect(result).toEqual({ sent: true, termId: 'term-1' });
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'annual_prepay_payment_reminder',
+      expect.objectContaining({ amount_text: ' for $300.00' }),
+      expect.anything(),
+    );
   });
 
   test('skips a payer-billed invoice — never texts the homeowner a payer pay link', async () => {
@@ -163,6 +214,7 @@ describe('annual prepay pre-visit payment reminders', () => {
       annual_prepay_terms: [query({ columnInfo: REMINDER_COLS })],
       invoices: [query({ first: { ...UNPAID_INVOICE, payer_id: 'payer-9' } })],
     });
+    // payer check fires on the first read — before the credit seam re-read.
 
     const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
 
@@ -185,18 +237,18 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('defers when dunning is DUE today even if it has not fired yet (shared 10 AM cron hour)', async () => {
-    setDbQueues({
-      annual_prepay_terms: [query({ columnInfo: REMINDER_COLS })],
-      invoices: [query({ first: { ...UNPAID_INVOICE } })],
-      invoice_followup_sequences: [query({
-        first: { status: 'active', last_touch_at: null, next_touch_at: new Date() },
-      })],
-    });
-
-    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 3);
-
-    expect(result).toEqual({ sent: false, reason: 'dunning_active_today' });
+  test('a DUE dunning touch suppresses only on days the follow-up cron runs (Tue–Fri)', async () => {
+    const dueRow = { status: 'active', last_touch_at: null, next_touch_at: new Date('2026-07-06T14:00:00Z') };
+    // Wednesday 2026-07-08: cron fires → suppress.
+    setDbQueues({ invoice_followup_sequences: [query({ first: { ...dueRow } })] });
+    await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-08' })).resolves.toBe(true);
+    // Monday 2026-07-06: no dunning runs Mondays — the reminder must NOT be
+    // suppressed or the customer reaches the visit with no contact at all.
+    setDbQueues({ invoice_followup_sequences: [query({ first: { ...dueRow } })] });
+    await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-06' })).resolves.toBe(false);
+    // Saturday 2026-07-11: same.
+    setDbQueues({ invoice_followup_sequences: [query({ first: { ...dueRow } })] });
+    await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-11' })).resolves.toBe(false);
   });
 
   test('missing SMS template releases the claim instead of stamping sent', async () => {
@@ -208,7 +260,7 @@ describe('annual prepay pre-visit payment reminders', () => {
         claimQ,
         releaseQ,
       ],
-      invoices: [query({ first: { ...UNPAID_INVOICE } })],
+      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
       invoice_followup_sequences: [query({ first: undefined })],
       customers: [query({ first: { ...CUSTOMER } })],
     });
@@ -232,7 +284,7 @@ describe('annual prepay pre-visit payment reminders', () => {
         claimQ,
         markQ,
       ],
-      invoices: [query({ first: { ...UNPAID_INVOICE } })],
+      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
       invoice_followup_sequences: [query({ first: undefined })],
       customers: [query({ first: { ...CUSTOMER, phone: null } })],
     });
@@ -242,6 +294,30 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(result).toEqual({ sent: false, reason: 'no_phone' });
     expect(markQ.update).toHaveBeenCalledWith(expect.objectContaining({
       payment_reminder_1d_sent_at: expect.any(Date),
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('soft-deleted customer never gets a pay-link text — claim released', async () => {
+    const claimQ = query({ returning: [{ ...BASE_TERM }] });
+    const releaseQ = query();
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: REMINDER_COLS }),
+        claimQ,
+        releaseQ,
+      ],
+      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
+      invoice_followup_sequences: [query({ first: undefined })],
+      // whereNull('deleted_at') filters the archived account out.
+      customers: [query({ first: undefined })],
+    });
+
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    expect(result).toEqual({ sent: false, reason: 'customer_missing_or_deleted' });
+    expect(releaseQ.update).toHaveBeenCalledWith(expect.objectContaining({
+      payment_reminder_1d_claimed_at: null,
     }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
