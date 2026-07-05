@@ -1636,23 +1636,9 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
     return { sent: false, reason: 'dunning_active_today' };
   }
 
-  // Run the same account-credit seam the regular invoice send paths run
-  // before asking for money (feature-gated + fail-soft inside), then re-read:
-  // available credit may shrink or fully cover the balance, and the reminder
-  // must quote the amount Stripe will actually collect, not the gross total.
-  try {
-    const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
-    await autoApplyAccountCreditIfEnabled(invoice.id, { createdBy: 'system:annual_prepay_payment_reminder' });
-    const freshInvoice = await db('invoices').where({ id: invoice.id }).first();
-    if (freshInvoice) invoice = freshInvoice;
-  } catch (err) {
-    logger.warn(`[annual-prepay] credit seam skipped for invoice ${invoice.id}: ${err.message}`);
-  }
-  if (!isInvoiceCollectibleStatus(invoice.status)) {
-    return { sent: false, reason: 'invoice_not_collectible' };
-  }
-  const amountDue = invoiceAmountDue(invoice);
-  if (!(amountDue > 0)) return { sent: false, reason: 'fully_credited' };
+  // Credit already applied to the invoice may fully cover it — nothing to
+  // remind (the auto-apply seam itself runs post-claim, see below).
+  if (!(invoiceAmountDue(invoice) > 0)) return { sent: false, reason: 'fully_credited' };
 
   const now = new Date();
   const staleClaimCutoff = new Date(now.getTime() - NOTICE_CLAIM_TTL_MS);
@@ -1674,7 +1660,51 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       .catch((err) => logger.warn(`[annual-prepay] payment reminder claim release failed for term ${claimedTerm.id}: ${err.message}`));
   };
 
+  // Credit this reminder draws down must not stay consumed if no touch goes
+  // out — mirror the dunning engine: reverse exactly THIS call's increment on
+  // any no-channel exit (missing customer/template, blocked SMS, throw). A
+  // seam apply that FULLY covers the invoice is a settle event, not a touch —
+  // the credit stays (and reverseAppliedCredit refuses 'prepaid' anyway).
+  let reminderAppliedCredit = 0;
+  const reverseReminderCredit = async () => {
+    if (!(reminderAppliedCredit > 0)) return;
+    try {
+      const { reverseAppliedCredit } = require('./customer-credit');
+      await reverseAppliedCredit({ invoiceId: invoice.id, amount: reminderAppliedCredit, createdBy: 'system:prepay_reminder_undelivered' });
+    } catch (err) {
+      logger.warn(`[annual-prepay] credit reversal after undelivered payment reminder skipped for invoice ${invoice.id}: ${err.message}`);
+    }
+    reminderAppliedCredit = 0;
+  };
+
   try {
+    // Run the same account-credit seam the regular invoice send paths run
+    // before asking for money (feature-gated + fail-soft inside), then
+    // re-read: available credit may shrink or fully cover the balance, and
+    // the reminder must quote the amount Stripe will actually collect, not
+    // the gross total. Post-claim so the undelivered-touch reversal above
+    // covers every failure exit that follows.
+    try {
+      const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
+      const creditResult = await autoApplyAccountCreditIfEnabled(invoice.id, { createdBy: 'system:annual_prepay_payment_reminder' });
+      reminderAppliedCredit = Number(creditResult?.applied) || 0;
+      const freshInvoice = await db('invoices').where({ id: invoice.id }).first();
+      if (freshInvoice) invoice = freshInvoice;
+    } catch (err) {
+      logger.warn(`[annual-prepay] credit seam skipped for invoice ${invoice.id}: ${err.message}`);
+    }
+    if (!isInvoiceCollectibleStatus(invoice.status)) {
+      // Seam flipped the invoice to prepaid/paid (full coverage side effects
+      // also activate the term) — settled, keep the credit, free the claim.
+      await releaseClaim();
+      return { sent: false, reason: 'invoice_not_collectible' };
+    }
+    const amountDue = invoiceAmountDue(invoice);
+    if (!(amountDue > 0)) {
+      await releaseClaim();
+      return { sent: false, reason: 'fully_credited' };
+    }
+
     // whereNull(deleted_at): a soft-deleted account must not get a pay-link
     // text (mirrors the renewal scan's deleted-customer exclusion).
     const customer = await db('customers')
@@ -1682,13 +1712,16 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       .whereNull('deleted_at')
       .first();
     if (!customer) {
+      await reverseReminderCredit();
       await releaseClaim();
       return { sent: false, reason: 'customer_missing_or_deleted' };
     }
     if (!customer.phone) {
       // The invoice email already carries the pay link (sent at accept, plus
       // the follow-up sequence's email legs) — with no phone there is no SMS
-      // nudge to add. Mark sent so the daily cron doesn't re-claim forever.
+      // nudge to add. Mark sent so the daily cron doesn't re-claim forever;
+      // reverse the seam credit (no touch went out to consume it).
+      await reverseReminderCredit();
       await db('annual_prepay_terms')
         .where({ id: claimedTerm.id })
         .whereNull(sentCol)
@@ -1721,6 +1754,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
     );
     if (!body) {
       logger.warn(`[annual-prepay] annual_prepay_payment_reminder template missing/disabled for customer ${customer.id}`);
+      await reverseReminderCredit();
       await releaseClaim();
       return { sent: false, reason: 'missing_sms_template' };
     }
@@ -1744,6 +1778,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
     });
     if (!smsResult.sent) {
       logger.warn(`[annual-prepay] payment reminder SMS blocked/failed for term ${claimedTerm.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      await reverseReminderCredit();
       await releaseClaim();
       return { sent: false, reason: smsResult.code || smsResult.reason || 'send_failed' };
     }
@@ -1764,6 +1799,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
 
     return { sent: true, termId: claimedTerm.id };
   } catch (err) {
+    await reverseReminderCredit();
     await releaseClaim();
     throw err;
   }

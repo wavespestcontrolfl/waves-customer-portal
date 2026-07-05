@@ -22,9 +22,11 @@ jest.mock('../utils/portal-url', () => ({
 }));
 jest.mock('../services/customer-credit', () => ({
   autoApplyAccountCreditIfEnabled: jest.fn().mockResolvedValue(null),
+  reverseAppliedCredit: jest.fn().mockResolvedValue(0),
 }));
 
 const db = require('../models/db');
+const { autoApplyAccountCreditIfEnabled, reverseAppliedCredit } = require('../services/customer-credit');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
@@ -167,13 +169,10 @@ describe('annual prepay pre-visit payment reminders', () => {
     },
   );
 
-  test('skips when applied account credit fully covers the balance', async () => {
+  test('skips when already-applied account credit fully covers the balance (pre-claim)', async () => {
     setDbQueues({
       annual_prepay_terms: [query({ columnInfo: REMINDER_COLS })],
-      invoices: [
-        query({ first: { ...UNPAID_INVOICE, credit_applied: '392.04' } }),
-        query({ first: { ...UNPAID_INVOICE, credit_applied: '392.04' } }),
-      ],
+      invoices: [query({ first: { ...UNPAID_INVOICE, credit_applied: '392.04' } })],
       invoice_followup_sequences: [query({ first: undefined })],
     });
 
@@ -295,6 +294,60 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(markQ.update).toHaveBeenCalledWith(expect.objectContaining({
       payment_reminder_1d_sent_at: expect.any(Date),
     }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('credit the seam applied is REVERSED when the reminder cannot be delivered (mirrors dunning)', async () => {
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 50 });
+    const claimQ = query({ returning: [{ ...BASE_TERM }] });
+    const releaseQ = query();
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: REMINDER_COLS }),
+        claimQ,
+        releaseQ,
+      ],
+      invoices: [
+        query({ first: { ...UNPAID_INVOICE } }),
+        // post-seam re-read: 50 applied, balance remains — reminder still owed
+        query({ first: { ...UNPAID_INVOICE, credit_applied: '50.00' } }),
+      ],
+      invoice_followup_sequences: [query({ first: undefined })],
+      customers: [query({ first: { ...CUSTOMER } })],
+    });
+    renderSmsTemplate.mockResolvedValue(null); // template missing → no touch
+
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    expect(result).toEqual({ sent: false, reason: 'missing_sms_template' });
+    expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({
+      invoiceId: 'inv-1',
+      amount: 50,
+      createdBy: 'system:prepay_reminder_undelivered',
+    }));
+  });
+
+  test('a seam apply that FULLY covers the invoice keeps the credit (settle event, not an undelivered touch)', async () => {
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 392.04, fullyCovered: true });
+    const claimQ = query({ returning: [{ ...BASE_TERM }] });
+    const releaseQ = query();
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: REMINDER_COLS }),
+        claimQ,
+        releaseQ,
+      ],
+      invoices: [
+        query({ first: { ...UNPAID_INVOICE } }),
+        query({ first: { ...UNPAID_INVOICE, status: 'prepaid', credit_applied: '392.04' } }),
+      ],
+      invoice_followup_sequences: [query({ first: undefined })],
+    });
+
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    expect(result).toEqual({ sent: false, reason: 'invoice_not_collectible' });
+    expect(reverseAppliedCredit).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
