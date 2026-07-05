@@ -336,6 +336,28 @@ function parseEstimateDataSafe(estimate = {}) {
   return raw || {};
 }
 
+// Customer-facing fallback when scheduled_services.window_display is empty:
+// the 2-hour arrival window from window_start ("3:00 PM - 5:00 PM"), matching
+// the confirmation SMS — never the raw 24h window_start, and never window_end
+// (that's the job-duration block, not the arrival window).
+function customerArrivalWindowDisplay(windowStart) {
+  const range = arrivalWindowRange(windowStart);
+  return range ? formatSmsTimeRange(range) : null;
+}
+
+// SSR existing-appointment title. windowDisplay is a TIME display (stored
+// values are "11:00 AM"-style; the fallback above is the arrival range), so
+// the date must be composed in here — mirrors the React formatAppointmentLabel.
+function existingAppointmentTitle(appointment = {}) {
+  const date = appointment.scheduledDate
+    ? new Date(`${appointment.scheduledDate}T12:00:00Z`).toLocaleDateString('en-US', {
+      weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
+    })
+    : '';
+  const time = appointment.windowDisplay || appointment.windowStart || '';
+  return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
+}
+
 function shapeLinkedAppointment(row) {
   if (!row) return null;
   return {
@@ -343,7 +365,11 @@ function shapeLinkedAppointment(row) {
     scheduledDate: dateOnly(row.scheduled_date),
     windowStart: hhmm(row.window_start),
     windowEnd: hhmm(row.window_end),
-    windowDisplay: row.window_display || null,
+    // Derived 2h arrival range FIRST: prod window_display values are only ever
+    // a bare start time ("9:00 AM" — the phone-booking writer) or NULL, never a
+    // range, so stored text can only lose information vs deriving from
+    // window_start. Stored text is the fallback for rows with no parseable start.
+    windowDisplay: customerArrivalWindowDisplay(row.window_start) || row.window_display || null,
     serviceType: row.service_type || 'Service visit',
     status: row.status || null,
   };
@@ -4646,7 +4672,7 @@ ${shellTopBar()}
       <p class="card-sub">Your visit is already on the schedule. Choose how you want to pay to approve this estimate.</p>
       <div class="existing-appt-card">
         <div class="existing-appt-kicker">Existing appointment</div>
-        <div class="existing-appt-title">${escapeHtml(existingAppointment.windowDisplay || `${existingAppointment.scheduledDate}${existingAppointment.windowStart ? ` at ${existingAppointment.windowStart}` : ''}`)}</div>
+        <div class="existing-appt-title">${escapeHtml(existingAppointmentTitle(existingAppointment))}</div>
         <div class="existing-appt-sub">${escapeHtml(existingAppointment.serviceType || pageCopy.aggregateDayLabel || 'Service visit')}</div>
       </div>
     ` : `

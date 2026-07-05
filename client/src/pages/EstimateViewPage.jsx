@@ -3158,7 +3158,10 @@ export default function EstimateViewPage() {
                 waveGuardTier={waveGuardTier}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
-                showAddOns={readOnly}
+                // Glass removes the customize section everywhere — including
+                // this accepted read-only recap (owner directive; the booked
+                // add-ons still price into the totals shown).
+                showAddOns={readOnly && !glassContent}
               />
             );
           })}
