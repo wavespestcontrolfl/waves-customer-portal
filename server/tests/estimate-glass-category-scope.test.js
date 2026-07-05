@@ -30,6 +30,13 @@
 //   in-scope pest/lawn specialty flags map strictly, out-of-scope lanes map
 //   loosely (a vestigial truthy object blocks — the safe direction), and
 //   deriveServiceCategory's narrow list (page copy) is untouched.
+// r7 — four holes in r6's inference: the union was skipped whenever recurring
+//   rows existed (rows only vouch for recurring services — a one-time engine
+//   flag like services.stinging leaked in beside them, its row classifying
+//   pest by name), the V2 flags were misspelled (stingingV/exclusionV), the
+//   engine's snake_case termite_bait alias was missing, and legacy admin
+//   estimates carrying TOP-LEVEL inputs.svc* form flags (svcWasp et al.) were
+//   never scanned. Union now always runs + legacy flag lists added.
 const { glassCategoryEligible, deriveServiceCategory } = require('../routes/estimate-public');
 
 const PEST_LAWN_SCOPE = ['pest_control', 'lawn_care'];
@@ -76,11 +83,63 @@ describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATE
     expect(glassCategoryEligible(estData, [], roachAddOn, PEST_LAWN_SCOPE)).toBe(true);
   });
 
-  test('persisted recurring rows are authoritative — engine inputs are not unioned when rows exist', () => {
-    // Rows exist for every selected recurring service; a stale/extra engine
-    // input must not conservatively withhold glass from a persisted estimate.
+  test('r7: engine inputs are unioned even when recurring rows exist (rd2 skip reversed)', () => {
+    // rd2 treated persisted recurring rows as authoritative and skipped the
+    // engine-input union; rd7 showed the leak: recurring rows only vouch for
+    // the RECURRING services, so an out-of-scope one-time engine flag rode in
+    // beside them. The union now always runs — an out-of-scope engine input
+    // beside a recurring row withholds glass (fail closed).
     const estData = { engineInputs: { services: { pest: true, mosquito: true } } };
-    expect(glassCategoryEligible(estData, [{ service: 'pest_control' }], [], PEST_LAWN_SCOPE)).toBe(true);
+    expect(glassCategoryEligible(estData, [{ service: 'pest_control' }], [], PEST_LAWN_SCOPE)).toBe(false);
+    // Consistent inputs (the normal case) still release.
+    const consistent = { engineInputs: { services: { pest: true } } };
+    expect(glassCategoryEligible(consistent, [{ service: 'pest_control' }], [], PEST_LAWN_SCOPE)).toBe(true);
+  });
+
+  test('r7: recurring pest + one-time stinging engine flag blocks despite the row name classifying pest', () => {
+    // The generated Stinging Insect one-time row classifies pest_control by
+    // name, so the row check alone would release it; the engine-flag union
+    // must catch it even though a recurring row exists.
+    const estData = { engineInputs: { services: { pest: true, stinging: true } } };
+    const stingingRow = [{ service: 'stinging_insect', name: 'Stinging Insect Treatment', amount: 245 }];
+    expect(glassCategoryEligible(estData, [{ service: 'pest_control' }], stingingRow, PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r7: V2 specialty flag names match the engine (stingingV2/exclusionV2, not stingingV/exclusionV)', () => {
+    const stingingV2 = { engineInputs: { services: { pest: true, stingingV2: true } } };
+    const exclusionV2 = { engineInputs: { services: { pest: true, exclusionV2: true } } };
+    expect(glassCategoryEligible(stingingV2, [], [], PEST_LAWN_SCOPE)).toBe(false);
+    expect(glassCategoryEligible(exclusionV2, [], [], PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r7: snake_case termite_bait engine input blocks', () => {
+    const estData = { engineInputs: { services: { pest: true, termite_bait: true } } };
+    expect(glassCategoryEligible(estData, [], [], PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r7: legacy TOP-LEVEL inputs.svc* out-of-scope flags block (svcWasp et al.)', () => {
+    const lanes = ['svcWasp', 'svcTs', 'svcInjection', 'svcRodentBait', 'svcRodentTrap',
+      'svcRodentSanitation', 'svcRodentGuarantee', 'svcTrapOnlyRetainer', 'svcExclusion',
+      'svcFoam', 'svcWdo'];
+    lanes.forEach((flag) => {
+      const estData = { inputs: { svcPest: true, [flag]: true } };
+      expect(glassCategoryEligible(estData, [], [], PEST_LAWN_SCOPE)).toBe(false);
+    });
+    // Standalone legacy wasp quote: the normalized row is a pest-classifying
+    // label, but the legacy flag scan still withholds glass.
+    const waspOnly = { inputs: { svcWasp: true } };
+    const waspRow = [{ name: 'Wasp/Bee Treatment', amount: 195 }];
+    expect(glassCategoryEligible(waspOnly, [], waspRow, PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r7: legacy in-scope svc* flags release with strict semantics', () => {
+    const legacyPestLawn = { inputs: { svcRoach: true, svcOnetimeLawn: true } };
+    const legacyBedbug = { inputs: { svcBedbug: true } };
+    const legacyDeselected = { inputs: { svcFlea: false, svcWasp: false } };
+    expect(glassCategoryEligible(legacyPestLawn, [], [], PEST_LAWN_SCOPE)).toBe(true);
+    expect(glassCategoryEligible(legacyBedbug, [], [], PEST_LAWN_SCOPE)).toBe(true);
+    // false flags infer nothing → nothing classifies → fail closed.
+    expect(glassCategoryEligible(legacyDeselected, [], [], PEST_LAWN_SCOPE)).toBe(false);
   });
 
   test('r3: an unclassified one-time service row on a mixed estimate fails closed', () => {

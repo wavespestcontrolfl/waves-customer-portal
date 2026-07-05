@@ -10182,16 +10182,14 @@ function glassCategoryEligible(estData, recurringServices, oneTimeItems, allowed
   const allowed = new Set(allowedList);
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   const categories = collectServiceCategories(recurring, oneTimeItems);
-  // Without persisted recurring rows the collected set can under-count: a
-  // generated one-time add-on (e.g. pest_initial_roach from roach activity)
-  // classifies alone while the engine inputs still carry the other selected
-  // services, letting an out-of-scope service hide behind an in-scope add-on.
-  // Union the inferred engine-input categories in. Persisted recurring rows
-  // are authoritative (every selected recurring service has a row), so they
-  // skip the union.
-  if (!recurring.length) {
-    inferScopeCategoriesFromEngineInputs(estData).forEach((c) => categories.add(c));
-  }
+  // Row categories under-count: a generated one-time add-on (e.g.
+  // pest_initial_roach from roach activity) classifies alone while the engine
+  // inputs still carry the other selected services, and recurring rows only
+  // vouch for the recurring services — an out-of-scope one-time flag (e.g.
+  // services.stinging beside a recurring pest row) produces a row whose NAME
+  // classifies in-scope. Engine inputs are therefore ALWAYS unioned in; the
+  // scope inference is fail-closed by construction (Codex rd7).
+  inferScopeCategoriesFromEngineInputs(estData).forEach((c) => categories.add(c));
   // Fail closed on service rows the classifiers DROP, not just on estimates
   // that classify to nothing: a recurring key or real one-time service line
   // that maps to no category (e.g. a WDO inspection alongside recurring pest)
@@ -10271,13 +10269,38 @@ const SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS = [
   ['rodentTrappingFollowups', 'rodent'], ['rodentGuarantee', 'rodent'],
   ['rodentGuaranteeCombo', 'rodent'], ['rodentInspection', 'rodent'],
   ['rodentWireMesh', 'rodent'], ['rodentBirdBoxes', 'rodent'], ['rodentPlugging', 'rodent'],
-  ['trapOnlyRetainer', 'rodent'], ['exclusion', 'rodent'], ['exclusionV', 'rodent'],
+  ['trapOnlyRetainer', 'rodent'], ['exclusion', 'rodent'], ['exclusionV2', 'rodent'],
   ['sanitation', 'rodent'],
   ['foam', 'foam_recurring'], ['foam_recurring', 'foam_recurring'],
   ['termiteFoam', 'termite_foam'],
+  ['termite_bait', 'termite_bait'],
   ['preSlabTermidor', 'pre_slab_termiticide'], ['pre_slab_termidor', 'pre_slab_termiticide'],
-  ['stinging', 'stinging'], ['stingingV', 'stinging'],
+  ['stinging', 'stinging'], ['stingingV2', 'stinging'],
   ['wdo', 'wdo'],
+];
+// Legacy admin estimates persist the selection as TOP-LEVEL inputs.svc* form
+// flags (see selectedServiceKeysFromInputs in estimate-service-lines.js), not
+// under inputs.services. The base inference reads the recurring-capable ones
+// (svcPest/svcLawn/...); these cover the rest of the form with the same
+// strict-in / loose-out asymmetry (Codex rd7: standalone svcWasp quotes
+// classified pest_control off the row name alone).
+const SCOPE_IN_SCOPE_LEGACY_FLAGS = [
+  ['svcOnetimePest', 'pest_control'], ['svcRoach', 'pest_control'],
+  ['svcBedbug', 'pest_control'], ['svcFlea', 'pest_control'],
+  ['svcFleaExterior', 'pest_control'],
+  ['svcOnetimeLawn', 'lawn_care'], ['svcTopdress', 'lawn_care'],
+  ['svcDethatch', 'lawn_care'], ['svcPlugging', 'lawn_care'],
+  ['svcOverseed', 'lawn_care'],
+];
+const SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS = [
+  ['svcWasp', 'stinging'],
+  ['svcTs', 'tree_shrub'], ['svcInjection', 'tree_shrub'],
+  ['svcRodentBait', 'rodent'], ['svcRodentTrap', 'rodent'],
+  ['svcRodentSanitation', 'rodent'], ['svcRodentGuarantee', 'rodent'],
+  ['svcRodentWireMesh', 'rodent'], ['svcRodentBirdBox', 'rodent'],
+  ['svcTrapOnlyRetainer', 'rodent'], ['svcExclusion', 'rodent'],
+  ['svcFoam', 'termite_foam'],
+  ['svcWdo', 'wdo'],
 ];
 
 function inferScopeCategoriesFromEngineInputs(estData = {}) {
@@ -10290,6 +10313,13 @@ function inferScopeCategoriesFromEngineInputs(estData = {}) {
   });
   SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
     if (services[flag]) categories.add(category);
+  });
+  SCOPE_IN_SCOPE_LEGACY_FLAGS.forEach(([flag, category]) => {
+    const value = inputs[flag];
+    if (value === true || engineCommercialServiceSelected(value)) categories.add(category);
+  });
+  SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS.forEach(([flag, category]) => {
+    if (inputs[flag]) categories.add(category);
   });
   return [...categories];
 }
