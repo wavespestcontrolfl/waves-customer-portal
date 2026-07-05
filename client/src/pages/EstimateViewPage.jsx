@@ -365,13 +365,27 @@ function labelAlreadyIncludesService(frequencyLabel, serviceLabel) {
   return !!left && !!right && (left.includes(right) || right.includes(left));
 }
 
+// Liquid-glass theme dark launch (docs/design/estimate-glass-plan.md, PR A).
+// Read once per mount; module-level so the shared Page wrapper below can gate
+// the theme for EVERY estimate state (loading, not-found, terminal, success,
+// review) — not just the main configure branch.
+function glassThemeRequested() {
+  try {
+    return new URLSearchParams(window.location.search).get('glass') === '1';
+  } catch {
+    return false;
+  }
+}
+
 function Page({ children }) {
+  const [glassActive] = useState(glassThemeRequested);
   return (
     <div style={{
       minHeight: '100vh', background: ESTIMATE_BG,
       fontFamily: FONT_BODY, color: COLORS.navy,
       display: 'flex', flexDirection: 'column',
     }}>
+      <EstimateGlassTheme active={glassActive} />
       <header style={{ background: COLORS.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
           maxWidth: 960,
@@ -2281,17 +2295,6 @@ export default function EstimateViewPage() {
     }
   });
 
-  // Liquid-glass theme dark launch (docs/design/estimate-glass-plan.md, PR A).
-  // Visual-only; applies no styles unless the link carries ?glass=1, so the
-  // default prod render is untouched. Read once like adminPreview above.
-  const [glassThemeRequested] = useState(() => {
-    try {
-      return new URLSearchParams(window.location.search).get('glass') === '1';
-    } catch {
-      return false;
-    }
-  });
-
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
@@ -2904,10 +2907,10 @@ export default function EstimateViewPage() {
   }, [adminDraftPreview, addServiceOffer, addServiceRequestState.status, token]);
 
   if (loading) {
-    return <Page><EstimateGlassTheme active={glassThemeRequested} /><Header customerFirstName={null} address={null} /><SkeletonBlock /><SkeletonBlock /></Page>;
+    return <Page><Header customerFirstName={null} address={null} /><SkeletonBlock /><SkeletonBlock /></Page>;
   }
   if (notFound || !data) {
-    return <Page><EstimateGlassTheme active={glassThemeRequested} /><NotFoundCard /></Page>;
+    return <Page><NotFoundCard /></Page>;
   }
 
   const { estimate, pricing, cta } = data;
@@ -3228,7 +3231,6 @@ export default function EstimateViewPage() {
 
   return (
     <Page>
-      <EstimateGlassTheme active={glassThemeRequested} />
       {adminDraftPreview ? <DraftPreviewBanner /> : null}
       <Header
         {...headerContactProps}
