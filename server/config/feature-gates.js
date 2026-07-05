@@ -439,6 +439,17 @@ const gates = {
   // the Monday sweep only shadow-logs candidate counts and never sends.
   irrigationWeeklyEmail: process.env.GATE_IRRIGATION_WEEKLY_EMAIL === 'true',
 
+  // Existing-customer campaign drafts (V1) — the seasonal-reactivation cron and
+  // the daily upsell generator write message_drafts status='pending' rows
+  // (campaign_type reactivation/upsell) for OWNER APPROVAL in the drafts queue.
+  // This lane NEVER auto-sends: the only send path is the operator's explicit
+  // approve/revise click on /api/admin/drafts, which runs the full messaging
+  // policy chain (marketing consent, seasonal_tips/sms_enabled prefs, quiet
+  // hours). With the gate OFF the generators only shadow-log candidate counts —
+  // zero drafts, zero sends. Explicit opt-in in EVERY environment (off in dev
+  // too) so campaign drafts never accumulate silently in a preview/dev queue.
+  campaignDrafts: process.env.GATE_CAMPAIGN_DRAFTS === 'true',
+
   // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
   // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"
   // checked, mint the visit's invoice, apply the prepaid amount as payment, and
