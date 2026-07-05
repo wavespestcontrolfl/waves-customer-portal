@@ -10,6 +10,7 @@ const {
 const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
+const { firstNameFrom } = require("./customer-contact");
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
@@ -390,7 +391,7 @@ const ReviewService = {
       body = OUTREACH.renderOutreachBody(
         request.custom_body,
         {
-          first: contact.name || customer.first_name || "",
+          first: firstNameFrom(contact.name) || customer.first_name || "",
           tech: techName,
           service_type: request.service_type || "service",
           review_url: customIsNoLink ? "" : reviewUrl,
@@ -401,7 +402,7 @@ const ReviewService = {
       body = OUTREACH.renderOutreachBody(
         outreachTpl.body,
         {
-          first: contact.name || customer.first_name || "",
+          first: firstNameFrom(contact.name) || customer.first_name || "",
           tech: techName,
           service_type: request.service_type || "service",
           review_url: reviewUrl,
@@ -412,7 +413,7 @@ const ReviewService = {
       try {
         const tpl = require("../routes/admin-sms-templates");
         body = await tpl.getTemplate("review_request", {
-          first_name: contact.name || customer.first_name || "",
+          first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
           tech_name: techName,
         });
@@ -1124,7 +1125,7 @@ const ReviewService = {
       const body = await renderSmsTemplate(
         "review_request_followup",
         {
-          first_name: contact.name || customer.first_name || "",
+          first_name: firstNameFrom(contact.name) || customer.first_name || "",
           google_review_url: googleReviewUrl,
         },
         {
@@ -1361,7 +1362,7 @@ const ReviewService = {
     });
 
     const vars = {
-      first: contact.name || customer.first_name || "",
+      first: firstNameFrom(contact.name) || customer.first_name || "",
       tech: techName || "Adam",
       service_type: serviceType || "service",
       review_url: reviewUrl,
@@ -1498,7 +1499,7 @@ const ReviewService = {
         templateKey: "review_request_email",
         to: contact.email,
         payload: {
-          first_name: contact.name || customer.first_name || "",
+          first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
           tech_name: techName || "Adam",
         },
