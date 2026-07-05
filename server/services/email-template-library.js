@@ -485,11 +485,16 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
     bodyText = [bodyText, defaultCta.bodyText].filter(Boolean).join('\n\n');
   }
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
-  // Invoice-family templates (invoice.sent / invoice.receipt /
-  // invoice.followup_*) carry the Stripe trust line — this renderer is
-  // the path production invoice sends actually take, so the line must
-  // live here, not only in invoice-email.js's SMTP fallback.
-  const isInvoiceTemplate = String(template.template_key || '').startsWith('invoice.');
+  // Billing-family templates carry the Stripe trust line (owner scope
+  // 2026-07-05): invoice.sent / invoice.receipt / invoice.followup_*,
+  // the billing_late_payment_* dunning series, and payer.statement.*
+  // NET statements. This renderer is the path production sends actually
+  // take, so the line must live here, not only in invoice-email.js's
+  // SMTP fallback.
+  const templateKey = String(template.template_key || '');
+  const isInvoiceTemplate = templateKey.startsWith('invoice.')
+    || templateKey.startsWith('billing_late_payment')
+    || templateKey.startsWith('payer.statement');
   const footerNote = mode === 'marketing'
     ? null
     : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${blockPalette().footerLink};text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.${isInvoiceTemplate ? stripeFooterLine() : ''}`;
