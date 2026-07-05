@@ -29,6 +29,13 @@
  *     head. If Codex hasn't re-reviewed the latest push yet it no-ops (and
  *     re-posts the "@codex review" request if a prior post failed), so it never
  *     double-fires or strands a PR on a transient GitHub error.
+ *   - Fixes are BODY-ONLY: any frontmatter change parks. A fix that passes the
+ *     content gates but introduces named-competitor content parks (the human-
+ *     sign-off stamps predate the fix). The autonomous lane re-runs the
+ *     runner's uniqueness/quality/SEO/visibility gates on the rewritten body
+ *     and parks on anything it can't prove; the scheduler lane mirrors the
+ *     committed body into blog_posts.content (park on sync failure) so a
+ *     later republish can't resurrect the pre-fix content.
  */
 
 const dbDefault = require('../../models/db');
@@ -116,7 +123,8 @@ function buildReviewRequestBody(newHeadSha) {
 const FIX_SYSTEM = [
   'You fix Waves Pest Control blog post markdown files in response to automated code-review (Codex) findings.',
   'Rules:',
-  '- Apply ONLY the minimal changes needed to resolve the findings. Preserve everything else exactly: YAML frontmatter keys and values (slug, canonical, domains, author/reviewer, dates), document structure, and the author voice.',
+  '- Apply ONLY the minimal changes needed to resolve the findings. Preserve everything else exactly: document structure and the author voice.',
+  '- NEVER change the YAML frontmatter — reproduce every key and value byte-for-byte. All fixes go in the Markdown body. If a finding can only be resolved by changing frontmatter, leave that part unchanged (it will be routed to a human).',
   '- Never invent facts, statistics, reviews, or prices. Pricing phrases link to /pest-control-calculator/ — never a hardcoded number.',
   '- Do not add "near me" phrasing. Do not name competitors.',
   '- Keep every link pointing at a route that actually exists for this post\'s domain.',
@@ -221,23 +229,143 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
     const p0 = (factResult.findings || []).filter((f) => f.severity === 'P0');
     if (p0.length) return { ok: false, reason: `factcheck ${p0.map((f) => f.message).slice(0, 2).join('; ')}` };
   }
-  return { ok: true };
+  // A PASSING comparison gate can still demand a human: a fix that introduces
+  // a (valid, sourced) named-competitor comparison sets requiresHumanReview.
+  // The merge stamps that enforce it (astro_requires_human_merge / the
+  // runner's named_competitor_review park) were taken BEFORE the fix, so the
+  // caller must park rather than let the new head auto-merge on Codex-clean.
+  return { ok: true, requiresHumanReview: comparison.requiresHumanReview === true };
+}
+
+// Canonical value serialization for frontmatter comparison: object keys are
+// sorted so a pure YAML re-emit can't read as a change, while any VALUE
+// difference (including array order) does.
+function canonValue(v) {
+  return JSON.stringify(v === undefined ? null : v, (key, val) => {
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      return Object.keys(val).sort().reduce((acc, k) => { acc[k] = val[k]; return acc; }, {});
+    }
+    return val;
+  });
 }
 
 /**
- * Immutable routing frontmatter (slug/canonical/domains) must survive a fix —
- * a changed slug/canonical/domains would mark a DIFFERENT Astro route published
- * than the portal recorded. Returns true if the fix altered any of them.
+ * The ENTIRE frontmatter is immutable during remediation — fixes are body-only.
+ * slug/canonical/domains would mark a different Astro route published than the
+ * portal recorded, and everything else (title, description, hero/og images,
+ * author/reviewer, dates) feeds merge stamps and portal columns that were
+ * written BEFORE the fix and are never restamped — a frontmatter delta both
+ * diverges from that source of truth and can smuggle changes past gates that
+ * only scanned the original. Returns true if ANY key was added, removed, or
+ * altered (parse failure counts as changed — fail closed).
  */
 function immutableFrontmatterChanged(originalMd, fixedMd) {
   let a; let b;
   try { a = (fm.parse(originalMd) || {}).data || {}; b = (fm.parse(fixedMd) || {}).data || {}; } catch (_) { return true; }
-  const norm = (v) => JSON.stringify(v ?? null);
-  if (norm(a.slug) !== norm(b.slug)) return true;
-  if (norm(a.canonical) !== norm(b.canonical)) return true;
-  const da = [...(a.domains || [])].sort();
-  const dbb = [...(b.domains || [])].sort();
-  return norm(da) !== norm(dbb);
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) { if (canonValue(a[k]) !== canonValue(b[k])) return true; }
+  return false;
+}
+
+function parseJsonMaybe(v) {
+  if (typeof v !== 'string') return v;
+  try { return JSON.parse(v); } catch (_) { return null; }
+}
+
+function envBool(key, defaultValue = false) {
+  const value = process.env[key];
+  if (value == null || value === '') return defaultValue;
+  if (/^(1|true|yes|on)$/i.test(value)) return true;
+  if (/^(0|false|no|off)$/i.test(value)) return false;
+  return defaultValue;
+}
+
+/**
+ * Re-run the AUTONOMOUS runner's publish gates on a remediated .mdx before
+ * committing — the runner's uniqueness / quality / SEO-completion /
+ * pre-publish-visibility verdicts were rendered on the ORIGINAL body
+ * (autonomous-runner runNext step 4–5b) and a body rewrite can invalidate any
+ * of them (dropped CTA/FAQ/component, broken SEO contract, corpus duplicate,
+ * unindexable HTML). Mirrors the runner's inputs: the stored draft_payload
+ * with the fixed body swapped in, the brief the run was generated against
+ * (_loadReviewedBrief), and the published-blog corpus (_loadBlogCorpus).
+ *
+ * Only new_supporting_blog runs are validated — that is the only autonomous
+ * action whose gate set this mirrors, so anything else fails closed (parks
+ * for a human) rather than committing a fix we can't prove safe.
+ *
+ * Returns { ok } or { ok:false, reason }. Every failure path is a park.
+ */
+async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
+  try {
+    if (!run || !run.id) return { ok: false, reason: 'autonomous run row unavailable' };
+    if (run.action_type !== 'new_supporting_blog') {
+      return { ok: false, reason: `remediation gates only cover new_supporting_blog runs (got ${run.action_type || 'unknown'})` };
+    }
+    const runner = deps.autonomousRunner || require('./autonomous-runner');
+    const uniquenessGate = deps.uniquenessGate || require('./uniqueness-gate');
+    const qualityGate = deps.qualityGate || require('./content-quality-gate');
+    const seoCompletionGate = deps.seoCompletionGate || require('./seo-completion-gate');
+    const aiVisibilityGate = deps.aiVisibilityGate || require('./ai-visibility-gate');
+
+    const draft0 = parseJsonMaybe(run.draft_payload);
+    if (!draft0 || !draft0.body) return { ok: false, reason: 'stored draft_payload missing or empty' };
+    const brief = await runner._loadReviewedBrief(run);
+    if (!brief) return { ok: false, reason: 'brief not found for run' };
+
+    let parsed;
+    try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
+    const draft = { ...draft0, body: String((parsed && parsed.content) || '').trim() };
+    if (!draft.body) return { ok: false, reason: 'fixed body is empty' };
+
+    // 1. Blog-corpus dedup (same env default as the runner: on unless
+    //    explicitly disabled). Corpus load is required — fail closed.
+    let uniquenessResult = { ok: true, skipped: 'not_applicable' };
+    if (envBool('AUTONOMOUS_CONTENT_BLOG_UNIQUENESS', true)) {
+      const siblingPages = await runner._loadBlogCorpus({ required: true });
+      uniquenessResult = uniquenessGate.evaluateBlog(draft, brief, { siblingPages });
+    }
+    if (uniquenessResult.ok !== true) {
+      return { ok: false, reason: `uniqueness gate: ${uniquenessResult.error || JSON.stringify(uniquenessResult.failures || uniquenessResult.findings || []).slice(0, 200)}` };
+    }
+
+    // 2. Quality gate. ctx is {} exactly as runNext passes for supporting
+    //    blogs (sitemap + previousVersion hydration are refresh-only).
+    const qualityResult = qualityGate.evaluate(draft, brief, {});
+    if (!qualityResult || qualityResult.ok !== true) {
+      return { ok: false, reason: `quality gate: ${(qualityResult && (qualityResult.error || JSON.stringify(qualityResult.failures || []).slice(0, 200))) || 'no result'}` };
+    }
+
+    // 3. SEO-completion gate — same brief coercion runNext applies, and a
+    //    skipped verdict on a supporting blog is a failure, not a pass.
+    const seoGateBrief = {
+      ...brief,
+      action_type: run.action_type,
+      page_type: brief.page_type || 'supporting-blog',
+    };
+    const seoResult = seoCompletionGate.evaluate({
+      draft,
+      brief: seoGateBrief,
+      uniquenessResult,
+      shadowMode: false,
+      actionType: run.action_type,
+      pageType: seoGateBrief.page_type,
+    });
+    if (!seoResult || seoResult.skipped || seoResult.passed !== true) {
+      const p0 = ((seoResult && seoResult.findings) || []).filter((f) => f.severity === 'P0').map((f) => f.code);
+      return { ok: false, reason: `seo-completion gate: ${(seoResult && (seoResult.error || p0.join(','))) || 'no result'}` };
+    }
+
+    // 4. Pre-publish visibility static checks on the rewritten body.
+    const visResult = aiVisibilityGate.evaluateStatic({ url: draft.url, html: draft.body });
+    if (!visResult || visResult.passed !== true) {
+      return { ok: false, reason: `pre-publish visibility: ${(visResult && (visResult.error || JSON.stringify((visResult.findings || []).map((f) => f.code)).slice(0, 200))) || 'no result'}` };
+    }
+
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: `autonomous gate re-run failed: ${err.message}` };
+  }
 }
 
 // ── PR-keyed remediation state ────────────────────────────────────────────
@@ -282,7 +410,10 @@ async function park(db, prNumber, reason, onPark) {
 async function runRemediationForPr(ctx = {}, deps = {}) {
   const db = deps.db || dbDefault;
   const gh = deps.gh || ghDefault;
-  const { prNumber, branch, slug = null, service = null, factContext = null, onPark = null } = ctx;
+  const {
+    prNumber, branch, slug = null, service = null, factContext = null,
+    onPark = null, revalidateFix = null, onRemediated = null,
+  } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
 
   const state = await getState(db, prNumber);
@@ -334,10 +465,12 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (fixed.trim() === String(file.content).trim()) {
     return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark);
   }
-  // Immutable routing frontmatter (slug/canonical/domains) must survive a fix —
-  // a changed route would mark a different URL published than the portal recorded.
+  // Frontmatter is immutable during remediation (fixes are body-only) — any
+  // added/removed/altered key parks: routing keys would mark a different URL
+  // published than the portal recorded, and the rest feed merge stamps and
+  // portal columns written before the fix that nothing restamps.
   if (immutableFrontmatterChanged(file.content, fixed)) {
-    return park(db, prNumber, 'fix changed immutable routing frontmatter (slug/canonical/domains)', onPark);
+    return park(db, prNumber, 'fix changed frontmatter (immutable during remediation — fixes are body-only)', onPark);
   }
 
   // Re-run the publisher's content-safety gates on the fix before committing —
@@ -345,6 +478,22 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const validate = deps.validateFixedBlogFile || validateFixedBlogFile;
   const gate = await validate(fixed, { service, factContext }, deps);
   if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark);
+  // A passing fix that INTRODUCES a named-competitor comparison still needs a
+  // human: the merge stamps enforcing that sign-off (astro_requires_human_merge
+  // / named_competitor_review) predate the fix and are never restamped here.
+  if (gate.requiresHumanReview === true) {
+    return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark);
+  }
+
+  // Lane-specific gate re-run (autonomous lane: uniqueness / quality /
+  // SEO-completion / visibility on the rewritten body). Fail or throw → park.
+  if (typeof revalidateFix === 'function') {
+    let recheck;
+    try { recheck = await revalidateFix(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
+    if (!recheck || recheck.ok !== true) {
+      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark);
+    }
+  }
 
   const round = (state.rounds || 0) + 1;
   // Mark 'remediating' BEFORE the push so a later save/comment failure can't
@@ -361,6 +510,20 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const newHead = (commit && commit.commit && commit.commit.sha)
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
+
+  // Lane-specific post-commit sync (scheduler lane: mirror the fixed body into
+  // blog_posts.content so a later edit/republish/social share can't resurrect
+  // the pre-fix body). A failed sync parks: the branch now diverges from the
+  // portal row, and onPark disarms the publishing claim so the poller can't
+  // merge that divergence — a human reconciles instead.
+  if (typeof onRemediated === 'function') {
+    try {
+      const body = String((fm.parse(fixed) || {}).content || '').trim();
+      await onRemediated({ markdown: fixed, body, newHead, round });
+    } catch (e) {
+      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark);
+    }
+  }
 
   await saveState(db, prNumber, { rounds: round, last_findings: JSON.stringify(findings) });
   await gh.createIssueComment(prNumber, buildReviewRequestBody(newHead));
@@ -388,6 +551,15 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // topic like the publisher does so FAQ-blocked-service etc. fire.
     service: [row.category, row.tag],
     factContext: { title: row.title, city: row.city, keyword: row.keyword, tag: row.tag },
+    // Mirror the committed fix into the portal row. blog_posts.content is the
+    // BODY only (publishAstro rebuilds frontmatter from row columns), and
+    // frontmatter is immutable during remediation, so the body is the whole
+    // delta — without this, a later republish or social share rebuilds from
+    // the pre-fix content and resurrects the issue Codex flagged.
+    onRemediated: async ({ body }) => {
+      const updated = await db('blog_posts').where({ id: row.id }).update({ content: body, updated_at: new Date() });
+      if (!updated) throw new Error(`blog_posts row ${row.id} not found for content sync`);
+    },
     onPark: async (reason) => {
       // Disarm the scheduler's publishing claim (guarded on it) so the
       // stale-publishing sweep moves the row to human review instead of it
@@ -402,8 +574,9 @@ async function maybeRemediateBlogPost(post, deps = {}) {
 }
 
 /** Autonomous lane (autonomous-pr-poller): a run with a live PR, no blog_posts row. */
-async function maybeRemediateAutonomousPr(pr, deps = {}) {
+async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
+  const revalidate = deps.validateAutonomousRunGates || validateAutonomousRunGates;
   return runRemediationForPr({
     prNumber: pr && pr.number,
     branch: pr && pr.head && pr.head.ref,
@@ -412,6 +585,10 @@ async function maybeRemediateAutonomousPr(pr, deps = {}) {
     // completed_pending_review and status='parked' stops re-remediation.
     slug: null,
     onPark: null,
+    // Re-run the runner's publish gates on the rewritten body before it can
+    // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
+    // the ORIGINAL body only. Missing run row fails closed inside (parks).
+    revalidateFix: (fixedMarkdown) => revalidate(fixedMarkdown, run, deps),
   }, deps);
 }
 
@@ -425,6 +602,7 @@ module.exports = {
   buildFixUserMessage,
   reviewRequestedForHead,
   validateFixedBlogFile,
+  validateAutonomousRunGates,
   immutableFrontmatterChanged,
   stripCodeFence,
   atRoundLimit,

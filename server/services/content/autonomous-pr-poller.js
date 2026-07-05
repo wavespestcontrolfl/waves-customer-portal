@@ -603,7 +603,10 @@ async function maybeAutoMerge(run, pr) {
       // is on; never merges (that still needs a genuine Codex-clean signal).
       try {
         const { maybeRemediateAutonomousPr } = require('./codex-remediation');
-        const rem = await maybeRemediateAutonomousPr(pr);
+        // Pass the run row: remediation re-runs the runner's publish gates
+        // (uniqueness/quality/SEO/visibility) against draft_payload + brief
+        // before committing any fix, and parks when it can't prove them.
+        const rem = await maybeRemediateAutonomousPr(pr, run);
         if (rem?.remediated) {
           logger.info(`[autonomous-pr-poller] codex remediation round ${rem.round} pushed for run ${run.id} PR #${pr.number} (${rem.findings} finding(s))`);
         } else if (rem?.parked) {

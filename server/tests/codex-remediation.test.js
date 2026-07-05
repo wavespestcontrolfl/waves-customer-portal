@@ -220,17 +220,52 @@ describe('lane entry points', () => {
     expect(db._tables.blog_posts[0].publish_status).toBe('pending_review');
   });
 
-  test('autonomous lane remediates from the PR object (.mdx)', async () => {
+  test('autonomous lane remediates from the PR object (.mdx) once the run gates re-pass', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const db = makeDb();
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    const run = { id: 'run-1', action_type: 'new_supporting_blog' };
     // getPr returns the same open PR
     gh.getPr = async () => pr;
-    const r = await maybeRemediateAutonomousPr(pr, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    let revalidatedWith = null;
+    const r = await maybeRemediateAutonomousPr(pr, run, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async (md, r2) => { revalidatedWith = r2; return { ok: true }; },
+    });
     expect(r.remediated).toBe(true);
+    expect(revalidatedWith).toBe(run);
     expect(gh._calls.putFile[0].path).toBe('src/content/blog/pest-control/roaches.mdx');
     expect(gh._calls.putFile[0].branch).toBe('content/autonomous-x');
+  });
+
+  test('autonomous lane with a failing gate re-run -> park, nothing committed', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: false, reason: 'uniqueness gate: near-duplicate' }),
+    });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/lane gates/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('autonomous lane with NO run row -> park (fail closed), runner never loaded', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    // No injected validator: the real validateAutonomousRunGates must bail on
+    // the missing run BEFORE requiring the autonomous-runner module.
+    const r = await maybeRemediateAutonomousPr(pr, null, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/run row unavailable/);
+    expect(gh._calls.putFile).toHaveLength(0);
   });
 });
 
@@ -294,7 +329,7 @@ describe('round-4 hardening', () => {
     const gh = makeGh({ fileContent: orig });
     const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall(changed), validateFixedBlogFile: PASS });
     expect(r.parked).toBe(true);
-    expect(r.reason).toMatch(/immutable routing/);
+    expect(r.reason).toMatch(/frontmatter/);
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
@@ -308,5 +343,144 @@ describe('round-4 hardening', () => {
     const db2 = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: MAX_ROUNDS - 1, status: 'remediating' }] });
     const r2 = await runRemediationForPr(CTX, { db: db2, gh: makeGh(), callAnthropic: nullCall, validateFixedBlogFile: PASS });
     expect(r2.parked).toBe(true); expect(r2.reason).toMatch(/max attempts/);
+  });
+});
+
+describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
+  const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+  afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
+
+  // P1: pass:true + requiresHumanReview:true must never auto-continue — the
+  // astro_requires_human_merge / named_competitor_review stamps predate the fix.
+  test('fix that introduces named-competitor content (requiresHumanReview) -> park', async () => {
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, {
+      db: makeDb(), gh, callAnthropic: makeCall('FIXED'),
+      validateFixedBlogFile: () => ({ ok: true, requiresHumanReview: true }),
+    });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/named-competitor/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  // P2: the ENTIRE frontmatter is immutable — not just slug/canonical/domains.
+  test('immutableFrontmatterChanged flags any key change (title/hero/author/date/added key)', () => {
+    const orig = '---\ntitle: Roof Rats\nhero_image: /images/blog/x/hero.webp\nauthor: Adam\npublished: "2026-07-01"\n---\nbody text';
+    expect(rem.immutableFrontmatterChanged(orig, orig)).toBe(false);
+    expect(rem.immutableFrontmatterChanged(orig, orig.replace('Roof Rats', 'Rats'))).toBe(true);
+    expect(rem.immutableFrontmatterChanged(orig, orig.replace('/images/blog/x/hero.webp', '/images/blog/x/other.webp'))).toBe(true);
+    expect(rem.immutableFrontmatterChanged(orig, orig.replace('Adam', 'Ghost Writer'))).toBe(true);
+    expect(rem.immutableFrontmatterChanged(orig, orig.replace('"2026-07-01"', '"2026-07-05"'))).toBe(true);
+    expect(rem.immutableFrontmatterChanged(orig, orig.replace('---\nbody', 'og_image: /og.png\n---\nbody'))).toBe(true);
+    // body-only edit with identical frontmatter is allowed
+    expect(rem.immutableFrontmatterChanged(orig, orig.replace('body text', 'fixed body text'))).toBe(false);
+  });
+
+  test('fix that changes non-routing frontmatter (title) -> park', async () => {
+    const orig = '---\ntitle: A\nslug: /pest-control/x/\n---\nbody';
+    const changed = '---\ntitle: B\nslug: /pest-control/x/\n---\nbody';
+    const gh = makeGh({ fileContent: orig });
+    const r = await runRemediationForPr(CTX, { db: makeDb(), gh, callAnthropic: makeCall(changed), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/frontmatter/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  // P2: lane gate re-run hook — a throwing hook parks, never commits.
+  test('revalidateFix that throws -> park with the error surfaced', async () => {
+    const gh = makeGh();
+    const r = await runRemediationForPr(
+      { ...CTX, revalidateFix: async () => { throw new Error('blog_corpus_loader_unavailable'); } },
+      { db: makeDb(), gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/blog_corpus_loader_unavailable/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  // P2: scheduler lane must mirror the committed body into blog_posts.content.
+  test('scheduler lane syncs blog_posts.content with the fixed BODY after commit', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\n---\nOLD BODY';
+    const fixedMd = '---\ntitle: T\n---\nNEW FIXED BODY';
+    const db = makeDb({
+      blog_posts: [{ id: 1, astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k', content: 'OLD BODY' }],
+    });
+    const gh = makeGh({ fileContent: orig });
+    const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(db._tables.blog_posts[0].content).toBe('NEW FIXED BODY');
+  });
+
+  test('row sync failure AFTER the commit -> park, review NOT re-requested', async () => {
+    const gh = makeGh();
+    const r = await runRemediationForPr(
+      { ...CTX, onRemediated: async () => { throw new Error('db down'); } },
+      { db: makeDb(), gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/row sync failed/);
+    expect(gh._calls.putFile).toHaveLength(1); // the commit DID land on the branch
+    expect(gh._calls.comments).toHaveLength(0); // but Codex re-review was not requested
+  });
+});
+
+describe('validateAutonomousRunGates', () => {
+  const MD = '---\ntitle: T\n---\nFixed body text';
+  const RUN = {
+    id: 'run-1',
+    action_type: 'new_supporting_blog',
+    draft_payload: JSON.stringify({ body: 'original body', url: 'https://hub/blog/x/', title: 'T' }),
+  };
+  const goodDeps = () => ({
+    autonomousRunner: {
+      _loadReviewedBrief: async () => ({ page_type: 'supporting-blog', action_type: 'new_supporting_blog' }),
+      _loadBlogCorpus: async () => [],
+    },
+    uniquenessGate: { evaluateBlog: () => ({ ok: true }) },
+    qualityGate: { evaluate: () => ({ ok: true }) },
+    seoCompletionGate: { evaluate: () => ({ passed: true, findings: [] }) },
+    aiVisibilityGate: { evaluateStatic: () => ({ passed: true }) },
+  });
+
+  test('all gates pass -> ok', async () => {
+    expect((await rem.validateAutonomousRunGates(MD, RUN, goodDeps())).ok).toBe(true);
+  });
+
+  test('fail closed: missing run / non-blog action / empty stored draft / missing brief', async () => {
+    expect((await rem.validateAutonomousRunGates(MD, null, goodDeps())).ok).toBe(false);
+    expect((await rem.validateAutonomousRunGates(MD, { id: 'r', action_type: 'refresh_existing_page' }, goodDeps())).ok).toBe(false);
+    expect((await rem.validateAutonomousRunGates(MD, { id: 'r', action_type: 'new_supporting_blog', draft_payload: '{}' }, goodDeps())).ok).toBe(false);
+    const noBrief = goodDeps(); noBrief.autonomousRunner._loadReviewedBrief = async () => null;
+    expect((await rem.validateAutonomousRunGates(MD, RUN, noBrief)).ok).toBe(false);
+  });
+
+  test('each failing gate fails the re-run with a named reason', async () => {
+    const d1 = goodDeps(); d1.uniquenessGate.evaluateBlog = () => ({ ok: false, error: 'near-duplicate of published post' });
+    expect((await rem.validateAutonomousRunGates(MD, RUN, d1)).reason).toMatch(/uniqueness/);
+    const d2 = goodDeps(); d2.qualityGate.evaluate = () => ({ ok: false, failures: ['cta_above_fold'] });
+    expect((await rem.validateAutonomousRunGates(MD, RUN, d2)).reason).toMatch(/quality/);
+    const d3 = goodDeps(); d3.seoCompletionGate.evaluate = () => ({ passed: false, findings: [{ severity: 'P0', code: 'P0_MISSING_BODY' }] });
+    expect((await rem.validateAutonomousRunGates(MD, RUN, d3)).reason).toMatch(/seo-completion/);
+    const d4 = goodDeps(); d4.aiVisibilityGate.evaluateStatic = () => ({ passed: false, findings: [{ code: 'P0_NOINDEX' }] });
+    expect((await rem.validateAutonomousRunGates(MD, RUN, d4)).reason).toMatch(/visibility/);
+    const d5 = goodDeps(); d5.autonomousRunner._loadBlogCorpus = async () => { throw new Error('corpus unavailable'); };
+    expect((await rem.validateAutonomousRunGates(MD, RUN, d5)).reason).toMatch(/corpus unavailable/);
+  });
+
+  test('a skipped SEO verdict on a supporting blog is a failure, not a pass', async () => {
+    const d = goodDeps(); d.seoCompletionGate.evaluate = () => ({ passed: true, skipped: 'not_supporting_blog' });
+    expect((await rem.validateAutonomousRunGates(MD, RUN, d)).ok).toBe(false);
+  });
+
+  test('gates evaluate the FIXED body swapped into the stored draft', async () => {
+    const deps = goodDeps();
+    const seen = {};
+    deps.uniquenessGate.evaluateBlog = (draft) => { seen.uniq = draft.body; return { ok: true }; };
+    deps.aiVisibilityGate.evaluateStatic = ({ url, html }) => { seen.url = url; seen.html = html; return { passed: true }; };
+    expect((await rem.validateAutonomousRunGates(MD, RUN, deps)).ok).toBe(true);
+    expect(seen.uniq).toBe('Fixed body text');
+    expect(seen.html).toBe('Fixed body text');
+    expect(seen.url).toBe('https://hub/blog/x/');
   });
 });
