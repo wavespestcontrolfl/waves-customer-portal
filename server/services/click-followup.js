@@ -21,17 +21,12 @@
  * booking-abandon-recovery lane already chases those and stacking a second
  * nudge on the same abandon would double-touch the prospect.
  *
- * Suppression, all of which must pass before a draft is queued:
- *   - conversion guard (estimate-conversion-guard.customerConvertedSince):
- *     paid invoice / live booking / customer pipeline stage — NEVER keyed on
- *     estimate status='accepted' (booking/invoicing don't write it)
- *   - no outbound SMS to the contact in the last 48h (sms_log)
- *   - reply-pause: contact texted Waves in the last 14 days → Virginia's
- *     conversation, not a cron's (same rule as estimate-follow-up)
- *   - opt-out / wrong-number / DNC / known-landline via the messaging
- *     validators' suppression + line-type caches
- *   - an estimate-followup cadence stage due within 24h → the cadence will
- *     nudge on its own; don't stack
+ * Suppression lives in the SHARED pre-send gate (click-followup-gate.js),
+ * which this cron evaluates at draft time and admin-drafts re-evaluates at
+ * approval time — conversion (customer / lead-side / phone-evidence, never
+ * estimate status='accepted'), opt-out/landline, 48h-outbound, reply-pause,
+ * and cadence-due (incl. the gated deposit-abandonment stage). See the gate
+ * module for the verdict codes and both callers' mappings.
  *
  * The click_followup_actions row is the atomic claim (partial unique indexes:
  * one open action per customer / per lead) AND the audit trail — see
