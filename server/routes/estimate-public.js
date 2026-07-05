@@ -345,6 +345,19 @@ function customerArrivalWindowDisplay(windowStart) {
   return range ? formatSmsTimeRange(range) : null;
 }
 
+// SSR existing-appointment title. windowDisplay is a TIME display (stored
+// values are "11:00 AM"-style; the fallback above is the arrival range), so
+// the date must be composed in here — mirrors the React formatAppointmentLabel.
+function existingAppointmentTitle(appointment = {}) {
+  const date = appointment.scheduledDate
+    ? new Date(`${appointment.scheduledDate}T12:00:00Z`).toLocaleDateString('en-US', {
+      weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
+    })
+    : '';
+  const time = appointment.windowDisplay || appointment.windowStart || '';
+  return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
+}
+
 function shapeLinkedAppointment(row) {
   if (!row) return null;
   return {
@@ -4655,7 +4668,7 @@ ${shellTopBar()}
       <p class="card-sub">Your visit is already on the schedule. Choose how you want to pay to approve this estimate.</p>
       <div class="existing-appt-card">
         <div class="existing-appt-kicker">Existing appointment</div>
-        <div class="existing-appt-title">${escapeHtml(existingAppointment.windowDisplay || `${existingAppointment.scheduledDate}${existingAppointment.windowStart ? ` at ${existingAppointment.windowStart}` : ''}`)}</div>
+        <div class="existing-appt-title">${escapeHtml(existingAppointmentTitle(existingAppointment))}</div>
         <div class="existing-appt-sub">${escapeHtml(existingAppointment.serviceType || pageCopy.aggregateDayLabel || 'Service visit')}</div>
       </div>
     ` : `

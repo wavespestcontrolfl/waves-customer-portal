@@ -1764,7 +1764,9 @@ describe('public estimate one-time breakdown', () => {
         scheduledDate: '2026-06-03',
         windowStart: '09:00',
         windowEnd: '11:00',
-        windowDisplay: 'Wednesday, June 3 - 9:00 AM-11:00 AM',
+        // Stored window_display values are time-only ("11:00 AM"-style);
+        // the SSR title composes the date in itself.
+        windowDisplay: '9:00 AM - 11:00 AM',
         serviceType: 'Initial Pest Control',
         status: 'confirmed',
       },
@@ -1776,6 +1778,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
+    expect(html).toContain('Wednesday, June 3 · 9:00 AM - 11:00 AM');
     expect(html).toContain('const EXISTING_APPOINTMENT_ID = "svc-123";');
     expect(html).toContain('if (EXISTING_APPOINTMENT_ID) pickExistingAppointmentPref(b.dataset.payPref);');
     expect(html).toContain('else pickPaymentPref(b.dataset.payPref);');
