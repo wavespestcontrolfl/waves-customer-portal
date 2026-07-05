@@ -240,3 +240,179 @@ describe('treeShrub count mapping — omitted count must reach the engine as ABS
     expect(source).toMatch(/Number\.isFinite\(treeShrubCount\) && treeShrubCount > 0/);
   });
 });
+
+describe('lawnPestControl — one-time turf-pest knockdown (owner decision 2026-07-05)', () => {
+  test('services.lawnPestControl produces a priced one-time pest line', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { lawnPestControl: {} },
+    });
+    const line = (estimate.lineItems || []).find((l) => l.service === 'one_time_lawn' && l.treatmentType === 'pest');
+    expect(line).toBeTruthy();
+    // Persistence compacts lines to service + name — without the distinct
+    // name a lawn-pest row renders as generic one_time_lawn downstream.
+    expect(line.name).toBe('Lawn Pest Knockdown');
+    // ONE_TIME.lawn floor ($115) is the engine's owner-set minimum.
+    expect(line.price).toBeGreaterThanOrEqual(115);
+    expect(Number(estimate.summary?.oneTimeTotal || 0)).toBeGreaterThanOrEqual(line.price);
+  });
+
+  test('coexists with a weed-type oneTimeLawn line (separate line items)', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { oneTimeLawn: { treatmentType: 'weed' }, lawnPestControl: {} },
+    });
+    const types = (estimate.lineItems || [])
+      .filter((l) => l.service === 'one_time_lawn')
+      .map((l) => l.treatmentType)
+      .sort();
+    expect(types).toEqual(['pest', 'weed']);
+  });
+});
+
+describe('cockroach chip path — roachType reaches the engine (2026-07-05)', () => {
+  test('roachType regular auto-adds the one-time Initial Roach Knockdown line', () => {
+    // The engine deliberately does NOT raise the recurring price for roach
+    // activity (the multiplicative roachModifier is zeroed) — it recovers the
+    // heavier visit-1 cost via an auto-added one-time pest_initial_roach line.
+    const plain = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const roach = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly', roachType: 'regular' } },
+    });
+    expect((plain.lineItems || []).find((l) => l.service === 'pest_initial_roach')).toBeUndefined();
+    const knockdown = (roach.lineItems || []).find((l) => l.service === 'pest_initial_roach');
+    expect(knockdown).toBeTruthy();
+    expect(knockdown.autoFiredFromRecurringPest).toBe(true);
+    expect(knockdown.price).toBeGreaterThan(0);
+    const oneTime = (e) => Number(e.summary?.oneTimeTotal || 0);
+    expect(oneTime(roach)).toBeGreaterThanOrEqual(oneTime(plain) + knockdown.price);
+  });
+
+  test('route mapping forwards roachType (the label must never outrun the price)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+    expect(source).toMatch(/services\.pest\.roachType \? \{ roachType: services\.pest\.roachType \}/);
+  });
+
+  test('label uses ENGINE normalization — raw truthy junk must not label an unpriced knockdown (codex rd2)', () => {
+    const { publicQuotePestLabel } = _internals;
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'regular' })).toBe('Quarterly Pest Control + Roach Knockdown');
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'palmetto' })).toBe('Quarterly Pest Control + Roach Knockdown');
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'german' })).toBe('Quarterly Pest Control + Roach Knockdown');
+    // The engine normalizes these to 'none' and prices NO knockdown line —
+    // a raw truthiness check would still have appended the label.
+    for (const junk of ['false', 'no', 'NONE', 'not-a-roach-type']) {
+      expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: junk })).toBe('Quarterly Pest Control');
+    }
+    expect(publicQuotePestLabel({ frequency: 'quarterly' })).toBe('Quarterly Pest Control');
+  });
+});
+
+describe('palm-only booking link — routes to tree_shrub, not lawn_care (codex rd2, 2026-07-05)', () => {
+  test('palm engine line is recurring service palm_injection (so the recurring resolver, not bookingServiceFor, decides)', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { palm: { palmCount: 4, treatmentType: 'nutrition' } },
+    });
+    const line = (estimate.lineItems || []).find((l) => l.service === 'palm_injection');
+    expect(line).toBeTruthy();
+    expect(Number(line.monthlyBeforeCredits || 0)).toBeGreaterThan(0);
+  });
+
+  test('recurring booking resolver counts palm_injection toward the tree_shrub booking bucket', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+    expect(source).toMatch(/pricedServiceKeys\.has\('palm_injection'\)/);
+  });
+});
+
+describe('bed bug public mapping — engine enum keys only, never a public 500 (codex rd3, 2026-07-05)', () => {
+  const { publicQuoteBedBugInput } = _internals;
+
+  test('defaults are the chat-gate product AND valid engine keys (old residential default threw)', () => {
+    expect(publicQuoteBedBugInput({})).toEqual({
+      method: 'CHEMICAL', rooms: 2, severity: 'moderate', prepStatus: 'ready', occupancyType: 'singleFamily',
+    });
+    // Junk/label-ish values collapse to the defaults instead of reaching assertEnum.
+    expect(publicQuoteBedBugInput({ occupancyType: 'residential', severity: 'bad', prepStatus: 'nope', method: 'HEAT' }))
+      .toEqual({ method: 'CHEMICAL', rooms: 2, severity: 'moderate', prepStatus: 'ready', occupancyType: 'singleFamily' });
+  });
+
+  test('valid keys pass through case-insensitively', () => {
+    const out = publicQuoteBedBugInput({ occupancyType: 'HOTEL', severity: 'heavy', prepStatus: 'partial', rooms: 5 });
+    expect(out).toEqual({ method: 'CHEMICAL', rooms: 5, severity: 'heavy', prepStatus: 'partial', occupancyType: 'hotel' });
+  });
+
+  test('mapped default shape actually prices through the engine without throwing', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { bedBug: publicQuoteBedBugInput({}) },
+    });
+    const line = (estimate.lineItems || []).find((l) => l.service === 'bed_bug');
+    expect(line).toBeTruthy();
+    expect(Number(line.price || line.total || 0)).toBeGreaterThan(0);
+  });
+});
+
+describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-05)', () => {
+  const { estimateBlocksBookingHandoff, estimateBlocksSelfBookLink } = _internals;
+
+  test('ANY mixed recurring + one-time quote blocks handoff; plain recurring does not', () => {
+    const plain = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const roach = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly', roachType: 'regular' } },
+    });
+    const lawnPestMix = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly' }, lawnPestControl: {} },
+    });
+    expect(estimateBlocksBookingHandoff(plain)).toBe(false);
+    expect(estimateBlocksBookingHandoff(roach)).toBe(true);
+    expect(estimateBlocksBookingHandoff(lawnPestMix)).toBe(true);
+    // Sanity: the blocker keys off the mixed shape, not a service allowlist.
+    expect(Number(roach.summary.oneTimeTotal)).toBeGreaterThan(0);
+    expect(Number(lawnPestMix.summary.oneTimeTotal)).toBeGreaterThan(0);
+  });
+
+  test('bed bug quotes never get a self-book link (generic 60-min pest slot undersizes a multi-visit treatment)', () => {
+    const bedBug = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { bedBug: _internals.publicQuoteBedBugInput({}) },
+    });
+    expect(estimateBlocksBookingHandoff(bedBug)).toBe(false); // one-time-only, no recurring
+    expect(estimateBlocksSelfBookLink(bedBug)).toBe(true);
+    // One-time-only NON-bed-bug quotes still self-book.
+    const weed = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { oneTimeLawn: { treatmentType: 'weed' } },
+    });
+    expect(estimateBlocksSelfBookLink(weed)).toBe(false);
+    // Palm-only recurring still self-books (rides tree_shrub with its label).
+    const palm = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { palm: { palmCount: 4, treatmentType: 'nutrition' } },
+    });
+    expect(estimateBlocksSelfBookLink(palm)).toBe(false);
+  });
+
+  test('mint + link sites consult the blockers (confirm bills annual/4 only; generic /book prices nothing)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+    expect(source).toMatch(/handoffPriceable = !estimateBlocksBookingHandoff\(estimate\) && !!resolveBookingVisitPrice\(/);
+    expect(source).toMatch(/!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink\(estimate\)/);
+    // Palm-only recurring bookings carry their quoted label into /book.
+    expect(source).toMatch(/recurringServiceLabelParam = bookingServiceLabel/);
+    expect(source).toMatch(/bookingParams\.set\('service_label', recurringServiceLabelParam\)/);
+  });
+});
