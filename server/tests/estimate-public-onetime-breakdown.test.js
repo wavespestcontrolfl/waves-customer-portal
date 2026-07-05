@@ -1731,6 +1731,24 @@ describe('public estimate one-time breakdown', () => {
     });
   });
 
+  test('missing window_display falls back to the 2h arrival window, never raw 24h window_start', () => {
+    const { appointment } = buildEstimateAcceptanceContract({
+      quoteRequirement: { quoteRequired: false },
+      existingAppointment: {
+        id: 'svc-456',
+        scheduled_date: '2026-07-11',
+        window_start: '15:00:00',
+        window_end: '16:00:00', // job-duration block — must NOT drive the display
+        window_display: null,
+        service_type: 'Quarterly Pest Control',
+        status: 'pending',
+      },
+    });
+
+    expect(appointment.windowDisplay).toBe('3:00 PM - 5:00 PM');
+    expect(appointment.windowStart).toBe('15:00');
+  });
+
   test('server-rendered existing appointments route pay choices through existing appointment flow', () => {
     const html = renderPage('existing-appt-token', {
       id: 'estimate-existing-appt',

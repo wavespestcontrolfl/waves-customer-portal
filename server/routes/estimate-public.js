@@ -336,6 +336,15 @@ function parseEstimateDataSafe(estimate = {}) {
   return raw || {};
 }
 
+// Customer-facing fallback when scheduled_services.window_display is empty:
+// the 2-hour arrival window from window_start ("3:00 PM - 5:00 PM"), matching
+// the confirmation SMS — never the raw 24h window_start, and never window_end
+// (that's the job-duration block, not the arrival window).
+function customerArrivalWindowDisplay(windowStart) {
+  const range = arrivalWindowRange(windowStart);
+  return range ? formatSmsTimeRange(range) : null;
+}
+
 function shapeLinkedAppointment(row) {
   if (!row) return null;
   return {
@@ -343,7 +352,7 @@ function shapeLinkedAppointment(row) {
     scheduledDate: dateOnly(row.scheduled_date),
     windowStart: hhmm(row.window_start),
     windowEnd: hhmm(row.window_end),
-    windowDisplay: row.window_display || null,
+    windowDisplay: row.window_display || customerArrivalWindowDisplay(row.window_start),
     serviceType: row.service_type || 'Service visit',
     status: row.status || null,
   };
