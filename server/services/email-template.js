@@ -54,6 +54,19 @@ const CLASSIC_THEME = {
   ctaText: '#FFFFFF',
   ctaRadius: '10px',
   ctaShadow: '',
+  // DB-template block palette (email-template-library.js renderBlocks).
+  // Classic keeps the original slate set verbatim — byte-identical gate-off.
+  blocks: {
+    font: 'Inter,Arial,sans-serif',
+    heading: '#0F172A',
+    text: '#334155',
+    mutedText: '#64748B',
+    rule: '#E2E8F0',
+    calloutBorder: '#FFD700',
+    calloutBg: '#FDF6EC',
+    calloutText: '#334155',
+    footerLink: '#006B99',
+  },
 };
 
 // Glass chrome — email translation of the liquid-glass tokens. Solid
@@ -83,10 +96,34 @@ const GLASS_THEME = {
   ctaText: '#1B2C5B',
   ctaRadius: '12px',
   ctaShadow: '0 10px 26px rgba(180,110,0,0.25)',
+  // Under glass the block palette converges on the chrome palette — the
+  // slate/gold clash between DB-template bodies and the wrapper is the
+  // thing this theme layer removes. Callout keeps a gold identity but on
+  // the glass accent gold (#F4B014, the CTA gradient's solid fallback).
+  blocks: {
+    font: "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Inter,Arial,sans-serif",
+    heading: '#04395E',
+    text: '#555B69',
+    mutedText: '#81858F',
+    rule: '#D8E4EF',
+    calloutBorder: '#F4B014',
+    calloutBg: '#FFF8E4',
+    calloutText: '#04395E',
+    footerLink: '#0A7EC2',
+  },
 };
 
 function activeTheme() {
   return isEnabled('emailGlassTheme') ? GLASS_THEME : CLASSIC_THEME;
+}
+
+/**
+ * Block-content palette for email-template-library.js renderBlocks.
+ * Resolved per call (like the wrappers) so DB-template bodies follow
+ * the active chrome.
+ */
+function blockPalette() {
+  return activeTheme().blocks;
 }
 
 // Style fragments shared by all three wrappers, kept as helpers so the
@@ -416,6 +453,7 @@ module.exports = {
   wrapNewsletter,
   ensureLegalTextFooter,
   ctaButton,
+  blockPalette,
   currency,
   formatDate,
   plainText,

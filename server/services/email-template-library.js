@@ -6,6 +6,7 @@ const {
   wrapNewsletter,
   ensureLegalTextFooter,
   ctaButton,
+  blockPalette,
 } = require('./email-template');
 const { auditNotificationTemplateIssue } = require('./audit-log');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
@@ -256,18 +257,19 @@ function normalizeBlocks(blocks) {
 function renderBlocks(blocks, payload) {
   const htmlParts = [];
   const textParts = [];
+  const B = blockPalette();
 
   for (const block of normalizeBlocks(blocks)) {
     if (block.type === 'heading') {
       const content = renderInline(block.content, payload);
       if (content) {
-        htmlParts.push(`<h2 style="margin:0 0 12px 0;font-family:Inter,Arial,sans-serif;font-size:18px;line-height:1.3;color:#0F172A;font-weight:700;">${content}</h2>`);
+        htmlParts.push(`<h2 style="margin:0 0 12px 0;font-family:${B.font};font-size:18px;line-height:1.3;color:${B.heading};font-weight:700;">${content}</h2>`);
         textParts.push(renderInline(block.content, payload, { html: false }).toUpperCase());
       }
     } else if (block.type === 'callout') {
       const content = renderInline(block.content, payload);
       if (content) {
-        htmlParts.push(`<div style="margin:18px 0;padding:14px 16px;border-left:4px solid #FFD700;background:#FDF6EC;color:#334155;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;">${content}</div>`);
+        htmlParts.push(`<div style="margin:18px 0;padding:14px 16px;border-left:4px solid ${B.calloutBorder};background:${B.calloutBg};color:${B.calloutText};font-family:${B.font};font-size:14px;line-height:1.55;">${content}</div>`);
         textParts.push(renderInline(block.content, payload, { html: false }));
       }
     } else if (block.type === 'details') {
@@ -280,11 +282,11 @@ function renderBlocks(blocks, payload) {
       }).filter((row) => String(row.valueText || '').trim() !== '');
       if (rows.length) {
         htmlParts.push(`
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0;border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0;border-top:1px solid ${B.rule};border-bottom:1px solid ${B.rule};">
             ${rows.map((row) => `
               <tr>
-                <td style="padding:8px 0;font-family:Inter,Arial,sans-serif;font-size:14px;color:#64748B;">${row.labelHtml}</td>
-                <td align="right" style="padding:8px 0;font-family:Inter,Arial,sans-serif;font-size:14px;color:#0F172A;font-weight:700;">${row.valueHtml}</td>
+                <td style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.mutedText};">${row.labelHtml}</td>
+                <td align="right" style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.valueHtml}</td>
               </tr>
             `).join('')}
           </table>
@@ -323,17 +325,17 @@ function renderBlocks(blocks, payload) {
         else if (href) textParts.push(href);
       }
     } else if (block.type === 'divider') {
-      htmlParts.push('<hr style="border:none;border-top:1px solid #E2E8F0;margin:22px 0;" />');
+      htmlParts.push(`<hr style="border:none;border-top:1px solid ${B.rule};margin:22px 0;" />`);
       textParts.push('---');
     } else if (block.type === 'signature') {
       const content = renderInline(block.content || 'The Waves Pest Control team', payload);
-      htmlParts.push(`<p style="margin:18px 0 0 0;font-family:Inter,Arial,sans-serif;font-size:15px;line-height:1.58;color:#334155;">${content}</p>`);
+      htmlParts.push(`<p style="margin:18px 0 0 0;font-family:${B.font};font-size:15px;line-height:1.58;color:${B.text};">${content}</p>`);
       textParts.push(renderInline(block.content || 'The Waves Pest Control team', payload, { html: false }));
     } else {
       const content = renderInline(block.content, payload);
       if (content) {
         const small = block.type === 'small_note';
-        htmlParts.push(`<p style="margin:0 0 ${small ? '10' : '16'}px 0;font-family:Inter,Arial,sans-serif;font-size:${small ? '13' : '15'}px;line-height:1.58;color:${small ? '#64748B' : '#334155'};">${content}</p>`);
+        htmlParts.push(`<p style="margin:0 0 ${small ? '10' : '16'}px 0;font-family:${B.font};font-size:${small ? '13' : '15'}px;line-height:1.58;color:${small ? B.mutedText : B.text};">${content}</p>`);
         textParts.push(renderInline(block.content, payload, { html: false }));
       }
     }
@@ -484,7 +486,7 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
   const footerNote = mode === 'marketing'
     ? null
-    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:#006B99;text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`;
+    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${blockPalette().footerLink};text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`;
   const html = mode === 'marketing'
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });
