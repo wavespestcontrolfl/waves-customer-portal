@@ -52,4 +52,18 @@ describe('anchoredAnnualTotal', () => {
     const blob = { result: { totals: { year2: 392 }, recurring: { monthlyTotal: 32.67 } } };
     expect(anchoredAnnualTotal(blob, 32.67)).toBe(392);
   });
+
+  test('grandTotal beats component monthlyTotal when year2mo is absent (v1-mapped supplements)', () => {
+    // v1-mapped blobs: grandTotal is the full monthly counterpart to year2;
+    // monthlyTotal excludes supplements (rodent bait / palm injection). Using
+    // the partial 32.67 would trip the correspondence guard vs year2=692 and
+    // forfeit the anchor — grandTotal keeps it.
+    const blob = {
+      result: {
+        totals: { year2: 692 },
+        recurring: { monthlyTotal: 32.67, grandTotal: 57.67, rodentBaitMo: 25 },
+      },
+    };
+    expect(anchoredAnnualTotal(blob, 57.67)).toBe(692);
+  });
 });

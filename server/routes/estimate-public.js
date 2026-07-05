@@ -1780,10 +1780,14 @@ function anchoredAnnualTotal(estData, monthlyTotal) {
     ? (estData.result && typeof estData.result === 'object' ? estData.result : estData)
     : null;
   const engineAnnual = firstPositiveNumber(root?.totals?.year2);
+  // grandTotal before monthlyTotal: in v1-mapped blobs grandTotal is the full
+  // monthly counterpart to year2 while monthlyTotal can exclude recurring
+  // supplements (rodent bait, palm injection) — the partial value would trip
+  // the correspondence guard below and forfeit the anchor.
   const engineMonthly = firstPositiveNumber(
     root?.totals?.year2mo,
-    root?.recurring?.monthlyTotal,
     root?.recurring?.grandTotal,
+    root?.recurring?.monthlyTotal,
   );
   if (!engineAnnual || !engineMonthly) return fallback;
   // Only trust the anchor when the engine pair actually corresponds (year2 is
