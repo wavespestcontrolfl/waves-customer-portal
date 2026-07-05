@@ -21,6 +21,7 @@ jest.mock("../services/short-url", () => ({
 jest.mock("../services/customer-contact", () => ({
   getAppointmentContacts: jest.fn(),
   isServiceContactRole: jest.requireActual("../services/customer-contact").isServiceContactRole,
+  firstNameFrom: jest.requireActual("../services/customer-contact").firstNameFrom,
 }));
 jest.mock("../services/messaging/send-customer-message", () => ({
   sendCustomerMessage: jest.fn(),
@@ -124,6 +125,44 @@ describe("TwilioService.sendTechEnRoute", () => {
         body: "Hello Sam! Bryan is on the way.\n\nTrack live: https://portal.wavespestcontrol.com/l/abc23\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.",
         purpose: "tech_en_route",
       }),
+    );
+    expect(result.success).toBe(true);
+  });
+
+  test("greets a full-name service contact by first name only", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Chris", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_en_route: true, sms_enabled: true }),
+    );
+
+    // Distinct on-location service contact whose stored name is a full name.
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15553334444", name: "Rhonda Whitney", role: "service_contact" },
+    ]);
+    shortenOrPassthrough.mockResolvedValue(
+      "https://portal.wavespestcontrol.com/l/abc23",
+    );
+    smsTemplates.getTemplate.mockResolvedValue(
+      "Hello Rhonda! Bryan is on the way.",
+    );
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const result = await TwilioService.sendTechEnRoute(
+      "cust-1",
+      "Bryan",
+      null,
+      "track-token",
+    );
+
+    // {first_name} slot is the first token, not the stored "Rhonda Whitney".
+    expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+      "tech_en_route",
+      expect.objectContaining({ first_name: "Rhonda" }),
+      { workflow: "tech_en_route", entity_type: "customer", entity_id: "cust-1" },
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "+15553334444", purpose: "tech_en_route" }),
     );
     expect(result.success).toBe(true);
   });
