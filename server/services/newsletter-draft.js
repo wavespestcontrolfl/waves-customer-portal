@@ -399,7 +399,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.crawlHeading || draft.crawlText) {
     parts.push(dividerHtml());
     if (draft.crawlHeading) {
-      parts.push(`<h2 id="pi-crawl" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.crawlHeading)}</em></strong></h2>`);
+      parts.push(`<h2 id="pi-crawl" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.crawlHeading)}</em></strong></h2>`);
     }
     if (crawlGif) parts.push(gifBlock(crawlGif, draft.crawlGifCaption));
     if (draft.crawlText) {
@@ -411,7 +411,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.pestOfMonth?.name) {
     const card = draft.pestOfMonth;
     parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-pest" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${escapeHtml(card.emoji || '🪲')} <strong><em>Pest of the Month: ${markdownToHtml(card.name)}</em></strong></h2>`);
+    parts.push(`<h2 id="pi-pest" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${escapeHtml(card.emoji || '🪲')} <strong><em>Pest of the Month: ${markdownToHtml(card.name)}</em></strong></h2>`);
     const rows = [
       card.whereYoullSeeIt && `📍 <strong>Where you'll see it:</strong> ${markdownToHtml(card.whereYoullSeeIt)}`,
       card.threatLevel && `⚠️ <strong>How worried to be:</strong> ${markdownToHtml(card.threatLevel)}`,
@@ -425,7 +425,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.lawnHeading || draft.lawnText) {
     parts.push(dividerHtml());
     if (draft.lawnHeading) {
-      parts.push(`<h2 id="pi-lawn" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.lawnHeading)}</em></strong></h2>`);
+      parts.push(`<h2 id="pi-lawn" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.lawnHeading)}</em></strong></h2>`);
     }
     if (draft.lawnText) {
       parts.push(`<div style="margin:0 0 14px 0;padding:14px 18px;background:#F2F8F0;border-radius:10px;border-left:4px solid #5BA862;">
@@ -437,14 +437,14 @@ async function assemblePestInsiderNewsletter(draft) {
   // 4. Myth-Buster
   if (draft.mythQuestion && draft.mythVerdict) {
     parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-myth" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">🔍 <strong><em>Myth-Buster: ${markdownToHtml(draft.mythQuestion)}</em></strong></h2>`);
+    parts.push(`<h2 id="pi-myth" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">🔍 <strong><em>Myth-Buster: ${markdownToHtml(draft.mythQuestion)}</em></strong></h2>`);
     parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.mythVerdict)}</p>`);
   }
 
   // 5. The pitch (sincere middle of the sandwich)
   if (draft.pitchHeading) {
     parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-pitch" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.pitchHeading)}</em></strong></h2>`);
+    parts.push(`<h2 id="pi-pitch" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;"><strong><em>${markdownToHtml(draft.pitchHeading)}</em></strong></h2>`);
     if (pitchGif) parts.push(gifBlock(pitchGif, draft.pitchGifCaption));
     if (draft.pitchIntro) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.pitchIntro)}</p>`);
@@ -459,7 +459,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.closingHeading || draft.closingText || draft.ctaLine) {
     parts.push(dividerHtml());
     if (draft.closingHeading) {
-      parts.push(`<h2 id="pi-close" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;"><strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
+      parts.push(`<h2 id="pi-close" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;"><strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
     }
     if (draft.closingText) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText).replace(/\n+/g, '<br/><br/>')}</p>`);
@@ -491,14 +491,21 @@ async function assemblePestInsiderNewsletter(draft) {
 // visual quality of the Beehiiv "Fresh This Week" newsletters: per-event
 // GIFs, branded dividers, emoji metadata blocks, TOC with jump links.
 
+// Palette lives in email-template.js (one theme layer for every email
+// surface, resolved per property access so generated bodies follow the
+// active GATE_EMAIL_GLASS chrome). Getter shape keeps the 30+
+// `COLORS.x` call sites unchanged; classic values are verbatim the
+// original set, so gate-off output is byte-identical.
+const { newsletterPalette } = require('./email-template');
 const COLORS = {
-  navy: '#1B2C5B',
-  blue: '#009CDE',
-  gold: '#FFD700',
-  muted: '#8B8680',
-  cardBg: '#FAFAF8',
-  homeownerBg: '#F0F7FA',
-  rule: '#E7E2D7',
+  get font() { return newsletterPalette().font; },
+  get navy() { return newsletterPalette().navy; },
+  get blue() { return newsletterPalette().blue; },
+  get gold() { return newsletterPalette().gold; },
+  get muted() { return newsletterPalette().muted; },
+  get cardBg() { return newsletterPalette().cardBg; },
+  get homeownerBg() { return newsletterPalette().homeownerBg; },
+  get rule() { return newsletterPalette().rule; },
 };
 
 const WAVES_DIVIDER_GIF = 'https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/952b11dc-99a2-4de3-8def-481a1c34f8d7/giphy.gif';
@@ -978,7 +985,7 @@ async function assembleBeehiivNewsletter(draft) {
 
     // Heading
     const anchorId = `evt-${slugify(ev.title)}`;
-    parts.push(`<h2 id="${anchorId}" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${escapeHtml(ev.emoji || '🎯')} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
+    parts.push(`<h2 id="${anchorId}" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 8px 0;">${escapeHtml(ev.emoji || '🎯')} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
 
     // Reaction GIF first — in the shipped Beehiiv formula the GIF + caption
     // IS the joke; the event photo is only a fallback when Giphy yields
@@ -1071,7 +1078,7 @@ async function assembleBeehiivNewsletter(draft) {
   // ── Homeowner Minute ──
   if (draft.homeownerMinute) {
     parts.push(dividerHtml());
-    parts.push(`<h2 id="homeowner-minute" style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;">🏠 <strong><em>Homeowner Minute</em></strong></h2>`);
+    parts.push(`<h2 id="homeowner-minute" style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;">🏠 <strong><em>Homeowner Minute</em></strong></h2>`);
     parts.push(`<div style="margin:0 0 20px 0;padding:18px 20px;background:${COLORS.homeownerBg};border-radius:12px;border-left:4px solid ${COLORS.blue};">
 <p style="margin:0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.homeownerMinute)}</p>
 </div>`);
@@ -1081,7 +1088,7 @@ async function assembleBeehiivNewsletter(draft) {
   if (draft.closingHeading || draft.closingText) {
     parts.push(dividerHtml());
     if (draft.closingHeading) {
-      parts.push(`<h2 style="font-family:Inter,Arial,sans-serif;font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;">${escapeHtml(draft.closingEmoji || '📝')} <strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
+      parts.push(`<h2 style="font-family:${COLORS.font};font-size:20px;font-weight:800;color:${COLORS.navy};margin:0 0 12px 0;">${escapeHtml(draft.closingEmoji || '📝')} <strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
     }
     if (draft.closingText) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText)}</p>`);

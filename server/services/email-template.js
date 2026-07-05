@@ -67,6 +67,18 @@ const CLASSIC_THEME = {
     calloutText: '#334155',
     footerLink: '#006B99',
   },
+  // Newsletter body palette (newsletter-draft.js COLORS). Classic keeps
+  // the original Beehiiv-era set verbatim — byte-identical gate-off.
+  newsletter: {
+    font: 'Inter,Arial,sans-serif',
+    navy: '#1B2C5B',
+    blue: '#009CDE',
+    gold: '#FFD700',
+    muted: '#8B8680',
+    cardBg: '#FAFAF8',
+    homeownerBg: '#F0F7FA',
+    rule: '#E7E2D7',
+  },
 };
 
 // Glass chrome — email translation of the liquid-glass tokens. Solid
@@ -111,6 +123,18 @@ const GLASS_THEME = {
     calloutText: '#04395E',
     footerLink: '#0A7EC2',
   },
+  // Newsletter bodies converge on the same glass tokens: navy ink,
+  // accent blue, accent gold, cool card tints and rules.
+  newsletter: {
+    font: "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Inter,Arial,sans-serif",
+    navy: '#04395E',
+    blue: '#0A7EC2',
+    gold: '#F4B014',
+    muted: '#81858F',
+    cardBg: '#F4F9FD',
+    homeownerBg: '#E9F3FB',
+    rule: '#D8E4EF',
+  },
 };
 
 function activeTheme() {
@@ -124,6 +148,14 @@ function activeTheme() {
  */
 function blockPalette() {
   return activeTheme().blocks;
+}
+
+/**
+ * Newsletter body palette (newsletter-draft.js). Resolved per call so
+ * generated newsletter bodies follow the active chrome.
+ */
+function newsletterPalette() {
+  return activeTheme().newsletter;
 }
 
 // Style fragments shared by all three wrappers, kept as helpers so the
@@ -454,6 +486,7 @@ module.exports = {
   ensureLegalTextFooter,
   ctaButton,
   blockPalette,
+  newsletterPalette,
   currency,
   formatDate,
   plainText,
