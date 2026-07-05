@@ -208,6 +208,22 @@ const FIXTURES = {
   "/admin/dashboard/calls-by-source": { sources: [], period: { label: "Month to Date" } },
   "/admin/dashboard/leads-by-source": { sources: [], period: {} },
   "/admin/dashboard/channel-mix": { channels: [] },
+  "/admin/dashboard/channel-roi": {
+    period: { from: "2026-07-01", to: "2026-07-04", label: "Month to Date" },
+    sources: [
+      { sourceKey: "google_ads", source: "Google Ads", revenue: 1200, grossProfit: 700, lifetimeValue: 2400, adSpend: 400, fixedCost: 100, allInSpend: 500, customers: 6, jobs: 8, roas: 2.4, ltvCac: 4.8, cac: 83, costPerJob: 63 },
+      { sourceKey: "organic", source: "Organic", revenue: 800, grossProfit: 500, lifetimeValue: 900, adSpend: 0, fixedCost: 300, allInSpend: 300, customers: 2, jobs: 2, roas: 2.7, ltvCac: 3, cac: 150, costPerJob: 150 },
+    ],
+    totalRevenue: 2000,
+    totalGrossProfit: 1200,
+    totalLifetimeValue: 3300,
+    totalAdSpend: 400,
+    totalFixedCost: 400,
+    totalAllInSpend: 800,
+    totalJobs: 10,
+    blendedROAS: 2.5,
+    blendedLtvCac: 4.1,
+  },
   "/admin/dashboard/lead-funnel": {
     period: { label: "Month to Date" },
     sources: [
@@ -314,6 +330,14 @@ describe("DashboardPageV2 sections", () => {
     );
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("What leads asked for"),
+    );
+    // Channel ROI: the ad-dollars card's tabular twin — table renders with the
+    // ad/fixed spend split visible on the row (never tooltip-only).
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Channel ROI"),
+    );
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("$400 ad + $100 fixed"),
     );
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("Termite"),

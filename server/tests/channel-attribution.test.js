@@ -79,6 +79,52 @@ describe('buildChannelAttribution', () => {
     expect(out.totalGrossProfit).toBe(270);
   });
 
+  test('jobs count completed costed visits credited to the channel, not attribution rows', () => {
+    const completed = [
+      // ONE primary row carries a repeat customer's whole realized total
+      // (ad-attribution-sync) — their 5 completed visits are 5 jobs, not 1 row.
+      { lead_source: 'google_ads', completed_revenue: 1000, gross_profit: 600, customer_id: 'c1', lead_date: '2026-06-01', created_at: '2026-06-01T10:00:00Z' },
+      { lead_source: 'google_ads', completed_revenue: 200, gross_profit: 100, customer_id: 'c2', lead_date: '2026-06-10', created_at: '2026-06-10T09:00:00Z' },
+    ];
+    const out = buildChannelAttribution(completed, { google_ads: 600 }, {}, { c1: 5, c2: 1 });
+    const g = out.sources.find((s) => s.sourceKey === 'google_ads');
+    expect(g.jobs).toBe(6); // 5 + 1 visits — repeat visits count
+    expect(g.customers).toBe(2);
+    expect(g.costPerJob).toBe(100); // 600 / 6 visits
+    expect(g.cac).toBe(300); // 600 / 2 customers — different denominator
+    expect(out.totalJobs).toBe(6);
+  });
+
+  test('a multi-row customer is credited once, on the first-touch row (sync parity)', () => {
+    const completed = [
+      // Later duplicate row on another source — carries no revenue, gets no
+      // jobs. DATE columns arrive as JS Date objects; the first-touch pick
+      // must compare chronologically, not by stringified weekday text.
+      { lead_source: 'facebook', fbclid: 'x', completed_revenue: 0, gross_profit: 0, customer_id: 'c1', lead_date: new Date('2026-06-20T00:00:00Z'), created_at: new Date('2026-06-20T08:00:00Z') },
+      // First-touch row — where ad-attribution-sync wrote the realized total.
+      { lead_source: 'google_ads', completed_revenue: 500, gross_profit: 300, customer_id: 'c1', lead_date: new Date('2026-06-01T00:00:00Z'), created_at: new Date('2026-06-01T08:00:00Z') },
+    ];
+    const out = buildChannelAttribution(completed, {}, {}, { c1: 3 });
+    expect(out.sources.find((s) => s.sourceKey === 'google_ads').jobs).toBe(3);
+    expect(out.sources.find((s) => s.sourceKey === 'facebook').jobs).toBe(0);
+    expect(out.totalJobs).toBe(3); // never double-credited across rows
+  });
+
+  test('spend that closed no jobs → costPerJob null (not 0); free channel → 0', () => {
+    const out = buildChannelAttribution(
+      [{ lead_source: 'organic', completed_revenue: 500, gross_profit: 300, customer_id: 'o1', lead_date: '2026-06-05' }],
+      { facebook: 200 },
+      {},
+      { o1: 1 },
+    );
+    const fb = out.sources.find((s) => s.sourceKey === 'facebook');
+    expect(fb.jobs).toBe(0);
+    expect(fb.costPerJob).toBeNull(); // $0/job would read as free acquisition
+    const o = out.sources.find((s) => s.sourceKey === 'organic');
+    expect(o.jobs).toBe(1);
+    expect(o.costPerJob).toBe(0); // genuinely free
+  });
+
   test('fixed cost folds into all-in spend; ratios divide by ad + fixed', () => {
     const completed = [
       row('organic', 1000, 600, 'o1'), // no ad spend, but has an SEO retainer

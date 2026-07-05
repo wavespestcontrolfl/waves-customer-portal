@@ -16,6 +16,7 @@ import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile } from "../KpiTile";
 import Verdict from "../Verdict";
 import FunnelBySource from "../FunnelBySource";
+import ChannelROI from "../ChannelROI";
 import {
   capitalVerdict,
   captureVerdict,
@@ -49,6 +50,7 @@ export default function GrowthSection({
   leadsBySource,
   channelMix,
   leadFunnel,
+  channelRoi,
   attributionLoading,
   attributionError,
   onDrillSource,
@@ -279,6 +281,38 @@ export default function GrowthSection({
           >
             <CapitalAllocationCard data={capAlloc} />
             <Verdict verdict={capitalVerdict(capAlloc)} />
+          </ChartCard>
+        </div>
+      )}
+
+      {/* Channel ROI — the ad-dollars card's tabular twin: money in vs all-in
+          money out per channel (attribution-row + job-cost basis, stated on
+          the card; same period selector as the attribution panels below,
+          unlike the fixed-90-day banding card above). */}
+      {isMobile ? (
+        <MobileFold
+          title="Channel ROI"
+          sub={channelRoi?.period?.label || kpis?.periodLabel || "Month to Date"}
+        >
+          <div className="px-1 pt-1">
+            <ChannelROI
+              data={channelRoi}
+              loading={attributionLoading}
+              error={attributionError}
+            />
+          </div>
+        </MobileFold>
+      ) : (
+        <div className="mb-5">
+          <ChartCard
+            title="Channel ROI"
+            sub={channelRoi?.period?.label || kpis?.periodLabel || "Month to Date"}
+          >
+            <ChannelROI
+              data={channelRoi}
+              loading={attributionLoading}
+              error={attributionError}
+            />
           </ChartCard>
         </div>
       )}

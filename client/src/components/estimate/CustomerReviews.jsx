@@ -8,6 +8,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { estimateCard, estimateInnerBox } from './cardStyles';
+import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
 
 const W = {
   blueDeeper: '#1B2C5B', yellow: '#FFD700',
@@ -140,10 +141,12 @@ export default function CustomerReviews() {
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,
         color: W.blueDeeper, margin: '0 0 6px',
       }}>
-        Customer reviews
+        {glassCopyActive() ? GLASS_COPY.reviewsTitle : 'Customer reviews'}
       </h2>
       <p style={{ fontSize: 14, color: W.textCaption, margin: '0 0 16px', lineHeight: 1.5 }}>
-        Real Google reviews from homeowners across our service area.
+        {glassCopyActive()
+          ? GLASS_COPY.reviewsExcerpt
+          : 'Real Google reviews from homeowners across our service area.'}
       </p>
       <div style={{
         display: 'grid', gap: 12,

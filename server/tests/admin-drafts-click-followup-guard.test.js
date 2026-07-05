@@ -232,6 +232,9 @@ describe('approve — verdict mapping (shared-gate parity)', () => {
       expect(updates).toEqual(expect.arrayContaining([
         { table: 'click_followup_actions', payload: expect.objectContaining({ status: actionStatus }) },
       ]));
+      // Retire + action transition are ATOMIC (round 7): a failure between
+      // the two writes must not strand the action in the open 'drafted' set.
+      expect(db.transaction).toHaveBeenCalledTimes(1);
     });
   }
 

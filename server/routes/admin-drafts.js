@@ -6,6 +6,15 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { evaluateClickFollowupGate } = require('../services/click-followup-gate');
+const { isEnabled } = require('../config/feature-gates');
+const { CAMPAIGN_GATE } = require('../services/campaign-drafts');
+const {
+  evaluateCampaignSendGate,
+  parseOpportunityRef,
+  TERMINAL_CODES: CAMPAIGN_TERMINAL_CODES,
+  HOLD_CODES: CAMPAIGN_HOLD_CODES,
+} = require('../services/campaign-drafts-gate');
+const { SUPPRESSION_SENTINELS } = require('../services/sms-auto-send');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -83,17 +92,15 @@ async function releaseDraftClaim(draftId, fields = {}) {
   }).catch(() => {});
 }
 
-// Send-policy mapping for owner-approved drafts. The route's default shape
-// (audience 'lead', purpose 'conversational', no consentBasis) exists for
-// the legacy inbound-reply queue — the messaging policy's anonymous-lead
-// conversational carve-out is safe there because the contact texted us
-// first. Click-followup drafts are PROACTIVE estimate nudges, so they must
-// ride the same policy rails as every other estimate follow-up SMS: purpose
-// 'estimate_followup' (transactional consent + quiet hours enforced by the
-// messaging validators), estimateId threaded, and the same consentBasis
-// shape estimate-follow-up.js passes for lead-only contacts. Narrowly
-// scoped on intent — PR #2357 is generalizing purpose passthrough in this
-// route; whichever merges second reconciles with the other.
+// Send-policy mapping for owner-approved drafts. Click-followup drafts are
+// PROACTIVE estimate nudges, so they must ride the same policy rails as
+// every other estimate follow-up SMS: purpose 'estimate_followup'
+// (transactional consent + quiet hours enforced by the messaging
+// validators), estimateId threaded, and the same consentBasis shape
+// estimate-follow-up.js passes for lead-only contacts. They carry no
+// message_drafts.purpose value, so the intent branch runs FIRST; every
+// other draft (campaign or legacy inbound-reply) rides
+// draftSendPolicyFields' purpose passthrough below.
 function sendPolicyForDraft(draft, recipient) {
   if (draft.intent === 'click_followup') {
     const flags = parseFlags(draft.flags);
@@ -108,7 +115,7 @@ function sendPolicyForDraft(draft, recipient) {
       },
     };
   }
-  return { audience: 'lead', purpose: 'conversational' };
+  return draftSendPolicyFields(draft, recipient);
 }
 
 // Terminal gate verdicts → retire the draft (it will never be sendable):
@@ -186,35 +193,270 @@ async function guardClickFollowupSend(draft) {
 
   const retire = GATE_RETIRE[verdict.code];
   if (retire) {
-    await db('message_drafts').where({ id: draft.id }).update({
-      status: 'rejected',
-      flags: JSON.stringify({ ...flags, reason: retire.reason }),
+    // Draft retire + linked action transition commit or roll back TOGETHER
+    // (same atomicity rule as the send-success and reject paths): a failure
+    // between the two writes would retire the draft but strand the action
+    // in 'drafted' — an open claim for hasOpenAction and the partial unique
+    // indexes, blocking a fresh re-click from re-qualifying the contact
+    // until the 14-day sweep.
+    await db.transaction(async (trx) => {
+      await trx('message_drafts').where({ id: draft.id }).update({
+        status: 'rejected',
+        flags: JSON.stringify({ ...flags, reason: retire.reason }),
+      });
+      await trx('click_followup_actions')
+        .where({ draft_id: draft.id })
+        .update({
+          status: retire.actionStatus,
+          ...(retire.actionStatus === 'converted' ? { converted_at: new Date() } : {}),
+          updated_at: db.fn.now(),
+        });
     });
-    await db('click_followup_actions')
-      .where({ draft_id: draft.id })
-      .update({
-        status: retire.actionStatus,
-        ...(retire.actionStatus === 'converted' ? { converted_at: new Date() } : {}),
-        updated_at: db.fn.now(),
-      })
-      .catch(() => {});
     return { blocked: true, message: retire.message };
   }
 
   return { hold: true, message: GATE_HOLD_MESSAGES[verdict.code] || 'Draft held by pre-send checks - retry later' };
 }
 
+// Purposes whose policy row requires marketing-grade consent
+// (policy.js requireConsent: 'marketing').
+const MARKETING_GRADE_PURPOSES = new Set(['marketing', 'retention']);
+
+/**
+ * Audience/purpose/consent fields for a draft send.
+ *
+ * Null-purpose drafts (the inbound-reply lane) keep the legacy behavior
+ * exactly: audience 'lead', purpose 'conversational', no consentBasis.
+ *
+ * Campaign drafts carry a non-null `purpose` — pass it through so the send
+ * runs under the REAL policy row instead of bypassing consent as
+ * 'conversational'. Marketing-grade purposes get the same stored-preference
+ * consent basis the existing campaign senders assert (seasonal-reactivation /
+ * upsell-trigger / retention agent: 'customer_marketing_preferences'); the
+ * consent validator still enforces sms_enabled + seasonal_tips prefs,
+ * customerId presence, and identity trust — this helper only stops the
+ * bypass, it does not manufacture consent.
+ */
+function draftSendPolicyFields(draft, recipient) {
+  if (!draft.purpose) {
+    return { audience: 'lead', purpose: 'conversational' };
+  }
+  const fields = {
+    audience: recipient.customerId ? 'customer' : 'lead',
+    purpose: draft.purpose,
+  };
+  if (MARKETING_GRADE_PURPOSES.has(draft.purpose)) {
+    fields.consentBasis = {
+      status: 'opted_in',
+      source: 'customer_marketing_preferences',
+      capturedAt: new Date(draft.created_at || Date.now()).toISOString(),
+    };
+  }
+  return fields;
+}
+
+/**
+ * 422 body for a blocked/failed send. Surfaces the block code and — for
+ * retryable holds like QUIET_HOURS_HOLD — the nextAllowedAt timestamp, so the
+ * operator sees "held until 8am" instead of an opaque failure. The draft has
+ * already been released back to pending, so it can simply be approved again
+ * after the window opens.
+ */
+function blockedSendResponse(res, smsResult) {
+  return res.status(422).json({
+    error: smsResult.reason || smsResult.code || 'SMS send blocked/failed',
+    code: smsResult.code,
+    held: smsResult.code === 'QUIET_HOURS_HOLD' ? true : undefined,
+    nextAllowedAt: smsResult.nextAllowedAt,
+  });
+}
+
+// sms_log.message_type for approved campaign sends — aligned with what the
+// legacy workflows historically logged ('reactivation' / 'upsell') so the
+// campaign cooldown's CAMPAIGN_SMS_TYPES filter and readers like
+// /api/admin/workflows/status see these sends. Null-campaign drafts keep the
+// legacy 'ai_approved' / 'ai_revised' provenance value.
+const CAMPAIGN_MESSAGE_TYPES = { reactivation: 'reactivation', upsell: 'upsell' };
+
+function draftMessageType(draft, legacyValue) {
+  if (!draft.campaign_type) return legacyValue;
+  return CAMPAIGN_MESSAGE_TYPES[draft.campaign_type] || draft.campaign_type;
+}
+
+/**
+ * Pre-send guard for campaign drafts (both approve and revise). Legacy
+ * (null campaign_type) drafts pass straight through.
+ *
+ * 1. Gate kill switch: with GATE_CAMPAIGN_DRAFTS off, approving an EXISTING
+ *    pending campaign draft must not send either — the gate's contract is
+ *    zero campaign sends, not just zero new drafts. The claim is released so
+ *    the draft stays pending and the 409 tells the operator why.
+ * 2. Shared pre-send gate (services/campaign-drafts-gate.js) — the SAME
+ *    guard stack the generators ran at draft time, re-evaluated against
+ *    CURRENT state, because every predicate can flip while a draft sits
+ *    pending. Verdict mapping:
+ *      terminal (customer deleted / upsell target no longer live /
+ *      reactivation target no longer lapsed / opportunity gone or already
+ *      pitched-accepted-declined-deferred elsewhere / prefs revoked)
+ *        → draft retired: status 'rejected' + flags.campaign_rejected_reason,
+ *          422 CAMPAIGN_INELIGIBLE. If the condition recurs legitimately
+ *          (customer lapses again), the next generator run writes a FRESH draft.
+ *      hold (unified 30d cooldown hit — another campaign lane touched the
+ *      customer after this draft was written; the draft's own row is excluded)
+ *        → claim released, draft LEFT PENDING, 409 CAMPAIGN_COOLDOWN_HOLD.
+ *      transient (guard lookup failed — fail closed)
+ *        → claim released, draft left pending, 503.
+ *
+ * Sends the HTTP response itself when blocking. Returns
+ *   { blocked: true }                    — response already sent, caller returns
+ *   { blocked: false, customer }         — proceed; customer carries
+ *                                          nearest_location_id for the send
+ */
+async function guardCampaignSend(draft, req, res, releaseFields = {}) {
+  if (!draft.campaign_type) return { blocked: false, customer: null };
+
+  if (!isEnabled(CAMPAIGN_GATE)) {
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(409).json({
+      error: 'Campaign drafts are disabled (GATE_CAMPAIGN_DRAFTS is off) — draft left pending',
+      code: 'CAMPAIGN_GATE_OFF',
+    });
+    return { blocked: true };
+  }
+
+  const verdict = await evaluateCampaignSendGate({
+    campaignType: draft.campaign_type,
+    customerId: draft.customer_id,
+    sourceRef: draft.source_ref,
+    excludeDraftId: draft.id,
+  });
+  if (verdict.ok) return { blocked: false, customer: verdict.customer };
+
+  if (CAMPAIGN_HOLD_CODES.has(verdict.code)) {
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(409).json({
+      error: `Campaign send held (${verdict.reason || verdict.code}) — another campaign lane touched this customer in the last 30 days; draft left pending`,
+      code: 'CAMPAIGN_COOLDOWN_HOLD',
+      reason: verdict.reason || verdict.code,
+    });
+    return { blocked: true };
+  }
+
+  if (!CAMPAIGN_TERMINAL_CODES.has(verdict.code)) {
+    // guard_error (or an unknown future code) — fail closed but transient:
+    // nothing about the draft is known to be stale, so keep it pending.
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(503).json({
+      error: 'Campaign pre-send check unavailable — draft left pending, try again',
+      code: 'CAMPAIGN_GUARD_ERROR',
+    });
+    return { blocked: true };
+  }
+
+  await db('message_drafts').where({ id: draft.id }).update({
+    status: 'rejected',
+    approved_by: req.technicianId,
+    approved_at: new Date(),
+    flags: JSON.stringify({
+      ...parseFlags(draft.flags),
+      campaign_rejected_reason: verdict.code,
+      ...(verdict.reason ? { campaign_rejected_detail: verdict.reason } : {}),
+    }),
+  });
+  res.status(422).json({
+    error: `Customer is no longer eligible for this campaign (${verdict.code}) — draft rejected`,
+    code: 'CAMPAIGN_INELIGIBLE',
+    reason: verdict.code,
+  });
+  return { blocked: true };
+}
+
+/**
+ * sendCustomerMessage reports sent:true for upstream SUPPRESSION paths where
+ * no customer SMS actually left — the provider id is a sentinel (e.g. the
+ * admin-sms-templates kill switch returns sid 'template-disabled'), not a
+ * Twilio sid. Same contract sms-auto-send.js enforces via
+ * SUPPRESSION_SENTINELS. Campaign drafts map messageType to
+ * 'upsell'/'reactivation', which are real per-template kill-switch keys, so
+ * this path is reachable: finalizing would mark the draft sent while the
+ * customer received nothing. Returns the sentinel id, or null for a real send.
+ */
+function suppressedSendSentinel(smsResult) {
+  const id = smsResult && smsResult.providerMessageId;
+  return id && SUPPRESSION_SENTINELS.has(id) ? id : null;
+}
+
+/**
+ * Finalize a draft after a REAL provider send. A draft's linked row moves in
+ * the SAME transaction as the draft finalization:
+ *
+ *  - Upsell campaign drafts (source_ref names their upsell_opportunities
+ *    row): flip that row to 'pitched' — customer-intel metrics and UI derive
+ *    pitched/accepted counts from upsell_opportunities.status, so a sent
+ *    pitch must move the row. Scoped to status='identified' so an outcome
+ *    set concurrently (accepted/declined via the customer-intel route) is
+ *    never regressed back to 'pitched'.
+ *  - Click-followup drafts: release the linked click_followup_actions claim
+ *    to 'sent' (same atomicity rule as the reject path, the queue's
+ *    draft-insert + action-link pair, and the stale sweep). The send
+ *    SUCCEEDED, so the action's open claim ('drafted' — held open by
+ *    hasOpenAction and the partial unique indexes) must end here: 'sent' is
+ *    terminal for claim purposes, so a later click from the same
+ *    customer/lead/phone re-qualifies immediately instead of waiting out the
+ *    14-day sweep, while staying distinguishable from 'dismissed' in outcome
+ *    telemetry. Scoped to open statuses so a more specific outcome is never
+ *    overwritten.
+ *
+ * Drafts with neither linkage (legacy inbound-reply, reactivation campaigns)
+ * finalize with a plain update — no transaction.
+ */
+async function finalizeDraftSend(draft, updates) {
+  const oppId = draft.campaign_type === 'upsell' ? parseOpportunityRef(draft.source_ref) : null;
+  const isClickFollowup = draft.intent === 'click_followup';
+  if (!oppId && !isClickFollowup) {
+    await db('message_drafts').where({ id: draft.id }).update(updates);
+    return;
+  }
+  await db.transaction(async (trx) => {
+    await trx('message_drafts').where({ id: draft.id }).update(updates);
+    if (isClickFollowup) {
+      await trx('click_followup_actions')
+        .where({ draft_id: draft.id })
+        .whereIn('status', ['pending', 'drafted'])
+        .update({ status: 'sent', updated_at: db.fn.now() });
+    }
+    if (oppId) {
+      await trx('upsell_opportunities')
+        .where({ id: oppId, status: 'identified' })
+        .update({
+          status: 'pitched',
+          pitched_at: new Date(),
+          pitched_by: 'campaign_draft',
+          updated_at: new Date(),
+        });
+    }
+  });
+}
+
 // GET /api/admin/drafts — pending drafts
+// Optional ?campaign_type= filter: 'reactivation' | 'upsell' scopes to that
+// campaign; 'none' scopes to legacy non-campaign drafts (inbound-reply lane).
 router.get('/', async (req, res, next) => {
   try {
-    const { status = 'pending' } = req.query;
-    const drafts = await db('message_drafts')
+    const { status = 'pending', campaign_type: campaignType } = req.query;
+    let query = db('message_drafts')
       .where(status === 'all' ? {} : { status })
       .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
       .select('message_drafts.*', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage')
       .orderBy('message_drafts.created_at', 'desc')
       .limit(50);
+    if (campaignType === 'none') {
+      query = query.whereNull('message_drafts.campaign_type');
+    } else if (campaignType) {
+      query = query.where('message_drafts.campaign_type', campaignType);
+    }
+    const drafts = await query;
 
     res.json({
       drafts: drafts.map(d => {
@@ -233,6 +475,9 @@ router.get('/', async (req, res, next) => {
           intent: d.intent, intentConfidence: d.intent_confidence,
           contextSummary: d.context_summary,
           flags,
+          campaignType: d.campaign_type || null,
+          purpose: d.purpose || null,
+          sourceRef: d.source_ref || null,
           status: d.status, responseTimeSeconds: d.response_time_seconds,
           createdAt: d.created_at, approvedAt: d.approved_at, sentAt: d.sent_at,
         };
@@ -279,6 +524,10 @@ router.put('/:id/approve', async (req, res, next) => {
       return res.status(409).json({ error: gateBlock.message });
     }
 
+    // Shared pre-send gate recheck (campaign drafts only).
+    const campaignGuard = await guardCampaignSend(draft, req, res);
+    if (campaignGuard.blocked) return;
+
     const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
@@ -295,16 +544,25 @@ router.put('/:id/approve', async (req, res, next) => {
         to: toPhone,
         body: draft.draft_response,
         channel: 'sms',
-        audience: sendPolicy.audience,
-        purpose: sendPolicy.purpose,
-        estimateId: sendPolicy.estimateId,
-        consentBasis: sendPolicy.consentBasis,
+        // Unified policy passthrough: click-followup drafts ride the
+        // estimate rails (purpose 'estimate_followup' + estimateId +
+        // transactional consentBasis for lead-only); campaign drafts pass
+        // their real purpose through (marketing-grade purposes carry the
+        // stored-preference consentBasis); legacy null-purpose drafts keep
+        // the conversational shape exactly.
+        ...sendPolicy,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
         metadata: {
-          original_message_type: 'ai_approved',
+          original_message_type: draftMessageType(draft, 'ai_approved'),
           draft_id: draft.id,
+          campaign_type: draft.campaign_type || undefined,
+          source_ref: draft.source_ref || undefined,
+          // Campaign drafts have no inbound sms_log to anchor a fromNumber —
+          // originate from the customer's local office number the way the
+          // legacy workflows did (TwilioService resolves it from this id).
+          customerLocationId: campaignGuard.customer?.nearest_location_id || undefined,
           adminUserId: req.technicianId,
           fromNumber,
         },
@@ -315,32 +573,31 @@ router.put('/:id/approve', async (req, res, next) => {
     }
     if (!smsResult.sent) {
       await releaseDraftClaim(draft.id);
-      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+      return blockedSendResponse(res, smsResult);
+    }
+    // Suppression sentinel (campaign drafts): sent:true but nothing actually
+    // left (e.g. the 'upsell'/'reactivation' SMS template is disabled). Do NOT
+    // finalize as sent — release the claim so the draft stays actionable once
+    // the template is re-enabled, and tell the operator what happened.
+    const suppressed = draft.campaign_type ? suppressedSendSentinel(smsResult) : null;
+    if (suppressed) {
+      await releaseDraftClaim(draft.id);
+      return res.status(422).json({
+        error: `No SMS was sent — the send was suppressed upstream (${suppressed}); draft left pending`,
+        code: 'SEND_SUPPRESSED',
+        reason: suppressed,
+      });
     }
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 
-    // Draft finalization + linked click-followup action release commit or
-    // roll back TOGETHER (same atomicity rule as the reject path, the
-    // queue's draft-insert + action-link pair, and the stale sweep). The
-    // send SUCCEEDED, so the action's open claim ('drafted' — held open by
-    // hasOpenAction and the partial unique indexes) must end here: 'sent'
-    // is terminal for claim purposes, so a later click from the same
-    // customer/lead/phone re-qualifies immediately instead of waiting out
-    // the 14-day sweep, while staying distinguishable from 'dismissed' in
-    // outcome telemetry. Scoped to open statuses so a more specific outcome
-    // is never overwritten; non-click intents have no linked action row and
-    // the update is a no-op.
-    await db.transaction(async (trx) => {
-      await trx('message_drafts').where({ id: draft.id }).update({
-        final_response: draft.draft_response,
-        sent_at: new Date(),
-        response_time_seconds: responseTime,
-      });
-      await trx('click_followup_actions')
-        .where({ draft_id: draft.id })
-        .whereIn('status', ['pending', 'drafted'])
-        .update({ status: 'sent', updated_at: db.fn.now() });
+    // Draft finalization + linked-row release (click action → 'sent';
+    // upsell opportunity → 'pitched') commit or roll back TOGETHER — see
+    // finalizeDraftSend.
+    await finalizeDraftSend(draft, {
+      final_response: draft.draft_response,
+      sent_at: new Date(),
+      response_time_seconds: responseTime,
     });
 
     res.json({ success: true, responseTimeSeconds: responseTime });
@@ -388,6 +645,10 @@ router.put('/:id/revise', async (req, res, next) => {
       return res.status(409).json({ error: gateBlock.message });
     }
 
+    // Shared pre-send gate recheck (campaign drafts only).
+    const campaignGuard = await guardCampaignSend(draft, req, res, { revised_response: null, final_response: null });
+    if (campaignGuard.blocked) return;
+
     const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
@@ -404,16 +665,25 @@ router.put('/:id/revise', async (req, res, next) => {
         to: toPhone,
         body: revisedResponse,
         channel: 'sms',
-        audience: sendPolicy.audience,
-        purpose: sendPolicy.purpose,
-        estimateId: sendPolicy.estimateId,
-        consentBasis: sendPolicy.consentBasis,
+        // Unified policy passthrough: click-followup drafts ride the
+        // estimate rails (purpose 'estimate_followup' + estimateId +
+        // transactional consentBasis for lead-only); campaign drafts pass
+        // their real purpose through (marketing-grade purposes carry the
+        // stored-preference consentBasis); legacy null-purpose drafts keep
+        // the conversational shape exactly.
+        ...sendPolicy,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',
         metadata: {
-          original_message_type: 'ai_revised',
+          original_message_type: draftMessageType(draft, 'ai_revised'),
           draft_id: draft.id,
+          campaign_type: draft.campaign_type || undefined,
+          source_ref: draft.source_ref || undefined,
+          // Campaign drafts have no inbound sms_log to anchor a fromNumber —
+          // originate from the customer's local office number the way the
+          // legacy workflows did (TwilioService resolves it from this id).
+          customerLocationId: campaignGuard.customer?.nearest_location_id || undefined,
           adminUserId: req.technicianId,
           fromNumber,
         },
@@ -424,23 +694,27 @@ router.put('/:id/revise', async (req, res, next) => {
     }
     if (!smsResult.sent) {
       await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
-      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+      return blockedSendResponse(res, smsResult);
+    }
+    // Suppression sentinel (campaign drafts) — same contract as approve: a
+    // sentinel provider id means nothing left, so never finalize as sent.
+    const suppressed = draft.campaign_type ? suppressedSendSentinel(smsResult) : null;
+    if (suppressed) {
+      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      return res.status(422).json({
+        error: `No SMS was sent — the send was suppressed upstream (${suppressed}); draft left pending`,
+        code: 'SEND_SUPPRESSED',
+        reason: suppressed,
+      });
     }
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 
-    // Same atomic finalization + click-followup action release as the
-    // approve route — the revised send went out, so the open claim moves to
-    // the terminal 'sent' status in the SAME transaction.
-    await db.transaction(async (trx) => {
-      await trx('message_drafts').where({ id: draft.id }).update({
-        sent_at: new Date(),
-        response_time_seconds: responseTime,
-      });
-      await trx('click_followup_actions')
-        .where({ draft_id: draft.id })
-        .whereIn('status', ['pending', 'drafted'])
-        .update({ status: 'sent', updated_at: db.fn.now() });
+    // Same atomic finalization + linked-row release as the approve route —
+    // see finalizeDraftSend.
+    await finalizeDraftSend(draft, {
+      sent_at: new Date(),
+      response_time_seconds: responseTime,
     });
 
     res.json({ success: true, responseTimeSeconds: responseTime });
@@ -534,6 +808,9 @@ router.get('/:id', async (req, res, next) => {
       intentConfidence: d.intent_confidence,
       contextSummary: d.context_summary,
       flags,
+      campaignType: d.campaign_type || null,
+      purpose: d.purpose || null,
+      sourceRef: d.source_ref || null,
       status: d.status,
       responseTimeSeconds: d.response_time_seconds,
       createdAt: d.created_at,
@@ -542,5 +819,11 @@ router.get('/:id', async (req, res, next) => {
     });
   } catch (err) { next(err); }
 });
+
+// Exposed for tests
+router._internals = {
+  draftSendPolicyFields, blockedSendResponse, draftMessageType,
+  CAMPAIGN_MESSAGE_TYPES, suppressedSendSentinel, finalizeDraftSend,
+};
 
 module.exports = router;

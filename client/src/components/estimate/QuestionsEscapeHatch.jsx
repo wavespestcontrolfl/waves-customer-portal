@@ -4,6 +4,8 @@
  * Waves" button and a warm-light "Questions? Text Waves!" button. The
  * text button sends an SMS on mobile and falls back to email on desktop.
  */
+import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
+
 const W = {
   navy: '#1B2C5B', white: '#FFFFFF',
   warmBg: '#F7F5EE', warmBorder: '#E7E2D7',
@@ -40,6 +42,8 @@ function ChatIcon() {
 }
 
 export default function QuestionsEscapeHatch({ estimateSlug }) {
+  // Glass copy pack (?glass=1, PR B) — person-first button labels.
+  const glass = glassCopyActive();
   const slugStr = estimateSlug ? `%23${estimateSlug}` : 'my%20estimate';
   const smsBody = `Hi, I have a question about quote ${slugStr}`;
   const textHref = isLikelyMobile()
@@ -57,7 +61,7 @@ export default function QuestionsEscapeHatch({ estimateSlug }) {
         style={{ ...BTN_BASE, background: W.navy, color: W.white }}
       >
         <PhoneIcon />
-        Questions? Call Waves
+        {glass ? GLASS_COPY.callButton : 'Questions? Call Waves'}
       </a>
       <a
         href={textHref}
@@ -65,7 +69,7 @@ export default function QuestionsEscapeHatch({ estimateSlug }) {
         style={{ ...BTN_BASE, background: W.warmBg, color: W.navy, border: `1px solid ${W.warmBorder}` }}
       >
         <ChatIcon />
-        Questions? Text Waves!
+        {glass ? GLASS_COPY.textButton : 'Questions? Text Waves!'}
       </a>
     </div>
   );

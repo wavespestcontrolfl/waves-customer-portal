@@ -228,6 +228,41 @@ describe('20260705010010 message_drafts guard exemption (splice, not clobber, pr
     "is distinct from 'shadow' and not coalesce(NEW.campaign_type is not null and NEW.status = 'pending', false) then",
   );
 
+  // LIVE post-#2357 prod text (verbatim pg_get_functiondef, pulled 2026-07-05
+  // AFTER #2357 merged + deployed): its campaign migration
+  // (20260705000502_message_drafts_guard_exempt_campaigns) ran FIRST in prod,
+  // wrapping the whole condition and appending ` and NEW.campaign_type is
+  // null` — NOT the coalesce shape the two fixtures above guessed pre-merge.
+  // This is the exact text 20260705010010 meets when it runs in prod, so the
+  // composed splice must keep BOTH exemptions live. (The guessed-shape
+  // fixtures stay for anchor-robustness coverage.)
+  const PROD_LIVE_AFTER_2357 = `CREATE OR REPLACE FUNCTION public.block_message_drafts_when_disabled()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+    declare
+      enabled boolean;
+    begin
+      -- Exempt ONLY the brand-voice loop's unsendable shape:
+      -- drafter='house_voice' AND status='shadow'. Every legitimate
+      -- house-voice insert (live shadow drafter + backfill) is status
+      -- 'shadow'; 'suggested' only ever arises via a later UPDATE, which
+      -- this BEFORE INSERT trigger doesn't gate. Requiring 'shadow' keeps
+      -- the kill switch effective against a future/buggy house-voice insert
+      -- with a sendable status (e.g. 'pending'), which admin-drafts would
+      -- otherwise pick up. Everything else (legacy NULL-drafter path) stays
+      -- subject to the flag.
+      if (NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow') and NEW.campaign_type is null then
+        select lower(value) = 'true' into enabled
+          from system_config where key = 'legacy_ai_drafts_enabled';
+        if coalesce(enabled, false) is not true then
+          raise exception 'legacy_ai_drafts_disabled' using errcode = 'P0001';
+        end if;
+      end if;
+      return new;
+    end;
+    $function$`;
+
   // Fake knex for the splice migration: the pg_get_functiondef SELECT returns
   // the configured live definition; every other raw() is recorded as executed.
   function spliceKnex(liveDef) {
@@ -277,6 +312,7 @@ describe('20260705010010 message_drafts guard exemption (splice, not clobber, pr
       .replace(/NEW\.intent = any \(ARRAY\['click_followup'\]::text\[\]\)/gi,
         NEW.intent == null ? 'null' : lit(NEW.intent === 'click_followup'))
       .replace(/NEW\.campaign_type is not null/gi, lit(NEW.campaign_type != null))
+      .replace(/NEW\.campaign_type is null/gi, lit(NEW.campaign_type == null))
       .replace(/\bcoalesce\b/gi, 'COALESCE')
       .replace(/\band\b/gi, '&&')
       .replace(/\bor\b/gi, '||')
@@ -292,16 +328,25 @@ describe('20260705010010 message_drafts guard exemption (splice, not clobber, pr
   const HOUSE_VOICE_SHADOW = { drafter: 'house_voice', status: 'shadow', intent: null };
   const NULL_INTENT_PENDING = { drafter: null, status: 'pending', intent: null };
   const PLAIN_LEGACY = { drafter: null, status: 'sent', intent: null };
+  const CAMPAIGN_INSERT = { drafter: null, status: 'pending', intent: null, campaign_type: 'upsell' };
 
-  // The full splice table runs against BOTH starting shapes (parenthesized
-  // 20260613 form and the verbatim UNPARENTHESIZED prod form), each with
-  // another PR's campaign clause present.
+  // The full splice table runs against every starting shape that carries a
+  // sibling campaign clause: the two pre-merge guesses (parenthesized 20260613
+  // form + verbatim UNPARENTHESIZED prod form, coalesce-style clause) and the
+  // LIVE post-#2357 prod text (parenthesize-and-append clause, as actually
+  // deployed). Third column: the campaign-clause text that must survive.
+  // Fourth: whether a campaign insert raises with the flag off — TRUE only
+  // for the UNPAREN fixture, whose bare-appended sibling clause is
+  // semantically dead by the same OR/AND precedence bug this suite pins (our
+  // splice must PRESERVE it textually, not resurrect it); in the fixtures
+  // whose campaign clause is live it must STAY live through our splice.
   const SHAPES = [
-    ['parenthesized 20260613 shape + campaign clause', PAREN_WITH_CAMPAIGN],
-    ['VERBATIM unparenthesized prod shape + campaign clause', UNPAREN_WITH_CAMPAIGN],
+    ['parenthesized 20260613 shape + campaign clause', PAREN_WITH_CAMPAIGN, 'NEW.campaign_type is not null', false],
+    ['VERBATIM unparenthesized prod shape + campaign clause', UNPAREN_WITH_CAMPAIGN, 'NEW.campaign_type is not null', true],
+    ['LIVE post-#2357 prod shape (campaign exemption deployed first)', PROD_LIVE_AFTER_2357, 'NEW.campaign_type is null', false],
   ];
 
-  for (const [label, fixture] of SHAPES) {
+  for (const [label, fixture, campaignMarker, campaignInsertRaises] of SHAPES) {
     describe(label, () => {
       test('up splices precedence-safely and preserves every other clause', async () => {
         const knex = spliceKnex(fixture);
@@ -311,12 +356,15 @@ describe('20260705010010 message_drafts guard exemption (splice, not clobber, pr
         const sql = knex.executed[0];
         // Textual preservation.
         expect(sql).toContain("NEW.status = 'pending' and NEW.intent = any (ARRAY['click_followup']::text[])");
-        expect(sql).toContain('NEW.campaign_type is not null');
+        expect(sql).toContain(campaignMarker);
         expect(sql).toContain("NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow'");
         expect(sql).toContain("raise exception 'legacy_ai_drafts_disabled'");
         // Semantic pins with the legacy flag OFF (the precedence bug made
         // the first assertion fail on the unparenthesized shape):
         expect(raisesWithFlagOff(sql, CLICK_INSERT)).toBe(false);       // exemption WORKS
+        // Sibling campaign exemption keeps ITS semantics (live stays live,
+        // the dead bare-append fixture stays dead — never resurrected).
+        expect(raisesWithFlagOff(sql, CAMPAIGN_INSERT)).toBe(campaignInsertRaises);
         expect(raisesWithFlagOff(sql, HOUSE_VOICE_SHADOW)).toBe(false); // still exempt
         expect(raisesWithFlagOff(sql, NULL_INTENT_PENDING)).toBe(true); // NULL intent still blocked
         expect(raisesWithFlagOff(sql, PLAIN_LEGACY)).toBe(true);        // legacy queue still blocked
@@ -339,11 +387,13 @@ describe('20260705010010 message_drafts guard exemption (splice, not clobber, pr
         expect(down.executed).toHaveLength(1);
         const sql = down.executed[0];
         expect(sql).not.toContain('click_followup');
-        expect(sql).toContain('NEW.campaign_type is not null');
+        expect(sql).toContain(campaignMarker);
         expect(sql).toContain("raise exception 'legacy_ai_drafts_disabled'");
         // Semantics revert: click-followup inserts raise again; house-voice
-        // shadow stays exempt.
+        // shadow stays exempt and the sibling campaign clause keeps its
+        // pre-splice semantics.
         expect(raisesWithFlagOff(sql, CLICK_INSERT)).toBe(true);
+        expect(raisesWithFlagOff(sql, CAMPAIGN_INSERT)).toBe(campaignInsertRaises);
         expect(raisesWithFlagOff(sql, HOUSE_VOICE_SHADOW)).toBe(false);
       });
     });
