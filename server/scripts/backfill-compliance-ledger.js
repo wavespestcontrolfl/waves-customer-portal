@@ -57,8 +57,22 @@ function parseArgs(argv = process.argv) {
 
 // service_records that still have at least one un-ledgered product row.
 // Keyset-paginated on the uuid PK (uuid > uuid is a stable ordering).
-async function fetchCandidates(lastId) {
-  return db('service_records as sr')
+//
+// "Covered" mirrors the writer's dedupe rules: an exact service_product_id
+// link, OR a row WITHOUT the link (legacy write / SET-NULL orphan) for the
+// same catalog product on the same record — including the both-NULL
+// unidentifiable case. Without the legacy arm, records the old writer
+// already ledgered scan as candidates forever, and a --limit'ed run can
+// burn its whole budget on those no-ops before reaching genuinely missing
+// V2 completions (each invocation restarts from the lowest uuid).
+//
+// One deliberate asymmetry remains: the writer's ilike name-match fallback
+// can resolve a catalog product this SQL can't see (sp.product_id NULL but
+// the legacy row carries the resolved id) — such records still scan as
+// candidates and write nothing. The writer stays the authority; the scan
+// only needs to be duplicate-safe and starve-proof, not perfect.
+function buildCandidateQuery(k, lastId) {
+  return k('service_records as sr')
     .whereExists(function productMissingLedgerRow() {
       this.select(1)
         .from('service_products as sp')
@@ -66,13 +80,29 @@ async function fetchCandidates(lastId) {
         .whereNotExists(function alreadyLedgered() {
           this.select(1)
             .from('property_application_history as pah')
-            .whereRaw('pah.service_product_id = sp.id');
+            .whereRaw('pah.service_record_id = sp.service_record_id')
+            .where(function coveredByLinkOrLegacyIdentity() {
+              this.whereRaw('pah.service_product_id = sp.id')
+                .orWhere(function legacyProductIdentity() {
+                  this.whereNull('pah.service_product_id')
+                    .where(function sameProductOrBothUnidentified() {
+                      this.whereRaw('pah.product_id = sp.product_id')
+                        .orWhere(function bothUnidentified() {
+                          this.whereNull('pah.product_id').whereRaw('sp.product_id is null');
+                        });
+                    });
+                });
+            });
         });
     })
     .modify((qb) => { if (lastId) qb.andWhere('sr.id', '>', lastId); })
     .orderBy('sr.id', 'asc')
     .limit(BATCH)
     .select('sr.id', 'sr.customer_id', 'sr.service_date', 'sr.service_type', 'sr.status');
+}
+
+async function fetchCandidates(lastId) {
+  return buildCandidateQuery(db, lastId);
 }
 
 // Run the writer for one record. Dry-run: same writer, same transaction
@@ -209,4 +239,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { runBackfill, parseArgs };
+module.exports = { runBackfill, parseArgs, buildCandidateQuery };

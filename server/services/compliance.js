@@ -67,10 +67,14 @@ const ComplianceService = {
    * status flip calls it fire-and-forget with no trx.
    *
    * Idempotent: each ledger row carries service_product_id (unique index,
-   * migration 20260705000401) and the insert is ON CONFLICT DO NOTHING, so
-   * retries / double-completions / backfill re-runs never duplicate rows.
-   * Rows written before that column existed have NULL there — for those,
-   * dedupe falls back to the resolved catalog product per record.
+   * migration 20260705000401) plus the stable-identity partial unique on
+   * (service_record_id, product_id) (migration 20260705000402), and the
+   * insert is catch-all ON CONFLICT DO NOTHING — so retries,
+   * double-completions, backfill re-runs, and even product-row replacement
+   * (pest-recap re-commit deletes + re-inserts service_products, SET-NULLing
+   * the link) never duplicate a ledgered application. Rows written before
+   * the link column existed have NULL there — for those, dedupe falls back
+   * to the resolved catalog product per record.
    */
   async createComplianceRecords(serviceRecordId, { trx } = {}) {
     const k = trx || db;
@@ -166,9 +170,17 @@ const ComplianceService = {
         notes: sp.notes || null,
       };
 
+      // Catch-all DO NOTHING (no conflict target): a race can conflict on
+      // EITHER unique index — the exact product-row link
+      // (service_product_id, migration ...000401) or the stable identity
+      // (service_record_id, product_id, migration ...000402). The second
+      // matters when service_products rows get replaced (pest-recap
+      // re-commit deletes + re-inserts them, SET-NULLing the ledger link):
+      // the replacement row has a new id, so only the stable identity can
+      // stop a concurrent writer double-ledgering the same application.
       const inserted = await k('property_application_history')
         .insert(record)
-        .onConflict('service_product_id')
+        .onConflict()
         .ignore()
         .returning('*');
       if (inserted.length) records.push(inserted[0]);
@@ -280,6 +292,14 @@ const ComplianceService = {
         applicationMethod: r.application_method,
         targetPest: r.target_pest,
         restrictedUse: r.restricted_use ? 'Yes' : 'No',
+        // Site + application-conditions fields the corrected writer now
+        // captures. Appended after the original fields (append-only order,
+        // mirrored in the CSV) so nothing scripting against the report by
+        // position breaks.
+        applicationSite: r.application_site,
+        weatherConditions: r.weather_conditions,
+        windSpeedMph: r.wind_speed_mph,
+        soilTempF: r.soil_temp_f,
       })),
     };
   },
@@ -294,6 +314,9 @@ const ComplianceService = {
       'Site Address', 'Product Name', 'EPA Reg Number', 'Active Ingredient',
       'Application Rate', 'Rate Unit', 'Quantity Applied', 'Quantity Unit',
       'Area Treated (sqft)', 'Application Method', 'Target Pest', 'Restricted Use',
+      // Appended columns only — existing column order is a compatibility
+      // surface for anything scripting against the CSV.
+      'Application Site', 'Weather Conditions', 'Wind Speed (mph)', 'Soil Temp (F)',
     ];
 
     const escape = (val) => {
@@ -311,6 +334,7 @@ const ComplianceService = {
         a.siteAddress, a.productName, a.epaRegNumber, a.activeIngredient,
         a.applicationRate, a.rateUnit, a.quantityApplied, a.quantityUnit,
         a.areaTreated, a.applicationMethod, a.targetPest, a.restrictedUse,
+        a.applicationSite, a.weatherConditions, a.windSpeedMph, a.soilTempF,
       ].map(escape).join(','));
     }
 

@@ -26,7 +26,7 @@ jest.mock('../services/logger', () => ({
 const db = require('../models/db');
 const ComplianceService = require('../services/compliance');
 const applicationLimits = require('../services/application-limits');
-const { runBackfill } = require('../scripts/backfill-compliance-ledger');
+const { runBackfill, buildCandidateQuery } = require('../scripts/backfill-compliance-ledger');
 
 function chain({ rows = [], first: firstVal, returningRows } = {}) {
   const q = {};
@@ -148,8 +148,11 @@ describe('ComplianceService.createComplianceRecords (corrected writer)', () => {
       restricted_use: false,
       applicator_license: 'JB351547',
     });
-    // Idempotency backstop on the unique product-row link.
-    expect(insertChain.onConflict).toHaveBeenCalledWith('service_product_id');
+    // Idempotency backstop: catch-all DO NOTHING, so a race resolves via
+    // EITHER unique index — the exact product-row link OR the stable
+    // (service_record_id, product_id) identity (survives product-row
+    // replacement by the pest-recap re-commit).
+    expect(insertChain.onConflict).toHaveBeenCalledWith();
     expect(insertChain.ignore).toHaveBeenCalled();
   });
 
@@ -212,6 +215,26 @@ describe('ComplianceService.createComplianceRecords (corrected writer)', () => {
 
     expect(records).toEqual([]);
     expect(db).toHaveBeenCalledTimes(5); // catalog looked up, insert never reached
+  });
+
+  test('recap-style product replacement + recompletion does NOT duplicate the ledgered application', async () => {
+    // pest-recap re-commit DELETEs and re-inserts service_products: the
+    // original ledger row's service_product_id is SET NULL (orphaned) but
+    // it keeps its product_id. The replacement row has a NEW id, so the
+    // link-based dedupe can't see it — the stable product identity must.
+    const replacementRow = { ...V2_SERVICE_PRODUCT, id: 'sp-recap-replacement' };
+    db
+      .mockReturnValueOnce(chain({ first: SERVICE_RECORD }))
+      .mockReturnValueOnce(chain({ rows: [replacementRow] }))
+      .mockReturnValueOnce(chain({ first: TECH }))
+      // orphaned row: link nulled by the FK, product identity intact
+      .mockReturnValueOnce(chain({ rows: [{ service_product_id: null, product_id: 'prod-1' }] }))
+      .mockReturnValueOnce(chain({ first: CATALOG_PRODUCT }));
+
+    const records = await ComplianceService.createComplianceRecords('rec-1');
+
+    expect(records).toEqual([]);
+    expect(db).toHaveBeenCalledTimes(5); // insert never reached
   });
 
   test('unidentifiable legacy row + unidentifiable product: skip, never risk a ledger duplicate', async () => {
@@ -405,5 +428,112 @@ describe('backfill-compliance-ledger dry-run', () => {
       rowsWritten: 0,
     });
     expect(summary.samples).toEqual([]);
+  });
+});
+
+describe('backfill candidate scan excludes legacy-covered records (limited-run starvation)', () => {
+  // The predicate lives in SQL, so pin the compiled query contract with a
+  // real (connectionless) knex client: a product row only counts as missing
+  // when NO ledger row covers it — neither by the exact service_product_id
+  // link NOR by a legacy/orphaned row (NULL link) with the same catalog
+  // product on the same record (including the both-NULL unidentifiable
+  // case). Without the legacy arm, a --limit'ed run burns its budget
+  // re-scanning records the old writer already ledgered.
+  const knexPg = require('knex')({ client: 'pg' });
+
+  test('compiled SQL carries the link arm AND the legacy product-identity arm', () => {
+    const { sql } = buildCandidateQuery(knexPg, null).toSQL();
+    const flat = sql.replace(/\s+/g, ' ');
+
+    // exact link coverage
+    expect(flat).toContain('pah.service_product_id = sp.id');
+    // legacy / SET-NULL-orphan coverage by stable product identity
+    expect(flat).toContain('"pah"."service_product_id" is null');
+    expect(flat).toContain('pah.product_id = sp.product_id');
+    // both-unidentified coverage
+    expect(flat).toContain('"pah"."product_id" is null');
+    expect(flat).toContain('sp.product_id is null');
+    // coverage is scoped to the same record, not any record
+    expect(flat).toContain('pah.service_record_id = sp.service_record_id');
+  });
+
+  test('keyset cursor and batch limit survive the predicate rewrite', () => {
+    const { sql, bindings } = buildCandidateQuery(knexPg, 'aaaa-cursor').toSQL();
+    expect(sql).toContain('"sr"."id" > ?');
+    expect(sql).toContain('order by "sr"."id" asc');
+    expect(sql).toContain('limit ?');
+    expect(bindings).toContain('aaaa-cursor');
+  });
+});
+
+describe('DACS report + CSV export surface the captured site and weather', () => {
+  beforeEach(() => {
+    db.mockReset();
+  });
+
+  const LEDGER_ROW = {
+    id: 'pah-1',
+    customer_id: 'cust-1',
+    service_record_id: 'rec-1',
+    service_product_id: 'sp-1',
+    product_id: 'prod-1',
+    technician_id: 'tech-1',
+    application_date: '2026-06-12',
+    application_rate: '0.5',
+    rate_unit: 'oz',
+    quantity_applied: '2.5',
+    quantity_unit: 'oz',
+    area_treated_sqft: 1200,
+    application_method: 'perimeter_spray',
+    target_pest: 'ants, german roaches',
+    restricted_use: false,
+    applicator_license: 'JB351547',
+    application_site: 'perimeter',
+    weather_conditions: 'Partly cloudy 84F 71% RH',
+    wind_speed_mph: 6,
+    soil_temp_f: 78.1,
+    active_ingredient: 'Lambda-cyhalothrin',
+    epa_registration_number: '100-1066',
+    // join columns
+    product_name: 'Demand CS',
+    first_name: 'Test',
+    last_name: 'Customer',
+    address_line1: '123 Palm Ave',
+    city: 'Bradenton',
+    state: 'FL',
+    zip: '34205',
+    tech_name: 'Adam Benetti',
+    tech_license: 'JB351547',
+  };
+
+  test('getDacsReport maps applicationSite + weather fields', async () => {
+    db.mockReturnValueOnce(chain({ rows: [LEDGER_ROW] }));
+
+    const report = await ComplianceService.getDacsReport('2026-01-01', '2026-12-31');
+
+    expect(report.applications[0]).toMatchObject({
+      targetPest: 'ants, german roaches',
+      applicationSite: 'perimeter',
+      weatherConditions: 'Partly cloudy 84F 71% RH',
+      windSpeedMph: 6,
+      soilTempF: 78.1,
+    });
+  });
+
+  test('exportDacsCSV appends the new columns after the original order (append-only)', async () => {
+    db.mockReturnValueOnce(chain({ rows: [LEDGER_ROW] }));
+
+    const csv = await ComplianceService.exportDacsCSV('2026-01-01', '2026-12-31');
+    const [headerLine, row] = csv.split('\n');
+
+    // Original 16 columns keep their exact positions; new ones append.
+    expect(headerLine).toBe(
+      'Application Date,Applicator Name,Applicator License,Customer Name,'
+      + 'Site Address,Product Name,EPA Reg Number,Active Ingredient,'
+      + 'Application Rate,Rate Unit,Quantity Applied,Quantity Unit,'
+      + 'Area Treated (sqft),Application Method,Target Pest,Restricted Use,'
+      + 'Application Site,Weather Conditions,Wind Speed (mph),Soil Temp (F)'
+    );
+    expect(row.endsWith(',perimeter,Partly cloudy 84F 71% RH,6,78.1')).toBe(true);
   });
 });
