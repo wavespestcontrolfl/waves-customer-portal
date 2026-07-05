@@ -153,10 +153,15 @@ export default function SlotPicker({
   // booking lead — otherwise clear it (and the CTA labels with it).
   useEffect(() => {
     if (!glass || !selectedSlotId) return;
+    // While slots are loading (first mount, or a remount after review-cancel
+    // that intentionally preserves selectedSlotId), an empty list means
+    // "unknown", not "gone" — clearing here would drop a valid selection and
+    // hide the payment choices before the fetch repopulates the list.
+    if (loading || !data) return;
     if (!selectedSlot || glassSlotIsStale(selectedSlot)) selectSlot(null);
     // freshnessTick re-runs the check each minute while the page sits open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [glass, selectedSlotId, selectedSlot, freshnessTick]);
+  }, [glass, selectedSlotId, selectedSlot, freshnessTick, loading, data]);
 
   useEffect(() => {
     let cancelled = false;

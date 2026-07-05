@@ -43,6 +43,59 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('SlotPicker (glass stale-selection sweep)', () => {
+  const setGlass = (on) => window.history.replaceState(null, '', on ? '/?glass=1' : '/');
+
+  it('preserves a selected slot while the availability fetch is still pending', async () => {
+    setGlass(true);
+    const pending = deferred();
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(pending.promise));
+    const onSelect = vi.fn();
+    const onSelectMeta = vi.fn();
+    try {
+      render(
+        <SlotPicker
+          token="tok"
+          selectedSlotId="kept-slot"
+          onSelect={onSelect}
+          onSelectMeta={onSelectMeta}
+          refreshSignal={0}
+        />,
+      );
+      // Loading: the sweep must treat the empty list as "unknown", not
+      // "gone" — a review-cancel remount preserves selectedSlotId on
+      // purpose and the payment choices hang off it.
+      expect(onSelect).not.toHaveBeenCalled();
+      pending.resolve(jsonResponse({ primary: [slot('kept-slot', '2099-06-01')], expander: [] }));
+      await screen.findByText(/Arrival window:/);
+      expect(onSelect).not.toHaveBeenCalledWith(null);
+    } finally {
+      setGlass(false);
+    }
+  });
+
+  it('clears the selection once loaded slots no longer include it', async () => {
+    setGlass(true);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      jsonResponse({ primary: [slot('other-slot', '2099-06-01')], expander: [] }),
+    ));
+    const onSelect = vi.fn();
+    try {
+      render(
+        <SlotPicker
+          token="tok"
+          selectedSlotId="gone-slot"
+          onSelect={onSelect}
+          refreshSignal={0}
+        />,
+      );
+      await waitFor(() => expect(onSelect).toHaveBeenCalledWith(null));
+    } finally {
+      setGlass(false);
+    }
+  });
+});
+
 describe('SlotPicker', () => {
   it('renders the date finder inside the booking card, above the slot list', async () => {
     const fetchMock = vi
