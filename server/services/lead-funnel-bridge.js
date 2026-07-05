@@ -74,7 +74,9 @@ function applyStagePredicate(query, target) {
   if (target === 'lost') {
     // Terminal collapse: lost overwrites any intermediate stage but never
     // 'completed' (sticky) and never re-writes 'lost' (idempotent no-op).
-    return query.whereNotIn('funnel_stage', ['completed', 'lost']);
+    // NULL must match explicitly — `NULL NOT IN (...)` is unknown in
+    // Postgres, and this bridge treats NULL as a defensive rank-0 stage.
+    return query.where((q) => q.whereNotIn('funnel_stage', ['completed', 'lost']).orWhereNull('funnel_stage'));
   }
   // Advance only from a STRICTLY lower rank. 'completed' is absent from the
   // list, so nothing is ever downgraded. NULL counts as rank 0 ('lead' is the

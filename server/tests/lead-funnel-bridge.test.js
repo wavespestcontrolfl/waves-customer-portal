@@ -45,14 +45,14 @@ function makeCaptureDb({ updatedRows = 1, throwOnUpdate = false } = {}) {
 }
 
 // Would a row currently at `stage` be matched by the captured stage predicate?
+// Models POSTGRES semantics: NULL never matches whereIn OR whereNotIn
+// (`NULL NOT IN (...)` is unknown) — a NULL stage matches only via an
+// explicit orWhereNull. This is exactly the trap the lost predicate hit.
 function predicateMatches(captured, stage) {
+  if (stage === null) return captured.orWhereNull === 'funnel_stage';
   const stageIn = captured.whereInByCol.funnel_stage;
-  if (stageIn) {
-    return stageIn.includes(stage) || (stage === null && captured.orWhereNull === 'funnel_stage');
-  }
-  if (captured.whereNotIn) {
-    return !captured.whereNotIn.list.includes(stage);
-  }
+  if (stageIn) return stageIn.includes(stage);
+  if (captured.whereNotIn) return !captured.whereNotIn.list.includes(stage);
   return false;
 }
 
@@ -152,6 +152,9 @@ describe('bridgeLeadFunnelStage — lost collapse (lost / unresponsive / disqual
       for (const stage of ['lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'booked']) {
         expect(predicateMatches(c, stage)).toBe(true);
       }
+      // NULL is the defensive rank-0 stage — the collapse must catch it via
+      // an explicit orWhereNull (NULL NOT IN (...) is unknown in Postgres).
+      expect(predicateMatches(c, null)).toBe(true);
       expect(predicateMatches(c, 'completed')).toBe(false);
       expect(predicateMatches(c, 'lost')).toBe(false);
     },

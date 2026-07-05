@@ -53,7 +53,14 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
     };
   }
   if (source === 'google' && medium === 'cpc') return { source: 'google_ads', detail: `Campaign: ${utmCampaign}`, channel: 'paid', area: utmContent };
-  if (source === 'facebook' || source === 'fb') return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: medium === 'cpc' ? 'paid' : 'organic' };
+  if (source === 'facebook' || source === 'fb') {
+    // A deterministic Meta click id wins regardless of the medium label —
+    // fbclid/_fbc only ride ad clicks (organic visits carry only _fbp), so
+    // utm_medium=paid_social etc. with a click id is still a paid click.
+    // Without one, only medium=cpc marks paid (unchanged).
+    const isPaid = medium === 'cpc' || !!(fbclid || fbc);
+    return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: isPaid ? 'paid' : 'organic' };
+  }
   if (source === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
   // Google auto-tagging (the default) appends gclid — or wbraid/gbraid for
   // iOS/web-to-app — to ad-click landing URLs WITHOUT utm_source/medium, so an
