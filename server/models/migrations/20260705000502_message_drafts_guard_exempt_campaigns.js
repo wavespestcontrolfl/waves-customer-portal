@@ -14,36 +14,38 @@
  * Campaign drafts are an independently-gated system (GATE_CAMPAIGN_DRAFTS +
  * explicit owner approval per send); the legacy approval-queue kill switch was
  * never meant to govern them. Legacy writers never set campaign_type, so
- * exempting `NEW.campaign_type IS NOT NULL` leaves the legacy lane fully
- * gated.
+ * requiring `NEW.campaign_type IS NULL` for the guard to fire leaves the
+ * legacy lane fully kill-switched.
  *
- * ORDER-INDEPENDENT EXTENSION: a sibling PR extends the SAME function for its
- * own lane (intent='click_followup', migration range 202607050100xx). To
- * compose in either merge order we do NOT install a hardcoded function body.
- * Instead we read the CURRENT function definition (pg_get_functiondef) and
- * splice an early-return campaign exemption in right after BEGIN — preserving
- * verbatim whatever exemptions are already installed (house_voice shadow,
- * click_followup, ...). Re-runs and an already-extended function are detected
- * and skipped. Only if the function is missing entirely (never true on a
- * DB that replayed 20260613000010) do we create the canonical guard from
- * scratch.
+ * PATTERN — parenthesize-and-append (shared with the sibling click-followup
+ * exemption PR so the two stack cleanly in either merge order): we do NOT
+ * install a hardcoded function body. We read the CURRENT definition
+ * (pg_get_functiondef), locate the guard's `if <condition> then` via the
+ * 'house_voice' anchor (present verbatim in every installed shape, including
+ * a sibling-extended one), wrap the ENTIRE captured condition in parentheses,
+ * and append ` and NEW.campaign_type is null`. Parenthesizing first matters:
+ * prod's live condition is UNPARENTHESIZED (`A or B`), and SQL gives AND
+ * precedence over OR — a bare append would parse as `A or (B and <ours>)`,
+ * leaving A true for campaign inserts (drafter NULL) and the exemption
+ * silently dead. `(A or B) and NEW.campaign_type is null` is precedence-safe,
+ * and repeated wraps compose associatively:
+ *   ((A or B) and not <click>) and NEW.campaign_type is null
+ * works identically to
+ *   ((A or B) and NEW.campaign_type is null) and not <click>.
+ *
+ * Idempotent on re-run (campaign_type marker check); fails loudly — never
+ * silently skips — if the guard's shape is unrecognizable; down() strips only
+ * the appended campaign clause. 20260613000010 is not edited (it has run in
+ * prod). Only if the function is missing entirely (never true on a DB that
+ * replayed 20260613000010) do we create the canonical guard from scratch.
  */
 
 const EXEMPTION_MARKER = 'campaign_type';
-
-// Spliced in immediately after the function's BEGIN. Early return = exempt.
-const CAMPAIGN_EXEMPTION_SNIPPET = `
-      -- Campaign drafts V1 (GATE_CAMPAIGN_DRAFTS lane): campaign rows are
-      -- owner-approval drafts from an independently-gated system - the legacy
-      -- approval-queue kill switch does not govern them. Legacy inserts never
-      -- set campaign_type, so they stay fully gated below.
-      if NEW.campaign_type is not null then
-        return NEW;
-      end if;
-`;
+const CAMPAIGN_CLAUSE = ' and NEW.campaign_type is null';
+const GUARD_ANCHOR = "NEW.drafter is distinct from 'house_voice'";
 
 // Fallback body if the function somehow doesn't exist (canonical
-// 20260613000010 shape + the campaign exemption).
+// 20260613000010 shape with the campaign clause applied the same way).
 const FALLBACK_FUNCTION_SQL = `
     CREATE OR REPLACE FUNCTION public.block_message_drafts_when_disabled()
     RETURNS trigger
@@ -52,8 +54,7 @@ const FALLBACK_FUNCTION_SQL = `
     declare
       enabled boolean;
     begin
-${CAMPAIGN_EXEMPTION_SNIPPET}
-      if NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow' then
+      if (NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow')${CAMPAIGN_CLAUSE} then
         select lower(value) = 'true' into enabled
           from system_config where key = 'legacy_ai_drafts_enabled';
         if coalesce(enabled, false) is not true then
@@ -76,16 +77,36 @@ async function currentGuardDef(knex) {
   return result?.rows?.[0]?.def || null;
 }
 
-// Insert the snippet right after the body's BEGIN (the first `begin` token
-// after the $function$ delimiter — the guard's known shapes keep comments
-// inside the body, after BEGIN).
+/**
+ * Locate the guard `if <condition> then` via the house_voice anchor (immune
+ * to comment lines above the if and to a sibling exemption already wrapped
+ * around the condition), parenthesize the captured condition, and append the
+ * campaign clause. Returns null when the shape is unrecognizable.
+ */
 function spliceExemption(def) {
-  const bodyStart = def.indexOf('$function$');
-  if (bodyStart === -1) return null;
-  const beginMatch = /\bbegin\b/i.exec(def.slice(bodyStart));
-  if (!beginMatch) return null;
-  const insertAt = bodyStart + beginMatch.index + beginMatch[0].length;
-  return def.slice(0, insertAt) + '\n' + CAMPAIGN_EXEMPTION_SNIPPET + def.slice(insertAt);
+  const anchorIdx = def.indexOf(GUARD_ANCHOR);
+  if (anchorIdx === -1) return null;
+
+  // Nearest `if` token BEFORE the anchor (the guard's if — the condition
+  // itself contains no `if`, and comments sit above the if, not inside it).
+  let ifMatch = null;
+  for (const m of def.slice(0, anchorIdx).matchAll(/\bif\b/gi)) ifMatch = m;
+  if (!ifMatch) return null;
+
+  // Nearest `then` token AFTER the anchor.
+  const thenMatch = /\bthen\b/i.exec(def.slice(anchorIdx));
+  if (!thenMatch) return null;
+
+  const condStart = ifMatch.index + ifMatch[0].length;
+  const condEnd = anchorIdx + thenMatch.index;
+  const condition = def.slice(condStart, condEnd).trim();
+  if (!condition) return null;
+
+  return (
+    def.slice(0, ifMatch.index) +
+    `if (${condition})${CAMPAIGN_CLAUSE} ` +
+    def.slice(condEnd)
+  );
 }
 
 exports.up = async function (knex) {
@@ -109,25 +130,21 @@ exports.up = async function (knex) {
   const extended = spliceExemption(def);
   if (!extended) {
     throw new Error(
-      'message_drafts_guard_exempt_campaigns: could not locate BEGIN in ' +
-      'block_message_drafts_when_disabled — guard shape changed; extend manually'
+      'message_drafts_guard_exempt_campaigns: could not locate the guard ' +
+      "if-condition (house_voice anchor) in block_message_drafts_when_disabled " +
+      '— guard shape changed; extend manually'
     );
   }
   await knex.raw(extended);
 };
 
 exports.down = async function (knex) {
-  // Remove exactly the spliced exemption block, preserving any other lane's
-  // exemptions. If the block isn't present (e.g. up() took the fallback path
-  // on a function-less DB), fall back to stripping via marker-free no-op.
+  // Remove exactly the appended campaign clause, preserving any other lane's
+  // exemptions and the (now-parenthesized) original condition — the added
+  // parentheses are semantically inert, so they stay.
   const def = await currentGuardDef(knex);
   if (!def || !def.includes(EXEMPTION_MARKER)) return;
+  if (!def.includes(CAMPAIGN_CLAUSE)) return;
 
-  const start = def.indexOf('-- Campaign drafts V1');
-  const endToken = 'end if;';
-  if (start === -1) return;
-  const end = def.indexOf(endToken, start);
-  if (end === -1) return;
-  const stripped = def.slice(0, start) + def.slice(end + endToken.length);
-  await knex.raw(stripped);
+  await knex.raw(def.replace(CAMPAIGN_CLAUSE, ''));
 };
