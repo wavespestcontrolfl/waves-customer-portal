@@ -346,6 +346,22 @@ function initScheduledJobs() {
     return;
   }
 
+  // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
+  // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
+  // and alerts Adam the moment one stops answering (bad model ID, revoked key,
+  // access/rate-limit denial). Without this, a dead route only shows up as
+  // fall-back-to-FLAGSHIP warnings buried under live traffic. runExclusive so
+  // a deploy overlap doesn't double-probe/double-alert.
+  const smsDraftCanaryTick = async () => {
+    try {
+      await runExclusive('sms-draft-canary', () => require('./sms-draft-canary').runSmsDraftCanary());
+    } catch (err) {
+      logger.error(`[sms-draft-canary] tick failed: ${err.message}`);
+    }
+  };
+  setTimeout(smsDraftCanaryTick, 60 * 1000);
+  cron.schedule('23 */6 * * *', smsDraftCanaryTick, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.
   cron.schedule('*/5 * * * *', async () => {
     try {
