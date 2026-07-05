@@ -49,14 +49,25 @@ class SeasonalReactivation {
     const month = new Date().getMonth();
     const seasonal = SEASONAL_HOOKS[month];
 
-    // Canonical lapsed-customer predicate (cancellation-processor stamps
-    // pipeline_stage='churned', active=false, churned_at on cancellation).
+    // Canonical lapsed-customer predicate, branched per how each stage is
+    // actually written:
+    //   churned — cancellation-processor stamps pipeline_stage='churned',
+    //             active=false AND churned_at together, so require all three;
+    //   dormant — the stale-service pipeline (pipeline-manager.js
+    //             no_service_120_days) sets pipeline_stage ONLY: active stays
+    //             true and churned_at is never stamped, so dormant matches on
+    //             the stage alone.
     // Soft-deleted customers must never get reactivation outreach (same
-    // deleted_at guard the billing/reminder/dunning sweeps use).
+    // deleted_at guard the billing/reminder/dunning sweeps use) — applied to
+    // both branches.
     const customers = await db('customers')
-      .whereIn('pipeline_stage', ['churned', 'dormant'])
-      .where('active', false)
-      .whereNotNull('churned_at')
+      .where(function () {
+        this.where(function () {
+          this.where('pipeline_stage', 'churned')
+            .where('active', false)
+            .whereNotNull('churned_at');
+        }).orWhere('pipeline_stage', 'dormant');
+      })
       .whereNull('deleted_at')
       .whereNotNull('phone')
       .where(function () {

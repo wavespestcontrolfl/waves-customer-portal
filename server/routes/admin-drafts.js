@@ -4,6 +4,8 @@ const db = require('../models/db');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { isEnabled } = require('../config/feature-gates');
+const { CAMPAIGN_GATE, campaignApprovalState } = require('../services/campaign-drafts');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -134,6 +136,66 @@ function blockedSendResponse(res, smsResult) {
   });
 }
 
+// sms_log.message_type for approved campaign sends — aligned with what the
+// legacy workflows historically logged ('reactivation' / 'upsell') so the
+// campaign cooldown's CAMPAIGN_SMS_TYPES filter and readers like
+// /api/admin/workflows/status see these sends. Null-campaign drafts keep the
+// legacy 'ai_approved' / 'ai_revised' provenance value.
+const CAMPAIGN_MESSAGE_TYPES = { reactivation: 'reactivation', upsell: 'upsell' };
+
+function draftMessageType(draft, legacyValue) {
+  if (!draft.campaign_type) return legacyValue;
+  return CAMPAIGN_MESSAGE_TYPES[draft.campaign_type] || draft.campaign_type;
+}
+
+/**
+ * Pre-send guard for campaign drafts (both approve and revise). Legacy
+ * (null campaign_type) drafts pass straight through.
+ *
+ * 1. Gate kill switch: with GATE_CAMPAIGN_DRAFTS off, approving an EXISTING
+ *    pending campaign draft must not send either — the gate's contract is
+ *    zero campaign sends, not just zero new drafts. The claim is released so
+ *    the draft stays pending and the 409 tells the operator why.
+ * 2. Eligibility recheck (campaignApprovalState): customer soft-deleted /
+ *    no-longer-live (upsell) / prefs flipped since generation → the draft is
+ *    marked rejected with flags.campaign_rejected_reason instead of sending.
+ *
+ * Sends the HTTP response itself when blocking. Returns
+ *   { blocked: true }                    — response already sent, caller returns
+ *   { blocked: false, customer }         — proceed; customer carries
+ *                                          nearest_location_id for the send
+ */
+async function guardCampaignSend(draft, req, res, releaseFields = {}) {
+  if (!draft.campaign_type) return { blocked: false, customer: null };
+
+  if (!isEnabled(CAMPAIGN_GATE)) {
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(409).json({
+      error: 'Campaign drafts are disabled (GATE_CAMPAIGN_DRAFTS is off) — draft left pending',
+      code: 'CAMPAIGN_GATE_OFF',
+    });
+    return { blocked: true };
+  }
+
+  const { blockReason, customer } = await campaignApprovalState(draft);
+  if (blockReason) {
+    await db('message_drafts').where({ id: draft.id }).update({
+      status: 'rejected',
+      approved_by: req.technicianId,
+      approved_at: new Date(),
+      flags: JSON.stringify({ ...parseFlags(draft.flags), campaign_rejected_reason: blockReason }),
+    });
+    res.status(422).json({
+      error: `Customer is no longer eligible for this campaign (${blockReason}) — draft rejected`,
+      code: 'CAMPAIGN_INELIGIBLE',
+      reason: blockReason,
+    });
+    return { blocked: true };
+  }
+
+  return { blocked: false, customer };
+}
+
 // GET /api/admin/drafts — pending drafts
 // Optional ?campaign_type= filter: 'reactivation' | 'upsell' scopes to that
 // campaign; 'none' scopes to legacy non-campaign drafts (inbound-reply lane).
@@ -206,6 +268,9 @@ router.put('/:id/approve', async (req, res, next) => {
       return res.status(409).json({ error: 'Draft is no longer pending' });
     }
 
+    const campaignGuard = await guardCampaignSend(draft, req, res);
+    if (campaignGuard.blocked) return;
+
     const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
@@ -226,10 +291,14 @@ router.put('/:id/approve', async (req, res, next) => {
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
         metadata: {
-          original_message_type: 'ai_approved',
+          original_message_type: draftMessageType(draft, 'ai_approved'),
           draft_id: draft.id,
           campaign_type: draft.campaign_type || undefined,
           source_ref: draft.source_ref || undefined,
+          // Campaign drafts have no inbound sms_log to anchor a fromNumber —
+          // originate from the customer's local office number the way the
+          // legacy workflows did (TwilioService resolves it from this id).
+          customerLocationId: campaignGuard.customer?.nearest_location_id || undefined,
           adminUserId: req.technicianId,
           fromNumber,
         },
@@ -282,6 +351,9 @@ router.put('/:id/revise', async (req, res, next) => {
       return res.status(409).json({ error: 'Draft is no longer pending' });
     }
 
+    const campaignGuard = await guardCampaignSend(draft, req, res, { revised_response: null, final_response: null });
+    if (campaignGuard.blocked) return;
+
     const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
@@ -302,10 +374,14 @@ router.put('/:id/revise', async (req, res, next) => {
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',
         metadata: {
-          original_message_type: 'ai_revised',
+          original_message_type: draftMessageType(draft, 'ai_revised'),
           draft_id: draft.id,
           campaign_type: draft.campaign_type || undefined,
           source_ref: draft.source_ref || undefined,
+          // Campaign drafts have no inbound sms_log to anchor a fromNumber —
+          // originate from the customer's local office number the way the
+          // legacy workflows did (TwilioService resolves it from this id).
+          customerLocationId: campaignGuard.customer?.nearest_location_id || undefined,
           adminUserId: req.technicianId,
           fromNumber,
         },
@@ -414,6 +490,6 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // Exposed for tests
-router._internals = { draftSendPolicyFields, blockedSendResponse };
+router._internals = { draftSendPolicyFields, blockedSendResponse, draftMessageType, CAMPAIGN_MESSAGE_TYPES };
 
 module.exports = router;

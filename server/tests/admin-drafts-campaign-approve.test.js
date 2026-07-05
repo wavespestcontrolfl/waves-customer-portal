@@ -15,6 +15,11 @@
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
+// Real listen+fetch round-trips: under full-suite parallel load the default 5s
+// per-test budget can starve (a timed-out test's still-pending request then
+// leaks into the next test's mock queues). Match the long-suite accommodation.
+jest.setTimeout(30000);
+
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
@@ -29,11 +34,21 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
+// Controllable campaign gate; every other gate defaults open.
+const mockGates = { campaignDrafts: true };
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn((gate) => mockGates[gate] !== false),
+}));
+jest.mock('../services/campaign-drafts', () => ({
+  CAMPAIGN_GATE: 'campaignDrafts',
+  campaignApprovalState: jest.fn(),
+}));
 
 const express = require('express');
 const db = require('../models/db');
 const draftsRouter = require('../routes/admin-drafts');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { campaignApprovalState } = require('../services/campaign-drafts');
 
 // ---------------------------------------------------------------------------
 // Table-keyed queue of chainable builders (house pattern — see
@@ -106,6 +121,11 @@ beforeEach(() => {
   queues = {};
   db.mockImplementation((table) => makeBuilder(table, (queues[table] || []).shift() || {}));
   sendCustomerMessage.mockResolvedValue({ sent: true });
+  mockGates.campaignDrafts = true;
+  campaignApprovalState.mockResolvedValue({
+    blockReason: null,
+    customer: { id: 'cust-1', nearest_location_id: 'loc-9' },
+  });
 });
 
 describe('draftSendPolicyFields (unit)', () => {
@@ -177,6 +197,11 @@ describe('PUT /admin/drafts/:id/approve', () => {
     expect(input.purpose).toBe('conversational');
     expect(input.consentBasis).toBeUndefined();
     expect(input.entryPoint).toBe('admin_draft_approve');
+    // Legacy provenance value + no campaign-only metadata.
+    expect(input.metadata.original_message_type).toBe('ai_approved');
+    expect(input.metadata.customerLocationId).toBeUndefined();
+    // Legacy drafts never consult the campaign eligibility recheck.
+    expect(campaignApprovalState).not.toHaveBeenCalled();
   });
 
   test('marketing campaign draft sends under purpose=marketing with consentBasis + customer audience', async () => {
@@ -195,6 +220,68 @@ describe('PUT /admin/drafts/:id/approve', () => {
     expect(input.consentBasis).toMatchObject({ status: 'opted_in', source: 'customer_marketing_preferences' });
     expect(input.metadata.campaign_type).toBe('upsell');
     expect(input.metadata.source_ref).toBe('upsell_opportunities:opp-1');
+    // sms_log.message_type lands as the legacy workflow type so the 30d
+    // cooldown (CAMPAIGN_SMS_TYPES) and workflow-status readers see the send.
+    expect(input.metadata.original_message_type).toBe('upsell');
+    // Originates from the customer's local office number (legacy workflow
+    // behavior) via the approval-time customer lookup.
+    expect(input.metadata.customerLocationId).toBe('loc-9');
+  });
+
+  test('gate off is a full kill switch: existing campaign drafts cannot be approve-sent, draft stays pending', async () => {
+    mockGates.campaignDrafts = false;
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(409);
+      body = await res.json();
+    });
+
+    expect(body.code).toBe('CAMPAIGN_GATE_OFF');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // Claim released — draft stays pending for when the gate comes back on.
+    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+    expect(release).toBeTruthy();
+  });
+
+  test('gate off does not touch legacy null-campaign drafts', async () => {
+    mockGates.campaignDrafts = false;
+    const draft = campaignDraft({ purpose: null, campaign_type: null, source_ref: null });
+    enqueueApproveHappyPath(draft);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(200);
+    });
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('approval-time eligibility recheck: ineligible customer rejects the draft instead of sending', async () => {
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+    campaignApprovalState.mockResolvedValue({ blockReason: 'customer_deleted', customer: { id: 'cust-1', deleted_at: new Date() } });
+
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(422);
+      body = await res.json();
+    });
+
+    expect(body.code).toBe('CAMPAIGN_INELIGIBLE');
+    expect(body.reason).toBe('customer_deleted');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+    // Draft marked rejected with a clear reason in flags — not released back
+    // to pending, not sent.
+    const rejection = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'rejected');
+    expect(rejection).toBeTruthy();
+    expect(JSON.parse(rejection.payload.flags)).toMatchObject({ campaign_rejected_reason: 'customer_deleted' });
+    expect(rejection.payload.approved_by).toBe('admin-1');
   });
 
   test('QUIET_HOURS_HOLD surfaces code + held + nextAllowedAt and releases the claim', async () => {
@@ -253,7 +340,7 @@ describe('PUT /admin/drafts/:id/approve', () => {
 
 describe('PUT /admin/drafts/:id/revise', () => {
   test('campaign draft revise also sends under the draft purpose (no consent bypass)', async () => {
-    const draft = campaignDraft();
+    const draft = campaignDraft({ campaign_type: 'reactivation', source_ref: 'customers:cust-1' });
     enqueue('message_drafts', { returning: [draft] });
     enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
 
@@ -271,6 +358,56 @@ describe('PUT /admin/drafts/:id/revise', () => {
     expect(input.audience).toBe('customer');
     expect(input.consentBasis?.status).toBe('opted_in');
     expect(input.entryPoint).toBe('admin_draft_revise');
+    // Campaign message_type + local office origin apply on revise too.
+    expect(input.metadata.original_message_type).toBe('reactivation');
+    expect(input.metadata.customerLocationId).toBe('loc-9');
+  });
+
+  test('gate off blocks revise-send for campaign drafts and restores the pending draft', async () => {
+    mockGates.campaignDrafts = false;
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/revise`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Edited copy.' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('CAMPAIGN_GATE_OFF');
+    });
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // Claim released with the revise fields cleared.
+    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+    expect(release).toBeTruthy();
+    expect(release.payload.revised_response).toBeNull();
+    expect(release.payload.final_response).toBeNull();
+  });
+});
+
+describe('campaign message_type mapping', () => {
+  const { draftMessageType, CAMPAIGN_MESSAGE_TYPES } = draftsRouter._internals;
+
+  test('maps campaign types to the legacy workflow sms_log types; legacy drafts keep their value', () => {
+    expect(draftMessageType({ campaign_type: null }, 'ai_approved')).toBe('ai_approved');
+    expect(draftMessageType({ campaign_type: 'upsell' }, 'ai_approved')).toBe('upsell');
+    expect(draftMessageType({ campaign_type: 'reactivation' }, 'ai_revised')).toBe('reactivation');
+    // Unknown future campaign type falls back to the campaign_type itself
+    // rather than mislabeling as a legacy provenance value.
+    expect(draftMessageType({ campaign_type: 'winback' }, 'ai_approved')).toBe('winback');
+  });
+
+  test('every mapped message_type is visible to the unified 30d cooldown filter', () => {
+    // requireActual: this suite mocks campaign-drafts for route isolation, but
+    // the contract must hold against the REAL cooldown constant.
+    const real = jest.requireActual('../services/campaign-drafts');
+    for (const type of Object.values(CAMPAIGN_MESSAGE_TYPES)) {
+      expect(real.CAMPAIGN_SMS_TYPES).toContain(type);
+    }
+    // And the mocked gate name matches the real one.
+    expect(real.CAMPAIGN_GATE).toBe('campaignDrafts');
   });
 });
 

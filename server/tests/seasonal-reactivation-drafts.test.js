@@ -97,21 +97,34 @@ afterEach(() => {
 });
 
 describe('audience query — dead-column fix', () => {
-  test('filters on the canonical lapsed predicate, not customers.status', async () => {
+  test('churned branch requires cancellation-processor stamps; dormant branch matches on stage alone', async () => {
     enqueue('customers', { rows: [] });
 
     await seasonalReactivation.run();
 
     const customersBuilder = builders.find((b) => b._table === 'customers');
-    expect(customersBuilder.whereIn).toHaveBeenCalledWith('pipeline_stage', ['churned', 'dormant']);
+
+    // Churned branch: pipeline_stage + active=false + churned_at (what
+    // cancellation-processor writes together).
+    expect(customersBuilder.where).toHaveBeenCalledWith('pipeline_stage', 'churned');
     expect(customersBuilder.where).toHaveBeenCalledWith('active', false);
     expect(customersBuilder.whereNotNull).toHaveBeenCalledWith('churned_at');
+
+    // Dormant branch: pipeline-manager's no_service_120_days sets
+    // pipeline_stage ONLY (active stays true, churned_at never stamped) — so
+    // a dormant-without-churned_at customer matches via a bare orWhere on the
+    // stage, with no churn-stamp constraints attached. Without this branch
+    // the stale-service audience this lane exists for never matches.
+    expect(customersBuilder.orWhere).toHaveBeenCalledWith('pipeline_stage', 'dormant');
+
+    // Both branches: soft-deleted exclusion + phone.
     expect(customersBuilder.whereNull).toHaveBeenCalledWith('deleted_at');
     expect(customersBuilder.whereNotNull).toHaveBeenCalledWith('phone');
 
-    // The dead filter is gone: no whereIn('status', [...onboarding-enum...]).
-    const whereInArgs = customersBuilder.whereIn.mock.calls.map((c) => c[0]);
-    expect(whereInArgs).not.toContain('status');
+    // The dead filters are gone: no whereIn on customers.status (onboarding
+    // enum) and no flat whereIn('pipeline_stage', ...) ANDing the churn
+    // stamps onto dormant rows.
+    expect(customersBuilder.whereIn).not.toHaveBeenCalled();
   });
 });
 

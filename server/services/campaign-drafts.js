@@ -107,6 +107,39 @@ async function campaignCooldownReason(customerId) {
 }
 
 /**
+ * Approval-time eligibility recheck for a campaign draft. A draft can sit
+ * pending for days; the customer can be soft-deleted, deactivated/churned, or
+ * flip their prefs between generation and the owner's approve click — and the
+ * messaging validators do not reject customers.deleted_at or non-live upsell
+ * targets. Re-runs the generator's guards against the CURRENT customer row:
+ *   - customer exists and is not soft-deleted (both campaign types)
+ *   - upsell only: still live (active + pipeline_stage in CUSTOMER_STAGES) —
+ *     reactivation targets are lapsed by design, so no live-stage check
+ *   - sms_enabled / seasonal_tips prefs not explicitly false
+ * Returns { blockReason, customer } — customer carries nearest_location_id so
+ * the approve route can originate the SMS from the customer's local office
+ * number, the way the legacy workflows did.
+ */
+async function campaignApprovalState(draft) {
+  if (!draft.customer_id) return { blockReason: 'customer_not_found', customer: null };
+  const customer = await db('customers')
+    .where({ id: draft.customer_id })
+    .first('id', 'deleted_at', 'active', 'pipeline_stage', 'nearest_location_id');
+  if (!customer) return { blockReason: 'customer_not_found', customer: null };
+  if (customer.deleted_at) return { blockReason: 'customer_deleted', customer };
+  if (
+    draft.campaign_type === 'upsell' &&
+    (customer.active !== true || !CUSTOMER_STAGES.includes(customer.pipeline_stage))
+  ) {
+    return { blockReason: 'customer_not_live', customer };
+  }
+  if (!(await prefsAllowMarketingSms(draft.customer_id))) {
+    return { blockReason: 'prefs_opted_out', customer };
+  }
+  return { blockReason: null, customer };
+}
+
+/**
  * Deterministic copy per health-scorer recommended_service. No LLM in V1 —
  * short, warm, GSM-7-safe, truthful about what the customer already has (the
  * health-scorer only writes each recommended_service when the matching
@@ -245,6 +278,7 @@ module.exports = {
   toGsm7Safe,
   prefsAllowMarketingSms,
   campaignCooldownReason,
+  campaignApprovalState,
   generateUpsellDrafts,
   _internals: {
     UPSELL_COPY,
