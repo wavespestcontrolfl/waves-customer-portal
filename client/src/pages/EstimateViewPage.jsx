@@ -37,6 +37,7 @@ import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
+import EstimateGlassTheme from '../components/estimate/glass/EstimateGlassTheme';
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
@@ -364,13 +365,27 @@ function labelAlreadyIncludesService(frequencyLabel, serviceLabel) {
   return !!left && !!right && (left.includes(right) || right.includes(left));
 }
 
+// Liquid-glass theme dark launch (docs/design/estimate-glass-plan.md, PR A).
+// Read once per mount; module-level so the shared Page wrapper below can gate
+// the theme for EVERY estimate state (loading, not-found, terminal, success,
+// review) — not just the main configure branch.
+function glassThemeRequested() {
+  try {
+    return new URLSearchParams(window.location.search).get('glass') === '1';
+  } catch {
+    return false;
+  }
+}
+
 function Page({ children }) {
+  const [glassActive] = useState(glassThemeRequested);
   return (
     <div style={{
       minHeight: '100vh', background: ESTIMATE_BG,
       fontFamily: FONT_BODY, color: COLORS.navy,
       display: 'flex', flexDirection: 'column',
     }}>
+      <EstimateGlassTheme active={glassActive} />
       <header style={{ background: COLORS.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
           maxWidth: 960,
