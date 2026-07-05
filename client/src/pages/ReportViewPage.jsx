@@ -1995,8 +1995,11 @@ export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = tr
   ].filter(Boolean);
 }
 
-function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false }) {
-  const hasCoverageMap = !(serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || '')));
+function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false, hasCoverageMap = true }) {
+  // hasCoverageMap comes from the page (the same hideCoverageCard gate that
+  // decides whether the Service Coverage card renders) — deriving it here
+  // from serviceLine alone missed pest V2, whose card hides while the Map
+  // link would still render and jump nowhere.
   const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry, hasActivity, hasCoverageMap });
 
   return (
@@ -7348,6 +7351,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               hasPestPressure={hasPestPressure}
               hasReentry={hasReentry}
               hasActivity={Boolean(data.activity)}
+              hasCoverageMap={!hideCoverageCard}
             />
           </>
         )}
@@ -7471,6 +7475,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             hasPestPressure={hasPestPressure && !data.pestReportV2}
             hasReentry={hasReentry}
             hasActivity={Boolean(data.activity) && !data.pestReportV2}
+            hasCoverageMap={!hideCoverageCard}
           />
         )}
 
