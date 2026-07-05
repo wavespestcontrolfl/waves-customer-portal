@@ -27,7 +27,15 @@
  *     Intermediate stages (contacted/estimate_*) still can't leave lost.
  *
  * Best-effort: never throws into a caller (a funnel write must not break a
- * lead transition). Accepts a database handle so trx callers stay atomic.
+ * lead transition). Accepts a database handle so trx callers stay atomic —
+ * and when that handle IS a transaction, the bridge UPDATE runs inside its
+ * own SAVEPOINT (knex nested transaction): in Postgres, a failed statement
+ * leaves the enclosing transaction aborted even when the exception is caught,
+ * so without the savepoint a bridge SQL error would doom the caller's
+ * conversion/sweep that this update is supposed to be best-effort FOR. A
+ * savepoint failure rolls back only the bridge; the caller's transaction
+ * stays usable. (Savepoints nest — a caller already inside its own savepoint,
+ * like the phone-booking conversion, just gets one level deeper.)
  * Idempotent — re-firing any event converges.
  */
 const logger = require('./logger');
@@ -79,6 +87,19 @@ function applyStagePredicate(query, target) {
   return query.where((q) => q.whereIn('funnel_stage', fromStages).orWhereNull('funnel_stage'));
 }
 
+// Run the stage UPDATE for `target`, isolated in a SAVEPOINT when the handle
+// is a knex transaction (see header). knex's trx.transaction() compiles to
+// SAVEPOINT / ROLLBACK TO SAVEPOINT on an already-open transaction.
+// `scopeRows` narrows the base query to the caller's lead row(s).
+function runStageUpdate(db, target, scopeRows) {
+  const run = (handle) => applyStagePredicate(scopeRows(handle('ad_service_attribution')), target)
+    .update({ funnel_stage: target, updated_at: new Date() });
+  if (db && db.isTransaction && typeof db.transaction === 'function') {
+    return db.transaction((sp) => run(sp));
+  }
+  return run(db);
+}
+
 /**
  * bridgeLeadFunnelStage(leadId, leadStatus, database?)
  * Advance the funnel row linked to `leadId` to the stage `leadStatus` maps to.
@@ -90,11 +111,7 @@ async function bridgeLeadFunnelStage(leadId, leadStatus, database = null) {
     const target = LEAD_STATUS_TO_FUNNEL_STAGE[leadStatus];
     if (!leadId || !target) return { updated: 0, reason: 'no_mapping' };
 
-    const query = applyStagePredicate(
-      db('ad_service_attribution').where({ lead_id: leadId }),
-      target,
-    );
-    const updated = await query.update({ funnel_stage: target, updated_at: new Date() });
+    const updated = await runStageUpdate(db, target, (q) => q.where({ lead_id: leadId }));
     return { updated, stage: target };
   } catch (err) {
     logger.warn(`[lead-funnel-bridge] stage bridge failed for lead ${leadId} (${leadStatus}): ${err.message}`);
@@ -115,11 +132,7 @@ async function bridgeLeadsFunnelStage(leadIds, leadStatus, database = null) {
     const ids = (leadIds || []).filter(Boolean);
     if (!ids.length || !target) return { updated: 0, reason: 'no_mapping' };
 
-    const query = applyStagePredicate(
-      db('ad_service_attribution').whereIn('lead_id', ids),
-      target,
-    );
-    const updated = await query.update({ funnel_stage: target, updated_at: new Date() });
+    const updated = await runStageUpdate(db, target, (q) => q.whereIn('lead_id', ids));
     return { updated, stage: target };
   } catch (err) {
     logger.warn(`[lead-funnel-bridge] bulk stage bridge failed (${leadStatus}, ${(leadIds || []).length} leads): ${err.message}`);

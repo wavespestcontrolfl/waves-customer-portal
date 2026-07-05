@@ -1,10 +1,18 @@
 /**
  * Lead-source classifier — the canonical URL/UTM/click-id → lead_source
- * mapping, extracted VERBATIM from routes/lead-webhook.js so non-webhook
- * writers (self-booking attribution in lead-estimate-link.js) classify with
- * the exact same semantics instead of growing a drifting copy. The webhook
- * still imports and re-exports it (including via its `_test` surface), so
- * every existing call site and test is unchanged.
+ * mapping, extracted from routes/lead-webhook.js so non-webhook writers
+ * (self-booking attribution in lead-estimate-link.js) classify with the exact
+ * same semantics instead of growing a drifting copy. The webhook still
+ * imports and re-exports it (including via its `_test` surface), so every
+ * existing call site and test is unchanged.
+ *
+ * One deliberate fix over the webhook original: the paid/social UTM branches
+ * compare the TRIMMED/LOWERCASED source+medium computed below (the original
+ * computed the normalized values but compared the RAW strings, so common
+ * ad-platform casing like `utm_source=Google&utm_medium=CPC` fell through to
+ * the organic/unknown fallback and was excluded from paid ROAS). The fix
+ * applies to the webhook path too; pinned by the casing tests in
+ * lead-webhook-meta-attribution. Detail strings still render the raw values.
  */
 const { findGbpLocationByUtmContent } = require('../config/locations');
 const { SPOKE_SITES } = require('./content-astro/spoke-sites');
@@ -44,9 +52,9 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
       area: gbpLocation?.id || null,
     };
   }
-  if (utmSource === 'google' && utmMedium === 'cpc') return { source: 'google_ads', detail: `Campaign: ${utmCampaign}`, channel: 'paid', area: utmContent };
-  if (utmSource === 'facebook' || utmSource === 'fb') return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: utmMedium === 'cpc' ? 'paid' : 'organic' };
-  if (utmSource === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
+  if (source === 'google' && medium === 'cpc') return { source: 'google_ads', detail: `Campaign: ${utmCampaign}`, channel: 'paid', area: utmContent };
+  if (source === 'facebook' || source === 'fb') return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: medium === 'cpc' ? 'paid' : 'organic' };
+  if (source === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
   // Google auto-tagging (the default) appends gclid — or wbraid/gbraid for
   // iOS/web-to-app — to ad-click landing URLs WITHOUT utm_source/medium, so an
   // auto-tagged paid click would otherwise fall through to the organic/referrer

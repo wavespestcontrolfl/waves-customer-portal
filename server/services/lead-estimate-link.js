@@ -844,6 +844,18 @@ function attributionHasCapture(attribution) {
   );
 }
 
+// Owned re-engagement booking sources — a booking that arrives through OUR
+// OWN outbound recovery link (booking-abandon-recovery's BOOKING_URL sends
+// /book?source=booking_recovery) is the SAME funnel journey completing, not a
+// new acquisition touch. Its landing_url is an owned portal address, so
+// classifying it would file the booking under waves_website and inflate
+// website ROI; the customer's original capture (booking_intents.attribution /
+// an existing lead row) already carries the true channel. Only the
+// acquisition-row mint is suppressed — the raw capture still persists on
+// self_booked_appointments.attribution (and the booking's source column
+// labels it booking_recovery).
+const NON_ACQUISITION_BOOKING_SOURCES = new Set(['booking_recovery']);
+
 // Organic (non-paid) self-booking → funnel row only, no lead. Classified with
 // the shared determineLeadSource. This branch is only reachable WITHOUT a
 // deterministic paid click id; is_paid comes from the classifier's channel —
@@ -871,9 +883,15 @@ async function recordOrganicSelfBookingAttribution({
   attribution,
   serviceInterest,
   selfBookedAppointmentId,
+  bookingSource,
   database,
 }) {
   if (!selfBookedAppointmentId) return { attributed: false, reason: 'no_booking_id' };
+  // Recovery/re-engagement links complete an EXISTING journey — never a new
+  // acquisition row (see NON_ACQUISITION_BOOKING_SOURCES above).
+  if (NON_ACQUISITION_BOOKING_SOURCES.has(String(bookingSource || '').trim().toLowerCase())) {
+    return { attributed: false, reason: 'recovery_rebooking' };
+  }
   if (!attributionHasCapture(attribution)) return { attributed: false, reason: 'no_attribution_capture' };
 
   const attr = attribution;
@@ -933,6 +951,7 @@ async function attributeSelfBooking({
   serviceInterest = null,
   customerCreated = false,
   selfBookedAppointmentId = null,
+  bookingSource = null,
   database = db,
 }) {
   try {
@@ -940,7 +959,7 @@ async function attributeSelfBooking({
     if (!attributionHasPaidClickId(attribution)) {
       // No deterministic paid click → organic funnel row, never a minted lead.
       return await recordOrganicSelfBookingAttribution({
-        customerId, attribution, serviceInterest, selfBookedAppointmentId, database,
+        customerId, attribution, serviceInterest, selfBookedAppointmentId, bookingSource, database,
       });
     }
     const clickIds = clickIdColumnsFromAttribution(attribution);

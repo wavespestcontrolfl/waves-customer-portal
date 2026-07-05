@@ -942,6 +942,29 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     }
   });
 
+  test('recovery-link booking mints NO acquisition row (same journey completing) and is labeled as such', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        // The abandoned-booking recovery SMS/email links to the OWNED portal URL
+        // (booking-abandon-recovery BOOKING_URL) — a real capture, but not a new
+        // acquisition touch.
+        landing_url: 'https://portal.wavespestcontrol.com/book?source=booking_recovery',
+        referrer: null,
+      },
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-recovery',
+      bookingSource: 'booking_recovery',
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'recovery_rebooking' });
+    expect(database._inserted).toEqual([]);
+  });
+
   test('paid Meta UTMs with a stripped click id stay PAID (is_paid from the classifier channel, like the webhook)', async () => {
     const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
 

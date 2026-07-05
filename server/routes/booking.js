@@ -1604,9 +1604,11 @@ async function createSelfBooking(payload = {}) {
     // report it to Google/Meta by deterministic click id, not just hashed PII.
     // A cold ad click that books straight from the funnel has no lead otherwise,
     // so it would be invisible to ad optimization. Non-paid bookings mint
-    // nothing but still get an is_paid=false funnel row (deduped per booking
-    // via self_booked_appointment_id). Best-effort (booking is already
-    // committed); only mints for ad-tracked bookers with no lead on file.
+    // nothing but still get a channel-classified funnel row (deduped per
+    // booking via self_booked_appointment_id); owned re-engagement links
+    // (booking_recovery) are excluded — same journey completing, not a new
+    // acquisition. Best-effort (booking is already committed); only mints
+    // won leads for ad-tracked bookers with no lead on file.
     try {
       const { attributeSelfBooking } = require('../services/lead-estimate-link');
       await attributeSelfBooking({
@@ -1617,6 +1619,7 @@ async function createSelfBooking(payload = {}) {
         // a resolved existing customer is a repeat booker, not a new lead.
         customerCreated: !!createdCustomerId,
         selfBookedAppointmentId: booking?.id || null,
+        bookingSource: source || null,
       });
     } catch (err) {
       logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);

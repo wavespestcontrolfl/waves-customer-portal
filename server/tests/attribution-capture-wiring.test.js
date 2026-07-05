@@ -138,6 +138,20 @@ describe('lead-estimate-link organic self-booking row wiring', () => {
     expect(src).toMatch(/landingHost === portalHost && referrerHost && referrerHost !== portalHost/);
   });
 
+  test('recovery-link bookings are excluded from the acquisition mint (booking.js passes the source; the mint gates on it)', () => {
+    const booking = read('../routes/booking.js');
+    expect(booking).toMatch(/bookingSource:\s*source \|\| null/);
+    expect(src).toMatch(/NON_ACQUISITION_BOOKING_SOURCES = new Set\(\['booking_recovery'\]\)/);
+    expect(src).toMatch(/reason: 'recovery_rebooking'/);
+  });
+
+  test('classifier compares NORMALIZED utm source/medium in the paid/social branches (casing fix, webhook included)', () => {
+    const classify = read('../services/lead-source-classify.js');
+    expect(classify).toMatch(/source === 'google' && medium === 'cpc'/);
+    expect(classify).toMatch(/source === 'facebook' \|\| source === 'fb'/);
+    expect(classify).not.toMatch(/utmSource === 'google'/);
+  });
+
   test('lead-webhook still owns the same classifier (extraction, not a fork)', () => {
     const webhook = read('../routes/lead-webhook.js');
     expect(webhook).toMatch(/require\('\.\.\/services\/lead-source-classify'\)/);
@@ -183,6 +197,12 @@ describe('lead-funnel-bridge call sites', () => {
     const src = read('../services/intelligence-bar/leads-tools.js');
     expect(src).toMatch(/bridgeLeadFunnelStage\(lead\.id, new_status\)/);
     expect(src).toMatch(/bridgeLeadsFunnelStage\(ids, new_status\)/);
+  });
+
+  test('the bridge isolates transactional callers behind a savepoint', () => {
+    const src = read('../services/lead-funnel-bridge.js');
+    expect(src).toMatch(/db\.isTransaction && typeof db\.transaction === 'function'/);
+    expect(src).toMatch(/db\.transaction\(\(sp\) => run\(sp\)\)/);
   });
 
   test('staleness sweep collapses flipped leads to the lost bucket in the same transaction', () => {

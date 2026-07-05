@@ -193,6 +193,70 @@ describe('bridgeLeadsFunnelStage — bulk form (IB bulk update, staleness sweep)
   });
 });
 
+describe('savepoint isolation for transactional callers', () => {
+  // When the handle IS a knex transaction, the bridge must run its UPDATE in
+  // a nested transaction (SAVEPOINT) — in Postgres a failed statement leaves
+  // the enclosing transaction aborted even when the exception is caught, so
+  // running directly on the caller's trx would doom the conversion/sweep the
+  // bridge is best-effort for. The fake trx THROWS if queried directly, so
+  // these tests prove the query goes through the savepoint handle only.
+  function makeTrxDb({ failUpdate = false } = {}) {
+    const state = { savepointUsed: false, patch: null };
+    const spHandle = (table) => {
+      const q = {
+        where(arg) { if (typeof arg === 'function') arg(q); return q; },
+        whereIn: () => q,
+        whereNotIn: () => q,
+        orWhereNull: () => q,
+        update: async (patch) => {
+          if (failUpdate) throw new Error('savepoint boom');
+          state.patch = patch;
+          return 1;
+        },
+      };
+      return q;
+    };
+    const trx = () => { throw new Error('caller trx queried directly — bridge must use the savepoint'); };
+    trx.isTransaction = true;
+    trx.transaction = async (cb) => { state.savepointUsed = true; return cb(spHandle); };
+    trx._state = state;
+    return trx;
+  }
+
+  test('a trx handle routes the UPDATE through a savepoint (never the caller trx directly)', async () => {
+    const trx = makeTrxDb();
+    const res = await bridgeLeadFunnelStage('L1', 'won', trx);
+    expect(res).toEqual({ updated: 1, stage: 'booked' });
+    expect(trx._state.savepointUsed).toBe(true);
+    expect(trx._state.patch).toMatchObject({ funnel_stage: 'booked' });
+  });
+
+  test('a bridge SQL failure inside a caller trx is contained to the savepoint (error result, caller trx untouched)', async () => {
+    const trx = makeTrxDb({ failUpdate: true });
+    const res = await bridgeLeadFunnelStage('L1', 'won', trx);
+    expect(res).toEqual({ updated: 0, reason: 'error' });
+    expect(trx._state.savepointUsed).toBe(true); // failure happened INSIDE the savepoint
+  });
+
+  test('the bulk form gets the same savepoint isolation', async () => {
+    const ok = makeTrxDb();
+    expect(await bridgeLeadsFunnelStage(['L1', 'L2'], 'unresponsive', ok)).toEqual({ updated: 1, stage: 'lost' });
+    expect(ok._state.savepointUsed).toBe(true);
+
+    const bad = makeTrxDb({ failUpdate: true });
+    expect(await bridgeLeadsFunnelStage(['L1'], 'won', bad)).toEqual({ updated: 0, reason: 'error' });
+    expect(bad._state.savepointUsed).toBe(true);
+  });
+
+  test('a plain (non-trx) handle runs directly — no savepoint machinery required', async () => {
+    // makeCaptureDb has neither isTransaction nor transaction(); the existing
+    // suites above all pass through this path.
+    const database = makeCaptureDb();
+    const res = await bridgeLeadFunnelStage('L1', 'won', database);
+    expect(res).toEqual({ updated: 1, stage: 'booked' });
+  });
+});
+
 describe('bridgeLeadFunnelStage — no-ops and failure containment', () => {
   test('statuses with no funnel meaning no-op without touching the db', async () => {
     for (const status of ['new', 'garbage', '', null, undefined]) {
