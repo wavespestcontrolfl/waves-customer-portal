@@ -2275,7 +2275,11 @@ function zoneOnServiceLine(zone, line) {
 
 // Pure entry composition, exported for tests: a drawn shape submits with the
 // served image's params as its drift ref; a removed PRELOADED mark submits a
-// clear tombstone; a removed same-session mark submits nothing.
+// clear tombstone; a removed same-session mark submits nothing. On an
+// all-cleared save, zones whose stored mark was HIDDEN by drift resolution
+// (staleKeys — the raw column still holds a shape the PUT's completeness
+// check will see) get an explicit clear too, or the server would reject the
+// save as partial over a mark the operator cannot even see.
 export function composeZoneShapeEntries({
   areas,
   marks,
@@ -2283,6 +2287,8 @@ export function composeZoneShapeEntries({
   preloads,
   image,
   capturedAt,
+  staleKeys = new Set(),
+  allCleared = false,
 }) {
   const ref = {
     lat: image?.center?.lat,
@@ -2303,6 +2309,14 @@ export function composeZoneShapeEntries({
       entries.push({ areaLabel: label, clear: true });
     }
   }
+  if (allCleared) {
+    for (const label of areas) {
+      if (entries.some((entry) => entry.areaLabel === label)) continue;
+      if (staleKeys.has(normalizeZoneKey(label))) {
+        entries.push({ areaLabel: label, clear: true });
+      }
+    }
+  }
   return entries;
 }
 
@@ -2318,6 +2332,20 @@ function PropertyZonesPanel({ customerId }) {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
 
+  // The 360 sheet swaps customers in place (selected360Id) — everything here
+  // is per-property state, so a customer change must drop it all or the old
+  // satellite image/zones would stay on screen while saves hit the new id.
+  useEffect(() => {
+    setOpen(false);
+    setMap(null);
+    setMarks({});
+    setPreloads({});
+    dirtyRef.current = new Set();
+    setLine("pest");
+    setErr("");
+    setMsg("");
+  }, [customerId]);
+
   useEffect(() => {
     if (!open || map || loading) return;
     setLoading(true);
@@ -2326,14 +2354,20 @@ function PropertyZonesPanel({ customerId }) {
       .then((res) => {
         setMap(res || { available: false, reason: "empty_response" });
         const preload = {};
+        const norm01 = (v) =>
+          Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
         (res?.zones || []).forEach((zone) => {
           const shape = zone.geometryImage;
-          if (
-            shape &&
-            typeof shape === "object" &&
-            (shape.type === "rect" || shape.type === "circle")
-          ) {
+          if (!shape || typeof shape !== "object") return;
+          if (shape.type === "rect" || shape.type === "circle") {
             preload[normalizeZoneKey(zone.label)] = shape;
+          } else if (
+            shape.type == null &&
+            [shape.x, shape.y, shape.w, shape.h].every(norm01)
+          ) {
+            // legacy typeless rect — the report renderer treats it as a
+            // valid rect, so it must preload (and be clearable) here too
+            preload[normalizeZoneKey(zone.label)] = { ...shape, type: "rect" };
           }
         });
         setPreloads(preload);
@@ -2344,7 +2378,12 @@ function PropertyZonesPanel({ customerId }) {
         );
         if (tagged.size && !tagged.has("pest")) setLine([...tagged][0]);
       })
-      .catch((e) => setErr(e.message || "Failed to load the property map"))
+      .catch((e) => {
+        // map must go non-null or this effect refires and loops the failed
+        // request forever; the render shows the error with a manual Retry
+        setErr(e.message || "Failed to load the property map");
+        setMap({ available: false, reason: "load_failed" });
+      })
       .finally(() => setLoading(false));
   }, [open, map, loading, customerId]);
 
@@ -2354,6 +2393,13 @@ function PropertyZonesPanel({ customerId }) {
   const lineOptions = [
     ...new Set(["pest", ...zones.flatMap((z) => z.serviceLines || [])]),
   ].filter((opt) => zones.some((zone) => zoneOnServiceLine(zone, opt)));
+  // zones whose stored mark was hidden by drift resolution — the raw column
+  // still holds a shape the PUT's completeness check will count as marked
+  const staleKeys = new Set(
+    zones
+      .filter((zone) => zone.staleMark)
+      .map((zone) => normalizeZoneKey(zone.label)),
+  );
   const areas = zones
     .filter((zone) => zoneOnServiceLine(zone, line))
     .map((zone) => zone.label);
@@ -2391,12 +2437,14 @@ function PropertyZonesPanel({ customerId }) {
     setMsg("");
     try {
       const entries = composeZoneShapeEntries({
-        areas: areas.filter((label) => dirtyRef.current.has(label)),
+        areas,
         marks,
         dirty: dirtyRef.current,
         preloads,
         image: map?.image,
         capturedAt: new Date().toISOString(),
+        staleKeys,
+        allCleared: markedCount === 0,
       });
       if (!entries.length) {
         setMsg("Nothing to save");
@@ -2409,7 +2457,11 @@ function PropertyZonesPanel({ customerId }) {
           body: JSON.stringify({ serviceLine: line, zoneShapes: entries }),
         },
       );
-      // fold the saved state into the preloads so the panel reflects reality
+      // fold the saved state into the preloads so the panel reflects
+      // reality, and drop ONLY the saved labels from the edit state — an
+      // operator can have unsaved marks on another service line, and wiping
+      // everything here would silently discard them
+      const savedLabels = new Set(entries.map((entry) => entry.areaLabel));
       const nextPreloads = { ...preloads };
       for (const entry of entries) {
         const key = normalizeZoneKey(entry.areaLabel);
@@ -2417,8 +2469,14 @@ function PropertyZonesPanel({ customerId }) {
         else nextPreloads[key] = entry.shape;
       }
       setPreloads(nextPreloads);
-      setMarks({});
-      dirtyRef.current = new Set();
+      setMarks((prev) => {
+        const next = { ...prev };
+        savedLabels.forEach((label) => delete next[label]);
+        return next;
+      });
+      const nextDirty = new Set(dirtyRef.current);
+      savedLabels.forEach((label) => nextDirty.delete(label));
+      dirtyRef.current = nextDirty;
       const s = res?.summary || {};
       setMsg(
         `Saved — ${s.shapesApplied || 0} mark${(s.shapesApplied || 0) === 1 ? "" : "s"} applied${s.cleared ? `, ${s.cleared} cleared` : ""}${s.created ? `, ${s.created} zone${s.created === 1 ? "" : "s"} created` : ""}`,
@@ -2449,12 +2507,25 @@ function PropertyZonesPanel({ customerId }) {
           {loading && (
             <div className="text-13 text-ink-secondary">Loading the satellite view…</div>
           )}
-          {!loading && err && !map && (
-            <div className="text-13 text-alert-fg">{err}</div>
-          )}
           {!loading && map && !map.available && (
-            <div className="text-13 text-ink-secondary">
-              Satellite view unavailable ({map.reason || "unknown"}).
+            <div className="flex items-center gap-3">
+              <span className={cn("text-13", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
+                {map.reason === "load_failed"
+                  ? err || "Failed to load the property map"
+                  : `Satellite view unavailable (${map.reason || "unknown"}).`}
+              </span>
+              {map.reason === "load_failed" && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setMap(null);
+                    setErr("");
+                  }}
+                >
+                  Retry
+                </Button>
+              )}
             </div>
           )}
           {!loading && map?.available && !zones.length && (
@@ -2483,6 +2554,18 @@ function PropertyZonesPanel({ customerId }) {
                       {opt.replace(/_/g, " ")}
                     </button>
                   ))}
+                </div>
+              )}
+              {areas.some((label) => staleKeys.has(normalizeZoneKey(label))) && (
+                <div className="text-12 text-zinc-700 mb-2">
+                  Some zones have marks that no longer match the current
+                  satellite image (the property was re-geocoded) — they show
+                  as unmarked below. Redraw them, or clear everything to
+                  remove the stored marks:{" "}
+                  {areas
+                    .filter((label) => staleKeys.has(normalizeZoneKey(label)))
+                    .join(", ")}
+                  .
                 </div>
               )}
               <ZoneMarkingStep
