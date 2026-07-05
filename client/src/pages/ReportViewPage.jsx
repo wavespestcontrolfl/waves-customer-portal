@@ -2066,7 +2066,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
             <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 700, marginBottom: 2 }}>
               {item.customerLabel}
             </dt>
-            <dd style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>
+            <dd className="sr-ink" style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>
               {item.customerValueLabel != null && item.customerValueLabel !== ''
                 ? String(item.customerValueLabel)
                 : String(item.value)}
@@ -7295,6 +7295,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         html[data-glass-theme] .service-report-v1 [data-glass="chip"] * {
           color: #04395E !important;
         }
+        /* inline #1B2C5B stragglers (typed-findings dd, photo summary) — the
+           inline styles stay untouched for gate-off purity; .sr-ink remaps
+           them to the glass navy only while the theme is mounted */
+        html[data-glass-theme] .service-report-v1 .sr-ink {
+          color: #04395E !important;
+        }
         @media print {
           /* a customer printing a ?glass=1 view still gets the paper document */
           html[data-glass-theme] .service-report-v1 { background: #fff; }
@@ -7597,7 +7603,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <section data-glass="card" className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (
-              <p style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.55, margin: '0 0 14px' }}>
+              <p className="sr-ink" style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.55, margin: '0 0 14px' }}>
                 {data.typedReport.photoSummary}
               </p>
             )}

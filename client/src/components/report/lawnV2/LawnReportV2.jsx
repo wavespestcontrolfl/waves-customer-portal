@@ -138,8 +138,10 @@ export function StatusPill({ status, small = false }) {
 }
 
 function Card({ children, style }) {
+  // data-glass is inert without html[data-glass-theme] (?glass=1 on the live
+  // report view) — glass-theme.css supplies all material; gate-off unchanged.
   return (
-    <section style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, marginBottom: 16, ...style }}>
+    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, marginBottom: 16, ...style }}>
       {children}
     </section>
   );
@@ -177,7 +179,7 @@ export function LawnSnapshotHero({ snapshot = {} }) {
           <ScoreRing value={overallScore} status={status} size={116} />
         </div>
         <div style={{ flex: 1, minWidth: 220 }}>
-          <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
+          <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
             Overall Lawn Status
           </div>
           <h1 style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
@@ -197,7 +199,7 @@ export function LawnSnapshotHero({ snapshot = {} }) {
       {/* Root cause — the connected "what's driving it" read. */}
       {rootCause ? (
         <div style={{ marginTop: 14, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
-          <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What’s driving it</div>
+          <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What’s driving it</div>
           <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{rootCause}</div>
         </div>
       ) : null}
@@ -205,7 +207,7 @@ export function LawnSnapshotHero({ snapshot = {} }) {
       {/* The "story": what we're watching, what Waves does next, what (if anything) you do. */}
       {watching.length ? (
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${BORDER}` }}>
-          <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 8 }}>Main things we’re watching</div>
+          <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 8 }}>Main things we’re watching</div>
           <ol style={{ margin: 0, padding: '0 0 0 20px', display: 'grid', gap: 5 }}>
             {watching.map((w, i) => (
               <li key={i} style={{ fontSize: 14.5, color: BODY, lineHeight: 1.45 }}>{w}</li>
@@ -254,7 +256,7 @@ function KeyLine({ label, value, dot }) {
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
       <span style={{ width: 9, height: 9, borderRadius: 999, background: dot, flex: 'none', marginTop: 6 }} />
       <div>
-        <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
+        <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
         <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>{value}</div>
       </div>
     </div>
