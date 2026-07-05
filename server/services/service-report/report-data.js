@@ -2559,6 +2559,52 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+  // Next upcoming appointment for this customer (owner ask 2026-07-05: every
+  // report shows the next visit, like the estimate documents) — and it must be
+  // the next visit OF THIS REPORT'S SERVICE LINE (owner 2026-07-05: a pest
+  // report shows the next pest visit, a lawn report the next lawn visit), so
+  // candidates are classified with the same detectServiceLine the report
+  // itself uses. The visit this report covers is excluded by id so a same-day
+  // report never shows its own just-completed slot. Best-effort: never blocks
+  // the report.
+  let nextAppointment = null;
+  try {
+    const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    // Same disclosable statuses as findReportFollowupAppointment: pending /
+    // confirmed / en_route / on_site — an in-progress visit IS the customer's
+    // next appointment when they open an older report on the service day.
+    // NO 'rescheduled': those are phantom placeholders holding the OLD
+    // date/window until the office rebooks (see report-followup-appointment.js
+    // — publishing one presents a stale time as if it were still real).
+    // The service-line match happens in JS (detectServiceLine's rules are
+    // regex-heavy and live in one place), so the candidate window must be
+    // wide enough that nearer OTHER-line visits can't crowd out the next
+    // same-line row — 200 covers ~4 years of weekly visits.
+    const upcomingRows = await knex('scheduled_services')
+      .where('customer_id', service.customer_id)
+      .andWhere('scheduled_date', '>=', reportTodayIso)
+      .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+      .modify((qb) => {
+        if (service.scheduled_service_id) qb.whereNot('id', service.scheduled_service_id);
+      })
+      .orderBy('scheduled_date', 'asc')
+      .orderBy('window_start', 'asc')
+      .limit(200)
+      .catch(() => []);
+    const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
+      .find((row) => detectServiceLine(row.service_type) === serviceLine) || null;
+    if (nextApptRow && nextApptRow.scheduled_date) {
+      const rawDate = nextApptRow.scheduled_date;
+      nextAppointment = {
+        serviceType: nextApptRow.service_type || null,
+        scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
+        // window_start only — the customer-facing arrival window is always
+        // window_start + 2 hours (window_end is the internal job block).
+        windowStart: nextApptRow.window_start || null,
+      };
+    }
+  } catch { /* best-effort */ }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -2579,9 +2625,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
-    // customerPhone/customerEmail intentionally NOT in the public report payload —
-    // the report token is a shareable, non-expiring bearer credential, so contact
-    // PII must not ride it. (Recap SMS loads the phone server-side via its own query.)
+    // Owner directive 2026-07-05: the report mirrors the estimate document and
+    // shows the customer's own email/phone with the service address. Like the
+    // estimate, the report token is a shareable bearer link the customer owns —
+    // these are the reader's own contact details, same exposure model as the
+    // address that already prints here.
+    // Callers alias the customer join differently (the public routes select
+    // email/phone; email delivery selects customer_email/customer_phone) —
+    // read both so every render path carries the contact block.
+    customerEmail: service.email || service.customer_email || null,
+    customerPhone: service.phone || service.customer_phone || null,
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     // Membership tier for this visit (see reportWaveGuardTier above). Consumed by the
     // report viewer to suppress the per-visit "Time on site" duration for members while
@@ -2647,6 +2700,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     serviceCoverage,
+    nextAppointment,
     visitTimeline,
     serviceLocations,
     workflowEvents,
