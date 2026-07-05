@@ -26,9 +26,7 @@ const dbDefault = require('../../models/db');
 const ghDefault = require('../content-astro/github-client');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const { callAnthropic } = require('../llm/call');
 
 const MAX_ROUNDS = Math.max(1, parseInt(process.env.CODEX_REMEDIATION_MAX_ROUNDS || '3', 10) || 3);
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -53,9 +51,10 @@ function atRoundLimit(rounds) {
 
 /**
  * Actionable inline Codex findings for the given head, from the PR's review
- * comments (GET /pulls/{n}/comments). Only comments Codex authored on the
- * current head are kept; each is {path, line, body}. A comment whose commit_id
- * GitHub omitted is kept rather than silently dropping a real finding.
+ * comments (GET /pulls/{n}/comments). Only comments Codex authored and provably
+ * tied to the current head (commit_id or original_commit_id) are kept; each is
+ * {path, line, body}. A comment we cannot tie to the head is skipped so a stale
+ * finding never causes a round to be spent against the wrong commit.
  */
 function parseCodexFindings(reviewComments = [], headSha = null) {
   const head = shortSha(headSha);
@@ -65,7 +64,7 @@ function parseCodexFindings(reviewComments = [], headSha = null) {
       if (!head) return true;
       const cid = shortSha(c.commit_id);
       const oid = shortSha(c.original_commit_id);
-      return !cid || cid === head || oid === head;
+      return cid === head || oid === head;
     })
     .map((c) => ({
       path: c.path || null,
@@ -136,18 +135,17 @@ function stripCodeFence(text) {
 }
 
 async function generateFix(markdown, findings, deps = {}) {
-  const client = deps.anthropic || (Anthropic && process.env.ANTHROPIC_API_KEY
-    ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-    : null);
-  if (!client) return null;
-  const resp = await client.messages.create({
+  // Route through the shared cross-provider helper (never throws; { ok, text }).
+  const call = deps.callAnthropic || callAnthropic;
+  const res = await call({
     model: MODELS.FLAGSHIP,
-    max_tokens: 8000,
     system: FIX_SYSTEM,
-    messages: [{ role: 'user', content: buildFixUserMessage(markdown, findings) }],
+    text: buildFixUserMessage(markdown, findings),
+    jsonMode: false,
+    maxTokens: 8000,
   });
-  const text = (resp?.content || []).map((b) => (b && b.text) || '').join('').trim();
-  return text ? stripCodeFence(text) : null;
+  if (!res || !res.ok || !res.text) return null;
+  return stripCodeFence(res.text);
 }
 
 async function park(db, post, reason) {

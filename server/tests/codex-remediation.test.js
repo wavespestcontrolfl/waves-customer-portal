@@ -54,8 +54,8 @@ function makeGh(over = {}) {
   return gh;
 }
 
-function makeAnthropic(text) {
-  return { messages: { create: async () => ({ content: [{ text }] }) } };
+function makeCall(text) {
+  return async () => ({ ok: true, text });
 }
 
 const basePost = {
@@ -74,8 +74,14 @@ describe('parseCodexFindings', () => {
   test('drops findings tied to a different commit', () => {
     expect(parseCodexFindings([finding({ commit_id: 'zzz9999' })], HEAD)).toEqual([]);
   });
-  test('keeps a finding whose commit_id GitHub omitted', () => {
-    expect(parseCodexFindings([finding({ commit_id: null })], HEAD)).toHaveLength(1);
+  test('drops a finding with no commit id when the head is known', () => {
+    expect(parseCodexFindings([finding({ commit_id: null, original_commit_id: null })], HEAD)).toEqual([]);
+  });
+  test('keeps findings when no head is provided', () => {
+    expect(parseCodexFindings([finding({ commit_id: null })], null)).toHaveLength(1);
+  });
+  test('matches on original_commit_id', () => {
+    expect(parseCodexFindings([finding({ commit_id: 'other999', original_commit_id: HEAD })], HEAD)).toHaveLength(1);
   });
   test('drops empty-body comments', () => {
     expect(parseCodexFindings([finding({ body: '  ' })], HEAD)).toEqual([]);
@@ -112,7 +118,7 @@ describe('runRemediationRound', () => {
   test('findings under limit → pushes a fix, re-requests review, bumps round', async () => {
     const db = makeDb({ ...basePost });
     const gh = makeGh();
-    const r = await runRemediationRound({ id: 1 }, { db, gh, anthropic: makeAnthropic('FIXED BODY') });
+    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED BODY') });
     expect(r.remediated).toBe(true);
     expect(r.round).toBe(1);
     expect(gh._calls.putFile).toHaveLength(1);
@@ -128,7 +134,7 @@ describe('runRemediationRound', () => {
   test('no fresh findings → waits (skip), no round burned, no park', async () => {
     const db = makeDb({ ...basePost });
     const gh = makeGh({ reviewComments: [] });
-    const r = await runRemediationRound({ id: 1 }, { db, gh, anthropic: makeAnthropic('X') });
+    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('X') });
     expect(r.skipped).toBe(true);
     expect(r.reason).toMatch(/awaiting/);
     expect(gh._calls.putFile).toHaveLength(0);
@@ -138,7 +144,7 @@ describe('runRemediationRound', () => {
   test('fresh findings at the round limit → park', async () => {
     const db = makeDb({ ...basePost, codex_remediation_rounds: MAX_ROUNDS });
     const gh = makeGh();
-    const r = await runRemediationRound({ id: 1 }, { db, gh, anthropic: makeAnthropic('FIXED') });
+    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED') });
     expect(r.parked).toBe(true);
     expect(r.reason).toMatch(/exhausted/);
     expect(gh._calls.putFile).toHaveLength(0);
@@ -148,7 +154,7 @@ describe('runRemediationRound', () => {
   test('fix produces no change → park (false-positive findings)', async () => {
     const db = makeDb({ ...basePost });
     const gh = makeGh({ fileContent: 'ORIGINAL BODY' });
-    const r = await runRemediationRound({ id: 1 }, { db, gh, anthropic: makeAnthropic('ORIGINAL BODY') });
+    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('ORIGINAL BODY') });
     expect(r.parked).toBe(true);
     expect(r.reason).toMatch(/no change/);
     expect(gh._calls.putFile).toHaveLength(0);
@@ -157,7 +163,7 @@ describe('runRemediationRound', () => {
   test('already parked → skip', async () => {
     const db = makeDb({ ...basePost, codex_remediation_status: 'parked' });
     const gh = makeGh();
-    const r = await runRemediationRound({ id: 1 }, { db, gh, anthropic: makeAnthropic('FIXED') });
+    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED') });
     expect(r.skipped).toBe(true);
     expect(r.reason).toBe('parked');
   });
@@ -165,7 +171,7 @@ describe('runRemediationRound', () => {
   test('closed PR → skip', async () => {
     const db = makeDb({ ...basePost });
     const gh = makeGh({ gh: { getPr: async () => ({ state: 'closed' }) } });
-    const r = await runRemediationRound({ id: 1 }, { db, gh, anthropic: makeAnthropic('FIXED') });
+    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED') });
     expect(r.skipped).toBe(true);
   });
 });
@@ -178,7 +184,7 @@ describe('maybeRemediate flag gate', () => {
     delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
     const db = makeDb({ ...basePost });
     const gh = makeGh();
-    const r = await maybeRemediate({ id: 1 }, { db, gh, anthropic: makeAnthropic('FIXED') });
+    const r = await maybeRemediate({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED') });
     expect(r).toEqual({ skipped: true, reason: 'disabled' });
     expect(gh._calls.putFile).toHaveLength(0);
   });
@@ -187,7 +193,7 @@ describe('maybeRemediate flag gate', () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const db = makeDb({ ...basePost });
     const gh = makeGh();
-    const r = await maybeRemediate({ id: 1 }, { db, gh, anthropic: makeAnthropic('FIXED BODY') });
+    const r = await maybeRemediate({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED BODY') });
     expect(r.remediated).toBe(true);
   });
 });
