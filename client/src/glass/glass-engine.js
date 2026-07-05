@@ -30,6 +30,24 @@ export function glassParamRequested() {
 }
 
 /**
+ * Param-precedence resolver for server-released glass surfaces (mirrors the
+ * estimate GATE_ESTIMATE_GLASS pattern from PR #2372): ?glass=1 forces on
+ * (pre-release preview), ?glass=0 forces off (per-link escape hatch back to
+ * the old page), otherwise the server's release flag decides — only a literal
+ * payload `true` (e.g. /data glassDefault under GATE_REPORT_GLASS) releases.
+ */
+export function glassReleaseActive(glassDefault) {
+  try {
+    const param = new URLSearchParams(window.location.search).get('glass');
+    if (param === '1') return true; // pre-release preview / force-on
+    if (param === '0') return false; // per-link escape hatch back to the old page
+    return glassDefault === true;
+  } catch {
+    return glassDefault === true;
+  }
+}
+
+/**
  * Mounts the scene: html attribute, mesh background, and (full variant only)
  * the parallax orbs + film grain. Returns the orb container for pointer FX
  * plus a cleanup that restores everything it changed.
