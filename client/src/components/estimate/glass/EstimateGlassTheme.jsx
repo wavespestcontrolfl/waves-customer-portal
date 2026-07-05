@@ -13,12 +13,26 @@
  * pass with real components; this keeps PR A reviewable and zero-risk — with
  * the gate off, nothing here mounts and no CSS applies.
  *
+ * The surface-agnostic core (scene builder, pointer FX, confetti, stylesheet)
+ * lives in src/glass/glass-engine.js so other surfaces can adopt glass
+ * without this file's DOM-tagging bridge. What remains here is exactly the
+ * legacy-page adapter: classify() and the observers that re-run it. Surfaces
+ * that author their own data-glass markup use useGlassSurface from the
+ * engine instead.
+ *
  * Everything is torn down on unmount: html attribute, scene nodes,
  * observers, listeners. Stray data attributes are inert without the html
  * attribute, so they are left in place rather than walked again.
  */
 import { useEffect, useMemo } from 'react';
-import './glass-theme.css';
+import {
+  applyGlassScene,
+  attachGlassPointerFx,
+  fireGlassConfetti,
+  glassParamRequested,
+} from '../../../glass/glass-engine';
+
+export { fireGlassConfetti };
 
 const TINT = {
   'rgb(242, 238, 224)': 'rgba(244,239,224,.36)',
@@ -38,65 +52,6 @@ const ownText = (el) => {
   for (const n of el.childNodes) if (n.nodeType === 3) s += n.textContent;
   return s.trim();
 };
-
-function buildScene(html, variant) {
-  html.setAttribute('data-glass-theme', variant);
-  // The 'pro' scene (invoices/receipts/statements) stays quiet: one soft
-  // brand-tinted wash, no orbs, no grain — financial documents should feel
-  // composed, not playful.
-  html.style.background = variant === 'pro'
-    ? [
-      'radial-gradient(900px 600px at 80% -10%, rgba(10,126,194,.14), transparent 60%)',
-      'radial-gradient(700px 500px at 0% 100%, rgba(4,57,94,.08), transparent 60%)',
-      'linear-gradient(180deg,#EDF3F9 0%,#F8FAFC 50%,#EEF3F8 100%)',
-    ].join(',')
-    : [
-      'radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%)',
-      'radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%)',
-      'radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%)',
-      'radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%)',
-      'radial-gradient(140% 120% at 50% 40%, rgba(255,255,255,0) 55%, rgba(4,57,94,.14) 100%)',
-      'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
-    ].join(',');
-  document.body.style.setProperty('background', 'transparent', 'important');
-  if (variant === 'pro') {
-    const root = document.getElementById('root');
-    if (root) {
-      root.style.position = 'relative';
-      root.style.zIndex = '1';
-    }
-    return { orbs: null, grain: null };
-  }
-
-  const orbs = document.createElement('div');
-  orbs.className = 'glass-scene-orbs';
-  orbs.setAttribute('aria-hidden', 'true');
-  orbs.innerHTML = [
-    ['10%', '6%', '380px', 'rgba(10,126,194,.36)'],
-    ['62%', '22%', '460px', 'rgba(56,170,225,.34)'],
-    ['22%', '62%', '420px', 'rgba(240,165,0,.18)'],
-    ['72%', '74%', '340px', 'rgba(4,57,94,.28)'],
-    ['44%', '40%', '220px', 'rgba(120,200,255,.28)'],
-  ]
-    .map((b) => `<div class="glass-orb" style="position:absolute;left:${b[0]};top:${b[1]};width:${b[2]};height:${b[2]};border-radius:50%;background:${b[3]};filter:blur(70px);will-change:transform;"></div>`)
-    .join('')
-    + '<div style="position:absolute;inset:-10%;background:radial-gradient(circle, rgba(4,57,94,.28) 0 1px, transparent 1.4px);background-size:24px 24px;opacity:.14;"></div>';
-  document.body.prepend(orbs);
-
-  const grainSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncA type="linear" slope="0.055"/></feComponentTransfer></filter><rect width="180" height="180" filter="url(%23n)"/></svg>';
-  const grain = document.createElement('div');
-  grain.className = 'glass-scene-grain';
-  grain.setAttribute('aria-hidden', 'true');
-  grain.style.backgroundImage = `url("data:image/svg+xml;utf8,${encodeURIComponent(grainSvg).replace(/%2523/g, '%23')}")`;
-  document.body.appendChild(grain);
-
-  const root = document.getElementById('root');
-  if (root) {
-    root.style.position = 'relative';
-    root.style.zIndex = '1';
-  }
-  return { orbs, grain };
-}
 
 function classify(revealIO, statIO, pro) {
   for (const el of document.querySelectorAll('#root *')) {
@@ -257,31 +212,6 @@ function classify(revealIO, statIO, pro) {
 }
 
 /**
- * Celebration burst for booking confirmation — exported for the accept flow.
- * No-ops unless the glass theme is mounted or the user prefers reduced motion.
- */
-export function fireGlassConfetti(cx, cy) {
-  // Purely decorative: feature-detect and fail silent — callers sit inside
-  // booking-success paths and must never see a visual error.
-  if (!document.documentElement.hasAttribute('data-glass-theme')) return;
-  if (typeof Element.prototype.animate !== 'function') return;
-  if (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const colors = ['#F0A500', '#FFD666', '#0A7EC2', '#04395E', '#7CC7F0'];
-  for (let i = 0; i < 30; i += 1) {
-    const b = document.createElement('div');
-    b.setAttribute('aria-hidden', 'true');
-    b.style.cssText = `position:fixed;left:${cx}px;top:${cy}px;width:9px;height:9px;border-radius:${i % 3 === 0 ? '50%' : '2px'};background:${colors[i % colors.length]};pointer-events:none;z-index:2000`;
-    document.body.appendChild(b);
-    const ang = Math.random() * Math.PI * 2;
-    const v = 70 + Math.random() * 170;
-    b.animate([
-      { transform: 'translate(0,0) rotate(0deg)', opacity: 1 },
-      { transform: `translate(${Math.cos(ang) * v}px,${Math.sin(ang) * v - 100}px) rotate(${Math.random() * 540 - 270}deg)`, opacity: 0 },
-    ], { duration: 950 + Math.random() * 450, easing: 'cubic-bezier(.16,.8,.4,1)' }).onfinish = () => b.remove();
-  }
-}
-
-/**
  * Hook form of the theme — pages with multiple return branches (loading /
  * error / loaded) call this once at the top of the component instead of
  * mounting the component in every branch.
@@ -290,9 +220,7 @@ export function useGlassTheme(active, variant = 'full') {
   useEffect(() => {
     if (!active) return undefined;
     const html = document.documentElement;
-    const prevHtmlBg = html.style.background;
-    const prevBodyBg = document.body.style.background;
-    const { orbs, grain } = buildScene(html, variant);
+    const { orbs, cleanup: sceneCleanup } = applyGlassScene(variant);
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const pro = variant === 'pro';
 
@@ -345,63 +273,16 @@ export function useGlassTheme(active, variant = 'full') {
     if (rootEl) mo.observe(rootEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
 
     // cursor-follow specular + pointer/scroll parallax on the orbs
-    // (skipped entirely for the pro variant — no orbs, no motion)
-    let raf = 0;
-    let lastEvt = null;
-    let px = 0;
-    let py = 0;
-    const orbEls = pro ? [] : orbs.querySelectorAll('.glass-orb');
-    const parallax = () => {
-      if (reduced) return;
-      const sy = window.scrollY;
-      orbEls.forEach((c, i) => {
-        const f = 0.015 + i * 0.012;
-        const drift = Math.sin(sy / 900 + i * 1.7) * 24;
-        c.style.transform = `translate(${px * -46 * ((i + 1) / orbEls.length) + drift}px, ${sy * f + py * -34 * ((i + 1) / orbEls.length)}px)`;
-      });
-    };
-    const onMove = (e) => {
-      lastEvt = e;
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        const t = lastEvt.target instanceof Element ? lastEvt.target.closest('[data-glass],[data-glass-accent]') : null;
-        if (t) {
-          // The specular vars live on <html> — OUTSIDE the observed #root
-          // subtree — so per-frame pointer motion never feeds the retag
-          // observer (Codex rd3). var() resolution inherits from the root,
-          // and only the :hover element renders its ::before, so a single
-          // global pair positions the shine correctly.
-          const r = t.getBoundingClientRect();
-          html.style.setProperty('--mx', `${((lastEvt.clientX - r.left) / r.width) * 100}%`);
-          html.style.setProperty('--my', `${((lastEvt.clientY - r.top) / r.height) * 100}%`);
-        }
-        px = lastEvt.clientX / window.innerWidth - 0.5;
-        py = lastEvt.clientY / window.innerHeight - 0.5;
-        parallax();
-      });
-    };
-    const onScroll = () => requestAnimationFrame(parallax);
-    if (!pro) {
-      document.addEventListener('pointermove', onMove, { passive: true });
-      window.addEventListener('scroll', onScroll, { passive: true });
-    }
+    // (no orbs on the pro variant, so the engine attaches nothing there)
+    const detachFx = attachGlassPointerFx(html, orbs, reduced);
 
     return () => {
-      document.removeEventListener('pointermove', onMove);
-      window.removeEventListener('scroll', onScroll);
-      if (raf) cancelAnimationFrame(raf);
+      detachFx();
       if (retagTimer) clearTimeout(retagTimer);
       mo.disconnect();
       if (revealIO) revealIO.disconnect();
       if (statIO) statIO.disconnect();
-      if (orbs) orbs.remove();
-      if (grain) grain.remove();
-      html.style.removeProperty('--mx');
-      html.style.removeProperty('--my');
-      html.removeAttribute('data-glass-theme');
-      html.style.background = prevHtmlBg;
-      document.body.style.background = prevBodyBg;
+      sceneCleanup();
     };
   }, [active, variant]);
 }
@@ -411,13 +292,7 @@ export function useGlassTheme(active, variant = 'full') {
  * reads the same ?glass=1 gate and applies the restrained 'pro' variant.
  */
 export function useGlassProGate() {
-  const requested = useMemo(() => {
-    try {
-      return new URLSearchParams(window.location.search).get('glass') === '1';
-    } catch {
-      return false;
-    }
-  }, []);
+  const requested = useMemo(() => glassParamRequested(), []);
   useGlassTheme(requested, 'pro');
 }
 
