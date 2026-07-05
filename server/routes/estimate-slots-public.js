@@ -37,6 +37,7 @@ const logger = require('../services/logger');
 const { getAvailableSlots, findEstimateSlots } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
 const {
+  annualPrepayEligibleForEstimateData,
   buildPricingBundle,
   estimateTrenchingReviewRequired,
   findLinkedUpcomingAppointment,
@@ -486,6 +487,15 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       }
     }
     const oneTime = req.body?.serviceMode === 'one_time' || isOneTimeOnly;
+    // Mirror accept's annual-prepay availability gate BEFORE collecting money:
+    // a prepay-annual accept is rejected for an ineligible service mix (and
+    // the frozen-snapshot existing-customer case), so a stale/crafted client
+    // requesting prepay must not pay a deposit for an acceptance shape the
+    // server will 400. Live existing plan customers never reach the mint —
+    // the deposit policy 409-exempts them below.
+    if (req.body?.paymentMethodPreference === 'prepay_annual' && !annualPrepayEligibleForEstimateData(estData)) {
+      return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+    }
     // Mirror accept's invoice-mode customer gate BEFORE collecting money:
     // accept rejects an invoice-mode estimate (admin flag OR derived
     // guarantee-only renewal) with no linked customer and no customer phone —

@@ -13154,6 +13154,7 @@ module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
 module.exports.acceptedOneTimeChoiceListForEstimate = acceptedOneTimeChoiceListForEstimate;
 module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
+module.exports.annualPrepayEligibleForEstimateData = annualPrepayEligibleForEstimateData;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isReservationHeldAppointment = isReservationHeldAppointment;

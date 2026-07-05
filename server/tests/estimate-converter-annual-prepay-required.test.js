@@ -65,6 +65,9 @@ describe('estimate converter annual prepay orchestration', () => {
   // mock returns null so convertEstimate rejects right after the term call — this
   // isolates the createTermForAnnualPrepay arguments (incl. coverage config)
   // without needing to mock the full downstream conversion.
+  // estimate-deposits is ALWAYS mocked: the prepay branch's ledger read now
+  // fails closed, and the makeDb mock throws on the estimate_deposits table —
+  // a clean null read is the default no-deposit path.
   function setup(recurringServices, totals, { deposits = null, invoiceCreateResult = { id: 'invoice-1' } } = {}) {
     const db = makeDb(recurringServices, totals);
     const invoiceService = {
@@ -81,7 +84,10 @@ describe('estimate converter annual prepay orchestration', () => {
     jest.doMock('../services/annual-prepay-renewals', () => renewals);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn, error: jest.fn() }));
     jest.doMock('../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn() }));
-    if (deposits) jest.doMock('../services/estimate-deposits', () => deposits);
+    jest.doMock('../services/estimate-deposits', () => deposits || {
+      pendingDepositCredit: jest.fn().mockResolvedValue(null),
+      consumeDepositCredit: jest.fn().mockResolvedValue(0),
+    });
 
     const EstimateConverter = require('../services/estimate-converter');
     return { EstimateConverter, invoiceService, renewals, warn };
@@ -144,6 +150,22 @@ describe('estimate converter annual prepay orchestration', () => {
     // GROSS = net invoice total (578) + credited deposit (49): recording the
     // net would understate the year by the deposit.
     expect(args).toMatchObject({ prepayAmount: 627 });
+  });
+
+  test('deposit ledger READ failure aborts the prepay conversion (fail closed — never mint with a dropped credit)', async () => {
+    const deposits = {
+      pendingDepositCredit: jest.fn().mockRejectedValue(new Error('connection reset')),
+      consumeDepositCredit: jest.fn(),
+    };
+    const { EstimateConverter, invoiceService } = setup(
+      [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' }],
+      undefined,
+      { deposits },
+    );
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
+      .rejects.toThrow('deposit ledger read failed for annual prepay invoice');
+    expect(invoiceService.create).not.toHaveBeenCalled();
   });
 
   test('deposit allocation mismatch on the prepay invoice throws (rolls back the accept transaction)', async () => {

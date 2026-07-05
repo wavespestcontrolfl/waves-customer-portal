@@ -1522,13 +1522,24 @@ const EstimateConverter = {
           // below — prepay-annual accepts owe the $49 deposit (owner decision
           // 2026-07-05), and this invoice is the only one a prepay estimate
           // ever mints, so a credit missed here would strand on the ledger
-          // (covered visits invoice nothing at completion). Ledger read and
-          // consumption both ride `database` (the accept transaction when
-          // called from accept): the credit line exists IFF the ledger
-          // consumed exactly that amount, or the whole accept rolls back —
-          // never an accepted prepay beside an unconsumed deposit row.
+          // (covered visits invoice nothing at completion, and the
+          // required-path sweep never refunds it). That is also why the
+          // ledger read fails CLOSED: the accept gate may have just verified
+          // a real deposit, so a read error must abort the accept
+          // (retryable) rather than mint the year with the credit silently
+          // dropped. A clean null read is the legitimate no-deposit path
+          // (legacy/manual conversions). Ledger read and consumption both
+          // ride `database` (the accept transaction when called from
+          // accept): the credit line exists IFF the ledger consumed exactly
+          // that amount, or the whole accept rolls back — never an accepted
+          // prepay beside an unconsumed deposit row.
           const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
-          const prepayDepositCredit = await pendingDepositCredit(estimateId, database).catch(() => null);
+          let prepayDepositCredit;
+          try {
+            prepayDepositCredit = await pendingDepositCredit(estimateId, database);
+          } catch (ledgerErr) {
+            throw new Error(`deposit ledger read failed for annual prepay invoice (estimate ${estimateId}): ${ledgerErr.message}`);
+          }
           const requestedPrepayDepositCredit = prepayDepositCredit ? Number(prepayDepositCredit.amount) : 0;
           const inv = await InvoiceService.create({
             database,
