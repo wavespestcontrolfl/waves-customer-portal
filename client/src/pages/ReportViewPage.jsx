@@ -407,6 +407,39 @@ export function visitTimeLabel(data = {}) {
   return arrived || exited || '';
 }
 
+// Mirrors the estimate hero's phone display: 10-digit US numbers get the
+// (xxx) xxx-xxxx treatment, anything else renders as stored.
+function formatCustomerPhone(phone) {
+  const raw = String(phone || '').replace(/\D/g, '');
+  const digits = raw.length === 11 && raw.startsWith('1') ? raw.slice(1) : raw;
+  if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  return String(phone || '').trim();
+}
+
+// "Tue, Jul 22 · 9:00 AM–11:00 AM" from the payload's nextAppointment.
+// The displayed arrival window is ALWAYS window_start + 2 hours — window_end
+// is the internal job block and never renders on customer surfaces.
+function formatNextAppointmentLabel(nextAppointment) {
+  if (!nextAppointment?.scheduledDate) return null;
+  const dateLabel = (() => {
+    try {
+      return new Date(`${nextAppointment.scheduledDate}T12:00:00Z`)
+        .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    } catch { return null; }
+  })();
+  if (!dateLabel) return null;
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(nextAppointment.windowStart || ''));
+  if (!m) return dateLabel;
+  const fmt = (mins) => {
+    const h24 = Math.floor(mins / 60) % 24;
+    const h12 = h24 % 12 || 12;
+    const mm = mins % 60;
+    return `${h12}:${String(mm).padStart(2, '0')} ${h24 >= 12 ? 'PM' : 'AM'}`;
+  };
+  const start = (Number(m[1]) * 60) + Number(m[2]);
+  return `${dateLabel} · ${fmt(start)}\u2013${fmt(start + 120)}`;
+}
+
 export function serviceReportDateTimeLabel(data = {}) {
   const serviceDate = formatDate(data.serviceDate);
   const serviceTime = visitTimeLabel(data);
@@ -1620,21 +1653,35 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const completionStatus = completionDisplayTime ? 'Completed' : (completedEvent?.status === 'pending' ? 'In progress' : 'Completed');
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   const serviceLabel = serviceDisplayName(data);
+  // "Quarterly Pest Control Service" → "Quarterly Pest Control" so the
+  // headline never reads "... Service service is complete".
+  const headlineServiceLabel = String(serviceLabel || '').replace(/\s+service$/i, '').trim();
+  const headline = headlineServiceLabel
+    ? String(smartStatus.heading || '').replace(/^your service\b/, `your ${headlineServiceLabel} service`)
+    : smartStatus.heading;
   const serviceDateTime = serviceReportDateTimeLabel(data);
+  const nextAppointmentLabel = formatNextAppointmentLabel(data.nextAppointment);
 
   return (
     <section className="service-report-hero" id="service-status">
       <div className="service-report-hero-copy">
-        <div className="section-eyebrow">Service report{serviceLabel ? ` · ${serviceLabel}` : ''}</div>
-        <h1 className="sr-title">Hey {firstName}, {smartStatus.heading}</h1>
-        {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
+        <div className="section-eyebrow">Service report</div>
+        <h1 className="sr-title">Hey {firstName}, {headline}</h1>
+        {(data.serviceAddress || data.customerEmail || data.customerPhone) && (
+          <div className="service-meta-address">
+            {[data.serviceAddress, data.customerEmail, formatCustomerPhone(data.customerPhone)]
+              .map((part) => String(part || '').trim())
+              .filter(Boolean)
+              .join(' \u00B7 ')}
+          </div>
+        )}
       </div>
       <div className="service-status-card">
         <div className="service-status-main">
           <div>
             <div className="section-eyebrow">Today&apos;s result</div>
             <div className="smart-status-result">{resultOverride || smartStatus.result}</div>
-            <div className="sr-meta">{[serviceLabel, serviceDateTime].filter(Boolean).join(' | ')}</div>
+            {serviceDateTime && <div className="sr-meta">{serviceDateTime}</div>}
           </div>
           {(smartStatus.status || readinessBadge) && (
             <div className={`status-badge status-${smartStatus.statusTone || (readinessBadge?.ready ? 'ready' : 'pending')}`}>
@@ -1655,6 +1702,12 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             <div className="sr-cell-label">Completion status</div>
             <div className="sr-cell-value">{completionStatus}</div>
           </div>
+          {nextAppointmentLabel && (
+            <div className="sr-cell">
+              <div className="sr-cell-label">Next appointment</div>
+              <div className="sr-cell-value">{nextAppointmentLabel}</div>
+            </div>
+          )}
         </div>
         {smartStatus.detail && <p className="smart-status-detail">{smartStatus.detail}</p>}
         <HeroConditions
@@ -4157,49 +4210,6 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
   );
 }
 
-function ServiceReportCoverageAndWorkflow({
-  serviceType,
-  serviceCoverage,
-  visitTimeline,
-  workflowEvents,
-  customerInteraction,
-  visitTiming,
-  timingSource,
-  evidenceLevel,
-  mapBackgroundUrl,
-  mapAttribution,
-  applications = [],
-  serviceLine = null,
-  hideCoverageMap = false,
-}) {
-  // Lawn and tree & shrub reports don't show the per-area Coverage map — the
-  // lawn-intelligence/assessment surfaces tell that story instead. Pest V2 hides
-  // it too (the "Where we protected" Waves diagram up top replaces the legacy
-  // lettered map). Keep the Visit Timeline for every service line.
-  const hideCoverage = serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || '')) || hideCoverageMap;
-  return (
-    <>
-      <ServiceTimelineSection
-        serviceType={serviceType}
-        visitTimeline={visitTimeline}
-        workflowEvents={workflowEvents}
-        customerInteraction={customerInteraction}
-        visitTiming={visitTiming}
-        timingSource={timingSource}
-      />
-      {!hideCoverage && (
-        <ServiceCoverageCard
-          coverage={serviceCoverage}
-          evidenceLevel={evidenceLevel}
-          mapBackgroundUrl={mapBackgroundUrl}
-          mapAttribution={mapAttribution}
-          applications={applications}
-        />
-      )}
-    </>
-  );
-}
-
 function overlayBox(geometry = {}) {
   if (geometry.type === 'circle') {
     const r = Number(geometry.r || 8);
@@ -4550,6 +4560,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   });
   const hasPestPressure = Boolean(data.pestPressure && data.pestPressure.showOnCustomerReport !== false && data.pestPressure.enabled !== false);
   const hasReentry = Boolean(dynamicContext.reentry);
+  // Lawn and tree & shrub reports don't show the per-area Coverage map — the
+  // lawn-intelligence/assessment surfaces tell that story instead. Pest V2
+  // hides it too (the "Where we protected" diagram replaces the lettered map).
+  const hideCoverageCard = data.serviceLine === 'lawn'
+    || /tree|shrub/.test(String(data.serviceLine || ''))
+    || Boolean(data.pestReportV2);
 
   const share = async () => {
     if (navigator.share) {
@@ -7247,6 +7263,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
 
+        {/* Visit Timeline sits directly under Re-entry on every layout (owner
+            ask 2026-07-05): lawn/tree V2 already lead with it below; the
+            standard layout renders it here instead of down in the coverage
+            block. */}
+        {!isV2LeadLayout && (
+          <ServiceTimelineSection
+            serviceType={visitTimelineServiceType}
+            visitTimeline={normalizedVisitTimeline}
+            workflowEvents={data.workflowEvents}
+            customerInteraction={data.customerInteraction}
+            visitTiming={data.visitTiming}
+            timingSource={data}
+          />
+        )}
+
         {/* Pest Report V2 — protection-first dashboard, right under Re-entry so it
             leads the pest report. Surfaces the premium-experience intelligence
             (protection status, next step, bug files, receipt) + the seasonal
@@ -7403,22 +7434,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* Non-lead-layout lines keep Timeline + Coverage and Products here; lawn +
             tree_shrub V2 already rendered them up top. */}
-        {!isV2LeadLayout && (
+        {!isV2LeadLayout && !hideCoverageCard && (
           <div id="map">
-            <ServiceReportCoverageAndWorkflow
-              serviceType={visitTimelineServiceType}
-              serviceCoverage={serviceCoverage}
-              visitTimeline={normalizedVisitTimeline}
-              workflowEvents={data.workflowEvents}
-              customerInteraction={data.customerInteraction}
-              visitTiming={data.visitTiming}
-              timingSource={data}
+            <ServiceCoverageCard
+              coverage={serviceCoverage}
               evidenceLevel={data.evidenceLevel}
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               applications={data.applications || []}
-              serviceLine={data.serviceLine}
-              hideCoverageMap={Boolean(data.pestReportV2)}
             />
           </div>
         )}

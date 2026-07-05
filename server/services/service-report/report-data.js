@@ -2547,6 +2547,38 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+  // Next upcoming appointment for this customer (owner ask 2026-07-05: every
+  // report shows the next visit, like the estimate documents). Same
+  // scheduled_services allow-list the V2 next-visit lookups use, minus the
+  // service-line filter — the customer's next appointment of ANY line counts.
+  // The visit this report covers is excluded by id so a same-day report never
+  // shows its own just-completed slot. Best-effort: never blocks the report.
+  let nextAppointment = null;
+  try {
+    const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const nextApptRow = await knex('scheduled_services')
+      .where('customer_id', service.customer_id)
+      .andWhere('scheduled_date', '>=', reportTodayIso)
+      .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+      .modify((qb) => {
+        if (service.scheduled_service_id) qb.whereNot('id', service.scheduled_service_id);
+      })
+      .orderBy('scheduled_date', 'asc')
+      .orderBy('window_start', 'asc')
+      .first('id', 'service_type', 'scheduled_date', 'window_start')
+      .catch(() => null);
+    if (nextApptRow && nextApptRow.scheduled_date) {
+      const rawDate = nextApptRow.scheduled_date;
+      nextAppointment = {
+        serviceType: nextApptRow.service_type || null,
+        scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
+        // window_start only — the customer-facing arrival window is always
+        // window_start + 2 hours (window_end is the internal job block).
+        windowStart: nextApptRow.window_start || null,
+      };
+    }
+  } catch { /* best-effort */ }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -2567,9 +2599,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
-    // customerPhone/customerEmail intentionally NOT in the public report payload —
-    // the report token is a shareable, non-expiring bearer credential, so contact
-    // PII must not ride it. (Recap SMS loads the phone server-side via its own query.)
+    // Owner directive 2026-07-05: the report mirrors the estimate document and
+    // shows the customer's own email/phone with the service address. Like the
+    // estimate, the report token is a shareable bearer link the customer owns —
+    // these are the reader's own contact details, same exposure model as the
+    // address that already prints here.
+    customerEmail: service.email || null,
+    customerPhone: service.phone || null,
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     // Membership tier for this visit (see reportWaveGuardTier above). Consumed by the
     // report viewer to suppress the per-visit "Time on site" duration for members while
@@ -2635,6 +2671,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     serviceCoverage,
+    nextAppointment,
     visitTimeline,
     serviceLocations,
     workflowEvents,
