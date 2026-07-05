@@ -2838,7 +2838,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       durableCompletionCommitted = true;
     } else {
       try {
-        conditionsAtApplication = serviceRecordCols.conditions && useServiceReportV1 && !isIncompleteVisit
+        conditionsAtApplication = shouldCaptureApplicationConditions({
+          hasConditionsColumn: !!serviceRecordCols.conditions,
+          useServiceReportV1,
+          isIncompleteVisit,
+          productCount: Array.isArray(products) ? products.length : 0,
+        })
           ? await fetchApplicationConditions({
             latitude: svc.customer_latitude,
             longitude: svc.customer_longitude,
@@ -6946,6 +6951,28 @@ router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
   }
 });
 
+// Whether to capture application conditions (weather snapshot) for the
+// service_record at completion time (extracted for unit testing).
+// Two independent reasons to capture:
+//   1. V1 service reports render conditions on the customer report — the
+//      historical trigger (complete visits only).
+//   2. Any visit that logs products gets FDACS compliance-ledger rows
+//      (property_application_history), and application records are meant to
+//      carry conditions — INCLUDING incomplete closeouts, whose products
+//      were still physically applied (Codex P2 round 2: the old
+//      !isIncompleteVisit gate exported those ledger rows with null
+//      weather/wind).
+function shouldCaptureApplicationConditions({
+  hasConditionsColumn,
+  useServiceReportV1,
+  isIncompleteVisit,
+  productCount,
+}) {
+  if (!hasConditionsColumn) return false;
+  if (useServiceReportV1 && !isIncompleteVisit) return true;
+  return Number(productCount) > 0;
+}
+
 // Auto-invoice eligibility for a completed visit (extracted for unit testing).
 // Historically required the scheduler's create_invoice_on_complete flag OR a
 // WaveGuard tier, which silently dropped priced, self-pay, non-WaveGuard visits
@@ -7138,4 +7165,5 @@ module.exports._test = {
   internalOnlyProductsBlockPayload,
   serviceReportEmailEligible,
   shouldAutoInvoiceCompletion,
+  shouldCaptureApplicationConditions,
 };

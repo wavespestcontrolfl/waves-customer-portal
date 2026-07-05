@@ -66,11 +66,15 @@ function parseArgs(argv = process.argv) {
 // burn its whole budget on those no-ops before reaching genuinely missing
 // V2 completions (each invocation restarts from the lowest uuid).
 //
-// One deliberate asymmetry remains: the writer's ilike name-match fallback
-// can resolve a catalog product this SQL can't see (sp.product_id NULL but
-// the legacy row carries the resolved id) — such records still scan as
-// candidates and write nothing. The writer stays the authority; the scan
-// only needs to be duplicate-safe and starve-proof, not perfect.
+// The legacy-identity arms mirror the writer's product resolution,
+// INCLUDING its catalog-name fallback: a legacy service_products row that
+// predates the product_id column can be ledgered under the catalog id the
+// old writer resolved by ilike name match, so coverage also accepts a
+// NULL-link row whose product_id is a name-match for the product row.
+// Without that arm those records scan as candidates forever and --limit
+// runs starve on no-ops again (Codex P2 round 2). The name arm requires a
+// non-empty product name — '%' || '' || '%' would match every catalog row,
+// and the writer treats an empty name as unidentifiable.
 function buildCandidateQuery(k, lastId) {
   return k('service_records as sr')
     .whereExists(function productMissingLedgerRow() {
@@ -85,10 +89,19 @@ function buildCandidateQuery(k, lastId) {
               this.whereRaw('pah.service_product_id = sp.id')
                 .orWhere(function legacyProductIdentity() {
                   this.whereNull('pah.service_product_id')
-                    .where(function sameProductOrBothUnidentified() {
+                    .where(function productIdentityArms() {
                       this.whereRaw('pah.product_id = sp.product_id')
                         .orWhere(function bothUnidentified() {
                           this.whereNull('pah.product_id').whereRaw('sp.product_id is null');
+                        })
+                        .orWhere(function nameResolvedIdentity() {
+                          this.whereNotNull('pah.product_id')
+                            .whereRaw('sp.product_id is null')
+                            .whereRaw("coalesce(sp.product_name, '') <> ''")
+                            .whereRaw(
+                              'pah.product_id in (select pc.id from products_catalog as pc '
+                              + "where pc.name ilike '%' || sp.product_name || '%')"
+                            );
                         });
                     });
                 });

@@ -457,12 +457,65 @@ describe('backfill candidate scan excludes legacy-covered records (limited-run s
     expect(flat).toContain('pah.service_record_id = sp.service_record_id');
   });
 
+  test('compiled SQL carries the catalog-name-fallback arm (legacy rows predating product_id)', () => {
+    const { sql } = buildCandidateQuery(knexPg, null).toSQL();
+    const flat = sql.replace(/\s+/g, ' ');
+
+    // mirrors the writer's ilike name resolution: a NULL-link ledger row
+    // whose product_id is a name-match for a product row with no product_id
+    expect(flat).toContain(
+      "pah.product_id in (select pc.id from products_catalog as pc where pc.name ilike '%' || sp.product_name || '%')"
+    );
+    // guarded against the match-everything empty name ('%' || '' || '%')
+    expect(flat).toContain("coalesce(sp.product_name, '') <> ''");
+    expect(flat).toContain('"pah"."product_id" is not null');
+  });
+
   test('keyset cursor and batch limit survive the predicate rewrite', () => {
     const { sql, bindings } = buildCandidateQuery(knexPg, 'aaaa-cursor').toSQL();
     expect(sql).toContain('"sr"."id" > ?');
     expect(sql).toContain('order by "sr"."id" asc');
     expect(sql).toContain('limit ?');
     expect(bindings).toContain('aaaa-cursor');
+  });
+});
+
+describe('shouldCaptureApplicationConditions (completion route gate)', () => {
+  // Conditions must be captured whenever ledger rows will carry them —
+  // including product-bearing INCOMPLETE closeouts (the products were
+  // physically applied; the old !isIncompleteVisit gate exported those
+  // FDACS rows with null weather/wind).
+  const { shouldCaptureApplicationConditions } = require('../routes/admin-dispatch')._test;
+
+  const base = {
+    hasConditionsColumn: true,
+    useServiceReportV1: true,
+    isIncompleteVisit: false,
+    productCount: 0,
+  };
+
+  test('V1 complete visit captures (historical report behavior unchanged)', () => {
+    expect(shouldCaptureApplicationConditions(base)).toBe(true);
+  });
+
+  test('incomplete visit with NO products still skips (nothing to ledger)', () => {
+    expect(shouldCaptureApplicationConditions({ ...base, isIncompleteVisit: true })).toBe(false);
+  });
+
+  test('incomplete visit WITH products captures — its ledger rows need conditions', () => {
+    expect(shouldCaptureApplicationConditions({ ...base, isIncompleteVisit: true, productCount: 2 })).toBe(true);
+  });
+
+  test('non-V1 completion WITH products captures — ledgering is independent of the report template', () => {
+    expect(shouldCaptureApplicationConditions({ ...base, useServiceReportV1: false, productCount: 1 })).toBe(true);
+  });
+
+  test('non-V1 completion with no products skips (behavior unchanged)', () => {
+    expect(shouldCaptureApplicationConditions({ ...base, useServiceReportV1: false })).toBe(false);
+  });
+
+  test('missing conditions column always skips', () => {
+    expect(shouldCaptureApplicationConditions({ ...base, hasConditionsColumn: false, productCount: 3 })).toBe(false);
   });
 });
 
