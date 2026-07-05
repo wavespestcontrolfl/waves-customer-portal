@@ -614,7 +614,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
 
   if (pendingTarget) {
     return {
-      heading: 'your service is complete.',
+      heading: 'your service is complete!',
       status: pendingReadyText,
       statusTone: 'pending',
       result: `${pendingTarget.label || 'Treated'} areas are still drying.`,
@@ -635,7 +635,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   }
 
   return {
-    heading: 'your service is complete.',
+    heading: 'your service is complete!',
     status: allReady ? 'Ready now' : 'Service complete',
     statusTone: allReady ? 'ready' : 'neutral',
     result: 'Routine service completed. No high-priority issues were noted.',
