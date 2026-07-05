@@ -6384,8 +6384,13 @@ async function handleEstimateView(req, res, next) {
       && !cardHoldForcesReactView
       && !adminPreviewRequested
       && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
+      // Only pre-decision estimates: a terminal quote's outcome is fixed, so
+      // assigning/logging it on a reopen would pollute the acceptance
+      // denominator with a non-convertible unit. Mirrors the terminal set used
+      // by this file's other status guards.
+      && !['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)
       && shouldCountView(req, clientIp(req), estimate)) {
-      const assignment = Experiments.assignEstimateViewExperiment(estimate);
+      const assignment = await Experiments.assignEstimateViewExperiment(estimate);
       if (assignment.inExperiment && typeof assignment.value === 'boolean') {
         shouldUseReactEstimateView = assignment.value;
       }

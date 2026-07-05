@@ -41,14 +41,17 @@ Grant `SELECT` on `experiment_exposures`, `estimates`, `estimate_deposits`,
 
 ### Identifier type + Experiment Assignment Query
 
-Add one identifier type `estimate_id`, and this assignment query:
+Add one identifier type `estimate_id`, and this assignment query. **`estimates.id`
+is a UUID** (migration `20260401000013_admin_layer.js`), and `logExposure` stores
+it as text in `unit_id`, so cast back to `uuid` (NOT bigint) to match the metric
+queries below (which return the native `estimates.id` uuid):
 
 ```sql
 SELECT
-  CAST(unit_id AS BIGINT) AS estimate_id,
-  exposed_at              AS timestamp,
-  experiment_key          AS experiment_id,
-  variation_id            AS variation_id
+  unit_id::uuid  AS estimate_id,
+  exposed_at     AS timestamp,
+  experiment_key AS experiment_id,
+  variation_id   AS variation_id
 FROM experiment_exposures
 WHERE unit_type = 'estimate'
 ```

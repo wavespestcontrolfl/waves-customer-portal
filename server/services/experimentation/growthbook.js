@@ -106,18 +106,45 @@ async function logExposure({ experimentKey, variationId, variationKey, unitId, u
   }
 }
 
+// The persisted exposure row is the source of truth for an already-assigned
+// unit. On a cold/failed feature cache we replay it instead of guessing, so we
+// never serve a different arm than GrowthBook has recorded.
+async function getPriorAssignment(experimentKey, unitId) {
+  try {
+    return (await db('experiment_exposures')
+      .select('variation_id', 'variation_key', 'metadata')
+      .where({ experiment_key: experimentKey, unit_id: String(unitId) })
+      .first()) || null;
+  } catch (e) {
+    logger.warn(`[growthbook] prior-assignment lookup failed (${experimentKey}/${unitId}): ${e.message}`);
+    return null;
+  }
+}
+
 /**
- * Assign a unit to a GrowthBook feature-flag experiment. Synchronous w.r.t. the
- * request (local hash eval); the exposure insert is fire-and-forget. Returns a
- * safe control default on any miss — never throws into the caller.
+ * Assign a unit to a GrowthBook feature-flag experiment. Happy path: a local
+ * deterministic hash (no request-path network); the exposure insert is
+ * fire-and-forget. Cache miss: replays any persisted assignment rather than
+ * guessing. Returns a safe control default on any miss — never throws.
  *
- * @returns {{ inExperiment: boolean, value: *, variationId: (number|null), variationKey: (string|null) }}
+ * @returns {Promise<{ inExperiment: boolean, value: *, variationId: (number|null), variationKey: (string|null) }>}
  */
-function assignExperiment({ experimentKey, featureKey, attributes, unitId, unitType = 'estimate', metadata = null, defaultValue = null }) {
+async function assignExperiment({ experimentKey, featureKey, attributes, unitId, unitType = 'estimate', metadata = null, defaultValue = null }) {
   const control = { inExperiment: false, value: defaultValue, variationId: null, variationKey: null };
   if (!experimentsEnabled()) return control;
+
   const features = getFeaturesNonBlocking();
-  if (!features) return control;
+  if (!features) {
+    // Cache miss (cold start / fetch failure): honor a prior assignment so we
+    // never serve a different arm than the one already recorded for this unit.
+    // No prior row → stay on the default and log nothing (the unit is simply not
+    // in the experiment for this view; it gets assigned once features return).
+    const prior = await getPriorAssignment(experimentKey, unitId);
+    if (prior && prior.metadata && typeof prior.metadata.value !== 'undefined') {
+      return { inExperiment: true, value: prior.metadata.value, variationId: prior.variation_id, variationKey: prior.variation_key };
+    }
+    return control;
+  }
 
   let exposure = null;
   let gb;
@@ -139,7 +166,9 @@ function assignExperiment({ experimentKey, featureKey, attributes, unitId, unitT
     });
     const value = gb.getFeatureValue(featureKey, defaultValue);
     if (exposure) {
-      logExposure({ ...exposure, unitId, unitType, metadata });
+      // Persist the resolved value alongside the assignment so a later
+      // cache-miss view can replay this exact arm (see getPriorAssignment).
+      logExposure({ ...exposure, unitId, unitType, metadata: { ...(metadata || {}), value } });
       return { inExperiment: true, value, variationId: exposure.variationId, variationKey: exposure.variationKey };
     }
     return { inExperiment: false, value, variationId: null, variationKey: null };
@@ -157,7 +186,7 @@ function assignExperiment({ experimentKey, featureKey, attributes, unitId, unitT
  * opens. `value===true` → serve React v2; `false` → serve legacy server-HTML.
  * Callers apply the override ONLY when `inExperiment` is true.
  */
-function assignEstimateViewExperiment(estimate) {
+async function assignEstimateViewExperiment(estimate) {
   return assignExperiment({
     experimentKey: ESTIMATE_VIEW_EXPERIMENT,
     featureKey: ESTIMATE_VIEW_FEATURE,
