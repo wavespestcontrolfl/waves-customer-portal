@@ -1775,6 +1775,10 @@ function firstPositiveNumber(...values) {
 // real discount moves it by its true annualized amount.
 function anchoredAnnualTotal(estData, monthlyTotal) {
   const monthly = Number(monthlyTotal) || 0;
+  // A comped/fully-discounted plan is $0/yr. Without this, the anchor's
+  // rounding residue (engineAnnual - engineMonthly*12, up to a few cents)
+  // would survive a zeroed monthly and persist a positive annual_total.
+  if (monthly <= 0) return 0;
   const fallback = Math.max(0, Math.round(monthly * 12 * 100) / 100);
   const root = estData && typeof estData === 'object'
     ? (estData.result && typeof estData.result === 'object' ? estData.result : estData)

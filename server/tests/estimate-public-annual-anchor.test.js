@@ -30,6 +30,13 @@ describe('anchoredAnnualTotal', () => {
     expect(anchoredAnnualTotal(quarterlyBlob(), 0)).toBe(0);
   });
 
+  test('zero monthly clamps to 0 even when the anchor residue is positive', () => {
+    // year2=100 with year2mo=8.33: residue 100 - 8.33*12 = +0.04 — a comped
+    // plan must never persist a positive annual from the rounding residue.
+    const blob = { result: { totals: { year2: 100, year2mo: 8.33 } } };
+    expect(anchoredAnnualTotal(blob, 0)).toBe(0);
+  });
+
   test('falls back to 12x monthly when the blob has no engine totals', () => {
     expect(anchoredAnnualTotal({}, 32.67)).toBe(392.04);
     expect(anchoredAnnualTotal(null, 32.67)).toBe(392.04);
