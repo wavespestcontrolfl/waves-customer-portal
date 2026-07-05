@@ -3,62 +3,175 @@ const logger = require('./logger');
 const { etDateString, etParts } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 
+// service_records.conditions is jsonb (object via pg) but tolerate a raw
+// JSON string — the writer must never throw on a malformed capture.
+function parseConditionsObject(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return Array.isArray(raw) ? null : raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function finiteOrNull(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+// "Partly cloudy 84F 71% RH" — fits the varchar(30) column. NULL when the
+// capture has nothing useful; never a guessed value.
+function weatherSummaryLabel(conditions) {
+  if (!conditions) return null;
+  const parts = [];
+  if (conditions.sky) parts.push(String(conditions.sky));
+  const temp = finiteOrNull(conditions.temp_f);
+  if (temp != null) parts.push(`${Math.round(temp)}F`);
+  const humidity = finiteOrNull(conditions.humidity_pct);
+  if (humidity != null) parts.push(`${Math.round(humidity)}% RH`);
+  return parts.length ? parts.join(' ').slice(0, 30) : null;
+}
+
+// service_products.targets is text[] of tech-selected pest keys. Join them
+// verbatim (underscores humanized to spaces — presentational only, never a
+// mapping guess); empty/missing → NULL. A blank target_pest beats a wrong
+// one in a state-auditable ledger.
+function targetPestFromTargets(targets) {
+  const list = Array.isArray(targets) ? targets : [];
+  const cleaned = list
+    .map((t) => String(t || '').trim().replace(/_/g, ' '))
+    .filter(Boolean);
+  return cleaned.length ? cleaned.join(', ').slice(0, 200) : null;
+}
+
+// Only trust an explicit sqft measurement — never convert linear_ft or
+// other units into square feet.
+function areaTreatedSqft(sp) {
+  if (String(sp.area_unit || '').toLowerCase() !== 'sqft') return null;
+  const n = finiteOrNull(sp.area_value);
+  return n != null && n > 0 ? Math.round(n) : null;
+}
+
 const ComplianceService = {
 
   /**
    * After service completion, create property_application_history records
    * from service_products — enriched with products_catalog data.
+   *
+   * Single source of truth for the FDACS application-record ledger: the
+   * live V2 completion (admin-dispatch :serviceId/complete) calls it INSIDE
+   * the completion transaction (pass { trx }), the legacy admin-schedule
+   * status flip calls it fire-and-forget with no trx.
+   *
+   * Idempotent: each ledger row carries service_product_id (unique index,
+   * migration 20260705000401) and the insert is ON CONFLICT DO NOTHING, so
+   * retries / double-completions / backfill re-runs never duplicate rows.
+   * Rows written before that column existed have NULL there — for those,
+   * dedupe falls back to the resolved catalog product per record.
    */
-  async createComplianceRecords(serviceRecordId) {
-    const sr = await db('service_records')
+  async createComplianceRecords(serviceRecordId, { trx } = {}) {
+    const k = trx || db;
+
+    const sr = await k('service_records')
       .where({ id: serviceRecordId })
       .first();
     if (!sr) throw new Error('Service record not found');
 
-    const products = await db('service_products')
+    const products = await k('service_products')
       .where({ service_record_id: serviceRecordId });
     if (!products.length) return [];
 
     const tech = sr.technician_id
-      ? await db('technicians').where({ id: sr.technician_id }).first()
+      ? await k('technicians').where({ id: sr.technician_id }).first()
       : null;
+
+    // Rows already ledgered for this record. New-style rows are identified
+    // by service_product_id; legacy rows (NULL there) by catalog product.
+    const existingRows = await k('property_application_history')
+      .where({ service_record_id: serviceRecordId })
+      .select('service_product_id', 'product_id');
+    const ledgeredServiceProductIds = new Set(
+      existingRows.map((r) => r.service_product_id).filter(Boolean)
+    );
+    const legacyLedgeredProductIds = new Set(
+      existingRows.filter((r) => !r.service_product_id).map((r) => r.product_id).filter(Boolean)
+    );
+    // A legacy row with NO catalog product can't be tied to a specific
+    // service_products row. When one exists, skip products that also resolve
+    // to no catalog product — a duplicate in a state-auditable ledger
+    // (inflating limit counts) is worse than leaving the legacy row as the
+    // record of that application.
+    const hasUnidentifiedLegacyRow = existingRows.some(
+      (r) => !r.service_product_id && !r.product_id
+    );
+
+    // Weather at application time — captured on the service_record by the
+    // completion route (fetchApplicationConditions → FAWN / Open-Meteo).
+    const conditions = parseConditionsObject(sr.conditions);
 
     const records = [];
     for (const sp of products) {
+      if (ledgeredServiceProductIds.has(sp.id)) continue;
+
       // Look up product catalog for EPA / active ingredient / MOA
       let catalog = null;
       if (sp.product_id) {
-        catalog = await db('products_catalog').where({ id: sp.product_id }).first();
+        catalog = await k('products_catalog').where({ id: sp.product_id }).first();
       } else if (sp.product_name) {
-        catalog = await db('products_catalog')
+        catalog = await k('products_catalog')
           .where('name', 'ilike', `%${sp.product_name}%`)
           .first();
       }
 
+      const productId = catalog?.id || sp.product_id || null;
+      if (productId && legacyLedgeredProductIds.has(productId)) continue;
+      if (!productId && hasUnidentifiedLegacyRow) continue;
+
       const record = {
         customer_id: sr.customer_id,
         service_record_id: serviceRecordId,
-        product_id: catalog?.id || sp.product_id || null,
+        service_product_id: sp.id,
+        product_id: productId,
         technician_id: sr.technician_id,
         application_date: sr.service_date || etDateString(),
-        quantity_applied: sp.quantity_applied || sp.application_rate || null,
-        quantity_unit: sp.rate_unit || null,
+        // Quantity actually applied lives in total_amount/amount_unit on
+        // service_products. The old writer read the nonexistent
+        // sp.quantity_applied and fell back to the application RATE —
+        // conflating rate with quantity in the DACS export, which reports
+        // both fields separately. No rate fallback: an absent quantity
+        // stays NULL rather than misreporting the rate as a total.
+        quantity_applied: finiteOrNull(sp.total_amount),
+        quantity_unit: sp.total_amount != null ? (sp.amount_unit || sp.rate_unit || null) : null,
         application_rate: sp.application_rate || null,
         rate_unit: sp.rate_unit || null,
         active_ingredient: catalog?.active_ingredient || sp.active_ingredient || null,
-        moa_group: catalog?.moa_group || null,
+        moa_group: catalog?.moa_group || sp.moa_group || null,
         category: sp.product_category || catalog?.category || null,
-        epa_registration_number: catalog?.epa_registration_number || catalog?.epa_reg_number || null,
+        epa_registration_number: catalog?.epa_registration_number || catalog?.epa_reg_number
+          || sp.epa_reg_number || null,
         application_method: sp.application_method || null,
+        target_pest: targetPestFromTargets(sp.targets),
+        area_treated_sqft: areaTreatedSqft(sp),
+        application_site: sp.application_area || null,
+        weather_conditions: weatherSummaryLabel(conditions),
+        wind_speed_mph: finiteOrNull(conditions?.wind_mph) != null
+          ? Math.round(finiteOrNull(conditions?.wind_mph))
+          : null,
+        soil_temp_f: finiteOrNull(conditions?.soil_temp_f) ?? finiteOrNull(sr.soil_temp),
         restricted_use: catalog?.restricted_use || false,
         applicator_license: tech?.fl_applicator_license || null,
         notes: sp.notes || null,
       };
 
-      const [inserted] = await db('property_application_history')
+      const inserted = await k('property_application_history')
         .insert(record)
+        .onConflict('service_product_id')
+        .ignore()
         .returning('*');
-      records.push(inserted);
+      if (inserted.length) records.push(inserted[0]);
     }
 
     logger.info(`[compliance] Created ${records.length} application records for service ${serviceRecordId}`);

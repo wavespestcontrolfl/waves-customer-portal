@@ -3483,6 +3483,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
 
+        // 2b. FDACS compliance ledger (property_application_history) — the
+        // application-record rows the DACS inspector export
+        // (admin-compliance-v2) and application-limits annual caps read.
+        // Same trx as the service_record + service_products inserts so the
+        // ledger can never half-commit: the completion lands with its
+        // regulatory rows or not at all. Idempotent inside the writer
+        // (unique service_product_id + ON CONFLICT DO NOTHING), so
+        // durable-completion resumes and retries never duplicate rows.
+        // Incomplete visits are included on purpose — any product logged
+        // was physically applied regardless of the visit outcome.
+        if (insertedServiceProducts.length) {
+          const ComplianceService = require('../services/compliance');
+          await ComplianceService.createComplianceRecords(record.id, { trx });
+        }
+
         if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured) {
           const protocolCompletion = await recordLawnProtocolCompletion(trx, {
             service: svc,
