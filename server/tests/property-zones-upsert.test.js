@@ -69,13 +69,15 @@ test('first shapes submission rows EVERY chip, applies shapes, filters status ch
   const summary = await upsertZonesForCompletion(trx, {
     customerId: CUSTOMER,
     serviceLine: 'pest',
-    areaLabels: ['Perimeter', 'Entry points', 'Yard', 'No issues found'],
+    areaLabels: ['Perimeter', 'Entry points', 'Yard', 'No issues found', 'Follow-up recommended'],
     zoneShapes: [
       { areaLabel: 'Perimeter', shape: { type: 'rect', x: 0.1, y: 0.1, w: 0.8, h: 0.15, ref: { lat: 27.36, lng: -82.38, zoom: 20 } } },
     ],
   });
 
-  // all three spatial chips get rows — the status chip does not
+  // all three spatial chips get rows — the status chips do not ('Follow-up
+  // recommended' normalizes to 'follow up recommended'; the filter must match
+  // in normalized space, not on the raw hyphenated label)
   expect(writes.inserts.map((z) => z.label)).toEqual(['Perimeter', 'Entry points', 'Yard']);
   expect(writes.inserts.map((z) => z.letter)).toEqual(['A', 'B', 'C']);
   expect(writes.inserts.every((z) => JSON.parse(z.geometry).w > 1)).toBe(true); // pixel-space schematic
@@ -124,6 +126,8 @@ test('malformed and pixel-space shapes are rejected, never guessed at', () => {
   expect(sanitizeZoneShape({ type: 'rect', x: 0.2, y: 0.2, w: 0, h: 0.1 })).toBeNull(); // zero size
   expect(sanitizeZoneShape({ type: 'circle', cx: 0.5, cy: 0.5, r: -0.1 })).toBeNull();
   expect(sanitizeZoneShape({ type: 'polygon', points: [[0, 0]] })).toBeNull(); // unsupported type
+  expect(sanitizeZoneShape(null)).toBeNull(); // null must not throw
+  expect(sanitizeZoneShape('rect')).toBeNull();
   expect(sanitizeZoneShape({ type: 'rect', x: 0.2, y: 0.2, w: 0.3, h: 0.1 }))
     .toEqual({ type: 'rect', x: 0.2, y: 0.2, w: 0.3, h: 0.1 });
 });
@@ -133,6 +137,8 @@ test('validateZoneShapesBody rejects the malformed payloads a stale client could
   expect(validateZoneShapesBody([])).toBeNull();
   expect(validateZoneShapesBody('nope')).toMatch(/array/);
   expect(validateZoneShapesBody([{ shape: {} }])).toMatch(/areaLabel/);
+  // shape: null must produce the 400 validation message, not a 500 throw
+  expect(validateZoneShapesBody([{ areaLabel: 'Yard', shape: null }])).toMatch(/malformed shape/);
   // a malformed / pixel-space shape must 400 at the route, not silently drop
   expect(validateZoneShapesBody([{ areaLabel: 'Yard', shape: { type: 'rect', x: 64, y: 42, w: 512, h: 46 } }])).toMatch(/malformed shape/);
   expect(validateZoneShapesBody([{ areaLabel: 'Yard', shape: { type: 'circle', cx: 0.5, cy: 0.5, r: 0.05 } }])).toBeNull();

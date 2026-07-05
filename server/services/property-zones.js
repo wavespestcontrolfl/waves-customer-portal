@@ -26,7 +26,9 @@
 
 // The two status chips in AREAS_BY_SERVICE.universal are visit outcomes, not
 // places — they must never become zone rows even if a stale client sends them.
-const NON_SPATIAL_CHIP_KEYS = new Set(['no issues found', 'follow-up recommended']);
+// Entries are in normalizeZoneLabel's output space (lowercase, punctuation →
+// spaces): 'Follow-up recommended' normalizes to 'follow up recommended'.
+const NON_SPATIAL_CHIP_KEYS = new Set(['no issues found', 'follow up recommended']);
 
 const MAX_ZONE_SHAPES_PER_COMPLETION = 30;
 
@@ -69,6 +71,7 @@ function isFiniteInRange(value, min, max) {
 // normalized 0-1 (the capture UI's contract) — pixel-space values are
 // rejected rather than guessed at.
 function sanitizeZoneShape(shape = {}) {
+  if (!shape || typeof shape !== 'object') return null;
   const type = shape.type === 'circle' ? 'circle' : (shape.type === 'rect' ? 'rect' : null);
   if (!type) return null;
   let out = null;
