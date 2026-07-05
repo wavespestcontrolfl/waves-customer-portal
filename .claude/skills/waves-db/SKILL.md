@@ -90,10 +90,14 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
   original IF condition in parentheses before AND-ing onto it; fixtures must
   be the verbatim `pg_get_functiondef` text from prod; simulate the splice
   against that prod text before merge.
-- Migration **writes** get a dry-run inside `BEGIN; … ROLLBACK;` against
-  real prod schema (authorized read-only session) before merge — mocked
-  tests miss type/constraint mismatches, and one failed migration blocks
-  EVERY Railway deploy (migrations run pre-deploy).
+- Migration **writes** get a dry-run inside `BEGIN; … ROLLBACK;` against a
+  dev/preview Postgres branch that mirrors prod schema before merge —
+  mocked tests miss type/constraint mismatches, and one failed migration
+  blocks EVERY Railway deploy (migrations run pre-deploy). Never execute
+  migration DDL/DML against prod from local, even wrapped in a rollback
+  (it takes locks and can fire side effects, and the read-only role can't
+  run writes anyway) — verify the schema/type assumptions the migration
+  relies on via read-only SELECTs instead (§3, §5).
 - After merging a PR that ships a migration, verify the deploy actually ran
   it (deploy log or `knex_migrations`) before relying on the new schema.
 

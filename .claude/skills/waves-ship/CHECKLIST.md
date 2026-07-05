@@ -7,8 +7,8 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Staged explicit paths only (no `git add -A`)
 - [ ] Diff touches `client/` → `npm run check:portal-brand` passes
 - [ ] Diff touches blog schema → `npm run verify:blog-schema` passes
-- [ ] New raw SQL / migration → waves-db skill verification done (read-only prod check, BEGIN…ROLLBACK dry-run)
-- [ ] Money-touching diff → waves-money invariants reviewed
+- [ ] New raw SQL / migration → waves-db skill verification done (read-only prod check; BEGIN…ROLLBACK dry-run on dev/preview)
+- [ ] Money-touching diff → waves-billing invariants reviewed
 
 ## Post-push
 - [ ] `git ls-remote origin <branch>` shows my SHA

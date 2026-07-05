@@ -43,7 +43,7 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
   - During Codex usage limits, a bounced re-tag is not queued — post a fresh one after reset. >15–20 min of silence on a heavy day usually means limits, not clean.
 
 ### 5. Merge and verify
-- After merge: `git merge-base --is-ancestor <your-final-sha> <merge-sha>` — "PR merged" does not prove your last commit landed (recover via cherry-pick if not).
+- After merge: confirm your final commit actually landed — "PR merged" doesn't prove it. Squash merges rewrite SHAs, so ancestry checks fail even on success: check `gh pr view <n> --json state,headRefOid,mergeCommit` and confirm `headRefOid` equals your final push SHA. Only for true merge commits does `git merge-base --is-ancestor <final-sha> <merge-sha>` apply. If your last push isn't in the merged head, recover via cherry-pick.
 - Confirm the Railway deploy went green before reporting done. A merged PR with a red deploy is not shipped.
 - Clean up the worktree when the lane closes: `git worktree remove ~/wt-<slug>`.
 

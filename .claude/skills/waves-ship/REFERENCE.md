@@ -30,10 +30,15 @@ An EXTERNAL Codex process (not the tracked pre-push hook) can reset your remote 
 
 Recovery:
 ```sh
-SKIP_CODEX_REVIEW=1 git push --no-verify --no-thin origin <local-sha>:refs/heads/<branch> --force-with-lease
-git ls-remote origin <branch>   # verify NOW
+git ls-remote origin <branch>                # note the hijacked SHA — the lease must name it
+SKIP_CODEX_REVIEW=1 git push --no-verify --no-thin origin <local-sha>:refs/heads/<branch> \
+  --force-with-lease=<branch>:<hijacked-sha>
+git ls-remote origin <branch>                # verify NOW
 sleep 120 && git ls-remote origin <branch>   # verify AGAIN — the process can re-strike
 ```
+Plain `--force-with-lease` (no value) compares against your stale local
+tracking ref and rejects with "stale info" after a hijack — pin the lease
+to the observed remote SHA.
 Always push by explicit `sha:ref` when recovering. The tracked hook at `scripts/hooks/pre-push` (wired via `core.hooksPath` in the npm `prepare` script) is innocent — it's a read-only Codex audit that blocks P0 findings and fails open on infra errors.
 
 ## Pre-push hook facts
