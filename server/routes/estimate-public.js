@@ -6379,16 +6379,20 @@ async function handleEstimateView(req, res, next) {
     // (use_v2_view=false) estimates are never reassigned. See
     // services/experimentation/growthbook.js.
     if (featureGates.isEnabled('growthbookExperiments')
+      // Only assign where treatment can actually be served: this handler backs
+      // both the /estimate/ mount (which hands v2 to the React SPA via next()
+      // below) and /api/estimates/ (which renders legacy HTML regardless), so
+      // assigning on the latter would log v2 for a customer who sees v1.
+      && req.path.startsWith('/estimate/')
       && estimate.use_v2_view === true
       && !effectiveInvoiceMode
       && !cardHoldForcesReactView
       && !adminPreviewRequested
-      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
-      // Only pre-decision estimates: a terminal quote's outcome is fixed, so
-      // assigning/logging it on a reopen would pollute the acceptance
-      // denominator with a non-convertible unit. Mirrors the terminal set used
-      // by this file's other status guards.
-      && !['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)
+      // Only estimates that can still convert: isEstimateAcceptActive excludes
+      // unpublished, terminal (accepted/declined/expired/send_failed), archived,
+      // and date-expired rows — otherwise they'd enter the acceptance
+      // denominator as non-convertible participants.
+      && isEstimateAcceptActive(estimate)
       && shouldCountView(req, clientIp(req), estimate)) {
       const assignment = await Experiments.assignEstimateViewExperiment(estimate);
       if (assignment.inExperiment && typeof assignment.value === 'boolean') {

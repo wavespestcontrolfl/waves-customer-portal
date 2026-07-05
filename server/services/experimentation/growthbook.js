@@ -107,8 +107,19 @@ async function logExposure({ experimentKey, variationId, variationKey, unitId, u
 }
 
 // The persisted exposure row is the source of truth for an already-assigned
-// unit. On a cold/failed feature cache we replay it instead of guessing, so we
-// never serve a different arm than GrowthBook has recorded.
+// unit: first exposure wins (onConflict-ignore). Replaying it BEFORE evaluating
+// GrowthBook makes assignment sticky — it survives feature-cache misses AND
+// mid-flight rule changes (coverage/weights/variation order), so we never serve
+// a different arm than the one recorded for this unit. Keyed on the canonical
+// experimentKey — the same key logExposure writes and the analysis query groups
+// on — so log, replay, and GrowthBook analysis always agree.
+function replayAssignment(prior) {
+  if (prior && prior.metadata && typeof prior.metadata.value !== 'undefined') {
+    return { inExperiment: true, value: prior.metadata.value, variationId: prior.variation_id, variationKey: prior.variation_key };
+  }
+  return null;
+}
+
 async function getPriorAssignment(experimentKey, unitId) {
   try {
     return (await db('experiment_exposures')
@@ -122,10 +133,10 @@ async function getPriorAssignment(experimentKey, unitId) {
 }
 
 /**
- * Assign a unit to a GrowthBook feature-flag experiment. Happy path: a local
- * deterministic hash (no request-path network); the exposure insert is
- * fire-and-forget. Cache miss: replays any persisted assignment rather than
- * guessing. Returns a safe control default on any miss — never throws.
+ * Assign a unit to a GrowthBook feature-flag experiment. Assignment is STICKY:
+ * an existing exposure row is replayed as-is; only a first-seen unit is
+ * evaluated against GrowthBook (a local deterministic hash — no request-path
+ * network) and logged. Returns a safe control default on any miss — never throws.
  *
  * @returns {Promise<{ inExperiment: boolean, value: *, variationId: (number|null), variationKey: (string|null) }>}
  */
@@ -133,18 +144,16 @@ async function assignExperiment({ experimentKey, featureKey, attributes, unitId,
   const control = { inExperiment: false, value: defaultValue, variationId: null, variationKey: null };
   if (!experimentsEnabled()) return control;
 
+  // 1. Sticky replay: a recorded assignment always wins (survives cache misses
+  //    AND mid-flight rule changes).
+  const replay = replayAssignment(await getPriorAssignment(experimentKey, unitId));
+  if (replay) return replay;
+
+  // 2. First exposure needs the feature payload. A cache miss here means the
+  //    unit isn't in the experiment for this view (nothing logged); it gets
+  //    assigned deterministically once features return.
   const features = getFeaturesNonBlocking();
-  if (!features) {
-    // Cache miss (cold start / fetch failure): honor a prior assignment so we
-    // never serve a different arm than the one already recorded for this unit.
-    // No prior row → stay on the default and log nothing (the unit is simply not
-    // in the experiment for this view; it gets assigned once features return).
-    const prior = await getPriorAssignment(experimentKey, unitId);
-    if (prior && prior.metadata && typeof prior.metadata.value !== 'undefined') {
-      return { inExperiment: true, value: prior.metadata.value, variationId: prior.variation_id, variationKey: prior.variation_key };
-    }
-    return control;
-  }
+  if (!features) return control;
 
   let exposure = null;
   let gb;
@@ -156,8 +165,14 @@ async function assignExperiment({ experimentKey, featureKey, attributes, unitId,
         // Only a genuine experiment assignment (not a forced value or a
         // percentage rollout) counts as an exposure.
         if (result && result.inExperiment) {
+          // GrowthBook defaults a rule's tracking key to the FEATURE id unless
+          // the experiment's trackingKey is set. We always key on the canonical
+          // experimentKey (== the required GrowthBook trackingKey) so log,
+          // replay, and the analysis query agree; warn on any drift.
+          if (experiment && experiment.key && experiment.key !== experimentKey) {
+            logger.warn(`[growthbook] tracking-key mismatch: GrowthBook '${experiment.key}' vs expected '${experimentKey}'. Set the experiment's trackingKey to '${experimentKey}'.`);
+          }
           exposure = {
-            experimentKey: (experiment && experiment.key) || experimentKey,
             variationId: result.variationId,
             variationKey: result.key,
           };
@@ -166,9 +181,9 @@ async function assignExperiment({ experimentKey, featureKey, attributes, unitId,
     });
     const value = gb.getFeatureValue(featureKey, defaultValue);
     if (exposure) {
-      // Persist the resolved value alongside the assignment so a later
-      // cache-miss view can replay this exact arm (see getPriorAssignment).
-      logExposure({ ...exposure, unitId, unitType, metadata: { ...(metadata || {}), value } });
+      // Log under the canonical experimentKey (not experiment.key) and persist
+      // the resolved value so a later view can replay this exact arm.
+      logExposure({ experimentKey, ...exposure, unitId, unitType, metadata: { ...(metadata || {}), value } });
       return { inExperiment: true, value, variationId: exposure.variationId, variationKey: exposure.variationKey };
     }
     return { inExperiment: false, value, variationId: null, variationKey: null };

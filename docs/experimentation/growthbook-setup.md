@@ -107,6 +107,12 @@ hold a slice back to the legacy server-HTML renderer and compare.
 
 Create a **boolean feature** `estimate-view-v2` (default `true` = React v2).
 Add an **Experiment rule**:
+- **Tracking key: MUST be `estimate-view`.** GrowthBook defaults a rule's
+  tracking key to the *feature id* (`estimate-view-v2`) unless you set it. The
+  server logs exposures and does sticky replay under the constant
+  `estimate-view` (`ESTIMATE_VIEW_EXPERIMENT`), and the assignment query groups
+  on it — a mismatch means exposures never line up with the analysis. (The
+  server logs a warning if GrowthBook reports a different key.)
 - Hash attribute: `id` (the server sets `attributes.id = estimate.id`).
 - Variations: `false` (legacy v1 control) / `true` (React v2 treatment).
 - Split: start conservative, e.g. **10% control / 90% treatment** (or 50/50 for
