@@ -1161,13 +1161,18 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
       zoom,
       attributionText: liveConfig.attributionText || '',
     },
-    zones: resolvedZones.map((zone) => ({
+    zones: resolvedZones.map((zone, i) => ({
       id: zone.id,
       letter: zone.letter,
       label: zone.label,
       category: zone.category,
       serviceLines: Array.isArray(zone.service_lines) ? zone.service_lines : [],
       geometryImage: zone.geometry_image || null,
+      // a stored mark exists but drift resolution dropped it: the desk UI
+      // must know — the PUT's completeness check rereads the RAW column, so
+      // a "clear everything" save would 400 unless this zone gets an
+      // explicit entry (redraw or clear tombstone)
+      staleMark: Boolean(zones[i]?.geometry_image) && !zone.geometry_image,
     })),
   };
 }
