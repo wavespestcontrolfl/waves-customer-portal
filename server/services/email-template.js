@@ -225,6 +225,24 @@ function ctaButton(href, label) {
 
 const GLASS_LOGO_IMG = 'https://portal.wavespestcontrol.com/waves-logo-2026.png';
 
+// Waves app promo row rendered in every email footer (owner ask
+// 2026-07-05). Badges are the portal-hosted store art the app_intro
+// template already uses; store URLs match account-membership-email.js.
+const APP_STORE_URL = 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
+const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
+const APPLE_BADGE_IMG = 'https://portal.wavespestcontrol.com/app-email/apple-app-store-badge.png';
+const GOOGLE_BADGE_IMG = 'https://portal.wavespestcontrol.com/app-email/google-play-badge.png';
+
+function appFooterHtml(T) {
+  return `<div style="margin:14px 0 10px 0;font-family:${T.font};font-size:12px;font-weight:700;color:${T.ink};text-align:center;">
+            Track visits, reports &amp; payments in the Waves app
+          </div>
+          <div style="text-align:center;">
+            <a href="${APP_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;"><img src="${APPLE_BADGE_IMG}" alt="Download on the App Store" height="40" style="height:40px;width:auto;border:0;vertical-align:middle;" /></a>
+            <a href="${PLAY_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;margin-left:10px;"><img src="${GOOGLE_BADGE_IMG}" alt="Get it on Google Play" height="40" style="height:40px;width:auto;border:0;vertical-align:middle;" /></a>
+          </div>`;
+}
+
 function glassPillHeader(T) {
   return `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
         <tr>
@@ -307,7 +325,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
           </div>
         </td></tr>
         <tr><td align="center" style="padding:20px 4px 0 4px;">
-          ${glassFinePrint(T)}
+          ${glassFinePrint(T, appFooterHtml(T))}
         </td></tr>
       </table>`;
 
@@ -327,7 +345,7 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
           </div>
         </td></tr>
         <tr><td align="center" style="padding:18px 4px 0 4px;">
-          ${glassFinePrint(T)}
+          ${glassFinePrint(T, appFooterHtml(T))}
         </td></tr>
       </table>`;
   return glassPage(T, { preheader, contentHtml });
@@ -367,7 +385,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newslett
           ${footerNote ? `<div style="margin-top:8px;font-family:${T.font};font-size:11px;color:${T.muted};text-align:center;">${footerNote}</div>` : ''}
         </td></tr>
         <tr><td align="center" style="padding:16px 4px 0 4px;">
-          ${glassFinePrint(T)}
+          ${glassFinePrint(T, appFooterHtml(T))}
         </td></tr>
       </table>`;
 
@@ -447,6 +465,7 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
           </div>
         </td></tr>
         <tr><td align="center" style="background:${T.footerBand};padding:20px 32px;border-top:1px solid ${T.rule};">
+          ${appFooterHtml(T)}
           <div style="font-family:${T.font};font-size:11px;color:${T.muted};line-height:1.55;text-align:center;">
             ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
@@ -507,6 +526,7 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
           </div>
         </td></tr>
         <tr><td align="center" style="background:${T.footerBand};padding:18px 24px;border-top:1px solid ${T.rule};">
+          ${appFooterHtml(T)}
           <div style="font-family:${T.font};font-size:11px;color:${T.muted};line-height:1.55;text-align:center;">
             ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
@@ -605,6 +625,7 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newslette
           ${safeBody}
         </td></tr>
         <tr><td align="center" style="background:${T.footerBand};padding:18px 24px 22px 24px;border-top:1px solid ${T.rule};">
+          ${appFooterHtml(T)}
           ${preferredSourcesLine}<div style="font-family:${T.font};font-size:12px;line-height:1.6;color:${T.muted};text-align:center;">
             ${unsubLine}<a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:underline;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
           </div>

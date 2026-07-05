@@ -284,6 +284,12 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
     }
     : {
       service_type: clean(serviceLabel) || 'service',
+      // Day + date joined the 24h template's allowed variables in
+      // migration 20260705010020 ("tomorrow, {{appointment_day}},
+      // {{appointment_date}}, starting at {{appointment_time}}");
+      // the 72h payload always carried them.
+      appointment_day: apptTime ? formatETDay(apptTime) : '',
+      appointment_date: apptTime ? formatETDate(apptTime) : '',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
       reschedule_url: clean(rescheduleUrl),
     };
