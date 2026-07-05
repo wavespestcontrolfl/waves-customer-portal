@@ -79,6 +79,31 @@ describe('buildChannelAttribution', () => {
     expect(out.totalGrossProfit).toBe(270);
   });
 
+  test('counts completed jobs and cost per booked job per channel', () => {
+    const completed = [
+      row('google_ads', 400, 240, 'c1'),
+      row('google_ads', 600, 360, 'c1'), // same customer, second job
+      row('google_ads', 200, 100, 'c2'),
+    ];
+    const out = buildChannelAttribution(completed, { google_ads: 600 });
+    const g = out.sources.find((s) => s.sourceKey === 'google_ads');
+    expect(g.jobs).toBe(3); // rows (won jobs), not unique customers
+    expect(g.customers).toBe(2);
+    expect(g.costPerJob).toBe(200); // 600 / 3 jobs
+    expect(g.cac).toBe(300); // 600 / 2 customers — different denominator
+    expect(out.totalJobs).toBe(3);
+  });
+
+  test('spend that closed no jobs → costPerJob null (not 0); free channel → 0', () => {
+    const out = buildChannelAttribution([row('organic', 500, 300, 'o1')], { facebook: 200 });
+    const fb = out.sources.find((s) => s.sourceKey === 'facebook');
+    expect(fb.jobs).toBe(0);
+    expect(fb.costPerJob).toBeNull(); // $0/job would read as free acquisition
+    const o = out.sources.find((s) => s.sourceKey === 'organic');
+    expect(o.jobs).toBe(1);
+    expect(o.costPerJob).toBe(0); // genuinely free
+  });
+
   test('fixed cost folds into all-in spend; ratios divide by ad + fixed', () => {
     const completed = [
       row('organic', 1000, 600, 'o1'), // no ad spend, but has an SEO retainer

@@ -644,3 +644,8 @@ function aggregate(rows) {
 }
 
 module.exports = router;
+// Shared with the dashboard's Channel ROI card (routes/admin-dashboard.js
+// /channel-roi) so both surfaces read ONE attribution/spend basis — the
+// dashboard only swaps in its own window semantics (ET calendar periods +
+// attribution fresh-start floor) for this file's trailing-days windows.
+module.exports.fetchChannelAttribution = fetchChannelAttribution;
