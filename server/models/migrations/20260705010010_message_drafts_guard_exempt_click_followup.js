@@ -81,16 +81,45 @@ async function readLiveDefinition(knex) {
   return rows.length ? rows[0].def : null;
 }
 
-// Inject the allowlist into the guard condition: anchor on the house-voice
+// Inject the allowlist into the guard condition. Anchor on the house-voice
 // check (present in every historical shape of this function, and preserved
-// by #2357's splice), then splice right before the THEN that closes that IF.
+// by #2357's splice), walk BACK to the IF that owns it (skipping any `if`
+// that only appears inside a `--` comment line — prod's body carries
+// comments above the guard), capture the ENTIRE condition up to the THEN,
+// wrap it in parentheses, and AND our clause onto the wrapped whole:
+//
+//   if <original condition> then
+//   →  if (<original condition>) and not coalesce(...) then
+//
+// The wrap is load-bearing (prod verification caught this): prod's LIVE
+// condition is UNPARENTHESIZED — `if A or B then`. Appending `and not C`
+// before THEN without wrapping parses as `A or (B and not C)` because AND
+// binds tighter than OR, so for a click-followup insert A (drafter NULL ≠
+// 'house_voice') is true and the guard still raises — the exemption would
+// silently do nothing. Wrapping preserves the original semantics exactly
+// (parenthesized or not, other PRs' spliced clauses included) and applies
+// the exemption to the whole condition.
 function injectAllowlist(def) {
   const anchor = def.indexOf("NEW.drafter is distinct from 'house_voice'");
   if (anchor === -1) return null;
+
+  // The IF that owns the anchor: last `if` before it that is NOT inside a
+  // `--` comment line.
+  const head = def.slice(0, anchor);
+  let owningIf = null;
+  for (const m of head.matchAll(/\bif\b/gi)) {
+    const lineStart = head.lastIndexOf('\n', m.index) + 1;
+    if (!head.slice(lineStart, m.index).includes('--')) owningIf = m;
+  }
+  if (!owningIf) return null;
+  const condStart = owningIf.index + owningIf[0].length;
+
   const thenMatch = /\bthen\b/i.exec(def.slice(anchor));
   if (!thenMatch) return null;
-  const insertAt = anchor + thenMatch.index;
-  return `${def.slice(0, insertAt)}${ALLOWLIST_CLAUSE}\n      ${def.slice(insertAt)}`;
+  const condEnd = anchor + thenMatch.index;
+
+  const condition = def.slice(condStart, condEnd).trim();
+  return `${def.slice(0, condStart)} (${condition})${ALLOWLIST_CLAUSE} ${def.slice(condEnd)}`;
 }
 
 exports.up = async function (knex) {
