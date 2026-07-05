@@ -1628,6 +1628,27 @@ async function createSelfBooking(payload = {}) {
     return { ok: true, body: { booking, confirmationCode: confCode } };
 }
 
+// Public shape for a self_booked_appointments row — an EXPLICIT allow-list,
+// never `self_booked_appointments.*`. The raw row now persists the full
+// attribution capture (gclid, _fbc/_fbp, full referrer, and landing_url —
+// which can embed booking/estimate handoff tokens), and referrer_url carries
+// the same class of data. Unauthenticated callers reach these rows with just
+// a confirmation code (GET /status/:code) or the confirm response, so new
+// columns stay private unless deliberately added here.
+const PUBLIC_BOOKING_FIELDS = [
+  'id', 'confirmation_code', 'status', 'date', 'start_time', 'end_time',
+  'duration_minutes', 'service_type', 'customer_notes', 'source',
+  'created_at', 'updated_at',
+];
+function toPublicBookingShape(row) {
+  if (!row || typeof row !== 'object') return null;
+  const out = {};
+  for (const field of PUBLIC_BOOKING_FIELDS) {
+    if (field in row) out[field] = row[field];
+  }
+  return out;
+}
+
 // POST /api/booking/confirm — thin HTTP adapter over createSelfBooking. The
 // selfBooking gate lives here (a caller concern); the service is gate-agnostic.
 router.post('/confirm', async (req, res, next) => {
@@ -1643,7 +1664,10 @@ router.post('/confirm', async (req, res, next) => {
       payAtVisit: isEnabled('bookingPayAtVisit'),
     });
     if (!result.ok) return res.status(result.status).json({ error: result.error });
-    return res.json(result.body);
+    // Sanitize HERE, not inside createSelfBooking — the service returns the
+    // full row for internal callers; the public response gets the safe shape
+    // (covers BOTH the fresh-booking body and the double-submit replay body).
+    return res.json({ ...result.body, booking: toPublicBookingShape(result.body.booking) });
   } catch (err) {
     logger.error('[booking:confirm] failed:', err);
     next(err);
@@ -1901,14 +1925,17 @@ router.get('/sources', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/booking/status/:code
+// GET /api/booking/status/:code — public (anyone holding a confirmation code).
+// Selects the explicit allow-list, NOT the wildcard row: the attribution jsonb
+// (click ids, referrer/landing URLs with handoff tokens) and referrer_url must
+// never ride along on a public payload.
 router.get('/status/:code', async (req, res, next) => {
   try {
     const booking = await db('self_booked_appointments')
       .where('confirmation_code', req.params.code)
       .leftJoin('customers', 'self_booked_appointments.customer_id', 'customers.id')
       .select(
-        'self_booked_appointments.*',
+        ...PUBLIC_BOOKING_FIELDS.map((field) => `self_booked_appointments.${field}`),
         'customers.first_name', 'customers.last_name',
         'customers.address_line1', 'customers.city'
       )
@@ -1939,4 +1966,8 @@ module.exports._internals = {
   MAX_BOOKING_HORIZON_DAYS,
   mintCaptureToken,
   verifyCaptureToken,
+  // Public-response allow-list for self_booked_appointments rows (P1 guard:
+  // the raw row carries the full attribution capture).
+  PUBLIC_BOOKING_FIELDS,
+  toPublicBookingShape,
 };

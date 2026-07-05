@@ -848,14 +848,60 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     });
   });
 
-  test('does NOT mint for a pre-existing customer (repeat booker, not a fresh paid lead)', async () => {
+  test('pre-existing customer on a paid Meta click: records a row-only booking row (correct paid channel), mints NO lead', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1', attribution: FB_ATTR, serviceInterest: 'General Pest Control',
+      customerCreated: false, selfBookedAppointmentId: 'sba-repeat', database,
+    });
+
+    expect(result).toEqual({ attributed: true, repeatPaid: true, leadSource: 'facebook' });
+    // The strongest-evidence paid conversion there is — but a repeat booker is
+    // NOT a fresh acquisition: no minted lead, no activity, row only.
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    expect(database._inserted.some((i) => i.table === 'lead_activities')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row).toBeTruthy();
+    expect(row.row).toMatchObject({
+      customer_id: 'c1',
+      self_booked_appointment_id: 'sba-repeat', // per-booking dedupe key
+      lead_source: 'facebook',
+      is_paid: true, // deterministic paid click id IS the paid channel
+      funnel_stage: 'booked',
+      fbclid: 'fb-click-123',
+      fbc: 'fb.1.1700000000000.fb-click-123',
+      fbp: 'fb.1.1700000000000.987654321',
+    });
+    // No-lead path: the row must not claim a lead.
+    expect(row.row).not.toHaveProperty('lead_id');
+  });
+
+  test('pre-existing customer on a paid Google click records lead_source google_ads (still no mint)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { utm: { source: 'google', medium: 'cpc' }, gclid: 'g-click-9', wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null },
+      customerCreated: false,
+      selfBookedAppointmentId: 'sba-repeat-g',
+      database,
+    });
+
+    expect(result).toEqual({ attributed: true, repeatPaid: true, leadSource: 'google_ads' });
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row).toMatchObject({ lead_source: 'google_ads', gclid: 'g-click-9', is_paid: true });
+  });
+
+  test('pre-existing customer paid click WITHOUT a booking id fails closed (no dedupe key → no row, like the organic path)', async () => {
     const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
 
     const result = await attributeSelfBooking({
       customerId: 'c1', attribution: FB_ATTR, customerCreated: false, database,
     });
 
-    expect(result).toEqual({ attributed: false, reason: 'existing_customer' });
+    expect(result).toEqual({ attributed: false, reason: 'no_booking_id' });
     expect(database._inserted).toEqual([]);
   });
 
@@ -962,6 +1008,70 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     });
 
     expect(result).toEqual({ attributed: false, reason: 'recovery_rebooking' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('recovery booking still carrying the ORIGINAL ad click id (_fbc) mints nothing — the source gate runs before the paid-click branch', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        // Same journey completing: the visitor abandoned after a real Meta ad
+        // click, so the browser still carries the live _fbc/fbclid. Round 3
+        // only gated the organic recorder, so this used to fall through to
+        // the paid-click mint and re-mint the journey as a NEW won paid lead.
+        ...FB_ATTR,
+        landing_url: 'https://portal.wavespestcontrol.com/book?source=booking_recovery',
+      },
+      customerCreated: true, // the recovery booking creates the customer
+      selfBookedAppointmentId: 'sba-recovery-fbc',
+      bookingSource: 'booking_recovery',
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'recovery_rebooking' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('owned estimate-originated sources skip acquisition minting with their own labeled reason (portal capture alone must not double-count the journey)', async () => {
+    for (const bookingSource of ['quote-wizard', 'quote-wizard-onetime', 'estimate-accept', 'admin-manual-booking-resend']) {
+      const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+      const result = await attributeSelfBooking({
+        customerId: 'c1',
+        attribution: {
+          utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+          // PublicBookingPage always posts the portal landing_url — a real
+          // capture, but the journey's attribution row already exists
+          // (public-quote inserts it at estimate time).
+          landing_url: `https://portal.wavespestcontrol.com/book?source=${bookingSource}`,
+          referrer: null,
+        },
+        customerCreated: false,
+        selfBookedAppointmentId: `sba-${bookingSource}`,
+        bookingSource,
+        database,
+      });
+
+      expect(result).toEqual({ attributed: false, reason: 'estimate_originated' });
+      expect(database._inserted).toEqual([]);
+    }
+  });
+
+  test('estimate-originated source gates the PAID path too (a lingering click id must not mint or row a second journey)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: FB_ATTR,
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-qw-paid',
+      bookingSource: 'quote-wizard',
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'estimate_originated' });
     expect(database._inserted).toEqual([]);
   });
 

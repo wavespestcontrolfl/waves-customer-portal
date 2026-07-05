@@ -111,6 +111,70 @@ describe('booking.js self-booking attribution wiring', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// P1 (round 4) — the raw self_booked_appointments row now carries the full
+// attribution capture (click ids, referrer/landing URLs with handoff tokens),
+// so NO public payload may ever return the wildcard row.
+// ---------------------------------------------------------------------------
+
+describe('booking.js public payloads never leak the raw attribution row', () => {
+  const src = read('../routes/booking.js');
+  const { toPublicBookingShape, PUBLIC_BOOKING_FIELDS } = require('../routes/booking')._internals;
+
+  test('no public select of self_booked_appointments.* remains anywhere in the route file', () => {
+    // the quoted knex select form — comments may mention the pattern by name
+    expect(src).not.toMatch(/'self_booked_appointments\.\*'/);
+  });
+
+  test('GET /status/:code selects the explicit allow-list', () => {
+    expect(src).toMatch(/PUBLIC_BOOKING_FIELDS\.map\(\(field\) => `self_booked_appointments\.\$\{field\}`\)/);
+  });
+
+  test('POST /confirm sanitizes the booking body through the safe shape (fresh + replay bodies)', () => {
+    expect(src).toMatch(/booking:\s*toPublicBookingShape\(result\.body\.booking\)/);
+  });
+
+  test('the public shape strips attribution, referrer_url, and internal ids — and never grows them implicitly', () => {
+    const raw = {
+      id: 'sba-1',
+      confirmation_code: 'WPC-1234',
+      status: 'confirmed',
+      date: '2026-07-09',
+      start_time: '09:00',
+      end_time: '10:00',
+      duration_minutes: 60,
+      service_type: 'General Pest Control',
+      customer_notes: 'gate code 4411',
+      source: 'direct',
+      created_at: 'x',
+      updated_at: 'x',
+      // sensitive — must never appear on a public payload
+      attribution: { gclid: 'g1', fbc: 'fb.1.1.click', fbp: 'fb.1.1.browser', referrer: 'https://x', landing_url: 'https://portal/book?estimate_token=SECRET' },
+      referrer_url: 'https://portal/book?estimate_token=SECRET',
+      customer_id: 'cust-uuid',
+      estimate_id: 'est-uuid',
+      technician_id: 'tech-uuid',
+      service_zone_id: 'zone-uuid',
+      reminder_sent: false,
+      synced_to_schedule: true,
+    };
+    const shaped = toPublicBookingShape(raw);
+    expect(shaped).not.toHaveProperty('attribution');
+    expect(shaped).not.toHaveProperty('referrer_url');
+    expect(shaped).not.toHaveProperty('customer_id');
+    expect(shaped).not.toHaveProperty('estimate_id');
+    expect(shaped).not.toHaveProperty('technician_id');
+    expect(shaped).not.toHaveProperty('service_zone_id');
+    // allow-list semantics: EXACTLY the declared public fields, nothing else
+    expect(Object.keys(shaped).sort()).toEqual([...PUBLIC_BOOKING_FIELDS].sort());
+    expect(shaped.confirmation_code).toBe('WPC-1234');
+    expect(PUBLIC_BOOKING_FIELDS).not.toContain('attribution');
+    expect(PUBLIC_BOOKING_FIELDS).not.toContain('referrer_url');
+    // null-safety for the replay/edge bodies
+    expect(toPublicBookingShape(null)).toBeNull();
+  });
+});
+
 describe('lead-estimate-link organic self-booking row wiring', () => {
   const src = read('../services/lead-estimate-link.js');
 
@@ -127,9 +191,10 @@ describe('lead-estimate-link organic self-booking row wiring', () => {
     expect(src).toMatch(/if \(!attributionHasCapture\(attribution\)\) return \{ attributed: false, reason: 'no_attribution_capture' \}/);
   });
 
-  test('BOTH self-booking funnel rows are born at booked — the booking is committed, and a born-won lead never fires the bridge', () => {
-    expect((src.match(/funnel_stage: 'booked'/g) || []).length).toBe(2);
-    // neither self-booking insert initializes at the bottom rung anymore
+  test('ALL THREE self-booking funnel rows are born at booked — the booking is committed, and a born-won lead never fires the bridge', () => {
+    // organic row + minted-lead PPC row + (round 4) paid repeat-booking row
+    expect((src.match(/funnel_stage: 'booked'/g) || []).length).toBe(3);
+    // no self-booking insert initializes at the bottom rung anymore
     expect(src).not.toMatch(/funnel_stage: 'lead'/);
   });
 
@@ -138,11 +203,25 @@ describe('lead-estimate-link organic self-booking row wiring', () => {
     expect(src).toMatch(/landingHost === portalHost && referrerHost && referrerHost !== portalHost/);
   });
 
-  test('recovery-link bookings are excluded from the acquisition mint (booking.js passes the source; the mint gates on it)', () => {
+  test('owned-source bookings are excluded from acquisition writers (booking.js passes the source; ONE up-front gate covers paid + organic)', () => {
     const booking = read('../routes/booking.js');
     expect(booking).toMatch(/bookingSource:\s*source \|\| null/);
     expect(src).toMatch(/NON_ACQUISITION_BOOKING_SOURCES = new Set\(\['booking_recovery'\]\)/);
-    expect(src).toMatch(/reason: 'recovery_rebooking'/);
+    expect(src).toMatch(/ESTIMATE_ORIGINATED_BOOKING_SOURCES = new Set\(\[\s*\n?\s*'quote-wizard', 'quote-wizard-onetime', 'estimate-accept', 'admin-manual-booking-resend',/);
+    // labeled skip reasons stay distinct per source class (telemetry contract)
+    expect(src).toMatch(/return 'recovery_rebooking'/);
+    expect(src).toMatch(/return 'estimate_originated'/);
+    // round-4 P2: the gate runs BEFORE the paid-click branch — a recovered
+    // visitor's lingering _fbc/gclid must not re-mint the same journey.
+    expect(src).toMatch(/const sourceSkip = bookingSourceSkipReason\(bookingSource\);\s*\n\s*if \(sourceSkip\) return \{ attributed: false, reason: sourceSkip \};\s*\n\s*if \(!attributionHasPaidClickId\(attribution\)\)/);
+  });
+
+  test('paid repeat bookings (existing customer + deterministic click id) record a row WITHOUT minting a lead', () => {
+    // the !customerCreated branch dispatches to the row-only recorder…
+    expect(src).toMatch(/if \(!customerCreated\) \{\s*\n\s*return await recordPaidRepeatBookingAttribution\(/);
+    // …which is paid by construction and dedupes on the per-booking key
+    expect(src).toMatch(/repeatPaid: true/);
+    expect((src.match(/\.onConflict\('self_booked_appointment_id'\)\.ignore\(\)/g) || []).length).toBe(2);
   });
 
   test('classifier compares NORMALIZED utm source/medium in the paid/social branches (casing fix, webhook included)', () => {

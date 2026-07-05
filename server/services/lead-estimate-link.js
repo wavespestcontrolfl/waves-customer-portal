@@ -784,9 +784,13 @@ async function convertLeadFromEvent({
 // ad_service_attribution funnel row (is_paid=false, lead_source classified by
 // the same determineLeadSource semantics the lead webhook uses), so organic /
 // referral / GBP self-bookings stop being invisible to channel attribution.
-// The organic row carries no lead (lead_id NULL) and is deduped per BOOKING via
-// the unique self_booked_appointment_id (migration 20260705000201) — the
-// lead_id unique index can't dedupe NULLs.
+// PAID clicks from PRE-EXISTING customers (repeat bookers) likewise get a
+// row-only record (is_paid=true, lead_source = the click's platform) — still
+// no minted lead. Both no-lead rows carry lead_id NULL and dedupe per BOOKING
+// via the unique self_booked_appointment_id (migration 20260705000201) — the
+// lead_id unique index can't dedupe NULLs. Owned sources (recovery /
+// estimate-originated links) skip ALL of this via the up-front
+// bookingSourceSkipReason gate — same journey, already attributed.
 // Best-effort + idempotent — never throws into the (already-committed) booking.
 // ---------------------------------------------------------------------------
 
@@ -856,6 +860,34 @@ function attributionHasCapture(attribution) {
 // labels it booking_recovery).
 const NON_ACQUISITION_BOOKING_SOURCES = new Set(['booking_recovery']);
 
+// Owned estimate-originated booking sources — bookings that arrive through OUR
+// OWN follow-up/accept links (PublicBookingPage's estimate sources plus the
+// admin one-time resend link). Those journeys already carry their originating
+// attribution row (the public quote wizard inserts one when the estimate is
+// created; the estimate lanes convert their own lead), and PublicBookingPage
+// still posts a portal landing_url for them — so letting them through the
+// capture check would insert a SECOND, lead_id-NULL row classified as generic
+// website and double-count the journey. Same suppression contract as recovery:
+// only the acquisition row is skipped; the raw capture still persists on
+// self_booked_appointments.attribution.
+const ESTIMATE_ORIGINATED_BOOKING_SOURCES = new Set([
+  'quote-wizard', 'quote-wizard-onetime', 'estimate-accept', 'admin-manual-booking-resend',
+]);
+
+// The single up-front owned-source gate. attributeSelfBooking checks it BEFORE
+// dispatching to ANY acquisition writer (paid-click mint, paid repeat row,
+// organic row) — a recovered visitor's browser can still carry the original
+// ad's _fbc, and gating only the organic recorder (round 3) let that click id
+// re-mint the same completing journey as a brand-new won paid lead. Skip
+// reasons stay distinct per source class so telemetry can tell a recovery
+// rebooking from an estimate-originated booking.
+function bookingSourceSkipReason(bookingSource) {
+  const src = String(bookingSource || '').trim().toLowerCase();
+  if (NON_ACQUISITION_BOOKING_SOURCES.has(src)) return 'recovery_rebooking';
+  if (ESTIMATE_ORIGINATED_BOOKING_SOURCES.has(src)) return 'estimate_originated';
+  return null;
+}
+
 // Organic (non-paid) self-booking → funnel row only, no lead. Classified with
 // the shared determineLeadSource. This branch is only reachable WITHOUT a
 // deterministic paid click id; is_paid comes from the classifier's channel —
@@ -878,20 +910,17 @@ const NON_ACQUISITION_BOOKING_SOURCES = new Set(['booking_recovery']);
 // it fails closed rather than risking duplicate funnel rows. Requires a real
 // capture (attributionHasCapture) — a no-capture booking writes no row, in
 // parity with its self_booked_appointments.attribution staying NULL.
+// Owned-source (recovery / estimate-originated) bookings never reach here —
+// attributeSelfBooking's up-front bookingSourceSkipReason gate short-circuits
+// them before ANY acquisition writer runs.
 async function recordOrganicSelfBookingAttribution({
   customerId,
   attribution,
   serviceInterest,
   selfBookedAppointmentId,
-  bookingSource,
   database,
 }) {
   if (!selfBookedAppointmentId) return { attributed: false, reason: 'no_booking_id' };
-  // Recovery/re-engagement links complete an EXISTING journey — never a new
-  // acquisition row (see NON_ACQUISITION_BOOKING_SOURCES above).
-  if (NON_ACQUISITION_BOOKING_SOURCES.has(String(bookingSource || '').trim().toLowerCase())) {
-    return { attributed: false, reason: 'recovery_rebooking' };
-  }
   if (!attributionHasCapture(attribution)) return { attributed: false, reason: 'no_attribution_capture' };
 
   const attr = attribution;
@@ -945,6 +974,63 @@ async function recordOrganicSelfBookingAttribution({
   return { attributed: true, organic: true, leadSource: classified.source };
 }
 
+// Paid click, PRE-EXISTING customer → per-booking attribution row ONLY, never
+// a lead. A repeat booker arriving on a deterministic click id (gclid/_fbc/…)
+// is the strongest-evidence paid conversion there is; before round 4 the paid
+// branch returned existing_customer before inserting ANY row, so those
+// bookings vanished from per-booking channel reporting while the weaker
+// cpc-UTM-without-click-id case (organic recorder, is_paid from the
+// classifier) WAS counted. Minting stays reserved for a customer the booking
+// just created — this row carries lead_id NULL and dedupes per booking on the
+// same unique self_booked_appointment_id the organic recorder uses (so it
+// fails closed without a booking id, exactly like that path). lead_source is
+// the click id's platform — the deterministic paid click IS the channel, so
+// is_paid is true by construction (no classifier needed).
+async function recordPaidRepeatBookingAttribution({
+  customerId,
+  attribution,
+  clickIds,
+  serviceInterest,
+  selfBookedAppointmentId,
+  database,
+}) {
+  if (!selfBookedAppointmentId) return { attributed: false, reason: 'no_booking_id' };
+  const ppcSource = (clickIds.gclid || clickIds.wbraid || clickIds.gbraid) ? 'google_ads'
+    : (clickIds.fbclid || clickIds.fbc) ? 'facebook' : null;
+  // Unreachable behind attributionHasPaidClickId, but never guess a channel.
+  if (!ppcSource) return { attributed: false, reason: 'no_click_ids' };
+
+  // Read-only source resolution — reused only for the human-readable detail
+  // string ('Google Ads click (gclid)' / 'Meta click (fbclid)').
+  const { leadSourceDetail } = await resolveLeadSource(attribution);
+  const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
+  const utm = (attribution && typeof attribution.utm === 'object' && attribution.utm) || {};
+  await database('ad_service_attribution').insert({
+    customer_id: customerId,
+    self_booked_appointment_id: selfBookedAppointmentId,
+    service_line: inferServiceLine(serviceInterest),
+    specific_service: inferSpecificService(serviceInterest),
+    service_bucket: inferServiceBucket(serviceInterest),
+    lead_date: etDateString(),
+    lead_source: ppcSource,
+    lead_source_detail: leadSourceDetail || null,
+    gclid: clickIds.gclid || null,
+    wbraid: clickIds.wbraid || null,
+    gbraid: clickIds.gbraid || null,
+    fbclid: clickIds.fbclid || null,
+    fbc: clickIds.fbc || null,
+    fbp: clickIds.fbp || null,
+    utm_campaign: utm.campaign || null,
+    utm_term: utm.term || null,
+    // Born at 'booked' — the booking is already committed when this runs
+    // (same contract as the organic and minted-lead rows).
+    funnel_stage: 'booked',
+    is_paid: true,
+  }).onConflict('self_booked_appointment_id').ignore();
+
+  return { attributed: true, repeatPaid: true, leadSource: ppcSource };
+}
+
 async function attributeSelfBooking({
   customerId,
   attribution,
@@ -956,10 +1042,17 @@ async function attributeSelfBooking({
 }) {
   try {
     if (!customerId) return { attributed: false, reason: 'no_customer_id' };
+    // Owned-source gate FIRST — before the paid-click AND organic paths. A
+    // recovery/estimate-originated booking is our own link completing an
+    // already-attributed journey; its browser can still carry the original
+    // ad's click id (_fbc/gclid), so gating only the organic recorder would
+    // let that click id fall through to the mint below.
+    const sourceSkip = bookingSourceSkipReason(bookingSource);
+    if (sourceSkip) return { attributed: false, reason: sourceSkip };
     if (!attributionHasPaidClickId(attribution)) {
       // No deterministic paid click → organic funnel row, never a minted lead.
       return await recordOrganicSelfBookingAttribution({
-        customerId, attribution, serviceInterest, selfBookedAppointmentId, bookingSource, database,
+        customerId, attribution, serviceInterest, selfBookedAppointmentId, database,
       });
     }
     const clickIds = clickIdColumnsFromAttribution(attribution);
@@ -971,7 +1064,12 @@ async function attributeSelfBooking({
     // feed the offline-conversion pipeline a synthetic "new qualified lead" and
     // inflate paid-channel conversions. (Legacy/admin customers can have prior
     // activity but no lead row, so an existing-lead check alone is insufficient.)
-    if (!customerCreated) return { attributed: false, reason: 'existing_customer' };
+    // Their paid click still counts: record the per-booking row, mint nothing.
+    if (!customerCreated) {
+      return await recordPaidRepeatBookingAttribution({
+        customerId, attribution, clickIds, serviceInterest, selfBookedAppointmentId, database,
+      });
+    }
 
     const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) return { attributed: false, reason: 'no_customer' };
