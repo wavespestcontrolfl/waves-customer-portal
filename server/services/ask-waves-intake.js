@@ -33,22 +33,23 @@ const COMPANY = {
 // Keys MUST match what POST /api/public/quote/calculate accepts with
 // server-side defaults (routes/public-quote.js engineInput mapping) AND the
 // astro island's SERVICE_DEFS (AskWaves.tsx) — a key the island doesn't carry
-// is filtered client-side and never reaches the gate. Only zero-extra-input
-// engines belong here: engines that price off a visitor-entered count (palm →
-// palmCount, bedBug → rooms) or ride another key with a conflicting payload
-// (cockroach → pest + roachType) stay out until the gate collects those inputs.
+// is filtered client-side and never reaches the gate. An entry belongs here
+// only when the gate's inputless payload prices the visitor's actual problem:
+// engines that price off a visitor-entered count (palm → palmCount, bedBug →
+// rooms), ride another key with a conflicting payload (cockroach → pest +
+// roachType), need job-scoping inputs the gate can't collect (stinging →
+// species/removal tier; plugging → patch area, else the engine prices the
+// whole lawn), hit the treeCount ?? 0 mapping that suppresses the engine's
+// density fallback (treeShrub), or have no pricing-engine consumer at all
+// (lawnPestControl) stay out.
 const QUOTABLE_SERVICES = [
   { key: 'pest', label: 'Recurring Pest Control (WaveGuard)', covers: 'ants, roaches, spiders, earwigs, silverfish, millipedes, and general household pests — quarterly barrier treatments with free re-treats' },
   { key: 'mosquito', label: 'Mosquito & No-See-Um Control', covers: 'mosquitoes and no-see-ums — recurring yard treatments' },
   { key: 'lawn', label: 'Lawn Care', covers: 'lawn fertilization, weed control, and turf health (St. Augustine and other Florida grasses) — the recurring lawn program' },
   { key: 'termite', label: 'Termite Bait Protection', covers: 'subterranean termite bait and monitoring protection' },
   { key: 'rodentBait', label: 'Rodent Bait Stations', covers: 'exterior rodent bait stations for rat and mouse prevention' },
-  { key: 'stinging', label: 'Wasp & Hornet Control', covers: 'wasp and hornet nest treatment and removal (not honey bee relocation)' },
-  { key: 'flea', label: 'Flea Treatment', covers: 'flea infestations in the home and yard' },
-  { key: 'oneTimeLawn', label: 'Lawn Weed Treatment', covers: 'a one-time lawn weed knockdown treatment (visitor asks about weeds only, not an ongoing program)' },
-  { key: 'lawnPestControl', label: 'Lawn Pest Control', covers: 'chinch bugs, sod webworms, armyworms, and grubs damaging the lawn' },
-  { key: 'plugging', label: 'Lawn Plugging', covers: 'St. Augustine plug installation to repair dead lawn patches' },
-  { key: 'treeShrub', label: 'Tree & Shrub Care', covers: 'ornamental tree and shrub fertilization and insect treatment' },
+  { key: 'flea', label: 'Flea Treatment', covers: 'flea infestations inside the home (yard-only flea problems need a custom quote — suggest calling)' },
+  { key: 'oneTimeLawn', label: 'Lawn Weed Treatment', covers: 'a one-time whole-lawn weed knockdown treatment (visitor asks about weeds only, not an ongoing program)' },
 ];
 const QUOTABLE_KEYS = new Set(QUOTABLE_SERVICES.map((s) => s.key));
 
@@ -134,7 +135,7 @@ const SYSTEM_PROMPT = `You are "Ask Waves", the intake assistant on the ${COMPAN
 SERVICES YOU CAN QUOTE INSTANTLY (service_keys values):
 ${QUOTABLE_SERVICES.map((s) => `- ${s.key}: ${s.label} — ${s.covers}`).join('\n')}
 
-NOT instantly quotable (do NOT put these in service_keys; suggest calling ${COMPANY.phone} or the full quote page instead): bed bugs, German roach cleanouts, honey bee removal or relocation, rodent trapping/exclusion work inside an attic, palm tree injections, termite inspections and WDO inspections, and commercial properties.
+NOT instantly quotable (do NOT put these in service_keys; suggest calling ${COMPANY.phone} or the full quote page instead): bed bugs, German roach cleanouts, wasp/hornet/bee nest treatment or removal, yard-only flea problems, lawn insects like chinch bugs or sod webworms or grubs, lawn plugging and patch repair, tree & shrub care, rodent trapping/exclusion work inside an attic, palm tree injections, termite inspections and WDO inspections, and commercial properties.
 
 YOUR JOB each turn:
 1. Answer the visitor's question helpfully in 1-3 short sentences — you are a knowledgeable Florida pest expert (sandy soil, humidity, afternoon storms, St. Augustine grass). Identify the likely pest when you can.

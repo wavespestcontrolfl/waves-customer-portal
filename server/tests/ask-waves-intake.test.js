@@ -180,22 +180,24 @@ describe('normalizeIntakeResult', () => {
 
   test('every quotable key matches a services key /calculate accepts', () => {
     const CALCULATE_KEYS = [
-      'pest', 'lawn', 'mosquito', 'termite', 'rodentBait',
-      'stinging', 'flea', 'oneTimeLawn', 'lawnPestControl', 'plugging', 'treeShrub',
+      'pest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'flea', 'oneTimeLawn',
     ];
     for (const s of QUOTABLE_SERVICES) expect(CALCULATE_KEYS).toContain(s.key);
   });
 
-  test('expanded specialty keys survive normalization; count-input engines stay out', () => {
+  test('expanded specialty keys survive normalization; input-dependent engines stay out', () => {
     const out = normalizeIntakeResult({
       reply: 'ok',
       intent: 'quote',
-      // palm and bedBug price off visitor-entered counts the gate cannot
-      // collect — they must keep dropping even though /calculate accepts them.
-      service_keys: ['stinging', 'flea', 'oneTimeLawn', 'lawnPestControl', 'plugging', 'treeShrub', 'palm', 'bedBug'],
+      // The dropped keys must keep dropping even though /calculate accepts
+      // them: palm/bedBug price off visitor-entered counts, stinging defaults
+      // to a no-removal paper-wasp job, plugging prices the whole lawn without
+      // a patch area, treeShrub hits the treeCount ?? 0 mapping, and
+      // lawnPestControl has no pricing-engine consumer at all.
+      service_keys: ['flea', 'oneTimeLawn', 'stinging', 'lawnPestControl', 'plugging', 'treeShrub', 'palm', 'bedBug'],
       ready_for_quote: true,
     }, 'openai');
-    expect(out.service_keys).toEqual(['stinging', 'flea', 'oneTimeLawn', 'lawnPestControl', 'plugging', 'treeShrub']);
+    expect(out.service_keys).toEqual(['flea', 'oneTimeLawn']);
   });
 });
 
