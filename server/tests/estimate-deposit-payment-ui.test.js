@@ -94,10 +94,13 @@ describe('server-rendered estimate page deposit injection', () => {
     expect(html).toContain('"exemptReason":"existing_plan_customer"');
   });
 
-  test('prepay-annual preference short-circuits collection client-side', () => {
+  test('prepay-annual preference does NOT short-circuit collection client-side (owner decision 2026-07-05)', () => {
     const html = renderPage('deposit-token', baseEstimate({
       depositPolicy: { enforced: true, required: true, slotRequired: false, exemptReason: null, recurringAmount: 49, oneTimeAmount: 99 },
     }), BASE_EST_DATA);
-    expect(html).toContain("if (bookingState.pickedPref === 'prepay_annual') return { ok: true };");
+    expect(html).not.toContain("if (bookingState.pickedPref === 'prepay_annual') return { ok: true };");
+    // The deposit note stays visible for prepay and names the annual invoice
+    // as the credit target.
+    expect(html).toContain('your annual prepay invoice');
   });
 });

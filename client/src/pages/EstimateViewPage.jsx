@@ -2910,7 +2910,9 @@ export default function EstimateViewPage() {
     // per mode and 409-exempts when nothing is owed.
     const depositRequired = depositPolicy?.required
       || (serviceMode === 'one_time' && depositPolicy?.requiredForOneTime);
-    if (depositRequired && paymentPreference !== 'prepay_annual' && !depositPaymentIntentIdRef.current) {
+    // Prepay-annual owes the deposit too — it credits against the annual
+    // invoice minted at accept; the server accept gate re-verifies either way.
+    if (depositRequired && !depositPaymentIntentIdRef.current) {
       setCtaPhase('submitting');
       setError(null);
       try {
@@ -3407,10 +3409,12 @@ export default function EstimateViewPage() {
             serviceMode={serviceMode}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
               ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
-              : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime)) && paymentPreference !== 'prepay_annual'
+              : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime))
                 ? (invoiceOnlyAccept
                   ? `A ${fmtMoney(data.depositPolicy.oneTimeAmount)} deposit is due today — it is applied to your invoice.`
-                  : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`)
+                  : paymentPreference === 'prepay_annual'
+                    ? `A ${fmtMoney(data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your annual prepay invoice.`
+                    : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`)
                 : null)}
           />
           {depositIntent ? (

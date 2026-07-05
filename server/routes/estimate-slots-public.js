@@ -442,12 +442,13 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
 // authoritative; ESTIMATE_DEPOSIT_REQUIRED rollout switch). Gates mirror
 // accept exactly: estimate-token format gate, terminal/expired rejection,
 // the accept-time quote gate (never collect money for an estimate accept
-// will reject), and the deposit policy itself (prepay-annual choice and
-// existing plan customers owe nothing). serviceMode picks the amount class —
-// one-time accepts pay the heavier flat amount, credited against their
-// completed-visit invoice. The client pays the intent, then calls accept
-// with depositPaymentIntentId; the intent is idempotent per estimate+amount,
-// so retries reuse it.
+// will reject), and the deposit policy itself (existing plan customers owe
+// nothing; prepay-annual owes the $49 like any recurring accept — it credits
+// against the annual invoice minted at accept). serviceMode picks the amount
+// class — one-time accepts pay the heavier flat amount, credited against
+// their completed-visit invoice. The client pays the intent, then calls
+// accept with depositPaymentIntentId; the intent is idempotent per
+// estimate+amount, so retries reuse it.
 router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
   const token = req.params.token;
   if (!token || !TOKEN_RE.test(token)) {
@@ -498,7 +499,6 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     // intent here would charge a current WaveGuard member who owes nothing.
     const policy = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
       membership,
       oneTime,
       // Effective invoice mode (admin flag OR derived guarantee-only renewal)

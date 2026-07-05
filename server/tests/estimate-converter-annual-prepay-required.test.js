@@ -5,6 +5,7 @@ describe('estimate converter annual prepay orchestration', () => {
     jest.dontMock('../models/db');
     jest.dontMock('../services/invoice');
     jest.dontMock('../services/annual-prepay-renewals');
+    jest.dontMock('../services/estimate-deposits');
   });
 
   function makeDb(recurringServices, { monthlyTotal = 55, annualTotal = 660, recurringExtra = {} } = {}) {
@@ -64,10 +65,10 @@ describe('estimate converter annual prepay orchestration', () => {
   // mock returns null so convertEstimate rejects right after the term call — this
   // isolates the createTermForAnnualPrepay arguments (incl. coverage config)
   // without needing to mock the full downstream conversion.
-  function setup(recurringServices, totals) {
+  function setup(recurringServices, totals, { deposits = null, invoiceCreateResult = { id: 'invoice-1' } } = {}) {
     const db = makeDb(recurringServices, totals);
     const invoiceService = {
-      create: jest.fn().mockResolvedValue({ id: 'invoice-1' }),
+      create: jest.fn().mockResolvedValue(invoiceCreateResult),
       voidInvoice: jest.fn().mockResolvedValue({ id: 'invoice-1', status: 'void' }),
     };
     const renewals = {
@@ -80,6 +81,7 @@ describe('estimate converter annual prepay orchestration', () => {
     jest.doMock('../services/annual-prepay-renewals', () => renewals);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn, error: jest.fn() }));
     jest.doMock('../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn() }));
+    if (deposits) jest.doMock('../services/estimate-deposits', () => deposits);
 
     const EstimateConverter = require('../services/estimate-converter');
     return { EstimateConverter, invoiceService, renewals, warn };
@@ -111,6 +113,52 @@ describe('estimate converter annual prepay orchestration', () => {
       coverageCadence: 'monthly',
     });
     expect(invoiceService.voidInvoice).toHaveBeenCalledWith('invoice-1');
+  });
+
+  test('acceptance deposit credits the prepay invoice: create carries depositCredit, the ledger consumes exactly the applied amount, and the term records the GROSS prepay', async () => {
+    const deposits = {
+      pendingDepositCredit: jest.fn().mockResolvedValue({ amount: 49 }),
+      consumeDepositCredit: jest.fn().mockResolvedValue(49),
+    };
+    const { EstimateConverter, invoiceService, renewals } = setup(
+      [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' }],
+      undefined,
+      // Net invoice total after the $49 credit: 627 gross (660 - 5% prepay
+      // discount) minus 49 = 578.
+      { deposits, invoiceCreateResult: { id: 'invoice-1', total: 578, applied_deposit_credit: 49 } },
+    );
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
+      .rejects.toThrow('Annual prepay term was not created');
+
+    expect(deposits.pendingDepositCredit).toHaveBeenCalledWith('estimate-1', expect.anything());
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({
+      depositCredit: { amount: 49, estimateId: 'estimate-1' },
+    }));
+    expect(deposits.consumeDepositCredit).toHaveBeenCalledWith(expect.objectContaining({
+      estimateId: 'estimate-1',
+      amount: 49,
+      invoiceId: 'invoice-1',
+    }));
+    const args = renewals.createTermForAnnualPrepay.mock.calls[0][0];
+    // GROSS = net invoice total (578) + credited deposit (49): recording the
+    // net would understate the year by the deposit.
+    expect(args).toMatchObject({ prepayAmount: 627 });
+  });
+
+  test('deposit allocation mismatch on the prepay invoice throws (rolls back the accept transaction)', async () => {
+    const deposits = {
+      pendingDepositCredit: jest.fn().mockResolvedValue({ amount: 49 }),
+      consumeDepositCredit: jest.fn().mockResolvedValue(20),
+    };
+    const { EstimateConverter } = setup(
+      [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' }],
+      undefined,
+      { deposits, invoiceCreateResult: { id: 'invoice-1', total: 578, applied_deposit_credit: 49 } },
+    );
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
+      .rejects.toThrow('deposit allocation mismatch');
   });
 
   test('single quarterly service with explicit visitsPerYear: coverage count comes from the line', async () => {
