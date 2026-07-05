@@ -360,10 +360,10 @@ describe('bed bug public mapping — engine enum keys only, never a public 500 (
   });
 });
 
-describe('roach knockdown blocks the quote→book handoff (codex rd3 P1, 2026-07-05)', () => {
-  const { estimateBlocksBookingHandoff } = _internals;
+describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-05)', () => {
+  const { estimateBlocksBookingHandoff, estimateBlocksSelfBookLink } = _internals;
 
-  test('estimate with an auto-added pest_initial_roach line blocks handoff; plain pest does not', () => {
+  test('ANY mixed recurring + one-time quote blocks handoff; plain recurring does not', () => {
     const plain = generateEstimate({
       ...BASE_PROPERTY,
       services: { pest: { frequency: 'quarterly' } },
@@ -372,14 +372,47 @@ describe('roach knockdown blocks the quote→book handoff (codex rd3 P1, 2026-07
       ...BASE_PROPERTY,
       services: { pest: { frequency: 'quarterly', roachType: 'regular' } },
     });
+    const lawnPestMix = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly' }, lawnPestControl: {} },
+    });
     expect(estimateBlocksBookingHandoff(plain)).toBe(false);
     expect(estimateBlocksBookingHandoff(roach)).toBe(true);
+    expect(estimateBlocksBookingHandoff(lawnPestMix)).toBe(true);
+    // Sanity: the blocker keys off the mixed shape, not a service allowlist.
+    expect(Number(roach.summary.oneTimeTotal)).toBeGreaterThan(0);
+    expect(Number(lawnPestMix.summary.oneTimeTotal)).toBeGreaterThan(0);
   });
 
-  test('handoffPriceable mint site consults the blocker (confirm bills annual/4 only — the one-time roach fee would vanish)', () => {
+  test('bed bug quotes never get a self-book link (generic 60-min pest slot undersizes a multi-visit treatment)', () => {
+    const bedBug = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { bedBug: _internals.publicQuoteBedBugInput({}) },
+    });
+    expect(estimateBlocksBookingHandoff(bedBug)).toBe(false); // one-time-only, no recurring
+    expect(estimateBlocksSelfBookLink(bedBug)).toBe(true);
+    // One-time-only NON-bed-bug quotes still self-book.
+    const weed = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { oneTimeLawn: { treatmentType: 'weed' } },
+    });
+    expect(estimateBlocksSelfBookLink(weed)).toBe(false);
+    // Palm-only recurring still self-books (rides tree_shrub with its label).
+    const palm = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { palm: { palmCount: 4, treatmentType: 'nutrition' } },
+    });
+    expect(estimateBlocksSelfBookLink(palm)).toBe(false);
+  });
+
+  test('mint + link sites consult the blockers (confirm bills annual/4 only; generic /book prices nothing)', () => {
     const fs = require('fs');
     const path = require('path');
     const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
     expect(source).toMatch(/handoffPriceable = !estimateBlocksBookingHandoff\(estimate\) && !!resolveBookingVisitPrice\(/);
+    expect(source).toMatch(/!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink\(estimate\)/);
+    // Palm-only recurring bookings carry their quoted label into /book.
+    expect(source).toMatch(/recurringServiceLabelParam = bookingServiceLabel/);
+    expect(source).toMatch(/bookingParams\.set\('service_label', recurringServiceLabelParam\)/);
   });
 });

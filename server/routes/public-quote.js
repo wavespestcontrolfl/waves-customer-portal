@@ -246,12 +246,27 @@ function publicQuoteBedBugInput(bedBug = {}) {
 }
 
 // /booking/confirm prices a quote→book handoff's visits from the recurring
-// annual only (annual_total / 4) — a one-time add-on line the engine attached
-// (pest_initial_roach from the roach chip path) would silently vanish from
-// the booked series' billing. Those quotes get NO handoff token and book
-// through the office instead.
+// annual only (annual_total / 4), and a generic /book link books the
+// recurring cadence with no pay-at-visit pricing at all — either way, every
+// one-time add-on the engine attached (pest_initial_roach from the roach
+// chip, the lawn-pest knockdown, ...) silently vanishes from the booked
+// series' billing. Mixed recurring + one-time quotes therefore get NO
+// handoff token and NO self-book link; the office schedules them. (A plain
+// recurring pest quote has oneTimeTotal 0 — setup fees are not in it.)
 function estimateBlocksBookingHandoff(estimate) {
-  return (estimate?.lineItems || []).some((l) => l && l.service === 'pest_initial_roach');
+  const summary = estimate?.summary || {};
+  const hasRecurring = Number(summary.recurringAnnualAfterDiscount ?? summary.recurringAnnual ?? 0) > 0;
+  return hasRecurring && Number(summary.oneTimeTotal || 0) > 0;
+}
+
+// Services with no self-bookable slot shape: bed bug treatment is multi-visit
+// with prep coordination, and bookingServiceFor('Bed Bug Treatment') falls
+// through to the generic 60-minute pest_control slot — undersized and
+// mis-labeled. These quotes show the price but the office schedules them.
+const NO_SELF_BOOK_LINE_SERVICES = new Set(['bed_bug']);
+function estimateBlocksSelfBookLink(estimate) {
+  return estimateBlocksBookingHandoff(estimate)
+    || (estimate?.lineItems || []).some((l) => l && NO_SELF_BOOK_LINE_SERVICES.has(l.service));
 }
 
 function compactServiceInterestPart(value) {
@@ -1170,9 +1185,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // commercial job (priced from tens of thousands of sqft) could self-book a
     // residential-length slot. The price still shows instantly; a team member
     // schedules the (longer, route-sensitive) commercial visit.
-    if (!quoteRequired && !commercialDetected) {
+    // estimateBlocksSelfBookLink adds two more no-link shapes: mixed
+    // recurring + one-time quotes (the /book path would never bill the
+    // one-time add-on) and bed bug (no right-sized bookable slot).
+    if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate)) {
       try {
         let bookingServiceId;
+        let recurringServiceLabelParam = null;
         if (isOneTimeOnly) {
           const { bookingServiceFor } = require('./estimate-public');
           const bookingService = bookingServiceFor(serviceInterest);
@@ -1206,9 +1225,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // Tree/shrub-only (incl. commercial_tree_shrub auto-priced) must not
             // fall back to the Lawn Care booking link.
             bookingServiceId = 'tree_shrub';
-            bookingServiceLabel = pricedServiceKeys.has('tree_shrub') || pricedServiceKeys.has('commercial_tree_shrub')
-              ? 'Tree & Shrub'
-              : 'Palm Injections';
+            if (pricedServiceKeys.has('tree_shrub') || pricedServiceKeys.has('commercial_tree_shrub')) {
+              bookingServiceLabel = 'Tree & Shrub';
+            } else {
+              // Palm-only rides the tree_shrub booking service, but the
+              // visit's persisted service type must say what was quoted —
+              // /booking stores quoted_service_label as resolvedServiceType.
+              bookingServiceLabel = 'Palm Injections';
+              recurringServiceLabelParam = bookingServiceLabel;
+            }
           } else {
             bookingServiceId = 'lawn_care';
             bookingServiceLabel = 'Lawn Care';
@@ -1217,6 +1242,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const bookingSource = isOneTimeOnly ? 'quote-wizard-onetime' : 'quote-wizard';
         const bookingParams = new URLSearchParams({ service: bookingServiceId, source: bookingSource });
         if (isOneTimeOnly && bookingServiceLabel) bookingParams.set('service_label', bookingServiceLabel);
+        else if (recurringServiceLabelParam) bookingParams.set('service_label', recurringServiceLabelParam);
         // Quote→book handoff on the emailed/texted booking link too, so an invite
         // booking is priced from this exact estimate (not just the astro CTA).
         // Recurring-only — one-time bookings aren't pay-at-visit-priced — and
@@ -1247,7 +1273,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? 'A Waves team member will review the property details and follow up with the right quote.'
       : commercialDetected
         ? 'This is an estimated price based on your property details — a Waves team member will confirm it on site and schedule your service.'
-        : 'You can book online now, or reply here if anything needs to be adjusted first.';
+        : !bookingUrl
+          // No self-book link (mixed one-time add-on, bed bug, or link
+          // failure) — never tell the lead to "book online" without one.
+          ? 'A Waves team member will reach out shortly to get your service scheduled.'
+          : 'You can book online now, or reply here if anything needs to be adjusted first.';
 
     await sendQuoteRequestEmail({
       lead,
@@ -1538,6 +1568,7 @@ module.exports._internals = {
   publicQuotePestLabel,
   publicQuoteBedBugInput,
   estimateBlocksBookingHandoff,
+  estimateBlocksSelfBookLink,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   buildCompactCustomerServiceInterest,
