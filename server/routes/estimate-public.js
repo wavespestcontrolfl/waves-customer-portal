@@ -7111,9 +7111,20 @@ router.put('/:token/accept', async (req, res, next) => {
     const effectiveMonthlyTotal = selectedCombo?.monthly != null
       ? Number(selectedCombo.monthly)
       : (selectedFrequency?.monthly != null ? Number(selectedFrequency.monthly) : Number(estimate.monthly_total || 0));
-    const effectiveAnnualTotal = selectedCombo?.annual != null
+    const effectiveAnnualTotalRaw = selectedCombo?.annual != null
       ? Number(selectedCombo.annual)
       : (selectedFrequency?.annual != null ? Number(selectedFrequency.annual) : Number(estimate.annual_total || 0));
+    // v1-shaped frequency rows derive their annual as round(monthly * 12)
+    // (shapeFromV1's totalAnnAfter), which re-imports the cents drift the
+    // anchor removes (392.04 for the quarterly $392 plan) — and from here it
+    // flows into annual_total on accept, the prepay invoice base, and the
+    // billing cadence amount. A derived annual is exactly round(monthly * 12);
+    // re-anchor that case to the engine annual. An explicit engine annual
+    // that differs from the derivation is already exact and is kept.
+    const effectiveAnnualTotal = effectiveAnnualTotalRaw > 0
+      && effectiveAnnualTotalRaw === Math.round(effectiveMonthlyTotal * 12 * 100) / 100
+      ? anchoredAnnualTotal(estData, effectiveMonthlyTotal)
+      : effectiveAnnualTotalRaw;
     const annualPrepayInvoiceAmount = annualPrepaySelected
       ? resolveAnnualPrepayInvoiceAmount(effectiveAnnualTotal, effectiveMonthlyTotal)
       : null;
