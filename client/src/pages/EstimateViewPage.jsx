@@ -46,6 +46,13 @@ const glassAppearanceActive = () => document.documentElement.hasAttribute('data-
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
+import {
+  glassCopyActive,
+  glassEstimateCopyFor,
+  glassTierDisplay,
+  GLASS_COPY,
+  GLASS_DAY_LINES,
+} from '../lib/estimate-glass-copy';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
 
@@ -93,9 +100,10 @@ function scrollToBookingSection() {
 
 // Primary booking CTA — same navy treatment as the add-service button;
 // jumps the customer straight to the scheduling section.
-function GetServiceTodayCta() {
+function GetServiceTodayCta({ showGuaranteeMicro = false }) {
+  const glass = glassCopyActive();
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', margin: '16px 0 24px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
       <button
         type="button"
         onClick={scrollToBookingSection}
@@ -112,8 +120,16 @@ function GetServiceTodayCta() {
           cursor: 'pointer',
         }}
       >
-        Get service today!
+        {glass ? GLASS_COPY.ctaMain : 'Get service today!'}
       </button>
+      {/* Recurring-plan terms only (unlimited callbacks, 90-day guarantee) —
+          the one-time branch renders this CTA too and has different terms,
+          so the microcopy is opt-in per call site. */}
+      {glass && showGuaranteeMicro ? (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
+          {GLASS_COPY.ctaMicro}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -324,6 +340,21 @@ export function estimateAddServiceOffer(services = [], serviceMode = 'recurring'
   }
 
   if (currentKeys.has('pest_control') && !currentKeys.has('lawn_care')) {
+    // Glass copy names the actual mechanics instead of the abstract "next
+    // pricing tier" — but the Silver/10% claim is only true when lawn would
+    // be the SECOND service; a multi-service pest plan is already past
+    // Silver, so it gets the tier-agnostic body.
+    if (glassCopyActive()) {
+      const lawnWouldBeSecondService = currentKeys.size === 1;
+      return {
+        serviceKey: 'lawn_care',
+        label: 'Lawn Care',
+        icon: 'leaf',
+        title: GLASS_COPY.lawnOfferTitle,
+        body: lawnWouldBeSecondService ? GLASS_COPY.lawnOfferBody : GLASS_COPY.lawnOfferBodyMulti,
+        buttonLabel: lawnWouldBeSecondService ? GLASS_COPY.lawnOfferButton : GLASS_COPY.lawnOfferButtonMulti,
+      };
+    }
     return {
       serviceKey: 'lawn_care',
       label: 'Lawn Care',
@@ -465,7 +496,7 @@ const HEADER_EYEBROW_STYLE = {
   fontWeight: 700,
 };
 
-function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, headline }) {
+function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, headline, eyebrowOverride = null, subline = null }) {
   const firstName = customerFirstName || 'there';
   const headlineText = String(headline || UNIVERSAL_HEADLINE).replace('{first}', firstName);
   const phoneDisplay = formatCustomerPhone(customerPhone);
@@ -478,7 +509,9 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   return (
     <div style={{ padding: '8px 0 24px' }}>
       <div style={{ ...HEADER_EYEBROW_STYLE, marginBottom: 6 }}>
-        Your estimate{serviceLabel ? ` · ${serviceLabel}` : ''}
+        {/* The glass eyebrow carries the plan framing itself, so it drops the
+            "· {service}" suffix instead of stacking both. */}
+        {eyebrowOverride || `Your estimate${serviceLabel ? ` · ${serviceLabel}` : ''}`}
       </div>
       <h1 style={{
         fontFamily: FONTS.serif,
@@ -491,6 +524,11 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
       }}>
         {headlineText}
       </h1>
+      {subline ? (
+        <p style={{ margin: '14px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.55, maxWidth: '62ch' }}>
+          {subline}
+        </p>
+      ) : null}
       {contactLines.length ? (
         <div style={{ marginTop: 14, display: 'grid', gap: 4 }}>
           {contactLines.map((line) => (
@@ -897,8 +935,13 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           margin: 0,
           letterSpacing: 0,
         }}>
-          Ask Waves
+          {glassCopyActive() ? GLASS_COPY.askTitle : 'Ask Waves'}
         </h2>
+        {glassCopyActive() ? (
+          <p style={{ margin: '6px 0 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+            {GLASS_COPY.askExcerpt}
+          </p>
+        ) : null}
       </div>
 
       <form
@@ -1164,7 +1207,7 @@ function SetupFeeCard({ fee }) {
       </div>
       {fee.waivedWithPrepay ? (
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.45 }}>
-          Waived when you pay the year in full up front.
+          {glassCopyActive() ? GLASS_COPY.setupWaivedNote : 'Waived when you pay the year in full up front.'}
         </div>
       ) : null}
     </div>
@@ -1266,7 +1309,7 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
             }}
           >
             <Icon name={isReceived ? 'check' : 'plus'} size={17} strokeWidth={2.4} />
-            {isSubmitting ? 'Sending request...' : isReceived ? 'Request received' : `Add ${offer.label}`}
+            {isSubmitting ? 'Sending request...' : isReceived ? 'Request received' : (offer.buttonLabel || `Add ${offer.label}`)}
           </button>
           {isReceived ? (
             <div role="status" style={{
@@ -2205,11 +2248,17 @@ export function ServiceSection({
   afterPrice = null,
   showGetServiceCta = false,
   showAddOns: showAddOnsProp = true,
+  glassSetupBulletEligible = false,
 }) {
   if (!section) return null;
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
   const current = frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
   const copy = section.copy || {};
+  // Glass pest cards restate the per-day figure with a cadence-matched
+  // comparison tail; other services keep their server-provided wording.
+  const priceWording = glassCopyActive() && section.isPest
+    ? { ...copy.priceWording, dayLineByKey: GLASS_DAY_LINES }
+    : copy.priceWording;
   const showSlider = frequencies.length > 1;
   const showAddOns = showAddOnsProp
     && section.isPest
@@ -2256,7 +2305,8 @@ export function ServiceSection({
           <PriceCard
             frequency={current}
             waveGuardTier={servicesLength > 1 ? null : (section?.waveGuardTierEligible !== false ? waveGuardTier : null)}
-            wording={copy.priceWording}
+            wording={priceWording}
+            glassSetupBullet={glassSetupBulletEligible}
             // Bundles keep showSavings on for the struck-through pre-discount
             // anchor next to the member price; the in-card "You save" line
             // stays bundle-suppressed via the null waveGuardTier above, so the
@@ -2266,7 +2316,7 @@ export function ServiceSection({
           />
         ) : null}
 
-        {showGetServiceCta ? <GetServiceTodayCta /> : null}
+        {showGetServiceCta ? <GetServiceTodayCta showGuaranteeMicro /> : null}
       </div>
 
       {afterPrice}
@@ -2937,7 +2987,19 @@ export default function EstimateViewPage() {
   const showAskBar = !['accepted', 'declined', 'expired'].includes(cta?.terminalState);
   const serviceCategory = estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
   const copy = estimateCopyFor(serviceCategory);
-  const headline = UNIVERSAL_HEADLINE;
+  // Glass copy pack (?glass=1, PR B) — null unless the glass preview is
+  // active AND this is a pest estimate; every use below falls back to the
+  // standard copy. `glassContent` alone gates the service-agnostic swaps.
+  const glassContent = glassCopyActive();
+  const glassPest = glassEstimateCopyFor(serviceCategory);
+  const headline = glassPest?.heroH1 || UNIVERSAL_HEADLINE;
+  // The server's intelligence.title/body outrank the static copy fallbacks in
+  // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
+  // intelligence payload itself — metrics/signals/satellite stay untouched.
+  const intelligenceDisplay = glassPest && estimate.intelligence
+    ? { ...estimate.intelligence, title: glassPest.aiTitle, body: glassPest.aiBody }
+    : estimate.intelligence;
+  const askChips = glassPest?.askChips || pricing.askChips;
   const headerContactProps = {
     customerFirstName: estimate.customerFirstName,
     customerName: estimate.customerName,
@@ -3004,7 +3066,7 @@ export default function EstimateViewPage() {
                 background: '#EEF2FF', color: COLORS.blueDeeper,
                 borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
               }}>
-                WaveGuard {waveGuardTier}
+                WaveGuard {glassContent ? glassTierDisplay(waveGuardTier) : waveGuardTier}
               </span>
             </div>
           ) : null}
@@ -3034,6 +3096,7 @@ export default function EstimateViewPage() {
                 key={section.key}
                 section={section}
                 servicesLength={services.length}
+                glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 selectedFrequencyKey={selected[section.key]}
                 selectedAddOns={selectedAddOns[section.key] || new Set()}
                 onFrequencyChange={handleFrequencyChange}
@@ -3062,8 +3125,11 @@ export default function EstimateViewPage() {
             />
           ) : null}
 
-          {/* Bundle save lines render once, BELOW all service boxes. */}
-          {services.length > 1 ? services.map((section) => {
+          {/* Bundle save lines render once, BELOW all service boxes. Glass
+              drops them: the "saved" figure is the anchor-vs-cadence delta
+              misattributed to the tier (owner directive — one-time pricing
+              uses a multiplier, so the comparison isn't real). */}
+          {services.length > 1 && !glassContent ? services.map((section) => {
             const frequency = selectedFrequencyForSection(section, selected);
             const info = frequency ? priceCardSavingsInfo(frequency) : null;
             if (!info || section?.waveGuardTierEligible === false || !waveGuardTier) return null;
@@ -3081,7 +3147,7 @@ export default function EstimateViewPage() {
             </div>
           ) : null}
 
-          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta /> : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
@@ -3108,7 +3174,7 @@ export default function EstimateViewPage() {
         />
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta /> : null}
         <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
-        {!readOnly && renderFlags.showOneTimePestAddOns === true ? (
+        {!readOnly && !glassContent && renderFlags.showOneTimePestAddOns === true ? (
           services
             .filter((section) => section.isPest)
             .map((section) => {
@@ -3149,16 +3215,17 @@ export default function EstimateViewPage() {
             cta.terminalState === 'accepted' ? estimate.acceptedServiceMode || null : null,
           )}
           headline={headline}
+          eyebrowOverride={glassPest?.eyebrow || null}
         />
         <MembershipCard membership={estimate.membership} />
-        <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+        <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar ? (
           <EstimateAskBar
             token={token}
             askToken={estimate.askToken}
             selectedFrequency={selectedFrequency}
             serviceMode={serviceMode}
-            chips={pricing.askChips}
+            chips={askChips}
           />
         ) : null}
         <TerminalStateCard
@@ -3189,6 +3256,7 @@ export default function EstimateViewPage() {
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, serviceMode)}
           headline={headline}
+          eyebrowOverride={glassPest?.eyebrow || null}
         />
         <SuccessCard acceptResult={acceptResult} />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
@@ -3203,13 +3271,13 @@ export default function EstimateViewPage() {
   const aiPanelBlock = (
     <>
       <MembershipCard membership={estimate.membership} />
-      <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+      <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
       <EstimateAskBar
         token={token}
         askToken={estimate.askToken}
         selectedFrequency={selectedFrequency}
         serviceMode={serviceMode}
-        chips={pricing.askChips}
+        chips={askChips}
       />
       <EstimateAddServiceRequestCard
         offer={addServiceOffer}
@@ -3233,6 +3301,8 @@ export default function EstimateViewPage() {
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
           headline={headline}
+          eyebrowOverride={glassPest?.eyebrow || null}
+          subline={glassPest?.heroSub || null}
         />
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
@@ -3251,6 +3321,10 @@ export default function EstimateViewPage() {
         {...headerContactProps}
         serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
         headline={headline}
+        eyebrowOverride={glassPest?.eyebrow || null}
+        // The booking-forward subline only belongs where booking is still on
+        // the table — terminal and success states keep the plain hero.
+        subline={glassPest?.heroSub || null}
       />
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
@@ -3369,8 +3443,10 @@ export default function EstimateViewPage() {
           </div>
 
           {/* Pest visit-preference toggles ("Skip parts you don't need")
-              live BELOW the schedule card (owner directive). */}
-          {serviceMode === 'recurring' && renderFlags.showPestRecurringAddOns === true
+              live BELOW the schedule card (owner directive). Glass removes
+              the customize section entirely — zero lifetime toggle clicks
+              (owner directive); pre-checked defaults still apply. */}
+          {serviceMode === 'recurring' && !glassContent && renderFlags.showPestRecurringAddOns === true
             ? services
               .filter((section) => section.isPest && section.isRecurring)
               .map((section) => {

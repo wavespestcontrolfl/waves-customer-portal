@@ -1,6 +1,7 @@
 import { COLORS as B, FONTS } from '../theme-brand';
 import NewsletterSignup from './NewsletterSignup';
 import { WAVES_ADDRESS_LINE } from '../constants/business';
+import { glassCopyActive, GLASS_FOOTER_CITY_LINKS } from '../lib/estimate-glass-copy';
 
 const GBP_LOCATION_LINKS = [
   { label: 'Lakewood Ranch', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Lakewood%20Ranch&query_place_id=ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
@@ -75,7 +76,27 @@ export default function BrandFooter({ borderColor, variant }) {
           {' '}<span aria-hidden="true" style={{ margin: '0 4px', color: B.grayMid }}>·</span>{' '}
           <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>wavespestcontrol.com</a>
         </div>
-        <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10 }}>{WAVES_ADDRESS_LINE}</div>
+        {/* Glass estimates (?glass=1, PR B) replace the single office address
+            with the four GBP city profiles — service-area-first framing. */}
+        {glassCopyActive() ? (
+          <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10 }}>
+            {GLASS_FOOTER_CITY_LINKS.map((city, index) => (
+              <span key={city.label}>
+                {index > 0 ? <span aria-hidden="true" style={{ margin: '0 4px', color: B.grayMid }}>·</span> : null}
+                <a
+                  href={city.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}
+                >
+                  {city.label}
+                </a>
+              </span>
+            ))}
+          </div>
+        ) : (
+          <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10 }}>{WAVES_ADDRESS_LINE}</div>
+        )}
         <div style={{ fontSize: 11, color: B.grayMid }}>© {new Date().getFullYear()} Waves Pest Control, LLC · All rights reserved</div>
       </div>
     );
