@@ -50,31 +50,49 @@ describe('glassSlotMeta', () => {
 });
 
 describe('glassScarcityInfo', () => {
-  it('reports scarcity only when the first day has ≤2 fresh slots', () => {
+  it('reports scarcity from the server pre-curation count, times from visible slots', () => {
     const info = glassScarcityInfo([
       { date: '2026-07-06', windowStart: '09:00' },
       { date: '2026-07-06', windowStart: '14:00' },
       { date: '2026-07-08', windowStart: '09:00' },
-    ], NOW);
+    ], { date: '2026-07-06', openCount: 2 }, NOW);
     expect(info).toEqual({ count: 2, label: 'Only 2 openings tomorrow — 9:00 AM & 2:00 PM' });
   });
 
-  it('self-removes when the first day has plenty', () => {
-    const slots = ['09:00', '10:30', '13:00'].map((windowStart) => ({ date: '2026-07-06', windowStart }));
-    expect(glassScarcityInfo(slots, NOW)).toBe(null);
+  it('self-removes when the TRUE first-day count has plenty, even if the curated list shows few', () => {
+    // Curation sliced the display list down to one same-day slot, but the
+    // server counted 5 bookable — claiming "Only 1 opening" would be
+    // manufactured scarcity.
+    expect(glassScarcityInfo(
+      [{ date: '2026-07-06', windowStart: '09:00' }],
+      { date: '2026-07-06', openCount: 5 },
+      NOW,
+    )).toBe(null);
   });
 
-  it('ignores stale same-day slots when picking the first day', () => {
-    // The 12:30 slot is inside the lead — the first REAL day is the 7th.
-    const info = glassScarcityInfo([
-      { date: '2026-07-05', windowStart: '12:30' },
-      { date: '2026-07-07', windowStart: '09:00' },
-    ], NOW);
-    expect(info).toEqual({ count: 1, label: 'Only 1 opening on Tuesday — 9:00 AM' });
+  it('never renders without the server count', () => {
+    expect(glassScarcityInfo(
+      [{ date: '2026-07-06', windowStart: '09:00' }],
+      null,
+      NOW,
+    )).toBe(null);
   });
 
-  it('returns null with no slots', () => {
-    expect(glassScarcityInfo([], NOW)).toBe(null);
-    expect(glassScarcityInfo(null, NOW)).toBe(null);
+  it('self-removes when the scarce day has no fresh visible slots left', () => {
+    // Server said 1 opening today at 12:30 — but that window slipped inside
+    // the lead client-side; no times to show, no claim to make.
+    expect(glassScarcityInfo(
+      [{ date: '2026-07-05', windowStart: '12:30' }],
+      { date: '2026-07-05', openCount: 1 },
+      NOW,
+    )).toBe(null);
+  });
+
+  it('handles the weekday form for later-week scarcity', () => {
+    expect(glassScarcityInfo(
+      [{ date: '2026-07-07', windowStart: '09:00' }],
+      { date: '2026-07-07', openCount: 1 },
+      NOW,
+    )).toEqual({ count: 1, label: 'Only 1 opening on Tuesday — 9:00 AM' });
   });
 });

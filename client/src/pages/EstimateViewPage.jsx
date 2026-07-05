@@ -3074,13 +3074,19 @@ export default function EstimateViewPage() {
   // total CombinedRecurringPriceCard renders as /mo — no cadence multiply.
   // Single service: the cadence price PriceCard renders.
   const stickyBarPrice = (() => {
+    const HIDDEN = { label: null, period: null };
     if (services.length > 1) {
       const monthly = combinedFrequency?.monthly;
-      if (combinedFrequency?.quoteRequired === true || monthly == null) return { label: null, period: null };
+      if (combinedFrequency?.quoteRequired === true || monthly == null) return HIDDEN;
+      // Narrow low-confidence commercial estimates price as a $low–$high
+      // RANGE on the cards; a fixed bar quoting one exact number would
+      // contradict them mid-booking, so it stays hidden for ranged pricing.
+      if (Number(combinedFrequency?.lowConfidenceRangePct) > 0) return HIDDEN;
       return { label: fmtMoney(Math.round(Number(monthly) * 100) / 100), period: '/mo' };
     }
     const src = currentFrequency;
-    if (!src || src.quoteRequired === true || src.monthly == null) return { label: null, period: null };
+    if (!src || src.quoteRequired === true || src.monthly == null) return HIDDEN;
+    if (Number(src.lowConfidenceRangePct) > 0) return HIDDEN;
     const billingKey = src.billingFrequencyKey || src.key;
     const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
     const period = billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo';
@@ -3475,6 +3481,7 @@ export default function EstimateViewPage() {
                 selectedSlotId={selectedSlotId}
                 onSelect={setSelectedSlotId}
                 onSelectMeta={setSelectedSlotMeta}
+                selectedSlotFallbackMeta={selectedSlotMeta}
                 licenseNumber={estimate.licenseNumber}
                 refreshSignal={slotsRefreshSignal}
                 serviceMode={serviceMode}

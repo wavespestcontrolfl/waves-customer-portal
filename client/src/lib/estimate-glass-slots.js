@@ -75,16 +75,21 @@ export function glassSlotMeta(slot) {
 }
 
 /**
- * Real-data scarcity: only when the FIRST day with availability has ≤2
- * open slots — "Only 1 opening tomorrow — 9:00 AM". Returns null otherwise
- * so the badge self-removes rather than manufacture urgency.
+ * Real-data scarcity: only when the FIRST day with availability truly has
+ * ≤2 open slots — "Only 1 opening tomorrow — 9:00 AM". The count comes
+ * from the server's pre-curation pool (metadata.firstDayAvailability):
+ * the display list is diversified-by-day and sliced, so counting IT could
+ * manufacture scarcity that doesn't exist. Returns null without the
+ * server count, when the day has plenty, or when its visible slots have
+ * gone stale — the badge self-removes rather than overstate urgency.
  */
-export function glassScarcityInfo(slots, now = new Date()) {
-  const fresh = (Array.isArray(slots) ? slots : []).filter((s) => s?.date && !glassSlotIsStale(s, now));
-  if (!fresh.length) return null;
-  const firstDay = fresh.reduce((min, s) => (s.date < min ? s.date : min), fresh[0].date);
-  const daySlots = fresh.filter((s) => s.date === firstDay);
-  if (daySlots.length > 2) return null;
+export function glassScarcityInfo(slots, firstDayAvailability, now = new Date()) {
+  const openCount = Number(firstDayAvailability?.openCount);
+  const firstDay = firstDayAvailability?.date;
+  if (!firstDay || !Number.isFinite(openCount) || openCount < 1 || openCount > 2) return null;
+  const daySlots = (Array.isArray(slots) ? slots : [])
+    .filter((s) => s?.date === firstDay && !glassSlotIsStale(s, now));
+  if (!daySlots.length) return null;
   const todayEt = etDateString(now);
   const dayDiff = Math.round(
     (Date.parse(`${firstDay}T12:00:00Z`) - Date.parse(`${todayEt}T12:00:00Z`)) / 86400000,
@@ -95,7 +100,7 @@ export function glassScarcityInfo(slots, now = new Date()) {
     .sort((a, b) => (a.mins ?? 0) - (b.mins ?? 0))
     .map((t) => t.label);
   return {
-    count: daySlots.length,
-    label: `Only ${daySlots.length} opening${daySlots.length === 1 ? '' : 's'} ${when} — ${times.join(' & ')}`,
+    count: openCount,
+    label: `Only ${openCount} opening${openCount === 1 ? '' : 's'} ${when} — ${times.join(' & ')}`,
   };
 }

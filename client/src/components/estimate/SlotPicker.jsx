@@ -104,6 +104,7 @@ export default function SlotPicker({
   selectedSlotId,
   onSelect,
   onSelectMeta = null,
+  selectedSlotFallbackMeta = null,
   licenseNumber = null,
   refreshSignal,
   serviceMode = 'recurring',
@@ -149,8 +150,17 @@ export default function SlotPicker({
     ? visibleSlots.find((s) => s.slotId === selectedSlotId) || null
     : null;
 
-  // A selection is only valid while its slot is on screen AND outside the
-  // booking lead — otherwise clear it (and the CTA labels with it).
+  // The selection the customer may be retrying after a review cancel: the
+  // page threads back the slot's own metadata because the customer's LIVE
+  // reservation hold occupies that slot server-side, so a refetch excludes
+  // it from the visible lists even though it's theirs to retry.
+  const heldSelection = selectedSlotFallbackMeta && selectedSlotFallbackMeta.slotId === selectedSlotId
+    ? selectedSlotFallbackMeta
+    : null;
+
+  // A selection is only valid while it's outside the booking lead AND
+  // either on screen or covered by the customer's own hold — otherwise
+  // clear it (and the CTA labels with it).
   useEffect(() => {
     if (!glass || !selectedSlotId) return;
     // While slots are loading (first mount, or a remount after review-cancel
@@ -158,10 +168,16 @@ export default function SlotPicker({
     // "unknown", not "gone" — clearing here would drop a valid selection and
     // hide the payment choices before the fetch repopulates the list.
     if (loading || !data) return;
-    if (!selectedSlot || glassSlotIsStale(selectedSlot)) selectSlot(null);
+    if (selectedSlot) {
+      if (glassSlotIsStale(selectedSlot)) selectSlot(null);
+      return;
+    }
+    // Absent from the visible lists: keep it while the customer's own held
+    // window is still bookable — reserve/accept revalidate server-side.
+    if (!heldSelection || glassSlotIsStale(heldSelection)) selectSlot(null);
     // freshnessTick re-runs the check each minute while the page sits open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [glass, selectedSlotId, selectedSlot, freshnessTick, loading, data]);
+  }, [glass, selectedSlotId, selectedSlot, heldSelection, freshnessTick, loading, data]);
 
   useEffect(() => {
     let cancelled = false;
@@ -457,10 +473,12 @@ export default function SlotPicker({
       {heading}
       {glass && selectedSlot && !glassSlotIsStale(selectedSlot) ? (
         <GlassTechChip slotMeta={glassSlotMeta(selectedSlot)} licenseNumber={licenseNumber} />
+      ) : glass && heldSelection && !glassSlotIsStale(heldSelection) ? (
+        <GlassTechChip slotMeta={heldSelection} licenseNumber={licenseNumber} />
       ) : null}
       {finder}
       {glass && !(searchData || pickedData || pickedLoading) ? (
-        <GlassScarcityBadge info={glassScarcityInfo(allSlots)} />
+        <GlassScarcityBadge info={glassScarcityInfo(allSlots, data?.metadata?.firstDayAvailability)} />
       ) : null}
       {searchData || pickedData || pickedLoading ? null : initial.map((slot) => (
         <SlotCard

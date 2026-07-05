@@ -973,6 +973,19 @@ function diversifyByDay(sortedSlots) {
   return ordered;
 }
 
+// True first-day availability BEFORE curation — selectCustomerFacingSlots
+// diversifies by day and slices to a display limit, so the customer-facing
+// list under-represents per-day counts. Any scarcity claim must come from
+// the full bookable pool, never the curated list.
+function firstDayAvailability(bookable) {
+  const dates = (Array.isArray(bookable) ? bookable : [])
+    .map((slot) => slot?.date)
+    .filter(Boolean);
+  if (!dates.length) return null;
+  const firstDay = dates.reduce((min, d) => (d < min ? d : min));
+  return { date: firstDay, openCount: dates.filter((d) => d === firstDay).length };
+}
+
 function selectCustomerFacingSlots(slots, limit) {
   const safeLimit = Math.max(0, Number(limit) || 0);
   if (!safeLimit) return [];
@@ -1188,6 +1201,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       metadata: {
         estimateAddress: estimate.address || null,
         estimateCoords: null,
+        firstDayAvailability: firstDayAvailability(bookable),
         windowDays: opts.windowDays,
         proximityDriveMinutes: opts.proximityDriveMinutes,
         includeWeekends: opts.includeWeekends,
@@ -1257,6 +1271,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       estimateAddress: estimate.address || null,
       estimateCoords: { lat: coords.lat, lng: coords.lng },
       coordsSource: coords.source,
+      firstDayAvailability: firstDayAvailability(bookable),
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
       includeWeekends: opts.includeWeekends,
