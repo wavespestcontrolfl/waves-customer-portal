@@ -112,11 +112,13 @@ function pickTargetPath(findings = [], slug = null) {
   return s ? `${ASTRO_BLOG_DIR}/${s}.md` : null;
 }
 
-function buildReviewRequestBody(newHeadSha) {
+function buildReviewRequestBody(newHeadSha, { initial = false } = {}) {
   return [
     '@codex review',
     '',
-    `Addressed the review findings on head \`${newHeadSha}\`. Please re-review.`,
+    initial
+      ? `Requesting Codex review for head \`${newHeadSha}\` — no prior review request found for this head (the PR-open request is fail-soft and a bounced request is not queued).`
+      : `Addressed the review findings on head \`${newHeadSha}\`. Please re-review.`,
   ].join('\n');
 }
 
@@ -543,7 +545,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const gh = deps.gh || ghDefault;
   const {
     prNumber, branch, slug = null, service = null, factContext = null,
-    onPark = null, revalidateFix = null, onRemediated = null,
+    onPark = null, revalidateFix = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
 
@@ -568,6 +570,18 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
         return { skipped: true, reason: 're-requested codex review (recovered)' };
       }
       return { skipped: true, reason: 'awaiting codex re-review' };
+    }
+    // Never remediated this PR and no findings: make sure a review request
+    // covering the CURRENT head exists at all. The publisher's PR-open
+    // request is fail-soft (and a usage-limit bounce is not queued), so a PR
+    // whose initial request was lost would otherwise sit at
+    // CODEX_REVIEW_REQUIRED forever with this branch waiting on a review
+    // that was never asked for. Bounded: the posted request embeds the head
+    // SHA, so subsequent ticks see it and wait instead of re-posting.
+    const issueComments = await gh.listIssueComments(prNumber);
+    if (!reviewRequestedForHead(issueComments, headSha)) {
+      await gh.createIssueComment(prNumber, buildReviewRequestBody(headSha, { initial: true }));
+      return { skipped: true, reason: 'requested codex review (no request found for current head)' };
     }
     return { skipped: true, reason: 'awaiting codex review (no inline findings)' };
   }
@@ -611,6 +625,20 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (schemaChanged(file.content, fixed, deps)) {
     return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark);
   }
+  // An un-interpolated {{token}} in an .mdx body crashes the MDX compile —
+  // publishOrUpdatePage blocks these before opening a PR (astro-publisher
+  // mdxBreakingToken), so a fix that introduces one would strand the PR on a
+  // failed preview build. Same guard here; unavailable/throwing fails closed.
+  if (targetPath.endsWith('.mdx')) {
+    let tokenOf = deps.mdxBreakingToken;
+    if (!tokenOf) {
+      try { tokenOf = require('../content-astro/astro-publisher')._internals.mdxBreakingToken; } catch (_) { tokenOf = null; }
+    }
+    if (typeof tokenOf !== 'function') return park(db, prNumber, 'mdx token guard unavailable (fail closed)', onPark);
+    let token = null;
+    try { token = tokenOf(String((fm.parse(fixed) || {}).content || '')); } catch (e) { return park(db, prNumber, `mdx token guard failed: ${e.message}`, onPark); }
+    if (token) return park(db, prNumber, `fix introduces an MDX-breaking token (${token})`, onPark);
+  }
 
   // Re-run the publisher's content-safety gates on the fix before committing —
   // a fix that fails them is worse than the original finding, so park it.
@@ -632,6 +660,18 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     if (!recheck || recheck.ok !== true) {
       return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark);
     }
+  }
+
+  // Last-instant pre-push guard, mirroring the merge path's: the LLM call and
+  // gate re-runs above take real time, and the lane's claim (queue row /
+  // publishing claim / tracked PR) can move while they run. A failed or
+  // throwing check skips WITHOUT spending a round or touching state — if the
+  // lane re-arms for this PR later, remediation resumes; if it was superseded,
+  // the poller stops invoking it.
+  if (typeof prePushCheck === 'function') {
+    let stillArmed = false;
+    try { stillArmed = (await prePushCheck()) === true; } catch (_) { stillArmed = false; }
+    if (!stillArmed) return { skipped: true, reason: 'lane state moved during remediation (pre-push check failed)' };
   }
 
   const round = (state.rounds || 0) + 1;
@@ -695,6 +735,15 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // frontmatter is immutable during remediation, so the body is the whole
     // delta — without this, a later republish or social share rebuilds from
     // the pre-fix content and resurrects the issue Codex flagged.
+    // Last-instant claim check before the branch push (the CAS below guards
+    // the row write; this guards the BRANCH write): skip the push entirely
+    // when the row left the publishing claim or was repointed mid-flight.
+    prePushCheck: async () => {
+      const fresh = await db('blog_posts').where({ id: row.id }).first();
+      return !!fresh && fresh.publish_status === 'publishing'
+        && fresh.astro_pr_number === row.astro_pr_number
+        && fresh.astro_branch_name === row.astro_branch_name;
+    },
     // Compare-and-set on the publishing claim + tracked PR/branch: the LLM
     // call, gates, and GitHub write above take real time, and the stale-
     // publishing sweep or an admin republish can move the row (or repoint it
@@ -746,6 +795,9 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
     revalidateFix: (fixedMarkdown) => revalidate(fixedMarkdown, run, deps),
+    // Last-instant queue re-check before the branch push (the poller's check
+    // runs BEFORE the LLM round; this one closes the window during it).
+    prePushCheck: deps.prePushCheck || null,
   }, deps);
 }
 

@@ -617,7 +617,13 @@ async function maybeAutoMerge(run, pr) {
             // (claims-ledger/guardrails/comparison/uniqueness/quality/SEO/
             // visibility) against the re-fetched run + brief before committing
             // any fix, and parks when it can't prove them.
-            const rem = await maybeRemediateAutonomousPr(pr, run);
+            // prePushCheck closes the window DURING the LLM round: the check
+            // above ran before it, and an operator requeue/dismiss landing
+            // mid-round must still block the branch push (same last-instant
+            // posture as the merge below).
+            const rem = await maybeRemediateAutonomousPr(pr, run, {
+              prePushCheck: () => queueRowStillParked(run),
+            });
             if (rem?.remediated) {
               logger.info(`[autonomous-pr-poller] codex remediation round ${rem.round} pushed for run ${run.id} PR #${pr.number} (${rem.findings} finding(s))`);
             } else if (rem?.parked) {

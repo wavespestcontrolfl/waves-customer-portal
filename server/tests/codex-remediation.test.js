@@ -130,12 +130,25 @@ describe('runRemediationForPr', () => {
     expect(gh._calls.putFile[0].path).toBe('src/content/blog/pest-control/roaches.mdx');
   });
 
-  test('no findings, never remediated → wait', async () => {
+  test('no findings, never remediated, no request for head → posts the initial review request', async () => {
     const db = makeDb();
-    const gh = makeGh({ reviewComments: [] });
+    const gh = makeGh({ reviewComments: [], issueComments: [] });
     const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/requested codex review/);
     expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.comments).toHaveLength(1);
+    expect(gh._calls.comments[0].body).toMatch(/@codex review/);
+    expect(gh._calls.comments[0].body).toContain(HEAD);
+  });
+
+  test('no findings, never remediated, request already covers head → wait without re-posting', async () => {
+    const db = makeDb();
+    const gh = makeGh({ reviewComments: [], issueComments: [{ body: `@codex review \`${HEAD}\`` }] });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/awaiting codex review/);
+    expect(gh._calls.comments).toHaveLength(0);
   });
 
   test('no findings while remediating + review request missing → re-requests (recovery)', async () => {
@@ -412,9 +425,10 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     expect(db._tables.blog_posts[0].content).toBe('NEW FIXED BODY');
   });
 
-  // r9: the sync is a compare-and-set on the publishing claim + tracked PR —
-  // a row the sweep or an admin moved mid-flight must NOT be overwritten.
-  test('row moved out of the publishing claim mid-flight -> CAS miss -> park, content untouched', async () => {
+  // r9/r11: two layers guard the sync. The pre-push check skips BEFORE the
+  // branch write when the row already left the claim; the CAS covers the
+  // narrower putFile→sync window and parks.
+  test('row already out of the publishing claim -> pre-push check skips before any branch write', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const orig = '---\ntitle: T\n---\nOLD BODY';
     const fixedMd = '---\ntitle: T\n---\nNEW FIXED BODY';
@@ -423,6 +437,24 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
       blog_posts: [{ id: 1, publish_status: 'pending_review', astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k', content: 'CURRENT BODY' }],
     });
     const gh = makeGh({ fileContent: orig });
+    const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/pre-push check failed/);
+    expect(gh._calls.putFile).toHaveLength(0); // branch never touched
+    expect(db._tables.blog_posts[0].content).toBe('CURRENT BODY'); // untouched
+  });
+
+  test('row moved DURING the branch write -> CAS miss -> park, content untouched', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\n---\nOLD BODY';
+    const fixedMd = '---\ntitle: T\n---\nNEW FIXED BODY';
+    const db = makeDb({
+      blog_posts: [{ id: 1, publish_status: 'publishing', astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k', content: 'CURRENT BODY' }],
+    });
+    const gh = makeGh({ fileContent: orig });
+    // The sweep lands in the window between the pre-push check and the sync.
+    const origPut = gh.putFile.bind(gh);
+    gh.putFile = async (args) => { db._tables.blog_posts[0].publish_status = 'pending_review'; return origPut(args); };
     const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
     expect(r.parked).toBe(true);
     expect(r.reason).toMatch(/no longer matches the publishing claim/);
@@ -477,6 +509,67 @@ describe('round-10 hardening (Codex findings on 82ec5608)', () => {
     const row = db._tables.blog_posts[0];
     expect(row.publish_status).toBe('publishing'); // fresh claim NOT disarmed
     expect(row.astro_publish_error).toBeUndefined(); // no stale error stamped
+  });
+});
+
+describe('round-11 hardening (Codex findings on 145dcee5)', () => {
+  const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+  afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
+
+  // P2: last-instant pre-push guard — a queue/claim move during the LLM round
+  // must block the branch write without spending a round or touching state.
+  test('prePushCheck false or throwing -> skip, no branch write, no state spent', async () => {
+    const gh1 = makeGh();
+    const db1 = makeDb();
+    const r1 = await runRemediationForPr(
+      { ...CTX, prePushCheck: async () => false },
+      { db: db1, gh: gh1, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r1.skipped).toBe(true);
+    expect(r1.reason).toMatch(/pre-push check failed/);
+    expect(gh1._calls.putFile).toHaveLength(0);
+    expect(db1._tables.codex_remediation_state || []).toHaveLength(0); // no round spent
+
+    const gh2 = makeGh();
+    const r2 = await runRemediationForPr(
+      { ...CTX, prePushCheck: async () => { throw new Error('queue lookup failed'); } },
+      { db: makeDb(), gh: gh2, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r2.skipped).toBe(true);
+    expect(gh2._calls.putFile).toHaveLength(0);
+  });
+
+  test('autonomous lane passes deps.prePushCheck through to the push guard', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    let checked = false;
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db: makeDb(), gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+      prePushCheck: async () => { checked = true; return false; },
+    });
+    expect(checked).toBe(true);
+    expect(r.skipped).toBe(true);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  // P2: a fix that introduces an un-interpolated {{token}} into an .mdx body
+  // would strand the PR on a failed MDX preview build — park instead.
+  test('.mdx fix introducing a {{token}} -> park; .md is not token-guarded', async () => {
+    const db = makeDb();
+    const ghMdx = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const r1 = await runRemediationForPr(CTX, { db, gh: ghMdx, callAnthropic: makeCall('Call {{cityPhone}} today.'), validateFixedBlogFile: PASS });
+    expect(r1.parked).toBe(true);
+    expect(r1.reason).toMatch(/MDX-breaking token/);
+    expect(r1.reason).toMatch(/cityPhone/);
+    expect(ghMdx._calls.putFile).toHaveLength(0);
+
+    // Same content on a .md target commits fine ({{tokens}} are legit there).
+    const ghMd = makeGh();
+    const r2 = await runRemediationForPr(CTX, { db: makeDb(), gh: ghMd, callAnthropic: makeCall('Call {{cityPhone}} today.'), validateFixedBlogFile: PASS });
+    expect(r2.remediated).toBe(true);
   });
 });
 
