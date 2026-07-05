@@ -171,31 +171,113 @@ describe('20260705000120 click_followup_actions', () => {
   });
 });
 
-describe('20260705010010 message_drafts guard exemption', () => {
-  test('up: pending click_followup inserts pass the trigger with the legacy flag OFF', async () => {
-    const knex = fakeKnex();
+describe('20260705010010 message_drafts guard exemption (splice, not clobber)', () => {
+  // Simulates the LIVE prod function: 20260613000010's house-voice guard,
+  // PLUS an unrelated pre-existing exemption (PR #2357's campaign clause) —
+  // the composition hazard this migration must survive when it runs second.
+  const LIVE_DEF_WITH_CAMPAIGN = `CREATE OR REPLACE FUNCTION public.block_message_drafts_when_disabled()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $function$
+    declare
+      enabled boolean;
+    begin
+      if (NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow')
+         and not coalesce(NEW.campaign_type is not null and NEW.status = 'pending', false) then
+        select lower(value) = 'true' into enabled
+          from system_config where key = 'legacy_ai_drafts_enabled';
+        if coalesce(enabled, false) is not true then
+          raise exception 'legacy_ai_drafts_disabled' using errcode = 'P0001';
+        end if;
+      end if;
+      return new;
+    end;
+    $function$;`;
+
+  // Fake knex for the splice migration: the pg_get_functiondef SELECT returns
+  // the configured live definition; every other raw() is recorded as executed.
+  function spliceKnex(liveDef) {
+    const executed = [];
+    const knex = {
+      executed,
+      raw: jest.fn(async (sql) => {
+        if (/pg_get_functiondef/.test(String(sql))) {
+          return { rows: liveDef == null ? [] : [{ def: liveDef }] };
+        }
+        executed.push(String(sql));
+        return { rows: [] };
+      }),
+    };
+    return knex;
+  }
+
+  test("up splices the allowlist INTO the live def, preserving another PR's exemption clause", async () => {
+    const knex = spliceKnex(LIVE_DEF_WITH_CAMPAIGN);
     await guardExempt.up(knex);
 
-    const sql = knex.state.raw.join('\n');
-    expect(sql).toContain('CREATE OR REPLACE FUNCTION public.block_message_drafts_when_disabled()');
-    // House-voice shadow exemption retained verbatim.
-    expect(sql).toContain("NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow'");
-    // New owner-review allowlist: pending + click_followup skips the legacy
-    // kill-switch check entirely (insert succeeds with the flag off).
+    expect(knex.executed).toHaveLength(1);
+    const sql = knex.executed[0];
+    // Our allowlist landed…
     expect(sql).toContain("NEW.status = 'pending' and NEW.intent = any (ARRAY['click_followup']::text[])");
-    // Three-valued-logic guard: a NULL intent must NOT satisfy the allowlist.
-    expect(sql).toMatch(/not coalesce\(\s*NEW\.status = 'pending'/);
-    // Legacy path still enforced.
+    // NULL intent can never satisfy it (three-valued logic pin).
+    expect(sql).toMatch(/not coalesce\(\s*NEW\.status = 'pending' and NEW\.intent/);
+    // …WITHOUT clobbering the other PR's campaign exemption,
+    expect(sql).toContain('NEW.campaign_type is not null');
+    // the house-voice exemption,
+    expect(sql).toContain("NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow'");
+    // or the legacy kill switch itself.
+    expect(sql).toContain("raise exception 'legacy_ai_drafts_disabled'");
+    // And the splice keeps a single guard IF: clause inserted before its THEN.
+    expect(sql.indexOf('click_followup')).toBeLessThan(sql.indexOf('legacy_ai_drafts_enabled'));
+  });
+
+  test('up is idempotent: live def already carrying the allowlist executes nothing', async () => {
+    const knex = spliceKnex(LIVE_DEF_WITH_CAMPAIGN.replace(
+      ' then',
+      " and not coalesce(NEW.status = 'pending' and NEW.intent = any (ARRAY['click_followup']::text[]), false) then",
+    ));
+    await guardExempt.up(knex);
+    expect(knex.executed).toHaveLength(0);
+  });
+
+  test('up fresh-replay fallback: no live function → full static guard (house-voice + allowlist + kill switch)', async () => {
+    const knex = spliceKnex(null);
+    await guardExempt.up(knex);
+
+    expect(knex.executed).toHaveLength(1);
+    const sql = knex.executed[0];
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION public.block_message_drafts_when_disabled()');
+    expect(sql).toContain("NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow'");
+    expect(sql).toContain("ARRAY['click_followup']");
     expect(sql).toContain("raise exception 'legacy_ai_drafts_disabled'");
   });
 
-  test('down: restores the house-voice-only guard (no click_followup exemption)', async () => {
-    const knex = fakeKnex();
-    await guardExempt.down(knex);
+  test('up fails loudly on an unrecognized function shape instead of clobbering it', async () => {
+    const knex = spliceKnex('CREATE OR REPLACE FUNCTION public.block_message_drafts_when_disabled() ... totally rewritten ...');
+    await expect(guardExempt.up(knex)).rejects.toThrow(/unrecognized shape/);
+    expect(knex.executed).toHaveLength(0);
+  });
 
-    const sql = knex.state.raw.join('\n');
-    expect(sql).toContain("NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow'");
+  test("down splice-removes ONLY our clause, preserving the other PR's exemption", async () => {
+    // Build a live def where OUR clause sits next to the campaign clause.
+    const knexUp = spliceKnex(LIVE_DEF_WITH_CAMPAIGN);
+    await guardExempt.up(knexUp);
+    const combined = knexUp.executed[0];
+
+    const knexDown = spliceKnex(combined);
+    await guardExempt.down(knexDown);
+
+    expect(knexDown.executed).toHaveLength(1);
+    const sql = knexDown.executed[0];
     expect(sql).not.toContain('click_followup');
+    expect(sql).toContain('NEW.campaign_type is not null');
+    expect(sql).toContain("NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow'");
     expect(sql).toContain("raise exception 'legacy_ai_drafts_disabled'");
+  });
+
+  test('down is a no-op when the clause is absent', async () => {
+    const knex = spliceKnex(LIVE_DEF_WITH_CAMPAIGN);
+    await guardExempt.down(knex);
+    expect(knex.executed).toHaveLength(0);
   });
 });

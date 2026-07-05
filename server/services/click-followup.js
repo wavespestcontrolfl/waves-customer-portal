@@ -50,11 +50,21 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { createTrackedShortLink } = require('./short-url');
-const { customerConvertedSince } = require('./estimate-conversion-guard');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
-const { DEPOSIT_FOLLOWUP_WINDOW } = require('./estimate-deposits');
-const { loadSuppressionState } = require('./messaging/validators/suppression');
-const { readCachedLineType } = require('./messaging/validators/line-type');
+// The shared pre-send guard stack. The SAME gate re-runs at approval time in
+// routes/admin-drafts.js, so every suppression this queue applies at draft
+// time automatically has its twin when the owner clicks approve.
+const {
+  evaluateClickFollowupGate,
+  cadenceStageDueSoon,
+  depositStageDueSoon,
+  leadConvertedSince,
+  hasRepliedRecently,
+  hasRecentOutboundSms,
+  isSuppressedContact,
+  last10,
+  normalizeE164,
+} = require('./click-followup-gate');
 
 // Click window (hours from clicked_at). Cron runs every 30 min, so a click
 // enters the queue ~4–4.5h after it landed.
@@ -66,28 +76,10 @@ const MAX_AGE_H = 72;
 // weeks is stale — expiring frees the partial-unique guard for future clicks.
 const ACTION_TTL_DAYS = 14;
 
-// Estimate statuses the cadence treats as terminal (estimate-follow-up.js).
-// A click on a link for one of these gets a 'dismissed' action, never a draft.
-const TERMINAL_STATUSES = new Set(['declined', 'accepted', 'expired', 'void']);
-
 // Deterministic draft copy — GSM-7 safe on purpose (plain hyphen, straight
 // apostrophe, no em-dashes / curly quotes / emoji). The owner can still edit
 // it in /admin/drafts before approving.
 const DRAFT_TEMPLATE = "Hi {first_name}, saw you were taking another look at your Waves quote - anything I can answer? If you're ready, you can pick your first visit here: {estimate_url}";
-
-function last10(phone) {
-  const d = String(phone || '').replace(/\D/g, '');
-  return d.length >= 10 ? d.slice(-10) : d;
-}
-
-function normalizeE164(phone) {
-  const trimmed = String(phone || '').trim();
-  if (!trimmed) return null;
-  const digits = trimmed.replace(/\D/g, '');
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-  return trimmed.startsWith('+') ? trimmed : trimmed;
-}
 
 // SECURITY: customer_name can originate from the public quote wizard, so it
 // is client-supplied text interpolated into message copy. Same sanitizer as
@@ -96,122 +88,6 @@ function firstNameOf(name) {
   const raw = String(name || '').trim().split(/\s+/)[0] || '';
   const clean = raw.replace(/[^\p{L}\p{M}'-]/gu, '').slice(0, 40);
   return clean || 'there';
-}
-
-// Reply-pause: the contact has texted Waves recently → let staff handle it
-// live. Mirrors estimate-follow-up's hasRepliedRecently (customer_id + phone
-// match); soft-fails OPEN like both existing services so a missing table
-// never breaks the loop — the worst case is a draft the owner declines.
-async function hasRepliedRecently({ customerId, phone }, days = 14) {
-  const cutoff = new Date(Date.now() - days * 86400000);
-  const ten = last10(phone);
-  if (!customerId && !ten) return false;
-  try {
-    const q = db('messages')
-      .join('conversations', 'messages.conversation_id', 'conversations.id')
-      .where('messages.direction', 'inbound')
-      .where('messages.channel', 'sms')
-      .where('messages.created_at', '>=', cutoff)
-      .first('messages.id');
-    q.andWhere(function () {
-      if (customerId) this.orWhere('conversations.customer_id', customerId);
-      if (ten) {
-        this.orWhereRaw(
-          "RIGHT(regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
-          [ten],
-        );
-      }
-    });
-    return !!(await q);
-  } catch (e) {
-    logger.warn(`[click-followup] reply-pause check skipped: ${e.message}`);
-    return false; // fail open
-  }
-}
-
-// Any outbound SMS to this contact in the last N hours → they just heard from
-// us; queueing another nudge would stack touches. Fails CLOSED (treat as
-// recent) — a transient read error skips this tick and the next run retries.
-async function hasRecentOutboundSms({ customerId, phone }, hours = 48) {
-  const cutoff = new Date(Date.now() - hours * 3600000);
-  const ten = last10(phone);
-  if (!customerId && !ten) return false;
-  try {
-    const q = db('sms_log')
-      .where('direction', 'outbound')
-      .where('created_at', '>=', cutoff)
-      .first('id');
-    q.andWhere(function () {
-      if (customerId) this.orWhere('customer_id', customerId);
-      if (ten) {
-        this.orWhereRaw(
-          "RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
-          [ten],
-        );
-      }
-    });
-    return !!(await q);
-  } catch (e) {
-    logger.warn(`[click-followup] outbound-48h check failed — skipping this tick: ${e.message}`);
-    return true; // fail closed → retry next tick
-  }
-}
-
-// Opt-out / wrong-number / DNC / known-landline. Reuses the messaging
-// validators' state loaders (no paid Lookup from here — cached line types
-// only). Returns true when the contact must never get this nudge.
-async function isSuppressedContact(phone) {
-  const e164 = normalizeE164(phone);
-  if (!e164) return false;
-  try {
-    const contactState = await loadSuppressionState({ to: e164 }, {});
-    if (contactState && contactState.suppression) return true;
-  } catch (e) {
-    logger.warn(`[click-followup] suppression lookup failed (continuing): ${e.message}`);
-  }
-  try {
-    const cached = await readCachedLineType(e164);
-    if (cached && cached.state === 'hit' && cached.lineType === 'landline') return true;
-  } catch (e) {
-    logger.warn(`[click-followup] line-type cache read failed (continuing): ${e.message}`);
-  }
-  return false;
-}
-
-// Is an estimate-followup cadence stage going to fire for this estimate
-// within the next `soonHours`? Mirrors the stage predicates in
-// estimate-follow-up.js checkAll() (flag unset + status + trigger window),
-// widened by the lookahead — if the cadence is about to nudge anyway, the
-// click-followup draft would stack a second touch on top of it.
-function cadenceStageDueSoon(est, now = new Date(), soonHours = 24) {
-  if (!est || est.archived_at) return false;
-  if (TERMINAL_STATUSES.has(est.status)) return false;
-  const H = 3600000;
-  const nowMs = now.getTime();
-  const overlapsSoon = (startMs, endMs) => startMs <= nowMs + soonHours * H && endMs >= nowMs;
-  const flagUnset = (flag) => est[flag] === false || est[flag] == null;
-  const ts = (v) => {
-    if (!v) return null;
-    const t = new Date(v).getTime();
-    return Number.isNaN(t) ? null : t;
-  };
-  const sentAt = ts(est.sent_at);
-  const viewedAt = ts(est.viewed_at);
-  const expiresAt = ts(est.expires_at);
-
-  // 1. Unviewed nudge: sent 24–48h ago.
-  if (est.status === 'sent' && !viewedAt && sentAt && flagUnset('followup_unviewed_sent')
-      && overlapsSoon(sentAt + 24 * H, sentAt + 48 * H)) return true;
-  // 2. Viewed-not-accepted: viewed 48–72h ago.
-  if (est.status === 'viewed' && viewedAt && flagUnset('followup_viewed_sent')
-      && overlapsSoon(viewedAt + 48 * H, viewedAt + 72 * H)) return true;
-  // 3. Final nudge: viewed 5–6d ago.
-  if (est.status === 'viewed' && viewedAt && flagUnset('followup_final_sent')
-      && overlapsSoon(viewedAt + 5 * 24 * H, viewedAt + 6 * 24 * H)) return true;
-  // 4. Expiring notice: expires in 1–3d.
-  if (['sent', 'viewed'].includes(est.status) && expiresAt && flagUnset('followup_expiring_sent')
-      && overlapsSoon(expiresAt - 3 * 24 * H, expiresAt - 24 * H)) return true;
-  return false;
 }
 
 // Sweep stale open actions → 'expired' so the one-open-action-per-contact
@@ -292,67 +168,6 @@ async function hasOpenAction({ customerId, leadId, entityId, phoneLast10 }) {
     if (phoneLast10) this.orWhere('contact_phone', phoneLast10);
   });
   return !!(await q);
-}
-
-// Lead-side conversion for lead-only estimates. customerConvertedSince(est)
-// short-circuits to false when the estimate carries no customer_id, but
-// conversion CREATES the customer without backfilling the estimate (e.g. the
-// admin booking-link flow books via /book?service=... with no estimate id).
-// Evidence, in order: the lead's own conversion stamp / terminal 'won'
-// status, else the linked customer (leads.customer_id) run through the same
-// guard. Fails CLOSED like the guard itself — a transient error skips this
-// tick's draft rather than nudging on unverified state.
-async function leadConvertedSince(leadId, est) {
-  if (!leadId) return { converted: false };
-  try {
-    const lead = await db('leads')
-      .where({ id: leadId })
-      .first('id', 'status', 'customer_id', 'converted_at');
-    if (!lead) return { converted: false };
-    if (lead.converted_at || lead.status === 'won') {
-      return { converted: true, reason: lead.converted_at ? 'lead-converted' : 'lead-won' };
-    }
-    if (lead.customer_id) {
-      return await customerConvertedSince({
-        id: est.id,
-        customer_id: lead.customer_id,
-        created_at: est.created_at,
-      });
-    }
-    return { converted: false };
-  } catch (e) {
-    logger.warn(`[click-followup] lead conversion check failed — skipping this tick: ${e.message}`);
-    return { converted: true, reason: 'guard-error' };
-  }
-}
-
-// Deposit-abandonment cadence stage (estimate-follow-up.js
-// checkDepositAbandoned): fires when the estimate's latest PENDING deposit
-// intent was last touched minAge–maxAge hours ago. Not modelable from the
-// estimate row alone (the anchor lives in estimate_deposits), so it gets its
-// own async check beside the four timestamp stages. Only live while its gate
-// is on — off, that stage only shadow-logs and can't double-touch. Fails
-// toward suppression: an unreadable deposits table skips this tick's draft.
-async function depositStageDueSoon(est, now = new Date(), soonHours = 24) {
-  if (!isEnabled('estimateDepositAbandonmentSms')) return false;
-  if (!est || !['sent', 'viewed'].includes(est.status)) return false;
-  if (!(est.followup_deposit_abandoned_sent === false || est.followup_deposit_abandoned_sent == null)) return false;
-  try {
-    const row = await db('estimate_deposits')
-      .where({ estimate_id: est.id, status: 'pending' })
-      .max('updated_at as latest_pending_at')
-      .first();
-    const latest = row && row.latest_pending_at ? new Date(row.latest_pending_at).getTime() : null;
-    if (!latest || Number.isNaN(latest)) return false;
-    const H = 3600000;
-    const nowMs = now.getTime();
-    // Stage window [latest+minAge, latest+maxAge] vs lookahead [now, now+soon].
-    return latest + DEPOSIT_FOLLOWUP_WINDOW.minAgeHours * H <= nowMs + soonHours * H
-      && latest + DEPOSIT_FOLLOWUP_WINDOW.maxAgeHours * H >= nowMs;
-  } catch (e) {
-    logger.warn(`[click-followup] deposit-stage check failed — suppressing this tick: ${e.message}`);
-    return true;
-  }
 }
 
 async function runQueue(now = new Date()) {
@@ -441,80 +256,53 @@ async function runQueue(now = new Date()) {
     let claimedId = null;
     try {
       const est = await loadEstimate(c.entity_id);
-      if (!est) {
-        await recordOutcome(c, 'dismissed');
-        counts.dismissed++;
-        continue;
-      }
-      if (est.archived_at || TERMINAL_STATUSES.has(est.status)) {
-        await recordOutcome(c, 'dismissed');
-        counts.dismissed++;
-        continue;
-      }
 
-      // Conversion guard — the broad estimate-conversion-guard semantics
-      // (paid invoice / live booking since the estimate / customer pipeline
-      // stage), NEVER estimate status. Its 'guard-error' reason is its
-      // fail-closed path for transient lookup errors: skip without writing
-      // so the next tick re-evaluates instead of permanently marking.
-      // Lead-only estimates never trip the customer guard (no customer_id on
-      // the row — conversion creates a customer WITHOUT backfilling the
-      // estimate), so the lead-side check covers that shape.
-      let conv = await customerConvertedSince(est);
-      if (!conv.converted && !est.customer_id && c.lead_id) {
-        conv = await leadConvertedSince(c.lead_id, est);
-      }
-      if (conv.converted && conv.reason === 'guard-error') {
-        counts.skipped++;
-        continue;
-      }
-      if (conv.converted) {
-        await recordOutcome(c, 'converted', { converted_at: new Date() });
-        counts.converted++;
-        continue;
-      }
-
-      // Contact resolution — a draft with no reachable phone is dead weight.
-      let phone = est.customer_phone || null;
-      if (!phone && est.customer_id) {
+      // Contact resolution — a draft with no reachable phone is dead weight,
+      // and the phone doubles as the gate's phone-evidence conversion key +
+      // the persisted cross-tick dedupe key.
+      let phone = est ? est.customer_phone || null : null;
+      if (!phone && est && est.customer_id) {
         const cust = await db('customers').where({ id: est.customer_id }).first('phone');
         phone = cust?.phone || null;
       }
+      c.contact_phone = last10(phone) || null;
+      const contact = { customerId: (est && est.customer_id) || c.customer_id || null, phone };
+
+      // The shared pre-send gate — the same stack re-runs at approval time
+      // in admin-drafts. Map its verdict onto queue semantics:
+      //   estimate_terminal / suppressed / cadence_due → dismissed (terminal
+      //     action row: this click is handled; a re-click re-qualifies)
+      //   converted → converted action row
+      //   guard_error / recent_outbound / replied_recently → skip (no row —
+      //     the click stays a candidate and the next tick re-evaluates
+      //     until it ages out of the 72h window)
+      const verdict = await evaluateClickFollowupGate({
+        estimate: est,
+        customerId: contact.customerId,
+        leadId: c.lead_id || null,
+        phone,
+        sinceTs: c.clicked_at,
+        now,
+      });
+      if (!verdict.ok) {
+        if (verdict.code === 'converted') {
+          await recordOutcome(c, 'converted', { converted_at: new Date() });
+          counts.converted++;
+        } else if (['estimate_terminal', 'suppressed', 'cadence_due'].includes(verdict.code)) {
+          await recordOutcome(c, 'dismissed');
+          counts.dismissed++;
+        } else {
+          counts.skipped++;
+        }
+        continue;
+      }
+
       if (!phone) {
         await recordOutcome(c, 'dismissed');
         counts.dismissed++;
         continue;
       }
-      // Persisted phone dedupe key — rides every action row (claim AND
-      // terminal outcomes) so the open-phone partial unique holds across
-      // ticks, not just within this run's grouping.
-      c.contact_phone = last10(phone) || null;
 
-      const contact = { customerId: est.customer_id || c.customer_id || null, phone };
-
-      // Terminal suppression → dismissed (never nudge this contact).
-      if (await isSuppressedContact(phone)) {
-        await recordOutcome(c, 'dismissed');
-        counts.dismissed++;
-        continue;
-      }
-      // Cadence stage imminent (incl. the gated deposit-abandonment stage) →
-      // the existing follow-up loop owns the touch.
-      if (cadenceStageDueSoon(est, now) || await depositStageDueSoon(est, now)) {
-        await recordOutcome(c, 'dismissed');
-        counts.dismissed++;
-        continue;
-      }
-      // Transient holds → no action row, so the click stays a candidate and
-      // the next tick re-evaluates (until it ages out of the 72h window).
-      if (await hasRecentOutboundSms(contact)) {
-        counts.skipped++;
-        continue;
-      }
-      if (await hasRepliedRecently(contact)) {
-        counts.skipped++;
-        continue;
-      }
       if (await hasOpenAction({
         customerId: contact.customerId,
         leadId: c.lead_id,

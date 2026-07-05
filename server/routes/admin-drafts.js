@@ -4,7 +4,7 @@ const db = require('../models/db');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { customerConvertedSince } = require('../services/estimate-conversion-guard');
+const { evaluateClickFollowupGate } = require('../services/click-followup-gate');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -110,44 +110,81 @@ function sendPolicyForDraft(draft, recipient) {
   return { audience: 'lead', purpose: 'conversational' };
 }
 
-// Click-followup drafts (services/click-followup.js) nudge a prospect toward
-// booking, and conversion can land while the draft sits pending — re-run the
-// conversion guard at approval time so a "pick your first visit" text never
-// goes to someone who already booked/paid. Narrowly scoped to
+// Terminal gate verdicts → retire the draft (it will never be sendable):
+// which flags.reason to stamp, what the linked action becomes, and the
+// operator-facing message.
+const GATE_RETIRE = {
+  converted: {
+    reason: 'converted_before_send',
+    actionStatus: 'converted',
+    message: 'Contact already converted - draft retired, no send needed',
+  },
+  estimate_terminal: {
+    reason: 'estimate_closed_before_send',
+    actionStatus: 'dismissed',
+    message: 'Estimate is no longer open (declined/expired/archived) - draft retired',
+  },
+  suppressed: {
+    reason: 'recipient_suppressed',
+    actionStatus: 'dismissed',
+    message: 'Recipient is suppressed (opt-out/landline) - draft retired',
+  },
+};
+
+// Transient gate verdicts → HOLD: block this send with a clear reason but
+// leave the draft pending so the owner can retry once the condition passes.
+const GATE_HOLD_MESSAGES = {
+  cadence_due: 'An automated estimate follow-up is due within 24h - draft left pending, retry after it goes out',
+  recent_outbound: 'Contact already received an SMS in the last 48h - draft left pending, retry later',
+  replied_recently: 'Contact replied by SMS recently - handle the conversation in Communications; draft left pending',
+};
+
+// Click-followup drafts (services/click-followup.js) are queued hours or days
+// before the owner approves them, and every guard the queue applied at draft
+// time can flip while the draft sits pending: the contact converts, the
+// estimate is declined/expires/archives, an opt-out lands, another SMS goes
+// out, they reply, or a cadence stage comes due. Re-run the SAME shared gate
+// (services/click-followup-gate.js) at approval time. Narrowly scoped to
 // intent='click_followup'; every other intent is untouched.
 //
-// Returns null (send may proceed), { transient: true } (guard couldn't verify
-// — caller releases the claim so a later approval re-checks), or
-// { blocked: true } after retiring the draft (status='rejected',
-// flags.reason='converted_before_send') and flipping the linked
-// click_followup_actions row to 'converted'.
-async function blockClickFollowupIfConverted(draft) {
+// Returns null (send may proceed), { transient: true } (a conversion lookup
+// failed — 503, claim released, retry re-checks), { hold: true, message }
+// (transient touch-guard — 409, draft stays pending), or
+// { blocked: true, message } after retiring the draft + updating the action.
+async function guardClickFollowupSend(draft) {
   if (draft.intent !== 'click_followup') return null;
   const flags = parseFlags(draft.flags);
-  let est = null;
-  if (flags.estimate_id) {
-    est = await db('estimates').where({ id: flags.estimate_id }).first().catch(() => null);
-  }
-  // Fallback shape keeps customerConvertedSince's semantics (customer_id +
-  // created_at anchor) when the estimate row is gone.
-  const conv = await customerConvertedSince(
-    est || { id: draft.id, customer_id: draft.customer_id, created_at: draft.created_at },
-  );
-  if (!conv.converted) return null;
-  if (conv.reason === 'guard-error') {
-    // Transient lookup failure — the guard fails closed. Don't retire the
-    // draft on an unverified signal; block THIS send and let a retry re-check.
-    return { transient: true };
-  }
-  await db('message_drafts').where({ id: draft.id }).update({
-    status: 'rejected',
-    flags: JSON.stringify({ ...flags, reason: 'converted_before_send' }),
+  const estimate = flags.estimate_id
+    ? await db('estimates').where({ id: flags.estimate_id }).first().catch(() => null)
+    : null;
+  const verdict = await evaluateClickFollowupGate({
+    estimate,
+    customerId: draft.customer_id || (estimate && estimate.customer_id) || null,
+    leadId: flags.lead_id || null,
+    phone: flags.toPhone || null,
+    sinceTs: flags.clicked_at || draft.created_at,
   });
-  await db('click_followup_actions')
-    .where({ draft_id: draft.id })
-    .update({ status: 'converted', converted_at: new Date(), updated_at: db.fn.now() })
-    .catch(() => {});
-  return { blocked: true };
+  if (verdict.ok) return null;
+  if (verdict.code === 'guard_error') return { transient: true };
+
+  const retire = GATE_RETIRE[verdict.code];
+  if (retire) {
+    await db('message_drafts').where({ id: draft.id }).update({
+      status: 'rejected',
+      flags: JSON.stringify({ ...flags, reason: retire.reason }),
+    });
+    await db('click_followup_actions')
+      .where({ draft_id: draft.id })
+      .update({
+        status: retire.actionStatus,
+        ...(retire.actionStatus === 'converted' ? { converted_at: new Date() } : {}),
+        updated_at: db.fn.now(),
+      })
+      .catch(() => {});
+    return { blocked: true, message: retire.message };
+  }
+
+  return { hold: true, message: GATE_HOLD_MESSAGES[verdict.code] || 'Draft held by pre-send checks - retry later' };
 }
 
 // GET /api/admin/drafts — pending drafts
@@ -211,14 +248,18 @@ router.put('/:id/approve', async (req, res, next) => {
       return res.status(409).json({ error: 'Draft is no longer pending' });
     }
 
-    // Pre-send conversion recheck (click-followup drafts only).
-    const conversionBlock = await blockClickFollowupIfConverted(draft);
-    if (conversionBlock) {
-      if (conversionBlock.transient) {
+    // Shared pre-send gate recheck (click-followup drafts only).
+    const gateBlock = await guardClickFollowupSend(draft);
+    if (gateBlock) {
+      if (gateBlock.transient) {
         await releaseDraftClaim(draft.id);
-        return res.status(503).json({ error: 'Conversion check unavailable - draft left pending, try again' });
+        return res.status(503).json({ error: 'Pre-send check unavailable - draft left pending, try again' });
       }
-      return res.status(409).json({ error: 'Contact already converted - draft retired, no send needed' });
+      if (gateBlock.hold) {
+        await releaseDraftClaim(draft.id);
+        return res.status(409).json({ error: gateBlock.message });
+      }
+      return res.status(409).json({ error: gateBlock.message });
     }
 
     const recipient = await resolveDraftRecipient(draft);
@@ -299,14 +340,18 @@ router.put('/:id/revise', async (req, res, next) => {
       return res.status(409).json({ error: 'Draft is no longer pending' });
     }
 
-    // Pre-send conversion recheck (click-followup drafts only).
-    const conversionBlock = await blockClickFollowupIfConverted(draft);
-    if (conversionBlock) {
-      if (conversionBlock.transient) {
+    // Shared pre-send gate recheck (click-followup drafts only).
+    const gateBlock = await guardClickFollowupSend(draft);
+    if (gateBlock) {
+      if (gateBlock.transient) {
         await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
-        return res.status(503).json({ error: 'Conversion check unavailable - draft left pending, try again' });
+        return res.status(503).json({ error: 'Pre-send check unavailable - draft left pending, try again' });
       }
-      return res.status(409).json({ error: 'Contact already converted - draft retired, no send needed' });
+      if (gateBlock.hold) {
+        await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+        return res.status(409).json({ error: gateBlock.message });
+      }
+      return res.status(409).json({ error: gateBlock.message });
     }
 
     const recipient = await resolveDraftRecipient(draft);

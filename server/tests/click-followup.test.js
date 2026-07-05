@@ -19,6 +19,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }))
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/estimate-conversion-guard', () => ({
   customerConvertedSince: jest.fn(async () => ({ converted: false })),
+  NON_LIVE_APPOINTMENT_STATUSES: ['cancelled', 'rescheduled', 'skipped', 'no_show'],
 }));
 jest.mock('../services/short-url', () => ({
   createTrackedShortLink: jest.fn(async () => ({
@@ -56,7 +57,7 @@ function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
     'join', 'where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw',
-    'whereNotExists', 'andWhere', 'orWhere', 'orWhereRaw', 'orderBy', 'select', 'groupBy', 'max',
+    'whereNotExists', 'whereNotIn', 'andWhere', 'orWhere', 'orWhereRaw', 'orderBy', 'select', 'groupBy', 'max',
   ]) b[m] = jest.fn(() => b);
   b.first = jest.fn(() => { b._mode = 'first'; return b; });
   b.insert = jest.fn((payload) => { b._mode = 'insert'; inserts.push({ table, payload }); return b; });
@@ -520,6 +521,25 @@ describe('runQueue — gate + suppression', () => {
     expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
   });
 
+  test('booked lead-only BOOKING click: phone-evidence conversion suppresses the draft (queue side)', async () => {
+    // The admin booking link targets /book with no lead_id/estimate_id, so
+    // the booking the click produced leaves no lead/estimate evidence — only
+    // a new customers row matching the contact's phone.
+    enqueue('short_code_clicks as scc', {
+      rows: [makeClick({ kind: 'booking', customer_id: null, lead_id: 'lead-1' })],
+    });
+    enqueue('estimates', { first: makeEstimate({ customer_id: null }) });
+    enqueue('leads', { first: { id: 'lead-1', status: 'quoted', customer_id: null, converted_at: null } });
+    enqueue('customers', { first: { id: 'new-cust' } }); // phone-matched customer created after the click
+    enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] }); // converted outcome row
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.converted).toBe(1);
+    expect(inserts.find((i) => i.table === 'click_followup_actions').payload).toMatchObject({ status: 'converted' });
+    expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
+  });
+
   test('unconverted lead-only estimate still drafts (lead check passes through)', async () => {
     enqueue('short_code_clicks as scc', { rows: [makeClick({ customer_id: null, lead_id: 'lead-1' })] });
     enqueue('estimates', { first: makeEstimate({ customer_id: null }) });
@@ -614,12 +634,97 @@ describe('expireStaleActions', () => {
 });
 
 describe('NO-SEND guarantee', () => {
-  test('module source has no path to the messaging send pipeline', () => {
+  test('queue + shared gate sources have no path to the messaging send pipeline', () => {
     const fs = require('fs');
-    const src = fs.readFileSync(require.resolve('../services/click-followup'), 'utf8');
-    expect(src).not.toContain('sendCustomerMessage');
-    expect(src).not.toContain('send-customer-message');
-    expect(src).not.toContain('sendTemplate');
-    expect(src).not.toMatch(/twilio/i);
+    for (const mod of ['../services/click-followup', '../services/click-followup-gate']) {
+      const src = fs.readFileSync(require.resolve(mod), 'utf8');
+      expect(src).not.toContain('sendCustomerMessage');
+      expect(src).not.toContain('send-customer-message');
+      expect(src).not.toContain('sendTemplate');
+      expect(src).not.toMatch(/twilio/i);
+    }
+  });
+});
+
+// Direct gate tests — the SAME verdicts drive both the cron (draft time) and
+// admin-drafts approve/revise (send time), so pinning each code here pins
+// both surfaces at once (parity by construction).
+describe('evaluateClickFollowupGate — shared verdict codes', () => {
+  const gate = require('../services/click-followup-gate');
+  const baseInput = () => ({
+    estimate: makeEstimate(),
+    customerId: 'cust-1',
+    leadId: null,
+    phone: '+19415550101',
+    sinceTs: new Date(NOW.getTime() - 6 * H),
+    now: NOW,
+  });
+
+  test('estimate_terminal: missing, archived, or terminal-status estimates', async () => {
+    expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: null })).code).toBe('estimate_terminal');
+    expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: makeEstimate({ status: 'declined' }) })).code).toBe('estimate_terminal');
+    expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: makeEstimate({ archived_at: new Date() }) })).code).toBe('estimate_terminal');
+  });
+
+  test('converted: customer-guard evidence', async () => {
+    customerConvertedSince.mockResolvedValue({ converted: true, reason: 'paid-invoice' });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v).toMatchObject({ ok: false, code: 'converted', reason: 'paid-invoice' });
+  });
+
+  test('converted: PHONE evidence — a customers row created after the click (booked lead-only booking click)', async () => {
+    enqueue('customers', { first: { id: 'new-cust' } }); // created >= clicked_at, phone matches
+    const v = await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: makeEstimate({ customer_id: null }), customerId: null });
+    expect(v).toMatchObject({ ok: false, code: 'converted', reason: 'phone-customer-created' });
+  });
+
+  test('converted: PHONE evidence — a live booking whose customer matches the phone', async () => {
+    enqueue('customers', { first: null });                       // no new customer row
+    enqueue('scheduled_services as ss', { first: { id: 'ss-9' } }); // live booking after the click
+    const v = await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: makeEstimate({ customer_id: null }), customerId: null });
+    expect(v).toMatchObject({ ok: false, code: 'converted', reason: 'phone-booking' });
+  });
+
+  test('converted: lead-side evidence at the gate (approval twin of the queue check)', async () => {
+    enqueue('leads', { first: { id: 'lead-1', status: 'won', customer_id: null, converted_at: null } });
+    const v = await gate.evaluateClickFollowupGate({
+      ...baseInput(), estimate: makeEstimate({ customer_id: null }), customerId: null, leadId: 'lead-1',
+    });
+    expect(v).toMatchObject({ ok: false, code: 'converted', reason: 'lead-won' });
+  });
+
+  test('suppressed: opt-out record blocks', async () => {
+    loadSuppressionState.mockImplementation(async (input, state) => {
+      state.suppression = { reason: 'opt_out_keyword' };
+      return state;
+    });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v).toMatchObject({ ok: false, code: 'suppressed' });
+  });
+
+  test('cadence_due: a stage window overlapping the next 24h', async () => {
+    const v = await gate.evaluateClickFollowupGate({
+      ...baseInput(),
+      estimate: makeEstimate({ viewed_at: new Date(NOW.getTime() - 49 * H), followup_viewed_sent: false }),
+    });
+    expect(v).toMatchObject({ ok: false, code: 'cadence_due' });
+  });
+
+  test('recent_outbound / replied_recently: touch holds', async () => {
+    enqueue('sms_log', { first: { id: 'sms-1' } });
+    expect((await gate.evaluateClickFollowupGate(baseInput())).code).toBe('recent_outbound');
+
+    enqueue('sms_log', { first: null });
+    enqueue('messages', { first: { id: 'm-1' } });
+    expect((await gate.evaluateClickFollowupGate(baseInput())).code).toBe('replied_recently');
+  });
+
+  test('guard_error: fail-closed conversion lookup', async () => {
+    customerConvertedSince.mockResolvedValue({ converted: true, reason: 'guard-error' });
+    expect((await gate.evaluateClickFollowupGate(baseInput())).code).toBe('guard_error');
+  });
+
+  test('all clear → ok', async () => {
+    expect((await gate.evaluateClickFollowupGate(baseInput())).ok).toBe(true);
   });
 });
