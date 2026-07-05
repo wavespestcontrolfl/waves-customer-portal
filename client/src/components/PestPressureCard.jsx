@@ -177,6 +177,7 @@ export default function PestPressureCard({ data, token }) {
     <section
       id="pest-pressure"
       data-section="pest-pressure"
+      data-glass="card"
       style={{
         background: '#FFFFFF',
         border: '1px solid #E7E2D7',
