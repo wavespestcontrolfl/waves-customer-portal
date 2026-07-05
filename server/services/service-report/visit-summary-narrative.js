@@ -29,6 +29,19 @@ const PROMPT_VERSION = 'pest_visit_summary_narrative_v1';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
+// The prompt bans more words than the shared customer-copy guard covers
+// (findBannedCustomerCopy catches "no infestation" but not bare
+// "infestation"). Prompt rules must be ENFORCED, not just requested — same
+// vocabulary as ai-summary.js FORBIDDEN_PATTERNS. \bsafe\b deliberately
+// leaves "safety" alone.
+const EXTRA_FORBIDDEN = [
+  /\binfestations?\b/i,
+  /\bdangerous\b/i,
+  /\btoxic\b/i,
+  /\bpoison(?:ous)?\b/i,
+  /\bsafe\b/i,
+];
+
 function stableStringify(value) {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   if (value && typeof value === 'object') {
@@ -55,14 +68,18 @@ function formatNextVisitDate(scheduledDate) {
   }
 }
 
-// "8–10 AM" from window_start. The customer-facing arrival window is ALWAYS
-// window_start + 2 hours (window_end is the internal job block — never show).
+// "8–10 AM" / "1:30–3:30 PM" from window_start. The customer-facing arrival
+// window is ALWAYS window_start + 2 hours (window_end is the internal job
+// block — never show). Minutes carry through: the schedule grid supports
+// half-hour starts, and "1–3 PM" for a 1:30 arrival is simply wrong.
 function formatArrivalWindow(windowStart) {
   const m = /^(\d{1,2}):(\d{2})/.exec(String(windowStart || ''));
   if (!m) return null;
   const startH = Number(m[1]);
-  if (!Number.isFinite(startH) || startH > 23) return null;
+  const startMin = Number(m[2]);
+  if (!Number.isFinite(startH) || startH > 23 || !Number.isFinite(startMin) || startMin > 59) return null;
   const endH = (startH + 2) % 24;
+  const minutes = startMin ? `:${String(startMin).padStart(2, '0')}` : '';
   const label = (h) => {
     const twelve = h % 12 === 0 ? 12 : h % 12;
     return { twelve, meridiem: h < 12 ? 'AM' : 'PM' };
@@ -70,8 +87,8 @@ function formatArrivalWindow(windowStart) {
   const s = label(startH);
   const e = label(endH);
   return s.meridiem === e.meridiem
-    ? `${s.twelve}–${e.twelve} ${e.meridiem}`
-    : `${s.twelve} ${s.meridiem}–${e.twelve} ${e.meridiem}`;
+    ? `${s.twelve}${minutes}–${e.twelve}${minutes} ${e.meridiem}`
+    : `${s.twelve}${minutes} ${s.meridiem}–${e.twelve}${minutes} ${e.meridiem}`;
 }
 
 // Only the FACTS that should drive copy. The recap is included as grounding
@@ -172,7 +189,10 @@ async function applyVisitSummaryNarrative(input = {}, deps = {}) {
     const res = await callModel({ system: SYSTEM_PROMPT, text: buildUserMessage(facts) });
     const text = cleanText(res && res.ok && res.json ? res.json.summary : '');
     if (text && text.length >= 40 && text.length <= 900) {
-      const banned = findBannedCustomerCopy(text);
+      const banned = [
+        ...findBannedCustomerCopy(text),
+        ...EXTRA_FORBIDDEN.map((rx) => text.match(rx)?.[0] || null).filter(Boolean),
+      ];
       if (!banned.length) {
         value = text;
       } else {

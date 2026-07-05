@@ -213,7 +213,10 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // Only the /data route resolves it (staffCanViewSuppressed — the same
   // staff-JWT signal as the Phase-1b suppressed-report gate); PDF, ask, and
   // every other caller stays a customer view.
-  const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer });
+  // mode rides into the builder so mode-sensitive copy (the pest Visit
+  // Summary narrative) can exclude the live-only next appointment from
+  // pdf/static text — the field-level strip below can't reach prose.
+  const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer, mode });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
   // nextAppointment is LIVE-VIEW ONLY: cached PDFs / static renders are

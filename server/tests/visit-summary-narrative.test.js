@@ -53,6 +53,9 @@ test('formatNextVisitDate / formatArrivalWindow render the customer-facing forms
   expect(formatArrivalWindow('08:00')).toBe('8–10 AM');
   expect(formatArrivalWindow('11:00')).toBe('11 AM–1 PM');
   expect(formatArrivalWindow('23:00')).toBe('11 PM–1 AM');
+  // half-hour starts keep their minutes — "1–3 PM" for a 1:30 arrival is wrong
+  expect(formatArrivalWindow('13:30')).toBe('1:30–3:30 PM');
+  expect(formatArrivalWindow('08:30')).toBe('8:30–10:30 AM');
   expect(formatArrivalWindow('')).toBeNull();
   expect(formatArrivalWindow('nope')).toBeNull();
 });
@@ -102,6 +105,22 @@ test('banned copy in model output falls back to the deterministic summary', asyn
   const args = input();
   const out = await applyVisitSummaryNarrative(args, { callModel });
   expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test('prompt-only banned words are enforced too, not just the shared guard', async () => {
+  // findBannedCustomerCopy catches "no infestation" but not bare
+  // "infestation" — the module's extra list must catch what the prompt bans
+  for (const word of ['infestation', 'toxic', 'poison', 'dangerous', 'safe']) {
+    const args = input();
+    const callModel = jest.fn().mockResolvedValue({ ok: true, json: { summary: `We looked closely at the ${word} conditions around your home today and refreshed all treated areas so everything stays in good shape between visits.` } });
+    const out = await applyVisitSummaryNarrative(args, { callModel });
+    expect(out).toBe(deterministicSummary(groundingFacts(args)));
+  }
+  // "safety" must NOT trip the \bsafe\b rule
+  const okArgs = input();
+  const okText = 'We reviewed the safety instructions with you today and refreshed every treated area so things stay in good shape between visits. See you Friday, October 2, arriving 8–10 AM.';
+  const callModel = jest.fn().mockResolvedValue({ ok: true, json: { summary: okText } });
+  expect(await applyVisitSummaryNarrative(okArgs, { callModel })).toBe(okText);
 });
 
 test('model failure and short/garbage output fall back to the deterministic summary', async () => {

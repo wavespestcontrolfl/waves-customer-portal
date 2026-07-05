@@ -2625,7 +2625,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       areasServiced: areaLabels,
       pestPressure,
       findings,
-      nextAppointment,
+      // nextAppointment is LIVE-VIEW ONLY (the response wrapper strips the
+      // payload field for pdf/static) — the summary text must not fossilize
+      // an appointment time into a downloadable document either.
+      nextAppointment: (opts.mode || 'live') === 'live' ? nextAppointment : null,
     }).catch(() => structured.customerRecap || '');
   }
 
