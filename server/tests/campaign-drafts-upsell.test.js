@@ -230,10 +230,13 @@ describe('guards', () => {
     expect(result.skipped.recent_campaign_sms).toBe(1);
     expect(inserts).toEqual([]);
 
-    // The cross-lane message types cover all four existing senders.
+    // The cross-lane message types cover all five existing senders.
+    // 'retention' = Customer-Intel retention approvals (admin-customer-intel
+    // logs original_message_type 'retention'), distinct from the retention
+    // agent's 'retention_outreach' — Codex round-3 finding.
     const smsBuilder = builders.find((b) => b._table === 'sms_log');
     expect(smsBuilder.whereIn).toHaveBeenCalledWith('message_type', CAMPAIGN_SMS_TYPES);
-    expect(CAMPAIGN_SMS_TYPES.sort()).toEqual(['reactivation', 'renewal', 'retention_outreach', 'upsell'].sort());
+    expect(CAMPAIGN_SMS_TYPES.sort()).toEqual(['reactivation', 'renewal', 'retention', 'retention_outreach', 'upsell'].sort());
   });
 
   test('recent annual-prepay renewal notice suppresses', async () => {

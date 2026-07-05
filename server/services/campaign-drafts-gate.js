@@ -57,12 +57,15 @@ const { CUSTOMER_STAGES } = require('./customer-stages');
 const COOLDOWN_DAYS = 30;
 const COOLDOWN_INTERVAL = `NOW() - INTERVAL '${COOLDOWN_DAYS} days'`;
 
-// message_type values written by the four existing campaign-grade senders:
+// message_type values written by the existing campaign-grade senders:
 // upsell-trigger ('upsell'), renewal-reminder ('renewal'), legacy
 // seasonal-reactivation sends + approved reactivation drafts ('reactivation'),
-// retention agent ('retention_outreach'). Approved campaign drafts log the
-// same values (admin-drafts CAMPAIGN_MESSAGE_TYPES), so this filter sees them.
-const CAMPAIGN_SMS_TYPES = ['upsell', 'renewal', 'reactivation', 'retention_outreach'];
+// retention agent ('retention_outreach'), and the Customer Intelligence
+// retention-approve route ('retention' — admin-customer-intel sends with
+// original_message_type: 'retention', persisted as sms_log.message_type).
+// Approved campaign drafts log the same values (admin-drafts
+// CAMPAIGN_MESSAGE_TYPES), so this filter sees them.
+const CAMPAIGN_SMS_TYPES = ['upsell', 'renewal', 'reactivation', 'retention_outreach', 'retention'];
 
 const TERMINAL_CODES = new Set([
   'customer_not_found',

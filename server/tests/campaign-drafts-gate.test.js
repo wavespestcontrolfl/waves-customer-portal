@@ -226,9 +226,18 @@ describe('unified 30d cooldown (HOLD)', () => {
     expect(verdict.code).toBe('cooldown_active');
     expect(verdict.reason).toBe('recent_campaign_sms');
 
-    // The cross-lane filter covers all four existing senders.
+    // The cross-lane filter covers all five existing senders.
     const smsBuilder = builders.find((b) => b._table === 'sms_log');
     expect(smsBuilder.whereIn).toHaveBeenCalledWith('message_type', CAMPAIGN_SMS_TYPES);
+  });
+
+  test('cooldown covers every campaign-grade sender, incl. Customer-Intel retention approvals', () => {
+    // admin-customer-intel retention approve sends original_message_type
+    // 'retention' (persisted as sms_log.message_type) — distinct from the
+    // retention agent's 'retention_outreach'. Both must hold the cooldown.
+    expect(CAMPAIGN_SMS_TYPES).toEqual(
+      expect.arrayContaining(['upsell', 'renewal', 'reactivation', 'retention_outreach', 'retention'])
+    );
   });
 
   test('another campaign draft in the window → cooldown_active (recent_campaign_draft)', async () => {
