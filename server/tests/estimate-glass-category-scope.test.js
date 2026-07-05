@@ -9,6 +9,10 @@
 // r2b — an estimate neither classifier understands (e.g. a WDO inspection)
 //   must fail closed under a scoped release instead of riding
 //   deriveServiceCategory's pest_control default into glass.
+// r3 — a MIXED estimate (in-scope recurring pest + an unclassifiable one-time
+//   service row) passed because collectServiceCategories silently drops the
+//   unknown row; unclassified real service rows now fail closed, while
+//   non-service rows (fees/adjustments/discounts) never block.
 const { glassCategoryEligible, deriveServiceCategory } = require('../routes/estimate-public');
 
 const PEST_LAWN_SCOPE = ['pest_control', 'lawn_care'];
@@ -60,6 +64,26 @@ describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATE
     // input must not conservatively withhold glass from a persisted estimate.
     const estData = { engineInputs: { services: { pest: true, mosquito: true } } };
     expect(glassCategoryEligible(estData, [{ service: 'pest_control' }], [], PEST_LAWN_SCOPE)).toBe(true);
+  });
+
+  test('r3: an unclassified one-time service row on a mixed estimate fails closed', () => {
+    const recurringPest = [{ service: 'pest_control' }];
+    const wdoItem = [{ service: 'wdo_inspection', name: 'WDO Inspection' }];
+    expect(glassCategoryEligible({}, recurringPest, wdoItem, PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r3: an unclassified recurring row fails closed', () => {
+    expect(glassCategoryEligible({}, [{ service: 'custom_specialty_program' }], [], PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r3: fee/adjustment/discount rows are not services and never block', () => {
+    const recurringPest = [{ service: 'pest_control' }];
+    const feeRows = [
+      { service: 'waveguard_setup', name: 'WaveGuard Setup' },
+      { service: 'one_time_adjustment', name: 'Adjustment' },
+      { service: 'rodent_bundle_discount', name: 'Bundle Discount' },
+    ];
+    expect(glassCategoryEligible({}, recurringPest, feeRows, PEST_LAWN_SCOPE)).toBe(true);
   });
 
   test('r2b: unclassifiable estimates fail closed under a scoped release', () => {

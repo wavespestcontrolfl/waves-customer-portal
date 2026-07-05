@@ -10104,11 +10104,20 @@ function serviceLabelForCategory(category, fallback = null) {
   }
 }
 
-function serviceCategoryForOneTimeItem(item = {}) {
+// Fee/adjustment/discount rows (and blank rows) are not services: they never
+// classify to a category, and a scoped glass release must not treat them as
+// unclassified services either.
+function isNonServiceOneTimeItem(item = {}) {
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
-  if (!name && !service) return null;
-  if (service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return null;
+  if (!name && !service) return true;
+  return service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount';
+}
+
+function serviceCategoryForOneTimeItem(item = {}) {
+  if (isNonServiceOneTimeItem(item)) return null;
+  const name = item?.name || item?.label || item?.service || '';
+  const service = String(item?.service || '').toLowerCase();
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   // Bora-Care carries the canonical service key `bora_care`; classify it before
   // the generic termite-install heuristic so an install-worded label
@@ -10164,10 +10173,16 @@ function glassCategoryEligible(estData, recurringServices, oneTimeItems, allowed
   if (!recurring.length) {
     inferCategoriesFromEngineInputs(estData).forEach((c) => categories.add(c));
   }
-  // Fail closed: an estimate neither classifier understands (e.g. a WDO
-  // inspection — no engine-input mapping, and the one-time item classifier
-  // returns null) keeps the old page under a scoped release rather than
-  // riding deriveServiceCategory's pest_control default into glass.
+  // Fail closed on service rows the classifiers DROP, not just on estimates
+  // that classify to nothing: a recurring key or real one-time service line
+  // that maps to no category (e.g. a WDO inspection alongside recurring pest)
+  // is an out-of-scope service, not an absent one. Fee/adjustment rows
+  // (waveguard_setup, one_time_adjustment, rodent_bundle_discount) are not
+  // services and never block.
+  const items = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  const hasUnclassifiedService = recurring.some((svc) => !categoryForRecurringServiceKey(recurringServiceKey(svc)))
+    || items.some((item) => !isNonServiceOneTimeItem(item) && !serviceCategoryForOneTimeItem(item));
+  if (hasUnclassifiedService) return false;
   return categories.size > 0 && [...categories].every((c) => allowed.has(c));
 }
 
