@@ -8,7 +8,8 @@ shipping. Each rule cites the file it protects.
 Codex integration reference:
 <https://developers.openai.com/codex/integrations/github>
 
-The pre-push hook in `.git/hooks/pre-push` blocks pushes that contain any P0
+The pre-push hook at `scripts/hooks/pre-push` (wired via `core.hooksPath` by
+the npm `prepare` script) blocks pushes that contain any P0
 finding and warns on P1. Reviewers must return JSON matching
 `.github/codex-review-schema.json`. Cite `file:line` for every finding.
 
