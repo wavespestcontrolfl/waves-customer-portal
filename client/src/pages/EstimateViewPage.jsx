@@ -37,6 +37,7 @@ import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
+import EstimateGlassTheme from '../components/estimate/glass/EstimateGlassTheme';
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
@@ -2280,6 +2281,17 @@ export default function EstimateViewPage() {
     }
   });
 
+  // Liquid-glass theme dark launch (docs/design/estimate-glass-plan.md, PR A).
+  // Visual-only; applies no styles unless the link carries ?glass=1, so the
+  // default prod render is untouched. Read once like adminPreview above.
+  const [glassThemeRequested] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('glass') === '1';
+    } catch {
+      return false;
+    }
+  });
+
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
@@ -2892,10 +2904,10 @@ export default function EstimateViewPage() {
   }, [adminDraftPreview, addServiceOffer, addServiceRequestState.status, token]);
 
   if (loading) {
-    return <Page><Header customerFirstName={null} address={null} /><SkeletonBlock /><SkeletonBlock /></Page>;
+    return <Page><EstimateGlassTheme active={glassThemeRequested} /><Header customerFirstName={null} address={null} /><SkeletonBlock /><SkeletonBlock /></Page>;
   }
   if (notFound || !data) {
-    return <Page><NotFoundCard /></Page>;
+    return <Page><EstimateGlassTheme active={glassThemeRequested} /><NotFoundCard /></Page>;
   }
 
   const { estimate, pricing, cta } = data;
@@ -3216,6 +3228,7 @@ export default function EstimateViewPage() {
 
   return (
     <Page>
+      <EstimateGlassTheme active={glassThemeRequested} />
       {adminDraftPreview ? <DraftPreviewBanner /> : null}
       <Header
         {...headerContactProps}
