@@ -252,6 +252,12 @@ function validateZoneShapesBody(zoneShapes) {
     if (!entry || typeof entry !== 'object' || typeof entry.areaLabel !== 'string' || !entry.areaLabel.trim()) {
       return 'each zoneShapes entry needs an areaLabel string and a shape object';
     }
+    // A malformed shape must 400 here, not silently drop in the upsert: on a
+    // first-marked property the prod guard writes nothing, so a silent skip
+    // would lose the tech's drawing behind a successful completion.
+    if (!sanitizeZoneShape(entry.shape)) {
+      return `zoneShapes entry "${entry.areaLabel.trim()}" has a malformed shape — expected a rect or circle with coordinates normalized 0-1`;
+    }
   }
   return null;
 }

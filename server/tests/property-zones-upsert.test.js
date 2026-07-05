@@ -133,5 +133,8 @@ test('validateZoneShapesBody rejects the malformed payloads a stale client could
   expect(validateZoneShapesBody([])).toBeNull();
   expect(validateZoneShapesBody('nope')).toMatch(/array/);
   expect(validateZoneShapesBody([{ shape: {} }])).toMatch(/areaLabel/);
+  // a malformed / pixel-space shape must 400 at the route, not silently drop
+  expect(validateZoneShapesBody([{ areaLabel: 'Yard', shape: { type: 'rect', x: 64, y: 42, w: 512, h: 46 } }])).toMatch(/malformed shape/);
+  expect(validateZoneShapesBody([{ areaLabel: 'Yard', shape: { type: 'circle', cx: 0.5, cy: 0.5, r: 0.05 } }])).toBeNull();
   expect(validateZoneShapesBody(new Array(31).fill({ areaLabel: 'Yard', shape: {} }))).toMatch(/at most/);
 });

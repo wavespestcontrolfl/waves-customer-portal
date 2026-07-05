@@ -554,7 +554,7 @@ function defaultZones(labels, serviceLine) {
   }));
 }
 
-function matchZoneIds(product, zones) {
+function matchZoneIds(product, zones, areaLabels = []) {
   const explicit = parseJsonArray(product.zone_ids);
   if (explicit.length) return explicit.map(String);
   const area = String(product.application_area || product.area || '').toLowerCase();
@@ -564,6 +564,18 @@ function matchZoneIds(product, zones) {
         || area.includes(String(zone.label || '').toLowerCase());
     });
     if (matched.length) return matched.map((zone) => String(zone.id));
+  }
+  // Unscoped product (no explicit ids, no usable area): fan out to THIS
+  // visit's chipped areas, not the whole property. With fabricated
+  // defaultZones the two sets are identical (zones are built from the
+  // chips), but persisted property_zones outlive the visit — fanning out to
+  // all of them would mark zones as serviced on reports for visits that
+  // never touched them. Falls back to every zone only when no chip matches
+  // any zone label (legacy shape, zones from findings, label drift).
+  const chipKeys = new Set((areaLabels || []).map((label) => normalizeCoverageLabel(label)).filter(Boolean));
+  if (chipKeys.size) {
+    const chipped = zones.filter((zone) => chipKeys.has(normalizeCoverageLabel(zone.label)));
+    if (chipped.length) return chipped.map((zone) => String(zone.id));
   }
   return zones.map((zone) => String(zone.id));
 }
@@ -2102,7 +2114,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       },
       method,
       methodLabel: METHOD_LABELS[method] || method.replace(/_/g, ' '),
-      zone_ids: matchZoneIds(product, zones),
+      zone_ids: matchZoneIds(product, zones, areaLabels),
       rate: product.application_rate,
       rateUnit: product.rate_unit,
       totalAmount: product.total_amount,
