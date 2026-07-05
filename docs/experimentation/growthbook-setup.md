@@ -209,7 +209,70 @@ null and nothing changes. To activate, set on the Railway client build:
 - In components: `useFeatureIsOn('<feature>')` / `useFeatureValue('<feature>',
   fallback)` from `@growthbook/growthbook-react`.
 
-## 7. Phase 3 (next)
+## 7. Phase 3 — marketing site (Astro) experiments
+
+This is where the statistical power lives (the estimate-view population is a
+long-lived guardrail, not a fast grader). Shipped in two halves:
+
+**Astro half** (`wavespestcontrol-astro` → `src/lib/experiments.ts`): a
+consent-gated (`waves_consent`) GrowthBook JS SDK boot, dark until
+`PUBLIC_GROWTHBOOK_CLIENT_KEY` is set on the **hub** Cloudflare Pages project
+(hub only — the CORS allowlist doesn't cover spokes). It probes
+`GET /api/public/experiments/status` first, so unsetting `GATE_GROWTHBOOK`
+rolls marketing experiments back too. Unit = `waves_exp_uid` in the hub's
+localStorage (SEPARATE storage from the portal SPA's same-named key — the two
+surfaces never share units). Exposures POST to the public intake and land in
+`experiment_exposures` with `unit_type='anon'`. We deliberately did NOT hash on
+the PostHog `distinct_id`: PostHog only attaches post-consent-and-load, and its
+id isn't queryable from Postgres anyway — a dedicated id keeps the warehouse
+join self-contained.
+
+**Portal half (conversion joinability):** the marketing forms stamp the visitor's
+unit id onto lead submissions as `attribution.anon_id` (read-only — the id is
+only ever minted by the consented experiment boot). The three public intake
+routes (`lead-webhook.js`, `public-property-lookup.js`, `public-quote.js`)
+validate it (`sanitizeAnonUnitId`, same shape contract as the exposure
+endpoint's `UNIT_ID_RE`) and persist it to **`leads.anon_id`** (migration
+`20260705120000_leads_anon_id.js`) — a first-class column like
+gclid/fbclid, because the webhook lane's AI triage replaces `extracted_data`
+wholesale. Existing-customer resubmissions create no lead row, so those
+conversions are (acceptably) invisible to marketing metrics.
+
+### GrowthBook UI steps when the first marketing experiment ships
+
+1. **Grant (prod, owner-authorized):** `GRANT SELECT ON leads TO growthbook_ro;`
+   — `leads` is NOT in the section-2 grant list yet.
+2. **Identifier type `anon_id`** (Data Source → Identifier Types; UI-only, no
+   REST endpoint) + assignment query (`unit_id` is TEXT here — no uuid cast):
+
+```sql
+SELECT
+  unit_id        AS anon_id,
+  exposed_at     AS timestamp,
+  experiment_key AS experiment_id,
+  variation_id   AS variation_id
+FROM experiment_exposures
+WHERE unit_type = 'anon'
+```
+
+3. **Metric `Lead Submitted`** — binomial, PRIMARY for marketing experiments
+   (conversion window "none", same as section 3):
+
+```sql
+SELECT anon_id, created_at AS timestamp
+FROM leads
+WHERE anon_id IS NOT NULL
+```
+
+4. Create the feature + experiment (trackingKey = the feature key unless the
+   rule sets one; hashAttribute `id`; **phase weights via `variationWeights`,
+   not `trafficSplit`, when using the REST API**) and attach the
+   experiment-ref rule.
+5. Set `PUBLIC_GROWTHBOOK_CLIENT_KEY=sdk-…` on the hub Pages project and
+   rebuild. Kill switches: unset that var (next build), or unset
+   `GATE_GROWTHBOOK` on Railway (instant — status probe fails closed).
+
+## 8. Later
 
 - **Experiment #2 — glass theme on/off** (the live redesign question). `?glass=1`
   today (`EstimateViewPage.jsx`) is a client-side CSS layer *inside* v2. Turning
@@ -217,6 +280,3 @@ null and nothing changes. To activate, set on the Railway client build:
   wiring keeps assignment server-side and passes it to the client via the
   existing `GET /:token/data` response (`experiment.glass`), so React just reads
   a field — no client GrowthBook SDK required for the decision.
-- **Marketing (Astro)** — client-side GrowthBook JS SDK in an island, hashing on
-  the existing PostHog cross-subdomain `distinct_id`, gated by `waves_consent`;
-  POST exposures to a portal endpoint so they land in the same warehouse.
